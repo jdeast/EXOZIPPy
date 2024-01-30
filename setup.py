@@ -148,6 +148,8 @@ setup(
         'astropy',
         'celerite',
         'pymc',
+        'corner',
+        #'exoplanet', # seems to have dependencies incompatible with pymc
         #'batman', # do we want this?
     ]
 
