@@ -7,6 +7,8 @@ from parameter import Parameter
 import arviz as az
 import math
 from summarize_model import summarize_model
+from build_latex_table import build_latex_table
+from trace_to_event import trace_to_event
 import pytensor.tensor as pt
 
 import ipdb
@@ -117,13 +119,13 @@ def build_model(nstars=1, nplanets=1, transit_only=False, fitlogmp=False, mist=T
             # the lower limits mean it doesn't actually have to be a star
             # the upper limits are defined by the most extreme stars known (plus some padding)
             star = {"radius": Parameter(label="rstar_" + str(i), lower=1e-1, upper=2, initval=1.0, unit=u.solRad,
-                                        latex='R_*', description='Radius', latex_unit="\rsun"),
+                                        latex='R_*', description='Radius', latex_unit="\\rsun"),
                     "mass": Parameter(label="mstar_" + str(i), lower=1e-1, upper=2, initval=1.0, unit=u.solMass,
                                       latex='M_*', description='Mass', latex_unit="\msun"),
                     "teff": Parameter(label="teff_" + str(i), lower=1.0, upper=5e5, initval=5778, unit=u.K,
-                                      latex='T_{\rm eff}', description="Effective Temperature", latex_unit='K'),
+                                      latex='T_{\\rm eff}', description="Effective Temperature", latex_unit='K'),
                     "feh": Parameter(label="feh_" + str(i), lower=-5.0, upper=5.0, initval=0.0,
-                                     latex="[{\rm Fe/H}]", description='Metallicity', latex_unit='dex'),
+                                     latex="[{\\rm Fe/H}]", description='Metallicity', latex_unit='dex'),
                     }
 
             star["lstar"] = Parameter(label='lstar_' + str(i), Deterministic=True,
@@ -136,7 +138,7 @@ def build_model(nstars=1, nplanets=1, transit_only=False, fitlogmp=False, mist=T
                                         expression=3.0*star["mass"].value*msun/
                                                    (4.0*math.pi*(star["radius"].value*rsun) ** 3),
                                         unit=u.gram/u.cm**3,
-                                        latex="\rho_*", description='Density', latex_unit='g~cm$^{-3}$')
+                                        latex="\\rho_*", description='Density', latex_unit='g~cm$^{-3}$')
 
             star["logg"] = Parameter(label='logg_' + str(i), Deterministic=True,
                                      expression = pt.log10(Gmsun * star["mass"].value / (star["radius"].value * rsun) ** 2),
@@ -146,7 +148,7 @@ def build_model(nstars=1, nplanets=1, transit_only=False, fitlogmp=False, mist=T
                 star["age"] = Parameter(label="age_" + str(i), lower=0.0, upper=13.77, initval=4.603,unit=u.year*1e9,
                                         latex="Age",description="Age",latex_unit="Gyr")
                 star["initfeh"] = Parameter(label="initfeh_" + str(i), lower=-5.0, upper=5.0, initval=0.0,
-                                            latex='[{\rm Fe/H}]_{0}', description='Initial Metallicity', latex_unit='dex')
+                                            latex='[{\\rm Fe/H}]_{0}', description='Initial Metallicity', latex_unit='dex')
 
             # if we need the distance, add it as a parameter
             if sedfile != None or mannrad[i] or mannmass[i]:
@@ -170,7 +172,7 @@ def build_model(nstars=1, nplanets=1, transit_only=False, fitlogmp=False, mist=T
 
                 # respect systematic error floors on fbol and teff as determined from the SED
                 star["rstarsed"] = Parameter(label="rstarsed_" + str(i), lower=1e-9, upper=2000.0, initval=1.0,
-                                             unit=u.solRad, latex='R_{*,SED}',latex_unit='\rsun')
+                                             unit=u.solRad, latex='R_{*,SED}',latex_unit='\\rsun')
                 star["teffsed"] = Parameter(label="teffsed_" + str(i), lower=1.0, upper=5e6,initval=5778.0,
                                             unit=u.K, latex='T_{eff,SED}', latex_unit='K')
 
@@ -290,11 +292,15 @@ def build_model(nstars=1, nplanets=1, transit_only=False, fitlogmp=False, mist=T
         # map_estimate = pm.find_MAP(model=model) 
 
         # MCMC sampling
-        trace = pm.sample(1000, chains=4, cores=4, target_accept=0.9)  # ,return_inferencedata=True)
+        trace = pm.sample(200, chains=4, cores=4, target_accept=0.9, discard_tuned_samples=False, tune=1000) 
+
+        # copy posteriors to event dictionary
+        trace_to_event(trace,event)
+
+        build_latex_table(event)
         ipdb.set_trace()
 
         summarize_model(trace, prefix='test.')
-        ipdb.set_trace()
 
     if 0:
         a = pm.Deterministic("a", np.power(period ** 2 * const.G * (mstar + mp) / (4.0 * math.pi ** 2), 1.0 / 3.0))

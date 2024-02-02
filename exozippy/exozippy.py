@@ -9,6 +9,7 @@ import ipdb
 from astropy import units as u
 import astropy.constants as const
 from build_model import build_model
+from build_latex_table import build_latex_table
 
 def exozippy(priorfile=None, \
              prefix='fitresults/planet.',\
@@ -74,7 +75,7 @@ def exozippy(priorfile=None, \
              plotonly=False, bestonly=False, \
              badstart=False):
 
-    model0, map_soln0, extras0 = build_model()
+    event = build_model()
     ipdb.set_trace()
              
     # Define the orbit
