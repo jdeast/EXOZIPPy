@@ -142,15 +142,17 @@ setup(
     # For an analysis of "install_requires" vs pip's requirements files see:
     # https://packaging.python.org/discussions/install-requires-vs-requirements/
     install_requires=[
-        'MulensModel',
         'numpy',
         'matplotlib',
         'astropy',
         'celerite',
         'pymc',
         'corner',
-        #'exoplanet', # seems to have dependencies incompatible with pymc
-        #'batman', # do we want this?
+        'MulensModel',
+        'ipdb',
+        'lightkurve',
+        #'exoplanet', # built on pymc3, seems to have dependencies incompatible with pymc... doesn't bode well for our future...
+        #'batman', # do we need this?
     ]
 
     # List additional groups of dependencies here (e.g. development

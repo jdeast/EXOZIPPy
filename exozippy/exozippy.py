@@ -11,7 +11,7 @@ import astropy.constants as const
 from build_model import build_model
 from build_latex_table import build_latex_table
 
-def exozippy(priorfile=None, \
+def exozippy(parfile=None, \
              prefix='fitresults/planet.',\
              # data file inputs
              rvpath=None, tranpath=None, \
@@ -75,8 +75,11 @@ def exozippy(priorfile=None, \
              plotonly=False, bestonly=False, \
              badstart=False):
 
-    event = build_model()
-    ipdb.set_trace()
+    # this is a user supplied parameter file that modifies the default
+    # initial values and imposes limits and priors on any parameter
+    # (fit or derived)
+
+    event = build_model(parfile=parfile, tranpath=tranpath)
              
     # Define the orbit
     orbit = xo.orbits.KeplerianOrbit(
@@ -123,4 +126,5 @@ def exozippy(priorfile=None, \
     # Define the rest of you model using `orbit`...
 
 if __name__ == "__main__":
-    exozippy()
+    exozippy(parfile="../examples/gj1132/101955023.priors.json",
+             tranpath="../examples/gj1132/*.dat")

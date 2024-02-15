@@ -6,20 +6,94 @@ import ipdb
 
 class Parameter:
 
-    def __init__(self, label, unit=None,
+    def __init__(self, label, unit=None, ndx=0,
                  initval=None,
-                 Deterministic=False, expression=None,
-                 Uniform=True, lower=None, upper=None,
-                 Normal=False, mu=None, sigma=None,
-                 latex=None, latex_unit=None, description=None, latex_prefix="ez"):
+                 expression=None,
+                 lower=None, upper=None,
+                 mu=None, sigma=None,
+                 latex=None, latex_unit=None, description=None, latex_prefix="ez",
+                 user_params=None):
 
-        # its pytensor distribution
-        if Deterministic:
+
+
+        # if the user supplied a parameter file, 
+        # check to see if it matches the declared parameter
+        l = None
+        add_potential=False
+
+        if user_params is not None:
+            if label in user_params.keys():
+                l = label
+            elif "_0" in label:
+                temp_label = label.split("_")[0]
+                if temp_label in user_params.keys():
+                    l = temp_label
+
+        if l is not None:
+
+            # if only one of initval and mu are specified
+            # set initval=mu or mu=initval
+            if "initval" in user_params[l]:
+                initval = user_params[l]["initval"]
+                if "mu" not in user_params[l]:
+                    mu = initval
+
+            if "mu" in user_params[l]:
+                mu = user_params[l]["mu"]
+                if "initval" not in user_params[l]:
+                    initval = mu
+
+            if "sigma" in user_params[l]:
+                if user_params[l]["sigma"] == 0:
+                    self.value = pm.Deterministic(label, mu)
+                elif user_params[l]["sigma"] > 0:
+                    if sigma is None:
+                        # the user wants to impose a Gaussian penalty
+                        sigma=user_params[l]["sigma"]
+                    else:
+                        # but there's already a gaussian penalty -- must add it as a potential
+                        add_potential=True
+ 
+            # the user can't expand the default (physical) bounds
+            # only further limit them
+            if "upper" in user_params[l]:
+                upper = min(user_params[l]["upper"],upper)
+            if "lower" in user_params[l]:
+                lower = max(user_params[l]["lower"],lower)
+                
+        if expression is not None:
+            print("deterministic: "+label+' (mu='+str(mu) +', lower='+str(lower) + ', upper='+str(upper)+', initval='+str(initval) + ',sigma='+str(sigma)+')')
+
             self.value = pm.Deterministic(label, expression)
-        elif Normal:
-            self.value = pm.Normal(label, mu=mu, sigma=sigma)
-        elif Uniform:
-            self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+
+            # if it's deterministic, apply constraints as potentials
+            if lower is not None:
+                pm.Potential("user_upperbound_" + str(ndx), pt.switch(self.value > upper, -np.inf))
+            if upper is not None:
+                pm.Potential("user_lowerbound_" + str(ndx), pt.switch(self.value < lower, -np.inf))
+            if mu is not None and sigma is not None:
+                pass
+                #pm.Potential("user_prior_" + str(ndx), -0.5 * ((param.value - mu) / sigma) ** 2)
+        else:
+            if (mu is not None) and (sigma is not None) and ((upper is not None) or (lower is not None)):
+                # bounded normal
+                print("bounded normal: " + str(lower) + " < " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " < " + str(upper) + " (initval="+str(initval)+")")
+                self.value = pm.Truncated(label, pm.Normal.dist(mu=mu,sigma=sigma),lower=lower,upper=upper, initval=initval)
+            elif (mu is not None) and (sigma is not None):
+                # normal
+                print("normal: " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " (lower=" + str(lower)+', upper='+str(upper)+', initval='+str(initval)+')')
+                self.value = pm.Normal(label, mu=mu, sigma=sigma, initval=initval)
+            else:
+                # uniform
+                print("uniform: " + str(lower) + " < " + label + " < " + str(upper) + " (initval="+str(initval)+', mu='+str(mu)+', sigma='+str(sigma)+")")
+                self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+
+        if add_potential:
+            pass
+            #user_prior = pm.Potential("user_prior_" + str(ndx), -0.5 * 
+            #                          ((self.value - user_params[l].mu) / user_params[l].sigma) ** 2)
+      
+        #ipdb.set_trace()
 
         self.unit = unit # astropy units
         self.label = label # its unique name for specifying in the parameter file.
@@ -31,6 +105,7 @@ class Parameter:
         self.description = description  # a verbose description for the latex table
         self.latex_prefix = latex_prefix
         self.get_latex_var()
+        self.table_note = None # A note to appear in the latex table
 
         self.posterior = None  # NSTEPS x NCHAINS array of all values
         self.prior = None  # its prior value
