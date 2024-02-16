@@ -7,3 +7,4 @@ exozippy/__pycache__
 EXOZIPPy.egg-info
 .idea/
 *.egg
+.DS_Store
