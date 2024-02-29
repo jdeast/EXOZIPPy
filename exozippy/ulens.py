@@ -142,3 +142,12 @@ class Phys2UlensConverter(object):
         frame.
         """
         return self.lens.mu - self.source.mu
+
+    @property
+    def v_earth_perp(self):
+        """
+        *vector*
+
+        The velocity of Earth projected on the sky at t_ref.
+        """
+        raise NotImplementedError()
