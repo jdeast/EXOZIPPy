@@ -9,6 +9,149 @@ import MulensModel as mm
 kappa = 8.14  # Should this be imported from mulens model for consistency?
 
 
+class Star(object):
+    """
+    Class defining a star and its properties.
+
+    Arguments:
+        mass: *float*
+            Mass of the star in _Solar Masses_.
+
+        radius: *float*
+            Radius of the star in _Solar Radii_.
+
+        distance: *float*
+            Distance to the star in _kpc_. Use either `distance` OR `pi`, not
+            both.
+
+        pi: *float*
+            parallax to the star in _mas_. Use either `distance` OR `pi`, not
+            both.
+
+        mu: *list*, *np.array*, *astropy.Quantity*
+            [N, E] heliocentric proper motion of the star in _mas/yr_.
+            Use either `mu` OR `vel`, not both.
+
+        vel: *list*, *np.array*, *astropy.Quantity*
+            [N, E] heliocentric velocity of the star in _km/s_.
+            Use either `mu` OR `vel`, not both.
+    """
+
+    def __init__(
+            self,
+            mass=None, radius=None,
+            distance=None, pi=None, mu=None, vel=None):
+
+        self.mass = mass
+        self.radius = radius
+        self._theta_star = None
+
+        if (distance is not None) and (pi is not None):
+            raise KeyError('Define either *distance* or *pi*, not both!')
+        else:
+            self._distance = distance
+            self._pi = pi
+
+        self._mu = None
+        self._vel = None
+        if (mu is not None) and (vel is not None):
+            raise KeyError('Define either *mu* or *vel*, not both!')
+        else:
+            self.mu = mu
+            self.vel = vel
+
+    @property
+    def distance(self):
+        """
+        *float*
+
+        Distance to the star in _kpc_.
+        """
+        if self._distance is None:
+            if self._pi is None:
+                raise AttributeError(
+                    'Cannot return distance. ' +
+                    'Neither *distance* nor *pi* were defined.')
+            else:
+                self._distance = 1. / self._pi
+
+        return self._distance
+
+    @property
+    def pi(self):
+        """
+        *float*
+
+        Parallax to the star in _mas_.
+        """
+        if self._pi is None:
+            if self._distance is None:
+                raise AttributeError(
+                    'Cannot return pi. ' +
+                    'Neither *distance* nor *pi* were defined.')
+            else:
+                self._pi = 1. / self._distance
+
+        return self._pi
+
+    @property
+    def mu(self):
+        """
+        *astropy.Quantity*
+
+        [N, E] heliocentric proper motion of the star in _mas/yr_.
+        """
+        if self._mu is None:
+            if self._vel is None:
+                raise AttributeError(
+                    'Cannot return mu. ' +
+                    'Neither *mu* nor *vel* were defined.')
+            else:
+                raise NotImplementedError('Conversion from vel to mu')
+
+        return self._mu
+
+    @mu.setter
+    def mu(self, new_value):
+        raise NotImplementedError(
+            'Need to write some code to create an astropy.Quantity')
+
+    @property
+    def vel(self):
+        """
+        *astropy.Quantity*
+
+        [N, E] heliocentric velocity of the star in _km/s_.
+        """
+        if self._vel is None:
+            if self._mu is None:
+                raise AttributeError(
+                    'Cannot return vel. ' +
+                    'Neither *mu* nor *vel* were defined.')
+            else:
+                raise NotImplementedError('Conversion from mu to vel')
+
+        return self._vel
+
+    @vel.setter
+    def vel(self, new_value):
+        raise NotImplementedError(
+            'Need to write some code to create an astropy.Quantity')
+
+    @property
+    def theta_star(self):
+        """
+        *float*
+
+        Angular radius of the star in _mas_
+        """
+        if self._theta_star is None:
+            # 215.032 RSun = 1 AU
+            self._theta_star = self.radius / 215.032 / self.distance
+
+        return self._theta_star
+
+
 class Phys2UlensConverter(object):
     """
     Class for converting from physical parameters to microlensing model
