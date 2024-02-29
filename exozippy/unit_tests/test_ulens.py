@@ -4,7 +4,7 @@ Unit tests for parameter conversions
 import unittest
 from numpy import testing
 
-from ulens import Star, phys2ulens
+from ulens import Star, Phys2UlensConverter
 
 
 class TestPhys2ulens(unittest.TestCase):
@@ -23,9 +23,10 @@ class TestPhys2ulens(unittest.TestCase):
         lens = Star(mass=0.5, distance=6.0, mu=(0, 1))
         source = Star(mass=1.0, distance=8.0, radius=1.0, mu=(1, 0))
 
-        ulens_params = phys2ulens(
+        converter = Phys2UlensConverter(
             source=source, lens=lens, coords=self.coords,
-            tref=self.ulens_expected['t_0'])
+            t_ref=self.ulens_expected['t_0'])
+        ulens_params = converter.get_ulens_params()
         testing.assert_almost_equal(
             ulens_params['t_E'], self.ulens_expected['t_E'])
         testing.assert_almost_equal(
@@ -42,9 +43,10 @@ class TestPhys2ulens(unittest.TestCase):
         lens = Star(mass=0.5, distance=6.0, vel=(0, 200))
         source = Star(mass=1.0, distance=8.0, radius=1.0, vel=(200, 0))
 
-        ulens_params = phys2ulens(
+        converter = Phys2UlensConverter(
             source=source, lens=lens, coords=self.coords,
-            tref=self.ulens_expected['t_0'])
+            t_ref=self.ulens_expected['t_0'])
+        ulens_params = converter.get_ulens_params()
         testing.assert_almost_equal(
             ulens_params['t_E'], self.ulens_expected['t_E'])
         testing.assert_almost_equal(
