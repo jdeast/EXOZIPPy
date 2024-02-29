@@ -39,8 +39,6 @@ class Phys2UlensConverter(object):
 
         self.t_ref = t_ref
 
-        # Probably all need to be replaced with private variables and
-        # properties...
         self._theta_E = None
         self._pi_rel = None
         self._mu_rel = None
@@ -121,7 +119,7 @@ class Phys2UlensConverter(object):
     @property
     def mu_rel(self):
         """
-        *vector*
+        *vector*  # Are these vectors really astropy.Quantity ?
 
         Lens-source relative proper motion in _mas/yr_ in the _geocentric_
         frame.
