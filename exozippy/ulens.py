@@ -10,6 +10,25 @@ kappa = 8.14  # Should this be imported from mulens model for consistency?
 
 
 class Phys2UlensConverter(object):
+    """
+    Class for converting from physical parameters to microlensing model
+    parameters.
+
+    Arguments :
+        source: :py:class:`~Star`
+            The source star.
+
+        lens: :py:class:`~Star`
+            The lens star.  # eventually, will need to upgrade to systems.
+
+        coords: *str* or *astropy.coordinates.SkyCoords*
+            The coordinates of the event.
+
+        t_ref: *float*
+            A reference time for converting from heliocentric to geocentric
+            proper motions. Recommend using t_0.
+
+    """
 
     def __init__(self, source=None, lens=None, coords=None, t_ref=None):
         self.source = source
