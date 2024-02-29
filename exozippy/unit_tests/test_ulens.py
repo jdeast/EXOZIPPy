@@ -20,8 +20,8 @@ class TestPhys2ulens(unittest.TestCase):
         """
         raise NotImplementedError('Need to update with real values')
 
-        lens = Star(mass=0.5, distance=6.0, mu=(0, 1))
-        source = Star(mass=1.0, distance=8.0, radius=1.0, mu=(1, 0))
+        lens = Star(mass=0.5, distance=6.0, mu=[0, 1])
+        source = Star(mass=1.0, distance=8.0, radius=1.0, mu=[1, 0])
 
         converter = Phys2UlensConverter(
             source=source, lens=lens, coords=self.coords,
@@ -40,8 +40,8 @@ class TestPhys2ulens(unittest.TestCase):
         """
         raise NotImplementedError('Still need to add real values')
 
-        lens = Star(mass=0.5, distance=6.0, vel=(0, 200))
-        source = Star(mass=1.0, distance=8.0, radius=1.0, vel=(200, 0))
+        lens = Star(mass=0.5, distance=6.0, vel=[0, 200])
+        source = Star(mass=1.0, distance=8.0, radius=1.0, vel=[200, 0])
 
         converter = Phys2UlensConverter(
             source=source, lens=lens, coords=self.coords,
