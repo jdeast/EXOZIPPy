@@ -147,7 +147,8 @@ class Star(object):
         """
         if self._theta_star is None:
             # 215.032 RSun = 1 AU
-            self._theta_star = self.radius / 215.032 / self.distance
+            if self.radius is not None:
+                self._theta_star = self.radius / 215.032 / self.distance
 
         return self._theta_star
 
@@ -185,18 +186,23 @@ class Phys2UlensConverter(object):
         self._theta_E = None
         self._pi_rel = None
         self._mu_rel = None
+        self._mu_rel_hat = None
         self._mu_rel_hel = None
         self._v_earth_perp = None
 
         self._t_E = None
         self._rho = None
+        self._pi_E_N = None
+        self._pi_E_E = None
+        self._pi_E = None
         self.ulens_params = None
 
     def get_ulens_params(self):
         """
         :return: *dict* of relevant microlensing model parameters.
         """
-        self.ulens_params = {'t_E': self.t_E, 'rho': self.rho}
+        self.ulens_params = {'t_E': self.t_E, 'rho': self.rho,
+                             'pi_E_N': self.pi_E_N, 'pi_E_E': self.pi_E_E}
 
         return self.ulens_params
 
@@ -255,9 +261,55 @@ class Phys2UlensConverter(object):
         Source radius normalized to the Einstein ring radius.
         """
         if self._rho is None:
-            self._rho = self.source.theta_star / self.theta_E
+            if self.source.theta_star is not None:
+                self._rho = self.source.theta_star / self.theta_E
 
         return self._rho
+
+    @property
+    def pi_E(self):
+        """
+        *float*
+
+        The magnitude of the microlens parallax vector.
+        """
+        if self._pi_E is None:
+            self._pi_E = self.pi_rel / self.theta_E
+
+        return self._pi_E
+
+    @property
+    def pi_E_vec(self):
+        """
+        *list*
+
+        The [N, E] components of the microlens parallax vector.
+        """
+        return [self.pi_E_N, self.pi_E_E]
+
+    @property
+    def pi_E_N(self):
+        """
+        *float*
+
+        The North component of the microlens parallax vector.
+        """
+        if self._pi_E_N is None:
+            self._pi_E_N = self.pi_E * self.mu_rel_hat[0]
+
+        return self._pi_E_N
+
+    @property
+    def pi_E_E(self):
+        """
+        *float*
+
+        The East component of the microlens parallax vector.
+        """
+        if self._pi_E_E is None:
+            self._pi_E_E = self.pi_E * self.mu_rel_hat[1]
+
+        return self._pi_E_E
 
     @property
     def mu_rel(self):
@@ -273,6 +325,20 @@ class Phys2UlensConverter(object):
             # Units are going to be a thing...
 
         return self._mu_rel
+
+    @property
+    def mu_rel_hat(self):
+        """
+        *vector*  # Are these vectors really astropy.Quantity ?
+
+        _Direction_ of the lens-source relative proper motion in the _geocentric_
+        frame.
+        """
+        if self._mu_rel_hat is None:
+            mu_rel_mag = np.sqrt(self.mu_rel[0]**2 + self.mu_rel[1]**2)
+            self._mu_rel_hat = np.array(self.mu_rel) / mu_rel_mag
+
+        return self._mu_rel_hat
 
     @property
     def mu_rel_hel(self):
