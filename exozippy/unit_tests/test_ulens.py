@@ -3,9 +3,9 @@ Unit tests for parameter conversions
 """
 import unittest
 from numpy import testing
+import MulensModel as mm
 
 from ulens import Star, Phys2UlensConverter
-
 
 
 class TestPhys2ulens(unittest.TestCase):
@@ -37,7 +37,6 @@ class TestPhys2ulens(unittest.TestCase):
         testing.assert_almost_equal(
             ulens_params['rho'], self.ulens_expected['rho'])
 
-
     def test_phys2ulens_vel(self):
         """
         Same as test_phys2ulens_mu() but using stellar velocities instead of proper
@@ -56,6 +55,63 @@ class TestPhys2ulens(unittest.TestCase):
             ulens_params['t_E'], self.ulens_expected['t_E'])
         testing.assert_almost_equal(
             ulens_params['rho'], self.ulens_expected['rho'])
+
+
+class TestGRAVITYEvent(unittest.TestCase):
+
+    def setUp(self):
+        # https://ui.adsabs.harvard.edu/abs/2020ApJ...897..180Z/abstract
+        self.coords = "05:07:42.72 24:47:56.4" # RA, Dec
+        # From Table 4
+        ## Inputs
+        self.M_L = 0.495
+        self.D_L = 0.429
+        self.D_S = 692
+        self.mu_L = [-28.89, 13.39] # N, E, helio
+        self.mu_S = [-6.42, -0.80]
+        ## Outputs
+        self.mu_rel_hel = [-22.45, 14.18]
+        self.mu_rel_geo = [-22.73, 9.83]
+
+        # Table 1, w/Lens light
+        ## Inputs
+        self.t_0 = 2458058.76
+        ## Outputs
+        self.t_E = 27.89
+        self.pi_E_vec = [-0.430, 0.186] # N, E
+        self.pi_E = 0.469
+
+        # From Section 4.2
+        ## Outputs
+        self.theta_E = 1.891
+
+        self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
+        self.source = Star(distance=self.D_S, mu=self.mu_S)
+        self.converter = Phys2UlensConverter(
+            source=self.source, lens=self.lens, coords=self.coords, t_ref=self.t_0)
+
+    def test_basic_calculations(self):
+        testing.assert_almost_equal(
+            self.converter.theta_E, self.theta_E, decimal=3)
+        testing.assert_almost_equal(self.converter.t_E, self.t_E, decimal=2)
+        testing.assert_almost_equal(self.converter.pi_E, self.pi_E, decimal=3)
+        testing.assert_almost_equal(
+            self.converter.pi_rel, self.theta_E * self.pi_E, decimal=3)
+
+    def test_mu_calculations(self):
+        testing.assert_almost_equal(
+            self.converter.mu_rel, self.mu_rel_geo, decimal=2)
+        testing.assert_almost_equal(
+            self.converter.mu_rel_hel, self.mu_rel_hel, decimal=2)
+
+    def test_get_ulens_params(self):
+        ulens_params = self.converter.get_ulens_params()
+        testing.assert_almost_equal(ulens_params['t_E'], self.t_E, decimal=2)
+        assert ulens_params['rho'] is None
+        testing.assert_almost_equal(
+            ulens_params['pi_E_N'], self.pi_E_vec[0], decimal=3)
+        testing.assert_almost_equal(
+            ulens_params['pi_E_E'], self.pi_E_vec[1], decimal=3)
 
 
 def test_v_earth_perp():
