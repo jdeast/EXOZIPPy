@@ -58,10 +58,17 @@ class TestPhys2ulens(unittest.TestCase):
 
 
 class TestGRAVITYEvent(unittest.TestCase):
+    """
+    Test based on properties of Kojima-1:
+    https://ui.adsabs.harvard.edu/abs/2020ApJ...897..180Z/abstract
+
+    So far, this only tests the total lens system properties, not the
+    planet properties, but those could be implemented
+    """
 
     def setUp(self):
-        # https://ui.adsabs.harvard.edu/abs/2020ApJ...897..180Z/abstract
         self.coords = "05:07:42.72 24:47:56.4" # RA, Dec
+
         # From Table 4
         ## Inputs
         self.M_L = 0.495
