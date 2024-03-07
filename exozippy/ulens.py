@@ -279,7 +279,7 @@ class Phys2UlensConverter(object):
         """
         *vector*
 
-        Lens-source relative proper motion in _mas/yr_ in the _helocentric_
+        Lens-source relative proper motion in _mas/yr_ in the _heliocentric_
         frame.
         """
         return self.lens.mu - self.source.mu
@@ -291,4 +291,5 @@ class Phys2UlensConverter(object):
 
         The velocity of Earth projected on the sky at t_ref.
         """
+        # Use MM.
         raise NotImplementedError()

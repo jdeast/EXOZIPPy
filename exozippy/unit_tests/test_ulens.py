@@ -6,7 +6,6 @@ from numpy import testing
 
 from ulens import Star, Phys2UlensConverter
 
-
 class TestPhys2ulens(unittest.TestCase):
 
     def setUp(self):
@@ -19,6 +18,10 @@ class TestPhys2ulens(unittest.TestCase):
         Also serves as a use case.
         """
         raise NotImplementedError('Need to update with real values')
+
+        # Possible real events for examples:
+        # GRAVITY
+        # Aparna: 2 epochs of HST
 
         lens = Star(mass=0.5, distance=6.0, mu=[0, 1])
         source = Star(mass=1.0, distance=8.0, radius=1.0, mu=[1, 0])
