@@ -84,6 +84,7 @@ class TestGRAVITYEvent(unittest.TestCase):
         # From Section 4.2
         ## Outputs
         self.theta_E = 1.891
+        self.v_earth_perp = [1.47, 23.29] # km/s
 
         self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
         self.source = Star(distance=self.D_S, mu=self.mu_S)
@@ -103,6 +104,8 @@ class TestGRAVITYEvent(unittest.TestCase):
             self.converter.mu_rel, self.mu_rel_geo, decimal=2)
         testing.assert_almost_equal(
             self.converter.mu_rel_hel, self.mu_rel_hel, decimal=2)
+        testing.assert_almost_equal(
+            self.converter.v_earth_perp, self.v_earth_perp, decimal=2)
 
     def test_get_ulens_params(self):
         ulens_params = self.converter.get_ulens_params()
