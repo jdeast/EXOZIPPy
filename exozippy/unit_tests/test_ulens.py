@@ -100,11 +100,12 @@ class TestGRAVITYEvent(unittest.TestCase):
 
     def test_basic_calculations(self):
         testing.assert_almost_equal(
-            self.converter.theta_E, self.theta_E, decimal=3)
-        testing.assert_almost_equal(self.converter.t_E, self.t_E, decimal=2)
-        testing.assert_almost_equal(self.converter.pi_E, self.pi_E, decimal=3)
-        testing.assert_almost_equal(
             self.converter.pi_rel, self.theta_E * self.pi_E, decimal=3)
+        testing.assert_almost_equal(
+            self.converter.theta_E, self.theta_E, decimal=3)
+        testing.assert_almost_equal(self.converter.pi_E, self.pi_E, decimal=3)
+        testing.assert_almost_equal(self.converter.t_E, self.t_E, decimal=2)
+
 
     def test_mu_calculations(self):
         testing.assert_almost_equal(
