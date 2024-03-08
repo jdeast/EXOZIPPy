@@ -56,8 +56,9 @@ class Star(object):
         self._vel = None
         if (mu is not None) and (vel is not None):
             raise KeyError('Define either *mu* or *vel*, not both!')
-        else:
+        elif mu is not None:
             self.mu = mu
+        elif vel is not None:
             self.vel = vel
 
     @property
