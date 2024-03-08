@@ -334,10 +334,9 @@ class Phys2UlensConverter(object):
         frame.
         """
         # mu_rel, hel = mu_rel + v_earth,perp * pi_rel / au
-        # apparently, units all work out by default.
         if self._mu_rel_vec is None:
             self._mu_rel_vec = (self.mu_rel_hel -
-                                self.v_earth_perp * self.pi_rel)
+                                self.v_earth_perp * self.pi_rel / 4.74047)
 
         return self._mu_rel_vec
 

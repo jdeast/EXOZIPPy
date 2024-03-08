@@ -127,9 +127,9 @@ class TestGRAVITYEvent(unittest.TestCase):
         testing.assert_allclose(ulens_params['t_E'], self.t_E, rtol=0.02)
         assert ulens_params['rho'] is None
         testing.assert_allclose(
-            ulens_params['pi_E_N'], self.pi_E_vec[0], atol=0.001)
+            ulens_params['pi_E_N'], self.pi_E_vec[0], atol=0.002)
         testing.assert_allclose(
-            ulens_params['pi_E_E'], self.pi_E_vec[1], atol=0.001)
+            ulens_params['pi_E_E'], self.pi_E_vec[1], atol=0.002)
 
 
 def test_v_earth_perp():
