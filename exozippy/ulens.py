@@ -119,7 +119,7 @@ class Star(object):
             self._mu = new_value
         else:
             raise ValueError(
-                'Invalid type for mu. Must be *tuple*, *list*, '+
+                'Invalid type for mu. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
     @property
@@ -147,7 +147,7 @@ class Star(object):
             self._vel = new_value
         else:
             raise ValueError(
-                'Invalid type for vel. Must be *tuple*, *list*, '+
+                'Invalid type for vel. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
     @property
@@ -181,8 +181,8 @@ class Phys2UlensConverter(object):
             The coordinates of the event.
 
         t_ref: *float*
-            A reference time in BJD for converting from heliocentric to geocentric
-            proper motions. Recommend using t_0.
+            A reference time in BJD for converting from heliocentric to
+            geocentric proper motions. Recommend using t_0.
 
     """
 
@@ -347,8 +347,8 @@ class Phys2UlensConverter(object):
         """
         *vector*  # Are these vectors really astropy.Quantity ?
 
-        _Direction_ of the lens-source relative proper motion in the _geocentric_
-        frame.
+        _Direction_ of the lens-source relative proper motion in the
+        _geocentric_ frame.
         """
         if self._mu_rel_hat is None:
             mu_rel_mag = np.sqrt(self.mu_rel[0]**2 + self.mu_rel[1]**2)
