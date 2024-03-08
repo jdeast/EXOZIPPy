@@ -199,6 +199,7 @@ class Phys2UlensConverter(object):
         self._theta_E = None
         self._pi_rel = None
         self._mu_rel = None
+        self._mu_rel_vec = None
         self._mu_rel_hat = None
         self._mu_rel_hel = None
         self._v_earth_perp = None
@@ -262,7 +263,7 @@ class Phys2UlensConverter(object):
         Einstein timescale in _days_.
         """
         if self._t_E is None:
-            self._t_E = self.theta_E / self.mu_rel.value
+            self._t_E = self.theta_E / self.mu_rel
 
         return self._t_E
 
@@ -325,9 +326,9 @@ class Phys2UlensConverter(object):
         return self._pi_E_E
 
     @property
-    def mu_rel(self):
+    def mu_rel_vec(self):
         """
-        *vector*  # Are these vectors really astropy.Quantity ?
+        *np.ndarray*
 
         Lens-source relative proper motion in _mas/yr_ in the _geocentric_
         frame.
@@ -337,30 +338,43 @@ class Phys2UlensConverter(object):
         # pi_rel: mas
         # mu_rel : mas/yr
         # mas * km/s / au = mas * km/s * (s/yr) * (au / km) / au
-        if self._mu_rel is None:
-            self._mu_rel = (self.mu_rel_hel -
+        if self._mu_rel_vec is None:
+            self._mu_rel_vec = (self.mu_rel_hel -
                             4.74047 * self.v_earth_perp * self.pi_rel)
+
+        return self._mu_rel_vec
+
+    @property
+    def mu_rel(self):
+        """
+        *float*
+
+        _magnitude_ of lens-source relative proper motion in _mas/yr_ in the
+        _geocentric_frame.
+        """
+        if self._mu_rel is None:
+            self._mu_rel = np.sqrt(
+                self.mu_rel_vec[0] ** 2 + self.mu_rel_vec[1] ** 2)
 
         return self._mu_rel
 
     @property
     def mu_rel_hat(self):
         """
-        *vector*  # Are these vectors really astropy.Quantity ?
+        *np.ndarray*
 
         _Direction_ of the lens-source relative proper motion in the
         _geocentric_ frame.
         """
         if self._mu_rel_hat is None:
-            mu_rel_mag = np.sqrt(self.mu_rel[0]**2 + self.mu_rel[1]**2)
-            self._mu_rel_hat = np.array(self.mu_rel) / mu_rel_mag
+            self._mu_rel_hat = self.mu_rel_vec / self.mu_rel
 
         return self._mu_rel_hat
 
     @property
     def mu_rel_hel(self):
         """
-        *vector*
+        *np.ndarray*
 
         Lens-source relative proper motion in _mas/yr_ in the _heliocentric_
         frame.

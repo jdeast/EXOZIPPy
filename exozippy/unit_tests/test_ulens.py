@@ -108,7 +108,7 @@ class TestGRAVITYEvent(unittest.TestCase):
 
     def test_mu_calculations(self):
         testing.assert_almost_equal(
-            self.converter.mu_rel, self.mu_rel_geo, decimal=2)
+            self.converter.mu_rel_vec, self.mu_rel_geo, decimal=2)
         testing.assert_almost_equal(
             self.converter.mu_rel_hel, self.mu_rel_hel, decimal=2)
         testing.assert_almost_equal(
