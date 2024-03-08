@@ -240,7 +240,7 @@ class Phys2UlensConverter(object):
         if self._pi_rel is None:
             self._pi_rel = self.lens.pi - self.source.pi
 
-        return self.pi_rel
+        return self._pi_rel
 
     @property
     def theta_E(self):
