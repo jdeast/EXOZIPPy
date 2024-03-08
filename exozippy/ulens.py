@@ -370,8 +370,8 @@ class Phys2UlensConverter(object):
     @property
     def v_earth_perp(self):
         """
-        *vector*
+        *np.ndarray*
 
         The velocity of Earth projected on the sky at t_ref.
         """
-        return self._coords.v_Earth_projected(self.t_ref)
+        return np.array(self._coords.v_Earth_projected(self.t_ref))
