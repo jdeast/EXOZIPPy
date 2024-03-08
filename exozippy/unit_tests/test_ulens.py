@@ -135,13 +135,11 @@ def test_v_earth_perp():
     t_ref = 2456836.06
     conv = Phys2UlensConverter(coords=coords, t_ref=t_ref)
     v_perp = conv.v_earth_perp
-    result = [v_perp.N, v_perp.E]
-    testing.assert_almost_equal([-0.5, 28.9], result, decimal=1)
+    testing.assert_almost_equal([-0.5, 28.9], v_perp, decimal=1)
 
     # Batista et al. 2011, mb09387:
     coords = "17:53:50.79 -33:59:25"
     t_ref = 2455042.34
     conv = Phys2UlensConverter(coords=coords, t_ref=t_ref)
     v_perp = conv.v_earth_perp
-    result = [v_perp.N, v_perp.E]
-    testing.assert_almost_equal([-3.60, 22.95], result, decimal=2)
+    testing.assert_almost_equal([-3.60, 22.95], v_perp, decimal=2)
