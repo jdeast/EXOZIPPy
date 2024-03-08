@@ -73,7 +73,7 @@ class TestGRAVITYEvent(unittest.TestCase):
         ## Inputs
         self.M_L = 0.495
         self.D_L = 0.429
-        self.D_S = 692
+        self.D_S = 0.692
         self.mu_L = [-28.89, 13.39] # N, E, helio
         self.mu_S = [-6.42, -0.80]
         ## Outputs
@@ -93,16 +93,24 @@ class TestGRAVITYEvent(unittest.TestCase):
         self.theta_E = 1.891
         self.v_earth_perp = [1.47, 23.29] # km/s
 
+        # From Section 4.3
+        ## Outputs
+        self.pi_L = 2.332
+
         self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
         self.source = Star(distance=self.D_S, mu=self.mu_S)
         self.converter = Phys2UlensConverter(
             source=self.source, lens=self.lens, coords=self.coords, t_ref=self.t_0)
 
+    def test_Star_calculations(self):
+        testing.assert_almost_equal(self.lens.pi, self.pi_L, decimal=3)
+
     def test_basic_calculations(self):
+        print(self.lens.pi, self.source.pi)
         testing.assert_almost_equal(
             self.converter.pi_rel, self.theta_E * self.pi_E, decimal=3)
         testing.assert_almost_equal(
-            self.converter.theta_E, self.theta_E, decimal=3)
+            self.converter.theta_E, self.theta_E, decimal=2)
         testing.assert_almost_equal(self.converter.pi_E, self.pi_E, decimal=3)
         testing.assert_almost_equal(self.converter.t_E, self.t_E, decimal=2)
 

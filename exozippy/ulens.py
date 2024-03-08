@@ -263,7 +263,7 @@ class Phys2UlensConverter(object):
         Einstein timescale in _days_.
         """
         if self._t_E is None:
-            self._t_E = self.theta_E / self.mu_rel
+            self._t_E = 365.25 * self.theta_E / self.mu_rel
 
         return self._t_E
 
