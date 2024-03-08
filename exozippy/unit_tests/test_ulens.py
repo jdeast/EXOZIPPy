@@ -85,13 +85,13 @@ class TestGRAVITYEvent(unittest.TestCase):
         self.t_0 = 2458058.76
         ## Outputs
         self.t_E = 27.89
-        self.pi_E_vec = [-0.430, 0.186] # N, E
+        self.pi_E_vec = [-0.430, 0.186]  # N, E
         self.pi_E = 0.469
 
         # From Section 4.2
         ## Outputs
         self.theta_E = 1.891
-        self.v_earth_perp = [1.47, 23.29] # km/s
+        self.v_earth_perp = [1.47, 23.29]  # km/s
 
         # From Section 4.3
         ## Outputs
@@ -117,11 +117,11 @@ class TestGRAVITYEvent(unittest.TestCase):
 
     def test_mu_calculations(self):
         testing.assert_almost_equal(
-            self.converter.mu_rel_vec, self.mu_rel_geo, decimal=2)
-        testing.assert_almost_equal(
             self.converter.mu_rel_hel, self.mu_rel_hel, decimal=2)
         testing.assert_almost_equal(
             self.converter.v_earth_perp, self.v_earth_perp, decimal=2)
+        testing.assert_almost_equal(
+            self.converter.mu_rel_vec, self.mu_rel_geo, decimal=2)
 
     def test_get_ulens_params(self):
         ulens_params = self.converter.get_ulens_params()
