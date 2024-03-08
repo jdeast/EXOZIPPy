@@ -5,7 +5,7 @@ import unittest
 from numpy import testing
 import MulensModel as mm
 
-from ulens import Star, Phys2UlensConverter
+from exozippy.ulens import Star, Phys2UlensConverter
 
 
 class TestPhys2ulens(unittest.TestCase):
