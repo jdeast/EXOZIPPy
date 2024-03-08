@@ -114,7 +114,6 @@ class TestGRAVITYEvent(unittest.TestCase):
         testing.assert_allclose(self.converter.pi_E, self.pi_E, rtol=0.001)
         testing.assert_allclose(self.converter.t_E, self.t_E, rtol=0.02)
 
-
     def test_mu_calculations(self):
         testing.assert_allclose(
             self.converter.mu_rel_hel, self.mu_rel_hel, rtol=0.001)
