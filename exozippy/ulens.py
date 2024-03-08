@@ -97,7 +97,7 @@ class Star(object):
     @property
     def mu(self):
         """
-        *astropy.Quantity*
+        *np.ndarray*
 
         [N, E] heliocentric proper motion of the star in _mas/yr_.
         """
@@ -113,13 +113,19 @@ class Star(object):
 
     @mu.setter
     def mu(self, new_value):
-        raise NotImplementedError(
-            'Need to write some code to create an astropy.Quantity')
+        if isinstance(new_value, (tuple, list)):
+            self._mu = np.array(new_value)
+        elif isinstance(new_value, (np.ndarray)):
+            self._mu = new_value
+        else:
+            raise ValueError(
+                'Invalid type for mu. Must be *tuple*, *list*, '+
+                ' or *np.ndarray: ', type(new_value))
 
     @property
     def vel(self):
         """
-        *astropy.Quantity*
+        *np.ndarray*
 
         [N, E] heliocentric velocity of the star in _km/s_.
         """
@@ -135,8 +141,14 @@ class Star(object):
 
     @vel.setter
     def vel(self, new_value):
-        raise NotImplementedError(
-            'Need to write some code to create an astropy.Quantity')
+        if isinstance(new_value, (tuple, list)):
+            self._vel = np.array(new_value)
+        elif isinstance(new_value, (np.ndarray)):
+            self._vel = new_value
+        else:
+            raise ValueError(
+                'Invalid type for vel. Must be *tuple*, *list*, '+
+                ' or *np.ndarray: ', type(new_value))
 
     @property
     def theta_star(self):
@@ -169,7 +181,7 @@ class Phys2UlensConverter(object):
             The coordinates of the event.
 
         t_ref: *float*
-            A reference time for converting from heliocentric to geocentric
+            A reference time in BJD for converting from heliocentric to geocentric
             proper motions. Recommend using t_0.
 
     """
@@ -320,9 +332,13 @@ class Phys2UlensConverter(object):
         frame.
         """
         # mu_rel, hel = mu_rel + v_earth,perp * pi_rel / au
+        # v_earth_perp: km/s
+        # pi_rel: mas
+        # mu_rel : mas/yr
+        # mas * km/s / au = mas * km/s * (s/yr) * (au / km) / au
         if self._mu_rel is None:
-            self._mu_rel = self.mu_rel_hel - self.v_earth_perp * self.pi_rel
-            # Units are going to be a thing...
+            self._mu_rel = (self.mu_rel_hel -
+                            4.74047 * self.v_earth_perp * self.pi_rel)
 
         return self._mu_rel
 
@@ -357,5 +373,4 @@ class Phys2UlensConverter(object):
 
         The velocity of Earth projected on the sky at t_ref.
         """
-        # Use MM.
-        raise NotImplementedError()
+        return self._coords.v_Earth_projected(self.t_ref)
