@@ -1,5 +1,7 @@
 """
 Example 01: Show how MM-EXOFAST should work on an FSPL microlensing event.
+
+DRAFT!!! As can be seen below, some architecture things need more thought.
 """
 import os.path
 import MulensModel as mm
