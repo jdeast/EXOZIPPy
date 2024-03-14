@@ -34,11 +34,15 @@ def print_metrics(results, expected):
 
 
 # Long form:
-init_ulens_params = mmexo.get_initial_ulens_params(SAMPLE_FILE_01)
-init_phys_params = mmexo.get_phys_params(init_ulens_params)
-results = mmexo.mcmc_fit(SAMPLE_FILE_01, init_params=init_phys_params)
-print_metrics(results, expected)
+fitter = mmexo.MMEXOFASTFitter(SAMPLE_FILE_01)
+fitter.get_initial_ulens_params()
+print(fitter.initial_ulens_params)
+fitter.get_initial_phys_params()
+print(fitter.initial_phys_params)
+fitter.mcmc_fit()
+print_metrics(fitter.results, expected)
 
 # Short form:
-results_short = mmexo.fit(SAMPLE_FILE_01)
-print_metrics(results_short, expected)
+fitter_2 = mmexo.MMEXOFASTFitter(SAMPLE_FILE_01)
+fitter_2.fit()
+print_metrics(fitter_2.results, expected)
