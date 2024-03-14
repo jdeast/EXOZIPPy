@@ -34,7 +34,7 @@ def print_metrics(results, expected):
 
 
 # Long form:
-fitter = mmexo.MMEXOFASTFitter(SAMPLE_FILE_01)
+fitter = mmexo.MMEXOFASTSingleLensFitter(SAMPLE_FILE_01)
 fitter.get_initial_mulens_parameters()
 print(fitter.initial_mulens_parameters)
 fitter.get_initial_physical_parameters()
@@ -43,6 +43,6 @@ fitter.mcmc_fit()
 print_metrics(fitter.results, expected)
 
 # Short form:
-fitter_2 = mmexo.MMEXOFASTFitter(SAMPLE_FILE_01)
+fitter_2 = mmexo.MMEXOFASTSingleLensFitter(SAMPLE_FILE_01)
 fitter_2.fit()
 print_metrics(fitter_2.results, expected)
