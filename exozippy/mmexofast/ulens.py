@@ -6,7 +6,8 @@ import numpy as np
 import MulensModel as mm
 
 
-kappa = 8.14  # Should this be imported from mulens model for consistency?
+_kappa = 8.14  # Should this be imported from mulens model for consistency?
+_masyr2kms = 4.740470463533349
 
 
 class Star(object):
@@ -108,7 +109,7 @@ class Star(object):
                     'Cannot return mu. ' +
                     'Neither *mu* nor *vel* were defined.')
             else:
-                raise NotImplementedError('Conversion from vel to mu')
+                self._mu = self._vel / self.distance / _masyr2kms
 
         return self._mu
 
@@ -136,7 +137,7 @@ class Star(object):
                     'Cannot return vel. ' +
                     'Neither *mu* nor *vel* were defined.')
             else:
-                raise NotImplementedError('Conversion from mu to vel')
+                self._vel = self._mu * self.distance * _masyr2kms
 
         return self._vel
 
@@ -251,7 +252,7 @@ class Phys2UlensConverter(object):
         Angular Einstein radius in _mas_.
         """
         if self._theta_E is None:
-            self._theta_E = np.sqrt(kappa * self.lens.mass * self.pi_rel)
+            self._theta_E = np.sqrt(_kappa * self.lens.mass * self.pi_rel)
 
         return self._theta_E
 
@@ -336,7 +337,7 @@ class Phys2UlensConverter(object):
         # mu_rel, hel = mu_rel + v_earth,perp * pi_rel / au
         if self._mu_rel_vec is None:
             self._mu_rel_vec = (self.mu_rel_hel -
-                                self.v_earth_perp * self.pi_rel / 4.74047)
+                                self.v_earth_perp * self.pi_rel / _masyr2kms)
 
         return self._mu_rel_vec
 
