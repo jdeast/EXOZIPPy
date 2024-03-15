@@ -3,9 +3,8 @@ Unit tests for parameter conversions
 """
 import unittest
 from numpy import testing
-import MulensModel as mm
 
-from exozippy.ulens import Star, Phys2UlensConverter
+from exozippy.mmexofast.ulens import Star, Phys2UlensConverter
 
 
 class TestPhys2ulens(unittest.TestCase):
