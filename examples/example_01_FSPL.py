@@ -19,7 +19,7 @@ SAMPLE_FILE_01 = os.path.join(
 
 coords = "17:47:29.42, -34:43:35.6"
 
-expected = {'mulens': {'t_0': 5379.571, 'u_0': 0.523, 't_E': 17.94},
+expected = {'mulens': {'t_0': 2455379.571, 'u_0': 0.523, 't_E': 17.94},
             'physical': {'D_L': 8.1, 'D_S': 9.7, 'M_L': 0.15,
                     'mu_rel': 3.2,
                      'theta_E': 0.33}}
