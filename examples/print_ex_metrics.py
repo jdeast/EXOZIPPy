@@ -1,8 +1,16 @@
 
 def print_metrics(results, expected):
+    """
+    Prints metrics comparing MMEXOFAST results to expected values.
+
+    :param results: Output from MMEXOFAST
+    :param expected: *dict* of expected values
+    """
     for key in expected.keys():
         print('Param type:', key)
-        print('key, exp_value, exp_sigma, obs_value, obs_sigma, Dsig^2, Dfrac^2, sig_frac^2')
+        print(
+            'key, exp_value, exp_sigma, obs_value, obs_sigma, ' +
+            'Dsig^2, Dfrac^2, sig_frac^2')
         for param_key in expected[key].keys():
             obs_value = results[key][param_key]
             obs_sigma = results['{0}_sigma'.format(key)][param_key]
