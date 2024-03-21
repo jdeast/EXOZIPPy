@@ -1,3 +1,5 @@
+import astropy.units
+
 
 def print_metrics(results, expected):
     """
@@ -16,14 +18,26 @@ def print_metrics(results, expected):
             obs_sigma = results['{0}_sigma'.format(key)][param_key]
 
             exp = expected[key][param_key]
+            # NEED TO UPDATE TO HANDLE ASYMMETRIC ERRORS!
             if isinstance(exp, (float)):
                 exp_value = exp
                 exp_sigma = None
                 sig_frac2 = None
             else:
-                exp_value = exp[0]
-                exp_sigma = exp[1]
-                sig_frac2 = ((exp_sigma - obs_sigma) / exp_sigma)**2
+                if len(exp) == 2:
+                    exp_value = exp[0]
+                    exp_sigma = exp[1]
+                    sig_frac2 = ((exp_sigma - obs_sigma) / exp_sigma)**2
+                elif len(exp) == 3:
+                    if isinstance(exp[-1], (astropy.units.Unit)):
+                        # symmetric error bar + units
+                        pass
+                    else:
+                        # asymmetric error bar, no units
+                        pass
+                elif len(exp) == 4:
+                    """handle asymmetric error bars and units"""
+                    pass
 
             dsig2 = ((obs_value - exp_value) / obs_sigma)**2
             dfrac2 = ((obs_value - exp_value) / exp_value)**2
