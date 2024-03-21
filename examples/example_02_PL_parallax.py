@@ -3,6 +3,8 @@ Example 02: Show how MM-EXOFAST should work on OB140939, a point lens
 microlensing event with satellite parallax.
 
 Uses MulensModel.MulensData objects as input.
+
+https://ui.adsabs.harvard.edu/abs/2015ApJ...802...76Y/abstract
 """
 
 import os.path
@@ -29,7 +31,6 @@ data_spitzer = mm.MulensData(
 # For parallax calculations we need event coordinates:
 coords = "17:47:12.25 -21:22:58.7"
 
-# Values from https://ui.adsabs.harvard.edu/abs/2015ApJ...802...76Y/abstract
 # 4 degenerate solutions
 expected_mp = {'mulens': {'t_0': [6836.22, 0.11], 'u_0': [0.840, 0.002], 't_E': [24.29, 0.16],
                           'pi_E_N': [-0.214, 0.044], 'pi_E_E': [0.217, 0.006]},

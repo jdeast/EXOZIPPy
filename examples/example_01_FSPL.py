@@ -4,6 +4,7 @@ Example 01: Show how MM-EXOFAST should work on a point lens microlensing event
 
 Uses a data file as input.
 
+https://ui.adsabs.harvard.edu/abs/2014ApJ...795...42P/abstract
 """
 import os.path
 import MulensModel as mm
