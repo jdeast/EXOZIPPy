@@ -7,6 +7,57 @@ import MulensModel as mm
 import sfit_minimizer as sfit
 
 
+def fit(files=None, coords=None, priors=None, fit_type=None,
+        print_results=False, verbose=False, output_file=None):
+    """
+    Fit a microlensing light curve using MMEXOFAST
+
+    :param files:
+    :param coords:
+    :param priors:
+    :param fit_type:
+    :param print_results:
+    :param verbose:
+    :param output_file:
+    :return:
+
+    ***
+    Q1: Should this also include an `input_file` option?
+    Q2: What about `initial_param` = *dict* of microlensing parameters option?
+    Open issue: as written, only supports single solutions.
+    ***
+
+    """
+    if isinstance(files, (str)):
+        files = [files]
+
+    if files is not None:
+        datasets = create_mulensdata_objects(files)
+
+    if fit_type is None:
+        raise ValueError('You must set the fit_type.')
+
+
+    # Find initial Point Lens model
+    best_ef_grid_params = do_ef_grid_search(datasets)
+    initial_pspl_params = get_initial_pspl_params(best_ef_grid_params)
+    best_pspl_params = do_sfit(datasets, initial_pspl_params)
+    if fit_type == 'point lens':
+        # Do the full MMEXOFAST fit to get physical parameters
+        point_lens_results = do_mmexofast_fit(datasets, best_pspl_params)
+        return point_lens_results
+    elif fit_type == 'binary_lens':
+        # Find the initial planet parameters
+        initial_af_grid_params = do_af_grid_search(datasets, best_pspl_params)
+        initial_2L1S_params = get_initial_2L1S_params(initial_af_grid_params)
+
+        # Do the full MMEXOFAST fit to get physical parameters
+        binary_lens_results = do_mmexofast_fit(datasets, initial_2L1S_params)
+        return binary_lens_results
+    else:
+        raise ValueError('fit_type not recognized. Your value', fit_type)
+
+
 class MMEXOFASTSingleLensFitter():
 
     def __init__(self, datafiles=None, data=None):
