@@ -15,6 +15,8 @@ from print_ex_metrics import print_metrics
 
 
 # Read the data (note that we do not rescale errorbars here):
+# File Formatting convention: nYYYYMMDD.filtername.telescope.whateveryouwant.
+# YYYYMMDD = UT date of first datapoint
 dir_ = os.path.join(mm.DATA_PATH, "photometry_files", "OB140939")
 file_ground = os.path.join(dir_, "ob140939_OGLE.dat")
 file_spitzer = os.path.join(dir_, "ob140939_Spitzer.dat")

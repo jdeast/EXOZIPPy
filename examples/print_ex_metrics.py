@@ -1,13 +1,23 @@
 import astropy.units
 
 
+class CSVResults():
+    """
+    MMEXOFAST Results file.
+    """
+
+    def __init__(self, filename):
+        pass
+
+
 def print_metrics(results, expected):
     """
     Prints metrics comparing MMEXOFAST results to expected values.
 
-    :param results: Output from MMEXOFAST
+    :param results: *CSVResults* Output from MMEXOFAST
     :param expected: *dict* of expected values
     """
+    # diff = (value1-value2)/sqrt(err1^2+err2^2)
     for key in expected.keys():
         print('Param type:', key)
         print(
