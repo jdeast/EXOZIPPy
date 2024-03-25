@@ -67,7 +67,7 @@ priors = {'mu_s_hel': {'N': ['gauss', -0.64, 0.45],
                        'E': ['gauss', -5.31, 0.45]}}
 
 results = mmexo.mmexofast.fit(
-    files=[file_ground, file_spitzer], fit_type='point lens',
+    files=[file_ground, file_spitzer], coords=coords, fit_type='point lens',
     print_results=True, verbose=True, priors=priors)
 
 # This solution matching will not necessarily work if the solutions aren't
