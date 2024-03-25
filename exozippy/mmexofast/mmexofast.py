@@ -58,6 +58,32 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
         raise ValueError('fit_type not recognized. Your value', fit_type)
 
 
+def do_ef_grid_search(datasets):
+    ef_grid = mmexo.EventFinderGridSearch(datasets=datasets)
+    ef_grid.run()
+    return ef_grid.best
+
+
+def do_af_grid_search(datasets, best_pspl_params):
+    event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
+    event.fit_fluxes()
+    residuals = []
+    for i, dataset in enumerate(datasets):
+        res, err = event.fit[i].get_residuals(phot_fmt='flux')
+        residuals.append(
+            mm.MulensData(
+                [dataset.time, res, err], phot_fmt='flux',
+                bandpass=dataset.bandpass,
+                ephemerides_file=dataset.ephemerides_file))
+
+    af_grid = mmexo.EventFinderGridSearch(datasets=residuals, teff_min=0.3)
+    # May need to update value of teff_min
+    # Is the AnomalyFinderGridSearch really the same as EventFinderGridSearch?
+    # Or are they just based on the same principles? (but differ in the details)
+    af_grid.run()
+    return af_grid.best
+
+
 class MMEXOFASTSingleLensFitter():
 
     def __init__(self, datafiles=None, data=None):
