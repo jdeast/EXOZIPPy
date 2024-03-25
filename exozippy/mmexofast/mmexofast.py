@@ -35,8 +35,9 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
         datasets = create_mulensdata_objects(files)
 
     if fit_type is None:
+        # Maybe "None" means initial mulens parameters were passed, so we can
+        # go straight to a mmexofast_fit?
         raise ValueError('You must set the fit_type.')
-
 
     # Find initial Point Lens model
     best_ef_grid_params = do_ef_grid_search(datasets)
