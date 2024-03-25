@@ -1,0 +1,35 @@
+coords: "17:54:19.2 -30:22:38"
+fit_type: 'binary lens'
+priors:
+    theta_star: ['gauss', 5.25, 0.73]
+    D_S: ['gauss', 8.001, 1.905]
+    gamma:
+        I: 0.538
+        R: 0.626
+files:
+    root: MODULE_PATH
+    subdir: examples/OB05390_lightcurves
+    files:
+        - OGLE_I.dat
+        - MOA_r.dat
+        - Canopus_I.dat
+        - Danish_I.dat
+        - FTN_R.dat
+        - Perth_I.dat
+expected: 
+    mulens:
+        s: [1.610, 0.008]
+        q: [0.000076, 0.000007]
+        u_0: [0.359, 0.005]
+        t_E: [11.03, 0.11]
+        t_0: [2453582.731, 0.005]
+        t_star: [0.282, 0.010]
+        alpha: [157.907, 0.172] # original: [np.rad2deg(2.756), np.rad2deg(0.003)]
+    physical: 
+        R_S: [9.6, 1.3]
+        Teff_S: 5200
+        M_2: [5.5, -2.7, 5.5, u.M_e]
+        a: [2.6, -0.6, 1.5]
+        M_1: [0.22, -0.11, 0.21]
+        D_L: [6.6, 1.0]
+        P: [9, -3, 9]
