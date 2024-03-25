@@ -60,6 +60,7 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
 
 
 def do_ef_grid_search(datasets):
+    # Should probably scrape t_0_1 from the filenames
     ef_grid = mmexo.EventFinderGridSearch(datasets=datasets)
     ef_grid.run()
     return ef_grid.best
