@@ -17,13 +17,13 @@ from print_ex_metrics import print_metrics
 
 # REWRITE INPUTS USING YAML BECAUSE IT NEEDS TO CAPTURE BAND INFORMATION!
 # Data files
-dir_ = os.path.join(mm.MODULE_PATH, "examples", "OB05390_lightcurves")
-file_1 = os.path.join(dir_, "OGLE_I.dat mag")
-file_2 = os.path.join(dir_, "MOA_r.dat mag")
-file_3 = os.path.join(dir_, "Canopus_I.dat mag")
-file_4 = os.path.join(dir_, "Danish_I.dat mag")
-file_5 = os.path.join(dir_, "FTN_R.dat mag")
-file_6 = os.path.join(dir_, "Perth_I.dat mag")
+dir_ = os.path.join(mmexo.MULENS_DATA_PATH, "OB05390")
+file_1 = os.path.join(dir_, "n20050215.I.OGLE3.dat")
+file_2 = os.path.join(dir_, "n20050724.R.MOA.dat")
+file_3 = os.path.join(dir_, "n20050725.I.Canopus.dat")
+file_4 = os.path.join(dir_, "n20050725.I.Danish.dat")
+file_5 = os.path.join(dir_, "n20050725.R.FTN.dat")
+file_6 = os.path.join(dir_, "n20050725.I.Perth.dat")
 files = [file_1, file_2, file_3, file_4, file_5, file_6]
 
 coords = "17:54:19.2 -30:22:38"

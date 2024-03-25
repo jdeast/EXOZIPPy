@@ -2,8 +2,6 @@
 Example 02: Show how MM-EXOFAST should work on OB140939, a point lens
 microlensing event with satellite parallax.
 
-Uses MulensModel.MulensData objects as input.
-
 https://ui.adsabs.harvard.edu/abs/2015ApJ...802...76Y/abstract
 """
 
@@ -17,18 +15,19 @@ from print_ex_metrics import print_metrics
 # Read the data (note that we do not rescale errorbars here):
 # File Formatting convention: nYYYYMMDD.filtername.telescope.whateveryouwant.
 # YYYYMMDD = UT date of first datapoint
-dir_ = os.path.join(mm.DATA_PATH, "photometry_files", "OB140939")
-file_ground = os.path.join(dir_, "ob140939_OGLE.dat")
-file_spitzer = os.path.join(dir_, "ob140939_Spitzer.dat")
-data_ground = mm.MulensData(
-    file_name=file_ground, plot_properties={'label': 'OGLE'})
+dir_ = os.path.join(mmexo.MULENS_DATA_PATH, "OB140939")
+file_ground = os.path.join(dir_, "n20140210.I.OGLE4.ob140939.dat")
+file_spitzer = os.path.join(dir_, "n20140605.Spit36.Spitzer.ob140939.dat")
 
-# Here is the main difference - we provide the ephemeris for Spitzer:
-file_spitzer_eph = os.path.join(
-    mm.DATA_PATH, 'ephemeris_files', 'Spitzer_ephemeris_01.dat')
-data_spitzer = mm.MulensData(
-    file_name=file_spitzer, ephemerides_file=file_spitzer_eph,
-    plot_properties={'label': 'Spitzer'})
+# data_ground = mm.MulensData(
+#     file_name=file_ground, plot_properties={'label': 'OGLE'})
+#
+# # Here is the main difference - we provide the ephemeris for Spitzer:
+# file_spitzer_eph = os.path.join(
+#     mm.DATA_PATH, 'ephemeris_files', 'Spitzer_ephemeris_01.dat')
+# data_spitzer = mm.MulensData(
+#     file_name=file_spitzer, ephemerides_file=file_spitzer_eph,
+#     plot_properties={'label': 'Spitzer'})
 
 # For parallax calculations we need event coordinates:
 coords = "17:47:12.25 -21:22:58.7"
@@ -68,7 +67,7 @@ priors = {'mu_s_hel': {'N': ['gauss', -0.64, 0.45],
                        'E': ['gauss', -5.31, 0.45]}}
 
 results = mmexo.mmexofast.fit(
-    data_sets=[data_ground, data_spitzer], fit_type='point lens',
+    files=[file_ground, file_spitzer], fit_type='point lens',
     print_results=True, verbose=True, priors=priors)
 
 # This solution matching will not necessarily work if the solutions aren't
