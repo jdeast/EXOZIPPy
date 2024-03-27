@@ -2,6 +2,9 @@ import numpy as np
 import MulensModel
 
 
+# The way this is implemented uses a lot of architecture from MulensModel.
+# This may make it inefficient.
+
 class EventFinderGridSearch():
     """
     Based on Kim et al. 2018, AJ, 155, 76
@@ -88,6 +91,10 @@ class EventFinderGridSearch():
         model = EFModel(parameters)
         chi2 = 0
         for dataset in self.datasets:
+            z_pts = 5
+
+            # Need to add restrictions for t_0 +- z * t_eff with the
+            # requirement N > 50.
             fit = MulensModel.FitData(dataset=dataset, model=model)
             fit.fit_fluxes()
             chi2 += fit.chi2
