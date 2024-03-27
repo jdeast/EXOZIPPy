@@ -79,7 +79,7 @@ def do_af_grid_search(datasets, best_pspl_params):
                 bandpass=dataset.bandpass,
                 ephemerides_file=dataset.ephemerides_file))
 
-    af_grid = mmexo.EventFinderGridSearch(datasets=residuals, teff_min=0.3)
+    af_grid = mmexo.AnomalyFinderGridSearch(datasets=residuals, teff_min=0.3)
     # May need to update value of teff_min
     # Is the AnomalyFinderGridSearch really the same as EventFinderGridSearch?
     # Or are they just based on the same principles? (but differ in the details)
@@ -87,6 +87,7 @@ def do_af_grid_search(datasets, best_pspl_params):
     return af_grid.best
 
 
+#### CODE BELOW HERE IS PROBABLY DEFUNCT.
 class MMEXOFASTSingleLensFitter():
 
     def __init__(self, datafiles=None, data=None):
@@ -122,7 +123,7 @@ class MMEXOFASTSingleLensFitter():
         Figure out initial values for the microlensing parameters
         :return:
         """
-        ef = mmexo.EventFinder(self.data) # architecture issue
+        ef = mmexo.gridsearches.EventFinder(self.data) # architecture issue
         ef.fit_grid()
 
         init_sfit_params = mmexo.convert_ef_params(ef.best_grid_point)
