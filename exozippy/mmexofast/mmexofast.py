@@ -5,6 +5,7 @@ import os.path
 
 import MulensModel as mm
 import sfit_minimizer as sfit
+import mmexofast as mmexo
 
 
 def fit(files=None, coords=None, priors=None, fit_type=None,
