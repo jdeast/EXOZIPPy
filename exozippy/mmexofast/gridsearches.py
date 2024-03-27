@@ -81,25 +81,46 @@ class EventFinderGridSearch():
     def run(self):
         results = []
         for (t_0, t_eff) in zip(self.grid_t_0, self.grid_t_eff):
-            chi2_1 = self.do_fit({'t_0': t_0, 't_eff': t_eff, 'j': 1})
-            chi2_2 = self.do_fit({'t_0': t_0, 't_eff': t_eff, 'j': 2})
-            results.append([chi2_1, chi2_2])
+            chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff})
+            results.append(chi2s)
 
         self.results = np.array(results)
 
     def do_fit(self, parameters):
-        model = EFModel(parameters)
-        chi2 = 0
+        z_t_eff = 5
+        n_min = 50
+
+        chi2s = np.array([np.nan, np.nan])
+
+        trimmed_datasets = []
         for dataset in self.datasets:
-            z_pts = 5
-
-            # Need to add restrictions for t_0 +- z * t_eff with the
+            # Restrict fitting to points t_0 +- z * t_eff with the
             # requirement N > 50.
-            fit = MulensModel.FitData(dataset=dataset, model=model)
-            fit.fit_fluxes()
-            chi2 += fit.chi2
+            index = ((dataset.time >
+                     (parameters['t_0'] - z_t_eff * parameters['t_eff'])) &
+                     (dataset.time <
+                      (parameters['t_0'] + z_t_eff * parameters['t_eff'])))
+            # Minimum requirement for including a dataset
+            if np.sum(index) >= n_min:
+                trimmed_dataset = MulensModel.MulensData(
+                    [dataset.time[index], dataset.flux[index],
+                     dataset.err_flux[index]])
+                trimmed_datasets.append(trimmed_dataset)
 
-        return chi2
+        # Only fit the window if there's enough data to do so.
+        if len(trimmed_datasets) >= 1:
+            for j in [1, 2]:
+                parameters['j'] = j
+                model = EFModel(parameters)
+                chi2 = 0
+                for dataset in trimmed_datasets:
+                    fit = MulensModel.FitData(dataset=dataset, model=model)
+                    fit.fit_fluxes()
+                    chi2 += fit.chi2
+
+                chi2s[j-1] = chi2
+
+        return chi2s
 
     @property
     def grid_t_0(self):
