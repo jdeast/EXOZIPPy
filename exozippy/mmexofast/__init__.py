@@ -1,1 +1,1 @@
-from gridsearches import EventFinderGridSearch
+from exozippy.mmexofast.gridsearches import EventFinderGridSearch

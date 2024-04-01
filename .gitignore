@@ -8,3 +8,4 @@ EXOZIPPy.egg-info
 .idea/
 *.egg
 .DS_Store
+/sandbox/
