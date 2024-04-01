@@ -86,7 +86,7 @@ class EventFinderGridSearch():
 
         self.results = np.array(results)
 
-    def do_fit(self, parameters):
+    def do_fits(self, parameters):
         z_t_eff = 5
         n_min = 50
 
@@ -156,11 +156,13 @@ class EventFinderGridSearch():
 
         return self._best
 
-
+### NEED TO REWRITE BELOW USING SFIT_MINIMIZER AS THE BASE ####
+# This does not work because MulensModel has too many internal checks to apply
+# to a modified function.
 class EFModel(MulensModel.Model):
 
     def __init__(self, parameters=None):
-        self.parameters = parameters
+        self._parameters = parameters
 
     def get_magnification(self, time):
         time = np.atleast_1d(time)
