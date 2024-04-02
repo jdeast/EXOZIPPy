@@ -149,12 +149,11 @@ class EventFinderGridSearch():
     @property
     def best(self):
         if (self._best is None) & (self.results is not None):
-            # Need to check indexing
-            index_1 = np.nanargmin(self.results[0, :])
-            index_2 = np.nanargmin(self.results[1, :])
-            print('index_1, 2', index_1, index_2)
-            print(self.results.shape)
-            if self.results[index_1[0], 0] < self.results[index_2[0], 1]:
+            index_1 = np.nanargmin(self.results[:, 0])
+            index_2 = np.nanargmin(self.results[:, 1])
+            #print('index_1, 2', index_1, index_2)
+            #print(self.results.shape)
+            if self.results[index_1, 0] < self.results[index_2, 1]:
                 j = 1
                 index = index_1
             else:
