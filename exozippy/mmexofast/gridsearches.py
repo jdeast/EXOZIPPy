@@ -1,5 +1,6 @@
 import numpy as np
 import MulensModel
+import sfit_minimizer
 
 
 # The way this is implemented uses a lot of architecture from MulensModel.
@@ -111,12 +112,11 @@ class EventFinderGridSearch():
         if len(trimmed_datasets) >= 1:
             for j in [1, 2]:
                 parameters['j'] = j
-                model = EFModel(parameters)
-                chi2 = 0
-                for dataset in trimmed_datasets:
-                    fit = MulensModel.FitData(dataset=dataset, model=model)
-                    fit.fit_fluxes()
-                    chi2 += fit.chi2
+                ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
+                print(ef_sfit.theta, ef_sfit.get_chi2())
+                ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
+                print(ef_sfit.theta, ef_sfit.chi2)
+                chi2 = ef_sfit.chi2
 
                 chi2s[j-1] = chi2
 
@@ -156,41 +156,100 @@ class EventFinderGridSearch():
 
         return self._best
 
-### NEED TO REWRITE BELOW USING SFIT_MINIMIZER AS THE BASE ####
-# This does not work because MulensModel has too many internal checks to apply
-# to a modified function.
-class EFModel(MulensModel.Model):
 
-    def __init__(self, parameters=None):
-        self._parameters = parameters
+class EFSFitFunction(sfit_minimizer.SFitFunction):
 
-    def get_magnification(self, time):
-        time = np.atleast_1d(time)
-        magnification_curve = EFMagnificationCurve(
-            time, parameters=self.parameters)
-        return magnification_curve.get_magnification()
-
-
-class EFMagnificationCurve(
-    MulensModel.PointSourcePointLensMagnification):
-
-    def __init__(self, time, parameters=None):
-        self.time = time
+    def __init__(self, datasets, parameters):
+        self.datasets = datasets
         self.parameters = parameters
+        self.parameters_to_fit = []
+        self.data_indices = self._set_data_indices()
+
         self._q = None
         self._magnification = None
+
+        self.data_len = None
+        self.flatten_data()
+        self.n_params = 2. * len(self.datasets)
+        self.theta = np.resize([1, 0], len(self.datasets))
+
+    def _set_data_indices(self):
+        data_indices = np.cumsum(self.data_len)
+        data_indices = np.hstack((0, data_indices))
+        return data_indices
+
+    def flatten_data(self):
+        """ Concatenate good points for all datasets into a single array with
+                columns: Date, flux, err.
+                """
+        self.data_len = []
+        flattened_data = []
+        for i, dataset in enumerate(self.datasets):
+            data = [dataset.time[dataset.good], dataset.flux[dataset.good],
+                    dataset.err_flux[dataset.good]]
+            self.data_len.append(np.sum(dataset.good))
+            if i == 0:
+                flattened_data = np.array(data)
+            else:
+                flattened_data = np.hstack((flattened_data, data))
+
+        flattened_data = flattened_data.transpose()
+        sfit_minimizer.SFitFunction.__init__(self, data=flattened_data)
+
+    def update_all(self, theta=None, verbose=False):
+        sfit_minimizer.sfit_classes.SFitFunction.update_all(
+            theta=theta, verbose=verbose)
+
+    def calc_model(self):
+        model = None
+        for i, dataset in enumerate(self.datasets):
+            fs = self.theta[2 * i]
+            fb = self.theta[2 * i + 1]
+            mag = self.magnification[
+                  self.data_indices[i]:self.data_indices[i + 1]]
+            model_fluxes = fs * mag + fb
+            if i == 0:
+                model = np.array(model_fluxes[dataset.good])
+            else:
+                model = np.hstack(
+                    (model, model_fluxes[dataset.good]))
+
+        self.ymod = model
+
+    def calc_residuals(self):
+        """Calculate expected values of the residuals"""
+        sfit_minimizer.SFitFunction.calc_residuals(self)
+
+    def calc_df(self):
+        """
+        Calculate the derivatives of the fitting function and store as
+        self.df.
+
+        """
+        dfunc = np.zeros((self.n_params, self.data_indices[-1]))
+        for i, dataset in enumerate(self.datasets):
+            ind_start = self.data_indices[i]
+            ind_stop = self.data_indices[i+1]
+            dfunc_df_source = np.array(
+                [self.magnification[ind_start:ind_stop][dataset.good]])
+            dfunc[2 * i, ind_start:ind_stop] = dfunc_df_source
+            dfunc_df_blend = np.ones((1, np.sum(dataset.good)))
+            dfunc[2 * i + 1, ind_start:ind_stop] = dfunc_df_blend
+
+        self.df = dfunc
 
     @property
     def q(self):
         if self._q is None:
-            self._q = 1 + ((self.time - self.parameters['t_0']) /
+            self._q = 1 + ((self.data[:, 0] - self.parameters['t_0']) /
                            self.parameters['t_eff'])**2
 
         return self._q
 
-    def get_magnification(self):
+    @property
+    def magnification(self):
         """
-        Calculate the magnification
+        The magnification
 
         Parameters : None
 
@@ -207,4 +266,3 @@ class EFMagnificationCurve(
             raise ValueError('Invalid value for j.', self.parameters)
 
         return self._magnification
-
