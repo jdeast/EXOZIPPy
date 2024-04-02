@@ -21,22 +21,6 @@ data_w149 = MulensModel.MulensData(file_name=file_w149, phot_fmt='flux')
 data_z087 = MulensModel.MulensData(file_name=file_z087, phot_fmt='flux')
 datasets = [data_w149, data_z087]
 
-# data_w149.plot()
-# data_z087.plot(color='red')
-#
-# # Test EFSFit
-# # {'t_0': 2460025, 't_eff': 15, 'j': 1}
-# ef_sfit = mmexo.gridsearches.EFSFitFunction(
-#     datasets=datasets, parameters={'t_0': 2460017.5, 't_eff': 0.3, 'j': 1})
-# ef_sfit.update_all()
-# theta_new = ef_sfit.theta + ef_sfit.get_step()
-# ef_sfit.update_all(theta=theta_new)
-# print('chi2', ef_sfit.chi2, ef_sfit.parameters)
-# plt.scatter(
-#     ef_sfit.data[:, 0], ef_sfit.ymod, color='black', facecolor='none',
-#     marker='s', s=3, zorder=3)
-# plt.show()
-
 # Do the EF search
 ef = mmexo.gridsearches.EventFinderGridSearch(
     datasets=datasets, t_0_min=2459980., t_0_max=2460060.)
@@ -73,7 +57,6 @@ best_model.update_all(theta=theta_new)
 
 plt.figure()
 data_w149.plot(phot_fmt='flux')
-#sorted = np.argsort(best_model.data[:, 0])
 plt.axvline(ef.best['t_0'], color='black')
 plt.axvline(ef.best['t_0'] - ef.best['t_eff'], color='black', linestyle='--')
 plt.axvline(ef.best['t_0'] + ef.best['t_eff'], color='black', linestyle='--')

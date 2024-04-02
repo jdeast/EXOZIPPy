@@ -3,9 +3,6 @@ import MulensModel
 import sfit_minimizer
 
 
-# The way this is implemented uses a lot of architecture from MulensModel.
-# This may make it inefficient.
-
 class EventFinderGridSearch():
     """
     Based on Kim et al. 2018, AJ, 155, 76
@@ -115,8 +112,6 @@ class EventFinderGridSearch():
             print('trimmed datasets', len(trimmed_datasets),
                   [dataset.n_epochs for dataset in trimmed_datasets])
 
-        #print('trimmed datasets', trimmed_datasets)
-        #print('dtype', type(trimmed_datasets))
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
             flat_sfit = FlatSFitFunction(trimmed_datasets)
@@ -125,11 +120,8 @@ class EventFinderGridSearch():
 
             for j in [1, 2]:
                 parameters['j'] = j
-                #print('len datasets, len trimmed', len(self.datasets), len(trimmed_datasets))
                 ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
-                #print('init theta, chi2', ef_sfit.theta, ef_sfit.get_chi2())
                 ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
-                #print('final theta, chi2', ef_sfit.theta, ef_sfit.chi2)
                 dchi2 = ef_sfit.chi2 - flat_chi2
 
                 dchi2s[j-1] = dchi2
@@ -155,8 +147,6 @@ class EventFinderGridSearch():
         if (self._best is None) & (self.results is not None):
             index_1 = np.nanargmin(self.results[:, 0])
             index_2 = np.nanargmin(self.results[:, 1])
-            #print('index_1, 2', index_1, index_2)
-            #print(self.results.shape)
             if self.results[index_1, 0] < self.results[index_2, 1]:
                 j = 1
                 index = index_1
@@ -188,9 +178,7 @@ class FlatSFitFunction(sfit_minimizer.SFitFunction):
         self.theta = np.zeros(self.n_params)
 
     def _set_data_indices(self):
-        #print('data_len', self.data_len)
         data_indices = np.cumsum(self.data_len)
-        #print('cumsum', np.cumsum(self.data_len))
         data_indices = np.hstack((0, data_indices))
         return data_indices
 
@@ -254,7 +242,6 @@ class EFSFitFunction(FlatSFitFunction):
                                for i in range(len(self.datasets))]).flatten()
 
     def calc_model(self):
-        #print('model theta', self.theta)
         model = None
         for i, dataset in enumerate(self.datasets):
             fs = self.theta[2 * i]
