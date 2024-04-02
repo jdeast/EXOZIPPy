@@ -94,7 +94,7 @@ class EventFinderGridSearch():
         z_t_eff = 5
         n_min = 50
 
-        chi2s = np.array([np.nan, np.nan])
+        dchi2s = np.array([np.nan, np.nan])
 
         trimmed_datasets = []
         for dataset in self.datasets:
@@ -119,6 +119,10 @@ class EventFinderGridSearch():
         #print('dtype', type(trimmed_datasets))
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
+            flat_sfit = FlatSFitFunction(trimmed_datasets)
+            flat_sfit.update_all(theta=flat_sfit.theta + flat_sfit.get_step())
+            flat_chi2 = flat_sfit.chi2
+
             for j in [1, 2]:
                 parameters['j'] = j
                 #print('len datasets, len trimmed', len(self.datasets), len(trimmed_datasets))
@@ -126,11 +130,11 @@ class EventFinderGridSearch():
                 #print('init theta, chi2', ef_sfit.theta, ef_sfit.get_chi2())
                 ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
                 #print('final theta, chi2', ef_sfit.theta, ef_sfit.chi2)
-                chi2 = ef_sfit.chi2
+                dchi2 = ef_sfit.chi2 - flat_chi2
 
-                chi2s[j-1] = chi2
+                dchi2s[j-1] = dchi2
 
-        return chi2s
+        return dchi2s
 
     @property
     def grid_t_0(self):
@@ -168,31 +172,20 @@ class EventFinderGridSearch():
         return self._best
 
 
-class EFSFitFunction(sfit_minimizer.SFitFunction):
+class FlatSFitFunction(sfit_minimizer.SFitFunction):
 
-    def __init__(self, datasets, parameters):
+    def __init__(self, datasets):
         if isinstance(datasets, (MulensModel.MulensData)):
             self.datasets = [datasets]
         else:
             self.datasets = datasets
 
-        self.parameters = parameters
-        self.parameters_to_fit = []
-        self.n_params = 2 * len(self.datasets)
-        #(len(self.datasets))
-
+        self.n_params = len(self.datasets)
         self._theta = None
-        self._q = None
-        self._magnification = None
-
         self.data_len = None
         self.flatten_data() # destroys self.theta
         self.data_indices = self._set_data_indices()
-        self.theta = np.array([np.array([1, 0])
-                               for i in range(len(self.datasets))]).flatten()
-        #print('after setup', self.theta)
-        #print('data_indices', self.data_indices)
-        #print('n_params', self.n_params)
+        self.theta = np.zeros(self.n_params)
 
     def _set_data_indices(self):
         #print('data_len', self.data_len)
@@ -219,9 +212,46 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         flattened_data = flattened_data.transpose()
         sfit_minimizer.SFitFunction.__init__(self, data=flattened_data)
 
-    def update_all(self, theta=None, verbose=False):
-        sfit_minimizer.sfit_classes.SFitFunction.update_all(self,
-            theta=theta, verbose=verbose)
+    def calc_model(self):
+        model = None
+        for i, dataset in enumerate(self.datasets):
+            fs = self.theta[i]
+            model_fluxes = fs * np.ones(self.data_len[i])
+            if i == 0:
+                model = np.array(model_fluxes[dataset.good])
+            else:
+                model = np.hstack(
+                    (model, model_fluxes[dataset.good]))
+
+        self.ymod = model
+
+    def calc_df(self):
+        """
+        Calculate the derivatives of the fitting function and store as
+        self.df.
+
+        """
+        dfunc = np.zeros((self.n_params, self.data_indices[-1]))
+        for i, dataset in enumerate(self.datasets):
+            ind_start = self.data_indices[i]
+            ind_stop = self.data_indices[i+1]
+            dfunc_df_blend = np.ones((1, np.sum(dataset.good)))
+            dfunc[i, ind_start:ind_stop] = dfunc_df_blend
+
+        self.df = dfunc
+
+
+class EFSFitFunction(FlatSFitFunction):
+
+    def __init__(self, datasets, parameters):
+        self.parameters = parameters
+        self._q = None
+        self._magnification = None
+
+        FlatSFitFunction.__init__(self, datasets=datasets)
+        self.n_params = 2 * len(datasets)
+        self.theta = np.array([np.array([1, 0])
+                               for i in range(len(self.datasets))]).flatten()
 
     def calc_model(self):
         #print('model theta', self.theta)
