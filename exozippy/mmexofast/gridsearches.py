@@ -174,15 +174,18 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         self._magnification = None
 
         self.data_len = None
-        self.data_indices = self._set_data_indices()
         self.flatten_data() # destroys self.theta
-
+        self.data_indices = self._set_data_indices()
         self.theta = np.array([np.array([1, 0])
                                for i in range(len(self.datasets))]).flatten()
         print('after setup', self.theta)
+        print('data_indices', self.data_indices)
+        print('n_params', self.n_params)
 
     def _set_data_indices(self):
+        print('data_len', self.data_len)
         data_indices = np.cumsum(self.data_len)
+        print('cumsum', np.cumsum(self.data_len))
         data_indices = np.hstack((0, data_indices))
         return data_indices
 
@@ -205,7 +208,7 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         sfit_minimizer.SFitFunction.__init__(self, data=flattened_data)
 
     def update_all(self, theta=None, verbose=False):
-        sfit_minimizer.sfit_classes.SFitFunction.update_all(
+        sfit_minimizer.sfit_classes.SFitFunction.update_all(self,
             theta=theta, verbose=verbose)
 
     def calc_model(self):
