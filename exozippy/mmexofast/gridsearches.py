@@ -79,15 +79,18 @@ class EventFinderGridSearch():
 
             t_eff *= t_eff_factor
 
-    def run(self):
+    def run(self, verbose=False):
         results = []
         for (t_0, t_eff) in zip(self.grid_t_0, self.grid_t_eff):
-            chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff})
+            chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff}, verbose=verbose)
+            if verbose:
+                print(t_0, t_eff, chi2s)
+
             results.append(chi2s)
 
         self.results = np.array(results)
 
-    def do_fits(self, parameters):
+    def do_fits(self, parameters, verbose=False):
         z_t_eff = 5
         n_min = 50
 
@@ -108,17 +111,21 @@ class EventFinderGridSearch():
                      dataset.err_flux[index]])
                 trimmed_datasets.append(trimmed_dataset)
 
-        print('trimmed datasets', trimmed_datasets)
-        print('dtype', type(trimmed_datasets))
+        if verbose:
+            print('trimmed datasets', len(trimmed_datasets),
+                  [dataset.n_epochs for dataset in trimmed_datasets])
+
+        #print('trimmed datasets', trimmed_datasets)
+        #print('dtype', type(trimmed_datasets))
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
             for j in [1, 2]:
                 parameters['j'] = j
-                print('len datasets, len trimmed', len(self.datasets), len(trimmed_datasets))
+                #print('len datasets, len trimmed', len(self.datasets), len(trimmed_datasets))
                 ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
-                print('init theta, chi2', ef_sfit.theta, ef_sfit.get_chi2())
+                #print('init theta, chi2', ef_sfit.theta, ef_sfit.get_chi2())
                 ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
-                print('final theta, chi2', ef_sfit.theta, ef_sfit.chi2)
+                #print('final theta, chi2', ef_sfit.theta, ef_sfit.chi2)
                 chi2 = ef_sfit.chi2
 
                 chi2s[j-1] = chi2
@@ -167,7 +174,7 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         self.parameters = parameters
         self.parameters_to_fit = []
         self.n_params = 2 * len(self.datasets)
-        print(len(self.datasets))
+        #(len(self.datasets))
 
         self._theta = None
         self._q = None
@@ -178,14 +185,14 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         self.data_indices = self._set_data_indices()
         self.theta = np.array([np.array([1, 0])
                                for i in range(len(self.datasets))]).flatten()
-        print('after setup', self.theta)
-        print('data_indices', self.data_indices)
-        print('n_params', self.n_params)
+        #print('after setup', self.theta)
+        #print('data_indices', self.data_indices)
+        #print('n_params', self.n_params)
 
     def _set_data_indices(self):
-        print('data_len', self.data_len)
+        #print('data_len', self.data_len)
         data_indices = np.cumsum(self.data_len)
-        print('cumsum', np.cumsum(self.data_len))
+        #print('cumsum', np.cumsum(self.data_len))
         data_indices = np.hstack((0, data_indices))
         return data_indices
 
@@ -212,7 +219,7 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
             theta=theta, verbose=verbose)
 
     def calc_model(self):
-        print('model theta', self.theta)
+        #print('model theta', self.theta)
         model = None
         for i, dataset in enumerate(self.datasets):
             fs = self.theta[2 * i]

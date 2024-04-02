@@ -22,7 +22,7 @@ data_z087 = MulensModel.MulensData(file_name=file_z087, phot_fmt='flux')
 
 # Do the EF search
 ef = mmexo.gridsearches.EventFinderGridSearch(datasets=[data_w149, data_z087])
-ef.run()
+ef.run(verbose=True)
 
 # Print best-fit parameters
 print(ef.best)
