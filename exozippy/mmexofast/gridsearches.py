@@ -171,7 +171,11 @@ class EventFinderGridSearch():
 class EFSFitFunction(sfit_minimizer.SFitFunction):
 
     def __init__(self, datasets, parameters):
-        self.datasets = datasets
+        if isinstance(datasets, (MulensModel.MulensData)):
+            self.datasets = [datasets]
+        else:
+            self.datasets = datasets
+
         self.parameters = parameters
         self.parameters_to_fit = []
         self.n_params = 2 * len(self.datasets)
