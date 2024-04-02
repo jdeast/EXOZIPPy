@@ -137,14 +137,14 @@ class EventFinderGridSearch():
         if self._grid_t_0 is None:
             self._setup_grid()
 
-        return self._grid_t_0
+        return np.array(self._grid_t_0)
 
     @property
     def grid_t_eff(self):
         if self._grid_t_eff is None:
             self._setup_grid()
 
-        return self._grid_t_eff
+        return np.array(self._grid_t_eff)
 
     @property
     def best(self):

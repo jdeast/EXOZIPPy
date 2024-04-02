@@ -21,7 +21,8 @@ data_w149 = MulensModel.MulensData(file_name=file_w149, phot_fmt='flux')
 data_z087 = MulensModel.MulensData(file_name=file_z087, phot_fmt='flux')
 datasets = [data_w149, data_z087]
 # Do the EF search
-ef = mmexo.gridsearches.EventFinderGridSearch(datasets=datasets)
+ef = mmexo.gridsearches.EventFinderGridSearch(
+    datasets=datasets, t_0_min=2459980., t_0_max=2460060.)
 ef.run(verbose=True)
 
 # Print best-fit parameters
@@ -32,12 +33,14 @@ plt.figure()
 for j in [1, 2]:
     plt.subplot(1, 2, j)
     plt.title('j={0}'.format(j))
+    sorted = np.argsort(ef.results[:, j-1])[::-1]
     plt.scatter(
-        ef.grid_t_0, ef.grid_t_eff, c=ef.results[:, j-1]-ef.best['chi2'],
+        ef.grid_t_0[sorted], ef.grid_t_eff[sorted],
+        c=ef.results[sorted, j-1]-ef.best['chi2'],
         edgecolors='black', vmin=0, vmax=100, cmap='tab20b')
-    plt.colorbar(label='chi2')
+    plt.colorbar(label='Delta chi2')
     plt.scatter(
-        ef.best['t_0'], ef.best['t_eff'], color='black', marker='x')
+        ef.best['t_0'], ef.best['t_eff'], color='black', marker='x', zorder=5)
     plt.minorticks_on()
     plt.xlabel('t_0')
     plt.ylabel('t_eff')
