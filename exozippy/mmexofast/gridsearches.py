@@ -152,7 +152,9 @@ class EventFinderGridSearch():
             # Need to check indexing
             index_1 = np.nanargmin(self.results[0, :])
             index_2 = np.nanargmin(self.results[1, :])
-            if self.results[0, index_1[0]] < self.results[1, index_2[0]]:
+            print('index_1, 2', index_1, index_2)
+            print(self.results.shape)
+            if self.results[index_1[0], 0] < self.results[index_2[0], 1]:
                 j = 1
                 index = index_1
             else:
@@ -162,7 +164,7 @@ class EventFinderGridSearch():
             self._best = {'t_0': self.grid_t_0[index],
                           't_eff': self.grid_t_eff[index],
                           'j': j,
-                          'chi2': self.results[j-1, index]}
+                          'chi2': self.results[index, j-1]}
 
         return self._best
 
