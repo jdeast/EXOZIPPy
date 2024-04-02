@@ -35,7 +35,7 @@ for j in [1, 2]:
     plt.scatter(
         ef.grid_t_0, ef.grid_t_eff, c=ef.results[:, j-1]-ef.best['chi2'],
         edgecolors='black', vmin=0, vmax=100, cmap='tab20b')
-    plt.colorbar('chi2')
+    plt.colorbar(label='chi2')
     plt.scatter(
         ef.best['t_0'], ef.best['t_eff'], color='black', marker='x')
     plt.minorticks_on()
