@@ -108,14 +108,17 @@ class EventFinderGridSearch():
                      dataset.err_flux[index]])
                 trimmed_datasets.append(trimmed_dataset)
 
+        print('trimmed datasets', trimmed_datasets)
+        print('dtype', type(trimmed_datasets))
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
             for j in [1, 2]:
                 parameters['j'] = j
+                print('len datasets, len trimmed', len(self.datasets), len(trimmed_datasets))
                 ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
-                print(ef_sfit.theta, ef_sfit.get_chi2())
+                print('init theta, chi2', ef_sfit.theta, ef_sfit.get_chi2())
                 ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
-                print(ef_sfit.theta, ef_sfit.chi2)
+                print('final theta, chi2', ef_sfit.theta, ef_sfit.chi2)
                 chi2 = ef_sfit.chi2
 
                 chi2s[j-1] = chi2
@@ -163,15 +166,20 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
         self.datasets = datasets
         self.parameters = parameters
         self.parameters_to_fit = []
-        self.data_indices = self._set_data_indices()
+        self.n_params = 2 * len(self.datasets)
+        print(len(self.datasets))
 
+        self._theta = None
         self._q = None
         self._magnification = None
 
         self.data_len = None
-        self.flatten_data()
-        self.n_params = 2. * len(self.datasets)
-        self.theta = np.resize([1, 0], len(self.datasets))
+        self.data_indices = self._set_data_indices()
+        self.flatten_data() # destroys self.theta
+
+        self.theta = np.array([np.array([1, 0])
+                               for i in range(len(self.datasets))]).flatten()
+        print('after setup', self.theta)
 
     def _set_data_indices(self):
         data_indices = np.cumsum(self.data_len)
@@ -201,6 +209,7 @@ class EFSFitFunction(sfit_minimizer.SFitFunction):
             theta=theta, verbose=verbose)
 
     def calc_model(self):
+        print('model theta', self.theta)
         model = None
         for i, dataset in enumerate(self.datasets):
             fs = self.theta[2 * i]
