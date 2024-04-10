@@ -407,7 +407,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
     @property
     def best(self):
         if (self.results is not None) and (self._best is None):
-            index = np.nanargmin(self.anomalies[:, 3])
+            index = np.nanargmax(self.anomalies[:, 5])
             self._best = {'t_0': self.anomalies[index, 0],
                           't_eff': self.anomalies[index, 1],
                           'j': self.anomalies[index, 2],
