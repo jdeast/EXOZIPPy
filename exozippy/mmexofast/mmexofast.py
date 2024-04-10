@@ -136,8 +136,7 @@ def do_sfit(datasets, initial_params, verbose=False):
 
     return params
 
-
-def do_af_grid_search(datasets, best_pspl_params):
+def get_residuals(datasets, best_pspl_params):
     event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
     event.fit_fluxes()
     residuals = []
@@ -149,6 +148,10 @@ def do_af_grid_search(datasets, best_pspl_params):
                 bandpass=dataset.bandpass,
                 ephemerides_file=dataset.ephemerides_file))
 
+    return residuals
+
+def do_af_grid_search(datasets, best_pspl_params):
+    residuals = get_residuals(datasets, best_pspl_params)
     af_grid = mmexo.AnomalyFinderGridSearch(datasets=residuals, teff_min=0.3)
     # May need to update value of teff_min
     # Is the AnomalyFinderGridSearch really the same as EventFinderGridSearch?
