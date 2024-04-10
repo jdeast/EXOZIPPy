@@ -27,13 +27,16 @@ plt.scatter(
 plt.colorbar(label='chi2 - chi2_flat')
 plt.scatter(
     af.best['t_0'], af.best['t_eff'], color='black', marker='x', zorder=5)
+plt.scatter(
+    af.anomalies[:, 0], af.anomalies[:, 1],
+    color='red', facecolor='none', marker='s', zorder=5)
 plt.minorticks_on()
 plt.xlabel('t_0')
 plt.ylabel('t_eff')
 plt.yscale('log')
 plt.tight_layout()
 
-best_model = mmexo.gridsearches.AFSFitFunction(datasets, af.best)
+best_model = mmexo.gridsearches.EFSFitFunction(datasets, af.best)
 best_model.update_all()
 theta_new = best_model.theta + best_model.get_step()
 best_model.update_all(theta=theta_new)

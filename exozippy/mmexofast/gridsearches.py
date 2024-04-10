@@ -331,4 +331,90 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
         EventFinderGridSearch.__init__(
             datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
             t_eff_max=t_eff_max, d_t_0=d_t_0, **kwargs)
+        self._anomalies = None
 
+    def run(self, verbose=False):
+        results = []
+        for (t_0, t_eff) in zip(self.grid_t_0, self.grid_t_eff):
+            chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff}, verbose=verbose)
+            if verbose:
+                print(t_0, t_eff, chi2s)
+
+            results.append([chi2s[key] for key in ['1', '2', 'flat', 'zero']])
+
+        self.results = np.array(results)
+
+    def get_zero_chi2(self, trimmed_datasets):
+        chi2 = 0.
+        for dataset in trimmed_datasets:
+            chi2 += np.sum( (dataset.flux / dataset.err_flux)**2 )
+
+        return chi2
+
+    def do_fits(self, parameters, verbose=False):
+        chi2s = {'1': np.nan, '2': np.nan, 'flat': np.nan, 'zero': np.nan}
+
+        trimmed_datasets = self.get_trimmed_datasets(
+            parameters, verbose=verbose)
+
+        # Only fit the window if there's enough data to do so.
+        if len(trimmed_datasets) >= 1:
+            chi2s['zero'] = self.get_zero_chi2(trimmed_datasets)
+            chi2s['flat'] = self.get_flat_chi2(trimmed_datasets)
+
+            for j in [1, 2]:
+                parameters['j'] = j
+                ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
+                ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
+                chi2s['{0}'.format(j)] = ef_sfit.chi2
+
+        return chi2s
+
+    def get_anomalies(self):
+        tol_zero = 120.
+        tol_flat = 35.
+        tol_zero_alt = 75.
+        anomalies = None
+
+        for j in [1, 2]:
+            dchi2_zero = self.results[:, 3] - self.results[:, j-1]
+            dchi2_flat = self.results[:, 2] - self.results[:, j-1]
+            index_zero = dchi2_zero > tol_zero
+            index_flat = (dchi2_zero > tol_zero_alt) & (dchi2_flat > tol_flat)
+            index = index_zero | index_flat
+
+            values = np.hstack(
+                (self.grid_t_0[index], self.grid_t_eff[index],
+                j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
+                dchi2_flat[index], dchi2_zero[index]))
+            if anomalies is None:
+                anomalies = values
+            else:
+                anomalies = np.vstack((anomalies, values))
+
+        return anomalies
+
+    @property
+    def anomalies(self):
+        if (self._anomalies is None) and (self._results is None):
+            self._anomalies = self.get_anomalies()
+
+        return self._anomalies
+
+    @property
+    def best(self):
+        if (self._anomalies is not None) and (self._best is None):
+            index = np.nanargmin(self.anomalies[:, 3])
+            self._best = {'t_0': self.anomalies[index, 0],
+                          't_eff': self.anomalies[index, 1],
+                          'j': self.anomalies[index, 2],
+                          'chi2': self.anomalies[index, 3],
+                          'dchi2_zero':
+                              (self.anomalies[index, 5] -
+                              self.anomalies[index, 3])
+                          'dchi2_flat':
+                              (self.anomalies[index, 4] -
+                               self.anomalies[index, 3])
+                          }
+
+        return self._best
