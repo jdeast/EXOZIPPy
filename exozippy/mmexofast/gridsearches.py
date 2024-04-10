@@ -387,13 +387,11 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
                 (self.grid_t_0[index], self.grid_t_eff[index],
                 j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
                 dchi2_flat[index], dchi2_zero[index]))
-            print('values shape', values.shape)
+
             if anomalies is None:
                 anomalies = values
             else:
                 anomalies = np.hstack((anomalies, values))
-
-            print('anomalies shape', anomalies.shape)
 
         return anomalies.transpose()
 
