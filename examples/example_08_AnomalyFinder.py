@@ -12,29 +12,36 @@ pspl_params = {
     't_0': 2460023.2579352586, 't_E': 7.39674573, 'u_0': 1.4295525500937951}
 
 residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
-af = mmexo.gridsearches.AnomalyFinderGridSearch(residuals=residuals)
+af = mmexo.gridsearches.AnomalyFinderGridSearch(
+    residuals=residuals, t_0_min=2459980., t_0_max=2460060.)
 af.run(verbose=True)
 
 # Print best-fit parameters
 print(af.best)
 
 # Grid search chi2 plot with data
-sorted = np.argsort(af.results[:])[::-1]
-plt.scatter(
-    af.grid_t_0[sorted], af.grid_t_eff[sorted],
-    c=af.results[sorted],
-    edgecolors='black', cmap='tab20b')
-plt.colorbar(label='chi2 - chi2_flat')
-plt.scatter(
-    af.best['t_0'], af.best['t_eff'], color='black', marker='x', zorder=5)
-plt.scatter(
-    af.anomalies[:, 0], af.anomalies[:, 1],
-    color='red', facecolor='none', marker='s', zorder=5)
-plt.minorticks_on()
-plt.xlabel('t_0')
-plt.ylabel('t_eff')
-plt.yscale('log')
-plt.tight_layout()
+plt.figure(figsize=(8, 4))
+for j in [1, 2]:
+    plt.subplot(1, 2, j)
+    plt.title('j={0}'.format(j))
+    sorted = np.argsort(af.results[:, j-1])[::-1]
+    plt.scatter(
+        af.grid_t_0[sorted], af.grid_t_eff[sorted],
+        c=af.results[sorted, j-1],
+        edgecolors='black', cmap='tab20b')
+    plt.colorbar(label='chi2 - chi2_flat')
+    plt.scatter(
+        af.best['t_0'], af.best['t_eff'], color='black', marker='x', zorder=5)
+    index = af.anomalies[:, 2] == j
+    plt.scatter(
+        af.anomalies[index, 0], af.anomalies[index, 1], color='red',
+        facecolor='none', marker='s', zorder=5)
+    plt.minorticks_on()
+    plt.xlabel('t_0')
+    plt.ylabel('t_eff')
+    plt.yscale('log')
+    plt.tight_layout()
+
 
 best_model = mmexo.gridsearches.EFSFitFunction(datasets, af.best)
 best_model.update_all()

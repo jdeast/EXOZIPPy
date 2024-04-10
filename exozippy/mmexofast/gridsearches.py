@@ -399,14 +399,14 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 
     @property
     def anomalies(self):
-        if (self._anomalies is None) and (self._results is None):
+        if (self._anomalies is None) and (self.results is None):
             self._anomalies = self.get_anomalies()
 
         return self._anomalies
 
     @property
     def best(self):
-        if (self._anomalies is not None) and (self._best is None):
+        if (self.results is not None) and (self._best is None):
             index = np.nanargmin(self.anomalies[:, 3])
             self._best = {'t_0': self.anomalies[index, 0],
                           't_eff': self.anomalies[index, 1],
