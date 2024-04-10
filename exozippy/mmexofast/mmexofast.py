@@ -142,7 +142,7 @@ def get_residuals(datasets, best_pspl_params):
     event.fit_fluxes()
     residuals = []
     for i, dataset in enumerate(datasets):
-        res, err = event.fit[i].get_residuals(phot_fmt='flux')
+        res, err = event.fits[i].get_residuals(phot_fmt='flux')
         residuals.append(
             mm.MulensData(
                 [dataset.time, res, err], phot_fmt='flux',

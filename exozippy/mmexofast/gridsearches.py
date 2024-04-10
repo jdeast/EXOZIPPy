@@ -328,7 +328,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
     def __init__(self,
         residuals=None, t_eff_3=0.75, d_t_eff=1/3., t_eff_max=10.,
         d_t_0=1/6., **kwargs):
-        EventFinderGridSearch.__init__(
+        EventFinderGridSearch.__init__(self,
             datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
             t_eff_max=t_eff_max, d_t_0=d_t_0, **kwargs)
         self._anomalies = None
@@ -387,10 +387,13 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
                 (self.grid_t_0[index], self.grid_t_eff[index],
                 j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
                 dchi2_flat[index], dchi2_zero[index]))
+            print('values shape', values.shape)
             if anomalies is None:
                 anomalies = values
             else:
                 anomalies = np.vstack((anomalies, values))
+
+            print('anomalies shape', anomalies.shape)
 
         return anomalies
 
@@ -411,7 +414,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
                           'chi2': self.anomalies[index, 3],
                           'dchi2_zero':
                               (self.anomalies[index, 5] -
-                              self.anomalies[index, 3])
+                              self.anomalies[index, 3]),
                           'dchi2_flat':
                               (self.anomalies[index, 4] -
                                self.anomalies[index, 3])
