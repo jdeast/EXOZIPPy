@@ -9,8 +9,9 @@ class EventFinderGridSearch():
     """
 
     def __init__(self,
-                 datasets=None, t_eff_3=1, d_t_eff=1/3., t_eff_max=99,
-                 d_t_0=1/3, t_0_min=None, t_0_max=None):
+                 datasets=None, t_eff_3=1, d_t_eff=1/3., t_eff_max=99.,
+                 d_t_0=1/3, t_0_min=None, t_0_max=None, z_t_eff=5,
+                 n_min=50):
         if datasets is None:
             raise ValueError('You must define the datasets!')
         elif isinstance(datasets, (MulensModel.MulensData)):
@@ -37,6 +38,10 @@ class EventFinderGridSearch():
         self._grid_t_0 = None
         self.results = None
         self._best = None
+
+        # parameters for trimming data
+        self.z_t_eff = z_t_eff
+        self.n_min = n_min
 
     def _get_t_0_min(self):
         t_0_min = None
@@ -80,29 +85,25 @@ class EventFinderGridSearch():
         results = []
         for (t_0, t_eff) in zip(self.grid_t_0, self.grid_t_eff):
             chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff}, verbose=verbose)
+            dchi2s = [chi2s['1'] - chi2s['flat'], chi2s['2'] - chi2s['flat']]
             if verbose:
-                print(t_0, t_eff, chi2s)
+                print(t_0, t_eff, dchi2s)
 
-            results.append(chi2s)
+            results.append(dchi2s)
 
         self.results = np.array(results)
 
-    def do_fits(self, parameters, verbose=False):
-        z_t_eff = 5
-        n_min = 50
-
-        dchi2s = np.array([np.nan, np.nan])
-
+    def get_trimmed_datasets(self, parameters, verbose=False):
         trimmed_datasets = []
         for dataset in self.datasets:
             # Restrict fitting to points t_0 +- z * t_eff with the
             # requirement N > 50.
             index = ((dataset.time >
-                     (parameters['t_0'] - z_t_eff * parameters['t_eff'])) &
+                      (parameters['t_0'] - self.z_t_eff * parameters['t_eff'])) &
                      (dataset.time <
-                      (parameters['t_0'] + z_t_eff * parameters['t_eff'])))
+                      (parameters['t_0'] + self.z_t_eff * parameters['t_eff'])))
             # Minimum requirement for including a dataset
-            if np.sum(index) >= n_min:
+            if np.sum(index) >= self.n_min:
                 trimmed_dataset = MulensModel.MulensData(
                     [dataset.time[index], dataset.flux[index],
                      dataset.err_flux[index]])
@@ -112,21 +113,31 @@ class EventFinderGridSearch():
             print('trimmed datasets', len(trimmed_datasets),
                   [dataset.n_epochs for dataset in trimmed_datasets])
 
+        return trimmed_datasets
+
+    def get_flat_chi2(self, trimmed_datasets):
+        flat_sfit = FlatSFitFunction(trimmed_datasets)
+        flat_sfit.update_all(theta=flat_sfit.theta + flat_sfit.get_step())
+        flat_chi2 = flat_sfit.chi2
+        return flat_chi2
+
+    def do_fits(self, parameters, verbose=False):
+        chi2s = {'1': np.nan, '2': np.nan, 'flat': np.nan}
+
+        trimmed_datasets = self.get_trimmed_datasets(
+            parameters, verbose=verbose)
+
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
-            flat_sfit = FlatSFitFunction(trimmed_datasets)
-            flat_sfit.update_all(theta=flat_sfit.theta + flat_sfit.get_step())
-            flat_chi2 = flat_sfit.chi2
+            chi2s['flat'] = self.get_flat_chi2(trimmed_datasets)
 
             for j in [1, 2]:
                 parameters['j'] = j
                 ef_sfit = EFSFitFunction(trimmed_datasets, parameters)
                 ef_sfit.update_all(theta=ef_sfit.theta + ef_sfit.get_step())
-                dchi2 = ef_sfit.chi2 - flat_chi2
+                chi2s['{0}'.format(j)] = ef_sfit.chi2
 
-                dchi2s[j-1] = dchi2
-
-        return dchi2s
+        return chi2s
 
     @property
     def grid_t_0(self):
@@ -307,3 +318,17 @@ class EFSFitFunction(FlatSFitFunction):
             raise ValueError('Invalid value for j.', self.parameters)
 
         return self._magnification
+
+
+class AnomalyFinderGridSearch(EventFinderGridSearch):
+    """
+    https://ui.adsabs.harvard.edu/abs/2021AJ....162..163Z/abstract
+    """
+
+    def __init__(self,
+        residuals=None, t_eff_3=0.75, d_t_eff=1/3., t_eff_max=10.,
+        d_t_0=1/6., **kwargs):
+        EventFinderGridSearch.__init__(
+            datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
+            t_eff_max=t_eff_max, d_t_0=d_t_0, **kwargs)
+
