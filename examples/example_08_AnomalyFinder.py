@@ -55,9 +55,6 @@ for j in [1, 2]:
     plt.scatter(
         af.best['t_0'], af.best['t_eff'], color='black', marker='x', zorder=10)
     index = af.anomalies[:, 2] == j
-    #plt.scatter(
-    #    af.anomalies[index, 0], af.anomalies[index, 1], color='red',
-    #    facecolor='none', marker='s', zorder=5)
     plt.minorticks_on()
     plt.xlabel('t_0')
     plt.ylabel('t_eff')
@@ -65,12 +62,8 @@ for j in [1, 2]:
     plt.tight_layout()
 
 
-best_model = mmexo.gridsearches.EFSFitFunction(datasets, af.best)
-best_model.update_all()
-theta_new = best_model.theta + best_model.get_step()
-best_model.update_all(theta=theta_new)
-
 plt.figure()
+plt.title('Event')
 event = MulensModel.Event(
     datasets=datasets, model=MulensModel.Model(pspl_params))
 event.plot_data(phot_fmt='flux')
@@ -87,12 +80,32 @@ plt.plot(times, model_fluxes, color='black', zorder=5)
 plt.axvline(af.best['t_0'], color='black')
 plt.axvline(af.best['t_0'] - af.best['t_eff'], color='black', linestyle='--')
 plt.axvline(af.best['t_0'] + af.best['t_eff'], color='black', linestyle='--')
-#plt.plot(
-#    best_model.data[best_model.data_indices[0]:best_model.data_indices[1], 0],
-#    best_model.ymod[best_model.data_indices[0]:best_model.data_indices[1]],
-#    color='black', zorder=5)
 plt.xlabel('HJD')
 plt.ylabel('W149 flux')
+plt.minorticks_on()
+plt.tight_layout()
+
+plt.figure()
+plt.title('Residuals')
+best_model = mmexo.gridsearches.EFSFitFunction(
+    [residuals[0]], af.best)
+best_model.update_all()
+theta_new = best_model.theta + best_model.get_step()
+best_model.update_all(theta=theta_new)
+plt.errorbar(
+    residuals[0].time, residuals[0].flux, yerr=residuals[0].err_flux,
+    fmt='o')
+
+plt.axhline(0, color='black', linestyle='--')
+plt.plot(
+    best_model.data[best_model.data_indices[0]:best_model.data_indices[1], 0],
+    best_model.ymod[best_model.data_indices[0]:best_model.data_indices[1]],
+    color='black', zorder=5)
+plt.xlabel('HJD')
+plt.ylabel('W149 flux')
+plt.minorticks_on()
+plt.tight_layout()
+
 plt.show()
 
 
