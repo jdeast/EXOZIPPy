@@ -1,5 +1,9 @@
 """
 Example to show that the basic sfit fit works as expected.
+
+Truth values:
+u0        alpha       t0         tE        rE       thetaE    piE     rhos
+-1.52343 38.6665 1790.31690896 6.6877 2.15354 0.35275 0.171343 0.00120717
 """
 import os.path
 import matplotlib.pyplot as plt
