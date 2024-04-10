@@ -7,53 +7,53 @@ from numpy import testing
 from exozippy.mmexofast.ulens import Star, Phys2UlensConverter
 
 
-class TestPhys2ulens(unittest.TestCase):
-
-    def setUp(self):
-        self.coords = "18:00:00 -30:00:00"
-        self.ulens_expected = {'t_0': 2461000., 'u_0': 0.1, 't_E': 1., 'rho': 0.1}
-
-    def test_phys2ulens_mu(self):
-        """
-        test conversion of physical parameters to microlensing parameters.
-        Also serves as a use case.
-        """
-        raise NotImplementedError('Need to update with real values')
-
-        # Possible real events for examples:
-        # GRAVITY
-        # Aparna: 2 epochs of HST
-
-        lens = Star(mass=0.5, distance=6.0, mu=[0, 1])
-        source = Star(mass=1.0, distance=8.0, radius=1.0, mu=[1, 0])
-
-        converter = Phys2UlensConverter(
-            source=source, lens=lens, coords=self.coords,
-            t_ref=self.ulens_expected['t_0'])
-        ulens_params = converter.get_ulens_params()
-        testing.assert_allclose(
-            ulens_params['t_E'], self.ulens_expected['t_E'], rtol=0.001)
-        testing.assert_allclose(
-            ulens_params['rho'], self.ulens_expected['rho'], rtol=0.001)
-
-    def test_phys2ulens_vel(self):
-        """
-        Same as test_phys2ulens_mu() but using stellar velocities instead of proper
-        motions.
-        """
-        raise NotImplementedError('Still need to add real values')
-
-        lens = Star(mass=0.5, distance=6.0, vel=[0, 200])
-        source = Star(mass=1.0, distance=8.0, radius=1.0, vel=[200, 0])
-
-        converter = Phys2UlensConverter(
-            source=source, lens=lens, coords=self.coords,
-            t_ref=self.ulens_expected['t_0'])
-        ulens_params = converter.get_ulens_params()
-        testing.assert_allclose(
-            ulens_params['t_E'], self.ulens_expected['t_E'], rtol=0.001)
-        testing.assert_allclose(
-            ulens_params['rho'], self.ulens_expected['rho'], rtol=0.001)
+# class TestPhys2ulens(unittest.TestCase):
+#
+#     def setUp(self):
+#         self.coords = "18:00:00 -30:00:00"
+#         self.ulens_expected = {'t_0': 2461000., 'u_0': 0.1, 't_E': 1., 'rho': 0.1}
+#
+#     def test_phys2ulens_mu(self):
+#         """
+#         test conversion of physical parameters to microlensing parameters.
+#         Also serves as a use case.
+#         """
+#         raise NotImplementedError('Need to update with real values')
+#
+#         # Possible real events for examples:
+#         # GRAVITY
+#         # Aparna: 2 epochs of HST
+#
+#         lens = Star(mass=0.5, distance=6.0, mu=[0, 1])
+#         source = Star(mass=1.0, distance=8.0, radius=1.0, mu=[1, 0])
+#
+#         converter = Phys2UlensConverter(
+#             source=source, lens=lens, coords=self.coords,
+#             t_ref=self.ulens_expected['t_0'])
+#         ulens_params = converter.get_ulens_params()
+#         testing.assert_allclose(
+#             ulens_params['t_E'], self.ulens_expected['t_E'], rtol=0.001)
+#         testing.assert_allclose(
+#             ulens_params['rho'], self.ulens_expected['rho'], rtol=0.001)
+#
+#     def test_phys2ulens_vel(self):
+#         """
+#         Same as test_phys2ulens_mu() but using stellar velocities instead of proper
+#         motions.
+#         """
+#         raise NotImplementedError('Still need to add real values')
+#
+#         lens = Star(mass=0.5, distance=6.0, vel=[0, 200])
+#         source = Star(mass=1.0, distance=8.0, radius=1.0, vel=[200, 0])
+#
+#         converter = Phys2UlensConverter(
+#             source=source, lens=lens, coords=self.coords,
+#             t_ref=self.ulens_expected['t_0'])
+#         ulens_params = converter.get_ulens_params()
+#         testing.assert_allclose(
+#             ulens_params['t_E'], self.ulens_expected['t_E'], rtol=0.001)
+#         testing.assert_allclose(
+#             ulens_params['rho'], self.ulens_expected['rho'], rtol=0.001)
 
 
 class TestGRAVITYEvent(unittest.TestCase):
@@ -96,8 +96,17 @@ class TestGRAVITYEvent(unittest.TestCase):
         ## Outputs
         self.pi_L = 2.332
 
+        # From RP
+        ## Inputs
+        self.r_source = 1.29
+        ## Outputs
+        self.v_L_hel = [-58.5, 27.3] # N, E
+        self.v_S_hel = [-21.1, -2.62]
+        self.rho = 4.567e-3
+
         self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
-        self.source = Star(distance=self.D_S, mu=self.mu_S)
+        self.source = Star(
+            distance=self.D_S, radius=self.r_source, mu=self.mu_S)
         self.converter = Phys2UlensConverter(
             source=self.source, lens=self.lens, coords=self.coords, t_ref=self.t_0)
 
@@ -121,10 +130,16 @@ class TestGRAVITYEvent(unittest.TestCase):
         testing.assert_allclose(
             self.converter.mu_rel_vec, self.mu_rel_geo, rtol=0.02)
 
+    def test_vel_calculations(self):
+        testing.assert_allclose(
+            self.lens.vel, self.v_L_hel, rtol=0.001)
+        testing.assert_allclose(
+            self.source.vel, self.v_S_hel, rtol=0.001)
+
     def test_get_ulens_params(self):
         ulens_params = self.converter.get_ulens_params()
         testing.assert_allclose(ulens_params['t_E'], self.t_E, rtol=0.02)
-        assert ulens_params['rho'] is None
+        testing.assert_allclose(ulens_params['rho'], self.rho, rtol=0.001)
         testing.assert_allclose(
             ulens_params['pi_E_N'], self.pi_E_vec[0], atol=0.002)
         testing.assert_allclose(
