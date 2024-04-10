@@ -136,6 +136,7 @@ def do_sfit(datasets, initial_params, verbose=False):
 
     return params
 
+
 def get_residuals(datasets, best_pspl_params):
     event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
     event.fit_fluxes()
@@ -149,6 +150,7 @@ def get_residuals(datasets, best_pspl_params):
                 ephemerides_file=dataset.ephemerides_file))
 
     return residuals
+
 
 def do_af_grid_search(datasets, best_pspl_params):
     residuals = get_residuals(datasets, best_pspl_params)
