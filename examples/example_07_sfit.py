@@ -5,26 +5,14 @@ Truth values:
 u0        alpha       t0         tE        rE       thetaE    piE     rhos
 -1.52343 38.6665 1790.31690896 6.6877 2.15354 0.35275 0.171343 0.00120717
 """
-import os.path
 import matplotlib.pyplot as plt
 
 import MulensModel
 import exozippy as mmexo
-
-dir_ = os.path.join(mmexo.MULENS_DATA_PATH, "2018DataChallenge")
+from data_for_test_examples import datasets
 
 results_EF = {'t_0': 2460023.2844586717, 't_eff': 9.988721231519582, 'j': 2,
               'chi2': -45944.85009340058}
-
-# Test data
-lc_num = 4
-file_w149 = os.path.join(
-    dir_, 'n20180816.W149.WFIRST.{0:03}.txt'.format(lc_num))
-file_z087 = os.path.join(
-    dir_, 'n20180816.Z087.WFIRST.{0:03}.txt'.format(lc_num))
-data_w149 = MulensModel.MulensData(file_name=file_w149, phot_fmt='flux')
-data_z087 = MulensModel.MulensData(file_name=file_z087, phot_fmt='flux')
-datasets = [data_w149, data_z087]
 
 initial_pspl_params = mmexo.mmexofast.get_initial_pspl_params(
     datasets, results_EF, verbose=True)
