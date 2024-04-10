@@ -383,7 +383,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
             index_flat = (dchi2_zero > tol_zero_alt) & (dchi2_flat > tol_flat)
             index = index_zero | index_flat
 
-            values = np.hstack(
+            values = np.vstack(
                 (self.grid_t_0[index], self.grid_t_eff[index],
                 j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
                 dchi2_flat[index], dchi2_zero[index]))
@@ -391,15 +391,15 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
             if anomalies is None:
                 anomalies = values
             else:
-                anomalies = np.vstack((anomalies, values))
+                anomalies = np.hstack((anomalies, values))
 
             print('anomalies shape', anomalies.shape)
 
-        return anomalies
+        return anomalies.transpose()
 
     @property
     def anomalies(self):
-        if (self._anomalies is None) and (self.results is None):
+        if (self._anomalies is None) and (self.results is not None):
             self._anomalies = self.get_anomalies()
 
         return self._anomalies
