@@ -327,10 +327,13 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 
     def __init__(self,
         residuals=None, t_eff_3=0.75, d_t_eff=1/3., t_eff_max=10.,
-        d_t_0=1/6., **kwargs):
-        EventFinderGridSearch.__init__(self,
+        d_t_0=1/6., z_t_eff=3, n_min=1, **kwargs):
+        EventFinderGridSearch.__init__(
+            self,
             datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
-            t_eff_max=t_eff_max, d_t_0=d_t_0, **kwargs)
+            t_eff_max=t_eff_max, d_t_0=d_t_0, z_t_eff=z_t_eff, n_min=n_min,
+            **kwargs)
+
         self._anomalies = None
 
     def run(self, verbose=False):
@@ -351,14 +354,51 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 
         return chi2
 
+    def check_successive(self, trimmed_datasets):
+        times = None
+        residuals = None
+        for dataset in trimmed_datasets:
+            if times is None:
+                times = dataset.time
+                residuals = dataset.flux / dataset.err_flux
+            else:
+                times = np.hstack((times, dataset.time))
+                residuals = np.hstack((residuals,
+                                       dataset.flux / dataset.err_flux))
+
+        ind_sort = np.argsort(times)
+        times = times[ind_sort]
+        residuals = residuals[ind_sort]
+
+        n_success = 0
+        for i in range(times.shape[0]):
+            if residuals[i] > 2:
+                n_success += 1
+            else:
+                n_success = 0
+
+            if n_success > 3:
+                return True
+
+        return False
+
     def do_fits(self, parameters, verbose=False):
         chi2s = {'1': np.nan, '2': np.nan, 'flat': np.nan, 'zero': np.nan}
 
         trimmed_datasets = self.get_trimmed_datasets(
             parameters, verbose=verbose)
 
+        do_fit = False
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
+            # Check for a minimum of 5 datapoints
+            n_tot = np.sum([dataset.good for dataset in trimmed_datasets])
+            successive = self.check_successive(trimmed_datasets)
+            if (n_tot > 5) and (successive):
+                do_fit = True
+
+        if do_fit:
+
             chi2s['zero'] = self.get_zero_chi2(trimmed_datasets)
             chi2s['flat'] = self.get_flat_chi2(trimmed_datasets)
 
