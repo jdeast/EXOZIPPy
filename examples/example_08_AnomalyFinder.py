@@ -17,12 +17,15 @@ t_stop = 2460060.
 residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
 
 
-def plot_EFSFitFunction(datasets, params):
+def plot_EFSFitFunction(datasets, params, verbose=False):
     model = mmexo.gridsearches.EFSFitFunction(
         datasets, params)
     model.update_all()
     theta_new = model.theta + model.get_step()
     model.update_all(theta=theta_new)
+    if verbose:
+        print('chi2', model.chi2)
+
     plt.errorbar(
         datasets[0].time, datasets[0].flux, yerr=datasets[0].err_flux,
         fmt='o')
@@ -42,14 +45,24 @@ af = mmexo.gridsearches.AnomalyFinderGridSearch(
     residuals=residuals, t_0_min=t_start, t_0_max=t_stop)
 
 # Test Single Fit
-test_params = {'t_0': 2460017.56, 't_eff': 3, 'j': 1}
-trimmed_residuals = af.get_trimmed_datasets(test_params)
-plot_EFSFitFunction(trimmed_residuals, test_params)
+plt.figure()
+plt.title('Test Single element')
+for test_params in [
+    {'t_0': 2460017.56, 't_eff': 1., 'j': 1},
+    {'t_0': 2460028.2788192877, 't_eff': 9.988721231519582, 'j': 1}]:
+    print(test_params)
+    trimmed_residuals = af.get_trimmed_datasets(test_params)
+    print('chi2_zero', np.sum(np.hstack(
+        [(dataset.flux /dataset.err_flux)**2 for dataset in trimmed_residuals]))
+          )
+    plot_EFSFitFunction(trimmed_residuals, test_params, verbose=True)
+
 plt.show()
 
 # Run Grid Search
 af.run(verbose=True)
 # Print best-fit parameters
+print('Best:')
 print(af.best)
 print(af.results.shape)
 
