@@ -15,6 +15,7 @@ t_start = 2459980.
 t_stop = 2460060.
 
 residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
+#print('max flux', [(np.max(residual.flux)) for residual in residuals])
 
 
 def plot_EFSFitFunction(datasets, params, verbose=False):
@@ -52,32 +53,37 @@ for test_params in [
     {'t_0': 2460028.2788192877, 't_eff': 9.988721231519582, 'j': 1}]:
     print(test_params)
     trimmed_residuals = af.get_trimmed_datasets(test_params)
+    #print('max flux trimmed',
+    #      [(np.max(residual.flux)) for residual in trimmed_residuals])
     print('chi2_zero', np.sum(np.hstack(
         [(dataset.flux /dataset.err_flux)**2 for dataset in trimmed_residuals]))
           )
     plot_EFSFitFunction(trimmed_residuals, test_params, verbose=True)
 
-plt.show()
+#plt.show()
 
 # Run Grid Search
 af.run(verbose=True)
 # Print best-fit parameters
 print('Best:')
 print(af.best)
-print(af.results.shape)
+print('# of anomalies', len(af.anomalies))
 
 # Grid search chi2 plot with data
-
+chi2_range = 1000
 labels = ['1', '2', 'flat', 'zero']
 for j in range(4):
-    sorted = np.argsort(af.results[:, j])
+    sorted = np.argsort(af.results[:, j])[::-1]
     plt.figure()
     plt.scatter(
         af.grid_t_0[sorted], af.grid_t_eff[sorted],
         c=af.results[sorted, j],
         edgecolors='black', cmap='tab20b')
-    plt.title('chi2_{0}'.format(labels[j]))
     plt.colorbar(label='chi2_{0}'.format(labels[j]))
+    plt.scatter(
+        af.best['t_0'], af.best['t_eff'], color='black', marker='x',
+        zorder=10, s=100)
+    plt.title('chi2_{0}'.format(labels[j]))
     plt.minorticks_on()
     plt.xlabel('t_0')
     plt.ylabel('t_eff')
@@ -88,16 +94,16 @@ plt.figure(figsize=(8, 4))
 for j in [1, 2]:
     plt.subplot(1, 2, j)
     plt.title('j={0}'.format(j))
-    sorted = np.argsort(af.results[:, 3] - af.results[:, j-1])[::-1]
-
+    dchi2_zero = af.results[:, 3] - af.results[:, j-1]
+    sorted = np.argsort(dchi2_zero)
     plt.scatter(
         af.grid_t_0[sorted], af.grid_t_eff[sorted],
-        c=af.results[sorted, 3] - af.results[sorted, j-1],
-        edgecolors='black', cmap='tab20b')
-    plt.colorbar(label='chi2 - chi2_zero')
+        c=dchi2_zero[sorted],
+        edgecolors='black', cmap='tab20b', vmin=0)
+    plt.colorbar(label='chi2_zero - chi2 ')
     plt.scatter(
         af.best['t_0'], af.best['t_eff'], color='black', marker='x', zorder=10)
-    index = af.anomalies[:, 2] == j
+    index = (af.anomalies[:, 2] == j)
     plt.minorticks_on()
     plt.xlabel('t_0')
     plt.ylabel('t_eff')
@@ -131,24 +137,6 @@ plt.tight_layout()
 plt.figure()
 plt.title('Residuals')
 plot_EFSFitFunction(residuals, af.best)
-# best_model = mmexo.gridsearches.EFSFitFunction(
-#     [residuals[0]], af.best)
-# best_model.update_all()
-# theta_new = best_model.theta + best_model.get_step()
-# best_model.update_all(theta=theta_new)
-# plt.errorbar(
-#     residuals[0].time, residuals[0].flux, yerr=residuals[0].err_flux,
-#     fmt='o')
-#
-# plt.axhline(0, color='black', linestyle='--')
-# plt.plot(
-#     best_model.data[best_model.data_indices[0]:best_model.data_indices[1], 0],
-#     best_model.ymod[best_model.data_indices[0]:best_model.data_indices[1]],
-#     color='black', zorder=5)
-# plt.xlabel('HJD')
-# plt.ylabel('W149 flux')
-# plt.minorticks_on()
-# plt.tight_layout()
 
 plt.show()
 

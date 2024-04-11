@@ -106,7 +106,7 @@ class EventFinderGridSearch():
             if np.sum(index) >= self.n_min:
                 trimmed_dataset = MulensModel.MulensData(
                     [dataset.time[index], dataset.flux[index],
-                     dataset.err_flux[index]])
+                     dataset.err_flux[index]], phot_fmt='flux')
                 trimmed_datasets.append(trimmed_dataset)
 
         if verbose:
@@ -333,7 +333,8 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
             datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
             t_eff_max=t_eff_max, d_t_0=d_t_0, z_t_eff=z_t_eff, n_min=n_min,
             **kwargs)
-
+        #print('max flux AF input',
+        #      [np.max(residuals.flux) for residuals in self.datasets])
         self._anomalies = None
 
     def run(self, verbose=False):
@@ -391,10 +392,13 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
         do_fit = False
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
+            #print('max flux AF trimmed input',
+            #      [np.max(residuals.flux) for residuals in trimmed_datasets])
+
             # Check for a minimum of 5 datapoints
             n_tot = np.sum(np.hstack(
                 [dataset.good for dataset in trimmed_datasets]))
-            print('n_tot', n_tot)
+            #print('n_tot', n_tot)
             successive = self.check_successive(trimmed_datasets)
             if (n_tot > 5) and (successive):
                 do_fit = True
