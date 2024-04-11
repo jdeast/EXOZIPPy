@@ -11,8 +11,8 @@ import MulensModel
 import exozippy as mmexo
 from data_for_test_examples import datasets
 
-results_EF = {'t_0': 2460023.2844586717, 't_eff': 9.988721231519582, 'j': 2,
-              'chi2': -45944.85009340058}
+results_EF = {'t_0': 2460023.2844586717, 't_eff': 9.988721231519582,
+              'j': 2, 'chi2': -42226.356330652685}
 
 initial_pspl_params = mmexo.mmexofast.get_initial_pspl_params(
     datasets, results_EF, verbose=True)
