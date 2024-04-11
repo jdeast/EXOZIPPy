@@ -15,10 +15,40 @@ t_start = 2459980.
 t_stop = 2460060.
 
 residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
+
+
+def plot_EFSFitFunction(datasets, params):
+    model = mmexo.gridsearches.EFSFitFunction(
+        datasets, params)
+    model.update_all()
+    theta_new = model.theta + model.get_step()
+    model.update_all(theta=theta_new)
+    plt.errorbar(
+        datasets[0].time, datasets[0].flux, yerr=datasets[0].err_flux,
+        fmt='o')
+
+    plt.axhline(0, color='black', linestyle='--')
+    plt.plot(
+        model.data[model.data_indices[0]:model.data_indices[1], 0],
+        model.ymod[model.data_indices[0]:model.data_indices[1]],
+        color='black', zorder=5)
+    plt.xlabel('HJD')
+    plt.ylabel('W149 flux')
+    plt.minorticks_on()
+    plt.tight_layout()
+
+# Test Grid Search
 af = mmexo.gridsearches.AnomalyFinderGridSearch(
     residuals=residuals, t_0_min=t_start, t_0_max=t_stop)
-af.run(verbose=True)
 
+# Test Single Fit
+test_params = {'t_0': 2460017.56, 't_eff': 3, 'j': 1}
+trimmed_residuals = af.get_trimmed_datasets(test_params)
+plot_EFSFitFunction(trimmed_residuals, test_params)
+plt.show()
+
+# Run Grid Search
+af.run(verbose=True)
 # Print best-fit parameters
 print(af.best)
 print(af.results.shape)
@@ -87,24 +117,25 @@ plt.tight_layout()
 
 plt.figure()
 plt.title('Residuals')
-best_model = mmexo.gridsearches.EFSFitFunction(
-    [residuals[0]], af.best)
-best_model.update_all()
-theta_new = best_model.theta + best_model.get_step()
-best_model.update_all(theta=theta_new)
-plt.errorbar(
-    residuals[0].time, residuals[0].flux, yerr=residuals[0].err_flux,
-    fmt='o')
-
-plt.axhline(0, color='black', linestyle='--')
-plt.plot(
-    best_model.data[best_model.data_indices[0]:best_model.data_indices[1], 0],
-    best_model.ymod[best_model.data_indices[0]:best_model.data_indices[1]],
-    color='black', zorder=5)
-plt.xlabel('HJD')
-plt.ylabel('W149 flux')
-plt.minorticks_on()
-plt.tight_layout()
+plot_EFSFitFunction(residuals, af.best)
+# best_model = mmexo.gridsearches.EFSFitFunction(
+#     [residuals[0]], af.best)
+# best_model.update_all()
+# theta_new = best_model.theta + best_model.get_step()
+# best_model.update_all(theta=theta_new)
+# plt.errorbar(
+#     residuals[0].time, residuals[0].flux, yerr=residuals[0].err_flux,
+#     fmt='o')
+#
+# plt.axhline(0, color='black', linestyle='--')
+# plt.plot(
+#     best_model.data[best_model.data_indices[0]:best_model.data_indices[1], 0],
+#     best_model.ymod[best_model.data_indices[0]:best_model.data_indices[1]],
+#     color='black', zorder=5)
+# plt.xlabel('HJD')
+# plt.ylabel('W149 flux')
+# plt.minorticks_on()
+# plt.tight_layout()
 
 plt.show()
 

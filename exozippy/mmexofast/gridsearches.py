@@ -327,7 +327,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 
     def __init__(self,
         residuals=None, t_eff_3=0.75, d_t_eff=1/3., t_eff_max=10.,
-        d_t_0=1/6., z_t_eff=3, n_min=1, **kwargs):
+        d_t_0=1/6., z_t_eff=3, n_min=2, **kwargs):
         EventFinderGridSearch.__init__(
             self,
             datasets=residuals, t_eff_3=t_eff_3, d_t_eff=d_t_eff,
@@ -392,13 +392,14 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
             # Check for a minimum of 5 datapoints
-            n_tot = np.sum([dataset.good for dataset in trimmed_datasets])
+            n_tot = np.sum(np.hstack(
+                [dataset.good for dataset in trimmed_datasets]))
+            print('n_tot', n_tot)
             successive = self.check_successive(trimmed_datasets)
             if (n_tot > 5) and (successive):
                 do_fit = True
 
         if do_fit:
-
             chi2s['zero'] = self.get_zero_chi2(trimmed_datasets)
             chi2s['flat'] = self.get_flat_chi2(trimmed_datasets)
 
