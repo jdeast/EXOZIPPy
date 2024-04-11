@@ -154,7 +154,7 @@ def get_residuals(datasets, best_pspl_params):
 
 def do_af_grid_search(datasets, best_pspl_params):
     residuals = get_residuals(datasets, best_pspl_params)
-    af_grid = mmexo.AnomalyFinderGridSearch(datasets=residuals, teff_min=0.3)
+    af_grid = mmexo.AnomalyFinderGridSearch(residuals=residuals)
     # May need to update value of teff_min
     # Is the AnomalyFinderGridSearch really the same as EventFinderGridSearch?
     # Or are they just based on the same principles? (but differ in the details)
