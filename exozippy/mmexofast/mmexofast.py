@@ -3,6 +3,7 @@ High-level functions for fitting microlensing events.
 """
 import os.path
 import numpy as np
+import copy
 
 import MulensModel
 import MulensModel as mm
@@ -55,7 +56,13 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
     elif fit_type == 'binary_lens':
         # Find the initial planet parameters
         initial_af_grid_params = do_af_grid_search(datasets, best_pspl_params)
-        initial_2L1S_params = get_initial_2L1S_params(initial_af_grid_params)
+
+        refined_params = refine_pspl_params(
+            datasets, best_pspl_params, initial_af_grid_params)
+        # JCY: I don't like this. Too many arguments and stuff getting passed around.
+
+        initial_2L1S_params = get_initial_2L1S_params(
+            refined_params, initial_af_grid_params)
 
         # Do the full MMEXOFAST fit to get physical parameters
         binary_lens_results = do_mmexofast_fit(datasets, initial_2L1S_params)
@@ -135,6 +142,29 @@ def do_sfit(datasets, initial_params, verbose=False):
         params = my_func.event.model.parameters.parameters
 
     return params
+
+def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
+    masked_datasets = []
+    for dataset in datasets:
+        masked_datasets.append(copy.copy(dataset))
+
+    for dataset in masked_datasets:
+        index = ((dataset.time >
+                 initial_af_grid_params['t_0'] -
+                 n_mask * initial_af_grid_params['t_eff']) &
+                 (dataset.time <
+                  initial_af_grid_params['t_0'] +
+                  n_mask * initial_af_grid_params['t_eff']))
+        dataset.bad = index
+
+    return masked_datasets
+
+
+def refine_pspl_params(
+        datasets, best_pspl_params, initial_af_grid_params):
+    masked_datasets = get_datasets_with_anomaly_masked(datasets, initial_af_grid_params)
+
+    return do_sfit(masked_datasets, best_pspl_params)
 
 
 def get_residuals(datasets, best_pspl_params):
