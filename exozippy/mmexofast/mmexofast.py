@@ -74,7 +74,7 @@ class MMEXOFASTFitter():
         self.pspl_params = self.do_sfit()
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
-            point_lens_results = do_mmexofast_fit(datasets, best_pspl_params)
+            point_lens_results = self.do_mmexofast_fit()
             return point_lens_results
         elif self.fit_type == 'binary_lens':
             # Find the initial planet parameters
@@ -89,7 +89,7 @@ class MMEXOFASTFitter():
                 datasets, refined_params, initial_af_grid_params)
 
             # Do the full MMEXOFAST fit to get physical parameters
-            binary_lens_results = do_mmexofast_fit(datasets,
+            binary_lens_results = self.do_mmexofast_fit(datasets,
                                                    initial_2L1S_params)
             return binary_lens_results
         else:
@@ -165,6 +165,9 @@ class MMEXOFASTFitter():
 
         return params
 
+    def do_mmexofast_fit(self):
+        raise NotImplementedError(
+            'do_mmexofast_fit needs to be implemented')
 
     def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
         masked_datasets = []
