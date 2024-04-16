@@ -12,8 +12,7 @@ import sfit_minimizer as sfit
 import exozippy as mmexo
 
 
-def fit(files=None, coords=None, priors=None, fit_type=None,
-        print_results=False, verbose=False, output_file=None):
+def fit(files=None, fit_type=None, **kwargs):
     """
     Fit a microlensing light curve using MMEXOFAST
 
@@ -33,206 +32,254 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
     ***
 
     """
-    if isinstance(files, (str)):
-        files = [files]
-
-    if files is not None:
-        datasets = create_mulensdata_objects(files)
-
-    if fit_type is None:
-        # Maybe "None" means initial mulens parameters were passed, so we can
-        # go straight to a mmexofast_fit?
-        raise ValueError('You must set the fit_type.')
-
-    # Find initial Point Lens model
-    best_ef_grid_params = do_ef_grid_search(datasets)
-    initial_pspl_params = get_initial_pspl_params(
-        datasets, best_ef_grid_params)
-    best_pspl_params = do_sfit(datasets, initial_pspl_params)
-    if fit_type == 'point lens':
-        # Do the full MMEXOFAST fit to get physical parameters
-        point_lens_results = do_mmexofast_fit(datasets, best_pspl_params)
-        return point_lens_results
-    elif fit_type == 'binary_lens':
-        # Find the initial planet parameters
-        initial_af_grid_params = do_af_grid_search(datasets, best_pspl_params)
-
-        refined_params = refine_pspl_params(
-            datasets, best_pspl_params, initial_af_grid_params)
-        # JCY: I don't like this. Too many arguments and stuff getting passed around.
-
-        initial_2L1S_params = get_initial_2L1S_params(
-            datasets, refined_params, initial_af_grid_params)
-
-        # Do the full MMEXOFAST fit to get physical parameters
-        binary_lens_results = do_mmexofast_fit(datasets, initial_2L1S_params)
-        return binary_lens_results
-    else:
-        raise ValueError('fit_type not recognized. Your value', fit_type)
+    fitter = MMEXOFASTFitter(files=files, fit_type=fit_type, **kwargs)
+    fitter.fit()
+    return fitter.results
 
 
-def do_ef_grid_search(datasets):
-    # Should probably scrape t_0_1 from the filenames
-    ef_grid = mmexo.EventFinderGridSearch(datasets=datasets)
-    ef_grid.run()
-    return ef_grid.best
+class MMEXOFASTFitter():
+
+    def __init__(self, files=None, fit_type=None,coords=None, priors=None,
+        print_results=False, verbose=False, output_file=None):
+        self.datasets = self._create_mulensdata_objects(files)
+        self.fit_type = fit_type
+
+        # initialize additional data versions
+        self._residuals = None
+        self._masked_data = None
+
+        # initialize params
+        self._best_ef_grid_point = None
+        self._pspl_params = None
+        self._best_af_grid_point = None
+        self._binary_params = None
+
+        self._results = None
+
+    def _create_mulensdata_objects(self, files):
+        if isinstance(files, (str)):
+            files = [files]
+
+        raise NotImplementedError('Need to write code to ingest data.')
+
+    def fit(self):
+        if self.fit_type is None:
+            # Maybe "None" means initial mulens parameters were passed, so we can
+            # go straight to a mmexofast_fit?
+            raise ValueError('You must set the fit_type.')
+
+        # Find initial Point Lens model
+        best_ef_grid_params = self.do_ef_grid_search(datasets)
+        initial_pspl_params = get_initial_pspl_params(
+            datasets, best_ef_grid_params)
+        best_pspl_params = do_sfit(datasets, initial_pspl_params)
+        if self.fit_type == 'point lens':
+            # Do the full MMEXOFAST fit to get physical parameters
+            point_lens_results = do_mmexofast_fit(datasets, best_pspl_params)
+            return point_lens_results
+        elif self.fit_type == 'binary_lens':
+            # Find the initial planet parameters
+            initial_af_grid_params = do_af_grid_search(datasets,
+                                                       best_pspl_params)
+
+            refined_params = refine_pspl_params(
+                datasets, best_pspl_params, initial_af_grid_params)
+            # JCY: I don't like this. Too many arguments and stuff getting passed around.
+
+            initial_2L1S_params = get_initial_2L1S_params(
+                datasets, refined_params, initial_af_grid_params)
+
+            # Do the full MMEXOFAST fit to get physical parameters
+            binary_lens_results = do_mmexofast_fit(datasets,
+                                                   initial_2L1S_params)
+            return binary_lens_results
+        else:
+            raise ValueError('fit_type not recognized. Your value', fit_type)
+
+    def do_ef_grid_search(self):
+        # Should probably scrape t_0_1 from the filenames
+        ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
+        ef_grid.run()
+        self.best_ef_grid = ef_grid.best
+
+    def get_initial_pspl_params(self, datasets, best_ef_params, verbose=False):
+        t_0 = best_ef_params['t_0']
+        if best_ef_params['j'] == 1:
+            u_0 = 0.01
+        elif best_ef_params['j'] == 2:
+            u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
+            chi2s = []
+            for u_0 in u_0s:
+                t_E = best_ef_params['t_eff'] / u_0
+                params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
+                event = MulensModel.Event(
+                    datasets=datasets, model=MulensModel.Model(params))
+                chi2s.append(event.get_chi2())
+
+            index = np.nanargmin(chi2s)
+            u_0 = u_0s[index]
+            if verbose:
+                print('u0s', u_0s)
+                print('chi2s', chi2s)
+                print('selected', index, u_0)
+
+        else:
+            raise ValueError(
+                'j may only be 1 or 2. Your input: ', best_ef_params)
+
+        t_E = best_ef_params['t_eff'] / u_0
+
+        return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
 
-def get_initial_pspl_params(datasets, best_ef_params, verbose=False):
-    t_0 = best_ef_params['t_0']
-    if best_ef_params['j'] == 1:
-        u_0 = 0.01
-    elif best_ef_params['j'] == 2:
-        u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
-        chi2s = []
-        for u_0 in u_0s:
-            t_E = best_ef_params['t_eff'] / u_0
-            params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
+    def do_sfit(datasets, initial_params, verbose=False):
+        param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
+
+        params = initial_params
+        for i in range(len(param_sets)):
+            parameters_to_fit = param_sets[i]
             event = MulensModel.Event(
                 datasets=datasets, model=MulensModel.Model(params))
-            chi2s.append(event.get_chi2())
+            event.fit_fluxes()
 
-        index = np.nanargmin(chi2s)
-        u_0 = u_0s[index]
-        if verbose:
-            print('u0s', u_0s)
-            print('chi2s', chi2s)
-            print('selected', index, u_0)
+            my_func = sfit.mm_funcs.PointLensSFitFunction(
+                event, parameters_to_fit)
 
-    else:
-        raise ValueError(
-            'j may only be 1 or 2. Your input: ', best_ef_params)
+            initial_guess = []
+            for key in parameters_to_fit:
+                if isinstance(params[key], (astropy.units.Quantity)):
+                    initial_guess.append(params[key].value)
+                else:
+                    initial_guess.append(params[key])
 
-    t_E = best_ef_params['t_eff'] / u_0
+            for i in range(len(datasets)):
+                initial_guess.append(event.fits[i].source_flux)
+                initial_guess.append(event.fits[i].blend_flux)
 
-    return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
+            result = sfit.minimize(
+                my_func, x0=initial_guess, tol=1e-5,
+                options={'step': 'adaptive'}, verbose=verbose)
+
+            if verbose:
+                print(result)
+
+            params = my_func.event.model.parameters.parameters
+
+        return params
 
 
-def do_sfit(datasets, initial_params, verbose=False):
-    param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
+    def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
+        masked_datasets = []
+        for dataset in datasets:
+            masked_datasets.append(copy.copy(dataset))
 
-    params = initial_params
-    for i in range(len(param_sets)):
-        parameters_to_fit = param_sets[i]
-        event = MulensModel.Event(
-            datasets=datasets, model=MulensModel.Model(params))
+        for dataset in masked_datasets:
+            index = ((dataset.time >
+                     initial_af_grid_params['t_0'] -
+                     n_mask * initial_af_grid_params['t_eff']) &
+                     (dataset.time <
+                      initial_af_grid_params['t_0'] +
+                      n_mask * initial_af_grid_params['t_eff']))
+            dataset.bad = index
+
+        return masked_datasets
+
+
+    def refine_pspl_params(
+            datasets, best_pspl_params, initial_af_grid_params):
+        masked_datasets = get_datasets_with_anomaly_masked(datasets, initial_af_grid_params)
+
+        return do_sfit(masked_datasets, best_pspl_params)
+
+
+    def get_residuals(datasets, best_pspl_params):
+        event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
         event.fit_fluxes()
+        residuals = []
+        for i, dataset in enumerate(datasets):
+            res, err = event.fits[i].get_residuals(phot_fmt='flux')
+            residuals.append(
+                mm.MulensData(
+                    [dataset.time, res, err], phot_fmt='flux',
+                    bandpass=dataset.bandpass,
+                    ephemerides_file=dataset.ephemerides_file))
 
-        my_func = sfit.mm_funcs.PointLensSFitFunction(
-            event, parameters_to_fit)
-
-        initial_guess = []
-        for key in parameters_to_fit:
-            if isinstance(params[key], (astropy.units.Quantity)):
-                initial_guess.append(params[key].value)
-            else:
-                initial_guess.append(params[key])
-
-        for i in range(len(datasets)):
-            initial_guess.append(event.fits[i].source_flux)
-            initial_guess.append(event.fits[i].blend_flux)
-
-        result = sfit.minimize(
-            my_func, x0=initial_guess, tol=1e-5,
-            options={'step': 'adaptive'}, verbose=verbose)
-
-        if verbose:
-            print(result)
-
-        params = my_func.event.model.parameters.parameters
-
-    return params
+        return residuals
 
 
-def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
-    masked_datasets = []
-    for dataset in datasets:
-        masked_datasets.append(copy.copy(dataset))
-
-    for dataset in masked_datasets:
-        index = ((dataset.time >
-                 initial_af_grid_params['t_0'] -
-                 n_mask * initial_af_grid_params['t_eff']) &
-                 (dataset.time <
-                  initial_af_grid_params['t_0'] +
-                  n_mask * initial_af_grid_params['t_eff']))
-        dataset.bad = index
-
-    return masked_datasets
+    def do_af_grid_search(datasets, best_pspl_params):
+        residuals = get_residuals(datasets, best_pspl_params)
+        af_grid = mmexo.AnomalyFinderGridSearch(residuals=residuals)
+        # May need to update value of teff_min
+        af_grid.run()
+        return af_grid.best
 
 
-def refine_pspl_params(
-        datasets, best_pspl_params, initial_af_grid_params):
-    masked_datasets = get_datasets_with_anomaly_masked(datasets, initial_af_grid_params)
+    def get_dmag(datasets, pspl_params, af_grid_params):
+        # UGLY. PLEASE REFACTOR ME.
+        masked_datasets = get_datasets_with_anomaly_masked(
+            datasets, af_grid_params)
+        pspl_event = MulensModel.Event(
+            datasets=masked_datasets, model=MulensModel.Model(pspl_params))
+        source_flux, blend_flux = pspl_event.get_ref_fluxes()
+        flux_pspl = source_flux[0] * pspl_event.model.get_magnification(
+            af_grid_params['t_0']) + blend_flux
 
-    return do_sfit(masked_datasets, best_pspl_params)
+        residuals = get_residuals(datasets, pspl_params)
+        af_grid_search = mmexo.gridsearches.AnomalyFinderGridSearch(
+            residuals)
+        trimmed_datasets = af_grid_search.get_trimmed_datasets(af_grid_params)
+        ef_sfit = mmexo.gridsearches.EFSFitFunction(
+            trimmed_datasets, af_grid_params)
+        ef_sfit.update_all()
+        new_theta = ef_sfit.theta + ef_sfit.get_step()
+        ef_sfit.update_all(new_theta)
 
+        i = pspl_event.data_ref
+        fs = ef_sfit.theta[2 * i]
+        fb = ef_sfit.theta[2 * i + 1]
+        mag = ef_sfit.get_magnification(af_grid_params['t_0'])
+        d_flux_anom = fs * mag * fb
 
-def get_residuals(datasets, best_pspl_params):
-    event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
-    event.fit_fluxes()
-    residuals = []
-    for i, dataset in enumerate(datasets):
-        res, err = event.fits[i].get_residuals(phot_fmt='flux')
-        residuals.append(
-            mm.MulensData(
-                [dataset.time, res, err], phot_fmt='flux',
-                bandpass=dataset.bandpass,
-                ephemerides_file=dataset.ephemerides_file))
+        dmag = -2.5 * np.log10((flux_pspl + d_flux_anom) / flux_pspl)
+        return dmag[0]
 
-    return residuals
+    def get_initial_2L1S_params(datasets, pspl_params, af_grid_params):
+        dmag = get_dmag(datasets, pspl_params, af_grid_params)
+        params = {
+            't_0': pspl_params['t_0'], 'u_0': pspl_params['u_0'],
+            't_E': pspl_params['t_E'], 't_pl': af_grid_params['t_0'],
+            'dt': 2. * af_grid_params['t_eff'], 'dmag': dmag}
+        binary_params = mmexo.estimate_params.get_wide_params(params)
+        return binary_params
 
+    @property
+    def residuals(self):
+        return self._residuals
 
-def do_af_grid_search(datasets, best_pspl_params):
-    residuals = get_residuals(datasets, best_pspl_params)
-    af_grid = mmexo.AnomalyFinderGridSearch(residuals=residuals)
-    # May need to update value of teff_min
-    # Is the AnomalyFinderGridSearch really the same as EventFinderGridSearch?
-    # Or are they just based on the same principles? (but differ in the details)
-    af_grid.run()
-    return af_grid.best
+    @property
+    def masked_data(self):
+        return self._masked_data
 
+    @property
+    def best_ef_grid_point(self):
+        return self._best_ef_grid_point
 
-def get_dmag(datasets, pspl_params, af_grid_params):
-    # UGLY. PLEASE REFACTOR ME.
-    masked_datasets = get_datasets_with_anomaly_masked(
-        datasets, af_grid_params)
-    pspl_event = MulensModel.Event(
-        datasets=masked_datasets, model=MulensModel.Model(pspl_params))
-    source_flux, blend_flux = pspl_event.get_ref_fluxes()
-    flux_pspl = source_flux[0] * pspl_event.model.get_magnification(
-        af_grid_params['t_0']) + blend_flux
+    @property
+    def pspl_params(self):
+        return self._pspl_params
 
-    residuals = get_residuals(datasets, pspl_params)
-    af_grid_search = mmexo.gridsearches.AnomalyFinderGridSearch(
-        residuals)
-    trimmed_datasets = af_grid_search.get_trimmed_datasets(af_grid_params)
-    ef_sfit = mmexo.gridsearches.EFSFitFunction(
-        trimmed_datasets, af_grid_params)
-    ef_sfit.update_all()
-    new_theta = ef_sfit.theta + ef_sfit.get_step()
-    ef_sfit.update_all(new_theta)
-    print('theta', ef_sfit.theta)
-    i = pspl_event.data_ref
-    fs = ef_sfit.theta[2 * i]
-    fb = ef_sfit.theta[2 * i + 1]
-    mag = ef_sfit.get_magnification(af_grid_params['t_0'])
-    d_flux_anom = fs * mag * fb
-    print('i', i)
-    print('dflux', d_flux_anom)
+    @property
+    def best_af_grid_point(self):
+        return self._best_af_grid_point
 
-    dmag = -2.5 * np.log10((flux_pspl + d_flux_anom) / flux_pspl)
-    print('dmag', dmag[0])
-    return dmag[0]
+    @property
+    def binary_params(self):
+        return self._binary_params
 
-def get_initial_2L1S_params(datasets, pspl_params, af_grid_params):
-    dmag = get_dmag(datasets, pspl_params, af_grid_params)
-    params = {
-        't_0': pspl_params['t_0'], 'u_0': pspl_params['u_0'],
-        't_E': pspl_params['t_E'], 't_pl': af_grid_params['t_0'],
-        'dt': 2. * af_grid_params['t_eff'], 'dmag': dmag}
-    binary_params = mmexo.estimate_params.get_wide_params(params)
-    return binary_params
+    @property
+    def results(self):
+        return self._results
 
 #### CODE BELOW HERE IS PROBABLY DEFUNCT.
 class MMEXOFASTSingleLensFitter():
