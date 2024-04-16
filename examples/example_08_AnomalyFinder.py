@@ -14,7 +14,7 @@ pspl_params = {
 t_start = 2459980.
 t_stop = 2460060.
 
-residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
+#residuals = mmexo.mmexofast.get_residuals(datasets, pspl_params)
 #print('max flux', [(np.max(residual.flux)) for residual in residuals])
 
 
@@ -41,9 +41,13 @@ def plot_EFSFitFunction(datasets, params, verbose=False):
     plt.minorticks_on()
     plt.tight_layout()
 
+
 # Test Grid Search
+fitter = mmexo.mmexofast.MMEXOFASTFitter(datasets=datasets)
+fitter.pspl_params = pspl_params
+fitter.set_residuals()
 af = mmexo.gridsearches.AnomalyFinderGridSearch(
-    residuals=residuals, t_0_min=t_start, t_0_max=t_stop)
+    residuals=fitter.residuals, t_0_min=t_start, t_0_max=t_stop)
 
 # Test Single Fit
 plt.figure()
@@ -53,8 +57,6 @@ for test_params in [
     {'t_0': 2460028.2788192877, 't_eff': 9.988721231519582, 'j': 1}]:
     print(test_params)
     trimmed_residuals = af.get_trimmed_datasets(test_params)
-    #print('max flux trimmed',
-    #      [(np.max(residual.flux)) for residual in trimmed_residuals])
     print('chi2_zero', np.sum(np.hstack(
         [(dataset.flux /dataset.err_flux)**2 for dataset in trimmed_residuals]))
           )
@@ -136,7 +138,7 @@ plt.tight_layout()
 
 plt.figure()
 plt.title('Residuals')
-plot_EFSFitFunction(residuals, af.best)
+plot_EFSFitFunction(fitter.residuals, af.best)
 
 plt.show()
 
