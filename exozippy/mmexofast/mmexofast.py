@@ -71,20 +71,15 @@ class MMEXOFASTFitter():
         # Find initial Point Lens model
         self.best_ef_grid_params = self.do_ef_grid_search()
         self.pspl_params = self.get_initial_pspl_params()
-        self.pspl_params = self.do_sfit()
+        self.pspl_params = self.do_sfit(self.datasets)
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
             return self.results
         elif self.fit_type == 'binary_lens':
             # Find the initial planet parameters
-            initial_af_grid_params = do_af_grid_search(datasets,
-                                                       best_pspl_params)
-
-            refined_params = refine_pspl_params(
-                datasets, best_pspl_params, initial_af_grid_params)
-            # JCY: I don't like this. Too many arguments and stuff getting passed around.
-
+            self.best_af_grid_params = self.do_af_grid_search()
+            self.pspl_params = self.refine_pspl_params()
             initial_2L1S_params = get_initial_2L1S_params(
                 datasets, refined_params, initial_af_grid_params)
 
@@ -129,14 +124,14 @@ class MMEXOFASTFitter():
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
-    def do_sfit(self, verbose=False):
+    def do_sfit(self, datasets, verbose=False):
         param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
 
         params = self.pspl_params
         for i in range(len(param_sets)):
             parameters_to_fit = param_sets[i]
             event = MulensModel.Event(
-                datasets=self.datasets, model=MulensModel.Model(params))
+                datasets=datasets, model=MulensModel.Model(params))
             event.fit_fluxes()
 
             my_func = sfit.mm_funcs.PointLensSFitFunction(
@@ -149,7 +144,7 @@ class MMEXOFASTFitter():
                 else:
                     initial_guess.append(params[key])
 
-            for i in range(len(self.datasets)):
+            for i in range(len(datasets)):
                 initial_guess.append(event.fits[i].source_flux)
                 initial_guess.append(event.fits[i].blend_flux)
 
@@ -168,35 +163,33 @@ class MMEXOFASTFitter():
         raise NotImplementedError(
             'do_mmexofast_fit needs to be implemented')
 
-    def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
+    def set_datasets_with_anomaly_masked(self, n_mask=3):
         masked_datasets = []
-        for dataset in datasets:
+        for dataset in self.datasets:
             masked_datasets.append(copy.copy(dataset))
 
         for dataset in masked_datasets:
             index = ((dataset.time >
-                     initial_af_grid_params['t_0'] -
-                     n_mask * initial_af_grid_params['t_eff']) &
+                     self.best_af_grid_point['t_0'] -
+                     n_mask * self.best_af_grid_point['t_eff']) &
                      (dataset.time <
-                      initial_af_grid_params['t_0'] +
-                      n_mask * initial_af_grid_params['t_eff']))
+                      self.best_af_grid_point['t_0'] +
+                      n_mask * self.best_af_grid_point['t_eff']))
             dataset.bad = index
 
-        return masked_datasets
+        self.masked_datasets = masked_datasets
 
+    def refine_pspl_params(self):
+        self.set_datasets_with_anomaly_masked()
+        results = self.do_sfit(self.masked_datasets)
+        return results
 
-    def refine_pspl_params(
-            datasets, best_pspl_params, initial_af_grid_params):
-        masked_datasets = get_datasets_with_anomaly_masked(datasets, initial_af_grid_params)
-
-        return do_sfit(masked_datasets, best_pspl_params)
-
-
-    def get_residuals(datasets, best_pspl_params):
-        event = mm.Event(datasets=datasets, model=mm.Model(best_pspl_params))
+    def get_residuals(self):
+        event = mm.Event(
+            datasets=self.datasets, model=mm.Model(self.pspl_params))
         event.fit_fluxes()
         residuals = []
-        for i, dataset in enumerate(datasets):
+        for i, dataset in enumerate(self.datasets):
             res, err = event.fits[i].get_residuals(phot_fmt='flux')
             residuals.append(
                 mm.MulensData(
@@ -206,14 +199,12 @@ class MMEXOFASTFitter():
 
         return residuals
 
-
-    def do_af_grid_search(datasets, best_pspl_params):
-        residuals = get_residuals(datasets, best_pspl_params)
-        af_grid = mmexo.AnomalyFinderGridSearch(residuals=residuals)
+    def do_af_grid_search(self):
+        self.residuals = self.get_residuals()
+        af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
         af_grid.run()
         return af_grid.best
-
 
     def get_dmag(datasets, pspl_params, af_grid_params):
         # UGLY. PLEASE REFACTOR ME.
@@ -257,9 +248,17 @@ class MMEXOFASTFitter():
     def residuals(self):
         return self._residuals
 
+    @residuals.setter
+    def residuals(self, value):
+        self._residuals = value
+
     @property
     def masked_data(self):
         return self._masked_data
+
+    @masked_data.setter
+    def masked_data(self, value):
+        self._masked_data = value
 
     @property
     def best_ef_grid_point(self):
