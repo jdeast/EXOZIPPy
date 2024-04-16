@@ -218,15 +218,15 @@ class MMEXOFASTFitter():
             model=MulensModel.Model(self.pspl_params))
         source_flux, blend_flux = pspl_event.get_ref_fluxes()
         flux_pspl = source_flux[0] * pspl_event.model.get_magnification(
-            self.af_grid_params['t_0']) + blend_flux
+            self.best_af_grid_point['t_0']) + blend_flux
 
         # Can this be cleaned up?
         af_grid_search = mmexo.gridsearches.AnomalyFinderGridSearch(
             self.residuals)
         trimmed_datasets = af_grid_search.get_trimmed_datasets(
-            self.af_grid_params)
+            self.best_af_grid_point)
         ef_sfit = mmexo.gridsearches.EFSFitFunction(
-            trimmed_datasets, self.af_grid_params)
+            trimmed_datasets, self.best_af_grid_point)
         ef_sfit.update_all()
         new_theta = ef_sfit.theta + ef_sfit.get_step()
         ef_sfit.update_all(new_theta)
@@ -234,7 +234,7 @@ class MMEXOFASTFitter():
         i = pspl_event.data_ref
         fs = ef_sfit.theta[2 * i]
         fb = ef_sfit.theta[2 * i + 1]
-        mag = ef_sfit.get_magnification(self.af_grid_params['t_0'])
+        mag = ef_sfit.get_magnification(self.best_af_grid_point['t_0'])
         d_flux_anom = fs * mag * fb
 
         dmag = -2.5 * np.log10((flux_pspl + d_flux_anom) / flux_pspl)
