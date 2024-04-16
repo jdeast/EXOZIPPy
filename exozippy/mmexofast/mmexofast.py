@@ -64,14 +64,13 @@ class MMEXOFASTFitter():
 
     def fit(self):
         if self.fit_type is None:
-            # Maybe "None" means initial mulens parameters were passed, so we can
-            # go straight to a mmexofast_fit?
+            # Maybe "None" means initial mulens parameters were passed,
+            # so we can go straight to a mmexofast_fit?
             raise ValueError('You must set the fit_type.')
 
         # Find initial Point Lens model
-        best_ef_grid_params = self.do_ef_grid_search(datasets)
-        initial_pspl_params = get_initial_pspl_params(
-            datasets, best_ef_grid_params)
+        self.best_ef_grid_params = self.do_ef_grid_search()
+        self.pspl_params = self.get_initial_pspl_params()
         best_pspl_params = do_sfit(datasets, initial_pspl_params)
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
@@ -100,20 +99,20 @@ class MMEXOFASTFitter():
         # Should probably scrape t_0_1 from the filenames
         ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
         ef_grid.run()
-        self.best_ef_grid = ef_grid.best
+        return ef_grid.best
 
-    def get_initial_pspl_params(self, datasets, best_ef_params, verbose=False):
-        t_0 = best_ef_params['t_0']
-        if best_ef_params['j'] == 1:
+    def get_initial_pspl_params(self, verbose=False):
+        t_0 = self.best_ef_params['t_0']
+        if self.best_ef_params['j'] == 1:
             u_0 = 0.01
-        elif best_ef_params['j'] == 2:
+        elif self.best_ef_params['j'] == 2:
             u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
             chi2s = []
             for u_0 in u_0s:
-                t_E = best_ef_params['t_eff'] / u_0
+                t_E = self.best_ef_params['t_eff'] / u_0
                 params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
                 event = MulensModel.Event(
-                    datasets=datasets, model=MulensModel.Model(params))
+                    datasets=self.datasets, model=MulensModel.Model(params))
                 chi2s.append(event.get_chi2())
 
             index = np.nanargmin(chi2s)
@@ -125,12 +124,11 @@ class MMEXOFASTFitter():
 
         else:
             raise ValueError(
-                'j may only be 1 or 2. Your input: ', best_ef_params)
+                'j may only be 1 or 2. Your input: ', self.best_ef_params)
 
-        t_E = best_ef_params['t_eff'] / u_0
+        t_E = self.best_ef_params['t_eff'] / u_0
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
-
 
     def do_sfit(datasets, initial_params, verbose=False):
         param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
@@ -265,13 +263,22 @@ class MMEXOFASTFitter():
     def best_ef_grid_point(self):
         return self._best_ef_grid_point
 
+    @best_ef_grid_point.setter
+    def best_ef_grid_point(self, value):
+        self._best_ef_grid_point = value
+
     @property
     def pspl_params(self):
         return self._pspl_params
 
+    @pspl_params.setter
+    def pspl_params(self, value):
+        self._pspl_params = value
+
     @property
     def best_af_grid_point(self):
         return self._best_af_grid_point
+
 
     @property
     def binary_params(self):
