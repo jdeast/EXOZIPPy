@@ -290,13 +290,27 @@ class EFSFitFunction(FlatSFitFunction):
 
         self.df = dfunc
 
+    def _get_q(self, time):
+        q_ = 1. + ((time - self.parameters['t_0']) /
+                       self.parameters['t_eff']) ** 2
+        return q_
+
     @property
     def q(self):
         if self._q is None:
-            self._q = 1 + ((self.data[:, 0] - self.parameters['t_0']) /
-                           self.parameters['t_eff'])**2
+            self._q = self._get_q(self.data[:, 0])
 
         return self._q
+
+    def _get_magnification(self, q):
+        if self.parameters['j'] == 1:
+            magnification = 1. / np.sqrt(q)
+        elif self.parameters['j'] == 2:
+            magnification = 1. / np.sqrt(1. - (q / 2 + 1) ** (-2))
+        else:
+            raise ValueError('Invalid value for j.', self.parameters)
+
+        return magnification
 
     @property
     def magnification(self):
@@ -307,17 +321,27 @@ class EFSFitFunction(FlatSFitFunction):
 
         Returns :
             magnification: *float* or *np.ndarray*
-                The magnification for each point
-                specified by `u` in :py:attr:`~trajectory`.
+                The magnification for each data point.
         """
-        if self.parameters['j'] == 1:
-            self._magnification = 1. / np.sqrt(self.q)
-        elif self.parameters['j'] == 2:
-            self._magnification = 1. / np.sqrt(1. - (self.q / 2 + 1) ** (-2))
-        else:
-            raise ValueError('Invalid value for j.', self.parameters)
+        self._magnification = self._get_magnification(self.q)
 
         return self._magnification
+
+    def get_magnification(self, time):
+        """
+        The magnification
+
+        Parameters :
+            time : *float*, np.array
+                times at which to calculation the magnification.
+
+        Returns :
+            magnification: *float* or *np.ndarray*
+                The magnification for given time(s).
+        """
+        q = self._get_q(time)
+        magnification = self._get_magnification(q)
+        return magnification
 
 
 class AnomalyFinderGridSearch(EventFinderGridSearch):

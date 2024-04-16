@@ -62,7 +62,7 @@ def fit(files=None, coords=None, priors=None, fit_type=None,
         # JCY: I don't like this. Too many arguments and stuff getting passed around.
 
         initial_2L1S_params = get_initial_2L1S_params(
-            refined_params, initial_af_grid_params)
+            datasets, refined_params, initial_af_grid_params)
 
         # Do the full MMEXOFAST fit to get physical parameters
         binary_lens_results = do_mmexofast_fit(datasets, initial_2L1S_params)
@@ -143,6 +143,7 @@ def do_sfit(datasets, initial_params, verbose=False):
 
     return params
 
+
 def get_datasets_with_anomaly_masked(datasets, initial_af_grid_params, n_mask=3):
     masked_datasets = []
     for dataset in datasets:
@@ -191,6 +192,47 @@ def do_af_grid_search(datasets, best_pspl_params):
     af_grid.run()
     return af_grid.best
 
+
+def get_dmag(datasets, pspl_params, af_grid_params):
+    # UGLY. PLEASE REFACTOR ME.
+    masked_datasets = get_datasets_with_anomaly_masked(
+        datasets, af_grid_params)
+    pspl_event = MulensModel.Event(
+        datasets=masked_datasets, model=MulensModel.Model(pspl_params))
+    source_flux, blend_flux = pspl_event.get_ref_fluxes()
+    flux_pspl = source_flux[0] * pspl_event.model.get_magnification(
+        af_grid_params['t_0']) + blend_flux
+
+    residuals = get_residuals(datasets, pspl_params)
+    af_grid_search = mmexo.gridsearches.AnomalyFinderGridSearch(
+        residuals)
+    trimmed_datasets = af_grid_search.get_trimmed_datasets(af_grid_params)
+    ef_sfit = mmexo.gridsearches.EFSFitFunction(
+        trimmed_datasets, af_grid_params)
+    ef_sfit.update_all()
+    new_theta = ef_sfit.theta + ef_sfit.get_step()
+    ef_sfit.update_all(new_theta)
+    print('theta', ef_sfit.theta)
+    i = pspl_event.data_ref
+    fs = ef_sfit.theta[2 * i]
+    fb = ef_sfit.theta[2 * i + 1]
+    mag = ef_sfit.get_magnification(af_grid_params['t_0'])
+    d_flux_anom = fs * mag * fb
+    print('i', i)
+    print('dflux', d_flux_anom)
+
+    dmag = -2.5 * np.log10((flux_pspl + d_flux_anom) / flux_pspl)
+    print('dmag', dmag[0])
+    return dmag[0]
+
+def get_initial_2L1S_params(datasets, pspl_params, af_grid_params):
+    dmag = get_dmag(datasets, pspl_params, af_grid_params)
+    params = {
+        't_0': pspl_params['t_0'], 'u_0': pspl_params['u_0'],
+        't_E': pspl_params['t_E'], 't_pl': af_grid_params['t_0'],
+        'dt': 2. * af_grid_params['t_eff'], 'dmag': dmag}
+    binary_params = mmexo.estimate_params.get_wide_params(params)
+    return binary_params
 
 #### CODE BELOW HERE IS PROBABLY DEFUNCT.
 class MMEXOFASTSingleLensFitter():
