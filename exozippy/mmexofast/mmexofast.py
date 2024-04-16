@@ -184,23 +184,23 @@ class MMEXOFASTFitter():
         results = self.do_sfit(self.masked_datasets)
         return results
 
-    def get_residuals(self):
+    def set_residuals(self):
         event = mm.Event(
             datasets=self.datasets, model=mm.Model(self.pspl_params))
         event.fit_fluxes()
         residuals = []
         for i, dataset in enumerate(self.datasets):
-            res, err = event.fits[i].get_residuals(phot_fmt='flux')
+            res, err = event.fits[i].set_residuals(phot_fmt='flux')
             residuals.append(
                 mm.MulensData(
                     [dataset.time, res, err], phot_fmt='flux',
                     bandpass=dataset.bandpass,
                     ephemerides_file=dataset.ephemerides_file))
 
-        return residuals
+        self.residuals = residuals
 
     def do_af_grid_search(self):
-        self.residuals = self.get_residuals()
+        self.set_residuals()
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
         af_grid.run()
