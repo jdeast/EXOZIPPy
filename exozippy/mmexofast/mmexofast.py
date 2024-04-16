@@ -74,8 +74,8 @@ class MMEXOFASTFitter():
         self.pspl_params = self.do_sfit()
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
-            point_lens_results = self.do_mmexofast_fit()
-            return point_lens_results
+            self.results = self.do_mmexofast_fit()
+            return self.results
         elif self.fit_type == 'binary_lens':
             # Find the initial planet parameters
             initial_af_grid_params = do_af_grid_search(datasets,
@@ -89,9 +89,8 @@ class MMEXOFASTFitter():
                 datasets, refined_params, initial_af_grid_params)
 
             # Do the full MMEXOFAST fit to get physical parameters
-            binary_lens_results = self.do_mmexofast_fit(datasets,
-                                                   initial_2L1S_params)
-            return binary_lens_results
+            self.results = self.do_mmexofast_fit()
+            return self.results
         else:
             raise ValueError('fit_type not recognized. Your value', fit_type)
 
@@ -290,6 +289,11 @@ class MMEXOFASTFitter():
     @property
     def results(self):
         return self._results
+
+    @results.setter
+    def results(self, value):
+        self._results = value
+
 
 #### CODE BELOW HERE IS PROBABLY DEFUNCT.
 class MMEXOFASTSingleLensFitter():
