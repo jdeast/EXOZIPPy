@@ -14,15 +14,17 @@ from data_for_test_examples import datasets
 results_EF = {'t_0': 2460023.2844586717, 't_eff': 9.988721231519582,
               'j': 2, 'chi2': -42226.356330652685}
 
-initial_pspl_params = mmexo.mmexofast.get_initial_pspl_params(
-    datasets, results_EF, verbose=True)
+fitter = mmexo.mmexofast.MMEXOFASTFitter(datasets=datasets)
+fitter.best_ef_grid_point = results_EF
+initial_pspl_params = fitter.get_initial_pspl_params(verbose=True)
 print('initial parameters', initial_pspl_params)
-
 init_event = MulensModel.Event(
     datasets=datasets, model=MulensModel.Model(initial_pspl_params))
 print('initial chi2', init_event.get_chi2())
 
-results = mmexo.mmexofast.do_sfit(datasets, initial_pspl_params, verbose=True)
+
+fitter.pspl_params = initial_pspl_params
+results = fitter.do_sfit(fitter.datasets, verbose=True)
 print(results)
 
 init_event.plot(title='Initial Parameters')

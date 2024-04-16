@@ -39,9 +39,15 @@ def fit(files=None, fit_type=None, **kwargs):
 
 class MMEXOFASTFitter():
 
-    def __init__(self, files=None, fit_type=None,coords=None, priors=None,
-        print_results=False, verbose=False, output_file=None):
-        self.datasets = self._create_mulensdata_objects(files)
+    def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
+                 priors=None, print_results=False, verbose=False,
+                 output_file=None):
+        # setup datasets.
+        if datasets is not None:
+            self.datasets = datasets
+        else:
+            self.datasets = self._create_mulensdata_objects(files)
+
         self.fit_type = fit_type
 
         # initialize additional data versions
@@ -69,7 +75,7 @@ class MMEXOFASTFitter():
             raise ValueError('You must set the fit_type.')
 
         # Find initial Point Lens model
-        self.best_ef_grid_params = self.do_ef_grid_search()
+        self.best_ef_grid_point = self.do_ef_grid_search()
         self.pspl_params = self.get_initial_pspl_params()
         self.pspl_params = self.do_sfit(self.datasets)
         if self.fit_type == 'point lens':
@@ -96,14 +102,14 @@ class MMEXOFASTFitter():
         return ef_grid.best
 
     def get_initial_pspl_params(self, verbose=False):
-        t_0 = self.best_ef_params['t_0']
-        if self.best_ef_params['j'] == 1:
+        t_0 = self.best_ef_grid_point['t_0']
+        if self.best_ef_grid_point['j'] == 1:
             u_0 = 0.01
-        elif self.best_ef_params['j'] == 2:
+        elif self.best_ef_grid_point['j'] == 2:
             u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
             chi2s = []
             for u_0 in u_0s:
-                t_E = self.best_ef_params['t_eff'] / u_0
+                t_E = self.best_ef_grid_point['t_eff'] / u_0
                 params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
                 event = MulensModel.Event(
                     datasets=self.datasets, model=MulensModel.Model(params))
@@ -118,9 +124,9 @@ class MMEXOFASTFitter():
 
         else:
             raise ValueError(
-                'j may only be 1 or 2. Your input: ', self.best_ef_params)
+                'j may only be 1 or 2. Your input: ', self.best_ef_grid_point)
 
-        t_E = self.best_ef_params['t_eff'] / u_0
+        t_E = self.best_ef_grid_point['t_eff'] / u_0
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
