@@ -52,7 +52,7 @@ class MMEXOFASTFitter():
 
         # initialize additional data versions
         self._residuals = None
-        self._masked_data = None
+        self._masked_datasets = None
 
         # initialize params
         self._best_ef_grid_point = None
@@ -258,12 +258,12 @@ class MMEXOFASTFitter():
         self._residuals = value
 
     @property
-    def masked_data(self):
-        return self._masked_data
+    def masked_datasets(self):
+        return self._masked_datasets
 
-    @masked_data.setter
-    def masked_data(self, value):
-        self._masked_data = value
+    @masked_datasets.setter
+    def masked_datasets(self, value):
+        self._masked_datasets = value
 
     @property
     def best_ef_grid_point(self):
