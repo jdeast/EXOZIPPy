@@ -71,7 +71,7 @@ class MMEXOFASTFitter():
         # Find initial Point Lens model
         self.best_ef_grid_params = self.do_ef_grid_search()
         self.pspl_params = self.get_initial_pspl_params()
-        best_pspl_params = do_sfit(datasets, initial_pspl_params)
+        self.pspl_params = self.do_sfit()
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
             point_lens_results = do_mmexofast_fit(datasets, best_pspl_params)
@@ -130,14 +130,14 @@ class MMEXOFASTFitter():
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
-    def do_sfit(datasets, initial_params, verbose=False):
+    def do_sfit(self, verbose=False):
         param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
 
-        params = initial_params
+        params = self.pspl_params
         for i in range(len(param_sets)):
             parameters_to_fit = param_sets[i]
             event = MulensModel.Event(
-                datasets=datasets, model=MulensModel.Model(params))
+                datasets=self.datasets, model=MulensModel.Model(params))
             event.fit_fluxes()
 
             my_func = sfit.mm_funcs.PointLensSFitFunction(
@@ -150,7 +150,7 @@ class MMEXOFASTFitter():
                 else:
                     initial_guess.append(params[key])
 
-            for i in range(len(datasets)):
+            for i in range(len(self.datasets)):
                 initial_guess.append(event.fits[i].source_flux)
                 initial_guess.append(event.fits[i].blend_flux)
 
