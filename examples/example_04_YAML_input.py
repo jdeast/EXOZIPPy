@@ -45,6 +45,28 @@ def process_files(files, root=None, subdir=None):
     return out
 
 
+def parse_units(physical):
+    """
+    Replace strings with corresponding astropy.units instances.
+    The input is a dict with values being lists and we only check
+    the last elements of these lists.
+    """
+    conversion = dict()
+
+    for text in ['u.earthMass', 'u.M_earth', 'u.Mearth']:
+        conversion[text] = u.earthMass
+    for text in ['u.jupiterMass', 'u.M_jup', 'u.Mjup', 'u.M_jupiter', 'u.Mjupiter']:
+        conversion[text] = u.jupiterMass
+    for text in ['u.solMass', 'u.M_sun', 'u.Msun']:
+        conversion[text] = u.solMass
+
+    for (_, value) in physical.items():
+        if not isinstance(value, list):
+            continue
+        if value[-1] in conversion:
+            value[-1] = conversion[value[-1]]
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         raise ValueError('single yaml file with settings is needed')
@@ -57,7 +79,7 @@ if __name__ == '__main__':
     files = process_files(**file_settings)
     kwargs['files'] = files
 
-    # u.M_e has to be parsed.
+    parse_units(expected['physical'])
 
     print(kwargs)
     print()
