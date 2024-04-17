@@ -40,7 +40,7 @@ expected = {
                't_0': [2453582.731, 0.005], 't_star': [0.282, 0.010],
                'alpha': [np.rad2deg(2.756), np.rad2deg(0.003)]},
     'physical': {'R_S': [9.6, 1.3]}, 'Teff_S': 5200,
-        'M_2': [5.5, -2.7, 5.5, u.M_e], 'a': [2.6, -0.6, 1.5],
+        'M_2': [5.5, -2.7, 5.5, u.M_earth], 'a': [2.6, -0.6, 1.5],
         'M_1': [0.22, -0.11, 0.21], 'D_L': [6.6, 1.0]}, 'P': [9, -3, 9]}}
 # Should the source and lens parameters be reported separately?
 
