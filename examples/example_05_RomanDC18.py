@@ -2,7 +2,7 @@
 Analyze a planet light curve from the 2018 Data Challenge. Minimal user effort.
 """
 import os.path
-import mmexofast as mmexo
+import exozippy.mmexofast as mmexo
 import numpy as np
 
 dir_ = os.path.join(mmexo.MULENS_DATA_PATH, "2018DataChallenge")
