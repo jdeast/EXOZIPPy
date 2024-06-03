@@ -108,9 +108,9 @@ class MMEXOFASTFitter():
             return self.results
         elif self.fit_type == 'binary lens':
             # Find the initial planet parameters
-            self.best_af_grid_params = self.do_af_grid_search()
+            self.best_af_grid_point = self.do_af_grid_search()
             if self.verbose:
-                print('Best AF grid', self.best_af_grid_params)
+                print('Best AF grid', self.best_af_grid_point)
 
             self.pspl_params = self.refine_pspl_params()
             if self.verbose:
