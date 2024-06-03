@@ -8,8 +8,10 @@ import copy
 import MulensModel
 import MulensModel as mm
 import astropy.units
+
 import sfit_minimizer as sfit
 import exozippy as mmexo
+from exozippy.mmexofast import observatories
 
 
 def fit(files=None, fit_type=None, **kwargs):
@@ -66,7 +68,17 @@ class MMEXOFASTFitter():
         if isinstance(files, (str)):
             files = [files]
 
-        raise NotImplementedError('Need to write code to ingest data.')
+        datasets = []
+        for filename in files:
+            if not os.path.exists(filename):
+                raise FileNotFoundError(
+                    "Data file {0} does not exist".format(filename))
+
+            kwargs = observatories.get_kwargs(filename)
+            data = mm.MulensData(file_name=filename, **kwargs)
+            datasets.append(data)
+
+        return datasets
 
     def fit(self):
         if self.fit_type is None:
