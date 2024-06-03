@@ -334,6 +334,10 @@ class MMEXOFASTFitter():
     def binary_params(self):
         return self._binary_params
 
+    @binary_params.setter
+    def binary_params(self, value):
+        self._binary_params = value
+
     @property
     def results(self):
         return self._results
