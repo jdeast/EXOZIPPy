@@ -118,7 +118,9 @@ class MMEXOFASTFitter():
 
             self.binary_params = self.get_initial_2L1S_params()
             if self.verbose:
-                print('Initial 2L1S', self.binary_params)
+                print(
+                    'Initial 2L1S', self.binary_params.ulens,
+                    self.binary_params.mag_method)
 
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
