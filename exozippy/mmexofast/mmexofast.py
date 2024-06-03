@@ -274,9 +274,18 @@ class MMEXOFASTFitter():
 
     def get_initial_2L1S_params(self):
         dmag = self.get_dmag()
+        if isinstance(self.pspl_params['t_E'], (astropy.units.Quantity)):
+            t_E = self.pspl_params['t_E'].value
+        elif isinstance(self.pspl_params['t_E'], (float)):
+            t_E = self.pspl_params['t_E']
+        else:
+            raise TypeError(
+                'Invalid type for t_E:', self.pspl_params['t_E'],
+                type(self.pspl_params['t_E']))
+
         params = {
             't_0': self.pspl_params['t_0'], 'u_0': self.pspl_params['u_0'],
-            't_E': self.pspl_params['t_E'], 't_pl': self.best_af_grid_point['t_0'],
+            't_E': t_E, 't_pl': self.best_af_grid_point['t_0'],
             'dt': 2. * self.best_af_grid_point['t_eff'], 'dmag': dmag}
         binary_params = mmexo.estimate_params.get_wide_params(params)
         return binary_params
