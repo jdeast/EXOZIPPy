@@ -4,8 +4,10 @@ This will eventually be a python implementation of EXOFASTv2, but is a long ways
 
 When we have a functional stub, it'll be a pip installable package. For now, install it like this:
 
+```
 git clone https://github.com/jdeast/EXOZIPPy.git
 pip install .
+```
 
 EXOZIPPY_PATH environment variable?
 

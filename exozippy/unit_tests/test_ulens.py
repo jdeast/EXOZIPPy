@@ -96,12 +96,13 @@ class TestGRAVITYEvent(unittest.TestCase):
         ## Outputs
         self.pi_L = 2.332
 
-        # From RP
+        # From RP - r_source and rho are based also on Fukui et al. 2019
+        # https://ui.adsabs.harvard.edu/abs/2019AJ....158..206F/abstract
         ## Inputs
-        self.r_source = 1.29
+        self.r_source = 1.284
         ## Outputs
-        self.v_L_hel = [-58.5, 27.3] # N, E
-        self.v_S_hel = [-21.1, -2.62]
+        self.v_L_hel = [-58.75, 27.23] # N, E
+        self.v_S_hel = [-21.06, -2.624]
         self.rho = 4.567e-3
 
         self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
