@@ -10,7 +10,7 @@ import MulensModel as mm
 import astropy.units
 
 import sfit_minimizer as sfit
-import exozippy as mmexo
+import exozippy.mmexofast as mmexo
 from exozippy.mmexofast import observatories
 
 
@@ -44,6 +44,8 @@ class MMEXOFASTFitter():
     def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
                  priors=None, print_results=False, verbose=False,
                  output_file=None):
+        self.verbose = verbose
+
         # setup datasets.
         if datasets is not None:
             self.datasets = datasets
@@ -88,17 +90,35 @@ class MMEXOFASTFitter():
 
         # Find initial Point Lens model
         self.best_ef_grid_point = self.do_ef_grid_search()
-        self.pspl_params = self.get_initial_pspl_params()
+        if self.verbose:
+            print('Best EF grid point', self.best_ef_grid_point)
+
+        self.pspl_params = self.get_initial_pspl_params(
+            verbose=self.verbose)
+        if self.verbose:
+            print('Initial PSPL', self.pspl_params)
+
         self.pspl_params = self.do_sfit(self.datasets)
+        if self.verbose:
+            print('SFIT params:', self.pspl_params)
+
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
             return self.results
-        elif self.fit_type == 'binary_lens':
+        elif self.fit_type == 'binary lens':
             # Find the initial planet parameters
             self.best_af_grid_params = self.do_af_grid_search()
+            if self.verbose:
+                print('Best AF grid', self.best_af_grid_params)
+
             self.pspl_params = self.refine_pspl_params()
+            if self.verbose:
+                print('Revised SFIT', self.pspl_params)
+
             self.binary_params = self.get_initial_2L1S_params()
+            if self.verbose:
+                print('Initial 2L1S', self.binary_params)
 
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
