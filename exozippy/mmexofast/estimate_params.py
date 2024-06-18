@@ -78,7 +78,7 @@ def get_wide_params(params):
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
     alpha = np.arctan2(-params['u_0'],tau)
-    rho = params['dt'] / params['t_E']
+    rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
    
     new_params = {'t_0': params['t_0'],
@@ -98,7 +98,7 @@ def get_wide_params(params):
 # In[ ]:
 
 
-def get_close_params(params):
+def get_close_params(params, q=None, rho=None):
     """
     Transform initial parameters into two close model parameters for a binary lens. One for upper and one for lower caustics. 
 
@@ -110,22 +110,35 @@ def get_close_params(params):
             - 'u_0' (*float*): Impact parameter.
             - 't_E' (*float*): Einstein crossing time.
             - 't_pl' (*float*): Time at which to compute the close model parameters.
-            - 'dt' (*float*): Duration of the anomaly
+            - 'dt' (*float*), optional: Duration of the anomaly
+            - 'q' (*float*): trial value of q for calculating the caustic,
+                default is 0.004
+            - 'rho' (*float*): value of rho for the model. If 'dt' is specified,
+                'rho' is calculated from 'dt'. If neither are specified,
+                default is 0.001.
 
     Returns:
         lens1, lens2 : *tuple of BinaryLensParams*
             Two instances of BinaryLensParams representing close model parameters.
     """
+    if q is None:
+        q = 0.0040
+
     tau = (params['t_pl'] - params['t_0'])/params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
+
     s = 0.5 * (np.sqrt(u**2 + 4) - u)
-    rho = params['dt'] / params['t_E']
-    q = 0.0040
+
     eta_not = (q**0.5 / s) * (1/(np.sqrt(1+s**2)) + np.sqrt(1-s**2))
     mu = np.arctan2(eta_not,s-1/s)
     phi = np.arctan2(tau,params['u_0'])
     alpha1 = np.pi/2 - mu - phi
     alpha2 = alpha1 + 2 * mu
+
+    if 'dt' in params.keys():
+        rho = params['dt'] / params['t_E'] / 2.
+    elif 'rho' is None:
+        rho = 0.001
     
     new_params1 = {'t_0': params['t_0'],
                 'u_0': params['u_0'],
