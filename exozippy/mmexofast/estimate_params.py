@@ -41,8 +41,8 @@ class BinaryLensParams():
                 - 'u_0' (*float*): Impact parameter.
                 - 't_E' (*float*): Einstein crossing time.
                 - 't_pl' (*float*): Time at which to compute the wide model parameters.
-                - 'dt' (*float*): Time delay between the two lens components.
-                - 'dmag' (*float*): Magnitude difference between the two lens components.
+                - 'dt' (*float*): Duration of the anomaly
+                - 'dmag' (*float*): Magnitude difference of the perturbation
 
         Returns :
            None
@@ -67,8 +67,8 @@ def get_wide_params(params):
             - 'u_0' (*float*): Impact parameter.
             - 't_E' (*float*): Einstein crossing time.
             - 't_pl' (*float*): Time at which to compute the wide model parameters.
-            - 'dt' (*float*): Time delay between the two lens components.
-            - 'dmag' (*float*): Magnitude difference between the two lens components.
+            - 'dt' (*float*): Duration of the anomaly
+            - 'dmag' (*float*): Magnitude difference of the perturbation
 
     Returns :
         wide_params : *BinaryLensParams*
@@ -110,7 +110,7 @@ def get_close_params(params):
             - 'u_0' (*float*): Impact parameter.
             - 't_E' (*float*): Einstein crossing time.
             - 't_pl' (*float*): Time at which to compute the close model parameters.
-            - 'dt' (*float*): Time delay between the two lens components.
+            - 'dt' (*float*): Duration of the anomaly
 
     Returns:
         lens1, lens2 : *tuple of BinaryLensParams*
@@ -212,8 +212,8 @@ class BinarySourceParams():
                 - 'u_0' (*float*): Impact parameter.
                 - 't_E' (*float*): Einstein crossing time.
                 - 't_pl' (*float*): Time at which to compute the wide model parameters.
-                - 'dt' (*float*): Time delay between the two lens components.
-                - 'dmag' (*float*): Magnitude difference between the two lens components.
+                - 'dt' (*float*): Duration of the anomaly
+                - 'dmag' (*float*): Magnitude difference of the perturbation
 
         Returns :
            None
@@ -238,9 +238,9 @@ def get_binary_source_params(params):
             - 't_0' (*float*): Time of maximum magnification for the first lens.
             - 'u_0' (*float*): Impact parameter for the first lens.
             - 't_pl' (*float*): Time at which to compute the source flux ratio.
-            - 'dt' (*float*): Time delay between the two lens components.
+            - 'dt' (*float*): Duration of the anomaly
             - 't_E' (*float*): Einstein crossing time.
-            - 'dmag' (*float*): Magnitude difference between the two lens components.
+            - 'dmag' (*float*): Magnitude difference of the perturbation
 
     Returns:
         source_params : *BinarySourceParams*
