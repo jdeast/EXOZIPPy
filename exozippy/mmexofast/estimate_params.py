@@ -29,7 +29,7 @@ class BinaryLensParams():
         self.ulens = ulens
         self.mag_method = None
         
-    def set_mag_method (self, params):
+    def set_mag_method(self, params):
         """
         Sets the magnification calculation method based on input parameters.
 
@@ -74,10 +74,10 @@ def get_wide_params(params):
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
     """
-    tau = (params['t_pl'] - params['t_0'])/params['t_E']
+    tau = (params['t_pl'] - params['t_0']) / params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    alpha = np.arctan2(-params['u_0'],tau)
+    alpha = np.arctan2(-params['u_0'], tau)
     rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
    
@@ -124,15 +124,15 @@ def get_close_params(params, q=None, rho=None):
     if q is None:
         q = 0.0040
 
-    tau = (params['t_pl'] - params['t_0'])/params['t_E']
+    tau = (params['t_pl'] - params['t_0']) / params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
 
     s = 0.5 * (np.sqrt(u**2 + 4) - u)
 
-    eta_not = (q**0.5 / s) * (1/(np.sqrt(1+s**2)) + np.sqrt(1-s**2))
-    mu = np.arctan2(eta_not,s-1/s)
-    phi = np.arctan2(tau,params['u_0'])
-    alpha1 = np.pi/2 - mu - phi
+    eta_not = (q**0.5 / s) * (1 / (np.sqrt(1 + s**2)) + np.sqrt(1 - s**2))
+    mu = np.arctan2(eta_not, s - 1 / s)
+    phi = np.arctan2(tau, params['u_0'])
+    alpha1 = np.pi / 2 - mu - phi
     alpha2 = alpha1 + 2 * mu
 
     if 'dt' in params.keys():
