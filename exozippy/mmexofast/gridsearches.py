@@ -440,6 +440,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
         return chi2s
 
     def get_anomalies(self):
+        # JCY: Hard-coding these values is a problem!
         tol_zero = 120.
         tol_flat = 35.
         tol_zero_alt = 75.
