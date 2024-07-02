@@ -86,7 +86,9 @@ class MMEXOFASTFitter():
         if self.fit_type is None:
             # Maybe "None" means initial mulens parameters were passed,
             # so we can go straight to a mmexofast_fit?
-            raise ValueError('You must set the fit_type.')
+            raise ValueError(
+                'You must set the fit_type when initializing the ' +
+                'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
         # Find initial Point Lens model
         self.best_ef_grid_point = self.do_ef_grid_search()
