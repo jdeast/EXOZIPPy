@@ -440,23 +440,16 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
         return chi2s
 
     def get_anomalies(self):
-        # JCY: Hard-coding these values is a problem!
-        tol_zero = 120.
-        tol_flat = 35.
-        tol_zero_alt = 75.
+
         anomalies = None
 
         for j in [1, 2]:
             dchi2_zero = self.results[:, 3] - self.results[:, j-1]
             dchi2_flat = self.results[:, 2] - self.results[:, j-1]
-            index_zero = dchi2_zero > tol_zero
-            index_flat = (dchi2_zero > tol_zero_alt) & (dchi2_flat > tol_flat)
-            index = index_zero | index_flat
-
             values = np.vstack(
-                (self.grid_t_0[index], self.grid_t_eff[index],
-                j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
-                dchi2_flat[index], dchi2_zero[index]))
+                (self.grid_t_0, self.grid_t_eff,
+                 j * np.ones(self.results.shape[0], dtype=int), self.results[:, j - 1],
+                 dchi2_flat, dchi2_zero))
 
             if anomalies is None:
                 anomalies = values
@@ -464,6 +457,19 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
                 anomalies = np.hstack((anomalies, values))
 
         return anomalies.transpose()
+
+    def filter_anomalies(self, tol_zero=120., tol_flat=35, tol_zero_alt = 75.):
+        # Loop over j
+        #    index_zero = dchi2_zero > tol_zero
+        #    index_flat = (dchi2_zero > tol_zero_alt) & (dchi2_flat > tol_flat)
+        #    index = index_zero | index_flat
+        #
+        #    values = np.vstack(
+        #        (self.grid_t_0[index], self.grid_t_eff[index],
+        #        j * np.ones(np.sum(index)).astype(int), self.results[index, j-1],
+        #        dchi2_flat[index], dchi2_zero[index]))
+        #
+        raise NotImplementedError()
 
     @property
     def anomalies(self):
