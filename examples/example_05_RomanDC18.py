@@ -2,6 +2,8 @@
 Analyze a planet light curve from the 2018 Data Challenge. Minimal user effort.
 """
 import os.path
+import glob
+import numpy as np
 import exozippy
 
 from DC18_classes import dir_, TestDataSet
@@ -24,14 +26,18 @@ def evaluate_results(lc_num):
     """Calculate metrics between input and output values"""
     pass
 
+files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
+lc_nums = []
+for file_ in files:
+    elements = file_.split('.')
+    lc_nums.append(int(elements[-2]))
 
-if __name__ == '__main__':
-    for lc_num in [1, 4, 8]:
-        print('\n...Fitting light curve {0}...'.format(lc_num))
-        try:
-            results = fit_lc(lc_num, verbose=True)
-            evaluate_results(lc_num)
-        except NotImplementedError:
-            pass
-        except Exception as e:
-            print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
+for lc_num in np.sort(lc_nums):
+    print('\n...Fitting light curve {0}...'.format(lc_num))
+    try:
+        results = fit_lc(lc_num, verbose=True)
+        evaluate_results(lc_num)
+    except NotImplementedError:
+        pass
+    except Exception as e:
+        print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
