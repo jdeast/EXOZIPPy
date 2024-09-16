@@ -52,4 +52,4 @@ if __name__ == '__main__':
         except NotImplementedError:
             pass
         except Exception as e:
-            print('Run {0} ABORTED. {1}: {2}'.format(lc_num, e.value, e.msg))
+            print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
