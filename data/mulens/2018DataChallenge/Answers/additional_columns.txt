@@ -1,0 +1,32 @@
+For CVs the additional columns are:
+72 - unimportant
+73 - unimportant
+74 - unimportant
+75 - Delta chi^2 (relative to a flat line)
+76 - simulated event type (dccv = CV) 
+77 - =column 0
+78 - lightcurve filename root
+79 - Data challenge lightcurve number
+
+For binary star lenses and bound planets they are:
+72 - unimportant
+73 - Delta chi^2 (relative to a flat line)
+74 - unimportant
+75 - Delta chi^2 (relative to a single lens fit PSPL or FSPL if necessary)
+76 - |
+77 - unimportant
+78 - simulated event type (ombin = Binary star, omcassan = Bound planet) 
+79 - unimportant (I think)
+80 - lightcurve filename root
+81 - Data challenge lightcurve number
+
+For single lenses they are (***Note for these, the mass of the lens is given by the planet mass column, not the host mass column):
+72 - unimportant
+73 - number of consecutive W149 data points deviating by >=3 sigma from a flat line
+74 - unimportant
+75 - Delta chi^2 (relative to a flat line
+76-91 - unimportant
+92 - simulated event type (dcnormffp = single lens or free-floating planet) 
+93 - unimportant (I think)
+94 - lightcurve filename root
+95 - Data challenge lightcurve number
