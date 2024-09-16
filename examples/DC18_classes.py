@@ -37,7 +37,7 @@ class DC18Answers():
         self.data = pd.read_csv(
             os.path.join(dir_, 'Answers', 'master_file.txt'),
             names=self.names, usecols=range(len(self.names)),
-            delim_whitespace=True, skiprows=1
+            delim_whitespace=True, skiprows=1,
         )
 
 
@@ -45,3 +45,5 @@ if __name__ == '__main__':
     answers = DC18Answers()
     print(answers.data)
     print(event_info.shape)
+    print(answers.data.iloc[0])
+    print(answers.data['q'])
