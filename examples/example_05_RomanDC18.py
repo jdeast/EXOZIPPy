@@ -12,18 +12,24 @@ event_info = np.genfromtxt(
     names=['file', 'num', 'ra', 'dec'], usecols=range(4))
 
 
-def fit_lc(lc_num, verbose=False):
-    file_w149 = os.path.join(
-        dir_, 'n20180816.W149.WFIRST18.{0:03}.txt'.format(lc_num))
-    file_z087 = os.path.join(
-        dir_, 'n20180816.Z087.WFIRST18.{0:03}.txt'.format(lc_num))
+class TestDataSet():
 
-    index = np.where(event_info['num'] == lc_num)
-    coords = '{0} {1}'.format(
-        event_info['ra'][index][0], event_info['dec'][index][0])
+    def __init__(self, lc_num):
+        self.file_w149 = os.path.join(
+            dir_, 'n20180816.W149.WFIRST18.{0:03}.txt'.format(lc_num))
+        self.file_z087 = os.path.join(
+            dir_, 'n20180816.Z087.WFIRST18.{0:03}.txt'.format(lc_num))
+
+        index = np.where(event_info['num'] == lc_num)
+        self.coords = '{0} {1}'.format(
+            event_info['ra'][index][0], event_info['dec'][index][0])
+
+
+def fit_lc(lc_num, verbose=False):
+    data = TestDataSet(lc_num)
 
     results = exozippy.mmexofast.fit(
-        files=[file_w149, file_z087], coords=coords, fit_type='binary lens',
+        files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         print_results=True, verbose=verbose,
         output_file=os.path.join(
             dir_, 'temp_output', 'WFIRST.{0:03f}.csv'.format(lc_num))
