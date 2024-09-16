@@ -45,8 +45,11 @@ def evaluate_results(lc_num):
 
 if __name__ == '__main__':
     for lc_num in [1, 4, 8]:
+        print('\n...Fitting light curve {0}...'.format(lc_num))
         try:
             results = fit_lc(lc_num, verbose=True)
             evaluate_results(lc_num)
         except NotImplementedError:
             pass
+        except Exception as e:
+            print('Run {0} ABORTED. {1}: {2}'.format(lc_num, e.value, e.msg))
