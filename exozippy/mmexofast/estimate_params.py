@@ -130,7 +130,7 @@ def get_close_params(params, q=None, rho=None):
     s = 0.5 * (np.sqrt(u**2 + 4) - u)
 
     eta_not = (q**0.5 / s) * (1 / (np.sqrt(1 + s**2)) + np.sqrt(1 - s**2))
-    mu = np.arctan2(eta_not, s - 1 / s)
+    mu = np.arctan2(eta_not, (s - 1 / s) / (1 + q)) # correction for primary --> COM
     phi = np.arctan2(tau, params['u_0'])
     alpha1 = np.pi / 2 - mu - phi
     alpha2 = alpha1 + 2 * mu

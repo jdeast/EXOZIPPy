@@ -38,6 +38,9 @@ def evaluate_results(lc_num):
 
 
 if __name__ == '__main__':
-    lc_num = 4
-    results = fit_lc(lc_num, verbose=True)
-    evaluate_results(lc_num)
+    for lc_num in [1, 4, 8]:
+        try:
+            results = fit_lc(lc_num, verbose=True)
+            evaluate_results(lc_num)
+        except NotImplementedError:
+            pass
