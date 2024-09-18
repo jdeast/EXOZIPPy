@@ -7,7 +7,7 @@ my_star = mmexo.Star(
     mass=1.0,  # M_Sun
     distance=6.0,  # kpc
     gal_coords=[0.0, -0.5],  # (ell, b) deg
-    mu_hel=[],  # mas/yr
+    mu_hel_gal=[-6, 0.],  # mas/yr in Galactic coordinate system.
     extinction={'I': 1.5},  # A_I in mag
     age=8.0  # Gyr
 )
