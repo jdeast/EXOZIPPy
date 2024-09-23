@@ -6,7 +6,7 @@ import glob
 import numpy as np
 import exozippy
 
-from DC18_classes import dir_, TestDataSet
+from examples.DC18_classes import dir_, TestDataSet
 
 
 def fit_lc(lc_num, verbose=False):
@@ -16,7 +16,9 @@ def fit_lc(lc_num, verbose=False):
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         print_results=True, verbose=verbose,
         output_file=os.path.join(
-            dir_, 'temp_output', 'WFIRST.{0:03f}.csv'.format(lc_num))
+            'temp_output', 'WFIRST.{0:03f}.csv'.format(lc_num)),
+        log_file=os.path.join(
+            'temp_output', 'WFIRST.{0:03f}.log'.format(lc_num)),
     )
 
     return results
@@ -41,6 +43,6 @@ for lc_num in np.sort(lc_nums):
         results = fit_lc(lc_num, verbose=True)
         evaluate_results(lc_num)
     except NotImplementedError:
-        pass
+        print('Not Implemented Error')
     except Exception as e:
         print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))

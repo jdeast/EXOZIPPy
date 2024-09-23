@@ -43,8 +43,10 @@ class MMEXOFASTFitter():
 
     def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
                  priors=None, print_results=False, verbose=False,
-                 output_file=None):
+                 output_file=None, log_file=None):
         self.verbose = verbose
+        if log_file is not None:
+            self.log_file = log_file
 
         # setup datasets.
         if datasets is not None:
@@ -90,19 +92,28 @@ class MMEXOFASTFitter():
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
+        if self.log_file is not None:
+            log = open(self.log_file, 'w')
+
         # Find initial Point Lens model
         self.best_ef_grid_point = self.do_ef_grid_search()
         if self.verbose:
             print('Best EF grid point', self.best_ef_grid_point)
+        if self.log_file is not None:
+            log.write('Best EF grid point {0}\n'.format(self.best_ef_grid_point))
 
         self.pspl_params = self.get_initial_pspl_params(
             verbose=self.verbose)
         if self.verbose:
             print('Initial PSPL', self.pspl_params)
+        if self.log_file is not None:
+            log.write('Initial PSPL {0}\n'.format(self.pspl_params))
 
         self.pspl_params = self.do_sfit(self.datasets)
         if self.verbose:
             print('SFIT params:', self.pspl_params)
+        if self.log_file is not None:
+            log.write('SFIT params {0}\n'.format(self.pspl_params))
 
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
@@ -114,15 +125,25 @@ class MMEXOFASTFitter():
             if self.verbose:
                 print('Best AF grid', self.best_af_grid_point)
 
+            if self.log_file is not None:
+                log.write('Best AF grid {0}\n'.format(self.best_af_grid_point))
+
             self.pspl_params = self.refine_pspl_params()
             if self.verbose:
                 print('Revised SFIT', self.pspl_params)
+
+            if self.log_file is not None:
+                log.write('Revised SFIT {0}\n'.format(self.pspl_params))
 
             self.binary_params = self.get_initial_2L1S_params()
             if self.verbose:
                 print(
                     'Initial 2L1S params', self.binary_params.ulens)
                 print('mag_methods', self.binary_params.mag_method)
+            if self.log_file is not None:
+                log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
+                log.write('mag_methods {0}\n'.format(self.binary_params.mag_method))
+                log.flush()
 
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
@@ -130,6 +151,9 @@ class MMEXOFASTFitter():
         else:
             raise ValueError(
                 'fit_type not recognized. Your value', self.fit_type)
+
+        if self.log_file is not None:
+            log.close()
 
     def do_ef_grid_search(self):
         # Should probably scrape t_0_1 from the filenames

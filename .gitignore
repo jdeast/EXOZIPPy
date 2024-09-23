@@ -9,3 +9,4 @@ EXOZIPPy.egg-info
 *.egg
 .DS_Store
 /sandbox/
+/DC18Test/temp_output/

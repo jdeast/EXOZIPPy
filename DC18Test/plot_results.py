@@ -1,41 +1,20 @@
 import MulensModel
 import matplotlib.pyplot as plt
 import numpy as np
+import glob
 import exozippy as mmexo
 from examples.DC18_classes import TestDataSet
 
 
-class PlanetResults():
-
-    def __init__(self, filename='PlanetResults.txt'):
-        self.fit_info = self.read_results_file(filename)
-
-
-    def read_results_file(self, filename):
-        fit_info = {}
-        results = open(filename, 'r')
-        planet = []
-        for line in results.readlines():
-            if len(line.strip()) == 0:
-                pass
-            elif (line[0:3] == '...'):
-                if len(planet) > 0:
-                    lc_num = int(planet[0].split()[-1][:-3])
-                    fit_info[lc_num] = PlanetFitInfo(planet)
-
-                planet = [line]
-            elif len(line) > 0:
-                planet.append(line)
-
-        results.close()
-        return fit_info
-
-
 class PlanetFitInfo():
 
-    def __init__(self, lines):
+    def __init__(self, filename):
+        with open(filename, 'r') as file_:
+            lines = file_.readlines()
+
         self.lines = lines
-        self.lc_num = int(self.lines[0].split()[-1][:-3])
+        #self.lc_num = int(self.lines[0].split()[-1][:-3])
+        self.lc_num = int(os.path.basename(filename).split('.')[1])
 
         self._data = None
         self._fitter = None
@@ -205,12 +184,14 @@ class PlanetFitInfo():
         event = MulensModel.Event(datasets=self.fitter.masked_datasets, model=model)
         self.make_plot(event)
 
+
 if __name__ == '__main__':
-    results = PlanetResults()
-    for key in results.fit_info.keys():
-        print(key)
-        #print(results.fit_info[key].lines)
-        planet = results.fit_info[key]
+    import os.path
+
+    logs = glob.glob(os.path.join('temp_output', 'WFIRST*.log'))
+    for file in np.sort(logs):
+        print(os.path.basename(file))
+        planet = PlanetFitInfo(file)
         if planet.sfit_params is not None:
             planet.plot_initial_pspl_fit()
         else:
