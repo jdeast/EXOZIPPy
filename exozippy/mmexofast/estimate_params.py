@@ -4,7 +4,7 @@
 # In[ ]:
 
 
-# Created by LucaCampiani Campiani in January 2024
+# Created by Luca Campiani in January 2024
 
 import MulensModel as mm
 import matplotlib.pyplot as plt
