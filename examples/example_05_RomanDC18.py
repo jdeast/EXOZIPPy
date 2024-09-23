@@ -23,7 +23,10 @@ def fit_lc(lc_num, verbose=False):
 
 
 def evaluate_results(lc_num):
-    """Calculate metrics between input and output values"""
+    """
+    Calculate metrics between input and output values
+    Assume pymc output.
+    """
     pass
 
 files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
