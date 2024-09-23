@@ -205,7 +205,7 @@ class MMEXOFASTFitter():
         raise NotImplementedError(
             'do_mmexofast_fit needs to be implemented')
 
-    def set_datasets_with_anomaly_masked(self, mask_type='residuals', n_mask=3, tol=0.3):
+    def set_datasets_with_anomaly_masked(self, mask_type='t_eff', n_mask=3, tol=0.3):
         """
         Mask points associated with the anomaly.
 
