@@ -16,9 +16,9 @@ def fit_lc(lc_num, verbose=False):
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         print_results=True, verbose=verbose,
         output_file=os.path.join(
-            'temp_output', 'WFIRST.{0:03f}.csv'.format(lc_num)),
+            'temp_output', 'WFIRST.{0:03}.csv'.format(lc_num)),
         log_file=os.path.join(
-            'temp_output', 'WFIRST.{0:03f}.log'.format(lc_num)),
+            'temp_output', 'WFIRST.{0:03}.log'.format(lc_num)),
     )
 
     return results
