@@ -166,10 +166,10 @@ class MMEXOFASTFitter():
         if self.best_ef_grid_point['j'] == 1:
             u_0 = 0.01
         elif self.best_ef_grid_point['j'] == 2:
-            u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
+            u_0s = [0.01, 0.1, 0.3, 1.0, 1.5]
             chi2s = []
             for u_0 in u_0s:
-                t_E = self.best_ef_grid_point['t_eff'] / u_0
+                t_E = self.best_ef_grid_point['t_eff']
                 params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
                 event = MulensModel.Event(
                     datasets=self.datasets, model=MulensModel.Model(params))
@@ -186,7 +186,7 @@ class MMEXOFASTFitter():
             raise ValueError(
                 'j may only be 1 or 2. Your input: ', self.best_ef_grid_point)
 
-        t_E = self.best_ef_grid_point['t_eff'] / u_0
+        t_E = self.best_ef_grid_point['t_eff']
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
