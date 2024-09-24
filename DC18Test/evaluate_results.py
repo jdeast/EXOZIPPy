@@ -31,16 +31,16 @@ class AllResults():
                     [planet.initial_pspl_guess, planet.sfit_params, planet.revised_sfit_params,
                      planet.initial_planet_params]):
 
-                print(fit_type, params)
+                #print(fit_type, params)
 
                 df = {'ID': planet.lc_num}
                 if params is not None:
-                    print({**df, **params})
+                    #print({**df, **params})
                     df = pd.Series(data={**df, **params})
                 else:
                     df = pd.Series(df)
 
-                print(df)
+                #print(df)
 
                 if results[fit_type] is None:
                     results[fit_type] = df
@@ -49,10 +49,10 @@ class AllResults():
 
                 #
         for fit_type in AllResults.pspl_fit_types:
-            print(fit_type)
+            #print(fit_type)
             results[fit_type] = results[fit_type].transpose()
             results[fit_type].set_index('ID')
-            print(results[fit_type])
+            #print(results[fit_type])
 
         return results
 
@@ -61,8 +61,8 @@ class AllResults():
         answers = None
         for value in self.results['Initial PSPL Guess']['ID'].values:
             key = int(value)
-            print(pd.Series(data={'ID': key}))
-            print( all_answers.data.iloc[key - 1])
+            #print(pd.Series(data={'ID': key}))
+            #print( all_answers.data.iloc[key - 1])
             df = pd.concat((pd.Series(data={'ID': key}), all_answers.data.iloc[key - 1]))
 
             if answers is None:
@@ -72,7 +72,7 @@ class AllResults():
 
         answers = answers.transpose()
         answers.set_index('ID')
-        print(answers.columns)
+        #print(answers.columns)
         return answers
 
     def plot_delta_t_0(self):
@@ -124,6 +124,8 @@ class AllResults():
             for fit_type in AllResults.pspl_fit_types:
                 delta_t_0[fit_type] = self.answers['t0'] - self.results[fit_type]['t_0']
 
+            self._delta_t_0 = delta_t_0
+
         return self._delta_t_0
 
     @property
@@ -142,3 +144,4 @@ if __name__ == '__main__':
     results.plot_delta_t_0()
     #results.plot_delta_u_0()
     #results.plot_delta_t_E()
+    plt.show()
