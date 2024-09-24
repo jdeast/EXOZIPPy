@@ -101,16 +101,16 @@ class AllResults():
 
             plt.hist(
                 x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_u_0[fit_type]))),
-                bins=20,
+                bins=20, zorder=-i,
                 edgecolor=AllResults.colors[i], lw=2, facecolor='none')
 
         if frac:
             plt.xlabel(r'$\log (|\Delta u_0 / u_0|)$')
         else:
             plt.xlabel(r'$\Delta u_0$')
+            plt.yscale('log')
 
         plt.legend()
-        plt.yscale('log')
         plt.minorticks_on()
 
     def plot_delta_t_E(self, frac=True):
