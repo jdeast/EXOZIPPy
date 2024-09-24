@@ -34,13 +34,54 @@ class DC18Answers():
             columns[i]['name'] = 'col{0}'.format(i)
 
         self.names = [name for name in columns['name']]
+        self.filename = os.path.join(dir_, 'Answers', 'master_file.txt')
         self.data = pd.read_csv(
-            os.path.join(dir_, 'Answers', 'master_file.txt'),
+            self.filename,
             names=self.names, usecols=range(len(self.names)),
             delim_whitespace=True, skiprows=1,
         )
-        print('The columns may NOT be read in correctly!')
+        #print('The columns may NOT be read in correctly!')
+
+    def check_table(self):
+        orig_file = open(self.filename, 'r')
+        lines = orig_file.readlines()
+        for i, line in enumerate(lines[1:]):
+            #print(line)
+            sections = line.split('|')
+            ulens_1 = sections[3].split()
+            u0 = float(ulens_1[0])
+            alpha = float(ulens_1[1])
+            t0 = float(ulens_1[2])
+            tE = float(ulens_1[3])
+            rhos = float(ulens_1[7])
+
+            ulens_2 = sections[4].split()
+            q = float(ulens_2[4])
+            s = float(ulens_2[5])
+
+            if (
+                    (t0 != self.data['t0'].iloc[i]) or
+                    (u0 != self.data['u0'].iloc[i]) or
+                    (tE != self.data['tE'].iloc[i]) or
+                    (rhos != self.data['rhos'].iloc[i]) or
+                    (s != self.data['s'].iloc[i]) or
+                    (q != self.data['q'].iloc[i]) or
+                    (alpha != self.data['alpha'].iloc[i])
+            ):
+                print(i, 'Read Error')
+                print(sections[3])
+                print(sections[4])
+                print('t0', t0, self.data['t0'].iloc[i])
+                print('u0', u0, self.data['u0'].iloc[i])
+                print('tE', tE, self.data['tE'].iloc[i])
+                print('rhos', rhos, self.data['rhos'].iloc[i])
+                print('s', s, self.data['s'].iloc[i])
+                print('q', q, self.data['q'].iloc[i])
+                print('alpha', alpha, self.data['alpha'].iloc[i])
+
+        orig_file.close()
 
 
 if __name__ == '__main__':
     answers = DC18Answers()
+    answers.check_table()
