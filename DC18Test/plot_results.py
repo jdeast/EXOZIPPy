@@ -188,7 +188,7 @@ class PlanetFitInfo():
 if __name__ == '__main__':
     import os.path
 
-    logs = glob.glob(os.path.join('temp_output', '4u0values', 'WFIRST*.log'))
+    logs = glob.glob(os.path.join('temp_output', 'WFIRST*.log'))
     for file in np.sort(logs):
         print(os.path.basename(file))
         planet = PlanetFitInfo(file)
