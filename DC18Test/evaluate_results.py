@@ -165,7 +165,7 @@ class AllResults():
 
 
 if __name__ == '__main__':
-    results = AllResults(path=os.path.join('temp_output', '4u0values'))
+    results = AllResults(path=os.path.join('temp_output'))
     results.plot_delta_t_0()
     results.plot_delta_u_0()
     results.plot_delta_t_E()
