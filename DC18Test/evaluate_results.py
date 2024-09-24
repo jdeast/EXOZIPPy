@@ -1,5 +1,6 @@
 import os.path, glob
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from examples.DC18_classes import DC18Answers
@@ -7,7 +8,7 @@ from plot_results import PlanetFitInfo
 
 
 class AllResults():
-    pspl_fit_types = ['Initial Guess', 'Initial SFIT', 'Revised SFIT']
+    pspl_fit_types = ['Initial Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
 
     def __init__(self, path='.'):
         self.results = self.get_results(path)
@@ -19,10 +20,26 @@ class AllResults():
 
     def get_results(self, path):
         results = {}
-        logs = glob.glob(os.path.join('temp_output', '4u0values', 'WFIRST*.log'))
+        for key in AllResults.pspl_fit_types:
+            results[key] = None
+
+        logs = glob.glob(os.path.join(path, 'WFIRST*.log'))
         for file in np.sort(logs):
             planet = PlanetFitInfo(file)
-            results[planet.lc_num] = planet
+            for fit_type, params in zip(
+                    AllResults.pspl_fit_types,
+                    [planet.initial_pspl_guess, planet.sfit_params, planet.revised_sfit_params,
+                     planet.initial_planet_params]):
+
+                if params is None:
+                    df = pd.DataFrame({'ID': planet.lc_num})
+                else:
+                    df = pd.DataFrame({'ID': planet.lc_num, **planet.initial_pspl_guess})
+
+                if results['Initial Guess'] is None:
+                    results['Initial Guess'] = df
+                else:
+                    results['Initial Guess'] = pd.concat(results['Initial Guess'], df)
 
         return results
 
@@ -47,7 +64,7 @@ class AllResults():
         plt.figure()
         for fit_type in AllResults.pspl_fit_types:
             if frac:
-                x = self.delta_u_0[fit_type] / self.answers['u_0']
+                x = self.delta_u_0[fit_type] / self.answers['u0']
             else:
                 x = self.plot_delta_u_0()
 
@@ -64,7 +81,7 @@ class AllResults():
         plt.figure()
         for fit_type in AllResults.pspl_fit_types:
             if frac:
-                x = self.delta_t_E[fit_type] / self.answers['t_E']
+                x = self.delta_t_E[fit_type] / self.answers['tE']
             else:
                 x = self.plot_delta_t_E()
 
