@@ -22,7 +22,7 @@ class PlanetFitInfo():
         self._sfit_params = None
         self._revised_sfit_params = None
         self._best_af_grid_point = None
-        self._planet_params = None
+        self._initial_planet_params = None
         self._mag_methods = None
 
     def extract_params(self, line, label_len=3):
@@ -86,13 +86,13 @@ class PlanetFitInfo():
         return self._revised_sfit_params
 
     @property
-    def planet_params(self):
-        if self._planet_params is None:
+    def initial_planet_params(self):
+        if self._initial_planet_params is None:
             for line in self.lines:
                 if 'Initial 2L1S' in line:
-                    self._planet_params = self.extract_params(line)
+                    self._initial_planet_params = self.extract_params(line)
 
-        return self._planet_params
+        return self._initial_planet_params
 
     @property
     def best_af_grid_point(self):
@@ -105,8 +105,8 @@ class PlanetFitInfo():
 
     def get_event_t_range(self, n_tE=3):
         params = None
-        if self.planet_params is not None:
-            params = self.planet_params
+        if self.initial_planet_params is not None:
+            params = self.initial_planet_params
         elif self.revised_sfit_params is not None:
             params = self.revised_sfit_params
         elif self.sfit_params is not None:
@@ -189,7 +189,7 @@ class PlanetFitInfo():
         self.make_plot(event)
 
     def plot_initial_planet_model(self):
-        model = MulensModel.Model(self.planet_params)
+        model = MulensModel.Model(self.initial_planet_params)
         model.set_magnification_methods(self.mag_methods)
         event = MulensModel.Event(datasets=self.fitter.masked_datasets, model=model)
         self.make_plot(event)
@@ -213,7 +213,7 @@ if __name__ == '__main__':
             print('No revised SFIT model!')
             print('AF Results: ', planet.best_af_grid_point)
 
-        if planet.planet_params is not None:
+        if planet.initial_planet_params is not None:
             try:
                 planet.plot_initial_planet_model()
             except:
