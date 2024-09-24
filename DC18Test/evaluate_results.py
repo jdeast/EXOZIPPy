@@ -8,7 +8,7 @@ from plot_results import PlanetFitInfo
 
 
 class AllResults():
-    pspl_fit_types =  ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT']
+    pspl_fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT']
     planet_fit_types = ['2L1S Guess']
     fit_types = [*pspl_fit_types, *planet_fit_types]
     colors = ['black', 'magenta', 'limegreen', 'blue']
@@ -120,6 +120,7 @@ class AllResults():
                 edgecolor=AllResults.colors[i], lw=2, facecolor='none')
 
         if frac:
+            plt.axvline(-0.7, color='red')
             plt.xlabel(r'$\log (|\Delta u_0 / u_0|)$')
         else:
             plt.xlabel(r'$\Delta u_0$')
@@ -153,6 +154,7 @@ class AllResults():
         for i, fit_type in enumerate(AllResults.planet_fit_types):
             if frac:
                 x = self.delta_s[fit_type] / self.answers['s']
+                x = np.log10(np.abs(x).astype(float))
             else:
                 x = self.plot_delta_s()
 
@@ -160,7 +162,8 @@ class AllResults():
                      bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
 
         if frac:
-            plt.xlabel(r'$\Delta s / s$')
+            plt.axvline(-0.7, color='red')
+            plt.xlabel(r'$\log |\Delta s / s|$')
         else:
             plt.xlabel(r'$\Delta s$')
 
@@ -173,6 +176,7 @@ class AllResults():
         for i, fit_type in enumerate(AllResults.planet_fit_types):
             if frac:
                 x = self.delta_q[fit_type] / self.answers['q']
+                x = np.log10(np.abs(x).astype(float))
             else:
                 x = self.plot_delta_q()
 
@@ -180,7 +184,8 @@ class AllResults():
                      bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
 
         if frac:
-            plt.xlabel(r'$\log \Delta q / q$')
+            plt.axvline(-0.7, color='red')
+            plt.xlabel(r'$\log |\Delta q / q|$')
         else:
             plt.xlabel(r'$\Delta q$')
 
@@ -194,15 +199,15 @@ class AllResults():
             if frac:
                 x = self.delta_alpha[fit_type] / self.answers['alpha']
             else:
-                x = self.plot_delta_alpha()
+                x = self.delta_alpha[fit_type]
 
             plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_alpha[fit_type]))),
                      bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
 
         if frac:
-            plt.xlabel(r'$\Delta alpha / alpha$')
+            plt.xlabel(r'$\Delta \alpha / \alpha$')
         else:
-            plt.xlabel(r'$\Delta alpha$')
+            plt.xlabel(r'$\Delta \alpha$')
 
         plt.legend()
         plt.yscale('log')
