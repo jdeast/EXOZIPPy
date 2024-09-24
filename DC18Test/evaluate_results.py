@@ -94,8 +94,8 @@ class AllResults():
         plt.figure()
         for i, fit_type in enumerate(AllResults.fit_types):
             if frac:
-                x = np.abs(self.delta_u_0[fit_type] / self.answers['u0'])
-                x = np.log10(x.astype(float))
+                x = self.delta_u_0[fit_type] / self.answers['u0']
+                x = np.log10(np.abs(x).astype(float))
             else:
                 x = self.plot_delta_u_0()
 
