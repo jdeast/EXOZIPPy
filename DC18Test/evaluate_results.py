@@ -8,7 +8,7 @@ from plot_results import PlanetFitInfo
 
 
 class AllResults():
-    pspl_fit_types = ['Initial Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
+    pspl_fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
 
     def __init__(self, path='.'):
         self.results = self.get_results(path)
@@ -36,19 +36,22 @@ class AllResults():
                 else:
                     df = pd.DataFrame({'ID': planet.lc_num, **planet.initial_pspl_guess})
 
-                if results['Initial Guess'] is None:
-                    results['Initial Guess'] = df
+                if results[fit_type] is None:
+                    results[fit_type] = df
                 else:
-                    results['Initial Guess'] = pd.concat(results['Initial Guess'], df)
+                    results[fit_type] = pd.concat((results[fit_type], df))
 
         return results
 
     def get_answers(self):
         all_answers = DC18Answers()
-        answers = []
-        # Probably needs to be rewritten to concatenate Pandas DF.
-        for key in self.results.keys():
-            answers.append(all_answers.get_ulens_params(key))
+        answers = None
+        for key in self.results['Initial PSPL Guess']['ID'].values:
+            df = pd.concat((pd.DataFrame({'ID': key}), all_answers.data.iloc(key - 1)))
+            if answers is None:
+                answers = df
+            else:
+                answers = pd.concat((answers, df))
 
         return answers
 
@@ -96,16 +99,10 @@ class AllResults():
 
     @property
     def delta_t_0(self):
-        raise NotImplementedError()
         if self._delta_t_0 is None:
-            delta_t_0 = np.ones((len(self.results.keys()), len(AllResults.pspl_fit_types)))
+            delta_t_0 = {}
             for fit_type in AllResults.pspl_fit_types:
-                if fit_type == 'Initial Guess':
-                    pass
-                elif fit_type == 'Initial SFIT':
-                    pass
-                elif fit_type == 'Revised SFIT':
-                    pass
+                delta_t_0[fit_type] = self.answers['t0'] - self.results[fit_type]['t_0']
 
         return self._delta_t_0
 
@@ -123,5 +120,5 @@ class AllResults():
 if __name__ == '__main__':
     results = AllResults(path=os.path.join('temp_output', '4u0values'))
     results.plot_delta_t_0()
-    results.plot_delta_u_0()
-    results.plot_delta_t_E()
+    #results.plot_delta_u_0()
+    #results.plot_delta_t_E()
