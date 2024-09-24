@@ -8,7 +8,8 @@ from plot_results import PlanetFitInfo
 
 
 class AllResults():
-    pspl_fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
+    fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
+    colors = ['black', 'magenta', 'limegreen', 'blue']
 
     def __init__(self, path='.'):
         self.results = self.get_results(path)
@@ -20,14 +21,14 @@ class AllResults():
 
     def get_results(self, path):
         results = {}
-        for key in AllResults.pspl_fit_types:
+        for key in AllResults.fit_types:
             results[key] = None
 
         logs = glob.glob(os.path.join(path, 'WFIRST*.log'))
         for file in np.sort(logs):
             planet = PlanetFitInfo(file)
             for fit_type, params in zip(
-                    AllResults.pspl_fit_types,
+                    AllResults.fit_types,
                     [planet.initial_pspl_guess, planet.sfit_params, planet.revised_sfit_params,
                      planet.initial_planet_params]):
 
@@ -48,7 +49,7 @@ class AllResults():
                     results[fit_type] = pd.concat([results[fit_type], df], axis=1)
 
                 #
-        for fit_type in AllResults.pspl_fit_types:
+        for fit_type in AllResults.fit_types:
             #print(fit_type)
             results[fit_type] = results[fit_type].transpose()
             results[fit_type].set_index('ID')
@@ -77,15 +78,20 @@ class AllResults():
 
     def plot_delta_t_0(self):
         plt.figure()
-        for fit_type in AllResults.pspl_fit_types:
-            plt.hist(self.delta_t_0[fit_type], label=fit_type, bins=20)
+        for i, fit_type in enumerate(AllResults.fit_types):
+            plt.hist(
+                self.delta_t_0[fit_type],
+                edgecolor=AllResults.colors[i], lw=2, facecolor='none',
+                label=fit_type, range=[-10, 40], bins=100)
 
-        plt.xlabel(r'$\Delta t_0')
+        plt.legend()
+        plt.xlabel(r'$\Delta t_0$')
+        plt.yscale('log')
         plt.minorticks_on()
 
     def plot_delta_u_0(self, frac=True):
         plt.figure()
-        for fit_type in AllResults.pspl_fit_types:
+        for fit_type in AllResults.fit_types:
             if frac:
                 x = self.delta_u_0[fit_type] / self.answers['u0']
             else:
@@ -94,15 +100,15 @@ class AllResults():
             plt.hist(x, label=fit_type, bins=20)
 
         if frac:
-            plt.xlabel(r'$\Delta u_0 / u_0')
+            plt.xlabel(r'$\Delta u_0 / u_0$')
         else:
-            plt.xlabel(r'$\Delta u_0')
+            plt.xlabel(r'$\Delta u_0$')
 
         plt.minorticks_on()
 
     def plot_delta_t_E(self, frac=True):
         plt.figure()
-        for fit_type in AllResults.pspl_fit_types:
+        for fit_type in AllResults.fit_types:
             if frac:
                 x = self.delta_t_E[fit_type] / self.answers['tE']
             else:
@@ -111,18 +117,19 @@ class AllResults():
             plt.hist(x, label=fit_type, bins=20)
 
         if frac:
-            plt.xlabel(r'$\Delta t_E / t_E')
+            plt.xlabel(r'$\Delta t_E / t_E$')
         else:
-            plt.xlabel(r'$\Delta t_E')
+            plt.xlabel(r'$\Delta t_E$')
 
+        plt.legend()
         plt.minorticks_on()
 
     @property
     def delta_t_0(self):
         if self._delta_t_0 is None:
             delta_t_0 = {}
-            for fit_type in AllResults.pspl_fit_types:
-                delta_t_0[fit_type] = self.answers['t0'] - self.results[fit_type]['t_0']
+            for fit_type in AllResults.fit_types:
+                delta_t_0[fit_type] = self.answers['t0'] - self.results[fit_type]['t_0'] + 2458234.
 
             self._delta_t_0 = delta_t_0
 
