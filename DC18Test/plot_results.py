@@ -18,6 +18,7 @@ class PlanetFitInfo():
 
         self._data = None
         self._fitter = None
+        self._initial_pspl_guess = None
         self._sfit_params = None
         self._revised_sfit_params = None
         self._best_af_grid_point = None
@@ -56,6 +57,15 @@ class PlanetFitInfo():
                     self._mag_methods = mag_methods
 
         return self._mag_methods
+
+    @property
+    def initial_pspl_guess(self):
+        if self._initial_pspl_guess is None:
+            for line in self.lines:
+                if 'Initial PSPL' in line:
+                    self._initial_pspl_guess = self.extract_params(line, label_len=2)
+
+        return self._initial_pspl_guess
 
     @property
     def sfit_params(self):
