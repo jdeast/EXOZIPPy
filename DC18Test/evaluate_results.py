@@ -82,7 +82,8 @@ class AllResults():
             plt.hist(
                 self.delta_t_0[fit_type],
                 edgecolor=AllResults.colors[i], lw=2, facecolor='none',
-                label=fit_type, range=[-40, 40], bins=800)
+                label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_t_0[fit_type]))),
+                range=[-40, 40], bins=800)
 
         plt.legend()
         plt.xlabel(r'$\Delta t_0$')
@@ -99,7 +100,8 @@ class AllResults():
                 x = self.plot_delta_u_0()
 
             plt.hist(
-                x, label=fit_type, bins=20,
+                x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_u_0[fit_type]))),
+                bins=20,
                 edgecolor=AllResults.colors[i], lw=2, facecolor='none')
 
         if frac:
@@ -119,7 +121,8 @@ class AllResults():
             else:
                 x = self.plot_delta_t_E()
 
-            plt.hist(x, label=fit_type, bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
+            plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_t_E[fit_type]))),
+                     bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
 
         if frac:
             plt.xlabel(r'$\Delta t_E / t_E$')
