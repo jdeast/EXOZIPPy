@@ -1,7 +1,7 @@
 import MulensModel
 import matplotlib.pyplot as plt
 import numpy as np
-import glob
+import glob, os.path
 import exozippy as mmexo
 from examples.DC18_classes import TestDataSet
 
