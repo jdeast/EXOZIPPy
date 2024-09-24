@@ -31,15 +31,23 @@ class AllResults():
                     [planet.initial_pspl_guess, planet.sfit_params, planet.revised_sfit_params,
                      planet.initial_planet_params]):
 
-                if params is None:
-                    df = pd.DataFrame({'ID': planet.lc_num})
+                print(fit_type, params)
+
+                df = {'ID': planet.lc_num}
+                print({**df, **params})
+                if params is not None:
+                    df = pd.Series(data={**df, **params})
                 else:
-                    df = pd.DataFrame({'ID': planet.lc_num, **planet.initial_pspl_guess})
+                    df = pd.Series(df)
+
+                print(df)
 
                 if results[fit_type] is None:
                     results[fit_type] = df
                 else:
                     results[fit_type] = pd.concat((results[fit_type], df))
+
+                print(results[fit_type].iloc[-1])
 
         return results
 
@@ -47,7 +55,8 @@ class AllResults():
         all_answers = DC18Answers()
         answers = None
         for key in self.results['Initial PSPL Guess']['ID'].values:
-            df = pd.concat((pd.DataFrame({'ID': key}), all_answers.data.iloc(key - 1)))
+
+            df = pd.concat((pd.Series(data={'ID': key}), all_answers.data.iloc(key - 1)))
             if answers is None:
                 answers = df
             else:
