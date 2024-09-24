@@ -34,8 +34,8 @@ class AllResults():
                 print(fit_type, params)
 
                 df = {'ID': planet.lc_num}
-                print({**df, **params})
                 if params is not None:
+                    print({**df, **params})
                     df = pd.Series(data={**df, **params})
                 else:
                     df = pd.Series(df)
@@ -45,23 +45,34 @@ class AllResults():
                 if results[fit_type] is None:
                     results[fit_type] = df
                 else:
-                    results[fit_type] = pd.concat((results[fit_type], df))
+                    results[fit_type] = pd.concat([results[fit_type], df], axis=1)
 
-                print(results[fit_type].iloc[-1])
+                #
+        for fit_type in AllResults.pspl_fit_types:
+            print(fit_type)
+            results[fit_type] = results[fit_type].transpose()
+            results[fit_type].set_index('ID')
+            print(results[fit_type])
 
         return results
 
     def get_answers(self):
         all_answers = DC18Answers()
         answers = None
-        for key in self.results['Initial PSPL Guess']['ID'].values:
+        for value in self.results['Initial PSPL Guess']['ID'].values:
+            key = int(value)
+            print(pd.Series(data={'ID': key}))
+            print( all_answers.data.iloc[key - 1])
+            df = pd.concat((pd.Series(data={'ID': key}), all_answers.data.iloc[key - 1]))
 
-            df = pd.concat((pd.Series(data={'ID': key}), all_answers.data.iloc(key - 1)))
             if answers is None:
                 answers = df
             else:
-                answers = pd.concat((answers, df))
+                answers = pd.concat((answers, df), axis=1)
 
+        answers = answers.transpose()
+        answers.set_index('ID')
+        print(answers.columns)
         return answers
 
     def plot_delta_t_0(self):
