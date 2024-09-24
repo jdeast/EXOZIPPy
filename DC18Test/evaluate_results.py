@@ -82,7 +82,7 @@ class AllResults():
             plt.hist(
                 self.delta_t_0[fit_type],
                 edgecolor=AllResults.colors[i], lw=2, facecolor='none',
-                label=fit_type, range=[-10, 40], bins=100)
+                label=fit_type, range=[-40, 40], bins=800)
 
         plt.legend()
         plt.xlabel(r'$\Delta t_0$')
@@ -91,30 +91,35 @@ class AllResults():
 
     def plot_delta_u_0(self, frac=True):
         plt.figure()
-        for fit_type in AllResults.fit_types:
+        for i, fit_type in enumerate(AllResults.fit_types):
             if frac:
-                x = self.delta_u_0[fit_type] / self.answers['u0']
+                x = np.abs(self.delta_u_0[fit_type] / self.answers['u0'])
+                x = np.log10(x.astype(float))
             else:
                 x = self.plot_delta_u_0()
 
-            plt.hist(x, label=fit_type, bins=20)
+            plt.hist(
+                x, label=fit_type, bins=20,
+                edgecolor=AllResults.colors[i], lw=2, facecolor='none')
 
         if frac:
-            plt.xlabel(r'$\Delta u_0 / u_0$')
+            plt.xlabel(r'$\log (|\Delta u_0 / u_0|)$')
         else:
             plt.xlabel(r'$\Delta u_0$')
 
+        plt.legend()
+        plt.yscale('log')
         plt.minorticks_on()
 
     def plot_delta_t_E(self, frac=True):
         plt.figure()
-        for fit_type in AllResults.fit_types:
+        for i, fit_type in enumerate(AllResults.fit_types):
             if frac:
                 x = self.delta_t_E[fit_type] / self.answers['tE']
             else:
                 x = self.plot_delta_t_E()
 
-            plt.hist(x, label=fit_type, bins=20)
+            plt.hist(x, label=fit_type, bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
 
         if frac:
             plt.xlabel(r'$\Delta t_E / t_E$')
@@ -122,6 +127,7 @@ class AllResults():
             plt.xlabel(r'$\Delta t_E$')
 
         plt.legend()
+        plt.yscale('log')
         plt.minorticks_on()
 
     @property
@@ -137,18 +143,30 @@ class AllResults():
 
     @property
     def delta_u_0(self):
-        raise NotImplementedError()
+        if self._delta_u_0 is None:
+            delta_u_0 = {}
+            for fit_type in AllResults.fit_types:
+                delta_u_0[fit_type] = self.answers['u0'] - self.results[fit_type]['u_0']
+
+            self._delta_u_0 = delta_u_0
+
         return self._delta_u_0
 
     @property
     def delta_t_E(self):
-        raise NotImplementedError()
+        if self._delta_t_E is None:
+            delta_t_E = {}
+            for fit_type in AllResults.fit_types:
+                delta_t_E[fit_type] = self.answers['tE'] - self.results[fit_type]['t_E']
+
+            self._delta_t_E = delta_t_E
+
         return self._delta_t_E
 
 
 if __name__ == '__main__':
     results = AllResults(path=os.path.join('temp_output', '4u0values'))
     results.plot_delta_t_0()
-    #results.plot_delta_u_0()
-    #results.plot_delta_t_E()
+    results.plot_delta_u_0()
+    results.plot_delta_t_E()
     plt.show()
