@@ -8,7 +8,9 @@ from plot_results import PlanetFitInfo
 
 
 class AllResults():
-    fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT', '2L1S Guess']
+    pspl_fit_types =  ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT']
+    planet_fit_types = ['2L1S Guess']
+    fit_types = [*pspl_fit_types, *planet_fit_types]
     colors = ['black', 'magenta', 'limegreen', 'blue']
 
     def __init__(self, path='.'):
@@ -18,6 +20,9 @@ class AllResults():
         self._delta_t_0 = None
         self._delta_u_0 = None
         self._delta_t_E = None
+        self._delta_s = None
+        self._delta_q = None
+        self._delta_alpha = None
 
     def get_results(self, path):
         results = {}
@@ -76,6 +81,16 @@ class AllResults():
         #print(answers.columns)
         return answers
 
+    def plot_pspl_deltas(self):
+        self.plot_delta_t_0()
+        self.plot_delta_u_0()
+        self.plot_delta_t_E()
+
+    def plot_planet_deltas(self):
+        self.plot_delta_s()
+        self.plot_delta_q()
+        self.plot_delta_alpha()
+
     def plot_delta_t_0(self):
         plt.figure()
         for i, fit_type in enumerate(AllResults.fit_types):
@@ -133,6 +148,66 @@ class AllResults():
         plt.yscale('log')
         plt.minorticks_on()
 
+    def plot_delta_s(self, frac=True):
+        plt.figure()
+        for i, fit_type in enumerate(AllResults.planet_fit_types):
+            if frac:
+                x = self.delta_s[fit_type] / self.answers['s']
+            else:
+                x = self.plot_delta_s()
+
+            plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_s[fit_type]))),
+                     bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
+
+        if frac:
+            plt.xlabel(r'$\Delta s / s$')
+        else:
+            plt.xlabel(r'$\Delta s$')
+
+        plt.legend()
+        plt.yscale('log')
+        plt.minorticks_on()
+
+    def plot_delta_q(self, frac=True):
+        plt.figure()
+        for i, fit_type in enumerate(AllResults.planet_fit_types):
+            if frac:
+                x = self.delta_q[fit_type] / self.answers['q']
+            else:
+                x = self.plot_delta_q()
+
+            plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_q[fit_type]))),
+                     bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
+
+        if frac:
+            plt.xlabel(r'$\log \Delta q / q$')
+        else:
+            plt.xlabel(r'$\Delta q$')
+
+        plt.legend()
+        plt.yscale('log')
+        plt.minorticks_on()
+
+    def plot_delta_alpha(self, frac=False):
+        plt.figure()
+        for i, fit_type in enumerate(AllResults.planet_fit_types):
+            if frac:
+                x = self.delta_alpha[fit_type] / self.answers['alpha']
+            else:
+                x = self.plot_delta_alpha()
+
+            plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_alpha[fit_type]))),
+                     bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
+
+        if frac:
+            plt.xlabel(r'$\Delta alpha / alpha$')
+        else:
+            plt.xlabel(r'$\Delta alpha$')
+
+        plt.legend()
+        plt.yscale('log')
+        plt.minorticks_on()
+
     @property
     def delta_t_0(self):
         if self._delta_t_0 is None:
@@ -166,10 +241,42 @@ class AllResults():
 
         return self._delta_t_E
 
+    @property
+    def delta_s(self):
+        if self._delta_s is None:
+            delta_s = {}
+            for fit_type in AllResults.planet_fit_types:
+                delta_s[fit_type] = self.answers['s'] - self.results[fit_type]['s']
+
+            self._delta_s = delta_s
+
+        return self._delta_s
+
+    @property
+    def delta_q(self):
+        if self._delta_q is None:
+            delta_q = {}
+            for fit_type in AllResults.planet_fit_types:
+                delta_q[fit_type] = self.answers['q'] - self.results[fit_type]['q']
+
+            self._delta_q = delta_q
+
+        return self._delta_q
+
+    @property
+    def delta_alpha(self):
+        if self._delta_alpha is None:
+            delta_alpha = {}
+            for fit_type in AllResults.planet_fit_types:
+                delta_alpha[fit_type] = self.answers['alpha'] - self.results[fit_type]['alpha']
+
+            self._delta_alpha = delta_alpha
+
+        return self._delta_alpha
+
 
 if __name__ == '__main__':
     results = AllResults(path=os.path.join('temp_output'))
-    results.plot_delta_t_0()
-    results.plot_delta_u_0()
-    results.plot_delta_t_E()
+    results.plot_pspl_deltas()
+    results.plot_planet_deltas()
     plt.show()
