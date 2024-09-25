@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from examples.DC18_classes import DC18Answers
+from examples.use_cases.DC18_classes import DC18Answers
 from plot_results import PlanetFitInfo
 
 

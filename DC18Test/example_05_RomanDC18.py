@@ -6,7 +6,7 @@ import glob
 import numpy as np
 import exozippy
 
-from examples.DC18_classes import dir_, TestDataSet
+from examples.use_cases.DC18_classes import dir_, TestDataSet
 
 
 def fit_lc(lc_num, verbose=False):
