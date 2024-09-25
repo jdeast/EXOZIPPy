@@ -163,17 +163,22 @@ class AllResults():
             headstr = '{0:6}'.format('')
             medstr = '{0:6}'.format('med')
             fracstr = '{0:6}'.format('frac')
+            goodstr = '{0:6}'.format('%<0.2')
             for key in self.results[fit_type].columns:
                 if key != 'ID':
                     headstr += '{0:>9} '.format('d({0})'.format(key))
                     x = self.__getattribute__('delta_{0}'.format(key))[fit_type]
                     value = self.answers[self.get_ans_key(key)]
                     medstr += '{0:9.4f} '.format(np.nanmedian(x.astype(float)))
-                    fracstr += '{0:9.4f} '.format(np.nanmedian(x.astype(float) / value.astype(float)))
+                    frac_err = x.astype(float) / value.astype(float)
+                    fracstr += '{0:9.4f} '.format(np.nanmedian(frac_err))
+                    goodstr += '{0:9.4f} '.format(
+                        np.sum((np.abs(frac_err) < 0.2) & (np.isfinite(frac_err))) / self.answers.shape[0])
 
             print(headstr)
             print(medstr)
             print(fracstr)
+            print(goodstr)
 
     @property
     def delta_t_0(self):
