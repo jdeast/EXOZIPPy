@@ -458,7 +458,7 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 
         return anomalies.transpose()
 
-    def filter_anomalies(self, tol_zero=120., tol_flat=35, tol_zero_alt = 75.):
+    def filter_anomalies(self, tol_zero=120., tol_flat=35, tol_zero_alt=75.):
         # Loop over j
         #    index_zero = dchi2_zero > tol_zero
         #    index_flat = (dchi2_zero > tol_zero_alt) & (dchi2_flat > tol_flat)
