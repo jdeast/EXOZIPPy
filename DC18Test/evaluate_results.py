@@ -42,28 +42,20 @@ class AllResults():
                     [planet.initial_pspl_guess, planet.sfit_params, planet.revised_sfit_params,
                      planet.initial_planet_params]):
 
-                #print(fit_type, params)
-
                 df = {'ID': planet.lc_num}
                 if params is not None:
-                    #print({**df, **params})
                     df = pd.Series(data={**df, **params})
                 else:
                     df = pd.Series(df)
-
-                #print(df)
 
                 if results[fit_type] is None:
                     results[fit_type] = df
                 else:
                     results[fit_type] = pd.concat([results[fit_type], df], axis=1)
 
-                #
         for fit_type in AllResults.fit_types:
-            #print(fit_type)
             results[fit_type] = results[fit_type].transpose()
             results[fit_type].set_index('ID')
-            #print(results[fit_type])
 
         return results
 
@@ -72,8 +64,6 @@ class AllResults():
         answers = None
         for value in self.results['Initial PSPL Guess']['ID'].values:
             key = int(value)
-            #print(pd.Series(data={'ID': key}))
-            #print( all_answers.data.iloc[key - 1])
             df = pd.concat((pd.Series(data={'ID': key}), all_answers.data.iloc[key - 1]))
 
             if answers is None:
@@ -83,7 +73,6 @@ class AllResults():
 
         answers = answers.transpose()
         answers.set_index('ID')
-        #print(answers.columns)
         return answers
 
     def get_ans_key(self, key):
@@ -152,131 +141,21 @@ class AllResults():
 
     def plot_delta_t_0(self):
         self._make_hist('t_0', range=[-40, 40], bins=800)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.fit_types):
-        #    plt.hist(
-        #        self.delta_t_0[fit_type],
-        #        edgecolor=AllResults.colors[i], lw=2, facecolor='none',
-        #        label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_t_0[fit_type]))),
-        #        range=[-40, 40], bins=800)
-        #
-        #plt.legend()
-        #plt.xlabel(r'$\Delta t_0$')
-        #plt.yscale('log')
-        #plt.minorticks_on()
 
     def plot_delta_u_0(self, frac=True):
         self._make_hist('u_0', frac=frac)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.fit_types):
-        #    if frac:
-        #        x = self.delta_u_0[fit_type] / self.answers['u0']
-        #        x = np.log10(np.abs(x).astype(float))
-        #    else:
-        #        x = self.plot_delta_u_0()
-        #
-        #    plt.hist(
-        #        x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_u_0[fit_type]))),
-        #        bins=20, zorder=-i,
-        #        edgecolor=AllResults.colors[i], lw=2, facecolor='none')
-        #
-        #if frac:
-        #    plt.axvline(-0.7, color='red')
-        #    plt.xlabel(r'$\log (|\Delta u_0 / u_0|)$')
-        #else:
-        #    plt.xlabel(r'$\Delta u_0$')
-        #    plt.yscale('log')
-        #
-        #plt.legend()
-        #plt.minorticks_on()
 
     def plot_delta_t_E(self, frac=True):
         self._make_hist('t_E', frac=frac)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.fit_types):
-        #    if frac:
-        #        x = self.delta_t_E[fit_type] / self.answers['tE']
-        #    else:
-        #        x = self.plot_delta_t_E()
-        #
-        #    plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_t_E[fit_type]))),
-        #             bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
-        #
-        #if frac:
-        #    plt.xlabel(r'$\Delta t_E / t_E$')
-        #else:
-        #    plt.xlabel(r'$\Delta t_E$')
-        #
-        #plt.legend()
-        #plt.yscale('log')
-        #plt.minorticks_on()
 
     def plot_delta_s(self, frac=True):
         self._make_hist('s', frac=frac)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.planet_fit_types):
-        #    if frac:
-        #        x = self.delta_s[fit_type] / self.answers['s']
-        #        x = np.log10(np.abs(x).astype(float))
-        #    else:
-        #        x = self.plot_delta_s()
-        #
-        #    plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_s[fit_type]))),
-        #             bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
-        #
-        #if frac:
-        #    plt.axvline(-0.7, color='red')
-        #    plt.xlabel(r'$\log |\Delta s / s|$')
-        #else:
-        #    plt.xlabel(r'$\Delta s$')
-        #
-        #plt.legend()
-        #plt.yscale('log')
-        #plt.minorticks_on()
 
     def plot_delta_q(self, frac=True):
         self._make_hist('q', frac=frac)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.planet_fit_types):
-        #    if frac:
-        #        x = self.delta_q[fit_type] / self.answers['q']
-        #        x = np.log10(np.abs(x).astype(float))
-        #    else:
-        #        x = self.plot_delta_q()
-        #
-        #    plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_q[fit_type]))),
-        #             bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
-        #
-        #if frac:
-        #    plt.axvline(-0.7, color='red')
-        #    plt.xlabel(r'$\log |\Delta q / q|$')
-        #else:
-        #    plt.xlabel(r'$\Delta q$')
-        #
-        #plt.legend()
-        #plt.yscale('log')
-        #plt.minorticks_on()
 
     def plot_delta_alpha(self, frac=False):
         self._make_hist('alpha', frac=frac)
-        #plt.figure()
-        #for i, fit_type in enumerate(AllResults.planet_fit_types):
-        #    if frac:
-        #        x = self.delta_alpha[fit_type] / self.answers['alpha']
-        #    else:
-        #        x = self.delta_alpha[fit_type]
-        #
-        #    plt.hist(x, label='{0} ({1})'.format(fit_type, np.sum(pd.notna(self.delta_alpha[fit_type]))),
-        #             bins=20, edgecolor=AllResults.colors[i], lw=2, facecolor='none',)
-        #
-        #if frac:
-        #    plt.xlabel(r'$\Delta \alpha / \alpha$')
-        #else:
-        #    plt.xlabel(r'$\Delta \alpha$')
-        #
-        #plt.legend()
-        #plt.yscale('log')
-        #plt.minorticks_on()
 
     def print_median_deltas(self):
         for fit_type in AllResults.fit_types:
