@@ -20,6 +20,7 @@ class AllResults():
         self._delta_t_0 = None
         self._delta_u_0 = None
         self._delta_t_E = None
+        self._delta_rho = None
         self._delta_s = None
         self._delta_q = None
         self._delta_alpha = None
@@ -213,6 +214,31 @@ class AllResults():
         plt.yscale('log')
         plt.minorticks_on()
 
+    def print_median_deltas(self):
+        for fit_type in AllResults.fit_types:
+            print(fit_type)
+            headstr = '{0:6}'.format('')
+            medstr = '{0:6}'.format('med')
+            fracstr = '{0:6}'.format('frac')
+            for key in self.results[fit_type].columns:
+                if key != 'ID':
+                    headstr += '{0:>9} '.format('d({0})'.format(key))
+                    x = self.__getattribute__('delta_{0}'.format(key))[fit_type]
+                    if key == 'rho':
+                        ans_key = 'rhos'
+                    elif '_' in key:
+                        ans_key = ''.join(key.split('_'))
+                    else:
+                        ans_key = key
+
+                    value = self.answers[ans_key]
+                    medstr += '{0:9.4f} '.format(np.nanmedian(x.astype(float)))
+                    fracstr += '{0:9.4f} '.format(np.nanmedian(x.astype(float) / value.astype(float)))
+
+            print(headstr)
+            print(medstr)
+            print(fracstr)
+
     @property
     def delta_t_0(self):
         if self._delta_t_0 is None:
@@ -243,6 +269,17 @@ class AllResults():
                 delta_t_E[fit_type] = self.answers['tE'] - self.results[fit_type]['t_E']
 
             self._delta_t_E = delta_t_E
+
+        return self._delta_t_E
+
+    @property
+    def delta_rho(self):
+        if self._delta_rho is None:
+            delta_rho = {}
+            for fit_type in AllResults.planet_fit_types:
+                delta_rho[fit_type] = self.answers['rhos'] - self.results[fit_type]['rho']
+
+            self._delta_rho = delta_rho
 
         return self._delta_t_E
 
@@ -284,4 +321,5 @@ if __name__ == '__main__':
     results = AllResults(path=os.path.join('temp_output'))
     results.plot_pspl_deltas()
     results.plot_planet_deltas()
+    results.print_median_deltas()
     plt.show()
