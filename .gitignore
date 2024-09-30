@@ -10,3 +10,5 @@ EXOZIPPy.egg-info
 .DS_Store
 /sandbox/
 /DC18Test/temp_output/
+/exozippy/mmexofast/htmlcov/
+/exozippy/mmexofast/.coverage
