@@ -74,6 +74,9 @@ def get_wide_params(params):
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
     """
+    # JCY: Should these calculations be broken out into individual parameters?
+    # e.g., so they can be tested individually?
+    # This would mean function --> class.
     tau = (params['t_pl'] - params['t_0']) / params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
