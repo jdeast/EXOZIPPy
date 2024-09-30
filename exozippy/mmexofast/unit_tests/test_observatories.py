@@ -32,7 +32,7 @@ def test_get_kwargs():
                 assert results[key][plot_key] == plot_value
 
 
-class Test_get_telescope_band_from_filename(unittest.TestCase):
+class TestGetTelescopeBandFromilename(unittest.TestCase):
 
     def test_get_telescope_band_from_filename(self):
         telescope, band = observatories.get_telescope_band_from_filename(
