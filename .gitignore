@@ -12,3 +12,4 @@ EXOZIPPy.egg-info
 /DC18Test/temp_output/
 /exozippy/mmexofast/htmlcov/
 /exozippy/mmexofast/.coverage
+/exozippy/mmexofast/.coveragerc

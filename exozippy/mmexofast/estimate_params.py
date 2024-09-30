@@ -61,7 +61,7 @@ def get_wide_params(params):
 
     Arguments :
         params: *dictionary*
-            Initilal parameters.
+            Initial parameters.
             
             - 't_0' (*float*): Time of maximum magnification.
             - 'u_0' (*float*): Impact parameter.
