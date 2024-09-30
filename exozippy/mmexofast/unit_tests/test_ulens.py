@@ -197,24 +197,31 @@ class TestStar(unittest.TestCase):
         self.rho = 4.567e-3
 
         self.lens = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
+        self.alt_lens = Star(mass=self.M_L, pi=self.pi_L, vel=self.v_L_hel)
         self.test_star = Star(mass=self.M_L, distance=self.D_L, mu=self.mu_L)
         self.source = Star(
             distance=self.D_S, radius=self.r_source, mu=self.mu_S)
 
     def test_distance(self):
         assert self.lens.distance == self.D_L
+        testing.assert_allclose(self.alt_lens.distance, self.D_L, rtol=0.001)
 
     def test_pi(self):
         testing.assert_allclose(self.lens.pi, self.pi_L, rtol=0.001)
+        assert self.alt_lens.pi == self.pi_L
 
     def test_mu(self):
         assert self.lens.mu[0] == self.mu_L[0]
         assert self.lens.mu[1] == self.mu_L[1]
+        testing.assert_allclose(self.alt_lens.mu, self.mu_L, rtol=0.001)
 
     def test_mu_setter(self):
         self.test_star.mu = [-50, 50]
         assert self.test_star.mu[0] == -50
         assert self.test_star.mu[1] == 50
+        self.test_star.mu = np.array([-5, 5])
+        assert self.test_star.mu[0] == -5
+        assert self.test_star.mu[1] == 5
 
     def test_vel(self):
         testing.assert_allclose(self.lens.vel, self.v_L_hel, rtol=0.001)
@@ -223,10 +230,12 @@ class TestStar(unittest.TestCase):
         self.test_star.vel = [-99, 99]
         assert self.test_star.vel[0] == -99
         assert self.test_star.vel[1] == 99
+        self.test_star.vel = np.array([-9, 9])
+        assert self.test_star.vel[0] == -9
+        assert self.test_star.vel[1] == 9
 
     def test_theta_star(self):
         theta_star = self.r_source * 0.00465047 / self.D_S  # R_Sun --> au, au / kpc = mas
-        print(theta_star, self.source.theta_star)
         testing.assert_allclose(self.source.theta_star, theta_star, rtol=0.001)
 
 
@@ -254,6 +263,10 @@ class TestStarErrors(unittest.TestCase):
     def test_mu_error(self):
         with self.assertRaises(AttributeError):
             print(self.star.mu)
+
+    def test_mu_setter_type_error(self):
+        with self.assertRaises(TypeError):
+            self.star.mu = 6.
 
     def test_vel_error(self):
         with self.assertRaises(AttributeError):

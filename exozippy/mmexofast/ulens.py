@@ -120,7 +120,7 @@ class Star(object):
         elif isinstance(new_value, (np.ndarray)):
             self._mu = new_value
         else:
-            raise ValueError(
+            raise TypeError(
                 'Invalid type for mu. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
