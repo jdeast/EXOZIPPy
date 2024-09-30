@@ -66,12 +66,25 @@ def test_get_observatory_kwargs():
         assert value == results[key]
 
 
-def test_get_plot_properties():
+def test_get_plot_properties_Z087():
     telescope = 'WFIRST18'
     band = 'Z087'
 
     expected = {'zorder': 5, 'label': 'WFIRST18-Z087', 'color': 'blue',
                 'marker': 's'}
+
+    results = observatories.get_plot_properties(telescope, band)
+    for key, value in expected.items():
+        print(key, value)
+        assert value == results[key]
+
+
+def test_get_plot_properties_W149():
+    telescope = 'WFIRST18'
+    band = 'W149'
+
+    expected = {'label': 'WFIRST18-W149', 'color': 'magenta',
+                'marker': 'o'}
 
     results = observatories.get_plot_properties(telescope, band)
     for key, value in expected.items():
