@@ -194,8 +194,8 @@ class TestStar(unittest.TestCase):
 
     def test_theta_star(self):
         theta_star = self.r_source * 0.00465047 / self.D_S  # R_Sun --> au, au / kpc = mas
-        print(theta_star, self.lens.theta_star)
-        testing.assert_allclose(self.lens.theta_star, theta_star, rtol=0.001)
+        print(theta_star, self.source.theta_star)
+        testing.assert_allclose(self.source.theta_star, theta_star, rtol=0.001)
 
 
 class TestPhys2UlensConverter(unittest.TestCase):
