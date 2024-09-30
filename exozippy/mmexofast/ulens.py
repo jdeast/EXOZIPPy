@@ -148,7 +148,7 @@ class Star(object):
         elif isinstance(new_value, (np.ndarray)):
             self._vel = new_value
         else:
-            raise ValueError(
+            raise TypeError(
                 'Invalid type for vel. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
