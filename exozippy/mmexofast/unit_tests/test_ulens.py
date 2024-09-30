@@ -3,6 +3,8 @@ Unit tests for parameter conversions
 """
 import unittest
 from numpy import testing
+import astropy.units as u
+from astropy.coordinates import SkyCoord
 
 from exozippy.mmexofast.ulens import Star, Phys2UlensConverter
 
@@ -96,6 +98,18 @@ class TestGRAVITYEvent(unittest.TestCase):
             ulens_params['pi_E_N'], self.pi_E_vec[0], atol=0.002)
         testing.assert_allclose(
             ulens_params['pi_E_E'], self.pi_E_vec[1], atol=0.002)
+
+    def test_coords(self):
+        astropy_coords = SkyCoord(self.coords, unit=[u.hourangle, u.deg])
+        assert self.converter.coords.ra.deg == astropy_coords.ra.deg
+        assert self.converter.coords.dec.deg == astropy_coords.dec.deg
+
+    def test_coords_setter(self):
+        test_conv = Phys2UlensConverter(
+            source=self.source, lens=self.lens, coords=self.coords, t_ref=self.t_0)
+        test_conv.coords = '18:00:00 -30:00:00'
+        testing.assert_almost_equal(test_conv.coords.ra.deg, 270.)
+        testing.assert_almost_equal(test_conv.coords.dec.deg, -30.)
 
 
 def test_v_earth_perp():
@@ -200,14 +214,7 @@ class TestStar(unittest.TestCase):
 
 class TestPhys2UlensConverter(unittest.TestCase):
 
-    def test_get_ulens_params(self):
-        raise NotImplementedError()
 
-    def test_coords(self):
-        raise NotImplementedError()
-
-    def test_coords_setter(self):
-        raise NotImplementedError()
 
     def test_pi_rel(self):
         raise NotImplementedError()
