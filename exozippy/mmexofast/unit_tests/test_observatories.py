@@ -1,4 +1,5 @@
 import os.path
+import unittest
 
 #from exozippy import MULENS_DATA_PATH
 import exozippy
@@ -31,14 +32,24 @@ def test_get_kwargs():
                 assert results[key][plot_key] == plot_value
 
 
-def test_get_telescope_band_from_filename():
-    telescope, band = observatories.get_telescope_band_from_filename(
-        os.path.join(
-            exozippy.MULENS_DATA_PATH, '2018DataChallenge',
-            'n20180816.W149.WFIRST18.004.txt')
-    )
-    assert telescope == 'WFIRST18'
-    assert band == 'W149'
+class Test_get_telescope_band_from_filename(unittest.TestCase):
+
+    def test_get_telescope_band_from_filename(self):
+        telescope, band = observatories.get_telescope_band_from_filename(
+            os.path.join(
+                exozippy.MULENS_DATA_PATH, '2018DataChallenge',
+                'n20180816.W149.WFIRST18.004.txt')
+        )
+        assert telescope == 'WFIRST18'
+        assert band == 'W149'
+
+    def test_Error(self):
+        with self.assertRaises(ValueError):
+            telescope, band = observatories.get_telescope_band_from_filename(
+                os.path.join(
+                    exozippy.MULENS_DATA_PATH, '2018DataChallenge',
+                    'ulwdc1_001_W149.txt')
+            )
 
 
 def test_get_observatory_kwargs():
