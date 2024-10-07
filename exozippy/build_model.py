@@ -43,8 +43,7 @@ them and can be replicated with ease for trivial generalization
 def build_model(nstars=1, nplanets=1, 
                 parfile=None,
                 tranpath=None,fittran=False,
-                rvpath=None,fitrv=False,
-                ulenspath=None,
+                rvpath=None,fitrv=False, 
                 fitlogmp=False, 
                 circular=False,
                 mist=True, parsec=False, mannrad=False, mannmass=False,
@@ -66,11 +65,6 @@ def build_model(nstars=1, nplanets=1,
         rvfiles = glob.glob(rvpath)
     else: rvfiles = []
     ninstruments = len(rvfiles)
-
-    if ulenspath is not None:
-        ulensfiles = glob.glob(ulenspath)
-    else: ulensfiles = []
-    nulens = len(ulensfiles)
 
     # constants easier to digest variable names
     G = const.GM_sun.value / const.R_sun.value ** 3 * 86400.0 ** 2
@@ -169,7 +163,7 @@ def build_model(nstars=1, nplanets=1,
                                           latex='\sigma_{SED}', description='photometric error scaling', 
                                           latex_unit="", user_params=user_params)
         # add per star parameters
-        starnames = list(string.ascii_uppercase) # [A,B,C... Z]
+        starnames = ["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
         event["star"] = []
         for i in range(nstars):
             # the lower limits mean it doesn't actually have to be a star
@@ -221,9 +215,6 @@ def build_model(nstars=1, nplanets=1,
                                             unit=u.mas,
                                             latex='\varpi', description='Parallax', latex_unit='mas', user_params=user_params)
 
-                # apply a potential to constrain the stellar radius according to the Mann+ 2015 K-Rstar relation (mannrad) or
-                # constrain the stellar mass according to the Mann+ 2019 K-Mstar relation (mannmass)
-                # only applies for 0.1 < mstar/msun < 0.7
                 if mannmass[i] or mannrad[i]:
                     star["appks"] = Parameter("appks_"+str(i),lower=-30,upper=30,unit=u.mag,
                                               latex='ks',description="Apparent ks mag", latex_unit='mag', user_params=user_params)
@@ -234,11 +225,14 @@ def build_model(nstars=1, nplanets=1,
                     mann_mstar, mann_rstar, mann_sigma_mstar, mann_sigma_rstar = massradius_mann(star["ks0"].value, star["feh"].value, 
                                                                                                  distance=star["distance"].value)
 #                    if mannmass[i]:
-#                        mannmass_prior = pm.Potential("mannmass_prior_" + str(i), -0.5 *
+#                        mannmass_prior = pm.Potential("mannmass_prior_" + str(i), -0.5 * 
 #                                                      ((star["mass"].value - mann_mstar) / mann_sigma_mstar) ** 2)
 #                    if mannrad[i]:
-#                        mannrad_prior = pm.Potential("mannrad_prior_" + str(i), -0.5 *
+#                        mannrad_prior = pm.Potential("mannrad_prior_" + str(i), -0.5 * 
 #                                                     ((star["radius"].value - mann_rstar) / mann_sigma_rstar) ** 2)
+
+
+
 
             # add SED parameters for each star
             if sedfile != None:
@@ -270,7 +264,7 @@ def build_model(nstars=1, nplanets=1,
 
         # for each planet
         event["planet"] = []
-        starndx = 0 # place holder -- this should be a user input with 0 as default
+        starndx = 0
         for i in range(nplanets):
 
             # physical range is -1 <= cosi <=1
@@ -284,9 +278,9 @@ def build_model(nstars=1, nplanets=1,
                       "logp": Parameter("logp_" + str(i), lower=1e-9, upper=13.7, initval=1.0, unit=u.dex(u.day),
                                         latex='P',description='log(Period/day)',latex_unit='', user_params=user_params),
                       "radius": Parameter("rp_" + str(i), lower=1e-9, upper=2e4, initval=1.0, unit=u.jupiterRad,
-                                          latex='R_P',description='Radius',latex_unit=r'\rj', user_params=user_params),
+                                          latex='R_P',description='Radius',latex_unit='\\rj', user_params=user_params),
                       "tco" : Parameter("tc_"+str(i), lower=0.0, upper=9e9, initval=2460000.0, unit=u.day,
-                                        latex='T_C', description='Time of conjunction',latex_unit=r'\bjdtdb', user_params=user_params)
+                                        latex='T_C', description='Time of conjunction',latex_unit='\\bjdtdb', user_params=user_params)
                   }
             
             # choose planet mass parameterization
@@ -362,7 +356,7 @@ def build_model(nstars=1, nplanets=1,
                                            latex='Sign',description='Sign of quadratic solution',
                                            latex_unit='',user_params=user_params)
 
-                # solve quadratic for e (Eastman 2024, eq 5)
+                # solve quadratic for e (Eastman+ 2024, eq 5)
                 a = planet["vcve"].value ** 2 * planet["sinw"].value ** 2 + 1.0
                 b = 2.0 * planet["vcve"].value ** 2 * planet["sinw"].value
                 c = planet["vcve"].value ** 2 - 1.0
@@ -401,7 +395,7 @@ def build_model(nstars=1, nplanets=1,
                                             latex='b',description='impact parameter',
                                             latex_unit='',user_params=user_params)
 
-                # correct the prior to be uniform in e/omega (Eastman 2024, eq 6)
+                # correct the prior to be uniform in e/omega (Eastman+ 2024, eq 6)
                 jacobian *= (planet["e"].value + planet["sinw"].value) / (
                     pt.sqrt(1.0 - planet["e"].value ** 2) * (1.0 + planet["esinw"].value) ** 2) # d(vcve)/d(e)
 
@@ -465,12 +459,9 @@ def build_model(nstars=1, nplanets=1,
         event["transit"] = []
         for i,tranfile in enumerate(tranfiles):
             event["transit"].append(readtran(tranfile, ndx=i, ttv=ttvs[i], tdeltav=tdeltavs[i],tiv=tivs[i]))#, user_params=user_params)
-
+            
         # we're gonna need this for mulensmodel...
-        # https://www.pymc.io/projects/examples/en/latest/howto/blackbox_external_likelihood_numpy.html
-        event["ulens"] = []
-        for i, ulensfile in enumerate(ulensfiles):
-            event["ulens"].append(readulens(ulensfile))
+        #https://www.pymc.io/projects/examples/en/latest/howto/blackbox_external_likelihood_numpy.html
 
         # pm.traceplot(trace)
 

@@ -14,7 +14,9 @@ class Parameter:
                  latex=None, latex_unit=None, description=None, latex_prefix="ez",
                  user_params=None):
 
-        # if the user supplied a parameter file,
+
+
+        # if the user supplied a parameter file, 
         # check to see if it matches the declared parameter
         l = None
         add_potential=False

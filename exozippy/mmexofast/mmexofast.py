@@ -43,8 +43,10 @@ class MMEXOFASTFitter():
 
     def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
                  priors=None, print_results=False, verbose=False,
-                 output_file=None):
+                 output_file=None, log_file=None):
         self.verbose = verbose
+        if log_file is not None:
+            self.log_file = log_file
 
         # setup datasets.
         if datasets is not None:
@@ -90,19 +92,28 @@ class MMEXOFASTFitter():
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
+        if self.log_file is not None:
+            log = open(self.log_file, 'w')
+
         # Find initial Point Lens model
         self.best_ef_grid_point = self.do_ef_grid_search()
         if self.verbose:
             print('Best EF grid point', self.best_ef_grid_point)
+        if self.log_file is not None:
+            log.write('Best EF grid point {0}\n'.format(self.best_ef_grid_point))
 
         self.pspl_params = self.get_initial_pspl_params(
             verbose=self.verbose)
         if self.verbose:
             print('Initial PSPL', self.pspl_params)
+        if self.log_file is not None:
+            log.write('Initial PSPL {0}\n'.format(self.pspl_params))
 
         self.pspl_params = self.do_sfit(self.datasets)
         if self.verbose:
             print('SFIT params:', self.pspl_params)
+        if self.log_file is not None:
+            log.write('SFIT params {0}\n'.format(self.pspl_params))
 
         if self.fit_type == 'point lens':
             # Do the full MMEXOFAST fit to get physical parameters
@@ -114,15 +125,25 @@ class MMEXOFASTFitter():
             if self.verbose:
                 print('Best AF grid', self.best_af_grid_point)
 
+            if self.log_file is not None:
+                log.write('Best AF grid {0}\n'.format(self.best_af_grid_point))
+
             self.pspl_params = self.refine_pspl_params()
             if self.verbose:
                 print('Revised SFIT', self.pspl_params)
+
+            if self.log_file is not None:
+                log.write('Revised SFIT {0}\n'.format(self.pspl_params))
 
             self.binary_params = self.get_initial_2L1S_params()
             if self.verbose:
                 print(
                     'Initial 2L1S params', self.binary_params.ulens)
                 print('mag_methods', self.binary_params.mag_method)
+            if self.log_file is not None:
+                log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
+                log.write('mag_methods {0}\n'.format(self.binary_params.mag_method))
+                log.flush()
 
             # Do the full MMEXOFAST fit to get physical parameters
             self.results = self.do_mmexofast_fit()
@@ -130,6 +151,9 @@ class MMEXOFASTFitter():
         else:
             raise ValueError(
                 'fit_type not recognized. Your value', self.fit_type)
+
+        if self.log_file is not None:
+            log.close()
 
     def do_ef_grid_search(self):
         # Should probably scrape t_0_1 from the filenames
@@ -142,10 +166,10 @@ class MMEXOFASTFitter():
         if self.best_ef_grid_point['j'] == 1:
             u_0 = 0.01
         elif self.best_ef_grid_point['j'] == 2:
-            u_0s = [0.1, 0.3, 0.5, 1.0, 1.3, 2.0]
+            u_0s = [0.01, 0.1, 0.3, 1.0, 1.5]
             chi2s = []
             for u_0 in u_0s:
-                t_E = self.best_ef_grid_point['t_eff'] / u_0
+                t_E = self.best_ef_grid_point['t_eff']
                 params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
                 event = MulensModel.Event(
                     datasets=self.datasets, model=MulensModel.Model(params))
@@ -162,7 +186,7 @@ class MMEXOFASTFitter():
             raise ValueError(
                 'j may only be 1 or 2. Your input: ', self.best_ef_grid_point)
 
-        t_E = self.best_ef_grid_point['t_eff'] / u_0
+        t_E = self.best_ef_grid_point['t_eff']
 
         return {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
 
@@ -205,21 +229,77 @@ class MMEXOFASTFitter():
         raise NotImplementedError(
             'do_mmexofast_fit needs to be implemented')
 
-    def set_datasets_with_anomaly_masked(self, n_mask=3):
+    def set_datasets_with_anomaly_masked(self, mask_type='t_eff', n_mask=3, tol=0.3):
+        """
+        Mask points associated with the anomaly.
+
+        :param mask_type: *str*
+            `t_eff' or `residuals'. If `t_eff' mask based on t_pl +- n_mask * t_eff. If `residuals', mask based on
+            deviation from existing point lens fit.
+
+        :param n_mask: *int*
+            Number of +- `t_eff' to mask. Only used with mask_type = `t_eff'.
+
+        :param tol: *float*
+            Maximum allowed deviation from point-lens in sigma. Only used with mask_type = `residuals'.
+
+        creates self.masked_datasets = *list* of mm.MulensData objects with bad points masked.
+
+        """
         masked_datasets = []
         for dataset in self.datasets:
             masked_datasets.append(copy.copy(dataset))
 
         for dataset in masked_datasets:
-            index = ((dataset.time >
-                     self.best_af_grid_point['t_0'] -
-                     n_mask * self.best_af_grid_point['t_eff']) &
-                     (dataset.time <
-                      self.best_af_grid_point['t_0'] +
-                      n_mask * self.best_af_grid_point['t_eff']))
+            if mask_type == 't_eff':
+                index = ((dataset.time >
+                         self.best_af_grid_point['t_0'] -
+                         n_mask * self.best_af_grid_point['t_eff']) &
+                         (dataset.time <
+                          self.best_af_grid_point['t_0'] +
+                          n_mask * self.best_af_grid_point['t_eff']))
+            elif mask_type == 'residuals':
+                index = self.get_residuals_mask(dataset, tol=tol)
+                print(np.sum(index))
+            else:
+                raise ValueError("mask_type must be one of ['t_eff', 'residuals']. Your value ", mask_type)
+
             dataset.bad = index
 
         self.masked_datasets = masked_datasets
+
+    def get_residuals_mask(self, dataset, tol=None, max_diff=1):
+        fit = mm.FitData(dataset=dataset, model=mm.Model(self.pspl_params))
+        fit.fit_fluxes()
+        ind_pl = np.argmin(np.abs(dataset.time - self.best_af_grid_point['t_0']))
+
+        res, err = fit.get_residuals(phot_fmt='mag')
+        out_tol = np.argwhere(((np.abs(res) / err) > tol) & fit.dataset.good).flatten()
+        print(out_tol)
+        diff = np.ediff1d(out_tol)
+
+        start = np.argmin(np.abs(out_tol - ind_pl))
+        first, last = 0, len(out_tol) - 1
+        for i in range(start, 0, -1):
+            if diff[i] <= max_diff:
+                first = i
+            else:
+                break
+
+        for i in range(start, len(out_tol)):
+            if diff[i] <= max_diff:
+                last = i
+            else:
+                break
+
+        print(ind_pl, res[ind_pl])
+        print(ind_pl in out_tol)
+        print(first, last, len(out_tol))
+        print(out_tol[first], out_tol[last], out_tol[last] - out_tol[first])
+        mask = np.zeros(len(dataset.time), dtype=bool)
+        mask[out_tol[first]:out_tol[last]+1] = True
+
+        return mask
 
     def refine_pspl_params(self):
         self.set_datasets_with_anomaly_masked()
