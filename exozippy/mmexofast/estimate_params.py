@@ -4,7 +4,7 @@
 # In[ ]:
 
 
-# Created by Luca Campiani in January 2024
+# Created by LucaCampiani Campiani in January 2024
 
 import MulensModel as mm
 import matplotlib.pyplot as plt
@@ -61,7 +61,7 @@ def get_wide_params(params):
 
     Arguments :
         params: *dictionary*
-            Initial parameters.
+            Initilal parameters.
             
             - 't_0' (*float*): Time of maximum magnification.
             - 'u_0' (*float*): Impact parameter.
@@ -74,9 +74,6 @@ def get_wide_params(params):
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
     """
-    # JCY: Should these calculations be broken out into individual parameters?
-    # e.g., so they can be tested individually?
-    # This would mean function --> class.
     tau = (params['t_pl'] - params['t_0']) / params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
@@ -124,7 +121,7 @@ def get_close_params(params, q=None, rho=None):
         lens1, lens2 : *tuple of BinaryLensParams*
             Two instances of BinaryLensParams representing close model parameters.
     """
-    if q is None:
+    if q == None:
         q = 0.0040
 
     tau = (params['t_pl'] - params['t_0']) / params['t_E']
@@ -140,7 +137,7 @@ def get_close_params(params, q=None, rho=None):
 
     if 'dt' in params.keys():
         rho = params['dt'] / params['t_E'] / 2.
-    elif 'rho' is None:
+    elif 'rho' == None:
         rho = 0.001
     
     new_params1 = {'t_0': params['t_0'],

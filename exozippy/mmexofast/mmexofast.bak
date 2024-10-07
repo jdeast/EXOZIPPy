@@ -86,31 +86,35 @@ class MMEXOFASTFitter():
         if self.fit_type is None:
             # Maybe "None" means initial mulens parameters were passed,
             # so we can go straight to a mmexofast_fit?
-            raise ValueError(
-                'You must set the fit_type when initializing the ' +
-                'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
+            raise ValueError('You must set the fit_type.')
 
-        # Find initial Point Lens model
+        # Find initial Point Lens model (BLS equivalent)
         self.best_ef_grid_point = self.do_ef_grid_search()
         if self.verbose:
             print('Best EF grid point', self.best_ef_grid_point)
 
+        # convert BLS-like point-lens parameters to ulens parameters
         self.pspl_params = self.get_initial_pspl_params(
             verbose=self.verbose)
         if self.verbose:
             print('Initial PSPL', self.pspl_params)
 
+        # optimizes ulens parameters
+        # and get uncertainties through fisher matrix (assumes Gaussian) -- redo with mcmc?
         self.pspl_params = self.do_sfit(self.datasets)
         if self.verbose:
             print('SFIT params:', self.pspl_params)
 
         if self.fit_type == 'point lens':
-            # Do the full MMEXOFAST fit to get physical parameters
+            # need this for sensitivity function later, but for most science, we'll throw these away before more sophisticated modeling
+            # Do the full MMEXOFAST fit to get physical parameters (if ulens parameters, we're done)
             self.results = self.do_mmexofast_fit()
             return self.results
         elif self.fit_type == 'binary lens':
-            # Find the initial planet parameters
-            self.best_af_grid_point = self.do_af_grid_search()
+            # Find the initial planet parameters for a binary lens
+            # BLS-like search for residuals to point lens (need robust optimized parameters (risk!), but don't need uncertainties)
+            self.best_af_grid_point = self.do_af_grid_search() # includes chi^2 threshholds (currently hard coded) for saying this is an anomaly
+            # proven reassonably effective at identifying non-point lens things (but not necessarily robustly modeling it).
             if self.verbose:
                 print('Best AF grid', self.best_af_grid_point)
 
@@ -118,6 +122,7 @@ class MMEXOFASTFitter():
             if self.verbose:
                 print('Revised SFIT', self.pspl_params)
 
+            # now BLS planet + point lens -> ulens binary parameters
             self.binary_params = self.get_initial_2L1S_params()
             if self.verbose:
                 print(
@@ -125,6 +130,7 @@ class MMEXOFASTFitter():
                 print('mag_methods', self.binary_params.mag_method)
 
             # Do the full MMEXOFAST fit to get physical parameters
+            # now optimize ulens binary parameters (self.binary_params -- jason)
             self.results = self.do_mmexofast_fit()
             return self.results
         else:

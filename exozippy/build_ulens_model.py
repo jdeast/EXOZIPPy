@@ -57,16 +57,6 @@ def build_model(nstars=1, nplanets=1,
     mist=False
     nastrom=0
 
-    if tranpath is not None: 
-        tranfiles = glob.glob(tranpath)
-    else: tranfiles = []
-    ntransits = len(tranfiles)
-
-    if rvpath is not None: 
-        rvfiles = glob.glob(rvpath)
-    else: rvfiles = []
-    ninstruments = len(rvfiles)
-
     if ulenspath is not None:
         ulensfiles = glob.glob(ulenspath)
     else: ulensfiles = []
@@ -84,77 +74,6 @@ def build_model(nstars=1, nplanets=1,
     Gmsun = const.GM_sun.cgs.value
     meter = 100.0 # cm/m
 
-    # set defaults
-    if fitrv is None:
-        if ninstruments > 0: 
-            fitrv = np.zeros((nplanets), dtype=bool) + True
-        else:
-            fitrv = np.zeros((nplanets), dtype=bool) + False
-    elif np.isscalar(fitrv):
-        fitrv = np.zeros((nplanets), dtype=bool) + fitrv
-    elif len(fitrv) != nplanets:
-        print("fitrv must be a scalar or a list with NPLANETS elements")
-
-    if fittran is None:
-        if ntransits > 0: 
-            fittran = np.zeros((nplanets), dtype=bool) + True
-        else:
-            fittran = np.zeros((nplanets), dtype=bool) + False
-    elif np.isscalar(fittran):
-        fittran = np.zeros((nplanets), dtype=bool) + fittran
-    elif len(fittran) != nplanets:
-        print("fittran must be a scalar or a list with NPLANETS elements")
-
-    if i180 is None:
-        if nastrom > 0: 
-            i180 = np.zeros((nplanets), dtype=bool) + True
-        else:
-            fittran = np.zeros((nplanets), dtype=bool) + False
-    elif np.isscalar(i180):
-        i180 = np.zeros((nplanets), dtype=bool) + i180
-    elif len(i180) != nplanets:
-        print("i180 must be a scalar or a list with NPLANETS elements")
-
-    if np.isscalar(circular):
-        circular = np.zeros((nplanets), dtype=bool) + circular
-    elif len(circular) != nplanets:
-        print("circlar must be a scalar or a list with NPLANETS elements")
-
-    if np.isscalar(ttvs):
-        ttvs = np.zeros((ntransits), dtype=bool) + ttvs
-    elif len(ttvs) != ntransits:
-        print("ttvs must be a scalar or a list with NTRANSITS elements")
-
-    if np.isscalar(tdeltavs):
-        tdeltavs = np.zeros((ntransits), dtype=bool) + tdeltavs
-    elif len(tdeltavs) != ntransits:
-        print("tdeltavs must be a scalar or a list with NTRANSITS elements")
-
-    if np.isscalar(tivs):
-        tivs = np.zeros((ntransits), dtype=bool) + tivs
-    elif len(tivs) != ntransits:
-        print("tivs must be a scalar or a list with NTRANSITS elements")
-
-    if np.isscalar(mannrad):
-        mannrad = np.zeros((nstars), dtype=bool) + mannrad
-    elif len(mannrad) != nstars:
-        print("mannrad must be a scalar or a list with NSTARS elements")
-
-    if np.isscalar(mannmass):
-        mannmass = np.zeros((nstars), dtype=bool) + mannmass
-    if len(mannmass) != nstars:
-        print("mannmass must be a scalar or a list with NSTARS elements")
-
-    if np.isscalar(mist):
-        mist = np.zeros((nstars), dtype=bool) + mist
-    if len(mist) != nstars:
-        print("mist must be a scalar or a list with NSTARS elements")
-
-    if np.isscalar(parsec):
-        parsec = np.zeros((nstars), dtype=bool) + parsec
-    if len(parsec) != nstars:
-        print("parsec must be a scalar or a list with NSTARS elements")
-
     if parfile is not None:
         user_params = read_parfile(parfile)
     else:
@@ -169,7 +88,7 @@ def build_model(nstars=1, nplanets=1,
                                           latex='\sigma_{SED}', description='photometric error scaling', 
                                           latex_unit="", user_params=user_params)
         # add per star parameters
-        starnames = list(string.ascii_uppercase) # [A,B,C... Z]
+        starnames = list(string.ascii_uppercase)  # [A,B,C... Z]
         event["star"] = []
         for i in range(nstars):
             # the lower limits mean it doesn't actually have to be a star

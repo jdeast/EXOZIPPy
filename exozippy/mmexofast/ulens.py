@@ -120,7 +120,7 @@ class Star(object):
         elif isinstance(new_value, (np.ndarray)):
             self._mu = new_value
         else:
-            raise TypeError(
+            raise ValueError(
                 'Invalid type for mu. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
@@ -148,7 +148,7 @@ class Star(object):
         elif isinstance(new_value, (np.ndarray)):
             self._vel = new_value
         else:
-            raise TypeError(
+            raise ValueError(
                 'Invalid type for vel. Must be *tuple*, *list*, ' +
                 ' or *np.ndarray: ', type(new_value))
 
