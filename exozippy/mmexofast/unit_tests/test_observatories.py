@@ -11,7 +11,7 @@ def test_get_kwargs():
             exozippy.MULENS_DATA_PATH, '2018DataChallenge',
             'n20180816.Z087.WFIRST18.004.txt')
     expected = {
-        'phot_fmt': 'mag', 'usecols': [0, 1, 2],
+        'phot_fmt': 'flux', 'usecols': [0, 1, 2],
         'ephemerides_file': os.path.join(
             exozippy.MULENS_DATA_PATH, '2018DataChallenge',
             'wfirst_ephemeris_W149.txt'),
@@ -55,7 +55,7 @@ class TestGetTelescopeBandFromilename(unittest.TestCase):
 def test_get_observatory_kwargs():
     telescope = 'WFIRST18'
     expected = {
-        'phot_fmt': 'mag', 'usecols': [0, 1, 2],
+        'phot_fmt': 'flux', 'usecols': [0, 1, 2],
         'ephemerides_file': os.path.join(
          exozippy.MULENS_DATA_PATH, '2018DataChallenge',
             'wfirst_ephemeris_W149.txt')}

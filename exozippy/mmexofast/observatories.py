@@ -54,7 +54,7 @@ def get_observatory_kwargs(telescope):
     """
     kwargs = {}
     if telescope == 'WFIRST18':
-        kwargs['phot_fmt'] = 'mag'
+        kwargs['phot_fmt'] = 'flux'  # Note: ORIGINAL files are in mag, but they have been CONVERTED TO FLUX.
         kwargs['usecols'] = [0, 1, 2]
         kwargs['ephemerides_file'] = os.path.join(
             exozippy.MULENS_DATA_PATH, '2018DataChallenge',
