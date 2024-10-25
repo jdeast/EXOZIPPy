@@ -35,7 +35,7 @@ for file_ in files:
     elements = file_.split('.')
     lc_nums.append(int(elements[-2]))
 
-for lc_num in np.sort(lc_nums)[0:10]:
+for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:
         results = fit_lc(lc_num, verbose=True)

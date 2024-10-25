@@ -80,7 +80,8 @@ def get_wide_params(params):
     tau = (params['t_pl'] - params['t_0']) / params['t_E']
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    alpha = np.arctan2(-params['u_0'], tau)
+    #alpha = np.arctan2(-params['u_0'], tau)
+    alpha = np.pi - np.arctan2(params['u_0'], tau)
     rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
    
