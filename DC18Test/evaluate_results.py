@@ -6,10 +6,6 @@ import matplotlib.pyplot as plt
 from examples.use_cases.DC18_classes import DC18Answers
 from plot_results import PlanetFitInfo
 
-
-
-
-
 class AllResults():
     pspl_fit_types = ['Initial PSPL Guess', 'Initial SFIT', 'Revised SFIT']
     planet_fit_types = ['2L1S Guess']
