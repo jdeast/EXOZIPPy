@@ -188,11 +188,16 @@ class PlanetFitInfo():
         event = MulensModel.Event(datasets=self.fitter.masked_datasets, model=model)
         self.make_plot(event)
 
-    def plot_initial_planet_model(self):
+    def plot_initial_planet_model(self, trajectory=False):
         model = MulensModel.Model(self.initial_planet_params)
         model.set_magnification_methods(self.mag_methods)
         event = MulensModel.Event(datasets=self.fitter.masked_datasets, model=model)
         self.make_plot(event)
+        if trajectory:
+            plt.figure()
+            model.plot_trajectory(caustics=True)
+            plt.gca().set_aspect('equal')
+            plt.gca().minorticks_on()
 
 
 if __name__ == '__main__':
@@ -215,7 +220,7 @@ if __name__ == '__main__':
 
         if planet.initial_planet_params is not None:
             try:
-                planet.plot_initial_planet_model()
+                planet.plot_initial_planet_model(trajectory=True)
             except:
                 print('Planet plotting failed.')
 
