@@ -33,6 +33,10 @@ class KB160625():
         self.dt = 0.25
         self.dmag = 0.3
 
+        # Approximate values of t_0 and u_0
+        self.t_0 = 7655.95
+        self.u_0 = 0.075
+
         self.tol = 0.03  # 2% uncertainty based on variation in u0
 
         self.params = {
