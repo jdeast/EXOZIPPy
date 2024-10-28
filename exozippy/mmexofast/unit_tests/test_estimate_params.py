@@ -20,10 +20,11 @@ class KB160625():
         # Data from Table 5:
         # s-
         self.close_params = {'t_0': 7655.951, 'u_0': 0.073, 't_E': 11.494,
-                             's': 0.741, 'q': 2.357e-4, 'alpha': np.rad2deg(3.217)}
+                             's': 0.741, 'q': 2.357e-4, 'alpha': np.rad2deg(3.217),
+                             'rho': 1.2256e-3}
         # s+
         self.wide_params = {'t_0': 7655.951, 'u_0': 0.075, 't_E':11.335,
-                            's': 1.367, 'q': 0.727e-4, 'alpha': np.rad2deg(0.122)}
+                            's': 1.367, 'q': 0.727e-4, 'alpha': np.rad2deg(0.122), 'rho': 1.7656e-3}
         # 1L2S
         self.binary_source_params = {
             't_0_1': 7655.953, 'u_0_1': 0.078, 't_E': 10.946, 't_0_2': 7662.943, 'u_0_2': 3.751e-4, 'rho_2': 5.1309e-3, 'q_flux':  0.005
@@ -43,6 +44,17 @@ class KB160625():
             't_0': self.t_0, 'u_0': self.u_0, 't_E': self.t_E, 't_pl': self.t_pl,
             'dt': self.dt, 'dmag': self.dmag
             }
+
+
+class OB180383():
+    """
+    Parameters for OGLE-2018-BLG-0383 Wang et al. 2022.
+    """
+    def __init__(self):
+        # Section 3.2
+
+        # Table 2
+        pass
 
 
 class TestGetWideParams(unittest.TestCase, KB160625):
@@ -65,11 +77,14 @@ class TestGetWideParams(unittest.TestCase, KB160625):
         alpha = np.min(np.abs(self.ulens_params.ulens['alpha'] - np.rad2deg(self.alpha)))
         np.testing.assert_allclose(self.ulens_params.ulens['alpha'], alpha, rtol=self.tol)
 
-    def test_q(self):
-        raise NotImplementedError()
-
-    def test_rho(self):
-        raise NotImplementedError()
+    def test_q_rho(self):
+        # Gould & Gaucherel approximation
+        # Ap = 2(q / ρ^2)
+        Ap_true = 2. * self.wide_params['q'] / self.wide_params['rho']**2
+        Ap_est = 2. * self.ulens_params.ulens['q'] / self.ulens_params.ulens['rho']**2
+        #print(Ap_true, Ap_est)
+        print('JCY: This is a good idea for a test, but this event is not in this regime...')
+        np.testing.assert_allclose(Ap_est, Ap_true, rtol=self.tol)
 
     def test_mag_methods(self):
         expected_values = [self.t_pl - 5. * self.dt, 'VBBL', self.t_pl + 5. * self.dt]
