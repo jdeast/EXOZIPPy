@@ -24,6 +24,10 @@ class KB160625():
         # s+
         self.wide_params = {'t_0': 7655.951, 'u_0': 0.075, 't_E':11.335,
                             's': 1.367, 'q': 0.727e-4, 'alpha': np.rad2deg(0.122)}
+        # 1L2S
+        self.binary_source_params = {
+            't_0_1': 7655.953, 'u_0_1': 0.078, 't_E': 10.946, 't_0_2': 7662.943, 'u_0_2': 3.751e-4, 'rho_2': 5.1309e-3, 'q_flux':  0.005
+        }
 
         # dt and dmag estimated by-eye from figure in paper.
         self.dt = 0.25
