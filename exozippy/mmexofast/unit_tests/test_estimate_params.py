@@ -8,15 +8,22 @@ class KB160625():
     Parameters for KMT-2016-BLG-0625 Shin et al. 2024.
     """
     def __init__(self):
-        self.t_0 = 7655.951
-        self.u_0 = 0.073
-        self.t_E = 11.5
-        self.t_pl = 7662.95
+        # Section 3.4
         self.tau_pl = 0.609
         self.u_pl = 0.613
+        self.t_pl = 7662.95
+        self.t_E = 11.5
         self.s_close = 0.739
         self.s_wide = 1.352
         self.alpha = [0.12, 3.26]  # radians
+
+        # Data from Table 5:
+        # s-
+        self.close_params = {'t_0': 7655.951, 'u_0': 0.073, 't_E': 11.494,
+                             's': 0.741, 'q': 2.357e-4, 'alpha': np.rad2deg(3.217)}
+        # s+
+        self.wide_params = {'t_0': 7655.951, 'u_0': 0.075, 't_E':11.335,
+                            's': 1.367, 'q': 0.727e-4, 'alpha': np.rad2deg(0.122)}
 
         # dt and dmag estimated by-eye from figure in paper.
         self.dt = 0.25
@@ -65,8 +72,11 @@ class TestGetWideParams(unittest.TestCase, KB160625):
                 np.testing.assert_allclose(actual, expected, atol=0.001)
 
 
-def test_get_close_params():
-    raise NotImplementedError()
+class TestGetCloseParams(unittest.TestCase, KB160625):
+
+    def setUp(self):
+        KB160625.__init__(self)
+        self.ulens_params = estimate_params.get_close_params(self.params, q=self)
 
 
 def test_model_pspl_at_pl():
