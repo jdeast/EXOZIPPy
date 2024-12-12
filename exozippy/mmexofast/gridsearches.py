@@ -118,7 +118,6 @@ class EventFinderGridSearch():
 
     def get_flat_chi2(self, trimmed_datasets):
         flat_sfit = FlatSFitFunction(trimmed_datasets)
-        print(flat_sfit.get_step())
         flat_sfit.update_all(theta=flat_sfit.theta + flat_sfit.get_step())
         flat_chi2 = flat_sfit.chi2
         return flat_chi2
