@@ -130,7 +130,7 @@ class EventFinderGridSearch():
 
         # Only fit the window if there's enough data to do so.
         if len(trimmed_datasets) >= 1:
-            chi2s['flat']  = self.get_flat_chi2(trimmed_datasets)
+            chi2s['flat'] = self.get_flat_chi2(trimmed_datasets)
 
             for j in [1, 2]:
                 parameters['j'] = j
