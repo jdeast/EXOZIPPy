@@ -141,7 +141,7 @@ def get_close_params(params, q=None, rho=None):
 
     if 'dt' in params.keys():
         rho = params['dt'] / params['t_E'] / 2.
-    elif 'rho' is None:
+    elif 'rho' not in params.keys():
         rho = 0.001
     
     new_params1 = {'t_0': params['t_0'],
