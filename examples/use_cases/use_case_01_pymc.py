@@ -21,32 +21,22 @@ from exozippy import MULENS_DATA_PATH
 # Affects choice of mm.Event vs. mm.FitData as the input.
 def ln_prob_mm(inputs):
     """ combines likelihood and priors"""
-
+    parameters = ['t_0', 'u_0', 't_E']
     model_parameters = {}
-    data_objects = {}
-    for item in inputs:
-        if (item.name[0:3] == 'Tim') or (item.name[0:3] == 'Flu') or (item.name[0:3] == 'Err'):
-            name_elements = item.name.split('_')
-            key = name_elements[0]
-            num = name_elements[-1]
-            if num in data_objects.keys():
-                data_objects[num][key] = item
 
-        else:
-            model_parameters[item.name] = item
+    for parameter, item in zip(parameters, inputs[0:len(parameters)]):
+        model_parameters[parameter] = item.item()
 
     datasets = []
-    data_keys = ['Time', 'Flux', 'Err']
-    for value in data_objects.values():
+    for i in range(int((len(inputs) - len(parameters)) / 3)):
         datasets.append(mm.MulensData(
-            [value[key] for key in data_keys], phot_fmt='flux'
-        ))
+            [inputs[len(parameters) + 3 * i], inputs[len(parameters) + 3 * i + 1], inputs[len(parameters) + 3 * i + 2]],
+            phot_fmt='flux'))
 
-    print(model_parameters)
     model = mm.Model(model_parameters)
     event = mm.Event(model=model, datasets=datasets)
 
-    chi2s = event.get_chi2_per_point()
+    chi2s = np.array(event.get_chi2_per_point()).transpose().squeeze()
 
     return -0.5 * chi2s
 
@@ -85,9 +75,9 @@ class LogLike(Op):
                     'dataset {0} must be MulensModel.MulensData object, not {1}'.format(i,  type(dataset)))
 
             # pm.Data(name, vector) didn't work
-            tensor_list.append(pt.as_tensor(dataset.time, name='Time_{0}'.format(i)))
-            tensor_list.append(pt.as_tensor(dataset.flux, name='Flux_{0}'.format(i)))
-            tensor_list.append(pt.as_tensor(dataset.err_flux, name='Err_{0}'.format(i)))
+            tensor_list.append(pytensor.as_symbolic(dataset.time, name='Time_{0}'.format(i)))
+            tensor_list.append(pytensor.as_symbolic(dataset.flux, name='Flux_{0}'.format(i)))
+            tensor_list.append(pytensor.as_symbolic(dataset.err_flux, name='Err_{0}'.format(i)))
 
         return tensor_list
 
@@ -103,12 +93,12 @@ class LogLike(Op):
 
         tensor_list = []
         for i, parameter in enumerate(parameters_to_fit):
-            tensor_list.append(pt.as_tensor(theta[i], name=parameter))
+            tensor_list.append(pytensor.as_symbolic(theta[i], name=parameter))
 
         for parameter in model.parameters.parameters.keys():
             if parameter not in parameters_to_fit:
                 tensor_list.append(
-                    pt.as_tensor(model.parameters.parameters[parameter], name=parameter))
+                    pt.constant(model.parameters.parameters[parameter], name=parameter))
 
         return tensor_list
 
@@ -132,7 +122,8 @@ class LogLike(Op):
         # If data must always be a vector, we could have hard-coded
         # outputs = [pt.vector()]
         #print([item.type() for item in data_tensors if item.name[0:4] == 'Flux'])
-        outputs = [item.type() for item in data_tensors if item.name[0:4] == 'Flux']
+        # outputs = [item.type() for item in data_tensors if item.name[0:4] == 'Flux']
+        outputs = [data_tensors[1].type()]
         # JCY: does this mean we need the likelihood for each individual datapoint?
 
         # Apply is an object that combines inputs, outputs and an Op (self)
@@ -156,33 +147,34 @@ class LogLike(Op):
 data = mm.MulensData(
     file_name=os.path.join(MULENS_DATA_PATH, 'OB140939', 'ob140939_OGLE.dat'), phot_fmt='mag')
 # Initial model
-model = mm.Model({'t_0': 6836.3, 'u_0': 0.9, 't_E': 23., 'pi_E_N': -0.248, 'pi_E_E': 0.234})
+model = mm.Model({'t_0': 6836.3, 'u_0': 0.9, 't_E': 23.})
+# , 'pi_E_N': -0.248, 'pi_E_E': 0.234}) # passing this extra info is hard. Also need to pass coords. ephem.
 event = mm.Event(datasets=data, model=model)
 
 parameters_to_fit = ['t_0', 'u_0', 't_E']
 
 log_like = LogLike()
 
-print('*** Test data to pytensor ***')
+print('\n*** Test data to pytensor ***')
 tensor_data = log_like.get_data_tensors(data)
 for item in tensor_data:
     print(item)
     print(item.name, item.name[0:4], item.type)
 
-print('*** Test model to pytensor ***')
+print('\n*** Test model to pytensor ***')
 theta = [model.parameters.parameters[param] for param in parameters_to_fit]
 print(theta)
 tensor_params = log_like.get_parameter_tensors(model=model, theta=theta, parameters_to_fit=parameters_to_fit)
 for item in tensor_params:
     print(item)
 
-print('*** Test model + data to pytensor: ***')
+print('\n*** Test model + data to pytensor: ***')
 node = log_like.make_node(theta=theta, parameters_to_fit=parameters_to_fit, event=event)
 print(node)
 
-print('*** Test full pytensor class: ***')
+print('\n*** Test full pytensor class: ***')
 test_out = log_like(theta, parameters_to_fit, event)
 pytensor.dprint(test_out, print_type=True)
 
-# Next step: produce posteriors?
+print('\n*** Test eval: ***')
 test_out.eval()
