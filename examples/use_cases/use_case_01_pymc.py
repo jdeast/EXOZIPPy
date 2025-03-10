@@ -9,8 +9,9 @@ except that example is bare bones, so also adding links to additional documentat
 import os.path
 import numpy as np
 
-import pytensor as pt
-import pymc as pm
+import pytensor
+import pytensor.tensor as pt
+from pytensor.graph import Apply, Op
 
 import MulensModel as mm
 from exozippy import MULENS_DATA_PATH
@@ -50,7 +51,7 @@ def ln_prob_mm(inputs):
     return -0.5 * chi2s
 
 
-class LogLike(pt.graph.Op):
+class LogLike(Op):
     """
     Op documentation: https://pytensor.readthedocs.io/en/latest/extending/op.html
     """
@@ -84,9 +85,9 @@ class LogLike(pt.graph.Op):
                     'dataset {0} must be MulensModel.MulensData object, not {1}'.format(i,  type(dataset)))
 
             # pm.Data(name, vector) didn't work
-            tensor_list.append(pt.as_symbolic(dataset.time, name='Time_{0}'.format(i)))
-            tensor_list.append(pt.as_symbolic(dataset.flux, name='Flux_{0}'.format(i)))
-            tensor_list.append(pt.as_symbolic(dataset.err_flux, name='Err_{0}'.format(i)))
+            tensor_list.append(pt.as_tensor(dataset.time, name='Time_{0}'.format(i)))
+            tensor_list.append(pt.as_tensor(dataset.flux, name='Flux_{0}'.format(i)))
+            tensor_list.append(pt.as_tensor(dataset.err_flux, name='Err_{0}'.format(i)))
 
         return tensor_list
 
@@ -102,16 +103,16 @@ class LogLike(pt.graph.Op):
 
         tensor_list = []
         for i, parameter in enumerate(parameters_to_fit):
-            tensor_list.append(pt.as_symbolic(theta[i], name=parameter))
+            tensor_list.append(pt.as_tensor(theta[i], name=parameter))
 
         for parameter in model.parameters.parameters.keys():
             if parameter not in parameters_to_fit:
                 tensor_list.append(
-                    pt.as_symbolic(model.parameters.parameters[parameter], name=parameter))
+                    pt.as_tensor(model.parameters.parameters[parameter], name=parameter))
 
         return tensor_list
 
-    def make_node(self, theta, parameters_to_fit, event) -> pt.graph.Apply:
+    def make_node(self, theta, parameters_to_fit, event) -> Apply:
         """
 
         :param theta:
@@ -135,9 +136,9 @@ class LogLike(pt.graph.Op):
         # JCY: does this mean we need the likelihood for each individual datapoint?
 
         # Apply is an object that combines inputs, outputs and an Op (self)
-        return pt.graph.Apply(self, inputs, outputs)
+        return Apply(self, inputs, outputs)
 
-    def perform(self, node: pt.graph.Apply, inputs: list[np.ndarray], outputs: list[list[None]]) -> None:
+    def perform(self, node: Apply, inputs: list[np.ndarray], outputs: list[list[None]]) -> None:
         # This is the method that compute numerical output
         # given numerical inputs. Everything here is numpy arrays
         #theta, data = inputs  # this will contain my variables
@@ -181,9 +182,7 @@ print(node)
 
 print('*** Test full pytensor class: ***')
 test_out = log_like(theta, parameters_to_fit, event)
-print(test_out)
+pytensor.dprint(test_out, print_type=True)
 
-
-
-
-
+# Next step: produce posteriors?
+test_out.eval()
