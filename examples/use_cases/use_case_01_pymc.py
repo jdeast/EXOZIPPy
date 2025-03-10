@@ -160,7 +160,7 @@ class LogLike(Op):
 data = mm.MulensData(
     file_name=os.path.join(MULENS_DATA_PATH, 'OB140939', 'ob140939_OGLE.dat'), phot_fmt='mag')
 # Initial model
-model = mm.Model({'t_0': 6836.3, 'u_0': 0.9, 't_E': 23.})
+model = mm.Model({'t_0': 6836.2, 'u_0': 0.9, 't_E': 23.})
 # , 'pi_E_N': -0.248, 'pi_E_E': 0.234}) # passing this extra info is hard. Also need to pass coords. ephem.
 event = mm.Event(datasets=data, model=model)
 
@@ -206,9 +206,9 @@ def custom_dist_loglike(flux, t_0, u_0, t_E, err, date):
 # use PyMC to sampler from log-likelihood
 with pm.Model() as no_grad_model:
     # uniform priors on m and c
-    t_0 = pm.Uniform("t_0", lower=model.parameters.t_0 - 3.0, upper=model.parameters.t_0 + 3.0, initval=model.parameters.t_0)
-    u_0 = pm.Uniform("u_0", lower=0., upper=1.5, initval=model.parameters.u_0)
-    t_E = pm.Uniform("t_E", lower=0., upper=150., initval=model.parameters.t_E)
+    t_0 = pm.Uniform("t_0", lower=model.parameters.t_0 - 0.1, upper=model.parameters.t_0 + 0.1, initval=model.parameters.t_0)
+    u_0 = pm.Uniform("u_0", lower=0.8, upper=1.0, initval=model.parameters.u_0)
+    t_E = pm.Uniform("t_E", lower=21., upper=25., initval=model.parameters.t_E)
 
     # use a CustomDist with a custom logp function
     likelihood = pm.CustomDist(
@@ -219,17 +219,20 @@ with pm.Model() as no_grad_model:
     print('Initial point:', ip)
     no_grad_model.compile_logp(vars=[likelihood], sum=False)(ip)
 
+    print('Expect error:')
     try:
         no_grad_model.compile_dlogp()
     except Exception as exc:
         print(type(exc))
 
+    print('run...')
     with no_grad_model:
         # Use custom number of draws to replace the HMC based defaults
-        idata_no_grad = pm.sample(3000, tune=1000)
+        idata_no_grad = pm.sample(5000, tune=1000, cores=1, chains=4)
 
     # plot the traces
     az.plot_trace(idata_no_grad, lines=[
         ("t_0", {}, model.parameters.t_0), ("u_0", {}, model.parameters.u_0), ("t_E", {}, model.parameters.t_E)])
 
+    plt.tight_layout()
     plt.show()
