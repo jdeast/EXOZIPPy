@@ -36,7 +36,7 @@ def ln_prob_mm(t_0, u_0, t_E, err, time, flux):
     #        [inputs[len(parameters) + 3 * i], inputs[len(parameters) + 3 * i + 1], inputs[len(parameters) + 3 * i + 2]],
     #        phot_fmt='flux'))
 
-    model_parameters = {'t_0': t_0, 'u_0': u_0, 't_E': t_E}
+    model_parameters = {'t_0': t_0.item(), 'u_0': u_0.item(), 't_E': t_E.item()}
     datasets = [mm.MulensData([time, flux, err], phot_fmt='flux')]
 
     model = mm.Model(model_parameters)
