@@ -1,5 +1,5 @@
 import numpy as np
-from .functions import *
+from .utils import *
 
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
