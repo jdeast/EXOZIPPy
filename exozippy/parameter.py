@@ -86,7 +86,7 @@ class Parameter:
             else:
                 # uniform
                 print("uniform: " + str(lower) + " < " + label + " < " + str(upper) + " (initval="+str(initval)+', mu='+str(mu)+', sigma='+str(sigma)+")")
-                self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+                # self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
 
         if add_potential:
             pass
