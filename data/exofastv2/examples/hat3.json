@@ -1,0 +1,58 @@
+{
+  "mstar": {
+    "mu": 0.89,
+    "sigma": null,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "rstar": {
+    "mu": 0.82,
+    "sigma": null,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "teff": {
+    "mu": 5224.0,
+    "sigma": null,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "feh": {
+    "mu": 0.41,
+    "sigma": 0.08,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "av": {
+    "mu": 0.0,
+    "sigma": -1.0,
+    "lower": 0.0,
+    "upper": 0.07409,
+    "initval": null
+  },
+  "parallax": {
+    "mu": 7.4331,
+    "sigma": 0.03524,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "period_0": {
+    "mu": 2.899703,
+    "sigma": 5.4e-05,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  },
+  "tc": {
+    "mu": 2454218.76016,
+    "sigma": null,
+    "lower": null,
+    "upper": null,
+    "initval": null
+  }
+}

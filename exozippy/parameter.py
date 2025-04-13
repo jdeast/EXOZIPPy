@@ -45,8 +45,8 @@ class Parameter:
 
             if "sigma" in user_params[l]:
                 if user_params[l]["sigma"] == 0:
-                    self.value = pm.Deterministic(label, mu)
-                elif user_params[l]["sigma"] > 0:
+                    self.value = mu#pm.Deterministic(label, mu)
+                elif user_params[l]["sigma"] is not None and user_params[l]["sigma"] > 0:
                     if sigma is None:
                         # the user wants to impose a Gaussian penalty
                         sigma=user_params[l]["sigma"]
@@ -56,15 +56,15 @@ class Parameter:
  
             # the user can't expand the default (physical) bounds
             # only further limit them
-            if "upper" in user_params[l]:
+            if "upper" in user_params[l] and user_params[l]["upper"] is not None:
                 upper = min(user_params[l]["upper"],upper)
-            if "lower" in user_params[l]:
+            if "lower" in user_params[l] and user_params[l]["lower"] is not None:
                 lower = max(user_params[l]["lower"],lower)
                 
         if expression is not None:
             print("deterministic: "+label+' (mu='+str(mu) +', lower='+str(lower) + ', upper='+str(upper)+', initval='+str(initval) + ',sigma='+str(sigma)+')')
 
-            self.value = pm.Deterministic(label, expression)
+            self.value = expression#pm.Deterministic(label, expression)
 
             # if it's deterministic, apply constraints as potentials
             if lower is not None:
@@ -78,15 +78,18 @@ class Parameter:
             if (mu is not None) and (sigma is not None) and ((upper is not None) or (lower is not None)):
                 # bounded normal
                 print("bounded normal: " + str(lower) + " < " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " < " + str(upper) + " (initval="+str(initval)+")")
-                self.value = pm.Truncated(label, pm.Normal.dist(mu=mu,sigma=sigma),lower=lower,upper=upper, initval=initval)
+                self.value = mu#pm.Truncated(label, pm.Normal.dist(mu=mu,sigma=sigma),lower=lower,upper=upper, initval=initval)
             elif (mu is not None) and (sigma is not None):
                 # normal
                 print("normal: " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " (lower=" + str(lower)+', upper='+str(upper)+', initval='+str(initval)+')')
-                self.value = pm.Normal(label, mu=mu, sigma=sigma, initval=initval)
+                self.value = mu#pm.Normal(label, mu=mu, sigma=sigma, initval=initval)
+            elif (mu is not None):
+                print("uniform: " + label + " = " + str(mu) + " (lower=n/a, upper=n/a, initval="+str(initval)+')')
+                self.value = mu#pm.Uniform(label, lower=lower, upper=upper, initval=initval)
             else:
                 # uniform
                 print("uniform: " + str(lower) + " < " + label + " < " + str(upper) + " (initval="+str(initval)+', mu='+str(mu)+', sigma='+str(sigma)+")")
-                # self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+                self.value = initval#pm.Uniform(label, lower=lower, upper=upper, initval=initval)
 
         if add_potential:
             pass

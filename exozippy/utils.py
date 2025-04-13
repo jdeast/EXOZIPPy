@@ -3,6 +3,49 @@ from .exozippy_keplereq import *
 import requests
 import re
 import os
+from numba import njit
+
+# ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+def parse_param_file(filepath):
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+
+    params = {}
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue  # skip comments and blank lines
+
+        # Remove inline comments and split on whitespace
+        parts = re.split(r'\s+', line.split("#")[0].strip())
+        if not parts:
+            continue
+
+        label = parts[0]
+        try:
+            values = list(map(float, parts[1:]))
+        except ValueError:
+            # Handle lines with malformed numbers
+            continue
+
+        # Assign values safely
+        mu      = values[0] if len(values) > 0 else None
+        sigma   = values[1] if len(values) > 1 else None
+        lower   = values[2] if len(values) > 2 else None
+        upper   = values[3] if len(values) > 3 else None
+        initval = values[4] if len(values) > 4 else None
+
+        params[label] = {
+            "mu": mu,
+            "sigma": sigma,
+            "lower": lower,
+            "upper": upper,
+            "initval": initval
+        }
+
+    return params
+
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
 def vcve2e(vcve0, omega=None, lsinw=None, lcosw=None, sign=None):
@@ -483,7 +526,7 @@ def target2bjd(
 # REVISION HISTORY:
 #   2011/06: Written by Jason Eastman (OSU)
 # -------------------------------------------------------------------
-
+@njit
 def bjd2target(
     bjd_tdb,
     inclination,
@@ -600,17 +643,18 @@ def exozippy_getb2(
     z1 = np.zeros((ntimes, ninterp))
 
     x2 = np.zeros((nplanets, ntimes, ninterp))
-    y2 = np.zeros_like(x2)
-    z2 = np.zeros_like(x2)
+    y2 = np.zeros((nplanets, ntimes, ninterp))
+    z2 = np.zeros((nplanets, ntimes, ninterp))
 
-    x0 = np.zeros_like(x2)
-    y0 = np.zeros_like(x2)
-    z0 = np.zeros_like(x2)
+    x0 = np.zeros((nplanets, ntimes, ninterp))
+    y0 = np.zeros((nplanets, ntimes, ninterp))
+    z0 = np.zeros((nplanets, ntimes, ninterp))
 
     isinf = ~np.isfinite(q)
     isfinite = np.isfinite(q)
-    a1 = np.zeros_like(a)
-    a2 = np.zeros_like(a)
+    na = a.shape
+    a1 = np.zeros(na)
+    a2 = np.zeros(na)
 
     a2[isinf] = a[isinf]
     a1[isinf] = 0.0
@@ -703,7 +747,7 @@ def exozippy_getb2(
 # MOD HISTORY:
 #   2010/06 - Rewritten by Jason Eastman (OSU)
 # -------------------------------------------------------------------
-
+@njit
 def exozippy_getphase(
     eccen,
     omega,
@@ -756,6 +800,7 @@ def exozippy_getphase(
 
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+@njit
 def cel_bulirsch_vec(k2, kc, p, a1, a2, a3, b1, b2, b3, f1, f2, f3):
     """
     Vectorized version of the Bulirsch-Stoer integration for computing
@@ -866,6 +911,7 @@ def cel_bulirsch_vec(k2, kc, p, a1, a2, a3, b1, b2, b3, f1, f2, f3):
     return f1, f2, f3
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+@njit
 def ellke(k):
     """
     Computes the complete elliptic integrals of the first (kk) and
@@ -1006,7 +1052,10 @@ def exozippy_occultquad_cel(z0, u1, u2, p0, return_coeffs=False):
         if p >= 1.0:
             z_notused = z[notusedyet]
             occulted = np.where(z_notused <= (p - 1.0))[0]
-            notused2 = np.setdiff1d(np.arange(len(z_notused)), occulted)
+            mask = np.ones_like(z_notused, dtype=bool)
+            mask[occulted] = False
+            notused2 = np.where(mask)[0]
+
 
             if occulted.size > 0:
                 ndxuse = notusedyet[occulted]
@@ -1053,7 +1102,9 @@ def exozippy_occultquad_cel(z0, u1, u2, p0, return_coeffs=False):
     # Case 5, 6, 7 — z == p (edge of planet at origin of star)
     z_notused = z[notusedyet]
     ocltor = np.where(z_notused == p)[0]  # indices where z == p
-    notused3 = np.setdiff1d(np.arange(len(z_notused)), ocltor)
+    # notused3 = np.setdiff1d(np.arange(len(z_notused)), ocltor)
+    # notused5 = np.delete(np.arange(len(z_notused)), inside)
+    notused3 = np.delete(np.arange(len(z_notused)), ocltor)
 
     if ocltor.size > 0:
         ndxuse = notusedyet[ocltor]
@@ -1104,7 +1155,9 @@ def exozippy_occultquad_cel(z0, u1, u2, p0, return_coeffs=False):
     # ;; Case 3, 4, 9, 10 - planet completely inside star
     z_notused = z[notusedyet]
     inside = np.where((p < 1.0) & (z_notused <= (1.0 - p)))[0]
-    notused5 = np.setdiff1d(np.arange(len(z_notused)), inside)
+    # notused5 = np.setdiff1d(np.arange(len(z_notused)), inside)
+    notused5 = np.delete(np.arange(len(z_notused)), inside)
+
     if inside.size > 0:
         ndxuse = notusedyet[inside]
         z_ndx = z[ndxuse]
@@ -1115,7 +1168,8 @@ def exozippy_occultquad_cel(z0, u1, u2, p0, return_coeffs=False):
         lambdae[ndxuse] = p ** 2
         # Case 4: edge of planet hits edge of star
         edge = np.where(z_ndx == (1.0 - p))[0]
-        notused6 = np.setdiff1d(np.arange(len(z_ndx)), edge)
+        # notused6 = np.setdiff1d(np.arange(len(z_ndx)), edge)
+        notused6 = np.delete(np.arange(len(z_ndx)), edge)
 
         if edge.size > 0:
             term1 = (2.0 / (3.0 * np.pi)) * np.arccos(1.0 - 2.0 * p)
@@ -1129,8 +1183,9 @@ def exozippy_occultquad_cel(z0, u1, u2, p0, return_coeffs=False):
                 z_ndx = z[ndxuse]
         # Case 10: center of planet hits center of star
         origin = np.where(z_ndx == 0.0)[0]
-        notused7 = np.setdiff1d(np.arange(len(z_ndx)), origin)
-
+        # notused7 = np.setdiff1d(np.arange(len(z_ndx)), origin)
+        notused7 = np.delete(np.arange(len(z_ndx)), origin)
+        
         if origin.size > 0:
             lambdad[ndxuse[origin]] = - (2.0 / 3.0) * (1.0 - p ** 2) ** 1.5
 

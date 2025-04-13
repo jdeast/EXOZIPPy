@@ -1,5 +1,5 @@
 # recursively traverse the event dictionary, find Parameters, and execute their corresponding latex commands
-from parameter import Parameter
+from .parameter import Parameter
 import pathlib
 
 def build_latex_table(event, var_filename="variables.tex", table_filename="table.tex", caption=None):
