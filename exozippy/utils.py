@@ -5,6 +5,13 @@ import re
 import os
 from numba import njit
 
+
+def printandlog(msg, logname):
+    print(msg)
+    if logname:
+        with open(logname, 'a') as logf:
+            logf.write(msg + '\n')
+
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
 def parse_param_file(filepath):
     with open(filepath, 'r') as f:

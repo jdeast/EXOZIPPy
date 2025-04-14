@@ -80,7 +80,7 @@ def exozippy(parfile=None, \
     # (fit or derived)
 
     event = build_model(parfile=parfile, tranpath=tranpath)
-             
+    return event
     # Define the orbit
     # orbit = xo.orbits.KeplerianOrbit(
     #     period=10.0,  # All times are in days

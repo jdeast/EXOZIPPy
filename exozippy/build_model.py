@@ -459,7 +459,7 @@ def build_model(nstars=1, nplanets=1,
         event["transit"] = []
         for i,tranfile in enumerate(tranfiles):
             event["transit"].append(readtran(tranfile, ndx=i, ttv=ttvs[i], tdeltav=tdeltavs[i],tiv=tivs[i]))#, user_params=user_params)
-            
+        return event
         # we're gonna need this for mulensmodel...
         #https://www.pymc.io/projects/examples/en/latest/howto/blackbox_external_likelihood_numpy.html
 

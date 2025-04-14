@@ -1,5 +1,6 @@
 import numpy as np
 from ..exozippy_keplereq import *
+from ..utils import *
 import requests
 import re
 import os
@@ -17,7 +18,6 @@ def file_lines(filename):
 
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
-@njit
 def ninterpolate(data, point):
     """
     Perform N-dimensional linear interpolation at a single point.
@@ -77,7 +77,7 @@ def ninterpolate(data, point):
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
 def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
                  redo=False, psname=None, debug=False, atmospheres=None,
-                 wavelength=None, logname=None, range=None, blend0=None):
+                 wavelength=None, logname=None, xyrange=None, blend0=None):
 
     nstars = len(teff)
     if not all(len(x) == nstars for x in [logg, feh, av, distance, lstar]):
@@ -93,14 +93,14 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
     nbands = len(sedbands)
 
     # Load filter mapping
-    filterfile = os.path.join(os.getenv("EXOFAST_PATH"), "sed", "mist", "filternames2.txt")
+    filterfile = filepath('filternames2.txt', exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
     keivanname, mistname, claretname, svoname = np.loadtxt(
         filterfile, dtype=str, comments="#", unpack=True
     )
 
     # Load grid
-    mistgridfile = os.path.join(os.getenv("EXOFAST_PATH"), "sed", "mist", "mist.sed.grid.npz")
-    grid = np.load(mistgridfile)
+    mistgridfile = filepath('mist.sed.grid.idl', exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
+    grid = readsav(mistgridfile, python_dict=True)
     teffgrid, logggrid, fehgrid, avgrid = grid['teffgrid'], grid['logggrid'], grid['fehgrid'], grid['avgrid']
 
     # Load BC tables for each band
@@ -115,9 +115,9 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
             candidates.append(mistname[np.where(svoname == band)[0][0]])
 
         for name in candidates:
-            filepath = os.path.join(os.getenv("EXOFAST_PATH"), "sed", "mist", f"{name}.npz")
-            if os.path.exists(filepath):
-                data = np.load(filepath, allow_pickle=True)
+            bcarraysfilepath = filepath(f"{name}.idl", exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
+            if os.path.exists(bcarraysfilepath):
+                data = readsav(bcarraysfilepath, python_dict=True)
                 bcarrays.append(data['bcarray'])
                 filterprops.append(data['filterproperties'])
                 found = True
@@ -305,11 +305,6 @@ def read_sed_file(
     filter_curve_sum=None,
     logname=None,
 ):
-    # def printandlog(msg, logname):
-    #     print(msg)
-    #     if logname:
-    #         with open(logname, 'a') as logf:
-    #             logf.write(msg + '\n')
 
 
     nlines = file_lines(sedfile)
@@ -380,7 +375,7 @@ def read_sed_file(
             errmag[i] = 99.0
             continue
 
-        filter = (readsav(idlfile))['filter']
+        filter = (readsav(idlfile, python_dict=True))['filter']
         filter_curves[i, :] = filter['transmission'][0]
         weff[i] = filter['weff'][0]
         widtheff[i] = filter['widtheff'][0]
