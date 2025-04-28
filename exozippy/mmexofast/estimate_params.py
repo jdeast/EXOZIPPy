@@ -47,12 +47,27 @@ class BinaryLensParams():
         Returns :
            None
         """
-        t1 = params['t_pl'] - (5 * params['dt'])
-        t2 = params['t_pl'] + (5 * params['dt'])
-        self.mag_method = [t1, 'VBBL', t2]
+        #t1 = params['t_pl'] - (5 * params['dt'])
+        #t2 = params['t_pl'] + (5 * params['dt'])
+        #self.mag_method = [t1, 'VBBL', t2]
+        print(params)
 
-
-# In[ ]:
+        t_E = params['t_E']
+        t_0 = params['t_0']
+        t_pl = params['t_pl']
+        t_star = params['dt'] / 2.
+        self.mag_method = [
+            np.min((t_0 - t_E, t_pl - t_E / 2., t_pl - 20. * t_star)),
+            'point_source',
+            t_pl - 10. * t_star,
+            'hexadecapole',
+            t_pl - 5. * t_star,
+            'VBBL',
+            t_pl + 5. * t_star,
+            'hexadecapole',
+            t_pl + 10. * t_star,
+            'point_source',
+            np.max((t_0 + t_E, t_pl + t_E / 2., t_pl + 20. * t_star))]
 
 
 def get_wide_params(params):
