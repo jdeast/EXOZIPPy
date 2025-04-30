@@ -29,6 +29,7 @@ def evaluate_results(lc_num):
     """
     pass
 
+
 files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
 lc_nums = []
 for file_ in files:
@@ -37,10 +38,10 @@ for file_ in files:
 
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
-    try:
-        results = fit_lc(lc_num, verbose=True)
-        evaluate_results(lc_num)
-    except NotImplementedError:
-        pass
-    except Exception as e:
-        print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
+    #try:
+    results = fit_lc(lc_num, verbose=True)
+    evaluate_results(lc_num)
+    #except NotImplementedError:
+    #    pass
+    #except Exception as e:
+    #    print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
