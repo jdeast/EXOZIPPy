@@ -96,8 +96,13 @@ class MMEXOFASTFitter():
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
+        self.get_best_point_lens_model()
+        self.do_af_grid_search()
+        self.results = self.find_best_binary_model()
+
+    def get_best_point_lens_model(self):
         if self.log_file is not None:
-            log = open(self.log_file, 'w')
+            log = open(self.log_file, 'a')
 
         # Find initial Point Lens model
         self.best_ef_grid_point = self.do_ef_grid_search()
@@ -118,49 +123,43 @@ class MMEXOFASTFitter():
             print('SFIT params:', self.pspl_params)
         if self.log_file is not None:
             log.write('SFIT params {0}\n'.format(self.pspl_params))
+            log.close()
 
-        if self.fit_type == 'point lens':
-            # Do the full MMEXOFAST fit to get physical parameters
-            self.results = self.do_mmexofast_fit()
-            return self.results
-        elif self.fit_type == 'binary lens':
-            # Find the initial planet parameters
-            self.best_af_grid_point = self.do_af_grid_search()
-            if self.verbose:
-                print('Best AF grid', self.best_af_grid_point)
+    #    if self.fit_type == 'point lens':
+    #        # Do the full MMEXOFAST fit to get physical parameters
+    #        self.results = self.do_mmexofast_fit()
+    #        return self.results
+    #    elif self.fit_type == 'binary lens':
+    #        # Find the initial planet parameters
+    #        self.best_af_grid_point = self.do_af_grid_search()
 
-            if self.log_file is not None:
-                log.write('Best AF grid {0}\n'.format(self.best_af_grid_point))
+    def find_best_binary_model(self):
+        if self.log_file is not None:
+            log = open(self.log_file, 'a')
 
-            self.pspl_params = self.refine_pspl_params()
-            if self.verbose:
-                print('Revised SFIT', self.pspl_params)
-
-            if self.log_file is not None:
-                log.write('Revised SFIT {0}\n'.format(self.pspl_params))
-
-            self.binary_params = self.get_initial_2L1S_params()
-            if self.verbose:
-                print(
-                    'Initial 2L1S params', self.binary_params.ulens)
-                print('mag_methods', self.binary_params.mag_method)
-            if self.log_file is not None:
-                log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
-                log.write('mag_methods {0}\n'.format(self.binary_params.mag_method))
-                log.flush()
-
-            # Do the full MMEXOFAST fit to get physical parameters
-            self.results = self.do_mmexofast_fit()
-            if self.verbose:
-                print('Final params', self.results)
-
-            return self.results
-        else:
-            raise ValueError(
-                'fit_type not recognized. Your value', self.fit_type)
+        self.pspl_params = self.refine_pspl_params()
+        if self.verbose:
+            print('Revised SFIT', self.pspl_params)
 
         if self.log_file is not None:
-            log.close()
+            log.write('Revised SFIT {0}\n'.format(self.pspl_params))
+
+        self.binary_params = self.get_initial_2L1S_params()
+        if self.verbose:
+            print(
+                'Initial 2L1S params', self.binary_params.ulens)
+            print('mag_methods', self.binary_params.mag_method)
+        if self.log_file is not None:
+            log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
+            log.write('mag_methods {0}\n'.format(self.binary_params.mag_method))
+            log.flush()
+
+        # Do the full MMEXOFAST fit to get physical parameters
+        self.results = self.do_mmexofast_fit()
+        if self.verbose:
+            print('Final params', self.results)
+
+        return self.results
 
     def do_ef_grid_search(self):
         # Should probably scrape t_0_1 from the filenames
@@ -447,11 +446,20 @@ class MMEXOFASTFitter():
         self.residuals = residuals
 
     def do_af_grid_search(self):
+        if self.log_file is not None:
+            log = open(self.log_file, 'a')
+
         self.set_residuals()
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
         af_grid.run()
-        return af_grid.best
+        self.best_af_grid_point = af_grid.best
+        if self.verbose:
+            print('Best AF grid', self.best_af_grid_point)
+
+        if self.log_file is not None:
+            log.write('Best AF grid {0}\n'.format(self.best_af_grid_point))
+            log.close()
 
     def get_dmag(self):
         pspl_event = MulensModel.Event(
