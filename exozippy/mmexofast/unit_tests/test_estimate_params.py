@@ -79,16 +79,16 @@ class KB160625():
         self.t_E = 11.5
         self.s_close = 0.739
         self.s_wide = 1.352
-        self.alpha = [0.12, 3.26]  # radians
+        self.alpha = np.pi - np.array([0.12, 3.26])  # radians
 
         # Data from Table 5:
         # s-
         self.close_params = {'t_0': 7655.951, 'u_0': 0.073, 't_E': 11.494,
-                             's': 0.741, 'q': 2.357e-4, 'alpha': np.rad2deg(3.217),
+                             's': 0.741, 'q': 2.357e-4, 'alpha': 180. - np.rad2deg(3.217),
                              'rho': 1.2256e-3}
         # s+
         self.wide_params = {'t_0': 7655.951, 'u_0': 0.075, 't_E':11.335,
-                            's': 1.367, 'q': 0.727e-4, 'alpha': np.rad2deg(0.122), 'rho': 1.7656e-3}
+                            's': 1.367, 'q': 0.727e-4, 'alpha': 180. - np.rad2deg(0.122), 'rho': 1.7656e-3}
         # 1L2S
         self.binary_source_params = {
             't_0_1': 7655.953, 'u_0_1': 0.078, 't_E': 10.946, 't_0_2': 7662.943, 'u_0_2': 3.751e-4, 'rho_2': 5.1309e-3, 'q_flux':  0.005
@@ -151,8 +151,8 @@ class TestGetWideParams(unittest.TestCase, KB160625):
         np.testing.assert_allclose(Ap_est, Ap_true, rtol=self.tol)
 
     def test_mag_methods(self):
-        expected_values = [self.t_pl - 5. * self.dt, 'VBBL', self.t_pl + 5. * self.dt]
-        for actual, expected in zip(self.ulens_params.mag_method, expected_values):
+        expected_values = [self.t_pl - 5. * self.dt / 2., 'VBBL', self.t_pl + 5. * self.dt / 2.]
+        for actual, expected in zip(self.ulens_params.mag_method[4:7], expected_values):
             if isinstance(actual, str):
                 assert actual == expected
             else:
