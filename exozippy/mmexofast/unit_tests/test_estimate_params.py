@@ -1,6 +1,57 @@
 import unittest
+
+import MulensModel
 import numpy as np
 from exozippy.mmexofast import estimate_params
+
+
+class TestGetWideParams_alpha(unittest.TestCase):
+    """
+    Test that the model calculated from a given t_pl produces an
+    anomaly at t_pl.
+
+            - 't_0' (*float*): Time of maximum magnification.
+            - 'u_0' (*float*): Impact parameter.
+            - 't_E' (*float*): Einstein crossing time.
+            - 't_pl' (*float*): Time at which to compute the wide model parameters.
+            - 'dt' (*float*): Duration of the anomaly
+            - 'dmag' (*float*): Magnitude difference of the perturbation
+
+    """
+
+    def setUp(self):
+        self.params = {'t_0': 0., 'u_0': 0.5, 't_E': 15., 't_pl': 0, 'dt': 0.7, 'dmag': 0.5}
+
+    def do_test(self, t_pl):
+        params = {key: value for key, value in self.params.items()}
+        params['t_pl'] = t_pl
+        planet_params = estimate_params.get_wide_params(params)
+
+        planet_model = MulensModel.Model(parameters=planet_params.ulens)
+        planet_model.set_magnification_methods([t_pl - 1., 'VBBL', t_pl + 1.])
+        planet_model_mag = planet_model.get_magnification(t_pl)
+
+        pspl_model = MulensModel.Model(
+            parameters={'t_0': self.params['t_0'], 'u_0': self.params['u_0'], 't_E': self.params['t_E']})
+        pspl_model_mag = pspl_model.get_magnification(t_pl)
+
+        assert np.abs((planet_model_mag - pspl_model_mag) / pspl_model_mag) > 0.05
+
+    def test_1(self):
+        t_pl = self.params['t_0'] - 0.5 * self.params['t_E']
+        self.do_test(t_pl)
+
+    def test_2(self):
+        t_pl = self.params['t_0'] - 1.5 * self.params['t_E']
+        self.do_test(t_pl)
+
+    def test_3(self):
+        t_pl = self.params['t_0'] + 0.5 * self.params['t_E']
+        self.do_test(t_pl)
+
+    def test_4(self):
+        t_pl = self.params['t_0'] + 1.5 * self.params['t_E']
+        self.do_test(t_pl)
 
 
 class KB160625():
