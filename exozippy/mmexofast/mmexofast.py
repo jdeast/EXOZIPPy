@@ -148,10 +148,10 @@ class MMEXOFASTFitter():
         if self.verbose:
             print(
                 'Initial 2L1S params', self.binary_params.ulens)
-            print('mag_methods', self.binary_params.mag_method)
+            print('mag_methods', self.binary_params.mag_methods)
         if self.log_file is not None:
             log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
-            log.write('mag_methods {0}\n'.format(self.binary_params.mag_method))
+            log.write('mag_methods {0}\n'.format(self.binary_params.mag_methods))
             log.flush()
 
         # Do the full MMEXOFAST fit to get physical parameters
@@ -239,7 +239,7 @@ class MMEXOFASTFitter():
             model = MulensModel.Model(self.binary_params.ulens)
             model.set_default_magnification_method = 'point_source_point_lens'
             #mag_methods = [model.parameters.t_0 - 3. * model.parameters.t_E, 'point_source'] +  self.binary_params.mag_method + ['point_source', model.parameters.t_0 + 3. * model.parameters.t_E]
-            model.set_magnification_methods(self.binary_params.mag_method)
+            model.set_magnification_methods(self.binary_params.mag_methods)
         else:
             raise KeyError('model_type must be ["pspl", "binary"]. Your value: ', model_type)
 

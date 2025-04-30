@@ -28,7 +28,7 @@ class BinaryLensParams():
     """
     def __init__(self, ulens):
         self.ulens = ulens
-        self.mag_method = None
+        self.mag_methods = None
         
     def set_mag_method(self, params):
         """
@@ -57,7 +57,7 @@ class BinaryLensParams():
         t_0 = params['t_0']
         t_pl = params['t_pl']
         t_star = params['dt'] / 2.
-        self.mag_method = [
+        self.mag_methods = [
             np.min((t_0 - t_E, t_pl - t_E / 2., t_pl - 20. * t_star)),
             'point_source',
             t_pl - 10. * t_star,

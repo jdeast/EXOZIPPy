@@ -152,7 +152,7 @@ class TestGetWideParams(unittest.TestCase, KB160625):
 
     def test_mag_methods(self):
         expected_values = [self.t_pl - 5. * self.dt / 2., 'VBBL', self.t_pl + 5. * self.dt / 2.]
-        for actual, expected in zip(self.ulens_params.mag_method[4:7], expected_values):
+        for actual, expected in zip(self.ulens_params.mag_methods[4:7], expected_values):
             if isinstance(actual, str):
                 assert actual == expected
             else:
