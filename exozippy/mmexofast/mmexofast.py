@@ -155,7 +155,8 @@ class MMEXOFASTFitter():
             log.flush()
 
         # Do the full MMEXOFAST fit to get physical parameters
-        self.results = self.do_mmexofast_fit()
+        #self.results = self.do_mmexofast_fit()
+        self.results = None
         if self.verbose:
             print('Final params', self.results)
 

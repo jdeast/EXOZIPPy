@@ -9,6 +9,7 @@
 import MulensModel as mm
 import matplotlib.pyplot as plt
 import numpy as np
+import warnings
 
 
 # In[ ]:
@@ -96,7 +97,7 @@ def get_wide_params(params):
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
     #alpha = np.arctan2(-params['u_0'], tau)
-    alpha = np.pi - np.arctan2(params['u_0'], tau)
+    alpha = 3.*np.pi - np.arctan2(params['u_0'], tau)
     rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
    
@@ -140,6 +141,7 @@ def get_close_params(params, q=None, rho=None):
         lens1, lens2 : *tuple of BinaryLensParams*
             Two instances of BinaryLensParams representing close model parameters.
     """
+    warnings.warn('The close estimator has not been updated for MMv3. Might just need alpha+180 deg')
     if q is None:
         q = 0.0040
 
