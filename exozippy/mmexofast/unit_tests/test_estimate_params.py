@@ -22,20 +22,27 @@ class TestGetWideParams_alpha(unittest.TestCase):
     def setUp(self):
         self.params = {'t_0': 0., 'u_0': 0.5, 't_E': 15., 't_pl': 0, 'dt': 0.7, 'dmag': 0.5}
 
+    def estimate_params(self, params):
+        return estimate_params.get_wide_params(params)
+
     def do_test(self, t_pl):
         params = {key: value for key, value in self.params.items()}
         params['t_pl'] = t_pl
-        planet_params = estimate_params.get_wide_params(params)
+        planet_params = self.estimate_params(params)
+        if isinstance(planet_params, estimate_params.BinaryLensParams):
+            planet_params = [planet_params]
 
-        planet_model = MulensModel.Model(parameters=planet_params.ulens)
-        planet_model.set_magnification_methods([t_pl - 1., 'VBBL', t_pl + 1.])
-        planet_model_mag = planet_model.get_magnification(t_pl)
+        for params in planet_params:
+            planet_model = MulensModel.Model(parameters=params.ulens)
+            planet_model.set_magnification_methods([t_pl - 1., 'VBBL', t_pl + 1.])
+            planet_model_mag = planet_model.get_magnification(t_pl)
 
-        pspl_model = MulensModel.Model(
-            parameters={'t_0': self.params['t_0'], 'u_0': self.params['u_0'], 't_E': self.params['t_E']})
-        pspl_model_mag = pspl_model.get_magnification(t_pl)
+            pspl_model = MulensModel.Model(
+                parameters={'t_0': self.params['t_0'], 'u_0': self.params['u_0'], 't_E': self.params['t_E']})
+            pspl_model_mag = pspl_model.get_magnification(t_pl)
 
-        assert np.abs((planet_model_mag - pspl_model_mag) / pspl_model_mag) > 0.05
+            print(params.ulens)
+            assert np.abs((planet_model_mag - pspl_model_mag) / pspl_model_mag) > 0.05
 
     def test_1(self):
         t_pl = self.params['t_0'] - 0.5 * self.params['t_E']
@@ -52,6 +59,12 @@ class TestGetWideParams_alpha(unittest.TestCase):
     def test_4(self):
         t_pl = self.params['t_0'] + 1.5 * self.params['t_E']
         self.do_test(t_pl)
+
+
+class TestGetCloseParams_alpha(TestGetWideParams_alpha):
+
+    def estimate_params(self, params):
+        return estimate_params.get_close_params(params)
 
 
 class KB160625():

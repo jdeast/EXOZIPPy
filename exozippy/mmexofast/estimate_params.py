@@ -141,7 +141,6 @@ def get_close_params(params, q=None, rho=None):
         lens1, lens2 : *tuple of BinaryLensParams*
             Two instances of BinaryLensParams representing close model parameters.
     """
-    warnings.warn('The close estimator has not been updated for MMv3. Might just need alpha+180 deg')
     if q is None:
         q = 0.0040
 
@@ -167,7 +166,7 @@ def get_close_params(params, q=None, rho=None):
                 's': s,
                 'q': q,
                 'rho': rho,
-                'alpha': -np.rad2deg(alpha1)}
+                'alpha': -np.rad2deg(alpha1)+180.}
     
     new_params2 = {'t_0': params['t_0'],
                 'u_0': params['u_0'],
@@ -175,7 +174,7 @@ def get_close_params(params, q=None, rho=None):
                 's': s,
                 'q': q,
                 'rho': rho,
-                'alpha': -np.rad2deg(alpha2)}
+                'alpha': -np.rad2deg(alpha2)+180.}
     
     out1 = BinaryLensParams(new_params1)
     out2 = BinaryLensParams(new_params2)
