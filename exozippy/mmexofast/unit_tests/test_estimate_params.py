@@ -80,9 +80,9 @@ class KB160625():
         self.t_E = 11.5
         self.s_close = 0.739
         self.s_wide = 1.352
-        self.alpha = np.pi - np.array([0.12, 3.26])  # radians
+        self.alpha = np.pi - np.array([0.12, 3.26])  # radians, alpha corrected to MMv3 system
 
-        # Data from Table 5:
+        # Data from Table 5 (alpha corrected to MMv3 system):
         # s-
         self.close_params = {'t_0': 7655.951, 'u_0': 0.073, 't_E': 11.494,
                              's': 0.741, 'q': 2.357e-4, 'alpha': 180. - np.rad2deg(3.217),
@@ -139,8 +139,9 @@ class TestGetWideParams(unittest.TestCase, KB160625):
         np.testing.assert_allclose(self.ulens_params.ulens['s'], self.s_wide, rtol=self.tol)
 
     def test_alpha(self):
-        alpha = np.min(np.abs(self.ulens_params.ulens['alpha'] - np.rad2deg(self.alpha)))
-        np.testing.assert_allclose(self.ulens_params.ulens['alpha'], alpha, rtol=self.tol)
+        # self.alpha has 2 values. choose the one closest to the results.
+        index = np.argmin(np.abs(self.ulens_params.ulens['alpha'] - np.rad2deg(self.alpha)))
+        np.testing.assert_allclose(self.ulens_params.ulens['alpha'], np.rad2deg(self.alpha[index]), rtol=self.tol)
 
     def test_q_rho(self):
         # Gould & Gaucherel approximation
