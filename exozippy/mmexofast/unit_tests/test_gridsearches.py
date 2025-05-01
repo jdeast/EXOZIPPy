@@ -147,8 +147,59 @@ class TestEFSFitFunction():
 
 class TestAnomalyFinderGridSearch(unittest.TestCase):
 
+    def setUp(self):
+        datafile = os.path.join(MULENS_DATA_PATH, 'unit_test_data', 'planet4AF.dat')
+        self.data = mm.MulensData(
+            file_name= datafile,
+            phot_fmt='mag')
+        self.expected = self._parse_header(datafile)
+        print(self.expected)
+
+        self.residuals = self._get_residuals()
+        self.af_grid = gridsearches.AnomalyFinderGridSearch(residuals=self.residuals)
+
+    def _parse_header(self, datafile):
+        with open(datafile, 'r') as file_:
+            lines = file_.readlines()
+
+        elements = lines[0].split()
+        expected = {}
+        for i, element in enumerate(elements):
+            if element[-2:] == "':":
+                key = element.strip('{')[1:-2]
+                expected[key] = float(elements[i + 1].strip(',').strip('}'))
+
+        elements = lines[1].split()
+        for i, element in enumerate(elements):
+            if element == '=':
+                expected[elements[i - 1]] = float(elements[i + 1].strip(','))
+
+        return expected
+
+    def _get_residuals(self):
+        pspl_model = mm.Model(
+            parameters={'t_0': self.expected['t_0'], 'u_0': self.expected['u_0'],
+                        't_E': self.expected['t_E']})
+        fit = mm.FitData(model=pspl_model, dataset=self.data)
+        fit.fit_fluxes()
+        res, err = fit.get_residuals(phot_fmt='flux')
+        residuals = mm.MulensData([self.data.time, res, err], phot_fmt='flux')
+        return residuals
+
     def test_run(self):
-        raise NotImplementedError()
+        self.af_grid.run()
+
+        # t_eff is reasonable
+        t_star = self.expected['t_E'] * self.expected['rho']
+        assert self.af_grid.best['t_eff'] < (5. * t_star)
+
+        # t_0 is as close to the expected value as possible given t_eff and the data spacing.
+        index = self.af_grid.grid_t_eff == self.af_grid.xbest['t_eff']
+        closest_t_0 = np.argmin(np.abs(self.af_grid.grid_t_0[index] - self.expected['t_pl']))
+        best_expected = self.af_grid.grid_t_0[index][closest_t_0]
+        np.testing.assert_allclose(
+            self.af_grid.best['t_0'], best_expected,
+            atol=(self.data.time[1] - self.data.time[0]))
 
     def test_get_zero_chi2(self):
         raise NotImplementedError()
