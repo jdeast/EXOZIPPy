@@ -48,11 +48,15 @@ class TestEventFinderGridSearch_1(unittest.TestCase):
             #print(n_expected, dataset.n_epochs, self.data.n_epochs)
             np.testing.assert_almost_equal(dataset.n_epochs, n_expected)
 
-    def get_flat_chi2(self):
-        raise NotImplementedError()
+    def test_get_flat_chi2(self):
+        raise NotImplementedError(
+            'Technically this part of the code is covered. But it might be a good idea to have a special test for ' +
+            'debugging.')
 
     def test_do_fits(self):
-        raise NotImplementedError()
+        raise NotImplementedError(
+            'Technically this part of the code is covered. But it might be a good idea to have a special test for ' +
+            'debugging.')
 
     def test_best(self):
         self.ef_grid.run()
@@ -79,6 +83,33 @@ class TestEventFinderGridSearch_2(TestEventFinderGridSearch_1):
             phot_fmt='mag')
         self.expected = self._parse_header(datafile)
         self.ef_grid = gridsearches.EventFinderGridSearch(datasets=self.data)
+
+    def test_bad_input_data(self):
+        with self.assertRaises(ValueError):
+            foo = gridsearches.EventFinderGridSearch(datasets=None)
+
+        with self.assertRaises(TypeError):
+            foo = gridsearches.EventFinderGridSearch(datasets=16.)
+
+    def test_set_t_0_multiple_datasets(self):
+        alt_times = [time for time in self.data.time]
+        alt_times[0] -= 10.
+        alt_times[-1] += 10.
+        data_2 = mm.MulensData([alt_times, self.data.mag, self.data.err_mag], phot_fmt='mag')
+
+        datasets = [self.data, data_2]
+        test_grid = gridsearches.EventFinderGridSearch(datasets=datasets)
+
+        np.testing.assert_almost_equal(test_grid.grid_params['t_0_min'], alt_times[0] - (1./3.))
+        np.testing.assert_almost_equal(test_grid.grid_params['t_0_max'], alt_times[-1] + (1. / 3.))
+
+    def test_set_t_0_manual(self):
+        t_0_min = -5.
+        t_0_max = 16.
+        test_grid = gridsearches.EventFinderGridSearch(
+            datasets=self.data, t_0_min=t_0_min, t_0_max=t_0_max)
+        np.testing.assert_almost_equal(test_grid.grid_params['t_0_min'], t_0_min)
+        np.testing.assert_almost_equal(test_grid.grid_params['t_0_max'], t_0_max)
 
 
 class TestFlatSFitFunction(unittest.TestCase):
