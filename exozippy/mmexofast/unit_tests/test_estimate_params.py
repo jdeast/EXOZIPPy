@@ -1,4 +1,5 @@
 import unittest
+import numpy.testing
 
 import MulensModel
 import numpy as np
@@ -168,6 +169,14 @@ class TestGetCloseParams(unittest.TestCase, KB160625):
 
 def test_model_pspl_at_pl():
     raise NotImplementedError()
+
+
+def test_correct_alpha():
+    expected = [20., 20., -20., -20.]
+    input = [20., 380., -20, -740.]
+    for value_exp, value_in in zip(expected, input):
+        print('expected', value_exp, 'input', value_in)
+        numpy.testing.assert_almost_equal(value_exp, estimate_params.correct_alpha(value_in))
 
 
 class TestBinarySourceParams(unittest.TestCase):

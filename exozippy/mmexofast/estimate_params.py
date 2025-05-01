@@ -71,6 +71,16 @@ class BinaryLensParams():
             np.max((t_0 + t_E, t_pl + t_E / 2., t_pl + 20. * t_star))]
 
 
+def correct_alpha(alpha):
+    while alpha > 360.:
+        alpha -= 360.
+
+    while alpha < -360:
+        alpha += 360.
+
+    return alpha
+
+
 def get_wide_params(params):
     """
     Transform initial parameters into wide model parameters.
@@ -97,7 +107,7 @@ def get_wide_params(params):
     u = np.sqrt(params['u_0']**2 + tau**2)
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
     #alpha = np.arctan2(-params['u_0'], tau)
-    alpha = 3.*np.pi - np.arctan2(params['u_0'], tau)
+    alpha = np.pi - np.arctan2(params['u_0'], tau)
     rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
    
@@ -108,7 +118,7 @@ def get_wide_params(params):
                'q': q,
                'rho': rho,
                'alpha': np.rad2deg(alpha)}
-    
+
     out = BinaryLensParams(new_params)
     out.set_mag_method(params)
     
