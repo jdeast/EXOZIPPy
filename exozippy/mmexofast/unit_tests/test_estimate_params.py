@@ -143,14 +143,14 @@ class TestGetWideParams(unittest.TestCase, KB160625):
         index = np.argmin(np.abs(self.ulens_params.ulens['alpha'] - np.rad2deg(self.alpha)))
         np.testing.assert_allclose(self.ulens_params.ulens['alpha'], np.rad2deg(self.alpha[index]), rtol=self.tol)
 
-    def test_q_rho(self):
-        # Gould & Gaucherel approximation
-        # Ap = 2(q / ρ^2)
-        Ap_true = 2. * self.wide_params['q'] / self.wide_params['rho']**2
-        Ap_est = 2. * self.ulens_params.ulens['q'] / self.ulens_params.ulens['rho']**2
-        #print(Ap_true, Ap_est)
-        print('JCY: This is a good idea for a test, but this event is not in this regime...')
-        np.testing.assert_allclose(Ap_est, Ap_true, rtol=self.tol)
+    #def test_q_rho(self):
+    #    # Gould & Gaucherel approximation
+    #    # Ap = 2(q / ρ^2)
+    #    Ap_true = 2. * self.wide_params['q'] / self.wide_params['rho']**2
+    #    Ap_est = 2. * self.ulens_params.ulens['q'] / self.ulens_params.ulens['rho']**2
+    #    #print(Ap_true, Ap_est)
+    #    print('JCY: This is a good idea for a test, but this event is not in this regime...')
+    #    np.testing.assert_allclose(Ap_est, Ap_true, rtol=self.tol)
 
     def test_mag_methods(self):
         expected_values = [self.t_pl - 5. * self.dt / 2., 'VBBL', self.t_pl + 5. * self.dt / 2.]
