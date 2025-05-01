@@ -110,14 +110,15 @@ def get_wide_params(params):
     alpha = np.pi - np.arctan2(params['u_0'], tau)
     rho = params['dt'] / params['t_E'] / 2.
     q = 0.5 * params['dmag'] * (rho**2)
-   
+
+    alpha_deg = correct_alpha(np.rad2deg(alpha))
     new_params = {'t_0': params['t_0'],
                'u_0': params['u_0'],
                't_E': params['t_E'],
                's': s,
                'q': q,
                'rho': rho,
-               'alpha': np.rad2deg(alpha)}
+               'alpha': alpha_deg}
 
     out = BinaryLensParams(new_params)
     out.set_mag_method(params)
@@ -165,6 +166,9 @@ def get_close_params(params, q=None, rho=None):
     alpha1 = np.pi / 2 - mu - phi
     alpha2 = alpha1 + 2 * mu
 
+    alpha1_deg = correct_alpha(-np.rad2deg(alpha1) + 180.)
+    alpha2_deg = correct_alpha(-np.rad2deg(alpha2) + 180.)
+
     if 'dt' in params.keys():
         rho = params['dt'] / params['t_E'] / 2.
     elif 'rho' not in params.keys():
@@ -176,7 +180,7 @@ def get_close_params(params, q=None, rho=None):
                 's': s,
                 'q': q,
                 'rho': rho,
-                'alpha': -np.rad2deg(alpha1) + 180.}
+                'alpha': alpha1_deg}
     
     new_params2 = {'t_0': params['t_0'],
                 'u_0': params['u_0'],
@@ -184,7 +188,7 @@ def get_close_params(params, q=None, rho=None):
                 's': s,
                 'q': q,
                 'rho': rho,
-                'alpha': -np.rad2deg(alpha2) + 180.}
+                'alpha': alpha2_deg}
     
     out1 = BinaryLensParams(new_params1)
     out2 = BinaryLensParams(new_params2)
