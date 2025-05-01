@@ -40,7 +40,13 @@ class TestEventFinderGridSearch_1(unittest.TestCase):
         np.testing.assert_almost_equal(self.ef_grid.grid_params['d_t_eff'], 1. / 3.)
 
     def test_get_trimmed_datasets(self):
-        raise NotImplementedError()
+        params = {'t_0': 3., 't_eff': 5.}
+        #print(self.ef_grid.z_t_eff)
+        n_expected = params['t_eff'] * 2 * 5 / (self.data.time[1] - self.data.time[0])
+        trimmed_data = self.ef_grid.get_trimmed_datasets(parameters=params)
+        for dataset in trimmed_data:
+            #print(n_expected, dataset.n_epochs, self.data.n_epochs)
+            np.testing.assert_almost_equal(dataset.n_epochs, n_expected)
 
     def get_flat_chi2(self):
         raise NotImplementedError()
