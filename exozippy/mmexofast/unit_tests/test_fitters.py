@@ -60,7 +60,7 @@ class TestSFitFitter_2(TestSFitFitter_1):
         self.initial_guess = {'t_0': 4., 'u_0': 0.7, 't_E': 20.}
 
 
-class TestWidePlanetFitter(TestSFitFitter_1):
+class TestWidePlanetFitter(unittest.TestCase):
 
     def setUp(self):
         datafile = os.path.join(MULENS_DATA_PATH, 'unit_test_data', 'planet4AF.dat')
@@ -68,9 +68,12 @@ class TestWidePlanetFitter(TestSFitFitter_1):
             file_name= datafile,
             phot_fmt='mag')
         self.true_params, self.input_fluxes = self._parse_header(datafile)
-        self.pspl = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
-        self.af_results = {'t_0': 17.43489583333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 98.97724735834696, 'dchi2_zero': 218.83573427369782, 'dchi2_flat': 143.937564049782}
-        self.fitter = fitters.WidePlanetFitter(datasets=[self.data], pspl_model_params=self.pspl, af_results=self.af_results)
+        #self.pspl = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
+        self.anomaly_lc_params = {'t_0': 5.012676614091774, 'u_0': 0.3001165942835024, 't_E': 16.049057513235873, 't_pl': 17.43489583333333, 'dt': 0.421875, 'dmag': -0.12254925495518165}
+        self.fitter = fitters.WidePlanetFitter(datasets=[self.data], anomaly_lc_params=self.anomaly_lc_params)
+
+    def _parse_header(self, datafile):
+        return TestSFitFitter_1._parse_header(self, datafile=datafile)
 
     def test_run(self):
         self.fitter.run()
