@@ -194,20 +194,26 @@ class TestAnomalyFinderGridSearch(unittest.TestCase):
         assert self.af_grid.best['t_eff'] < (5. * t_star)
 
         # t_0 is as close to the expected value as possible given t_eff and the data spacing.
-        index = self.af_grid.grid_t_eff == self.af_grid.xbest['t_eff']
+        index = self.af_grid.grid_t_eff == self.af_grid.best['t_eff']
         closest_t_0 = np.argmin(np.abs(self.af_grid.grid_t_0[index] - self.expected['t_pl']))
         best_expected = self.af_grid.grid_t_0[index][closest_t_0]
         np.testing.assert_allclose(
             self.af_grid.best['t_0'], best_expected,
             atol=(self.data.time[1] - self.data.time[0]))
 
+    def test_grid_t_0(self):
+        np.testing.assert_almost_equal(self.af_grid.grid_params['t_0_min'], self.data.time[0] - (1./6.))
+        np.testing.assert_almost_equal(self.af_grid.grid_params['t_0_max'], self.data.time[-1] + (1. / 6.))
+
+    def test_grid_t_eff(self):
+        np.testing.assert_almost_equal(self.af_grid.grid_params['t_eff_3'], 0.75)
+        np.testing.assert_almost_equal(self.af_grid.grid_params['t_eff_max'], 10.)
+        np.testing.assert_almost_equal(self.af_grid.grid_params['d_t_eff'], 1. / 3.)
+
     def test_get_zero_chi2(self):
         raise NotImplementedError()
 
     def test_check_successive(self):
-        raise NotImplementedError()
-
-    def test_do_fits(self):
         raise NotImplementedError()
 
     def test_get_anomalies(self):
@@ -218,7 +224,3 @@ class TestAnomalyFinderGridSearch(unittest.TestCase):
 
     def test_anomalies(self):
         raise NotImplementedError()
-
-    def test_best(self):
-        raise NotImplementedError()
-    
