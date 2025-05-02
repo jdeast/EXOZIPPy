@@ -59,3 +59,22 @@ class TestSFitFitter_2(TestSFitFitter_1):
         self.true_params, self.input_fluxes = self._parse_header(datafile)
         self.initial_guess = {'t_0': 4., 'u_0': 0.7, 't_E': 20.}
 
+
+class TestWidePlanetFitter(TestSFitFitter_1):
+
+    def setUp(self):
+        datafile = os.path.join(MULENS_DATA_PATH, 'unit_test_data', 'planet4AF.dat')
+        self.data = mm.MulensData(
+            file_name= datafile,
+            phot_fmt='mag')
+        self.true_params, self.input_fluxes = self._parse_header(datafile)
+        self.pspl = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
+        self.af_results = {'t_0': 17.43489583333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 98.97724735834696, 'dchi2_zero': 218.83573427369782, 'dchi2_flat': 143.937564049782}
+        self.fitter = fitters.WidePlanetFitter(datasets=[self.data], pspl_model_params=self.pspl, af_results=self.af_results)
+
+    def test_run(self):
+        self.fitter.run()
+        for key, value in self.fitter.best.items():
+            if key in self.true_params.keys():
+                np.testing.assert_allclose(value, self.true_params[key], rtol=0.01)
+
