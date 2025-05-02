@@ -3,6 +3,7 @@ import numpy.testing
 import os.path
 import MulensModel
 import numpy as np
+import matplotlib.pyplot as plt
 
 from exozippy.mmexofast import estimate_params
 from exozippy import MULENS_DATA_PATH
@@ -179,7 +180,7 @@ class TestAnomalyParameterEstimator(unittest.TestCase):
             file_name=datafile,
             phot_fmt='mag')
         self.true_params, self.input_fluxes = self._parse_header(datafile)
-        self.pspl = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
+        self.pspl_params = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
         self.af_results = {'t_0': 17.43489583333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 98.97724735834696,
                            'dchi2_zero': 218.83573427369782, 'dchi2_flat': 143.937564049782}
 
@@ -203,10 +204,37 @@ class TestAnomalyParameterEstimator(unittest.TestCase):
         return ulens_params, fluxes
 
     def test_update_pspl_model(self):
-        pass
+        print('JCY: this test does not work. Maybe there is a change in origin. Maybe it is a bad test, regardless.')
+        fitter = fitters.SFitFitter(datasets=[self.data], initial_model=self.pspl_params)
+        fitter.run()
+        test_pspl = {key: fitter.best[key] for key in self.pspl_params.keys()}
+        estimator = estimate_params.AnomalyPropertyEstimator(
+            datasets=self.data, pspl_params=test_pspl, af_results=self.af_results
+        )
+        estimator.update_pspl_model()
+
+        #print(test_pspl)
+        #print(self.pspl_params)
+        #print(estimator.refined_pspl_params)
+        #event = MulensModel.Event(datasets=self.data, model=MulensModel.Model(parameters=test_pspl))
+        #event.plot()
+        #
+        #event_2 = MulensModel.Event(datasets=estimator.masked_datasets, model=MulensModel.Model(parameters=estimator.refined_pspl_params))
+        #event_2.plot(show_bad=True)
+        #plt.show()
+
+        for key, value in estimator.refined_pspl_params.items():
+            np.testing.assert_allclose(value, self.pspl_params[key], rtol=0.001)
 
     def test_get_anomaly_lc_params(self):
-        pass
+        estimator = estimate_params.AnomalyPropertyEstimator(
+            datasets=self.data, pspl_params=self.pspl_params, af_results=self.af_results
+        )
+        results = estimator.get_anomaly_lc_parameters()
+        expected = {'t_pl': 17.44, 'dt': 0.43, 'dmag': -0.12}
+        print(results)
+        for key, value in expected.items():
+            np.testing.assert_allclose(results[key], value, rtol=0.2)
 
 
 def test_model_pspl_at_pl():

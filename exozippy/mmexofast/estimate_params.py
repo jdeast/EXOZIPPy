@@ -401,10 +401,10 @@ class AnomalyPropertyEstimator():
         dmag = []
         event.fit_fluxes()
         for fit in event.fits:
-            residuals, errors = fit.get_residuals(bad=True, format='flux')
+            residuals, errors = fit.get_residuals(bad=True, phot_fmt='flux')
             sigma = residuals[fit.dataset.bad]**2 / errors[fit.dataset.bad]**2
             index = np.argmax(sigma)
-            mag_residuals, mag_errs = fit.get_residuals(bad=True, format='mag')
+            mag_residuals, mag_errs = fit.get_residuals(bad=True, phot_fmt='mag')
             dmag.append(mag_residuals[fit.dataset.bad][index])
 
         max_ind = np.argmax(np.abs(dmag))
@@ -419,7 +419,7 @@ class AnomalyPropertyEstimator():
     def get_anomaly_lc_parameters(self):
         params = {key: value for key, value in self.refined_pspl_params.items()}
         params['t_pl'] = self.af_results['t_0']
-        params['dt'] = 2. * self.af_results['t_eff']
+        params['dt'] = self.af_results['t_eff']
         params['dmag'] = self.get_dmag()
 
         return params
