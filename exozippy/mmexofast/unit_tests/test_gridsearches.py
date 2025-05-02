@@ -22,7 +22,7 @@ class TestEventFinderGridSearch_1(unittest.TestCase):
         with open(datafile, 'r') as file_:
             lines = file_.readlines()
 
-        elements = lines[0].split()
+        elements = lines[2].split()
         expected = {}
         for i, element in enumerate(elements):
             if element == '=':
@@ -169,7 +169,7 @@ class TestAnomalyFinderGridSearch(unittest.TestCase):
                 key = element.strip('{')[1:-2]
                 expected[key] = float(elements[i + 1].strip(',').strip('}'))
 
-        elements = lines[1].split()
+        elements = lines[2].split()
         for i, element in enumerate(elements):
             if element == '=':
                 expected[elements[i - 1]] = float(elements[i + 1].strip(','))
