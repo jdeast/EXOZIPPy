@@ -5,12 +5,14 @@
 
 
 # Created by Luca Campiani in January 2024
-
+import MulensModel
 import MulensModel as mm
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import numpy as np
-import warnings
+#import warnings
+import copy
 
+import exozippy.mmexofast as mmexo
 
 # In[ ]:
 
@@ -303,3 +305,135 @@ def get_binary_source_params(params):
     out.set_source_flux_ratio(params)
     return out
 
+
+class AnomalyPropertyEstimator():
+
+    def __init__(self, datasets=None, pspl_params=None, af_results=None, mask_type='t_eff'):
+        if isinstance(datasets, MulensModel.MulensData):
+            datasets = [datasets]
+
+        self.datasets = datasets
+        self.pspl_params = pspl_params
+        self.af_results = af_results
+        self.mask_type = mask_type
+
+        self._refined_pspl_params = None
+        self._masked_datasets = None
+
+    def set_datasets_with_anomaly_masked(self, n_mask=3, tol=0.3):
+        """
+        Mask points associated with the anomaly.
+
+        :param mask_type: *str*
+            `t_eff' or `residuals'. If `t_eff' mask based on t_pl +- n_mask * t_eff. If `residuals', mask based on
+            deviation from existing point lens fit.
+
+        :param n_mask: *int*
+            Number of +- `t_eff' to mask. Only used with mask_type = `t_eff'.
+
+        :param tol: *float*
+            Maximum allowed deviation from point-lens in sigma. Only used with mask_type = `residuals'.
+
+        creates self.masked_datasets = *list* of MulensModel.MulensData objects with bad points masked.
+
+        """
+        masked_datasets = []
+        for dataset in self.datasets:
+            masked_datasets.append(copy.copy(dataset))
+
+        for dataset in masked_datasets:
+            if self.mask_type == 't_eff':
+                index = ((dataset.time >
+                         self.af_results['t_0'] -
+                         n_mask * self.af_results['t_eff']) &
+                         (dataset.time <
+                          self.af_results['t_0'] +
+                          n_mask * self.af_results['t_eff']))
+            elif self.mask_type == 'residuals':
+                index = self.get_residuals_mask(dataset, tol=tol)
+                print(np.sum(index))
+            else:
+                raise ValueError("mask_type must be one of ['t_eff', 'residuals']. Your value ", self.mask_type)
+
+            dataset.bad = index
+
+        self._masked_datasets = masked_datasets
+
+    def get_residuals_mask(self, dataset, tol=None, max_diff=1):
+        fit = MulensModel.FitData(dataset=dataset, model=MulensModel.Model(self.pspl_params))
+        fit.fit_fluxes()
+        ind_pl = np.argmin(np.abs(dataset.time - self.af_results['t_0']))
+
+        res, err = fit.get_residuals(phot_fmt='mag')
+        out_tol = np.argwhere(((np.abs(res) / err) > tol) & fit.dataset.good).flatten()
+        print(out_tol)
+        diff = np.ediff1d(out_tol)
+
+        start = np.argmin(np.abs(out_tol - ind_pl))
+        first, last = 0, len(out_tol) - 1
+        for i in range(start, 0, -1):
+            if diff[i] <= max_diff:
+                first = i
+            else:
+                break
+
+        for i in range(start, len(out_tol)):
+            if diff[i] <= max_diff:
+                last = i
+            else:
+                break
+
+        print(ind_pl, res[ind_pl])
+        print(ind_pl in out_tol)
+        print(first, last, len(out_tol))
+        print(out_tol[first], out_tol[last], out_tol[last] - out_tol[first])
+        mask = np.zeros(len(dataset.time), dtype=bool)
+        mask[out_tol[first]:out_tol[last]+1] = True
+
+        return mask
+
+    def get_dmag(self):
+        """
+        Find the magnitude difference at t_pl (af_results['t_0'])
+        :return: dmag: *float*
+        """
+        event = mm.Event(datasets=self.masked_datasets, model=mm.Model(self.refined_pspl_params))
+        dmag = []
+        event.fit_fluxes()
+        for fit in event.fits:
+            residuals, errors = fit.get_residuals(bad=True, format='flux')
+            sigma = residuals[fit.dataset.bad]**2 / errors[fit.dataset.bad]**2
+            index = np.argmax(sigma)
+            mag_residuals, mag_errs = fit.get_residuals(bad=True, format='mag')
+            dmag.append(mag_residuals[fit.dataset.bad][index])
+
+        max_ind = np.argmax(np.abs(dmag))
+        return dmag[max_ind]
+
+    def update_pspl_model(self):
+        fitter = mmexo.fitters.SFitFitter(datasets=self.datasets, initial_model=self.pspl_params)
+        fitter.run()
+        new_params = {key: fitter.best[key] for key in self.pspl_params.keys()}
+        self._refined_pspl_params = new_params
+
+    def get_anomaly_lc_parameters(self):
+        params = {key: value for key, value in self.refined_pspl_params.items()}
+        params['t_pl'] = self.af_results['t_0']
+        params['dt'] = 2. * self.af_results['t_eff']
+        params['dmag'] = self.get_dmag()
+
+        return params
+
+    @property
+    def refined_pspl_params(self):
+        if self._refined_pspl_params is None:
+            self.update_pspl_model()
+
+        return self._refined_pspl_params
+
+    @property
+    def masked_datasets(self):
+        if self._masked_datasets is None:
+            self.set_datasets_with_anomaly_masked()
+
+        return self._masked_datasets

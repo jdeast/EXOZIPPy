@@ -1,6 +1,8 @@
 import MulensModel
 import sfit_minimizer as sfit
 
+import exozippy.mmexofast as mmexo
+
 
 class MulensFitter():
     """
@@ -110,8 +112,23 @@ class WidePlanetFitter(AnomalyFitter):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+
     def estimate_initial_parameters(self):
-        pass
+        dmag = self.get_dmag()
+        if isinstance(self.pspl_params['t_E'], (astropy.units.Quantity)):
+            t_E = self.pspl_params['t_E'].value
+        elif isinstance(self.pspl_params['t_E'], (float)):
+            t_E = self.pspl_params['t_E']
+        else:
+            raise TypeError(
+                'Invalid type for t_E:', self.pspl_params['t_E'],
+                type(self.pspl_params['t_E']))
+
+        params = {
+            't_0': self.pspl_params['t_0'], 'u_0': self.pspl_params['u_0'],
+            't_E': t_E, 't_pl': self.best_af_grid_point['t_0'],
+            'dt': 2. * self.best_af_grid_point['t_eff'], 'dmag': dmag}
+        self.initial_model = estimate_params.get_wide_params(params)
 
     def run(self):
         if self.initial_model is None:
