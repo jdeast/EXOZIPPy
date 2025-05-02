@@ -45,7 +45,7 @@ class MulensFitter():
 
     @property
     def initial_model(self):
-        pass
+        return self._initial_model
 
     @initial_model.setter
     def initial_model(self, params_dict):
