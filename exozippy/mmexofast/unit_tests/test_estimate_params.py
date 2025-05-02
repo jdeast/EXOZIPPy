@@ -1,9 +1,12 @@
 import unittest
 import numpy.testing
-
+import os.path
 import MulensModel
 import numpy as np
+
 from exozippy.mmexofast import estimate_params
+from exozippy import MULENS_DATA_PATH
+from exozippy.mmexofast import fitters
 
 
 class TestGetWideParams_alpha(unittest.TestCase):
@@ -166,6 +169,44 @@ class TestGetCloseParams(unittest.TestCase, KB160625):
     def setUp(self):
         KB160625.__init__(self)
         self.ulens_params = estimate_params.get_close_params(self.params, q=self)
+
+
+class TestAnomalyParameterEstimator(unittest.TestCase):
+
+    def setUp(self):
+        datafile = os.path.join(MULENS_DATA_PATH, 'unit_test_data', 'planet4AF.dat')
+        self.data = MulensModel.MulensData(
+            file_name=datafile,
+            phot_fmt='mag')
+        self.true_params, self.input_fluxes = self._parse_header(datafile)
+        self.pspl = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
+        self.af_results = {'t_0': 17.43489583333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 98.97724735834696,
+                           'dchi2_zero': 218.83573427369782, 'dchi2_flat': 143.937564049782}
+
+    def _parse_header(self, datafile):
+        with open(datafile, 'r') as file_:
+            lines = file_.readlines()
+
+        elements = lines[0].split()
+        ulens_params = {}
+        for i, element in enumerate(elements):
+            if element[-2:] == "':":
+                key = element.strip('{')[1:-2]
+                ulens_params[key] = float(elements[i + 1].strip(',').strip('}'))
+
+        elements = lines[1].split()
+        fluxes = {}
+        for i, element in enumerate(elements):
+            if element == '=':
+                fluxes[elements[i - 1]] = float(elements[i + 1].strip(','))
+
+        return ulens_params, fluxes
+
+    def test_update_pspl_model(self):
+        pass
+
+    def test_get_anomaly_lc_params(self):
+        pass
 
 
 def test_model_pspl_at_pl():
