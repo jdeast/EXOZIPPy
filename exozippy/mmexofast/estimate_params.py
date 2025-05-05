@@ -264,6 +264,11 @@ class WidePlanetParameterEstimator(ParameterEstimator):
 
     @property
     def delta_A(self):
+        """
+        Might want to add an option to calculate delta_A using PSPL fitted fs and fb.
+        Current calculation assumes fb=0. This could be a problem if fb is large, e.g. OB180383.
+        :return:
+        """
         if self._delta_A is None:
             self._delta_A = self.a_pspl * (10.**(self.params['dmag'] / -2.5) - 1.)
 
