@@ -120,7 +120,7 @@ class OB180383():
     Parameters for OGLE-2018-BLG-0383 Wang et al. 2022.
     """
     def __init__(self):
-        self.dmag = 0.07  # preamble to Section 3.2
+        self.dmag = -0.07  # preamble to Section 3.2
 
         # Section 3.2.1 Heuristic analysis
         self.pspl_est = {'t_0': 8199.2, 'u_0': 0.071, 't_E': 11.3}  # Eq. 8
@@ -226,15 +226,18 @@ class TestWideParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB18038
     def test_s(self):
         np.testing.assert_allclose(self.estimator.s, self.s_wide, rtol=self.tol)
 
-    def test_q(self):
-        np.testing.assert_allclose(self.estimator.q, self.q_est, rtol=self.tol)
-
     def test_q_manual_dA(self):
         estimator = estimate_params.WidePlanetParameterEstimator(self.params, limit='GG97')
         estimator._delta_A = self.delta_A
         np.testing.assert_allclose(estimator.q, self.q_est, rtol=self.tol)
 
+    def test_q(self):
+        print('this test fails because of the large negative blending in the event, which affects the calculation of delta_A.')
+        np.testing.assert_allclose(self.estimator.q, self.q_est, rtol=self.tol)
+
     def test_delta_A(self):
+        print(
+            'this test fails because of the large negative blending in the event, which affects the calculation of delta_A.')
         np.testing.assert_allclose(self.estimator.delta_A, self.delta_A, rtol=self.tol)
 
 
