@@ -73,17 +73,7 @@ class BinaryLensParams():
             np.max((t_0 + t_E, t_pl + t_E / 2., t_pl + 20. * t_star))]
 
 
-def correct_alpha(alpha):
-    while alpha > 360.:
-        alpha -= 360.
-
-    while alpha < -360:
-        alpha += 360.
-
-    return alpha
-
-
-def get_wide_params(params):
+def get_wide_params(params, limit='GG97'):
     """
     Transform initial parameters into wide model parameters.
 
@@ -98,6 +88,9 @@ def get_wide_params(params):
             - 'dt' (*float*): Duration of the anomaly
             - 'dmag' (*float*): Magnitude difference of the perturbation
 
+        limit: *str*
+            Method to use for estimating *rho* and *q*.
+
     Returns :
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
@@ -105,30 +98,157 @@ def get_wide_params(params):
     # JCY: Should these calculations be broken out into individual parameters?
     # e.g., so they can be tested individually?
     # This would mean function --> class.
-    tau = (params['t_pl'] - params['t_0']) / params['t_E']
-    u = np.sqrt(params['u_0']**2 + tau**2)
-    s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    #alpha = np.arctan2(-params['u_0'], tau)
-    alpha = np.pi - np.arctan2(params['u_0'], tau)
+    #u = np.sqrt(params['u_0']**2 + tau**2)
+    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
+    #s = 0.5 * (np.sqrt(u**2 + 4) + u)
+    ##alpha = np.arctan2(-params['u_0'], tau)
+    #alpha = np.pi - np.arctan2(params['u_0'], tau)
+    #
+    #print('JCY: I do not like this method for estimating rho and q.')
+    #rho = params['dt'] / params['t_E'] / 2.
+    #q = 0.5 * np.abs(params['dmag']) * (rho**2)
+    #
+    #alpha_deg = correct_alpha(np.rad2deg(alpha))
+    #new_params = {'t_0': params['t_0'],
+    #           'u_0': params['u_0'],
+    #           't_E': params['t_E'],
+    #           's': s,
+    #           'q': q,
+    #           'rho': rho,
+    #           'alpha': alpha_deg}
+    #
+    #out = BinaryLensParams(new_params)
+    #out.set_mag_method(params)
 
-    print('JCY: I do not like this method for estimating rho and q.')
-    rho = params['dt'] / params['t_E'] / 2.
-    q = 0.5 * np.abs(params['dmag']) * (rho**2)
-
-    alpha_deg = correct_alpha(np.rad2deg(alpha))
-    new_params = {'t_0': params['t_0'],
-               'u_0': params['u_0'],
-               't_E': params['t_E'],
-               's': s,
-               'q': q,
-               'rho': rho,
-               'alpha': alpha_deg}
-
-    out = BinaryLensParams(new_params)
-    out.set_mag_method(params)
+    estimator = WidePlanetParameterEstimator(params, limit=limit)
     
-    return out
+    return estimator.binary_params
 
+
+class ParameterEstimator():
+
+    def __init__(self, params, limit=None):
+        self.params = params
+        self.limit = limit
+
+        self._tau_pl, self._u_pl = None, None
+        self._s, self._alpha = None, None
+        self._q = None
+        self._rho = None
+        self._binary_params = None
+
+    def get_binary_lens_params(self):
+        pass
+
+    def get_rho(self):
+        if self.limit == 'dwarf':
+            return 0.001
+        elif self.limit == 'giant':
+            return 0.05
+        elif self.limit == 'point':
+            return None
+        else:
+            raise NotImplementedError('Your limit for calculating rho is not implemented: ', self.limit)
+
+    @property
+    def binary_params(self):
+        if self._binary_params is None:
+            self._binary_params = self.get_binary_lens_params()
+
+        return self._binary_params
+
+    @property
+    def t_0(self):
+        return self.params['t_0']
+
+    @property
+    def u_0(self):
+        return self.params['u_0']
+
+    @property
+    def t_E(self):
+        return self.params['t_E']
+
+    @property
+    def tau_pl(self):
+        if self._tau_pl is None:
+            self._tau_pl = (self.params['t_pl'] - self.params['t_0']) / self.params['t_E']
+
+        return self._tau_pl
+
+    @property
+    def u_pl(self):
+        if self._u_pl is None:
+            self._u_pl = np.sqrt(self.params['u_0'] ** 2 + self.tau_pl ** 2)
+
+        return self._u_pl
+
+    @property
+    def alpha(self):
+        if self._alpha is None:
+            alpha = np.pi - np.arctan2(self.params['u_0'], self.tau_pl)
+            alpha = np.rad2deg(alpha)
+            while alpha > 360.:
+                alpha -= 360.
+
+            while alpha < -360:
+                alpha += 360.
+
+            self._alpha = alpha
+
+        return self._alpha
+
+    @property
+    def rho(self):
+        if self._rho is None:
+            self._rho = self.get_rho()
+
+        return self._rho
+
+    @rho.setter
+    def rho(self, value):
+        self._rho = value
+
+
+class WidePlanetParameterEstimator(ParameterEstimator):
+
+    def __init__(self, params, limit='GG97'):
+        super().__init__(params, limit=limit)
+
+    def get_rho(self):
+        if self.limit == 'GG97':
+            rho = self.params['dt'] / self.params['t_E'] / 4.
+        else:
+            rho = super().get_rho()
+
+        return rho
+
+    def calc_binary_ulens_params(self):
+        new_params = {'t_0': self.t_0, 'u_0':self.u_0, 't_E': self.t_E, 's': self.s, 'alpha': self.alpha}
+        rho = self.get_rho()
+        if rho is not None:
+            new_params['rho'] = rho
+
+    def get_binary_lens_params(self):
+        binary_ulens_params = self.calc_binary_ulens_params()
+        out = BinaryLensParams(binary_ulens_params)
+        out.set_mag_method(self.params)
+        return out
+
+    @property
+    def s(self):
+        if self._s is None:
+            u = self.u_pl
+            self._s = 0.5 * (np.sqrt(u ** 2 + 4) + u)
+        return self._s
+
+    @property
+    def q(self):
+        if self._q is None:
+            print('JCY: I think this implementation is wrong: dmag != delta A')
+            self._q = 0.5 * np.abs(self.params['dmag']) * (self.rho ** 2)
+
+        return self._q
 
 # In[ ]:
 
