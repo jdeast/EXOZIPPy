@@ -20,63 +20,123 @@ def file_lines(filename):
 
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+# def ninterpolate(data, point):
+#     """
+#     Perform N-dimensional linear interpolation at a single point.
+
+#     Parameters
+#     ----------
+#     data : ndarray
+#         The N-dimensional data array to interpolate.
+#     point : array-like
+#         A sequence of length N giving the coordinates at which to interpolate.
+
+#     Returns
+#     -------
+#     float
+#         Interpolated value.
+        
+#     ; MODIFICATION HISTORY:
+#     ;
+#     ;    Mon Jul 21 12:33:30 2003, J.D. Smith <jdsmith@as.arizona.edu>
+#     ;		Written.
+#     ;==========================================================================
+#     ; Copyright (C) 2003, J.D. Smith
+#     """
+#     point = np.asarray(point)
+#     ndim = point.size
+
+#     if data.ndim != ndim:
+#         raise ValueError("Point must specify 1 coordinate for each dimension of data")
+
+#     if ndim == 1:
+#         # 1D special case: np.interp
+#         x = np.arange(data.shape[0])
+#         return np.interp(point[0], x, data)
+
+#     base = np.floor(point).astype(int)
+#     frac = point - base
+#     result = 0.0
+
+#     for i in range(2 ** ndim):
+#         # Get corner offset in binary
+#         offset = [(i >> k) & 1 for k in range(ndim)]
+#         idx = tuple(base[k] + offset[k] for k in range(ndim))
+
+#         # Check bounds
+#         if any(j < 0 or j >= data.shape[k] for k, j in enumerate(idx)):
+#             continue  # skip out-of-bounds
+
+#         weight = 1.0
+#         for k in range(ndim):
+#             weight *= (1 - frac[k]) if offset[k] == 0 else frac[k]
+
+#         result += weight * data[idx]
+
+#     return result
+
+from scipy.ndimage import map_coordinates
+# ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+import numpy as np
+
+
 def ninterpolate(data, point):
     """
-    Perform N-dimensional linear interpolation at a single point.
+    Multilinear interpolation of an n‑dimensional array.
 
     Parameters
     ----------
     data : ndarray
-        The N-dimensional data array to interpolate.
-    point : array-like
-        A sequence of length N giving the coordinates at which to interpolate.
+        n‑D array of values.
+    point : 1‑D sequence (length n)
+        Real‑valued coordinates at which to interpolate.
 
     Returns
     -------
     float
-        Interpolated value.
-        
-    ; MODIFICATION HISTORY:
-    ;
-    ;    Mon Jul 21 12:33:30 2003, J.D. Smith <jdsmith@as.arizona.edu>
-    ;		Written.
-    ;==========================================================================
-    ; Copyright (C) 2003, J.D. Smith
+        Interpolated value at `point`.
     """
-    point = np.asarray(point)
-    ndim = point.size
+    data = np.asarray(data, dtype=float)
+    point = np.asarray(point, dtype=float)
 
-    if data.ndim != ndim:
-        raise ValueError("Point must specify 1 coordinate for each dimension of data")
+    # -- dimension checks -------------------------------------------------
+    n = point.size
+    if n != data.ndim:
+        raise ValueError("`point` must supply one coordinate for each dimension")
 
-    if ndim == 1:
-        # 1D special case: np.interp
-        x = np.arange(data.shape[0])
-        return np.interp(point[0], x, data)
+    # -- trivial 1‑D case -------------------------------------------------
+    if n == 1:
+        x = point[0]
+        x0 = int(np.floor(x))
+        x1 = x0 + 1
+        f = x - x0                        # fractional distance
+        x0 = np.clip(x0, 0, data.shape[0] - 1)
+        x1 = np.clip(x1, 0, data.shape[0] - 1)
+        return (1.0 - f) * data[x0] + f * data[x1]
 
-    base = np.floor(point).astype(int)
-    frac = point - base
-    result = 0.0
+    # -- general n‑D multilinear case ------------------------------------
+    base = np.floor(point).astype(int)    # “lower‑left” corner of the cell
+    f = point - base                      # fractional part in each dimension
 
-    for i in range(2 ** ndim):
-        # Get corner offset in binary
-        offset = [(i >> k) & 1 for k in range(ndim)]
-        idx = tuple(base[k] + offset[k] for k in range(ndim))
+    value = 0.0
+    two_n = 1 << n                        # 2**n corner combinations
 
-        # Check bounds
-        if any(j < 0 or j >= data.shape[k] for k, j in enumerate(idx)):
-            continue  # skip out-of-bounds
-
+    for corner in range(two_n):
+        idx = base.copy()
         weight = 1.0
-        for k in range(ndim):
-            weight *= (1 - frac[k]) if offset[k] == 0 else frac[k]
+        for dim in range(n):
+            if corner & (1 << dim):       # high corner along this axis
+                idx[dim] += 1
+                weight *= f[dim]
+            else:                         # low corner along this axis
+                weight *= (1.0 - f[dim])
 
-        result += weight * data[idx]
+            # stay inside array bounds
+            idx[dim] = np.clip(idx[dim], 0, data.shape[dim] - 1)
 
-    return result
+        value += weight * data[tuple(idx)]
 
-
-# ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+    return value
 
 
 @functools.lru_cache(maxsize=8)
@@ -161,7 +221,8 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
         for cand in candidates:
             bc_path = root / f"{cand}.idl"
             if bc_path.exists():
-                bc, props = _load_bc_cube(str(bc_path))
+                bc, props = _load_bc_cube(str(bc_path))     
+                bc = np.transpose(bc, (3, 2, 1, 0))
                 bc_cubes.append(bc)
                 filterprops.append(props)
                 break
@@ -169,7 +230,6 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
             raise FileNotFoundError(f"{band} not supported – remove it from {sedfile}")
 
     bcarrays = np.stack(bc_cubes, axis=-1)  # shape: (nteff, nlogg, nfeh, nav, nbands)
-
     # ---------- 4. Expand blend matrix to (nbands, nstars) ----------------
     blend = np.zeros((nbands, nstars), dtype=int)
     for i, token in enumerate(blend_spec):
@@ -198,7 +258,6 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
                   (avgrid,   av[j]))]
         for i in range(nbands):
             bcs[i, j] = ninterpolate(bcarrays[..., i], coord)
-
     # ---------- 6. Model magnitudes / fluxes ------------------------------
     mu         = 5.0 * np.log10(distance) - 5.0         # (nstars,)
     logL_term  = -2.5 * np.log10(lstar)                 # (nstars,)
@@ -221,7 +280,6 @@ def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
 
     # ---------- 7. χ² likelihood ------------------------------------------
     sedchi2 = np.sum((magresiduals / (errs * err0)) ** 2)
-
     return sedchi2, blendmag, modelflux, magresiduals
 
 
