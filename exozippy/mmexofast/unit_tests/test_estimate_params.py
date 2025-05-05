@@ -125,9 +125,9 @@ class OB180383():
         # Section 3.2.1 Heuristic analysis
         self.pspl_est = {'t_0': 8199.2, 'u_0': 0.071, 't_E': 11.3}  # Eq. 8
         self.t_0, self.u_0, self.t_E = self.pspl_est['t_0'], self.pspl_est['u_0'], self.pspl_est['t_E']
-        self.tau_anom, self.u_pl, self.alpha_est = -2.04, 2.05, 1.98  # deg, Eq. 9, u_anom --> u_pl
+        self.tau_pl, self.u_pl, self.alpha_est = -2.04, 2.05, 1.98  # deg, Eq. 9, u_anom --> u_pl
         self.alpha = np.deg2rad(self.alpha_est)  # might need to check reflections/conversion to MMv3 system
-        self.t_pl = self.pspl_est['t_0'] + self.tau_anom * self.pspl_est['t_E']  # derived
+        self.t_pl = self.pspl_est['t_0'] + self.tau_pl * self.pspl_est['t_E']  # derived
         self.s_wide, s_close = 2.46, 0.41  # Eq. 10: s_plus, s_minus
         self.dt = 2. * 0.55  # 2. * t_fwhm
         self.rho_est = 0.024  # Eq. 12
@@ -186,13 +186,17 @@ class TestParameterEstimatorKB160625(unittest.TestCase, KB160625):
         assert self.estimator.t_E == self.params['t_E']
 
     def test_tau_pl(self):
-        assert self.estimator.tau_pl == self.tau_pl
+        np.testing.assert_allclose(self.estimator.tau_pl, self.tau_pl, rtol=self.tol)
 
     def test_u_pl(self):
-        assert self.estimator.u_pl == self.u_pl
+        np.testing.assert_allclose(self.estimator.u_pl, self.u_pl, rtol=self.tol)
 
     def test_alpha(self):
-        assert self.estimator.alpha == self.alpha
+        if isinstance(self.alpha, float):
+            np.testing.assert_allclose(self.estimator.alpha, np.rad2deg(self.alpha), rtol=self.tol)
+        else:
+            index = np.argmin(np.abs(self.estimator.alpha - np.rad2deg(self.alpha)))
+            np.testing.assert_allclose(self.estimator.alpha, np.rad2deg(self.alpha[index]), rtol=self.tol)
 
     def test_rho(self):
         assert self.estimator.rho is None
@@ -200,14 +204,14 @@ class TestParameterEstimatorKB160625(unittest.TestCase, KB160625):
     def test_rho_manual(self):
         estimator = estimate_params.ParameterEstimator(self.params)
         estimator.rho = 0.3
-        assert self.estimator.rho == 0.3
+        assert estimator.rho == 0.3
 
 
 class TestParameterEstimatorOB180383(TestParameterEstimatorKB160625, OB180383):
 
     def setUp(self):
         OB180383.__init__(self)
-        self.ulens_params = estimate_params.get_wide_params(self.params, limit='point')
+        self.estimator = estimate_params.WidePlanetParameterEstimator(self.params, limit='point')
 
 
 class TestGetWideParams(unittest.TestCase, KB160625):
