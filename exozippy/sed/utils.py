@@ -7,7 +7,9 @@ import os
 import exozippy
 from scipy.io import readsav
 from numba import njit
-
+import functools
+import os
+import pathlib
 def filepath(filename, root_dir, subdir):
     return os.path.join(root_dir, *subdir, filename)
 
@@ -75,97 +77,150 @@ def ninterpolate(data, point):
 
 
 # ⚠️ Initial auto-translation from IDL (ChatGPT). Review required.
+
+
+@functools.lru_cache(maxsize=8)
+def _load_mist_grid(grid_path: str):
+    """Read and cache mist.sed.grid.idl (grid definitions for the BC cubes)."""
+    g = readsav(grid_path, python_dict=True)
+    return g['teffgrid'], g['logggrid'], g['fehgrid'], g['avgrid']
+
+
+@functools.lru_cache(maxsize=32)
+def _load_bc_cube(bc_path: str):
+    """Read and cache a single band’s 4‑D bolometric‑correction cube."""
+    s = readsav(bc_path, python_dict=True)
+    return s['bcarray'], s['filterproperties']
+
 def mistmultised(teff, logg, feh, av, distance, lstar, errscale, sedfile,
-                 redo=False, psname=None, debug=False, atmospheres=None,
-                 wavelength=None, logname=None, xyrange=None, blend0=None):
+                  *,
+                  redo=False,
+                  psname=None, debug=False, atmospheres=None,
+                  wavelength=None, logname=None, xyrange=None,
+                  blend0=None):
+    """
+    Parameters
+    ----------
+    teff, logg, feh, av, distance, lstar : array‑like, shape (nstars,)
+    errscale   : scalar or (≥1,) array — identical to the IDL behaviour
+    sedfile    : str  — path to the observed SED definition file
 
-    nstars = len(teff)
-    if not all(len(x) == nstars for x in [logg, feh, av, distance, lstar]):
-        raise ValueError("All stellar parameter arrays must have the same length as teff")
+    Returns
+    -------
+    sedchi2      : float
+    blendmag     : (nbands,) ndarray
+    modelflux    : (nbands, nstars) ndarray
+    magresiduals : (nbands,) ndarray
+    """
 
-    # Load SED + filter info
-    sed_data = read_sed_file(sedfile, nstars, logname=logname)
-    sedbands = sed_data['sedbands']
-    mags = sed_data['mag']
-    errs = sed_data['errmag']
-    blend = sed_data['blend']
+    # ---------- 1. Input validation ---------------------------------------
+    teff   = np.atleast_1d(teff).astype(float)
+    nstars = teff.size
 
-    nbands = len(sedbands)
+    def _check(name, arr):
+        a = np.atleast_1d(arr).astype(float)
+        if a.size != nstars:
+            raise ValueError(f"{name} must have same length as teff")
+        return a
 
-    # Load filter mapping
-    filterfile = filepath('filternames2.txt', exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
-    keivanname, mistname, claretname, svoname = np.loadtxt(
-        filterfile, dtype=str, comments="#", unpack=True
+    logg     = _check('logg',     logg)
+    feh      = _check('feh',      feh)
+    av       = _check('av',       av)
+    distance = _check('distance', distance)
+    lstar    = _check('lstar',    lstar)
+
+    err0 = float(np.atleast_1d(errscale)[0])
+
+    # ---------- 2. Read observed SED file ---------------------------------
+    sed_data   = read_sed_file(sedfile, nstars, logname=logname)
+    sedbands   = sed_data['sedbands']
+    mags       = sed_data['mag']
+    errs       = sed_data['errmag']
+    blend_spec = sed_data['blend']
+    nbands     = len(sedbands)
+    
+    # ---------- 3. Load / cache the MIST grid & BC cubes ------------------
+    root = pathlib.Path(exozippy.MODULE_PATH) / 'EXOZIPPy' / 'exozippy' / 'sed' / 'mist'
+    gridfile = root / 'mist.sed.grid.idl'
+    teffgrid, logggrid, fehgrid, avgrid = _load_mist_grid(str(gridfile))
+
+    # Filter mapping table
+    kname, mname, cname, svoname = np.loadtxt(
+        root / 'filternames2.txt', dtype=str, comments="#", unpack=True
     )
 
-    # Load grid
-    mistgridfile = filepath('mist.sed.grid.idl', exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
-    grid = readsav(mistgridfile, python_dict=True)
-    teffgrid, logggrid, fehgrid, avgrid = grid['teffgrid'], grid['logggrid'], grid['fehgrid'], grid['avgrid']
-
-    # Load BC tables for each band
-    bcarrays = []
-    filterprops = []
+    bc_cubes, filterprops = [], []
     for band in sedbands:
-        found = False
+        # Replicates the fallback order in the IDL code
         candidates = [band]
-        if band in keivanname:
-            candidates.append(mistname[np.where(keivanname == band)[0][0]])
+        if band in kname:
+            candidates.append(mname[np.where(kname == band)[0][0]])
         if band in svoname:
-            candidates.append(mistname[np.where(svoname == band)[0][0]])
+            candidates.append(mname[np.where(svoname == band)[0][0]])
 
-        for name in candidates:
-            bcarraysfilepath = filepath(f"{name}.idl", exozippy.MODULE_PATH, ['EXOZIPPy','exozippy','sed', 'mist'])
-            if os.path.exists(bcarraysfilepath):
-                data = readsav(bcarraysfilepath, python_dict=True)
-                bcarrays.append(data['bcarray'])
-                filterprops.append(data['filterproperties'])
-                found = True
+        for cand in candidates:
+            bc_path = root / f"{cand}.idl"
+            if bc_path.exists():
+                bc, props = _load_bc_cube(str(bc_path))
+                bc_cubes.append(bc)
+                filterprops.append(props)
                 break
+        else:
+            raise FileNotFoundError(f"{band} not supported – remove it from {sedfile}")
 
-        if not found:
-            raise FileNotFoundError(f"{band} not supported, please remove it from {sedfile}")
+    bcarrays = np.stack(bc_cubes, axis=-1)  # shape: (nteff, nlogg, nfeh, nav, nbands)
 
-    bcarrays = np.stack(bcarrays, axis=-1)  # shape: (nteff, nlogg, nfeh, nav, nbands)
-
-    # Distance modulus
-    mu = 5.0 * np.log10(distance) - 5.0
-
-    # Interpolate BCs for each star and band
-    bcs = np.zeros((nbands, nstars))
-    for j in range(nstars):
-        teff_ndx = get_grid_point(teffgrid, teff[j])
-        logg_ndx = get_grid_point(logggrid, logg[j])
-        feh_ndx = get_grid_point(fehgrid, feh[j])
-        av_ndx = get_grid_point(avgrid, av[j])
-
-        for i in range(nbands):
-            bcs[i, j] = ninterpolate(
-                bcarrays[..., i],
-                [teff_ndx, logg_ndx, feh_ndx, av_ndx]
-            )
+    # ---------- 4. Expand blend matrix to (nbands, nstars) ----------------
+    blend = np.zeros((nbands, nstars), dtype=int)
+    for i, token in enumerate(blend_spec):
+        if token == 'ALL':
+            blend[i, :] = 1
+            continue
+        if '-' in token:                      # differential magnitudes
+            pos, neg = (np.fromstring(t, sep=',', dtype=int)
+                        for t in token.split('-'))
+            blend[i, np.clip(pos, 0, nstars-1)] = +1
+            blend[i, np.clip(neg, 0, nstars-1)] = -1
+        else:                                 # unblended magnitudes
+            idx = np.fromstring(token, sep=',', dtype=int)
+            blend[i, np.clip(idx, 0, nstars-1)] = 1
 
     if blend0 is not None:
         blend0[:] = blend.copy()
 
-    # Compute model magnitudes and fluxes
-    modelmag = -2.5 * np.log10(lstar @ np.ones((1, nbands))) + 4.74 - bcs + np.outer(np.ones(nbands), mu)
-    modelflux = 10 ** (-0.4 * modelmag)
+    # ---------- 5. Interpolate bolometric corrections ---------------------
+    bcs = np.empty((nbands, nstars))
+    for j in range(nstars):
+        coord = [get_grid_point(g, v) for g, v in
+                 ((teffgrid, teff[j]),
+                  (logggrid, logg[j]),
+                  (fehgrid,  feh[j]),
+                  (avgrid,   av[j]))]
+        for i in range(nbands):
+            bcs[i, j] = ninterpolate(bcarrays[..., i], coord)
+
+    # ---------- 6. Model magnitudes / fluxes ------------------------------
+    mu         = 5.0 * np.log10(distance) - 5.0         # (nstars,)
+    logL_term  = -2.5 * np.log10(lstar)                 # (nstars,)
+    modelmag   = (logL_term[None, :] + 4.74             # (nbands, nstars)
+                  - bcs + mu[None, :])
+
+    modelflux  = 10.0 ** (-0.4 * modelmag)              # (nbands, nstars)
 
     if nstars == 1:
-        blendmag = modelmag[:, 0]
-        blendflux = modelflux[:, 0]
-        magresiduals = mags - blendmag
+        blendmag       = modelmag[:, 0]                 # (nbands,)
+        blendflux      = modelflux[:, 0]
+        magresiduals   = mags - blendmag
     else:
-        blendfluxpos = np.sum(modelflux * (blend > 0), axis=1)
-        blendfluxneg = np.sum(modelflux * (blend < 0), axis=1)
-        blendfluxneg[blendfluxneg == 0.0] = 1.0
-        blendmag = -2.5 * np.log10(blendfluxpos / blendfluxneg)
-        magresiduals = mags - blendmag
-        blendflux = np.sum(modelflux * blend, axis=1)
+        pos_flux  = (modelflux * (blend > 0)).sum(axis=1)
+        neg_flux  = (modelflux * (blend < 0)).sum(axis=1)
+        neg_flux[neg_flux == 0.0] = 1.0
+        blendmag       = -2.5 * np.log10(pos_flux / neg_flux)
+        magresiduals   = mags - blendmag
+        blendflux      = (modelflux * blend).sum(axis=1)
 
-    # Chi2 likelihood
-    sedchi2 = np.sum(((magresiduals / (errs * errscale[0])) ** 2))
+    # ---------- 7. χ² likelihood ------------------------------------------
+    sedchi2 = np.sum((magresiduals / (errs * err0)) ** 2)
 
     return sedchi2, blendmag, modelflux, magresiduals
 
