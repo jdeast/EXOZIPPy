@@ -152,6 +152,64 @@ class OB180383():
             'rho_1': 0.058, 'rho_2': 0.0202, 'q_flux_I': 0.0057}
 
 
+class TestParameterEstimatorKB160625(unittest.TestCase, KB160625):
+
+    def setUp(self):
+        KB160625.__init__(self)
+        self.estimator = estimate_params.ParameterEstimator(self.params, limit='point')
+        #self.ulens_params = estimate_params.get_wide_params(self.params, limit='point')
+
+    def test_get_rho_dwarf(self):
+        estimator = estimate_params.ParameterEstimator(self.params, limit='dwarf')
+        assert estimator.get_rho() == 0.001
+
+    def test_get_rho_giant(self):
+        estimator = estimate_params.ParameterEstimator(self.params, limit='giant')
+        assert estimator.get_rho() == 0.05
+
+    def test_get_rho_point(self):
+        estimator = estimate_params.ParameterEstimator(self.params, limit='point')
+        assert estimator.get_rho() is None
+
+    def test_get_rho_error(self):
+        with self.assertRaises(ValueError):
+            estimator = estimate_params.ParameterEstimator(self.params)
+            estimator.get_rho()
+
+    def test_t_0(self):
+        assert self.estimator.t_0 == self.params['t_0']
+
+    def test_u_0(self):
+        assert self.estimator.u_0 == self.params['u_0']
+
+    def test_t_E(self):
+        assert self.estimator.t_E == self.params['t_E']
+
+    def test_tau_pl(self):
+        assert self.estimator.tau_pl == self.tau_pl
+
+    def test_u_pl(self):
+        assert self.estimator.u_pl == self.u_pl
+
+    def test_alpha(self):
+        assert self.estimator.alpha == self.alpha
+
+    def test_rho(self):
+        assert self.estimator.rho is None
+
+    def test_rho_manual(self):
+        estimator = estimate_params.ParameterEstimator(self.params)
+        estimator.rho = 0.3
+        assert self.estimator.rho == 0.3
+
+
+class TestParameterEstimatorOB180383(TestParameterEstimatorKB160625, OB180383):
+
+    def setUp(self):
+        OB180383.__init__(self)
+        self.ulens_params = estimate_params.get_wide_params(self.params, limit='point')
+
+
 class TestGetWideParams(unittest.TestCase, KB160625):
 
     def setUp(self):
@@ -197,6 +255,7 @@ class TestGetWideParams2(TestGetWideParams, OB180383):
         np.testing.assert_allclose(Ap_est, self.delta_A, rtol=self.tol)
 
         np.testing.assert_allclose(self.ulens_params.ulens['q'], self.q_est)
+
 
 class TestGetCloseParams(unittest.TestCase, KB160625):
 

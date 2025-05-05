@@ -148,7 +148,7 @@ class ParameterEstimator():
         elif self.limit == 'point':
             return None
         else:
-            raise NotImplementedError('Your limit for calculating rho is not implemented: ', self.limit)
+            raise ValueError('Your limit for calculating rho is not implemented: ', self.limit)
 
     @property
     def binary_params(self):
@@ -225,9 +225,13 @@ class WidePlanetParameterEstimator(ParameterEstimator):
 
     def calc_binary_ulens_params(self):
         new_params = {'t_0': self.t_0, 'u_0':self.u_0, 't_E': self.t_E, 's': self.s, 'alpha': self.alpha}
-        rho = self.get_rho()
+        rho = self.rho
         if rho is not None:
             new_params['rho'] = rho
+
+        new_params['q'] = self.q
+
+        return new_params
 
     def get_binary_lens_params(self):
         binary_ulens_params = self.calc_binary_ulens_params()
