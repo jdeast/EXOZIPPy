@@ -17,14 +17,14 @@ import arviz as az
 # import exoplanet as xo
 
 # exozippy imports
-from summarize_model import summarize_model
-from build_latex_table import build_latex_table
-from trace_to_event import trace_to_event
-from massradius_mann import massradius_mann
-from parameter import Parameter
-from readtran import readtran
-from read_parfile import read_parfile
-from exozippy_getmcmcscale import exozippy_getmcmcscale
+from .summarize_model import summarize_model
+from .build_latex_table import build_latex_table
+from .trace_to_event import trace_to_event
+from .massradius_mann import massradius_mann
+from .parameter import Parameter
+from .readtran import readtran
+from .read_parfile import read_parfile
+from .exozippy_getmcmcscale import exozippy_getmcmcscale
 
 '''This function is analagous to exofastv2's mkss.pro, but also defines
 some of the fundamental relationships between parameters done in
@@ -44,6 +44,7 @@ def build_model(nstars=1, nplanets=1,
                 parfile=None,
                 tranpath=None,fittran=False,
                 rvpath=None,fitrv=False, 
+                mistsedfile=None,
                 fitlogmp=False, 
                 circular=False,
                 mist=True, parsec=False, mannrad=False, mannmass=False,
@@ -178,7 +179,6 @@ def build_model(nstars=1, nplanets=1,
                     "feh": Parameter("feh_" + str(i), lower=-5.0, upper=5.0, initval=0.0,
                                      latex="[{\\rm Fe/H}]", description='Metallicity', latex_unit='dex', user_params=user_params),
                     }
-
             star["lstar"] = Parameter('lstar_' + str(i), 
                                       expression=4.0 * math.pi * rsun * rsun * sigmasb *
                                                  star["radius"].value ** 2 * star["teff"].value ** 4,
@@ -210,7 +210,7 @@ def build_model(nstars=1, nplanets=1,
                                          (4.0 * math.pi * (star["distance"].value * pc) ** 2.0),
                                          unit=u.erg/u.second/u.cm**2,latex_unit='erg~s$^{-1}$~cm$^{-2}$',
                                          latex="F_{Bol}",description='Bolometric Flux', user_params=user_params)
-                star["parallax"] = Parmeter("parallax_" + str(i),
+                star["parallax"] = Parameter("parallax_" + str(i),
                                             expression= 1e3 / star["distance"].value,
                                             unit=u.mas,
                                             latex='\varpi', description='Parallax', latex_unit='mas', user_params=user_params)
@@ -459,7 +459,7 @@ def build_model(nstars=1, nplanets=1,
         event["transit"] = []
         for i,tranfile in enumerate(tranfiles):
             event["transit"].append(readtran(tranfile, ndx=i, ttv=ttvs[i], tdeltav=tdeltavs[i],tiv=tivs[i]))#, user_params=user_params)
-            
+        return event
         # we're gonna need this for mulensmodel...
         #https://www.pymc.io/projects/examples/en/latest/howto/blackbox_external_likelihood_numpy.html
 
@@ -474,9 +474,9 @@ def build_model(nstars=1, nplanets=1,
 #        model.debug()
 
         # MCMC sampling with pymc defaults
-        trace = pm.sample(200, chains=4, cores=4, target_accept=0.9, discard_tuned_samples=False, tune=1000) 
+        # trace = pm.sample(200, chains=4, cores=4, target_accept=0.9, discard_tuned_samples=False, tune=1000) 
 
-        ipdb.set_trace()
+        # ipdb.set_trace()
 
 
         # pymc generally assumes a small, well-behaved prior volume around the best-fit solution
@@ -485,35 +485,35 @@ def build_model(nstars=1, nplanets=1,
         # our model parameters have wide uniform priors that doesn't play well with that assumption. Use our own step scaling.
 
         # this initializes the model based on MAP optimization
-        map = pm.find_MAP(return_raw=True)
-        # TODO: fit_params needs to be defined
-        for p in fit_params:
-            model.initial_values[p] = np.array(map[0][p])
+        # map = pm.find_MAP(return_raw=True)
+        # # TODO: fit_params needs to be defined
+        # for p in fit_params:
+        #     model.initial_values[p] = np.array(map[0][p])
 
-        map_dict = dict()
-        for p in fit_params:
-            map_dict[p] = map[0][p]
+        # map_dict = dict()
+        # for p in fit_params:
+        #     map_dict[p] = map[0][p]
 
-        # chi2func should use model instead
-        scale, bestpars = exozippy_getmcmcscale(map_dict, chi2func)
+        # # chi2func should use model instead
+        # scale, bestpars = exozippy_getmcmcscale(map_dict, chi2func)
 
-        # Turn each value in to a single element array... Why?
-        for key, val in bestpars.items():
-            bestpars[key] = np.array(val)
+        # # Turn each value in to a single element array... Why?
+        # for key, val in bestpars.items():
+        #     bestpars[key] = np.array(val)
 
-        # huh?
-        apoint = DictToArrayBijection.map(bestpars)
-        n=len(apoint.data)
-        scaling = fmt_scale(model, scale)
+        # # huh?
+        # apoint = DictToArrayBijection.map(bestpars)
+        # n=len(apoint.data)
+        # scaling = fmt_scale(model, scale)
 
-        # this initializes the step scaling
-        potential = quadpotential.QuadPotentialDiagAdapt(n, apoint.data, scaling, 10)
-        nuts = pm.NUTS(target_accept=0.99, potential=potential, max_treedepth=12)
+        # # this initializes the step scaling
+        # potential = quadpotential.QuadPotentialDiagAdapt(n, apoint.data, scaling, 10)
+        # nuts = pm.NUTS(target_accept=0.99, potential=potential, max_treedepth=12)
 
-        # now I can actually sample
-        trace = pm.sample(tune=1500, draws=1000, initvals=init_points, step=nuts, chains=36, cores=12, target_accept=0.99, discard_tuned_samples=False) 
+        # # now I can actually sample
+        # trace = pm.sample(tune=1500, draws=1000, initvals=init_points, step=nuts, chains=36, cores=12, target_accept=0.99, discard_tuned_samples=False) 
 
-        # copy posteriors to event dictionary
-        trace_to_event(trace,event)
-        build_latex_table(event)
-        ipdb.set_trace()
+        # # copy posteriors to event dictionary
+        # trace_to_event(trace,event)
+        # build_latex_table(event)
+        # ipdb.set_trace()

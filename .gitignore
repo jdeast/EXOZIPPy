@@ -13,3 +13,6 @@ EXOZIPPy.egg-info
 /exozippy/mmexofast/htmlcov/
 /exozippy/mmexofast/.coverage
 /exozippy/mmexofast/.coveragerc
+__pycache__/
+*.pyc
+*settings.json

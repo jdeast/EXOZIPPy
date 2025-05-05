@@ -2,7 +2,7 @@ import numpy as np
 import glob
 import ipdb
 import os
-from parameter import Parameter
+from .parameter import Parameter
 import pymc as pm
 import pytensor.tensor as pt
 

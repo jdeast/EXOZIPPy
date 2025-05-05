@@ -1,6 +1,9 @@
 import numpy as np
 import ipdb
+from numba import njit
 
+
+@njit
 def exozippy_keplereq(m, ecc, thresh=1e-10):
     # Set default values
     if ecc < 0. or ecc >= 1.:
