@@ -1,4 +1,4 @@
-from parameter import Parameter
+from .parameter import Parameter
 import copy
 
 ''' recursively populate the posteriors of each parameter in the event dictionary from the trace object'''
