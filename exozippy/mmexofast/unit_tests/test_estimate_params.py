@@ -229,6 +229,11 @@ class TestWideParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB18038
     def test_q(self):
         np.testing.assert_allclose(self.estimator.q, self.q_est, rtol=self.tol)
 
+    def test_q_manual_dA(self):
+        estimator = estimate_params.WidePlanetParameterEstimator(self.params, limit='GG97')
+        estimator._delta_A = self.delta_A
+        np.testing.assert_allclose(estimator.q, self.q_est, rtol=self.tol)
+
     def test_delta_A(self):
         np.testing.assert_allclose(self.estimator.delta_A, self.delta_A, rtol=self.tol)
 

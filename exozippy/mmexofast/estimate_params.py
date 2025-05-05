@@ -251,7 +251,6 @@ class WidePlanetParameterEstimator(ParameterEstimator):
     @property
     def q(self):
         if self._q is None:
-            print('JCY: I think this implementation is wrong: dmag != delta A')
             self._q = 0.5 * np.abs(self.delta_A) * (self.rho ** 2)
 
         return self._q
@@ -268,7 +267,7 @@ class WidePlanetParameterEstimator(ParameterEstimator):
         if self._delta_A is None:
             self._delta_A = self.a_pspl * (10.**(self.params['dmag'] / -2.5) - 1.)
 
-        return self.a_pspl
+        return self._delta_A
 
 # In[ ]:
 
