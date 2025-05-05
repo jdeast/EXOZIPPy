@@ -214,6 +214,8 @@ class WidePlanetParameterEstimator(ParameterEstimator):
 
     def __init__(self, params, limit='GG97'):
         super().__init__(params, limit=limit)
+        self._delta_A = None
+        self._a_pspl = None
 
     def get_rho(self):
         if self.limit == 'GG97':
@@ -250,9 +252,23 @@ class WidePlanetParameterEstimator(ParameterEstimator):
     def q(self):
         if self._q is None:
             print('JCY: I think this implementation is wrong: dmag != delta A')
-            self._q = 0.5 * np.abs(self.params['dmag']) * (self.rho ** 2)
+            self._q = 0.5 * np.abs(self.delta_A) * (self.rho ** 2)
 
         return self._q
+
+    @property
+    def a_pspl(self):
+        if self._a_pspl is None:
+            self._a_pspl = (self.u_pl**2 + 2.) / np.sqrt(self.u_pl**2 * (self.u_pl**2 + 4.))
+
+        return self._a_pspl
+
+    @property
+    def delta_A(self):
+        if self._delta_A is None:
+            self._delta_A = self.a_pspl * (10.**(self.params['dmag'] / -2.5) - 1.)
+
+        return self.a_pspl
 
 # In[ ]:
 
