@@ -29,6 +29,7 @@ def evaluate_results(lc_num):
     """
     pass
 
+
 files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
 lc_nums = []
 for file_ in files:
