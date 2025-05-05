@@ -110,8 +110,10 @@ def get_wide_params(params):
     s = 0.5 * (np.sqrt(u**2 + 4) + u)
     #alpha = np.arctan2(-params['u_0'], tau)
     alpha = np.pi - np.arctan2(params['u_0'], tau)
+
+    print('JCY: I do not like this method for estimating rho and q.')
     rho = params['dt'] / params['t_E'] / 2.
-    q = 0.5 * params['dmag'] * (rho**2)
+    q = 0.5 * np.abs(params['dmag']) * (rho**2)
 
     alpha_deg = correct_alpha(np.rad2deg(alpha))
     new_params = {'t_0': params['t_0'],

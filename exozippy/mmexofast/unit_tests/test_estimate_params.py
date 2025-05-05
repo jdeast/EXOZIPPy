@@ -120,10 +120,36 @@ class OB180383():
     Parameters for OGLE-2018-BLG-0383 Wang et al. 2022.
     """
     def __init__(self):
-        # Section 3.2
+        self.dmag = 0.07  # preamble to Section 3.2
 
-        # Table 2
-        pass
+        # Section 3.2.1 Heuristic analysis
+        self.pspl_est = {'t_0': 8199.2, 'u_0': 0.071, 't_E': 11.3}  # Eq. 8
+        self.t_0, self.u_0, self.t_E = self.pspl_est['t_0'], self.pspl_est['u_0'], self.pspl_est['t_E']
+        self.tau_anom, self.u_pl, self.alpha_est = -2.04, 2.05, 1.98  # deg, Eq. 9, u_anom --> u_pl
+        self.alpha = np.deg2rad(self.alpha_est)  # might need to check reflections/conversion to MMv3 system
+        self.t_pl = self.pspl_est['t_0'] + self.tau_anom * self.pspl_est['t_E']  # derived
+        self.s_wide, s_close = 2.46, 0.41  # Eq. 10: s_plus, s_minus
+        self.dt = 2. * 0.55  # 2. * t_fwhm
+        self.rho_est = 0.024  # Eq. 12
+        self.delta_A = 0.61  # Eq. 13
+        self.q_est = 1.8e-4  # Eq. 14
+
+        self.params = {
+            't_0': self.t_0, 'u_0': self.u_0, 't_E': self.t_E, 't_pl': self.t_pl,
+            'dt': self.dt, 'dmag': self.dmag
+            }
+        self.tol = 0.03  # 2% uncertainty based on variation in u0 for 1S solutions. (incr to 7% for 2S soln)
+
+        # Table 2: Fitted parameters
+        pspl = {'t_0': 8199.244, 'u_0': 0.072, 't_E': 11.15}
+        self.wide_params = {'t_0': 8199.239, 'u_0': 0.071, 't_E': 11.35, 'rho': 0.0238, 'alpha': 181.98, 's': 2.453, 'q': 2.14e-4}
+        close_upper = {
+            't_0': 8199.247, 'u_0': 0.071, 't_E': 11.34, 'rho': 0.0060, 'alpha': 355.86, 's': 0.405, 'q': 23.6e-4}
+        close_lower = {
+            't_0': 8199.247, 'u_0': 0.072, 't_E': 11.46, 'rho': 0.0056, 'alpha': 7.84, 's': 0.404, 'q': 21.5e-4}
+        binary_source = {
+            't_0_1': 8199.244, 't_0_2': 8176.022, 'u_0_1': 0.074, 'u_0_2': 0.0007, 't_E': 11.34,
+            'rho_1': 0.058, 'rho_2': 0.0202, 'q_flux_I': 0.0057}
 
 
 class TestGetWideParams(unittest.TestCase, KB160625):
@@ -147,15 +173,6 @@ class TestGetWideParams(unittest.TestCase, KB160625):
         index = np.argmin(np.abs(self.ulens_params.ulens['alpha'] - np.rad2deg(self.alpha)))
         np.testing.assert_allclose(self.ulens_params.ulens['alpha'], np.rad2deg(self.alpha[index]), rtol=self.tol)
 
-    #def test_q_rho(self):
-    #    # Gould & Gaucherel approximation
-    #    # Ap = 2(q / ρ^2)
-    #    Ap_true = 2. * self.wide_params['q'] / self.wide_params['rho']**2
-    #    Ap_est = 2. * self.ulens_params.ulens['q'] / self.ulens_params.ulens['rho']**2
-    #    #print(Ap_true, Ap_est)
-    #    print('JCY: This is a good idea for a test, but this event is not in this regime...')
-    #    np.testing.assert_allclose(Ap_est, Ap_true, rtol=self.tol)
-
     def test_mag_methods(self):
         expected_values = [self.t_pl - 5. * self.dt / 2., 'VBBL', self.t_pl + 5. * self.dt / 2.]
         for actual, expected in zip(self.ulens_params.mag_methods[4:7], expected_values):
@@ -164,6 +181,22 @@ class TestGetWideParams(unittest.TestCase, KB160625):
             else:
                 np.testing.assert_allclose(actual, expected, atol=0.001)
 
+
+class TestGetWideParams2(TestGetWideParams, OB180383):
+
+    def setUp(self):
+        OB180383.__init__(self)
+        self.ulens_params = estimate_params.get_wide_params(self.params)
+
+    def test_q_rho(self):
+        # Gould & Gaucherel approximation
+        # Ap = 2(q / ρ^2)
+        np.testing.assert_allclose(self.ulens_params.ulens['rho'], self.rho_est)
+
+        Ap_est = 2. * self.ulens_params.ulens['q'] / self.ulens_params.ulens['rho']**2
+        np.testing.assert_allclose(Ap_est, self.delta_A, rtol=self.tol)
+
+        np.testing.assert_allclose(self.ulens_params.ulens['q'], self.q_est)
 
 class TestGetCloseParams(unittest.TestCase, KB160625):
 
