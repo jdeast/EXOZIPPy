@@ -128,7 +128,7 @@ class OB180383():
         self.tau_pl, self.u_pl, self.alpha_est = -2.04, 2.05, 1.98  # deg, Eq. 9, u_anom --> u_pl
         self.alpha = np.deg2rad(self.alpha_est)  # might need to check reflections/conversion to MMv3 system
         self.t_pl = self.pspl_est['t_0'] + self.tau_pl * self.pspl_est['t_E']  # derived
-        self.s_wide, s_close = 2.46, 0.41  # Eq. 10: s_plus, s_minus
+        self.s_wide, self.s_close = 2.46, 0.41  # Eq. 10: s_plus, s_minus
         self.dt = 2. * 0.55  # 2. * t_fwhm
         self.rho_est = 0.024  # Eq. 12
         self.delta_A = 0.61  # Eq. 13
@@ -239,6 +239,22 @@ class TestWideParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB18038
         print(
             'this test fails because of the large negative blending in the event, which affects the calculation of delta_A.')
         np.testing.assert_allclose(self.estimator.delta_A, self.delta_A, rtol=self.tol)
+
+
+class TestCloseParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB180383):
+
+    def setUp(self):
+        OB180383.__init__(self)
+        self.estimator = estimate_params.ClosePlanetParameterEstimator(self.params, limit='point')
+
+    def test_s(self):
+        np.testing.assert_allclose(self.estimator.s, self.s_close, rtol=self.tol)
+
+    def test_q(self):
+        np.testing.assert_allclose(self.estimator.q, 0.001, rtol=self.tol)
+
+    def test_alpha(self):
+        pass
 
 
 class TestGetWideParams(unittest.TestCase, KB160625):

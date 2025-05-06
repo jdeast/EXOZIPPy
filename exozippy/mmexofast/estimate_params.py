@@ -5,6 +5,8 @@
 
 
 # Created by Luca Campiani in January 2024
+# Updated by Jennifer Yee, May 2025
+
 import MulensModel
 import MulensModel as mm
 #import matplotlib.pyplot as plt
@@ -183,18 +185,21 @@ class ParameterEstimator():
 
         return self._u_pl
 
+    def _correct_alpha(self, alpha):
+        while alpha > 360.:
+            alpha -= 360.
+
+        while alpha < -360:
+            alpha += 360.
+
+        return alpha
+
     @property
     def alpha(self):
         if self._alpha is None:
             alpha = np.pi - np.arctan2(self.params['u_0'], self.tau_pl)
             alpha = np.rad2deg(alpha)
-            while alpha > 360.:
-                alpha -= 360.
-
-            while alpha < -360:
-                alpha += 360.
-
-            self._alpha = alpha
+            self._alpha = self._correct_alpha(alpha)
 
         return self._alpha
 
@@ -300,52 +305,158 @@ def get_close_params(params, q=None, rho=None):
         lens1, lens2 : *tuple of BinaryLensParams*
             Two instances of BinaryLensParams representing close model parameters.
     """
-    if q is None:
-        q = 0.0040
+    estimator = ClosePlanetParameterEstimator(params=params, q=q)
+    return estimator.binary_params
+    #if q is None:
+    #    q = 0.0040
+    #
+    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
+    #u = np.sqrt(params['u_0']**2 + tau**2)
+    #
+    #s = 0.5 * (np.sqrt(u**2 + 4) - u)
+    #
+    #eta_not = (q**0.5 / s) * (1 / (np.sqrt(1 + s**2)) + np.sqrt(1 - s**2))
+    #mu = np.arctan2(eta_not, (s - 1 / s) / (1 + q)) # correction for primary --> COM
+    #phi = np.arctan2(tau, params['u_0'])
+    #
+    #alpha1 = np.pi / 2 - mu - phi
+    #alpha2 = alpha1 + 2 * mu
+    #
+    #alpha1_deg = correct_alpha(-np.rad2deg(alpha1) + 180.)
+    #alpha2_deg = correct_alpha(-np.rad2deg(alpha2) + 180.)
+    #
+    #if 'dt' in params.keys():
+    #    rho = params['dt'] / params['t_E'] / 2.
+    #elif 'rho' not in params.keys():
+    #    rho = 0.001
+    #
+    #new_params1 = {'t_0': params['t_0'],
+    #            'u_0': params['u_0'],
+    #            't_E': params['t_E'],
+    #            's': s,
+    #            'q': q,
+    #            'rho': rho,
+    #            'alpha': alpha1_deg}
+    #
+    #new_params2 = {'t_0': params['t_0'],
+    #            'u_0': params['u_0'],
+    #            't_E': params['t_E'],
+    #            's': s,
+    #            'q': q,
+    #            'rho': rho,
+    #            'alpha': alpha2_deg}
+    #
+    #out1 = BinaryLensParams(new_params1)
+    #out2 = BinaryLensParams(new_params2)
+    #out1.set_mag_method(params)
+    #out2.set_mag_method(params)
+    #
+    #return out1, out2
 
-    tau = (params['t_pl'] - params['t_0']) / params['t_E']
-    u = np.sqrt(params['u_0']**2 + tau**2)
 
-    s = 0.5 * (np.sqrt(u**2 + 4) - u)
+class ClosePlanetParameterEstimator(WidePlanetParameterEstimator):
 
-    eta_not = (q**0.5 / s) * (1 / (np.sqrt(1 + s**2)) + np.sqrt(1 - s**2))
-    mu = np.arctan2(eta_not, (s - 1 / s) / (1 + q)) # correction for primary --> COM
-    phi = np.arctan2(tau, params['u_0'])
-    alpha1 = np.pi / 2 - mu - phi
-    alpha2 = alpha1 + 2 * mu
+    def __init__(self, params, limit='GG97', q=1e-3):
+        super().__init__(params, limit=limit)
+        self._q = q
+        self._eta_not, self._mu, self._phi = None, None, None
+        self._alpha_upper, self._alpha_lower = None, None
 
-    alpha1_deg = correct_alpha(-np.rad2deg(alpha1) + 180.)
-    alpha2_deg = correct_alpha(-np.rad2deg(alpha2) + 180.)
+    def setup_close_ulens_params(self):
+        new_params = {'t_0': self.t_0,
+                      'u_0': self.u_0,
+                      't_E': self.t_E,
+                      's': self.s,
+                      'q': self.q}
 
-    if 'dt' in params.keys():
-        rho = params['dt'] / params['t_E'] / 2.
-    elif 'rho' not in params.keys():
-        rho = 0.001
-    
-    new_params1 = {'t_0': params['t_0'],
-                'u_0': params['u_0'],
-                't_E': params['t_E'],
-                's': s,
-                'q': q,
-                'rho': rho,
-                'alpha': alpha1_deg}
-    
-    new_params2 = {'t_0': params['t_0'],
-                'u_0': params['u_0'],
-                't_E': params['t_E'],
-                's': s,
-                'q': q,
-                'rho': rho,
-                'alpha': alpha2_deg}
-    
-    out1 = BinaryLensParams(new_params1)
-    out2 = BinaryLensParams(new_params2)
-    out1.set_mag_method(params)
-    out2.set_mag_method(params)
-    
-    return out1, out2
+        if self.rho is not None:
+            new_params['rho'] = self.rho
+
+        return new_params
+
+    def calc_binary_ulens_params_upper(self):
+        new_params = self.setup_close_ulens_params()
+        new_params['alpha'] = self.alpha_upper
+
+        return new_params
+
+    def calc_binary_ulens_params_lower(self):
+        new_params = self.setup_close_ulens_params()
+        new_params['alpha'] = self.alpha_lower
+
+        return new_params
+
+    def get_binary_lens_params(self):
+        binary_params_upper = self.calc_binary_ulens_params_upper()
+        binary_params_lower = self.calc_binary_ulens_params_lower()
+
+        upper = BinaryLensParams(binary_params_upper)
+        upper.set_mag_method(self.params)
+        lower = BinaryLensParams(binary_params_lower)
+        lower.set_mag_method(self.params)
+
+        return upper, lower
+
+    @property
+    def binary_params(self):
+        if self._binary_params is None:
+            self._binary_params = self.get_binary_lens_params()
+
+        return self._binary_params
+
+    @property
+    def s(self):
+        if self._s is None:
+            u = self.u_pl
+            self._s = 0.5 * (np.sqrt(u**2 + 4) - u)
+        return self._s
+
+    @property
+    def q(self):
+        return self._q
+
+    @property
+    def eta_not(self):
+        if self._eta_not is None:
+            self._eta_not = (self.q**0.5 / self.s) * (1 / (np.sqrt(1 + self.s**2)) + np.sqrt(1 - self.s**2))
+
+        return self._eta_not
+
+    @property
+    def mu(self):
+        if self._mu is None:
+            self._mu = np.arctan2(self.eta_not, (self.s - 1 / self.s) / (1 + self.q))
+            # correction for primary --> COM
+
+        return self._mu
+
+    @property
+    def phi(self):
+        if self._phi is None:
+            self._phi = np.arctan2(self._tau_pl, self.u_0)
+
+        return self._phi
+
+    @property
+    def alpha_upper(self):
+        if self._alpha_upper is None:
+            alpha = np.pi / 2 - self.mu - self.phi
+            self._alpha_upper = self._correct_alpha(-np.rad2deg(alpha) + 180.)
 
 
+        return self._alpha_upper
+
+    @property
+    def alpha_lower(self):
+        if self._alpha_lower is None:
+            alpha = self.alpha_upper + 2 * self.mu
+            self._alpha_lower = self._correct_alpha(-np.rad2deg(alpha) + 180.)
+
+        return self._alpha_lower
+
+    @property
+    def alpha(self):
+        raise KeyError('For close models, there are 2 caustics -> Use *alpha_upper* or a*lpha_lower*.')
 # In[ ]:
 
 
