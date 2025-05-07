@@ -254,20 +254,27 @@ class TestWideParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB18038
         np.testing.assert_allclose(self.estimator.delta_A, self.delta_A, rtol=self.tol)
 
 
-class TestCloseParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB180383):
+class TestCloseUpperParameterEstimatorOB180383(TestParameterEstimatorOB180383, OB180383):
 
     def setUp(self):
         OB180383.__init__(self)
-        self.estimator = estimate_params.ClosePlanetParameterEstimator(self.params, limit='point')
+        self.estimator = estimate_params.CloseUpperPlanetParameterEstimator(self.params, limit='point')
 
     def test_s(self):
         np.testing.assert_allclose(self.estimator.s, self.s_close, rtol=self.tol)
 
     def test_q(self):
-        np.testing.assert_allclose(self.estimator.q, 0.001, rtol=self.tol)
+        np.testing.assert_allclose(self.estimator.q, 0.004, rtol=self.tol)
 
     def test_alpha(self):
         pass
+
+
+class TestCloseLowerParameterEstimatorOB180383(TestCloseUpperParameterEstimatorOB180383, OB180383):
+
+    def setUp(self):
+        OB180383.__init__(self)
+        self.estimator = estimate_params.CloseLowerPlanetParameterEstimator(self.params, limit='point')
 
 
 class TestGetWideParams(unittest.TestCase, KB160625):
