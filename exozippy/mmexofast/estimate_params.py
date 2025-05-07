@@ -307,7 +307,9 @@ def get_close_params(params, q=None, rho=None):
     """
     estimator_upper = CloseUpperPlanetParameterEstimator(params=params, q=q)
     estimator_lower = CloseLowerPlanetParameterEstimator(params=params, q=q)
+
     return estimator_upper.binary_params, estimator_lower.binary_params
+
     #if q is None:
     #    q = 0.0040
     #
@@ -384,23 +386,7 @@ class CloseUpperPlanetParameterEstimator(WidePlanetParameterEstimator):
 
         return new_params
 
-    #def calc_binary_ulens_params_lower(self):
-    #    new_params = self.setup_close_ulens_params()
-    #    new_params['alpha'] = self.alpha_lower
-    #
-    #    return new_params
-
     def get_binary_lens_params(self):
-        #binary_params_upper = self.calc_binary_ulens_params_upper()
-        #binary_params_lower = self.calc_binary_ulens_params_lower()
-        #
-        #upper = BinaryLensParams(binary_params_upper)
-        #upper.set_mag_method(self.params)
-        #lower = BinaryLensParams(binary_params_lower)
-        #lower.set_mag_method(self.params)
-        #
-        #return upper, lower
-
         binary_ulens_params = self.calc_binary_ulens_params()
         binary_params = BinaryLensParams(binary_ulens_params)
         binary_params.set_mag_method(self.params)
@@ -444,7 +430,6 @@ class CloseUpperPlanetParameterEstimator(WidePlanetParameterEstimator):
     @property
     def phi(self):
         if self._phi is None:
-            #self._phi = np.arctan2(self._tau_pl, self.u_0)
             self._phi = np.arctan2(self.u_0, self.tau_pl)
 
         return self._phi
@@ -452,34 +437,10 @@ class CloseUpperPlanetParameterEstimator(WidePlanetParameterEstimator):
     @property
     def alpha(self):
         if self._alpha is None:
-            #print('alpha_upper calc works fine?')
-            #alpha = np.pi / 2 - self.mu - self.phi
             alpha = 180. - np.rad2deg(self.phi - self.mu)
-            #print('alpha', np.rad2deg(alpha))
-            self._alpha = self._correct_alpha(alpha)#-np.rad2deg(alpha) + 180.)
-            #print('alpha_upper', self._alpha_upper)
+            self._alpha = self._correct_alpha(alpha)
 
         return self._alpha
-
-    #@property
-    #def alpha_lower(self):
-    #    if self._alpha_lower is None:
-    #        print('alpha_lower calc is broken!')
-    #        print('u0', self.u_0)
-    #        print('s - 1 / s', self.s - 1. / self.s)
-    #        print('mu', np.rad2deg(self.mu))
-    #        print('phi', np.rad2deg(self.phi))
-    #        alpha = self.phi + self.mu + np.pi #self.alpha_upper + 2 * self.mu
-    #        print('alpha', np.rad2deg(alpha))
-    #        self._alpha_lower = self._correct_alpha(-np.rad2deg(alpha) + 180.)
-    #        print('alpha_lower', self._alpha_lower)
-    #
-    #    return self._alpha_lower
-    #
-    #@property
-    #def alpha(self):
-    #    raise KeyError('For close models, there are 2 caustics -> Use *alpha_upper* or a*lpha_lower*.')
-# In[ ]:
 
 
 class CloseLowerPlanetParameterEstimator(CloseUpperPlanetParameterEstimator):
@@ -487,12 +448,8 @@ class CloseLowerPlanetParameterEstimator(CloseUpperPlanetParameterEstimator):
     @property
     def alpha(self):
         if self._alpha is None:
-            #print('alpha_upper calc works fine?')
-            #alpha = np.pi / 2 - self.mu - self.phi
             alpha = 180. - np.rad2deg(self.phi + self.mu)
-            #print('alpha', np.rad2deg(alpha))
-            self._alpha = self._correct_alpha(alpha)#-np.rad2deg(alpha) + 180.)
-            #print('alpha_upper', self._alpha_upper)
+            self._alpha = self._correct_alpha(alpha)
 
         return self._alpha
 
