@@ -42,11 +42,24 @@ class TestGetWideParams_alpha(unittest.TestCase):
             planet_model.set_magnification_methods([t_pl - 1., 'VBBL', t_pl + 1.])
             planet_model_mag = planet_model.get_magnification(t_pl)
 
+            print(planet_model)
+            plt.figure(figsize=(8, 4))
+            plt.suptitle(
+                'u_0={0}, alpha={1:8.2f}'.format(params.ulens['u_0'], params.ulens['alpha']))
+            plt.subplot(1, 2, 1)
+            #plt.title('alpha = {0}'.format(planet_model.parameters.alpha))
+            planet_model.plot_trajectory(caustics=True)
+
+            plt.subplot(1, 2, 2)
+            planet_model.plot_magnification()
+            plt.axvline(t_pl, color='black')
+            plt.show()
+
             pspl_model = MulensModel.Model(
                 parameters={'t_0': self.params['t_0'], 'u_0': self.params['u_0'], 't_E': self.params['t_E']})
             pspl_model_mag = pspl_model.get_magnification(t_pl)
 
-            print(params.ulens)
+            #print(params.ulens)
             assert np.abs((planet_model_mag - pspl_model_mag) / pspl_model_mag) > 0.05
 
     def test_1(self):
