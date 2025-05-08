@@ -5,7 +5,7 @@ import MulensModel
 import numpy as np
 import matplotlib.pyplot as plt
 
-from exozippy.mmexofast import estimate_params
+from exozippy.mmexofast import estimate_params, com_trans
 from exozippy import MULENS_DATA_PATH
 from exozippy.mmexofast import fitters
 
@@ -333,7 +333,7 @@ class TestGetCloseParams(unittest.TestCase, KB160625):
     def setUp(self):
         KB160625.__init__(self)
         self.ulens_params = estimate_params.get_close_params(self.params, q=self)
-
+        
 
 class TestAnomalyParameterEstimator(unittest.TestCase):
 
@@ -343,7 +343,9 @@ class TestAnomalyParameterEstimator(unittest.TestCase):
             file_name=datafile,
             phot_fmt='mag')
         self.true_params, self.input_fluxes = self._parse_header(datafile)
-        self.pspl_params = {key: self.true_params[key] for key in ['t_0', 'u_0', 't_E']}
+        new_params = com_trans.co_mass_to_co_magnif(self.true_params)
+        new_params['t_E'] = self.true_params['t_E']
+        self.pspl_params = new_params
         self.af_results = {'t_0': 17.43489583333333, 't_eff': 0.421875, 'j': 2.0, 'chi2': 98.97724735834696,
                            'dchi2_zero': 218.83573427369782, 'dchi2_flat': 143.937564049782}
 
@@ -376,9 +378,9 @@ class TestAnomalyParameterEstimator(unittest.TestCase):
         )
         estimator.update_pspl_model()
 
-        #print(test_pspl)
-        #print(self.pspl_params)
-        #print(estimator.refined_pspl_params)
+        print(test_pspl)
+        print(self.pspl_params)
+        print(estimator.refined_pspl_params)
         #event = MulensModel.Event(datasets=self.data, model=MulensModel.Model(parameters=test_pspl))
         #event.plot()
         #
