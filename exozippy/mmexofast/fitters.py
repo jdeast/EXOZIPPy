@@ -61,10 +61,10 @@ class MulensFitter():
 
         return self._parameters_to_fit
 
-    @initial_model.setter
+    @parameters_to_fit.setter
     def parameters_to_fit(self, params_dict):
-        if (params_dict is not None) and (not isinstance(params_dict, dict)):
-            raise ValueError('initial_model must be set with either *None* or *dict*.')
+        if (params_dict is not None) and (not isinstance(params_dict, (list, tuple))):
+            raise ValueError('initial_model must be set with either *None* or *list* or *tuple*.')
 
         self._parameters_to_fit = params_dict
 
@@ -173,9 +173,17 @@ class AnomalyFitter(MulensFitter):
 
 class WidePlanetFitter(AnomalyFitter):
 
-    def __init__(self, **kwargs):
+    def __init__(self, emcee_settings=None, **kwargs):
         super().__init__(**kwargs)
-        self._parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'd_xsi']
+        self.parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'd_xsi']
+        self.sigmas = [0.1, 0.01, 0.01, 0.01, 0.001, 0.01, 0.0005]
+        if emcee_settings is None:
+            emcee_settings = {'n_walkers': 40, 'n_dim': len(self.parameters_to_fit), 'n_burn': 500, 'n_steps': 1000,
+                              'temperature': 1.}
+
+        self.emcee_settings = emcee_settings
+        self._initial_guess = None
+        print('datasets', self.datasets)
 
     def estimate_initial_parameters(self):
         binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
@@ -214,6 +222,40 @@ class WidePlanetFitter(AnomalyFitter):
         # print('after set\n', event.model)
         return event
 
+    def make_starting_vector(self):
+        #t_pl = self.anomaly_lc_params['t_pl']
+        #t_range = [t_pl - self.initial_model['t_E'] / 4, t_pl + self.initial_model['t_E'] / 4]
+        starting_vector = []
+        for i in np.arange(self.emcee_settings['n_walkers']):
+            test_vector = self.initial_guess + np.random.randn(self.emcee_settings['n_dim']) * self.sigmas
+            starting_vector.append(test_vector)
+            #random_params_dict = {}
+            #for parameter, value in zip(self.parameters_to_fit, test_vector):
+            #    key = self.get_parameter_name(parameter)
+            #    if key == parameter:
+            #        random_params_dict[key] = value
+            #    else:
+            #        random_params_dict[key] = 10.**value
+            #
+            #for parameter in ['t_0', 'u_0', 't_E', 'rho', 's', 'q', 'alpha']:
+            #    if not (parameter in list(random_params_dict.keys())):
+            #        random_params_dict[parameter] = self.initial_model[parameter]
+            #
+            #random_model_params = MulensModel.ModelParameters(random_params_dict)
+            ## update to go through the caustic:
+            #random_anomaly_lc_params = {key: value for key, value in self.anomaly_lc_params.items()}
+            #for key in ['t_0', 'u_0', 't_E']:
+            #    random_anomaly_lc_params[key] = random_params_dict[key]
+            #
+            #random_causticx_params = mmexo.estimate_params.get_wide_params(random_anomaly_lc_params)
+            #random_model_params.s = random_causticx_params['s']
+            #random_model_params.alpha = random_causticx_params['alpha']
+            #
+            #starting_vector.append(
+            #    self.make_emcee_vector_from_ModelParameters(random_model_params))
+            #
+        return starting_vector
+
     def make_emcee_vector_from_ModelParameters(self, parameters):
         initial_guess = []
         for parameter in self.parameters_to_fit:
@@ -248,39 +290,41 @@ class WidePlanetFitter(AnomalyFitter):
 
         print(self.initial_model)
         model = MulensModel.Model(parameters=self.initial_model)
-        model.set_default_magnification_method('point_source_point_lens')
+        model.default_magnification_method = 'point_source_point_lens'
         model.set_magnification_methods(self.mag_methods)
         event = MulensModel.Event(datasets=self.datasets, model=model)
 
-        start = self.make_emcee_vector_from_ModelParameters(model.parameters)
-
-        n_walkers = 40
-        n_dim = len(self.parameters_to_fit)
-        n_burn = 500
-        n_steps = 1000
-        temperature = 1.
+        starting_vector = self.make_starting_vector()
 
         sampler = emcee.EnsembleSampler(
-            n_walkers, n_dim, self.ln_prob,
-            args=(event, self.parameters_to_fit, temperature))
-        sampler.run_mcmc(start, n_steps)
+            self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob,
+            args=(event, self.parameters_to_fit, self.emcee_settings['temperature']))
+        sampler.run_mcmc(starting_vector, self.emcee_settings['n_steps'])
 
         # Remove burn-in samples and reshape:
-        samples = sampler.chain[:, n_burn:, :].reshape((-1, n_dim))
+        samples = sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape((-1, self.emcee_settings['n_dim']))
 
         # Results:
         results = np.percentile(samples, [16, 50, 84], axis=0)
         if verbose:
             print("Fitted parameters:")
-            for i in range(n_dim):
+            for i in range(self.emcee_settings['n_dim']):
                 r = results[1, i]
                 print("${:.5f}^{{+{:.5f}}}_{{-{:.5f}}}$ &".format(
                     r, results[2, i] - r, r - results[0, i]))
 
-        prob = sampler.lnprobability[:, n_burn:].reshape((-1))
+        prob = sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
         best_index = np.argmax(prob)
         # self.best_chi2 = prob[best_index] / -0.5
         event = self.set_event_parameters(samples[best_index, :], event, self.parameters_to_fit)
 
         self.best = event.model.parameters.parameters
         self.best['chi2'] = event.get_chi2()
+
+    @property
+    def initial_guess(self):
+        if self._initial_guess is None:
+            self._initial_guess = self.make_emcee_vector_from_ModelParameters(
+                MulensModel.ModelParameters(self.initial_model))
+
+        return self._initial_guess
