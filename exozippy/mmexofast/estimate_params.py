@@ -32,6 +32,9 @@ def get_PSPL_params(ef_grid_point, datasets, verbose=False):
                 datasets=datasets, model=MulensModel.Model(params))
             if event.get_chi2() < best_chi2:
                 best_params = params
+                best_chi2 = event.chi2
+
+            #print(u_0, t_E, event.chi2)
 
     return best_params
 
@@ -72,7 +75,7 @@ class BinaryLensParams():
         #t1 = params['t_pl'] - (5 * params['dt'])
         #t2 = params['t_pl'] + (5 * params['dt'])
         #self.mag_method = [t1, 'VBBL', t2]
-        print(params)
+        #print(params)
 
         t_E = params['t_E']
         t_0 = params['t_0']

@@ -68,6 +68,7 @@ class MMEXOFASTFitter():
         # initialize params
         self._best_ef_grid_point = None
         self._initial_pspl_params = None
+        self._initial_pspl_results = None
         self._pspl_params = None
         self._best_af_grid_point = None
         self._anomaly_lc_params = None
@@ -100,10 +101,24 @@ class MMEXOFASTFitter():
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
         self.best_ef_grid_point = self.do_ef_grid_search()
-        self.initial_pspl_params = self.get_initial_pspl_params()
+        if self.verbose:
+            print('Best EF grid point ', self.best_ef_grid_point)
+
+        self.initial_pspl_results = self.get_initial_pspl()
+        if self.verbose:
+            print('Initial SFit', self.initial_pspl_results)
+
         self.best_af_grid_point = self.do_af_grid_search()
-        self.anomaly_lc_properties = self.get_anomaly_lc_params()
+        if self.verbose:
+            print('Best AF grid', self.best_af_grid_point)
+
+        self.anomaly_lc_params = self.get_anomaly_lc_params()
+        if self.verbose:
+            print('Anomaly Params', self.anomaly_lc_params)
+
         self.results = self.fit_anomaly()
+        if self.verbose:
+            print('Results', self.results)
 
         #self.get_best_point_lens_model()
         #self.do_af_grid_search()
@@ -178,13 +193,17 @@ class MMEXOFASTFitter():
         ef_grid.run()
         return ef_grid.best
 
-    def get_initial_pspl_params(self, verbose=False):
+    def get_initial_pspl(self, verbose=False):
         pspl_est_params = mmexo.estimate_params.get_PSPL_params(self.best_ef_grid_point, self.datasets)
+        if self.verbose:
+            print('Initial PSPL Estimate', pspl_est_params)
+
         fitter = mmexo.fitters.SFitFitter(initial_model=pspl_est_params, datasets=self.datasets)
         fitter.run()
-        pspl_params = fitter.best.copy()
-        del pspl_params['chi2']
-        return pspl_params
+        return fitter.best
+        #pspl_params = fitter.best.copy()
+        #del pspl_params['chi2']
+        #return pspl_params
 
     #    t_0 = self.best_ef_grid_point['t_0']
     #    if self.best_ef_grid_point['j'] == 1:
@@ -449,7 +468,7 @@ class MMEXOFASTFitter():
     #    return results
     #
     def set_residuals(self, pspl_params):
-        print(pspl_params)
+        #print(pspl_params)
         event = MulensModel.Event(
             datasets=self.datasets, model=MulensModel.Model(pspl_params))
         event.fit_fluxes()
@@ -467,7 +486,6 @@ class MMEXOFASTFitter():
     def do_af_grid_search(self):
         #if self.log_file is not None:
         #    log = open(self.log_file, 'a')
-
         self.set_residuals(self.initial_pspl_params)
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
@@ -488,6 +506,7 @@ class MMEXOFASTFitter():
 
     def fit_anomaly(self):
         # So far, this only fits wide planet models in the GG97 limit.
+        #print(self.anomaly_lc_params)
         wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
             datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
             emcee_settings=self.emcee_settings)
@@ -566,12 +585,23 @@ class MMEXOFASTFitter():
         self._best_ef_grid_point = value
 
     @property
-    def initial_pspl_params(self):
-        return self._initial_pspl_params
+    def initial_pspl_results(self):
+        return self._initial_pspl_results
 
-    @initial_pspl_params.setter
-    def initial_pspl_params(self, value):
-        self._initial_pspl_params = value
+    @initial_pspl_results.setter
+    def initial_pspl_results(self, value):
+        self._initial_pspl_results = value
+
+    @property
+    def initial_pspl_params(self):
+        if self._initial_pspl_params is None:
+            if self.initial_pspl_results is not None:
+                self._initial_pspl_params = self.initial_pspl_results.copy()
+                del self._initial_pspl_params['chi2']
+            else:
+                raise AttributeError('No Initial PSPL results.')
+
+        return self._initial_pspl_params
 
     @property
     def pspl_params(self):

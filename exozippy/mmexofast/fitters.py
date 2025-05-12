@@ -143,7 +143,7 @@ class AnomalyFitter(MulensFitter):
         except:
             return -np.inf
 
-        print(chi2, theta)
+        #print(chi2, theta)
         return -0.5 * chi2
 
     def ln_prior(self, theta, parameters_to_fit):
@@ -193,7 +193,7 @@ class WidePlanetFitter(AnomalyFitter):
 
         self.emcee_settings = emcee_settings
         self._initial_guess = None
-        print('datasets', self.datasets)
+        #print('datasets', self.datasets)
 
     def estimate_initial_parameters(self):
         binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
@@ -282,8 +282,8 @@ class WidePlanetFitter(AnomalyFitter):
                 sin_alpha = np.sin(np.deg2rad(alpha))
                 d_xsi = -u_0 / sin_alpha - xloc
                 value = d_xsi
-                print(u_0, xloc, sin_alpha, alpha)
-                print('initial d_xsi', d_xsi)
+                #print(u_0, xloc, sin_alpha, alpha)
+                #print('initial d_xsi', d_xsi)
             else:
                 value = parameters.__getattribute__(key)
 
@@ -298,7 +298,7 @@ class WidePlanetFitter(AnomalyFitter):
         if self.initial_model is None:
             self.estimate_initial_parameters()
 
-        print(self.initial_model)
+        #print(self.initial_model)
         model = MulensModel.Model(parameters=self.initial_model)
         model.default_magnification_method = 'point_source_point_lens'
         model.set_magnification_methods(self.mag_methods)
