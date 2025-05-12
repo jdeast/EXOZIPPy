@@ -510,6 +510,11 @@ class MMEXOFASTFitter():
         wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
             datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
             emcee_settings=self.emcee_settings)
+        if self.verbose:
+            wide_planet_fitter.estimate_initial_parameters()
+            print('Initial 2L1S Wide Model', wide_planet_fitter.initial_model)
+            print('mag methods', wide_planet_fitter.mag_methods)
+
         wide_planet_fitter.run()
         return wide_planet_fitter.best
 
