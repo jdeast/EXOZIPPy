@@ -176,7 +176,7 @@ class WidePlanetFitter(AnomalyFitter):
     def __init__(self, emcee_settings=None, **kwargs):
         super().__init__(**kwargs)
         self.parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'd_xsi']
-        self.sigmas = [0.1, 0.01, 0.01, 0.01, 0.001, 0.01, 0.0005]
+        self.sigmas = [0.1, 0.01, 0.01, 0.01, 0.001, 0.5, 0.0005]
         if emcee_settings is None:
             emcee_settings = {'n_walkers': 40, 'n_dim': len(self.parameters_to_fit), 'n_burn': 500, 'n_steps': 1000,
                               'temperature': 1.}
