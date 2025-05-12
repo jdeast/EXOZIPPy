@@ -171,6 +171,10 @@ class AnomalyFitter(MulensFitter):
         return ln_prior_ + ln_like_
 
 
+default_emcee_settings = {'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000,
+                              'temperature': 1.}
+
+
 class WidePlanetFitter(AnomalyFitter):
 
     def __init__(self, emcee_settings=None, **kwargs):
@@ -178,8 +182,14 @@ class WidePlanetFitter(AnomalyFitter):
         self.parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'd_xsi']
         self.sigmas = [0.1, 0.01, 0.01, 0.01, 0.001, 0.5, 0.0005]
         if emcee_settings is None:
-            emcee_settings = {'n_walkers': 40, 'n_dim': len(self.parameters_to_fit), 'n_burn': 500, 'n_steps': 1000,
-                              'temperature': 1.}
+            emcee_settings = default_emcee_settings
+
+        for key in default_emcee_settings.keys():
+            if key not in list(emcee_settings.keys()):
+                emcee_settings[key] = default_emcee_settings[key]
+
+        if 'ndim' not in list(emcee_settings.keys()):
+            emcee_settings['n_dim'] = len(self.parameters_to_fit)
 
         self.emcee_settings = emcee_settings
         self._initial_guess = None

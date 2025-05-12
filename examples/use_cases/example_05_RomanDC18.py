@@ -14,9 +14,9 @@ def fit_lc(lc_num, verbose=False):
 
     results = exozippy.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
-        print_results=True, verbose=verbose,
-        log_file=os.path.join(
-            exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
+        print_results=True, verbose=verbose, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
+        #log_file=os.path.join(
+        #    exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
     )
 
     return results
@@ -43,5 +43,5 @@ for lc_num in np.sort(lc_nums):
         evaluate_results(lc_num)
     except NotImplementedError:
         pass
-    except Exception as e:
-        print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
+    #except Exception as e:
+    #    print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))

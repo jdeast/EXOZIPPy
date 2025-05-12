@@ -19,6 +19,23 @@ import exozippy.mmexofast as mmexo
 # In[ ]:
 
 
+def get_PSPL_params(ef_grid_point, datasets, verbose=False):
+    t_0 = ef_grid_point['t_0']
+    u_0s = [0.01, 0.1, 0.3, 1.0, 1.5]
+    t_Es = [1., 3., 10., 20., 40., 100.]
+    best_chi2 = np.inf
+    best_params = None
+    for u_0 in u_0s:
+        for t_E in t_Es:
+            params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
+            event = MulensModel.Event(
+                datasets=datasets, model=MulensModel.Model(params))
+            if event.get_chi2() < best_chi2:
+                best_params = params
+
+    return best_params
+
+
 class BinaryLensParams():
     """
     A class for managing parameters related to binary lens models.
