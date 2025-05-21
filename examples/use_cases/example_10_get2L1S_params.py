@@ -24,10 +24,10 @@ fitter.set_residuals()
 fitter.set_datasets_with_anomaly_masked()
 binary_params = fitter.get_initial_2L1S_params()
 print(binary_params.ulens)
-print(binary_params.mag_method)
+print(binary_params.mag_methods)
 
 binary_model = MulensModel.Model(binary_params.ulens)
-binary_model.set_magnification_methods(binary_params.mag_method)
+binary_model.set_magnification_methods(binary_params.mag_methods)
 
 event = MulensModel.Event(datasets=datasets, model=binary_model)
 print(event.model)

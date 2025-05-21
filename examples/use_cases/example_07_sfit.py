@@ -16,7 +16,7 @@ results_EF = {'t_0': 2460023.2844586717, 't_eff': 9.988721231519582,
 
 fitter = mmexo.mmexofast.MMEXOFASTFitter(datasets=datasets)
 fitter.best_ef_grid_point = results_EF
-initial_pspl_params = fitter.get_initial_pspl_params(verbose=True)
+initial_pspl_params = fitter.get_initial_pspl(verbose=True)
 print('initial parameters', initial_pspl_params)
 init_event = MulensModel.Event(
     datasets=datasets, model=MulensModel.Model(initial_pspl_params))
