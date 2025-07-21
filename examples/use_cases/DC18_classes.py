@@ -38,15 +38,26 @@ class DC18Answers():
         self.data = pd.read_csv(
             self.filename,
             names=self.names, usecols=range(len(self.names)),
-            delim_whitespace=True, skiprows=1,
+            sep='\s+', skiprows=1,
         )
+        self.classes = self._read_classes()
         #print('The columns may NOT be read in correctly!')
+
+    def _read_classes(self):
+        classes = []
+        with open(self.filename, 'r') as orig_file:
+            for line in orig_file.readlines()[1:]:
+                label = line.split(' ')[-2]
+                class_type = label.split('_')[0]
+                classes.append(class_type)
+
+        return pd.Series(classes)
 
     def check_table(self):
         orig_file = open(self.filename, 'r')
         lines = orig_file.readlines()
         for i, line in enumerate(lines[1:]):
-            #print(line)
+            #print(i, line[-20:])
             sections = line.split('|')
             ulens_1 = sections[3].split()
             u0 = float(ulens_1[0])
@@ -58,30 +69,36 @@ class DC18Answers():
             ulens_2 = sections[4].split()
             q = float(ulens_2[4])
             s = float(ulens_2[5])
+            if (q < 0.01) and ('cassan' in line):
+                print(i, line)
+                print(ulens_1)
+                print(ulens_2)
+                print(self.data.iloc[i][['idx', 'u0', 'alpha', 't0', 'tE', 'rhos', 'q', 's']])
 
-            if (
-                    (t0 != self.data['t0'].iloc[i]) or
-                    (u0 != self.data['u0'].iloc[i]) or
-                    (tE != self.data['tE'].iloc[i]) or
-                    (rhos != self.data['rhos'].iloc[i]) or
-                    (s != self.data['s'].iloc[i]) or
-                    (q != self.data['q'].iloc[i]) or
-                    (alpha != self.data['alpha'].iloc[i])
-            ):
-                print(i, 'Read Error')
-                print(sections[3])
-                print(sections[4])
-                print('t0', t0, self.data['t0'].iloc[i])
-                print('u0', u0, self.data['u0'].iloc[i])
-                print('tE', tE, self.data['tE'].iloc[i])
-                print('rhos', rhos, self.data['rhos'].iloc[i])
-                print('s', s, self.data['s'].iloc[i])
-                print('q', q, self.data['q'].iloc[i])
-                print('alpha', alpha, self.data['alpha'].iloc[i])
+            #if (
+            #        (t0 != self.data['t0'].iloc[i]) or
+            #        (u0 != self.data['u0'].iloc[i]) or
+            #        (tE != self.data['tE'].iloc[i]) or
+            #        (rhos != self.data['rhos'].iloc[i]) or
+            #        (s != self.data['s'].iloc[i]) or
+            #        (q != self.data['q'].iloc[i]) or
+            #        (alpha != self.data['alpha'].iloc[i])
+            #):
+            #    print(i, 'Read Error')
+            #    print(sections[3])
+            #    print(sections[4])
+            #    print('t0', t0, self.data['t0'].iloc[i])
+            #    print('u0', u0, self.data['u0'].iloc[i])
+            #    print('tE', tE, self.data['tE'].iloc[i])
+            #    print('rhos', rhos, self.data['rhos'].iloc[i])
+            #    print('s', s, self.data['s'].iloc[i])
+            #    print('q', q, self.data['q'].iloc[i])
+            #    print('alpha', alpha, self.data['alpha'].iloc[i])
 
         orig_file.close()
 
 
 if __name__ == '__main__':
     answers = DC18Answers()
+    print(answers.classes)
     answers.check_table()
