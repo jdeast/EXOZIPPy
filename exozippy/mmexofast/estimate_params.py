@@ -117,34 +117,19 @@ def get_wide_params(params, limit='GG97'):
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
     """
-    # JCY: Should these calculations be broken out into individual parameters?
-    # e.g., so they can be tested individually?
-    # This would mean function --> class.
-    #u = np.sqrt(params['u_0']**2 + tau**2)
-    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
-    #s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    ##alpha = np.arctan2(-params['u_0'], tau)
-    #alpha = np.pi - np.arctan2(params['u_0'], tau)
-    #
-    #print('JCY: I do not like this method for estimating rho and q.')
-    #rho = params['dt'] / params['t_E'] / 2.
-    #q = 0.5 * np.abs(params['dmag']) * (rho**2)
-    #
-    #alpha_deg = correct_alpha(np.rad2deg(alpha))
-    #new_params = {'t_0': params['t_0'],
-    #           'u_0': params['u_0'],
-    #           't_E': params['t_E'],
-    #           's': s,
-    #           'q': q,
-    #           'rho': rho,
-    #           'alpha': alpha_deg}
-    #
-    #out = BinaryLensParams(new_params)
-    #out.set_mag_method(params)
-
     estimator = WidePlanetParameterEstimator(params, limit=limit)
     
     return estimator.binary_params
+
+
+def get_possible_bump_anomaly_solutions(params):
+    solutions = {}
+
+    # large rho limit
+    estimator = WidePlanetParameterEstimator(params, limit='GG97')
+    solutions['GG97'] = estimator.calc_binary_ulens_params()
+
+    return solutions
 
 
 class ParameterEstimator():
