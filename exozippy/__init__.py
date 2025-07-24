@@ -1,6 +1,6 @@
 from os import path
 
-from exozippy.mmexofast import gridsearches, mmexofast, ulens, estimate_params
+from exozippy.mmexofast import gridsearches, mmexofast, ulens, estimate_params, fitters
 
 MODULE_PATH = path.abspath(__file__)
 for i in range(3):

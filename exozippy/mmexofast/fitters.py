@@ -208,7 +208,6 @@ class WidePlanetFitter(AnomalyFitter):
         self._best = None
         self._event = None
         self._initial_guess = None
-        #print('datasets', self.datasets)
 
     def estimate_initial_parameters(self):
         binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
@@ -241,58 +240,12 @@ class WidePlanetFitter(AnomalyFitter):
 
         self._event = MulensModel.Event(datasets=self.datasets, model=model)
 
-#    def set_event_parameters(self, theta, event):
-#        # print('before set:\n', event.model)
-#        d_xsi = None
-#        for parameter, value in zip(self.parameters_to_fit, theta):
-#            key = self.get_parameter_name(parameter)
-#            if key != parameter:
-#                value = 10. ** value
-#
-#            # print(key, parameter, value)
-#            if key == 'd_xsi':
-#                d_xsi = value
-#            else:
-#                event.model.parameters.__setattr__(key, value)
-#
-#        if d_xsi is not None:
-#            event.model.parameters.alpha = self.get_alpha_from_d_xsi(event.model.parameters, d_xsi)
-#
-#        # print('after set\n', event.model)
-#        return event
-
     def make_starting_vector(self):
-        #t_pl = self.anomaly_lc_params['t_pl']
-        #t_range = [t_pl - self.initial_model['t_E'] / 4, t_pl + self.initial_model['t_E'] / 4]
         starting_vector = []
         for i in np.arange(self.emcee_settings['n_walkers']):
             test_vector = self.initial_guess + np.random.randn(self.emcee_settings['n_dim']) * self.sigmas
             starting_vector.append(test_vector)
-            #random_params_dict = {}
-            #for parameter, value in zip(self.parameters_to_fit, test_vector):
-            #    key = self.get_parameter_name(parameter)
-            #    if key == parameter:
-            #        random_params_dict[key] = value
-            #    else:
-            #        random_params_dict[key] = 10.**value
-            #
-            #for parameter in ['t_0', 'u_0', 't_E', 'rho', 's', 'q', 'alpha']:
-            #    if not (parameter in list(random_params_dict.keys())):
-            #        random_params_dict[parameter] = self.initial_model[parameter]
-            #
-            #random_model_params = MulensModel.ModelParameters(random_params_dict)
-            ## update to go through the caustic:
-            #random_anomaly_lc_params = {key: value for key, value in self.anomaly_lc_params.items()}
-            #for key in ['t_0', 'u_0', 't_E']:
-            #    random_anomaly_lc_params[key] = random_params_dict[key]
-            #
-            #random_causticx_params = mmexo.estimate_params.get_wide_params(random_anomaly_lc_params)
-            #random_model_params.s = random_causticx_params['s']
-            #random_model_params.alpha = random_causticx_params['alpha']
-            #
-            #starting_vector.append(
-            #    self.make_emcee_vector_from_ModelParameters(random_model_params))
-            #
+
         return starting_vector
 
     def make_emcee_vector_from_ModelParameters(self, parameters):
@@ -311,8 +264,6 @@ class WidePlanetFitter(AnomalyFitter):
                 sin_alpha = np.sin(np.deg2rad(alpha))
                 d_xsi = -u_0 / sin_alpha - xloc
                 value = d_xsi
-                #print(u_0, xloc, sin_alpha, alpha)
-                #print('initial d_xsi', d_xsi)
             else:
                 value = parameters.__getattribute__(key)
 
@@ -380,18 +331,12 @@ class WidePlanetFitter(AnomalyFitter):
         if self._event is None:
             raise AttributeError('Event has not been created. Run initialize_event() first!')
 
-        #print('Original Event:', self._event)
-        #print(self.parameters_to_fit)
-        #print(theta)
-
         d_xsi = None
         for parameter, value in zip(self.parameters_to_fit, theta):
-            #print(parameter, value)
             key = self.get_parameter_name(parameter)
             if key != parameter:
                 value = 10. ** value
 
-            # print(key, parameter, value)
             if key == 'd_xsi':
                 d_xsi = value
             else:
@@ -400,5 +345,3 @@ class WidePlanetFitter(AnomalyFitter):
         if d_xsi is not None:
             self._event.model.parameters.alpha = self.get_alpha_from_d_xsi(
                 self._event.model.parameters, d_xsi)
-
-        #print('Updated event', self._event)
