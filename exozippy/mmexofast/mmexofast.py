@@ -47,7 +47,7 @@ class MMEXOFASTFitter():
 
     def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
                  priors=None, print_results=False, verbose=False,
-                 output_file=None, log_file=None, emcee_settings=None, pool=None):
+                 output_file=None, log_file=None, emcee=True, emcee_settings=None, pool=None):
         self.verbose = verbose
         if log_file is not None:
             self.log_file = log_file
@@ -59,6 +59,7 @@ class MMEXOFASTFitter():
             self.datasets = self._create_mulensdata_objects(files)
 
         self.fit_type = fit_type
+        self.emcee = emcee
         self.emcee_settings = emcee_settings
         self.pool = pool
 
@@ -117,9 +118,10 @@ class MMEXOFASTFitter():
         if self.verbose:
             print('Anomaly Params', self.anomaly_lc_params)
 
-        self.results = self.fit_anomaly()
-        if self.verbose:
-            print('Results', self.results)
+        if self.emcee:
+            self.results = self.fit_anomaly()
+            if self.verbose:
+                print('Results', self.results)
 
         #self.get_best_point_lens_model()
         #self.do_af_grid_search()

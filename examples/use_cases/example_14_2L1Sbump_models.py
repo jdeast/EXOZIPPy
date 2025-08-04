@@ -31,6 +31,8 @@ model = MulensModel.Model(parameters=list(solutions.values())[0])
 model.set_magnification_methods(binary_params.mag_methods)
 
 event = MulensModel.Event(datasets=datasets, model=model)
+print('chi2', event.get_chi2())
+
 event.plot_data(markerfacecolor='none')
 ref_fluxes = event.get_ref_fluxes()
 
