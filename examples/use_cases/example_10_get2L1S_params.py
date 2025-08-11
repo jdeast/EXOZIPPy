@@ -12,17 +12,18 @@ import MulensModel
 import matplotlib.pyplot as plt
 
 pspl_params = {'t_0': 2460024.676357266, 't_E': 6.96083126,
-               'u_0': 1.4639013963602456}
+               'u_0': 1.4639013963602456, 'chi2': -99}
 af_grid_params = {'t_0': 2460017.625, 't_eff': 0.75, 'j': 2.0,
                   'chi2': 395.2493798573346, 'dchi2_zero': 5563.0445050189755,
                   'dchi2_flat': 4186.45789320002}
 
 fitter = mmexo.mmexofast.MMEXOFASTFitter(datasets=datasets)
-fitter.pspl_params = pspl_params
+fitter.initial_pspl_results = pspl_params
 fitter.best_af_grid_point = af_grid_params
-fitter.set_residuals()
-fitter.set_datasets_with_anomaly_masked()
-binary_params = fitter.get_initial_2L1S_params()
+#fitter.set_residuals(fitter.pspl_params)
+#fitter.set_datasets_with_anomaly_masked()
+anomaly_lc_params = fitter.get_anomaly_lc_params()
+binary_params = mmexo.estimate_params.get_wide_params(anomaly_lc_params)
 print(binary_params.ulens)
 print(binary_params.mag_methods)
 
