@@ -31,6 +31,10 @@ class TestGetWideParams_alpha(unittest.TestCase):
         return estimate_params.get_wide_params(params)
 
     def do_test(self, t_pl):
+        """
+        make sure the magnification at t_pl is different for the estimated
+        planet model than for a PSPL model.
+        """
         params = {key: value for key, value in self.params.items()}
         params['t_pl'] = t_pl
         planet_params = self.estimate_params(params)
