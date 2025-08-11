@@ -13,13 +13,13 @@ class TestCOMass2COMag(unittest.TestCase):
         pass
 
     def test_close_case(self):
-        params = {'t_0': 0., 'u_0': 0.5, 't_E': 1., 's': 0.7, 'q': 0.1, 'alpha': 30.}
+        params = {'t_0': 0., 'u_0': 0.02, 't_E': 1., 's': 0.7, 'q': 0.1, 'alpha': 30.}
         new_params = com_trans.co_mass_to_co_magnif(params)
         assert new_params['t_0'] == params['t_0']
         assert new_params['u_0'] == params['u_0']
 
     def do_wide_test(self, alpha):
-        params = {'t_0': 0., 'u_0': 0.5, 't_E': 1., 's': 20., 'q': 0.01, 'alpha': alpha}
+        params = {'t_0': 0., 'u_0': 0.02, 't_E': 1., 's': 20., 'q': 0.01, 'alpha': alpha}
         #delta = params['s'] * params['q'] / (1 + params['q'])
         new_params = com_trans.co_mass_to_co_magnif(params)
         new_params['t_E'] = params['t_E']
