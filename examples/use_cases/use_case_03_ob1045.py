@@ -17,3 +17,6 @@ fitter = exozippy.mmexofast.MMEXOFASTFitter(
     mag_methods=[2457558.5, 'finite_source_LD_Yoo04', 2457559.7],
     verbose=True)
 fitter.fit()
+
+fitter.output_latex_table()  # make a LateX table file summarizing the results of all fits (PSPL, FSPL, FSPL+Par, EXOZIPPy)
+
