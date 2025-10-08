@@ -30,7 +30,7 @@ def co_magnif_to_co_mass(params):
     """Transform from center of magnification to center of mass coordinates"""
     delta_t0, delta_u0 = get_co_mass_co_manif_offset(params)
 
-    return {'t_0': params['t_0'] - delta_t0,
+    return {'t_0': params['t_0'] - delta_t0, # guessing this should be ++ in v3 because mass2mag is --.
             'u_0': params['u_0'] + delta_u0}
 
 

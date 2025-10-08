@@ -9,7 +9,7 @@
 
 import MulensModel
 import MulensModel as mm
-#import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import numpy as np
 #import warnings
 import copy
@@ -117,34 +117,19 @@ def get_wide_params(params, limit='GG97'):
         wide_params : *BinaryLensParams*
              Wide model parameters for the binary lens.
     """
-    # JCY: Should these calculations be broken out into individual parameters?
-    # e.g., so they can be tested individually?
-    # This would mean function --> class.
-    #u = np.sqrt(params['u_0']**2 + tau**2)
-    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
-    #s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    ##alpha = np.arctan2(-params['u_0'], tau)
-    #alpha = np.pi - np.arctan2(params['u_0'], tau)
-    #
-    #print('JCY: I do not like this method for estimating rho and q.')
-    #rho = params['dt'] / params['t_E'] / 2.
-    #q = 0.5 * np.abs(params['dmag']) * (rho**2)
-    #
-    #alpha_deg = correct_alpha(np.rad2deg(alpha))
-    #new_params = {'t_0': params['t_0'],
-    #           'u_0': params['u_0'],
-    #           't_E': params['t_E'],
-    #           's': s,
-    #           'q': q,
-    #           'rho': rho,
-    #           'alpha': alpha_deg}
-    #
-    #out = BinaryLensParams(new_params)
-    #out.set_mag_method(params)
-
     estimator = WidePlanetParameterEstimator(params, limit=limit)
     
     return estimator.binary_params
+
+
+def get_possible_bump_anomaly_solutions(params):
+    solutions = {}
+
+    # large rho limit
+    estimator = WidePlanetParameterEstimator(params, limit='GG97')
+    solutions['GG97'] = estimator.calc_binary_ulens_params()
+
+    return solutions
 
 
 class ParameterEstimator():
@@ -578,133 +563,440 @@ def get_binary_source_params(params):
 
 
 class AnomalyPropertyEstimator():
+    # The old version revised the PSPL parameters after masking the anomaly.
+    # Could consider whether it would be a good idea to reimplement that.
 
-    def __init__(self, datasets=None, pspl_params=None, af_results=None, mask_type='t_eff'):
+    def __init__(self, datasets=None, pspl_params=None, af_results=None, mask_type='t_eff', n_mask=3):
         if isinstance(datasets, MulensModel.MulensData):
             datasets = [datasets]
 
         self.datasets = datasets
         self.pspl_params = pspl_params
         self.af_results = af_results
-        self.mask_type = mask_type
+        self.n_mask = n_mask
 
-        self._refined_pspl_params = None
-        self._masked_datasets = None
+        self.anom_t_range_af = self.af_results['t_0'] + self.n_mask * np.array(
+            [-1, 1]) * self.af_results['t_eff']
 
-    def set_datasets_with_anomaly_masked(self, n_mask=3, tol=0.3):
-        """
-        Mask points associated with the anomaly.
+        self._peak_index = None
+        self._peak_dflux = None
+        self._t_start = None
+        self._t_stop = None
 
-        :param mask_type: *str*
-            `t_eff' or `residuals'. If `t_eff' mask based on t_pl +- n_mask * t_eff. If `residuals', mask based on
-            deviation from existing point lens fit.
+        self._pspl_event = None
+        self._source_flux = None
+        self._blend_flux = None
 
-        :param n_mask: *int*
-            Number of +- `t_eff' to mask. Only used with mask_type = `t_eff'.
+        self._anom_type = None
+        self._anom_index = None
+        self._sorted_index = None
+        self._times = None
+        self._scaled_fluxes = None
+        self._scaled_residuals = None
+        self._chi2s = None
+        self._expected_model_fluxes = None
 
-        :param tol: *float*
-            Maximum allowed deviation from point-lens in sigma. Only used with mask_type = `residuals'.
-
-        creates self.masked_datasets = *list* of MulensModel.MulensData objects with bad points masked.
-
-        """
-        masked_datasets = []
-        for dataset in self.datasets:
-            masked_datasets.append(copy.copy(dataset))
-
-        for dataset in masked_datasets:
-            if self.mask_type == 't_eff':
-                index = ((dataset.time >
-                         self.af_results['t_0'] -
-                         n_mask * self.af_results['t_eff']) &
-                         (dataset.time <
-                          self.af_results['t_0'] +
-                          n_mask * self.af_results['t_eff']))
-            elif self.mask_type == 'residuals':
-                index = self.get_residuals_mask(dataset, tol=tol)
-                print(np.sum(index))
-            else:
-                raise ValueError("mask_type must be one of ['t_eff', 'residuals']. Your value ", self.mask_type)
-
-            dataset.bad = index
-
-        self._masked_datasets = masked_datasets
-
-    def get_residuals_mask(self, dataset, tol=None, max_diff=1):
-        fit = MulensModel.FitData(dataset=dataset, model=MulensModel.Model(self.pspl_params))
-        fit.fit_fluxes()
-        ind_pl = np.argmin(np.abs(dataset.time - self.af_results['t_0']))
-
-        res, err = fit.get_residuals(phot_fmt='mag')
-        out_tol = np.argwhere(((np.abs(res) / err) > tol) & fit.dataset.good).flatten()
-        print(out_tol)
-        diff = np.ediff1d(out_tol)
-
-        start = np.argmin(np.abs(out_tol - ind_pl))
-        first, last = 0, len(out_tol) - 1
-        for i in range(start, 0, -1):
-            if diff[i] <= max_diff:
-                first = i
-            else:
-                break
-
-        for i in range(start, len(out_tol)):
-            if diff[i] <= max_diff:
-                last = i
-            else:
-                break
-
-        print(ind_pl, res[ind_pl])
-        print(ind_pl in out_tol)
-        print(first, last, len(out_tol))
-        print(out_tol[first], out_tol[last], out_tol[last] - out_tol[first])
-        mask = np.zeros(len(dataset.time), dtype=bool)
-        mask[out_tol[first]:out_tol[last]+1] = True
-
-        return mask
-
-    def get_dmag(self):
-        """
-        Find the magnitude difference at t_pl (af_results['t_0'])
-        :return: dmag: *float*
-        """
-        event = mm.Event(datasets=self.masked_datasets, model=mm.Model(self.refined_pspl_params))
-        dmag = []
+    def get_pspl_event(self):
+        event = mm.Event(datasets=self.datasets,
+                         model=mm.Model(self.pspl_params))
         event.fit_fluxes()
-        for fit in event.fits:
-            residuals, errors = fit.get_residuals(bad=True, phot_fmt='flux')
-            sigma = residuals[fit.dataset.bad]**2 / errors[fit.dataset.bad]**2
-            index = np.argmax(sigma)
-            mag_residuals, mag_errs = fit.get_residuals(bad=True, phot_fmt='mag')
-            dmag.append(mag_residuals[fit.dataset.bad][index])
+        return event
 
-        max_ind = np.argmax(np.abs(dmag))
-        return dmag[max_ind]
+    def get_anom_type(self):
+        n_pts = np.sum(self.anom_index)
+        sigmas = np.sign(self.residuals) * np.sqrt(self.chi2s)
+        med, std = np.nanmedian(sigmas), np.nanstd(sigmas)
+        #print('sigma dist', med, std, np.percentile(sigmas, q=[0, 1, 2, 98, 99, 100]))
+        #plt.figure()
+        #plt.hist(sigmas, bins=int(n_pts/40))
+        #plt.axvline(med, color='black')
+        #plt.axvline(med - std, color='black')
+        #plt.axvline(med + std, color='black')
+        #plt.gca().minorticks_on()
+        #plt.xlabel('sigmas')
 
-    def update_pspl_model(self):
-        fitter = mmexo.fitters.SFitFitter(datasets=self.datasets, initial_model=self.pspl_params)
-        fitter.run()
-        new_params = {key: fitter.best[key] for key in self.pspl_params.keys()}
-        self._refined_pspl_params = new_params
+        if n_pts > 10:
+            max_res = np.percentile(sigmas, q=98)
+            min_res = np.percentile(sigmas, q=2)
+        else:
+            min_res, max_res = -np.inf, np.inf
+
+        #print('res', n_pts, min_res, max_res)
+        if (min_res < 0) and (np.abs(min_res) > max_res):
+            return 'negative'
+
+        top_index = (sigmas > 0) & (sigmas < max_res)
+        bot_index = (sigmas < 0) & (sigmas > min_res)
+        #print('n', np.sum(bot_index), np.sum(top_index))
+        if np.sum(top_index) == 0:
+            return 'negative'
+        elif np.sum(bot_index) == 0:
+            return 'positive'
+        else:
+            top_chi2 = np.sum(self.chi2s[top_index])
+            bot_chi2 = np.sum(self.chi2s[bot_index])
+            #print('chi2', bot_chi2, top_chi2)
+            if top_chi2 > bot_chi2:
+                return 'positive'
+            else:
+                return 'negative'
+
+    def set_anom_prop(self):
+        self._peak_dflux, self._peak_index, self._t_start, self._t_stop = self.find_extremum(
+            method='rolling')
+
+    def get_anom_prop(self):
+        if (self.peak_dflux is None) or (self.t_start is None) or (self.t_stop is None):
+            self.set_anom_prop()
+
+        return self.peak_dflux, self.peak_index, self.t_start, self.t_stop, self.peak_width
+
+    def _find_extremum_with_simple_line(self):
+        peak_index = np.nanargmax(self.chi2s)
+        peak_dflux = self.residuals[peak_index]
+        t_start, t_stop = None, None
+        for i in [1, -1]:
+            slope = (self.sorted_times[peak_index] - self.sorted_times[i]) / (self.peak_dflux - self.residuals[i])
+            intercept = self.sorted_times[peak_index] - slope * peak_dflux
+            t = slope * peak_dflux / 2. + intercept
+            if i == 1:
+                t_start = t
+            else:
+                t_stop = t
+
+        return peak_dflux, peak_index, t_start, t_stop
+
+    def _get_window_size(self):
+        n_pts = np.sum(self.anom_index)
+
+        if n_pts < 10:
+            window_size = 1
+        elif n_pts < 50:
+            window_size = int(np.floor(n_pts / 10))
+        elif n_pts < 100:
+            window_size = int(np.floor(n_pts / 20))
+        elif n_pts < 500:
+            window_size = int(np.floor(n_pts / 50))
+        else:
+            window_size = int(np.floor(n_pts / 100))
+
+        #window_size = int(np.floor(n_pts / 10))
+        #print('points', n_pts, 'window', window_size)
+        return window_size
+
+    def _find_extremum_with_rolling_mean(self):
+        window_size = self._get_window_size()
+        kernel = np.ones(window_size) / window_size
+        #print('points:', np.sum(t_index), 'window:', window_size,
+        #      'half window:', int(window_size / 2))
+
+        if (window_size > 0) and (window_size < np.sum(self.anom_index)):
+            chi2_rolling_mean = np.convolve(self.chi2s, kernel, mode='same')
+            peak_index = np.argmax(chi2_rolling_mean)
+
+            res_rolling_mean = np.convolve(self.residuals, kernel, mode='same')
+            #print('rolling mean:', len(res_rolling_mean))
+
+            peak_dflux = res_rolling_mean[peak_index]
+            # start_dflux = res_rolling_mean[half_window]
+            # end_dflux = res_rolling_mean[-half_window]
+
+            if peak_dflux > 0:
+                half_anomaly = res_rolling_mean > (peak_dflux / 2.)
+            else:
+                half_anomaly = res_rolling_mean < (peak_dflux / 2.)
+                # raise NotImplementedError('negative perturbations not implemented')
+
+            t_start = np.min(self.sorted_times[half_anomaly])
+            t_stop = np.max(self.sorted_times[half_anomaly])
+
+            return peak_dflux, peak_index, t_start, t_stop
+        else:
+            return self._find_extremum_with_simple_line()
+
+    def find_extremum(self, method=None):
+        if method == 'rolling':
+            return self._find_extremum_with_rolling_mean()
 
     def get_anomaly_lc_parameters(self):
-        params = {key: value for key, value in self.refined_pspl_params.items()}
-        params['t_pl'] = self.af_results['t_0']
-        params['dt'] = self.af_results['t_eff']
-        params['dmag'] = self.get_dmag()
+        self.set_anom_prop()
+        params = {key: value for key, value in self.pspl_params.items()}
+        params['dmag'] = self.dmag
+        params['dt'] = self.t_stop - self.t_start
+        params['t_pl'] = np.mean((self.t_start, self.t_stop))
 
         return params
 
+    def _plot_peak_lines(self):
+        plt.axvline(self.peak_time, color='darkgray', zorder=10, linestyle=':')
+        plt.axvline(self.t_start, color='darkgray')
+        plt.axvline(self.t_stop, color='darkgray')
+        #plt.axvline(self.peak_time - self.peak_width / 2., color='darkgray')
+        #plt.axvline(self.peak_time + self.peak_width / 2., color='darkgray')
+
+    def _plot_af_lines(self):
+        plt.axvline(self.af_results['t_0'] +
+                    self.af_results['t_eff'], color='black')
+        plt.axvline(self.af_results['t_0'] -
+                    self.af_results['t_eff'], color='black')
+
+    def _setup_anom_xaxis(self):
+        plt.xlim(self.af_results['t_0'] + 5. * np.array([-1, 1]) *
+                 self.af_results['t_eff'])
+        plt.xlabel('time')
+
+    def plot_residuals(self):
+        plt.figure()
+        plt.title(self.anom_type)
+        plt.axhline(0, color='black')
+        plt.scatter(self.sorted_times, self.residuals)
+        self._plot_peak_lines()
+        self._plot_af_lines()
+        self._setup_anom_xaxis()
+        plt.ylabel('res')
+
+    def plot_anomaly(self):
+        plt.figure()
+        plt.title(self.anom_type)
+        self.pspl_event.plot_data()
+        self.pspl_event.plot_model(color='black', zorder=5)
+        peak_anom_mag = mm.Utils.get_mag_from_flux(self.expected_model_fluxes[self.peak_index] + self.peak_dflux)
+        plt.scatter(self.peak_time, peak_anom_mag, marker='d', color='darkgray', zorder=10)
+
+        self._plot_peak_lines()
+        self._plot_af_lines()
+        self._setup_anom_xaxis()
+
+        plt.ylabel('mag')
+
     @property
-    def refined_pspl_params(self):
-        if self._refined_pspl_params is None:
-            self.update_pspl_model()
+    def anom_type(self):
+        if self._anom_type is None:
+            self._anom_type = self.get_anom_type()
 
-        return self._refined_pspl_params
+        return self._anom_type
 
     @property
-    def masked_datasets(self):
-        if self._masked_datasets is None:
-            self.set_datasets_with_anomaly_masked()
+    def peak_dflux(self):
+        return self._peak_dflux
 
-        return self._masked_datasets
+    @property
+    def peak_index(self):
+        return self._peak_index
+
+    @property
+    def peak_time(self):
+        return self.sorted_times[self.peak_index]
+
+    @property
+    def t_start(self):
+        return self._t_start
+
+    @property
+    def t_stop(self):
+        return self._t_stop
+
+    @property
+    def dmag(self):
+        expected_mag =  mm.Utils.get_mag_from_flux(
+            self.expected_model_fluxes[self.peak_index])
+        peak_anom_mag = mm.Utils.get_mag_from_flux(
+            self.expected_model_fluxes[self.peak_index] + self.peak_dflux)
+
+        return peak_anom_mag - expected_mag
+
+    @property
+    def peak_width(self):
+        return self.t_stop - self.t_start
+
+    @property
+    def anom_index(self):
+        if self._anom_index is None:
+            self._anom_index = (self.times > self.anom_t_range_af[0]) & (self.times < self.anom_t_range_af[1])
+
+        return self._anom_index
+
+    @property
+    def sorted_index(self):
+        if self._sorted_index is None:
+            self._sorted_index = np.argsort(self.times[self.anom_index])
+
+        return self._sorted_index
+
+    @property
+    def times(self):
+        if self._times is None:
+            self._times = np.hstack([dataset.time for dataset in self.pspl_event.datasets])
+
+        return self._times
+
+    @property
+    def sorted_times(self):
+        return self.times[self.anom_index][self.sorted_index]
+
+    @property
+    def pspl_event(self):
+        if self._pspl_event is None:
+            self._pspl_event = self.get_pspl_event()
+
+        return self._pspl_event
+
+    @property
+    def source_flux(self):
+        if self._source_flux is None:
+            self._source_flux, foo = self.pspl_event.get_ref_fluxes()
+
+        return self._source_flux
+
+    @property
+    def blend_flux(self):
+        if self._blend_flux is None:
+            foo, self._blend_flux = self.pspl_event.get_ref_fluxes()
+
+        return self._blend_flux
+
+    @property
+    def scaled_fluxes(self):
+        if self._scaled_fluxes is None:
+            self._scaled_fluxes = np.hstack(
+                [np.array(flux) for (flux, err) in self.pspl_event.get_scaled_fluxes()])[self.anom_index][self.sorted_index]
+
+        return self._scaled_fluxes
+
+    @property
+    def residuals(self):
+        if self._scaled_residuals is None:
+            self._scaled_residuals = self.scaled_fluxes - self.expected_model_fluxes
+
+        return self._scaled_residuals
+
+    @property
+    def chi2s(self):
+        if self._chi2s is None:
+            self._chi2s = np.hstack(self.pspl_event.get_chi2_per_point())[self.anom_index][self.sorted_index]
+
+        return self._chi2s
+
+    @property
+    def expected_model_fluxes(self):
+        if self._expected_model_fluxes is None:
+            self._expected_model_fluxes = self.source_flux * self.pspl_event.model.get_magnification(
+                self.sorted_times) + self.blend_flux
+
+        return self._expected_model_fluxes
+
+#        self.mask_type = mask_type
+#
+#        self._refined_pspl_params = None
+#        self._masked_datasets = None
+#
+#    def set_datasets_with_anomaly_masked(self, n_mask=3, tol=0.3):
+#        """
+#        Mask points associated with the anomaly.
+#
+#        :param mask_type: *str*
+#            `t_eff' or `residuals'. If `t_eff' mask based on t_pl +- n_mask * t_eff. If `residuals', mask based on
+#            deviation from existing point lens fit.
+#
+#        :param n_mask: *int*
+#            Number of +- `t_eff' to mask. Only used with mask_type = `t_eff'.
+#
+#        :param tol: *float*
+#            Maximum allowed deviation from point-lens in sigma. Only used with mask_type = `residuals'.
+#
+#        creates self.masked_datasets = *list* of MulensModel.MulensData objects with bad points masked.
+#
+#        """
+#        masked_datasets = []
+#        for dataset in self.datasets:
+#            masked_datasets.append(copy.copy(dataset))
+#
+#        for dataset in masked_datasets:
+#            if self.mask_type == 't_eff':
+#                index = ((dataset.time >
+#                         self.af_results['t_0'] -
+#                         n_mask * self.af_results['t_eff']) &
+#                         (dataset.time <
+#                          self.af_results['t_0'] +
+#                          n_mask * self.af_results['t_eff']))
+#            elif self.mask_type == 'residuals':
+#                index = self.get_residuals_mask(dataset, tol=tol)
+#                print(np.sum(index))
+#            else:
+#                raise ValueError("mask_type must be one of ['t_eff', 'residuals']. Your value ", self.mask_type)
+#
+#            dataset.bad = index
+#
+#        self._masked_datasets = masked_datasets
+#
+#    def get_residuals_mask(self, dataset, tol=None, max_diff=1):
+#        fit = MulensModel.FitData(dataset=dataset, model=MulensModel.Model(self.pspl_params))
+#        fit.fit_fluxes()
+#        ind_pl = np.argmin(np.abs(dataset.time - self.af_results['t_0']))
+#
+#        res, err = fit.get_residuals(phot_fmt='mag')
+#        out_tol = np.argwhere(((np.abs(res) / err) > tol) & fit.dataset.good).flatten()
+#        print(out_tol)
+#        diff = np.ediff1d(out_tol)
+#
+#        start = np.argmin(np.abs(out_tol - ind_pl))
+#        first, last = 0, len(out_tol) - 1
+#        for i in range(start, 0, -1):
+#            if diff[i] <= max_diff:
+#                first = i
+#            else:
+#                break
+#
+#        for i in range(start, len(out_tol)):
+#            if diff[i] <= max_diff:
+#                last = i
+#            else:
+#                break
+#
+#        print(ind_pl, res[ind_pl])
+#        print(ind_pl in out_tol)
+#        print(first, last, len(out_tol))
+#        print(out_tol[first], out_tol[last], out_tol[last] - out_tol[first])
+#        mask = np.zeros(len(dataset.time), dtype=bool)
+#        mask[out_tol[first]:out_tol[last]+1] = True
+#
+#        return mask
+#
+#    def get_dmag(self):
+#        """
+#        Find the magnitude difference at t_pl (af_results['t_0'])
+#        :return: dmag: *float*
+#        """
+#        event = mm.Event(datasets=self.masked_datasets, model=mm.Model(self.refined_pspl_params))
+#        dmag = []
+#        event.fit_fluxes()
+#        for fit in event.fits:
+#            residuals, errors = fit.get_residuals(bad=True, phot_fmt='flux')
+#            sigma = residuals[fit.dataset.bad]**2 / errors[fit.dataset.bad]**2
+#            index = np.argmax(sigma)
+#            mag_residuals, mag_errs = fit.get_residuals(bad=True, phot_fmt='mag')
+#            dmag.append(mag_residuals[fit.dataset.bad][index])
+#
+#        max_ind = np.argmax(np.abs(dmag))
+#        return dmag[max_ind]
+#
+#    def update_pspl_model(self):
+#        fitter = mmexo.fitters.SFitFitter(datasets=self.datasets, initial_model=self.pspl_params)
+#        fitter.run()
+#        new_params = {key: fitter.best[key] for key in self.pspl_params.keys()}
+#        self._refined_pspl_params = new_params
+#
+#
+#    @property
+#    def refined_pspl_params(self):
+#        if self._refined_pspl_params is None:
+#            self.update_pspl_model()
+#
+#        return self._refined_pspl_params
+#
+#    @property
+#    def masked_datasets(self):
+#        if self._masked_datasets is None:
+#            self.set_datasets_with_anomaly_masked()
+#
+#        return self._masked_datasets

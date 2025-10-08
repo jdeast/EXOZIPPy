@@ -87,7 +87,7 @@ class EventFinderGridSearch():
             chi2s = self.do_fits({'t_0': t_0, 't_eff': t_eff}, verbose=verbose)
             dchi2s = [chi2s['1'] - chi2s['flat'], chi2s['2'] - chi2s['flat']]
             if verbose:
-                print(t_0, t_eff, dchi2s)
+                print('t_0, t_eff, chi2s:', t_0, t_eff, chi2s)
 
             results.append(dchi2s)
 
@@ -101,7 +101,8 @@ class EventFinderGridSearch():
             index = ((dataset.time >
                       (parameters['t_0'] - self.z_t_eff * parameters['t_eff'])) &
                      (dataset.time <
-                      (parameters['t_0'] + self.z_t_eff * parameters['t_eff'])))
+                      (parameters['t_0'] + self.z_t_eff * parameters['t_eff'])) &
+                     dataset.good)
             # Minimum requirement for including a dataset
             if np.sum(index) >= self.n_min:
                 trimmed_dataset = MulensModel.MulensData(
@@ -110,7 +111,7 @@ class EventFinderGridSearch():
                 trimmed_datasets.append(trimmed_dataset)
 
         if verbose:
-            print('trimmed datasets', len(trimmed_datasets),
+            print('trimmed datasets (N, epochs_i):', len(trimmed_datasets),
                   [dataset.n_epochs for dataset in trimmed_datasets])
 
         return trimmed_datasets
@@ -156,19 +157,24 @@ class EventFinderGridSearch():
     @property
     def best(self):
         if (self._best is None) & (self.results is not None):
-            index_1 = np.nanargmin(self.results[:, 0])
-            index_2 = np.nanargmin(self.results[:, 1])
-            if self.results[index_1, 0] < self.results[index_2, 1]:
-                j = 1
-                index = index_1
-            else:
-                j = 2
-                index = index_2
+            try:
+                index_1 = np.nanargmin(self.results[:, 0])
+                index_2 = np.nanargmin(self.results[:, 1])
+                if self.results[index_1, 0] < self.results[index_2, 1]:
+                    j = 1
+                    index = index_1
+                else:
+                    j = 2
+                    index = index_2
 
-            self._best = {'t_0': self.grid_t_0[index],
-                          't_eff': self.grid_t_eff[index],
-                          'j': j,
-                          'chi2': self.results[index, j-1]}
+                self._best = {'t_0': self.grid_t_0[index],
+                              't_eff': self.grid_t_eff[index],
+                              'j': j,
+                              'chi2': self.results[index, j-1]}
+            except ValueError as e:
+                print(np.array(self.results).shape, np.sum(np.isnan(self.results)), np.sum(np.isfinite(self.results)))
+                print(self.grid_params)
+                raise ValueError(e)
 
         return self._best
 

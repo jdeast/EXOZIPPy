@@ -14,9 +14,9 @@ def fit_lc(lc_num, verbose=False):
 
     results = exozippy.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
-        print_results=True, verbose=verbose, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
-        #log_file=os.path.join(
-        #    exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
+        print_results=True, verbose=verbose, emcee=False, #emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
+        log_file=os.path.join(
+            exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
     )
 
     return results

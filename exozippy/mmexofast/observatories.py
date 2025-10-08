@@ -79,10 +79,10 @@ def get_plot_properties(telescope, band):
 
     if telescope == 'WFIRST18':
         if band == 'W149':
-            plot_kwargs['color'] = 'magenta'
+            plot_kwargs['color'] = 'darkorange'
             plot_kwargs['marker'] = 'o'
         elif band == 'Z087':
-            plot_kwargs['color'] = 'blue'
+            plot_kwargs['color'] = 'darkcyan'
             plot_kwargs['marker'] = 's'
             plot_kwargs['zorder'] = 5
 
