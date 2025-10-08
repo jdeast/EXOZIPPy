@@ -24,7 +24,10 @@ class MulensFitter():
     """
 
     def __init__(
-            self, datasets=None, initial_model_params=None, parameters_to_fit=None, sigmas=None, mag_methods=None, coords=None, verbose=False, pool=None):
+            self, datasets=None, initial_model_params=None, parameters_to_fit=None, sigmas=None,
+            mag_methods=None, coords=None, limb_darkening_coeffs_gamma=None,
+            limb_darkening_coeffs_u=None,
+            verbose=False, pool=None):
         self._initial_model = None
         self._best = None
         self.datasets = datasets
@@ -32,13 +35,33 @@ class MulensFitter():
         self.parameters_to_fit = parameters_to_fit
         self.sigmas = sigmas
         self.mag_methods = mag_methods
+        self.limb_darkening_coeffs_gamma = limb_darkening_coeffs_gamma
+        self.limb_darkening_coeffs_u = limb_darkening_coeffs_u
         self.coords = coords
         self.verbose = verbose
         self.pool = pool
 
-
     def run(self):
         pass
+
+    def get_model(self):
+        model = MulensModel.Model(self.initial_model_params)
+        #print('fitter 49', self.mag_methods)
+        if self.mag_methods is not None:
+            #print('setting mag_methods')
+            model.set_magnification_methods(self.mag_methods)
+            #print('results', model.get_magnification_methods())
+
+        if self.limb_darkening_coeffs_u is not None:
+            for band, value in self.limb_darkening_coeffs_u.items():
+                model.set_limb_coeff_u(band, value)
+
+        if self.limb_darkening_coeffs_gamma is not None:
+            for band, value in self.limb_darkening_coeffs_gamma.items():
+                model.set_limb_coeff_gamma(band, value)
+
+        #print('fitter 60', model)
+        return model
 
     @property
     def best(self):
@@ -86,7 +109,7 @@ class SFitFitter(MulensFitter):
 
     def run(self):
         event = MulensModel.Event(
-            datasets=self.datasets, model=MulensModel.Model(self.initial_model_params), coords=self.coords)
+            datasets=self.datasets, model=self.get_model(), coords=self.coords)
         event.fit_fluxes()
 
         my_func = sfit.mm_funcs.PointLensSFitFunction(

@@ -46,7 +46,8 @@ def fit(files=None, fit_type=None, **kwargs):
 class MMEXOFASTFitter():
 
     def __init__(
-            self, files=None, fit_type=None, finite_source=False,
+            self, files=None, fit_type=None, finite_source=False, limb_darkening_coeffs_gamma=None,
+            limb_darkening_coeffs_u=None, mag_methods=None,
             datasets=None, coords=None,
             priors=None, print_results=False, verbose=False,
             output_file=None, log_file=None, emcee=True, emcee_settings=None, pool=None):
@@ -60,9 +61,14 @@ class MMEXOFASTFitter():
         else:
             self.datasets = self._create_mulensdata_objects(files)
 
-        self.coords = coords
         self.fit_type = fit_type
         self.finite_source = finite_source
+        self.fitter_kwargs = {
+            'coords': coords, 'mag_methods': mag_methods,
+            'limb_darkening_coeffs_u': limb_darkening_coeffs_u,
+            'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
+        print(self.fitter_kwargs)
+
         self.emcee = emcee
         self.emcee_settings = emcee_settings
         self.pool = pool
@@ -115,7 +121,12 @@ class MMEXOFASTFitter():
             print('Initial SFit', self.initial_pspl_results)
 
         if self.fit_type == 'point lens':
-            self.initial_pspl_results = self.fit_pspl_parallax()
+            if self.finite_source:
+                self.initial_pspl_results = self.fit_fspl()
+                if self.verbose:
+                    print('SFit FSPL', self.initial_pspl_results)
+
+            self.initial_pspl_results = self.fit_pl_parallax()
             if self.verbose:
                 print('SFit w/par', self.initial_pspl_results)
 
@@ -218,12 +229,23 @@ class MMEXOFASTFitter():
         #del pspl_params['chi2']
         #return pspl_params
 
-    def fit_pspl_parallax(self):
+    def fit_fspl(self):
+        init_params = {key: value for key, value in self.initial_pspl_params.items()}
+        init_params['rho'] = 1.5 * init_params['u_0']
+        fitter = mmexo.fitters.SFitFitter(
+            initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
+        #print('mmexo237', fitter.mag_methods)
+        fitter.run()
+        return fitter.best
+
+    def fit_pl_parallax(self):
         init_params = {key: value for key, value in self.initial_pspl_params.items()}
         init_params['pi_E_N'] = 0.
         init_params['pi_E_E'] = 0
+        #print(self.initial_pspl_params)
+        #print(self.initial_pspl_results)
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=init_params, datasets=self.datasets, coords=self.coords)
+            initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
         fitter.run()
         return fitter.best
 
@@ -621,13 +643,17 @@ class MMEXOFASTFitter():
 
     @property
     def initial_pspl_params(self):
-        if self._initial_pspl_params is None:
-            if self.initial_pspl_results is not None:
-                self._initial_pspl_params = self.initial_pspl_results.copy()
-                del self._initial_pspl_params['chi2']
-            else:
-                raise AttributeError('No Initial PSPL results.')
+        # This is a bookkeepping problem
+        # Are we going to overwrite this or not?
+        #if self._initial_pspl_params is None:
+        #    if self.initial_pspl_results is not None:
+        #        self._initial_pspl_params = self.initial_pspl_results.copy()
+        #        del self._initial_pspl_params['chi2']
+        #    else:
+        #        raise AttributeError('No Initial PSPL results.')
 
+        self._initial_pspl_params = self.initial_pspl_results.copy()
+        del self._initial_pspl_params['chi2']
         return self._initial_pspl_params
 
     @property

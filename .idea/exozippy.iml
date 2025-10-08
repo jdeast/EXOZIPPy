@@ -5,7 +5,7 @@
     <content url="file://$MODULE_DIR$/../MulensModel/MulensModel/source" />
     <content url="file://$USER_HOME$/python_code/mulens" />
     <content url="file://$USER_HOME$/python_code/sfit_minimizer/source" />
-    <orderEntry type="jdk" jdkName="Python 3.12" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.10 (MMpyTorch) (2)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
