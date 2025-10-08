@@ -16,15 +16,18 @@ class MulensFitter():
     parameters_to_fit = *list* of parameters to be fitted. If None, fits all model parameters.
     mag_methods = *list*
         see MulensModel.model.mag_methods.
+    coords = *str* or *astropy.SkyCoords*
     verbose = *bool*
         default is False.
     """
 
-    def __init__(self, datasets=None, initial_model=None, parameters_to_fit=None, mag_methods=None, verbose=False):
+    def __init__(
+            self, datasets=None, initial_model_params=None, parameters_to_fit=None, mag_methods=None, coords=None, verbose=False):
         self.datasets = datasets
-        self.initial_model = initial_model
+        self.initial_model_params = initial_model_params
         self.parameters_to_fit = parameters_to_fit
         self.mag_methods = mag_methods
+        self.coords = coords
         self.verbose = verbose
 
         self._best = None
@@ -44,20 +47,20 @@ class MulensFitter():
         self._best = params_dict
 
     @property
-    def initial_model(self):
-        return self._initial_model
+    def initial_model_params(self):
+        return self._initial_model_params
 
-    @initial_model.setter
-    def initial_model(self, params_dict):
+    @initial_model_params.setter
+    def initial_model_params(self, params_dict):
         if (params_dict is not None) and (not isinstance(params_dict, dict)):
             raise ValueError('initial_model must be set with either *None* or *dict*.')
 
-        self._initial_model = params_dict
+        self._initial_model_params = params_dict
 
     @property
     def parameters_to_fit(self):
         if self._parameters_to_fit is None:
-            self.parameters_to_fit = list(self.initial_model.keys())
+            self.parameters_to_fit = list(self.initial_model_params.keys())
 
         return self._parameters_to_fit
 
@@ -78,13 +81,13 @@ class SFitFitter(MulensFitter):
 
     def run(self):
         event = MulensModel.Event(
-            datasets=self.datasets, model=MulensModel.Model(self.initial_model))
+            datasets=self.datasets, model=MulensModel.Model(self.initial_model_params), coords=self.coords)
         event.fit_fluxes()
 
         my_func = sfit.mm_funcs.PointLensSFitFunction(
             event, self.parameters_to_fit)
 
-        initial_guess = [self.initial_model[key] for key in self.parameters_to_fit]
+        initial_guess = [self.initial_model_params[key] for key in self.parameters_to_fit]
         for i in range(len(self.datasets)):
             initial_guess.append(event.fits[i].source_flux)
             initial_guess.append(event.fits[i].blend_flux)

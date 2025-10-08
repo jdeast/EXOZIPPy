@@ -45,9 +45,11 @@ def fit(files=None, fit_type=None, **kwargs):
 
 class MMEXOFASTFitter():
 
-    def __init__(self, files=None, fit_type=None, datasets=None, coords=None,
-                 priors=None, print_results=False, verbose=False,
-                 output_file=None, log_file=None, emcee_settings=None):
+    def __init__(
+            self, files=None, fit_type=None, finite_source=False,
+            datasets=None, coords=None,
+            priors=None, print_results=False, verbose=False,
+            output_file=None, log_file=None, emcee_settings=None):
         self.verbose = verbose
         if log_file is not None:
             self.log_file = log_file
@@ -58,7 +60,9 @@ class MMEXOFASTFitter():
         else:
             self.datasets = self._create_mulensdata_objects(files)
 
+        self.coords = coords
         self.fit_type = fit_type
+        self.finite_source = finite_source
         self.emcee_settings = emcee_settings
 
         # initialize additional data versions
@@ -108,21 +112,27 @@ class MMEXOFASTFitter():
         if self.verbose:
             print('Initial SFit', self.initial_pspl_results)
 
-        self.best_af_grid_point = self.do_af_grid_search()
-        if self.verbose:
-            print('Best AF grid', self.best_af_grid_point)
+        if self.fit_type == 'point lens':
+            self.initial_pspl_results = self.fit_pspl_parallax()
+            if self.verbose:
+                print('SFit w/par', self.initial_pspl_results)
 
-        self.anomaly_lc_params = self.get_anomaly_lc_params()
-        if self.verbose:
-            print('Anomaly Params', self.anomaly_lc_params)
+        if self.fit_type == 'binary lens':
+            self.best_af_grid_point = self.do_af_grid_search()
+            if self.verbose:
+                print('Best AF grid', self.best_af_grid_point)
 
-        self.results = self.fit_anomaly()
-        if self.verbose:
-            print('Results', self.results)
+            self.anomaly_lc_params = self.get_anomaly_lc_params()
+            if self.verbose:
+                print('Anomaly Params', self.anomaly_lc_params)
 
-        #self.get_best_point_lens_model()
-        #self.do_af_grid_search()
-        #self.results = self.find_best_binary_model()
+            self.results = self.fit_anomaly()
+            if self.verbose:
+                print('Results', self.results)
+
+            #self.get_best_point_lens_model()
+            #self.do_af_grid_search()
+            #self.results = self.find_best_binary_model()
 
     #def get_best_point_lens_model(self):
     #    if self.log_file is not None:
@@ -198,12 +208,21 @@ class MMEXOFASTFitter():
         if self.verbose:
             print('Initial PSPL Estimate', pspl_est_params)
 
-        fitter = mmexo.fitters.SFitFitter(initial_model=pspl_est_params, datasets=self.datasets)
+        fitter = mmexo.fitters.SFitFitter(initial_model_params=pspl_est_params, datasets=self.datasets)
         fitter.run()
         return fitter.best
         #pspl_params = fitter.best.copy()
         #del pspl_params['chi2']
         #return pspl_params
+
+    def fit_pspl_parallax(self):
+        init_params = {key: value for key, value in self.initial_pspl_params.items()}
+        init_params['pi_E_N'] = 0.
+        init_params['pi_E_E'] = 0
+        fitter = mmexo.fitters.SFitFitter(
+            initial_model_params=init_params, datasets=self.datasets, coords=self.coords)
+        fitter.run()
+        return fitter.best
 
     #    t_0 = self.best_ef_grid_point['t_0']
     #    if self.best_ef_grid_point['j'] == 1:

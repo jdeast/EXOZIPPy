@@ -49,10 +49,10 @@ def get_observatory_kwargs(telescope):
     :param telescope: *str*
 
     :return: *dict*
-            If the TELESCOPE is not implemented, returns an empty *dict*
+            If the TELESCOPE is not implemented, returns a *dict* with phot_fmt = flux.
 
     """
-    kwargs = {}
+    kwargs = {'phot_fmt': 'flux'}
     if telescope == 'WFIRST18':
         kwargs['phot_fmt'] = 'flux'  # Note: ORIGINAL files are in mag, but they have been CONVERTED TO FLUX.
         kwargs['usecols'] = [0, 1, 2]

@@ -2,6 +2,8 @@ import os.path
 import exozippy
 import numpy as np
 import pandas as pd
+import MulensModel as mm
+import matplotlib.pyplot as plt
 
 dir_ = os.path.join(exozippy.MULENS_DATA_PATH, "2018DataChallenge")
 
@@ -81,7 +83,38 @@ class DC18Answers():
 
         orig_file.close()
 
+    def print_wide_orbit_planets(self):
+        u0_index = self.data['u0'] > 0.1
+        s_index = self.data['s'] > 1.
+        q_index = self.data['q'] < 0.03
+        with pd.option_context('display.width', None, 'display.max_rows', None):
+            print(
+                self.data[u0_index & s_index & q_index][
+                    ['idx', 'ra', 'dec', 't0', 'u0', 'tE', 'rhos', 'piE', 's', 'q', 'alpha']].sort_values('idx'))
+
+
+    def plot_model(self, num):
+        index = self.data.index == (num - 1)
+        print(np.sum(index))
+        print(self.data[index])
+        values = self.data[index].iloc[0]
+        params = {
+            't_0': values['t0'], 'u_0': values['u0'], 't_E': values['tE'], 'rho': values['rhos'],
+            's': values['s'], 'q': values['q'], 'alpha': values['alpha'],
+        }
+        model = mm.Model(params)
+        print(model)
+        plt.figure()
+        model.plot_magnification()
+        plt.figure()
+        model.plot_trajectory(caustics=True)
+        plt.show()
 
 if __name__ == '__main__':
     answers = DC18Answers()
-    answers.check_table()
+    event_info = pd.DataFrame(event_info, index=event_info['num'])
+    answers.data = answers.data.merge(event_info)
+    answers.print_wide_orbit_planets()
+    #print(answers.data.columns)
+    print(answers.data[['idx', 'subrun', 'field', 'src_id', 'lens_id', 'file_', 'num']])
+    answers.plot_model(131)
