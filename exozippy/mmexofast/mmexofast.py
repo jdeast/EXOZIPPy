@@ -108,6 +108,11 @@ class MMEXOFASTFitter():
         return datasets
 
     def fit(self):
+        """
+        Perform the fit according to the settings established when the MMEXOFASTFitter object was created.
+
+        :return: None
+        """
         if self.fit_type is None:
             # Maybe "None" means initial mulens parameters were passed,
             # so we can go straight to a mmexofast_fit?
@@ -240,13 +245,26 @@ class MMEXOFASTFitter():
     #    return self.results
     #
     def do_ef_grid_search(self):
-        # Should probably scrape t_0_1 from the filenames
-        # JCY: what did this comment mean???
+        """
+        Run a :py:class:`mmexofast.gridsearches.EventFinderGridSearch`
+        :return: *dict* of best EventFinder grid point.
+        """
         ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
         ef_grid.run()
         return ef_grid.best
 
     def get_initial_pspl(self, verbose=False):
+        """
+        Estimate a starting point for the PSPL fitting and then optimize the parameters using
+        :py:class:`mmexofast.fitters.SFitFitter`.
+
+        :param verbose: *bool* optional
+        :return:  *dict* of the form
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
+
+        """
         pspl_est_params = mmexo.estimate_params.get_PSPL_params(self.best_ef_grid_point, self.datasets)
         if self.verbose:
             print('Initial PSPL Estimate', pspl_est_params)
@@ -254,12 +272,11 @@ class MMEXOFASTFitter():
         fitter = mmexo.fitters.SFitFitter(initial_model_params=pspl_est_params, datasets=self.datasets)
         fitter.run()
         return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
-        #pspl_params = fitter.best.copy()
-        #del pspl_params['chi2']
-        #return pspl_params
 
     def get_params_from_results(self, results):
         """
+        Take the results of a fit and return a dictionary with just the best-fit microlensing parameters and values,
+        i.e., something appropriate for using as input to `MulensModel.Model()`.
 
         :param results: *dict* of the form
             {'best': *dict* of best-fit values & chi2,
@@ -274,6 +291,7 @@ class MMEXOFASTFitter():
 
     def get_sigmas_from_results(self, results):
         """
+         Take the results of a fit and return a dictionary with the uncertainties for each microlensing parameter.
 
         :param results: *dict* of the form
             {'best': *dict* of best-fit values & chi2,
@@ -289,6 +307,14 @@ class MMEXOFASTFitter():
         return sigmas
 
     def fit_fspl(self):
+        """
+        Use the results from the static PSPL fit to initialize and optimize an FSPL fit.
+
+        :return:  *dict* of the form
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
+        """
         init_params = self.get_params_from_results(self.pspl_static_results)
         init_params['rho'] = 1.5 * init_params['u_0']
         fitter = mmexo.fitters.SFitFitter(
@@ -298,7 +324,15 @@ class MMEXOFASTFitter():
         return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
 
     def fit_pl_parallax(self):
-        # Need to update for u0+-
+        """
+        Use the results from the static fit (either PSPL or FSPL according to the value of `finite_source`) to
+        initialize u0+ and u0- parallax fits.
+
+        :return: *list* of 2 *dict* of the form
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
+        """
         if self.finite_source:
             init_params = self.get_params_from_results(self.fspl_static_results)
         else:
@@ -306,8 +340,6 @@ class MMEXOFASTFitter():
 
         init_params['pi_E_N'] = 0.
         init_params['pi_E_E'] = 0
-        #print(self.initial_pspl_params)
-        #print(self.initial_pspl_results)
 
         results = []
         for sign in [1, -1]:
