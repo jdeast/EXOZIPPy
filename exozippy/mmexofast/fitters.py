@@ -30,6 +30,8 @@ class MulensFitter():
             verbose=False, pool=None):
         self._initial_model = None
         self._best = None
+        self._results = None
+
         self.datasets = datasets
         self.initial_model_params = initial_model_params
         self.parameters_to_fit = parameters_to_fit
@@ -73,6 +75,17 @@ class MulensFitter():
     @best.setter
     def best(self, params_dict):
         self._best = params_dict
+
+    @property
+    def results(self):
+        """
+        *dict* containing full fit results
+        """
+        return self._results
+
+    @results.setter
+    def results(self, value):
+        self._results = value
 
     @property
     def initial_model_params(self):
@@ -134,6 +147,8 @@ class SFitFitter(MulensFitter):
             if self.verbose:
                 print(result)
 
+
+        self.results = result
         best = my_func.event.model.parameters.parameters
         best['chi2'] = my_func.event.get_chi2()
         self.best = best

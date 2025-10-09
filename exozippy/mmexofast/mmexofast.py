@@ -119,21 +119,22 @@ class MMEXOFASTFitter():
         if self.verbose:
             print('Best EF grid point ', self.best_ef_grid_point)
 
-        self.initial_pspl_results = self.get_initial_pspl()
+        self.pspl_static_results = self.get_initial_pspl()
         if self.verbose:
-            print('Initial SFit', self.initial_pspl_results)
+            print('Initial SFit', self.pspl_static_results['best'])
 
         if self.fit_type == 'point lens':
             if self.finite_source:
-                self.initial_pspl_results = self.fit_fspl()
+                self.fspl_static_results = self.fit_fspl()
                 if self.verbose:
-                    print('SFit FSPL', self.initial_pspl_results)
+                    print('SFit FSPL', self.fspl_static_results['best'])
 
-            self.pspl_parallax_results = self.fit_pl_parallax()
+            self.pl_parallax_results = self.fit_pl_parallax()
             if self.verbose:
-                print('SFit w/par', self.pspl_parallax_results)
+                for i in range(2):
+                    print('SFit w/par', i+1, self.pl_parallax_results[i]['best'])
 
-        if self.fit_type == 'binary lens':
+        elif self.fit_type == 'binary lens':
             self.best_af_grid_point = self.do_af_grid_search()
             if self.verbose:
                 print('Best AF grid', self.best_af_grid_point)
@@ -167,14 +168,13 @@ class MMEXOFASTFitter():
         if self.fit_type == 'point lens':
             fits = []
             for fit in self.pl_parallax_results:
-                fits.append({'parameters': fit.parameters, 'sigmas': fit.sigmas})
+                fits.append({'parameters': self.get_params_from_results(fit), 'sigmas': self.get_sigmas_from_results(fit)})
 
             initializations['fits'] = fits
         else:
             raise NotImplementedError('initialize_exozippy only implemented for point lens fits')
 
         return initializations
-
 
 
     #def get_best_point_lens_model(self):
@@ -253,36 +253,77 @@ class MMEXOFASTFitter():
 
         fitter = mmexo.fitters.SFitFitter(initial_model_params=pspl_est_params, datasets=self.datasets)
         fitter.run()
-        return fitter.best
+        return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
         #pspl_params = fitter.best.copy()
         #del pspl_params['chi2']
         #return pspl_params
 
+    def get_params_from_results(self, results):
+        """
+
+        :param results: *dict* of the form
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
+
+        :return: *dict* of microlensing parameters and values
+        """
+        params = {key: value for key, value in results['best'].items()}
+        params.pop('chi2')
+        return params
+
+    def get_sigmas_from_results(self, results):
+        """
+
+        :param results: *dict* of the form
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
+
+        :return: *dict* of uncertainties in microlensing parameters and values
+        """
+        sigmas = {}
+        for param, sigma in zip(results['parameters_to_fit'], results['results'].sigmas):
+            sigmas[param] = sigma
+
+        return sigmas
+
     def fit_fspl(self):
-        init_params = {key: value for key, value in self.initial_pspl_params.items()}
+        init_params = self.get_params_from_results(self.pspl_static_results)
         init_params['rho'] = 1.5 * init_params['u_0']
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
         #print('mmexo237', fitter.mag_methods)
         fitter.run()
-        return fitter.best
+        return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
 
     def fit_pl_parallax(self):
-        init_params = {key: value for key, value in self.initial_pspl_params.items()}
+        # Need to update for u0+-
+        if self.finite_source:
+            init_params = self.get_params_from_results(self.fspl_static_results)
+        else:
+            init_params = self.get_params_from_results(self.pspl_static_results)
+
         init_params['pi_E_N'] = 0.
         init_params['pi_E_E'] = 0
         #print(self.initial_pspl_params)
         #print(self.initial_pspl_results)
-        fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
-        fitter.run()
-        return fitter.best
+
+        results = []
+        for sign in [1, -1]:
+            init_params['u_0'] *= sign
+            fitter = mmexo.fitters.SFitFitter(
+                initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
+            fitter.run()
+            results.append({'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit})
+
+        return results
 
     def fit_parallax_grid(self, grid=None, plot=False):
         if grid is None:
             grid = {'pi_E_E': (-1, 1, 0.05), 'pi_E_N': (-2., 2., 0.1)}
 
-        init_params = {key: value for key, value in self.pspl_parallax_params.items()}
+        init_params = self.get_params_from_results(self.pl_parallax_results)
         parameters_to_fit = list(init_params.keys())
         parameters_to_fit.remove('pi_E_E')
         parameters_to_fit.remove('pi_E_N')
@@ -735,7 +776,10 @@ class MMEXOFASTFitter():
     def pspl_static_results(self):
         """
         Results from fitting a static PSPL Model
-        :return: :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.
+        :return: *dict*
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
         """
         return self._pspl_static_results
 
@@ -747,7 +791,10 @@ class MMEXOFASTFitter():
     def fspl_static_results(self):
         """
         Results from fitting a static FSPL Model
-        :return: :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.
+        :return: *dict*
+            {'best': *dict* of best-fit values & chi2,
+            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+            'parameters_to_fit': *list* of parameters corresponding to results}
         """
         return self._fspl_static_results
 
@@ -759,7 +806,11 @@ class MMEXOFASTFitter():
     def pl_parallax_results(self):
         """
         Results from fitting a static FSPL Model
-        :return: *list* of :py:class:`sfit_minimizer.sfit_classes.SFitResults` objects.
+        :return: *list* of *dict*
+            where each *dict* =
+                {'best': *dict* of best-fit values & chi2,
+                'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
+                'parameters_to_fit': *list* of parameters corresponding to results}
         """
         return self._pl_parallax_results
 
