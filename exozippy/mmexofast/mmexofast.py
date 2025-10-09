@@ -79,10 +79,12 @@ class MMEXOFASTFitter():
 
         # initialize params
         self._best_ef_grid_point = None
-        self._initial_pspl_params = None
-        self._initial_pspl_results = None
-        self._pspl_parallax_results = None
-        self._pspl_params = None
+
+        # Fit results
+        self._pspl_static_results = None
+        self._fspl_static_results = None
+        self._pl_parallax_results = None
+
         self._best_af_grid_point = None
         self._anomaly_lc_params = None
         self._binary_params = None
@@ -683,50 +685,88 @@ class MMEXOFASTFitter():
     def best_ef_grid_point(self, value):
         self._best_ef_grid_point = value
 
+    #@property
+    #def initial_pspl_results(self):
+    #    return self._initial_pspl_results
+    #
+    #@initial_pspl_results.setter
+    #def initial_pspl_results(self, value):
+    #    self._initial_pspl_results = value
+    #
+    #@property
+    #def initial_pspl_params(self):
+    #    # This is a bookkeepping problem
+    #    # Are we going to overwrite this or not?
+    #    #if self._initial_pspl_params is None:
+    #    #    if self.initial_pspl_results is not None:
+    #    #        self._initial_pspl_params = self.initial_pspl_results.copy()
+    #    #        del self._initial_pspl_params['chi2']
+    #    #    else:
+    #    #        raise AttributeError('No Initial PSPL results.')
+    #
+    #    self._initial_pspl_params = self.initial_pspl_results.copy()
+    #    del self._initial_pspl_params['chi2']
+    #    return self._initial_pspl_params
+    #
+    #@property
+    #def pspl_parallax_results(self):
+    #    return self._pspl_parallax_results
+    #
+    #@pspl_parallax_results.setter
+    #def pspl_parallax_results(self, value):
+    #    self._pspl_parallax_results = value
+    #
+    #@property
+    #def pspl_parallax_params(self):
+    #    params = self.pspl_parallax_results.copy()
+    #    del params['chi2']
+    #    return params
+    #
+    #@property
+    #def pspl_params(self):
+    #    return self._pspl_params
+    #
+    #@pspl_params.setter
+    #def pspl_params(self, value):
+    #    self._pspl_params = value
+
+
     @property
-    def initial_pspl_results(self):
-        return self._initial_pspl_results
+    def pspl_static_results(self):
+        """
+        Results from fitting a static PSPL Model
+        :return: :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.
+        """
+        return self._pspl_static_results
 
-    @initial_pspl_results.setter
-    def initial_pspl_results(self, value):
-        self._initial_pspl_results = value
-
-    @property
-    def initial_pspl_params(self):
-        # This is a bookkeepping problem
-        # Are we going to overwrite this or not?
-        #if self._initial_pspl_params is None:
-        #    if self.initial_pspl_results is not None:
-        #        self._initial_pspl_params = self.initial_pspl_results.copy()
-        #        del self._initial_pspl_params['chi2']
-        #    else:
-        #        raise AttributeError('No Initial PSPL results.')
-
-        self._initial_pspl_params = self.initial_pspl_results.copy()
-        del self._initial_pspl_params['chi2']
-        return self._initial_pspl_params
+    @pspl_static_results.setter
+    def pspl_static_results(self, value):
+        self._pspl_static_results = value
 
     @property
-    def pspl_parallax_results(self):
-        return self._pspl_parallax_results
+    def fspl_static_results(self):
+        """
+        Results from fitting a static FSPL Model
+        :return: :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.
+        """
+        return self._fspl_static_results
 
-    @pspl_parallax_results.setter
-    def pspl_parallax_results(self, value):
-        self._pspl_parallax_results = value
-
-    @property
-    def pspl_parallax_params(self):
-        params = self.pspl_parallax_results.copy()
-        del params['chi2']
-        return params
+    @fspl_static_results.setter
+    def fspl_static_results(self, value):
+        self._fspl_static_results = value
 
     @property
-    def pspl_params(self):
-        return self._pspl_params
+    def pl_parallax_results(self):
+        """
+        Results from fitting a static FSPL Model
+        :return: *list* of :py:class:`sfit_minimizer.sfit_classes.SFitResults` objects.
+        """
+        return self._pl_parallax_results
 
-    @pspl_params.setter
-    def pspl_params(self, value):
-        self._pspl_params = value
+    @pl_parallax_results.setter
+    def pl_parallax_results(self, value):
+        self._pl_parallax_results = value
+
 
     @property
     def best_af_grid_point(self):
