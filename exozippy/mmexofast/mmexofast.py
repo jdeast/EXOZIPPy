@@ -149,6 +149,32 @@ class MMEXOFASTFitter():
         #self.do_af_grid_search()
         #self.results = self.find_best_binary_model()
 
+    def initialize_exozippy(self):
+        """
+        Get the best-fit microlensing parameters for initializing exozippy fitting.
+
+        :return: *dict*
+            items:
+                'fits': *list* of *dict*
+                    [{'parameters': {*dict* of ulens parameters}, 'sigmas': {*dict* of uncertainties in ulensparameters}} ...]
+                'errfacs': *list* of error renormalization factors for each dataset. DEFAULT: None
+                'mag_methods': *list* of magnification methods following the MulensModel convention. DEFAULT: None
+        """
+        initializations = {'fits': [], 'errfacs': None, 'mag_methods': None}
+
+        if self.fit_type == 'point lens':
+            fits = []
+            for fit in self.pl_parallax_results:
+                fits.append({'parameters': fit.parameters, 'sigmas': fit.sigmas})
+
+            initializations['fits'] = fits
+        else:
+            raise NotImplementedError('initialize_exozippy only implemented for point lens fits')
+
+        return initializations
+
+
+
     #def get_best_point_lens_model(self):
     #    if self.log_file is not None:
     #        log = open(self.log_file, 'a')
