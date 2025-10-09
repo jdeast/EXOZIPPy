@@ -81,6 +81,7 @@ class MMEXOFASTFitter():
         self._best_ef_grid_point = None
         self._initial_pspl_params = None
         self._initial_pspl_results = None
+        self._pspl_parallax_results = None
         self._pspl_params = None
         self._best_af_grid_point = None
         self._anomaly_lc_params = None
@@ -126,9 +127,9 @@ class MMEXOFASTFitter():
                 if self.verbose:
                     print('SFit FSPL', self.initial_pspl_results)
 
-            self.initial_pspl_results = self.fit_pl_parallax()
+            self.pspl_parallax_results = self.fit_pl_parallax()
             if self.verbose:
-                print('SFit w/par', self.initial_pspl_results)
+                print('SFit w/par', self.pspl_parallax_results)
 
         if self.fit_type == 'binary lens':
             self.best_af_grid_point = self.do_af_grid_search()
@@ -248,6 +249,29 @@ class MMEXOFASTFitter():
             initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
         fitter.run()
         return fitter.best
+
+    def fit_parallax_grid(self, grid=None, plot=False):
+        if grid is None:
+            grid = {'pi_E_E': (-1, 1, 0.05), 'pi_E_N': (-2., 2., 0.1)}
+
+        init_params = {key: value for key, value in self.pspl_parallax_params.items()}
+        parameters_to_fit = list(init_params.keys())
+        parameters_to_fit.remove('pi_E_E')
+        parameters_to_fit.remove('pi_E_N')
+        print(parameters_to_fit)
+
+        pi_E_E = np.arange(grid['pi_E_E'][0], grid['pi_E_E'][1] + grid['pi_E_E'][2], grid['pi_E_E'][2])
+        pi_E_N = np.arange(grid['pi_E_N'][0], grid['pi_E_N'][1] + grid['pi_E_N'][2], grid['pi_E_N'][2])
+        chi2 = np.zeros((len(pi_E_E), len(pi_E_N)))
+        for i, east in enumerate(pi_E_E):
+            init_params['pi_E_E'] = east
+            for j, north in enumerate(pi_E_N):
+                init_params['pi_E_N'] = north
+                fitter = mmexo.fitters.SFitFitter(
+                    initial_model_params=init_params, parameters_to_fit=parameters_to_fit, datasets=self.datasets, **self.fitter_kwargs)
+                fitter.run()
+                print(fitter.best)
+                chi2[i, j] = fitter.best['chi2']
 
     #    t_0 = self.best_ef_grid_point['t_0']
     #    if self.best_ef_grid_point['j'] == 1:
@@ -655,6 +679,20 @@ class MMEXOFASTFitter():
         self._initial_pspl_params = self.initial_pspl_results.copy()
         del self._initial_pspl_params['chi2']
         return self._initial_pspl_params
+
+    @property
+    def pspl_parallax_results(self):
+        return self._pspl_parallax_results
+
+    @pspl_parallax_results.setter
+    def pspl_parallax_results(self, value):
+        self._pspl_parallax_results = value
+
+    @property
+    def pspl_parallax_params(self):
+        params = self.pspl_parallax_results.copy()
+        del params['chi2']
+        return params
 
     @property
     def pspl_params(self):

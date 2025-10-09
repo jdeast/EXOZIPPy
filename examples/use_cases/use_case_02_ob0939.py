@@ -13,6 +13,7 @@ fitter = exozippy.mmexofast.MMEXOFASTFitter(
     files=[data_file], fit_type='point lens', coords='17:47:12.25 -21:22:58.7',
     verbose=True)
 fitter.fit()
+print(fitter.initialize_exozippy())
 
 """
 Desired outputs:
@@ -29,10 +30,10 @@ EXOZIPPy:
 Note: all chi2s need to be on the same system.
 """
 
-fitter.print_static_pspl_results()
-fitter.print_parallax_pspl_results()
-fitter.fit_parallax_grid(plot=True)
-fitter.print_final_model()
-fitter.plot_posteriors()
+#fitter.print_static_pspl_results()
+#fitter.print_parallax_pspl_results()
+#fitter.fit_parallax_grid(plot=True)
+#fitter.print_final_model()
+#fitter.plot_posteriors()
 
 plt.show()
