@@ -164,7 +164,8 @@ class MMEXOFASTFitter():
         :return: *dict*
             items:
                 'fits': *list* of *dict*
-                    [{'parameters': {*dict* of ulens parameters}, 'sigmas': {*dict* of uncertainties in ulensparameters}} ...]
+                    [{'parameters': {*dict* of ulens parameters}, 'sigmas': {*dict* of uncertainties in
+                    ulensparameters}} ...]
                 'errfacs': *list* of error renormalization factors for each dataset. DEFAULT: None
                 'mag_methods': *list* of magnification methods following the MulensModel convention. DEFAULT: None
         """
@@ -173,7 +174,8 @@ class MMEXOFASTFitter():
         if self.fit_type == 'point lens':
             fits = []
             for fit in self.pl_parallax_results:
-                fits.append({'parameters': self.get_params_from_results(fit), 'sigmas': self.get_sigmas_from_results(fit)})
+                fits.append({'parameters': self.get_params_from_results(fit),
+                             'sigmas': self.get_sigmas_from_results(fit)})
 
             initializations['fits'] = fits
         else:
@@ -255,8 +257,8 @@ class MMEXOFASTFitter():
 
     def get_initial_pspl(self, verbose=False):
         """
-        Estimate a starting point for the PSPL fitting and then optimize the parameters using
-        :py:class:`mmexofast.fitters.SFitFitter`.
+        Estimate a starting point for the PSPL fitting from the EventFinder search (:py:attr:`best_ef_grid_point`)
+        and then optimize the parameters using :py:class:`mmexofast.fitters.SFitFitter`.
 
         :param verbose: *bool* optional
         :return:  *dict* of the form
@@ -308,7 +310,8 @@ class MMEXOFASTFitter():
 
     def fit_fspl(self):
         """
-        Use the results from the static PSPL fit to initialize and optimize an FSPL fit.
+        Use the results from the static PSPL fit (:py:attr:`pspl_static_results`) to initialize and optimize an FSPL
+        fit.
 
         :return:  *dict* of the form
             {'best': *dict* of best-fit values & chi2,
