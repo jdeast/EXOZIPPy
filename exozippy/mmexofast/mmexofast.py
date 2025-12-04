@@ -183,6 +183,15 @@ class MMEXOFASTFitter():
 
         return initializations
 
+    def make_ulens_table(self, type='ascii'):
+        """
+        Return a string consisting of a formatted table summarizing the results of the microlensing fits.
+
+        :param type:
+        :return: *str*
+        """
+        pass
+
 
     #def get_best_point_lens_model(self):
     #    if self.log_file is not None:
