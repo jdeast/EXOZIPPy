@@ -47,7 +47,8 @@ def fit(files=None, fit_type=None, **kwargs):
 class MMEXOFASTFitter():
 
     def __init__(
-            self, files=None, fit_type=None, finite_source=False, limb_darkening_coeffs_gamma=None,
+            self, files=None, fit_type=None, renormalize_errors=True,
+            finite_source=False, limb_darkening_coeffs_gamma=None,
             limb_darkening_coeffs_u=None, mag_methods=None,
             datasets=None, coords=None,
             priors=None, print_results=False, verbose=False,
@@ -63,6 +64,7 @@ class MMEXOFASTFitter():
             self.datasets = self._create_mulensdata_objects(files)
 
         self.fit_type = fit_type
+        self.renormalize_errors = renormalize_errors
         self.finite_source = finite_source
         self.fitter_kwargs = {
             'coords': coords, 'mag_methods': mag_methods,
@@ -140,6 +142,9 @@ class MMEXOFASTFitter():
                 for i in range(2):
                     print('SFit w/par', i+1, self.pl_parallax_results[i]['best'])
 
+            if self.renormalize_errors:
+                self.renormalize_errors_and_refit()
+
         elif self.fit_type == 'binary lens':
             self.best_af_grid_point = self.do_af_grid_search()
             if self.verbose:
@@ -157,6 +162,14 @@ class MMEXOFASTFitter():
         #self.get_best_point_lens_model()
         #self.do_af_grid_search()
         #self.results = self.find_best_binary_model()
+
+    def renormalize_errors_and_refit(self):
+        """
+        Given the existing fits, take the best one and renormalize the errorbars of each dataset relative to that fit.
+        Then, re-optimize all the fits with the new errorbars.
+        :return:
+        """
+        pass
 
     def initialize_exozippy(self):
         """
