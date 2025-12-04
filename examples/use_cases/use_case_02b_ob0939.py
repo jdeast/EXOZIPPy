@@ -41,8 +41,6 @@ class ParallaxFitter():
         self.fitter = exozippy.mmexofast.MMEXOFASTFitter(
             files=self.data_files, coords=self.coords, fit_type=self.fit_type, **kwargs)
         self.fitter.fit()
-        print(self.fitter.pspl_static_results)
-        print(self.fitter.pl_parallax_results)
 
     def print_latex_results_table(self):
         print(self.fitter.make_ulens_table('latex'))
@@ -73,6 +71,7 @@ def do_ground_fit():
     Updates needed to MMEXOFAST:
     - Error Renormalization and result recalculation
     - Parallax grid fitting (implementation started)
+    - Handling of zero blending cases.
 
     :return:
     """

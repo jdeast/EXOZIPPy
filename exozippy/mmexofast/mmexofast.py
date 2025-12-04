@@ -206,18 +206,17 @@ class MMEXOFASTFitter():
                 parameters.append('{0}_B_{1}'.format(band, obs))
 
                 obs_index = len(results['parameters_to_fit']) + 2 * i
-                fs = values[obs_index]
-                err_fs = sigmas[obs_index]
+                for index in range(2):
+                    flux = values[obs_index + index]
+                    if flux > 0:
+                        err_flux = sigmas[obs_index + index]
+                        mag, err_mag = MulensModel.utils.Utils.get_mag_and_err_from_flux(flux, err_flux)
+                    else:
+                        mag = 'neg flux'
+                        err_mag = np.nan
 
-                mag_s, err_s = MulensModel.utils.Utils.get_mag_and_err_from_flux(fs, err_fs)
-                values[obs_index] = mag_s
-                sigmas[obs_index] = err_s
-
-                fb = values[obs_index + 1]
-                err_fb = sigmas[obs_index]
-                mag_b, err_b = MulensModel.utils.Utils.get_mag_and_err_from_flux(fb, err_fb)
-                values[obs_index + 1] = mag_b
-                sigmas[obs_index + 1] = err_b
+                    values[obs_index + index] = mag
+                    sigmas[obs_index + index] = err_mag
 
             df = pd.DataFrame({
                 'parameter_names': parameters,
