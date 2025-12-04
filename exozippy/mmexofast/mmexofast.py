@@ -278,7 +278,7 @@ class MMEXOFASTFitter():
             results = static
 
         parallax["_order"] = np.arange(len(parallax))
-        results = static.merge(parallax, on="parameter_names", how="outer", sort=False)
+        results = results.merge(parallax, on="parameter_names", how="outer", sort=False)
         results = results.sort_values("_order", na_position="last").drop(columns='_order')
 
         if table_type == 'latex':
