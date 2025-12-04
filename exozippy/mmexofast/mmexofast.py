@@ -4,6 +4,7 @@ High-level functions for fitting microlensing events.
 import os.path
 import warnings
 
+import pandas as pd
 import numpy as np
 import copy
 from collections import OrderedDict
@@ -183,6 +184,31 @@ class MMEXOFASTFitter():
 
         return initializations
 
+    def get_results_df(self, model):
+        
+        def format_results_as_df(results):
+            df = pd.DataFrame({
+                'parameter_names': results.parameters_to_fit,
+                'values': results.results.x,
+                'sigmas': results.results.sigmas
+            })
+            return df
+
+        if self.fit_type == 'point lens':
+            if (model.lower() == 'static') & self.finite_source:
+                return format_results_as_df(self.fspl_static_results)
+            elif (model.lower() == 'static') or (model.lower() == 'point lens static'):
+                return format_results_as_df(self.pspl_static_results)
+            elif model.lower() == 'parallax':
+                return format_results_as_df(self.pl_parallax_results)
+            else:
+                raise ValueError(
+                    'argument for point lens fits can be "static", "point lens static" or "parallax". Your value: ',
+                    model)
+
+        else:
+            raise NotImplementedError('Only point lenses have been implemented.')
+
     def make_ulens_table(self, type='ascii'):
         """
         Return a string consisting of a formatted table summarizing the results of the microlensing fits.
@@ -190,7 +216,18 @@ class MMEXOFASTFitter():
         :param type:
         :return: *str*
         """
-        pass
+
+        static = self.get_results_df('static')
+        parallax = self.get_results_df('parallax')
+        if self.finite_source:
+            point_lens = self.get_results_df('point lens static')
+            results = point_lens.merge(static, on="parameter_names", how="outer", suffixes=("_pspl", "_static"))
+            results = results.merge(parallax, on="parameter_names", how="outer", suffixes=("", "_parallax"))
+        else:
+            results = static.merge(parallax, on="parameter_names", how="outer", suffixes=("_static", "_parallax")
+)
+
+        return results.to_latex(index=False)
 
 
     #def get_best_point_lens_model(self):
