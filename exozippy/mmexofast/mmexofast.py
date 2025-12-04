@@ -224,9 +224,11 @@ class MMEXOFASTFitter():
                 'sigmas': sigmas
             })
             df = pd.concat((
-                pd.DataFrame({'parameter_names': ['chi2'],
-                'values': [results['best']['chi2']],
-                'sigmas': [None]}), df))
+                pd.DataFrame({'parameter_names': ['chi2', 'N_data'],
+                'values': [
+                    results['best']['chi2'],
+                    np.sum([np.sum(dataset.good) for dataset in self.datasets])],
+                'sigmas': [None, None]}), df))
 
             return df
 
@@ -280,6 +282,20 @@ class MMEXOFASTFitter():
         results = results.sort_values("_order", na_position="last").drop(columns='_order')
 
         if table_type == 'latex':
+            def fmt(name):
+                if name == 'chi2':
+                    return '$\chi^2$'
+
+                parts = name.split("_")
+                if len(parts) == 1:
+                    return f"${name}$"
+                first = parts[0]
+                rest = ", ".join(parts[1:])
+                return f"${first}" + "_{" + rest + "}$"
+
+            results["parameter_names"] = results["parameter_names"].apply(fmt)
+            results.columns = [fmt(c) for c in results.columns]
+
             return results.to_latex(index=False)
         elif table_type == 'ascii':
             with pd.option_context("display.max_rows", None,
