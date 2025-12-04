@@ -187,20 +187,68 @@ class MMEXOFASTFitter():
     def get_results_df(self, model):
         
         def format_results_as_df(results):
+            parameters = [x for x in results['parameters_to_fit']]
+            values = [x for x in results['results'].x]
+            sigmas = [x for x in results['results'].sigmas]
+
+            for i, dataset in enumerate(self.datasets):
+                if 'label' in dataset.plot_properties.keys():
+                    obs = dataset.plot_properties['label'].split('-')[0]
+                else:
+                    obs = i
+
+                if dataset.bandpass is not None:
+                    band = dataset.bandpass
+                else:
+                    band = 'mag'
+
+                parameters.append('{0}_S_{1}'.format(band, obs))
+                parameters.append('{0}_B_{1}'.format(band, obs))
+
+                obs_index = len(results['parameters_to_fit']) + 2 * i
+                fs = values[obs_index]
+                err_fs = sigmas[obs_index]
+
+                mag_s, err_s = MulensModel.utils.Utils.get_mag_and_err_from_flux(fs, err_fs)
+                values[obs_index] = mag_s
+                sigmas[obs_index] = err_s
+
+                fb = values[obs_index + 1]
+                err_fb = sigmas[obs_index]
+                mag_b, err_b = MulensModel.utils.Utils.get_mag_and_err_from_flux(fb, err_fb)
+                values[obs_index + 1] = mag_b
+                sigmas[obs_index + 1] = err_b
+
             df = pd.DataFrame({
-                'parameter_names': results.parameters_to_fit,
-                'values': results.results.x,
-                'sigmas': results.results.sigmas
+                'parameter_names': parameters,
+                'values': values,
+                'sigmas': sigmas
             })
+            df = pd.concat((
+                pd.DataFrame({'parameter_names': ['chi2'],
+                'values': [results['best']['chi2']],
+                'sigmas': [None]}), df))
+
             return df
 
         if self.fit_type == 'point lens':
             if (model.lower() == 'static') & self.finite_source:
-                return format_results_as_df(self.fspl_static_results)
+                return format_results_as_df(self.fspl_static_results).rename(columns=lambda c: c + "_static" if c != "parameter_names" else c)
             elif (model.lower() == 'static') or (model.lower() == 'point lens static'):
-                return format_results_as_df(self.pspl_static_results)
+                return format_results_as_df(self.pspl_static_results).rename(columns=lambda c: c + "_pl_static" if c != "parameter_names" else c)
             elif model.lower() == 'parallax':
-                return format_results_as_df(self.pl_parallax_results)
+                df = None
+                for results in self.pl_parallax_results:
+                    formatted_df = format_results_as_df(results)
+                    if df is None:
+                        df = formatted_df
+                    else:
+                        df["_order"] = np.arange(len(df))
+                        df = df.merge(
+                            formatted_df, on="parameter_names", how="outer", suffixes=("_par_p", "_par_m"), sort=False)
+                        df = df.sort_values("_order", na_position="last").drop(columns='_order')
+
+                return df
             else:
                 raise ValueError(
                     'argument for point lens fits can be "static", "point lens static" or "parallax". Your value: ',
@@ -209,26 +257,38 @@ class MMEXOFASTFitter():
         else:
             raise NotImplementedError('Only point lenses have been implemented.')
 
-    def make_ulens_table(self, type='ascii'):
+    def make_ulens_table(self, table_type):
         """
         Return a string consisting of a formatted table summarizing the results of the microlensing fits.
 
         :param type:
         :return: *str*
         """
+        if table_type is None:
+            table_type = 'ascii'
 
         static = self.get_results_df('static')
         parallax = self.get_results_df('parallax')
+
         if self.finite_source:
             point_lens = self.get_results_df('point lens static')
-            results = point_lens.merge(static, on="parameter_names", how="outer", suffixes=("_pspl", "_static"))
-            results = results.merge(parallax, on="parameter_names", how="outer", suffixes=("", "_parallax"))
+            results = point_lens.merge(static, on="parameter_names", how="outer", sort=False)
         else:
-            results = static.merge(parallax, on="parameter_names", how="outer", suffixes=("_static", "_parallax")
-)
+            results = static
 
-        return results.to_latex(index=False)
+        parallax["_order"] = np.arange(len(parallax))
+        results = static.merge(parallax, on="parameter_names", how="outer", sort=False)
+        results = results.sort_values("_order", na_position="last").drop(columns='_order')
 
+        if table_type == 'latex':
+            return results.to_latex(index=False)
+        elif table_type == 'ascii':
+            with pd.option_context("display.max_rows", None,
+                                   "display.max_columns", None,
+                                   "display.width", None, "display.float_format", "{:f}".format):
+                return results.to_string(index=False)
+        else:
+            raise NotImplementedError(table_type + ' not implemented.')
 
     #def get_best_point_lens_model(self):
     #    if self.log_file is not None:

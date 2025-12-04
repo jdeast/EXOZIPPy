@@ -41,9 +41,11 @@ class ParallaxFitter():
         self.fitter = exozippy.mmexofast.MMEXOFASTFitter(
             files=self.data_files, coords=self.coords, fit_type=self.fit_type, **kwargs)
         self.fitter.fit()
+        print(self.fitter.pspl_static_results)
+        print(self.fitter.pl_parallax_results)
 
     def print_latex_results_table(self):
-        print(self.fitter.make_ulens_table(type='latex'))
+        print(self.fitter.make_ulens_table('latex'))
 
     def plot_lc(self):
         pass
@@ -76,7 +78,7 @@ def do_ground_fit():
     """
     pl_fitter = ParallaxFitter(
         data_files=ground_data_files, coords=coords, fit_type='point lens')
-    pl_fitter.fit()
+    pl_fitter.fit(verbose=True)
 
     pl_fitter.print_latex_results_table()
     #pl_fitter.plot_lc()
