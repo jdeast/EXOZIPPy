@@ -16,6 +16,10 @@ fitter = exozippy.mmexofast.MMEXOFASTFitter(
     finite_source=True, limb_darkening_coeffs_gamma={'I': 0.5103, 'R': 0.6583},
     mag_methods=[2457558.5, 'finite_source_LD_Yoo04', 2457559.7],
     verbose=True)
+
+for dataset in fitter.datasets:
+    print(dataset)
+
 fitter.fit()
 print(fitter.initialize_exozippy())
 
