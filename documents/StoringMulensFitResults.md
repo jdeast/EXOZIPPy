@@ -84,8 +84,10 @@ Hope that the signal is really parallax and not 3L1S.
 2. Output "final" (with renormalized errors) fits for the major model classes
    (in the proper order) for comparison in a table.
 
-   Maybe we need to look at some tables in recent papers for ideas about how
-   fit information is organized for different events.
+3. Output some custom table with just the models I think are important.
+
+Maybe we need to look at some tables in recent papers for ideas about how
+fit information is organized for different events.
 
 ## Proposed Solutions
 
