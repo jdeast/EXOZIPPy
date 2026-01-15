@@ -123,3 +123,8 @@ Advantages:
 Isn't this sort of already built into the classes in fitters? Is it just that 
 we don't want to store the entire fitter?
 
+# Current EXOZIPPy Architecture
+
+Everything has a read/write interface to an Event Structure.
+
+Different solutions have different objects associated with them.

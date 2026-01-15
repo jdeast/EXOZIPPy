@@ -44,6 +44,104 @@ def fit(files=None, fit_type=None, **kwargs):
     return fitter.results
 
 
+class MMEXOFASTFitResults():
+    """
+    Class containing the results of a fit and nice methods for accessing the results.
+    """
+
+    def __init__(self, fitter):
+        self.fitter = self.fitter
+
+    def get_params_from_results(self):
+        """
+        Take the results of a fit and return a dictionary with just the best-fit microlensing parameters and values,
+        i.e., something appropriate for using as input to `MulensModel.Model()`.
+
+        :param :py:class:`MMEXOFASTFit` object.
+
+        :return: *dict* of microlensing parameters and values
+        """
+        params = {key: value for key, value in self.best.items()}
+        params.pop('chi2')
+        return params
+
+    def get_sigmas_from_results(self):
+        """
+         Take the results of a fit and return a dictionary with the uncertainties for each microlensing parameter.
+
+        :param :return: :py:class:`MMEXOFASTFit` object.
+
+        :return: *dict* of uncertainties in microlensing parameters and values
+        """
+        sigmas = {}
+        for param, sigma in zip(self.parameters_to_fit, self.results.sigmas):
+            sigmas[param] = sigma
+
+        return sigmas
+
+    def format_results_as_df(self):
+        parameters = [x for x in self.parameters_to_fit]
+        values = [x for x in self.results.x]
+        sigmas = [x for x in self.results.sigmas]
+
+        for i, dataset in enumerate(self.datasets):
+            if 'label' in dataset.plot_properties.keys():
+                obs = dataset.plot_properties['label'].split('-')[0]
+            else:
+                obs = i
+
+            if dataset.bandpass is not None:
+                band = dataset.bandpass
+            else:
+                band = 'mag'
+
+            parameters.append('{0}_S_{1}'.format(band, obs))
+            parameters.append('{0}_B_{1}'.format(band, obs))
+
+            obs_index = len(self.parameters_to_fit) + 2 * i
+            for index in range(2):
+                flux = values[obs_index + index]
+                if flux > 0:
+                    err_flux = sigmas[obs_index + index]
+                    mag, err_mag = MulensModel.utils.Utils.get_mag_and_err_from_flux(flux, err_flux)
+                else:
+                    mag = 'neg flux'
+                    err_mag = np.nan
+
+                values[obs_index + index] = mag
+                sigmas[obs_index + index] = err_mag
+
+        df = pd.DataFrame({
+            'parameter_names': parameters,
+            'values': values,
+            'sigmas': sigmas
+        })
+        df = pd.concat((
+            pd.DataFrame({'parameter_names': ['chi2', 'N_data'],
+                          'values': [
+                              self.best['chi2'],
+                              np.sum([np.sum(dataset.good) for dataset in self.datasets])],
+                          'sigmas': [None, None]}), df))
+
+        return df
+
+    @property
+    def datasets(self):
+        return self.fitter.datasets
+
+    @property
+    def best(self):
+        return self.fitter.best
+
+    @property
+    def results(self):
+        return self.fitter.results
+
+    @property
+    def parameters_to_fit(self):
+        return self.fitter.parameters_to_fit
+
+
 class MMEXOFASTFitter():
 
     def __init__(
@@ -129,18 +227,18 @@ class MMEXOFASTFitter():
 
         self.pspl_static_results = self.get_initial_pspl()
         if self.verbose:
-            print('Initial SFit', self.pspl_static_results['best'])
+            print('Initial SFit', self.pspl_static_results.best)
 
         if self.fit_type == 'point lens':
             if self.finite_source:
                 self.fspl_static_results = self.fit_fspl()
                 if self.verbose:
-                    print('SFit FSPL', self.fspl_static_results['best'])
+                    print('SFit FSPL', self.fspl_static_results.best)
 
             self.pl_parallax_results = self.fit_pl_parallax()
             if self.verbose:
                 for i in range(2):
-                    print('SFit w/par', i+1, self.pl_parallax_results[i]['best'])
+                    print('SFit w/par', i+1, self.pl_parallax_results[i].best)
 
             if self.renormalize_errors:
                 self.renormalize_errors_and_refit()
@@ -188,8 +286,8 @@ class MMEXOFASTFitter():
         if self.fit_type == 'point lens':
             fits = []
             for fit in self.pl_parallax_results:
-                fits.append({'parameters': self.get_params_from_results(fit),
-                             'sigmas': self.get_sigmas_from_results(fit)})
+                fits.append({'parameters': fit.get_params_from_results(),
+                             'sigmas': fit.get_sigmas_from_results()})
 
             initializations['fits'] = fits
         else:
@@ -198,62 +296,15 @@ class MMEXOFASTFitter():
         return initializations
 
     def get_results_df(self, model):
-        
-        def format_results_as_df(results):
-            parameters = [x for x in results['parameters_to_fit']]
-            values = [x for x in results['results'].x]
-            sigmas = [x for x in results['results'].sigmas]
-
-            for i, dataset in enumerate(self.datasets):
-                if 'label' in dataset.plot_properties.keys():
-                    obs = dataset.plot_properties['label'].split('-')[0]
-                else:
-                    obs = i
-
-                if dataset.bandpass is not None:
-                    band = dataset.bandpass
-                else:
-                    band = 'mag'
-
-                parameters.append('{0}_S_{1}'.format(band, obs))
-                parameters.append('{0}_B_{1}'.format(band, obs))
-
-                obs_index = len(results['parameters_to_fit']) + 2 * i
-                for index in range(2):
-                    flux = values[obs_index + index]
-                    if flux > 0:
-                        err_flux = sigmas[obs_index + index]
-                        mag, err_mag = MulensModel.utils.Utils.get_mag_and_err_from_flux(flux, err_flux)
-                    else:
-                        mag = 'neg flux'
-                        err_mag = np.nan
-
-                    values[obs_index + index] = mag
-                    sigmas[obs_index + index] = err_mag
-
-            df = pd.DataFrame({
-                'parameter_names': parameters,
-                'values': values,
-                'sigmas': sigmas
-            })
-            df = pd.concat((
-                pd.DataFrame({'parameter_names': ['chi2', 'N_data'],
-                'values': [
-                    results['best']['chi2'],
-                    np.sum([np.sum(dataset.good) for dataset in self.datasets])],
-                'sigmas': [None, None]}), df))
-
-            return df
-
         if self.fit_type == 'point lens':
             if (model.lower() == 'static') & self.finite_source:
-                return format_results_as_df(self.fspl_static_results).rename(columns=lambda c: c + "_static" if c != "parameter_names" else c)
+                return self.fspl_static_results.format_results_as_df().rename(columns=lambda c: c + "_static" if c != "parameter_names" else c)
             elif (model.lower() == 'static') or (model.lower() == 'point lens static'):
-                return format_results_as_df(self.pspl_static_results).rename(columns=lambda c: c + "_pl_static" if c != "parameter_names" else c)
+                return self.pspl_static_results.format_results_as_df().rename(columns=lambda c: c + "_pl_static" if c != "parameter_names" else c)
             elif model.lower() == 'parallax':
                 df = None
                 for results in self.pl_parallax_results:
-                    formatted_df = format_results_as_df(results)
+                    formatted_df = results.format_results_as_df()
                     if df is None:
                         df = formatted_df
                     else:
@@ -395,11 +446,7 @@ class MMEXOFASTFitter():
         and then optimize the parameters using :py:class:`mmexofast.fitters.SFitFitter`.
 
         :param verbose: *bool* optional
-        :return:  *dict* of the form
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
-
+        :return: :py:class:`MMEXOFASTFit` object.
         """
         pspl_est_params = mmexo.estimate_params.get_PSPL_params(self.best_ef_grid_point, self.datasets)
         if self.verbose:
@@ -407,73 +454,35 @@ class MMEXOFASTFitter():
 
         fitter = mmexo.fitters.SFitFitter(initial_model_params=pspl_est_params, datasets=self.datasets)
         fitter.run()
-        return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
-
-    def get_params_from_results(self, results):
-        """
-        Take the results of a fit and return a dictionary with just the best-fit microlensing parameters and values,
-        i.e., something appropriate for using as input to `MulensModel.Model()`.
-
-        :param results: *dict* of the form
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
-
-        :return: *dict* of microlensing parameters and values
-        """
-        params = {key: value for key, value in results['best'].items()}
-        params.pop('chi2')
-        return params
-
-    def get_sigmas_from_results(self, results):
-        """
-         Take the results of a fit and return a dictionary with the uncertainties for each microlensing parameter.
-
-        :param results: *dict* of the form
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
-
-        :return: *dict* of uncertainties in microlensing parameters and values
-        """
-        sigmas = {}
-        for param, sigma in zip(results['parameters_to_fit'], results['results'].sigmas):
-            sigmas[param] = sigma
-
-        return sigmas
+        #return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
+        return MMEXOFASTFitResults(fitter)
 
     def fit_fspl(self):
         """
         Use the results from the static PSPL fit (:py:attr:`pspl_static_results`) to initialize and optimize an FSPL
         fit.
 
-        :return:  *dict* of the form
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
+        :return: :py:class:`MMEXOFASTFit` object.
         """
-        init_params = self.get_params_from_results(self.pspl_static_results)
+        init_params = self.pspl_static_results.get_params_from_results()
         init_params['rho'] = 1.5 * init_params['u_0']
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
         #print('mmexo237', fitter.mag_methods)
         fitter.run()
-        return {'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit}
+        return MMEXOFASTFitResults(fitter)
 
     def fit_pl_parallax(self):
         """
         Use the results from the static fit (either PSPL or FSPL according to the value of `finite_source`) to
         initialize u0+ and u0- parallax fits.
 
-        :return: *list* of 2 *dict* of the form
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
+        :return: *list* of 2 :py:class:`MMEXOFASTFit` objects.
         """
         if self.finite_source:
-            init_params = self.get_params_from_results(self.fspl_static_results)
+            init_params = self.fspl_static_results.get_params_from_results()
         else:
-            init_params = self.get_params_from_results(self.pspl_static_results)
+            init_params = self.pspl_static_results.get_params_from_results()
 
         init_params['pi_E_N'] = 0.
         init_params['pi_E_E'] = 0
@@ -484,7 +493,7 @@ class MMEXOFASTFitter():
             fitter = mmexo.fitters.SFitFitter(
                 initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
             fitter.run()
-            results.append({'best': fitter.best, 'results': fitter.results, 'parameters_to_fit': fitter.parameters_to_fit})
+            results.append(MMEXOFASTFitResults(fitter))
 
         return results
 
@@ -945,10 +954,7 @@ class MMEXOFASTFitter():
     def pspl_static_results(self):
         """
         Results from fitting a static PSPL Model
-        :return: *dict*
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
+        :return: :py:class:`MMEXOFASTFit` object.
         """
         return self._pspl_static_results
 
@@ -960,10 +966,7 @@ class MMEXOFASTFitter():
     def fspl_static_results(self):
         """
         Results from fitting a static FSPL Model
-        :return: *dict*
-            {'best': *dict* of best-fit values & chi2,
-            'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-            'parameters_to_fit': *list* of parameters corresponding to results}
+        :return: :py:class:`MMEXOFASTFit` object.
         """
         return self._fspl_static_results
 
@@ -975,11 +978,7 @@ class MMEXOFASTFitter():
     def pl_parallax_results(self):
         """
         Results from fitting a static FSPL Model
-        :return: *list* of *dict*
-            where each *dict* =
-                {'best': *dict* of best-fit values & chi2,
-                'results': :py:class:`sfit_minimizer.sfit_classes.SFitResults` object.,
-                'parameters_to_fit': *list* of parameters corresponding to results}
+        :return: *list* of :py:class:`MMEXOFASTFit` objects.
         """
         return self._pl_parallax_results
 
