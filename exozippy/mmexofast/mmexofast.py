@@ -50,7 +50,7 @@ class MMEXOFASTFitResults():
     """
 
     def __init__(self, fitter):
-        self.fitter = self.fitter
+        self.fitter = fitter
 
     def get_params_from_results(self):
         """
@@ -148,12 +148,14 @@ class MMEXOFASTFitter():
             self, files=None, fit_type=None, renormalize_errors=True,
             finite_source=False, limb_darkening_coeffs_gamma=None,
             limb_darkening_coeffs_u=None, mag_methods=None,
-            datasets=None, coords=None,
+            datasets=None, coords=None, prev_results=None,
             priors=None, print_results=False, verbose=False,
-            output_file=None, log_file=None, emcee=True, emcee_settings=None, pool=None):
+            output_file=None, latex_file=None, log_file=None, emcee=True, emcee_settings=None, pool=None):
+
+        # Output
         self.verbose = verbose
-        if log_file is not None:
-            self.log_file = log_file
+        self.log_file = log_file
+        self.latex_file = latex_file
 
         # setup datasets.
         if datasets is not None:
@@ -168,7 +170,7 @@ class MMEXOFASTFitter():
             'coords': coords, 'mag_methods': mag_methods,
             'limb_darkening_coeffs_u': limb_darkening_coeffs_u,
             'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
-        print(self.fitter_kwargs)
+        #print(self.fitter_kwargs)
 
         self.emcee = emcee
         self.emcee_settings = emcee_settings
@@ -190,7 +192,12 @@ class MMEXOFASTFitter():
         self._anomaly_lc_params = None
         self._binary_params = None
 
-        self._results = None
+        if prev_results is not None:
+            print(
+                'prev_results NEEDS WORK! should create a MMEXOFASTFitResults object so the datasets are not needed '+
+                'when creating prev_results items')
+
+        self._results = prev_results
 
     def _create_mulensdata_objects(self, files):
         if isinstance(files, (str)):
@@ -221,29 +228,10 @@ class MMEXOFASTFitter():
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
 
-        self.best_ef_grid_point = self.do_ef_grid_search()
-        if self.verbose:
-            print('Best EF grid point ', self.best_ef_grid_point)
+        # ADD a condition to check whether point lens fits already exist...
+        self.fit_point_lens()
 
-        self.pspl_static_results = self.get_initial_pspl()
-        if self.verbose:
-            print('Initial SFit', self.pspl_static_results.best)
-
-        if self.fit_type == 'point lens':
-            if self.finite_source:
-                self.fspl_static_results = self.fit_fspl()
-                if self.verbose:
-                    print('SFit FSPL', self.fspl_static_results.best)
-
-            self.pl_parallax_results = self.fit_pl_parallax()
-            if self.verbose:
-                for i in range(2):
-                    print('SFit w/par', i+1, self.pl_parallax_results[i].best)
-
-            if self.renormalize_errors:
-                self.renormalize_errors_and_refit()
-
-        elif self.fit_type == 'binary lens':
+        if self.fit_type == 'binary lens':
             self.best_af_grid_point = self.do_af_grid_search()
             if self.verbose:
                 print('Best AF grid', self.best_af_grid_point)
@@ -256,6 +244,44 @@ class MMEXOFASTFitter():
                 self.results = self.fit_anomaly()
                 if self.verbose:
                     print('Results', self.results)
+
+    def fit_point_lens(self):
+        ### Next steps:
+        # 1. Think about how to implement log file.
+        # 2. Implement renormalize errors.
+
+        results = {}
+
+        if self.best_ef_grid_point is None:
+            self.best_ef_grid_point = self.do_ef_grid_search()
+            if self.verbose:
+                print('Best EF grid point ', self.best_ef_grid_point)
+
+        if 'static PSPL' in self.results.keys():
+            print('is this really how you want this to work????') ###
+            results['static PSPL'] = self.results['static PSPL']
+            if self.verbose:
+                print('static PSPL exists', self.results['static PSPL'].best)
+        else:
+            results['static PSPL'] = self.fit_initial_pspl_model()
+            if self.verbose:
+                print('Initial SFit', self.results['static PSPL'].best)
+
+        if self.finite_source:
+            results['static FSPL'] = self.fit_static_fspl_model()
+            if self.verbose:
+                print('SFit FSPL', self.results['static FSPL'].best)
+
+        pl_results = self.fit_pl_parallax_models()
+        for key, value in pl_results.items():
+            results[key] = value
+
+        self.results = results
+
+        if self.renormalize_errors:
+            self.renormalize_errors_and_refit()
+
+
 
     def renormalize_errors_and_refit(self):
         """
@@ -291,55 +317,33 @@ class MMEXOFASTFitter():
 
         return initializations
 
-    def get_results_df(self, model):
-        if self.fit_type == 'point lens':
-            if (model.lower() == 'static') & self.finite_source:
-                return self.fspl_static_results.format_results_as_df().rename(columns=lambda c: c + "_static" if c != "parameter_names" else c)
-            elif (model.lower() == 'static') or (model.lower() == 'point lens static'):
-                return self.pspl_static_results.format_results_as_df().rename(columns=lambda c: c + "_pl_static" if c != "parameter_names" else c)
-            elif model.lower() == 'parallax':
-                df = None
-                for results in self.pl_parallax_results:
-                    formatted_df = results.format_results_as_df()
-                    if df is None:
-                        df = formatted_df
-                    else:
-                        df["_order"] = np.arange(len(df))
-                        df = df.merge(
-                            formatted_df, on="parameter_names", how="outer", suffixes=("_par_p", "_par_m"), sort=False)
-                        df = df.sort_values("_order", na_position="last").drop(columns='_order')
-
-                return df
-            else:
-                raise ValueError(
-                    'argument for point lens fits can be "static", "point lens static" or "parallax". Your value: ',
-                    model)
-
-        else:
-            raise NotImplementedError('Only point lenses have been implemented.')
-
-    def make_ulens_table(self, table_type):
+    def make_ulens_table(self, table_type, models=None):
         """
         Return a string consisting of a formatted table summarizing the results of the microlensing fits.
 
-        :param type:
+        :param table_type:
+        models = *list*, Optional
+            default is to make a table for all models
+
         :return: *str*
         """
+        print('Need to add parameter heirarchy to table construction.')
+
         if table_type is None:
             table_type = 'ascii'
 
-        static = self.get_results_df('static')
-        parallax = self.get_results_df('parallax')
+        if models is None:
+            models = self.results.keys()
 
-        if self.finite_source:
-            point_lens = self.get_results_df('point lens static')
-            results = point_lens.merge(static, on="parameter_names", how="outer", sort=False)
-        else:
-            results = static
+        results_table = None
+        for name in models:
+            new_column = self.results[name].format_results_as_df()
+            new_column = new_column.rename(columns={'values': name, 'sigmas': 'sig [{0}]'.format(name)})
 
-        parallax["_order"] = np.arange(len(parallax))
-        results = results.merge(parallax, on="parameter_names", how="outer", sort=False)
-        results = results.sort_values("_order", na_position="last").drop(columns='_order')
+            if results_table is None:
+                results_table = new_column
+            else:
+                results_table = results_table.merge(new_column, on="parameter_names", how="outer", sort=False)
 
         if table_type == 'latex':
             def fmt(name):
@@ -353,15 +357,14 @@ class MMEXOFASTFitter():
                 rest = ", ".join(parts[1:])
                 return f"${first}" + "_{" + rest + "}$"
 
-            results["parameter_names"] = results["parameter_names"].apply(fmt)
-            results.columns = [fmt(c) for c in results.columns]
+            results_table["parameter_names"] = results_table["parameter_names"].apply(fmt)
 
-            return results.to_latex(index=False)
+            return results_table.to_latex(index=False)
         elif table_type == 'ascii':
             with pd.option_context("display.max_rows", None,
                                    "display.max_columns", None,
                                    "display.width", None, "display.float_format", "{:f}".format):
-                return results.to_string(index=False)
+                return results_table.to_string(index=False)
         else:
             raise NotImplementedError(table_type + ' not implemented.')
 
@@ -374,7 +377,7 @@ class MMEXOFASTFitter():
         ef_grid.run()
         return ef_grid.best
 
-    def get_initial_pspl(self, verbose=False):
+    def fit_initial_pspl_model(self, verbose=False):
         """
         Estimate a starting point for the PSPL fitting from the EventFinder search (:py:attr:`best_ef_grid_point`)
         and then optimize the parameters using :py:class:`mmexofast.fitters.SFitFitter`.
@@ -391,22 +394,21 @@ class MMEXOFASTFitter():
 
         return MMEXOFASTFitResults(fitter)
 
-    def fit_fspl(self):
+    def fit_static_fspl_model(self):
         """
         Use the results from the static PSPL fit (:py:attr:`pspl_static_results`) to initialize and optimize an FSPL
         fit.
 
         :return: :py:class:`MMEXOFASTFit` object.
         """
-        init_params = self.pspl_static_results.get_params_from_results()
+        init_params = self.results['static PSPL'].get_params_from_results()
         init_params['rho'] = 1.5 * init_params['u_0']
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
-        #print('mmexo237', fitter.mag_methods)
         fitter.run()
         return MMEXOFASTFitResults(fitter)
 
-    def fit_pl_parallax(self):
+    def fit_pl_parallax_models(self):
         """
         Use the results from the static fit (either PSPL or FSPL according to the value of `finite_source`) to
         initialize u0+ and u0- parallax fits.
@@ -414,20 +416,25 @@ class MMEXOFASTFitter():
         :return: *list* of 2 :py:class:`MMEXOFASTFit` objects.
         """
         if self.finite_source:
-            init_params = self.fspl_static_results.get_params_from_results()
+            init_params = self.results['static FSPL'].get_params_from_results()
         else:
-            init_params = self.pspl_static_results.get_params_from_results()
+            init_params = self.results['static PSPL'].get_params_from_results()
 
         init_params['pi_E_N'] = 0.
         init_params['pi_E_E'] = 0
 
-        results = []
+        results = {}
         for sign in [1, -1]:
             init_params['u_0'] *= sign
+            if sign >= 0:
+                key = 'PL parallax (+u_0)'
+            else:
+                key = 'PL parallax (-u_0)'
+
             fitter = mmexo.fitters.SFitFitter(
                 initial_model_params=init_params, datasets=self.datasets, **self.fitter_kwargs)
             fitter.run()
-            results.append(MMEXOFASTFitResults(fitter))
+            results[key] = MMEXOFASTFitResults(fitter)
 
         return results
 
