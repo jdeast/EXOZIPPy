@@ -17,13 +17,13 @@ raw_fitter.fit()
 
 cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
     files=ground_data_files, coords=coords, fit_type='point lens',
-    prev_results='test_output/OB0939_raw_results.txt')
+    prev_results='test_output/OB0939_raw_results.txt', output_file='test_output/OB0939_gr_results.txt')
 cont_fitter.fit()
 
 sponly_fitter = exozippy.mmexofast.MMEXOFASTFitter(
     files=space_data_files, coords=coords, fit_type='point lens',
     parameters_to_fit=['pi_E_E', 'pi_E_N'],  # Should this specify fixed parameters instead?
     piE_grid=True,
-    prev_results='test_output/OB09393_raw_results.txt'
-)
+    prev_results='test_output/OB09393_gr_results.txt'
+)  # Alternatively is "space-only parallax" its own fit_type?
 sponly_fitter.fit()
