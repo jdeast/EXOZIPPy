@@ -187,6 +187,13 @@ class MMEXOFASTFitter():
             datasets=None, coords=None, prev_results=None,
             priors=None, print_results=False, verbose=False,
             output_file=None, latex_file=None, log_file=None, emcee=True, emcee_settings=None, pool=None):
+        # JCY: Can we reduce the number of separate inputs by grouping them as dicts? (actually probably want @dataclass classes)
+        # fit_type = {'n_lenses': int, 'n_sources': int, 'finite_source': True/False, 'renormalize_errors': True, 'piE_grid': True}
+        # fitter_kwargs = {[see below]}
+        # outputs = {'log_file': str, 'latex_table': str, 'piE_grid_file': str}
+        # emcee = {'emcee_settings': {}, 'pool':}
+        #
+        # Also, isn't emcee --> fitter_kwargs and fitter_kwargs --> model_kwargs?
 
         # Output
         self.verbose = verbose
@@ -200,12 +207,15 @@ class MMEXOFASTFitter():
             self.datasets = self._create_mulensdata_objects(files)
 
         self.fit_type = fit_type
-        self.renormalize_errors = renormalize_errors
         self.finite_source = finite_source
+
+        self.renormalize_errors = renormalize_errors
+
         self.fitter_kwargs = {
             'coords': coords, 'mag_methods': mag_methods,
             'limb_darkening_coeffs_u': limb_darkening_coeffs_u,
             'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
+        # JCY: Can this just be passed as a dict to begin with, rather than separate options?
         #print(self.fitter_kwargs)
 
         self.emcee = emcee
@@ -217,15 +227,21 @@ class MMEXOFASTFitter():
         self._masked_datasets = None
 
         # initialize params
+        # Should the grid_points be kept together? Are they part of results?
+        # Should results --> fitted_models? or something?
+        # Note: best_af_grid_point doesn't need to exist if we're only doing 1L1S fitting.
         self._best_ef_grid_point = None
+        self._best_af_grid_point = None
+
+        # Do we need to keep this around?
+        self._anomaly_lc_params = None
 
         # Fit results
+        # These should be deprecated
         self._pspl_static_results = None
         self._fspl_static_results = None
         self._pl_parallax_results = None
 
-        self._best_af_grid_point = None
-        self._anomaly_lc_params = None
         self._binary_params = None
 
         if prev_results is not None:
