@@ -2,6 +2,8 @@
 Analyze the microlensing event OB140939 and produce all outputs for the paper.
 """
 import exozippy
+import numpy as np
+import MulensModel as mm
 import os.path
 import matplotlib.pyplot as plt
 
@@ -45,11 +47,51 @@ class ParallaxFitter():
     def print_latex_results_table(self):
         print(self.fitter.make_ulens_table('latex'))
 
-    def plot_lc(self):
-        pass
+    def save_results_table(self, filename=None, type=None):
+        if filename is None:
+            raise KeyError('You must provide a filename.')
 
-    def plot_parallax_grids(self):
-        pass
+        with open(filename, 'w') as file_:
+            file_.write(self.fitter.make_ulens_table('latex'))
+
+    def plot_lc(self, savefig=None, **kwargs):
+        model = self.fitter.get_model()
+        model.parameters = self.fitter.best
+        event = mm.Event(datasets=self.fitter.datasets, model=model)
+        event.plot_lc()
+
+        if savefig is not None:
+            plt.savefig(savefig, **kwargs)
+
+    def plot_parallax_grids(self, n_scale=1, savefig=None, **kwargs):
+        ncols = 2
+        fig, axes = plt.subplots(1, ncols, figsize=(2.25*ncols, 5))
+        for idx, u0sign in enumerate(['+', '-']):
+            grid = self.fitter.results['PL parallax ({0}u_0)'.format(u0sign)].grid
+            best_chi2 = self.fitter.results['PL parallax ({0}u_0)'.format(u0sign)].best['chi2']
+            plt.sca(axes[idx])
+            plt.scatter(
+                grid['pi_E_E'], grid['pi_E_N'], c=np.sqrt(grid['chi2'] - best_chi2),
+                vmin=0, vmax=n_scale*9, cmap='Set1')
+            plt.colorbar(label=r'$\sigma$')
+
+            axes[idx].tick_params(axis='both', which='both', direction='in',
+                       top=True, right=True, bottom=True, left=True)
+            axes[idx].invert_xaxis()
+            axes[idx].set_xlabel(r'$\pi_{\rm E,E}$')
+            axes[idx].set_aspect('equal')
+            axes[idx].set_title("{0}u0".format(u0sign))
+
+            if idx == 0:
+                axes[idx].set_ylabel(r'$\pi_{\rm E,N}$')
+            else:
+                axes[idx].tick_params(axis='y', which='both', labelleft=False)
+                axes[idx].set_ylabel('')
+
+        plt.tight_layout()
+        if savefig is not None:
+            plt.savefig(savefig, **kwargs)
+
 
     @property
     def fitter(self):
@@ -62,7 +104,12 @@ class ParallaxFitter():
 
 class SpaceParallaxFitter(ParallaxFitter):
 
-    def __init__(self, ground_data_files=None, space_data_files=None, coords=None):
+    def __init__(self, ground_data_files=None, space_data_files=None, **kwargs):
+        super(SpaceParallaxFitter, self).__init__(**kwargs)
+        self.ground_data_files = ground_data_files
+        self.space_data_files = space_data_files
+
+    def do_fits(self):
         pass
 
 
@@ -79,23 +126,20 @@ def do_ground_fit():
         data_files=ground_data_files, coords=coords, fit_type='point lens')
     pl_fitter.fit(verbose=True)
 
-    pl_fitter.print_latex_results_table()
-    #pl_fitter.plot_lc()
-    #pl_fitter.plot_parallax_grids()
-    #plt.show()
+    pl_fitter.save_results_table(filename='test_output/OB0939_gr_fits.tex', type='latex')
+    pl_fitter.plot_lc(savefig='test_output/OB0939_gr_lc.eps', dpi=300)
+    #pl_fitter.plot_parallax_grids(savefig='test_output/OB0939_gr_piEgrid.eps', dpi=300)
+    plt.show()
 
 
 def do_complete_fit():
     par_fitter = SpaceParallaxFitter(
         ground_data_files=ground_data_files, space_data_files=space_data_files, coords=coords, fit_type='point lens')
-    par_fitter.fit_ground_only()
-    par_fitter.fit_space_and_ground()
+    par_fitter.do_fits()
+    par_fitter.save_results_table(filename='test_output/OB0939_fits.tex', type='latex')
 
-    par_fitter.print_latex_results_table(type='full')
-
-    par_fitter.plot_ground_only_lc()
-    par_fitter.plot_space_and_ground_lc()
-    par_fitter.plot_parallax_grids(savefig='OB0939_par_contours.eps', dpi=300)
+    par_fitter.plot_space_and_ground_lc(savefig='test_output/OB0939_lc.eps', dpi=300)
+    par_fitter.plot_parallax_contours(savefig='test_output/OB0939_par_contours.eps', dpi=300)
 
 
 if __name__ == '__main__':

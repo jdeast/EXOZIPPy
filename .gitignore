@@ -16,3 +16,4 @@ EXOZIPPy.egg-info
 __pycache__/
 *.pyc
 *settings.json
+/examples/use_cases/test_output/
