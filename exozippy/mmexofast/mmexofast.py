@@ -80,49 +80,81 @@ class MMEXOFASTFitResults():
         return sigmas
 
     def format_results_as_df(self):
-        parameters = [x for x in self.parameters_to_fit]
-        values = [x for x in self.results.x]
-        sigmas = [x for x in self.results.sigmas]
 
-        for i, dataset in enumerate(self.datasets):
-            if 'label' in dataset.plot_properties.keys():
-                obs = dataset.plot_properties['label'].split('-')[0]
-            else:
-                obs = i
+        def get_df_fitted_parameters():
+            parameters = [x for x in self.parameters_to_fit]
+            values = [x for x in self.results.x[0:len(parameters)]]
+            sigmas = [x for x in self.results.sigmas[0:len(parameters)]]
 
-            if dataset.bandpass is not None:
-                band = dataset.bandpass
-            else:
-                band = 'mag'
+            df = pd.DataFrame({
+                'parameter_names': parameters,
+                'values': values,
+                'sigmas': sigmas
+            })
 
-            parameters.append('{0}_S_{1}'.format(band, obs))
-            parameters.append('{0}_B_{1}'.format(band, obs))
+            return df
 
-            obs_index = len(self.parameters_to_fit) + 2 * i
-            for index in range(2):
-                flux = values[obs_index + index]
-                if flux > 0:
-                    err_flux = sigmas[obs_index + index]
-                    mag, err_mag = MulensModel.utils.Utils.get_mag_and_err_from_flux(flux, err_flux)
+        def get_df_fixed_parameters():
+            fixed_parameters = [p for p in self.all_model_parameters if p not in self.parameters_to_fit]
+            values = [self.best[param] for param in fixed_parameters]
+            fixed_parameters.append('N_data')
+            values.append(np.sum([np.sum(dataset.good) for dataset in self.datasets]))
+            print('QUESTION: Do we also want chi2s and N_data for individual datasets? Is that too much info?')
+
+            df = pd.DataFrame({
+                'parameter_names': fixed_parameters,
+                'values': values,
+                'sigmas': [None] * len(fixed_parameters)
+            })
+            return df
+
+        def get_df_flux_parameters():
+            print('QUESTION: Do we actually want magnitudes for all datasets or just the reference dataset?')
+            parameters = []
+            values = []
+            sigmas = []
+
+            for i, dataset in enumerate(self.datasets):
+                if 'label' in dataset.plot_properties.keys():
+                    obs = dataset.plot_properties['label'].split('-')[0]
                 else:
-                    mag = 'neg flux'
-                    err_mag = np.nan
+                    obs = i
 
-                values[obs_index + index] = mag
-                sigmas[obs_index + index] = err_mag
+                if dataset.bandpass is not None:
+                    band = dataset.bandpass
+                else:
+                    band = 'mag'
 
-        df = pd.DataFrame({
-            'parameter_names': parameters,
-            'values': values,
-            'sigmas': sigmas
-        })
-        df = pd.concat((
-            pd.DataFrame({'parameter_names': ['chi2', 'N_data'],
-                          'values': [
-                              self.best['chi2'],
-                              np.sum([np.sum(dataset.good) for dataset in self.datasets])],
-                          'sigmas': [None, None]}), df))
+                parameters.append('{0}_S_{1}'.format(band, obs))
+                parameters.append('{0}_B_{1}'.format(band, obs))
 
+                obs_index = len(self.parameters_to_fit) + 2 * i
+                for index in range(2):
+                    flux = self.results.x[obs_index + index]
+                    if flux > 0:
+                        err_flux = self.results.sigmas[obs_index + index]
+                        mag, err_mag = MulensModel.utils.Utils.get_mag_and_err_from_flux(flux, err_flux)
+                    else:
+                        mag = 'neg flux'
+                        err_mag = np.nan
+
+                    values.append(mag)
+                    sigmas.append(err_mag)
+
+            df = pd.DataFrame({
+                'parameter_names': parameters,
+                'values': values,
+                'sigmas': sigmas
+            })
+
+            return df
+
+        df_fit = get_df_fitted_parameters()
+        df_fixed = get_df_fixed_parameters()
+        df_ulens = pd.concat((df_fit, df_fixed))
+        df_flux = get_df_flux_parameters()
+        df = pd.concat((df_ulens, df_flux), ignore_index=True)
+        #print('As df w/flux\n', df)
         return df
 
     @property
@@ -140,6 +172,10 @@ class MMEXOFASTFitResults():
     @property
     def parameters_to_fit(self):
         return self.fitter.parameters_to_fit
+
+    @property
+    def all_model_parameters(self):
+        return self.fitter.best.keys()
 
 
 class MMEXOFASTFitter():
@@ -282,7 +318,6 @@ class MMEXOFASTFitter():
             self.renormalize_errors_and_refit()
 
 
-
     def renormalize_errors_and_refit(self):
         """
         Given the existing fits, take the best one and renormalize the errorbars of each dataset relative to that fit.
@@ -327,7 +362,82 @@ class MMEXOFASTFitter():
 
         :return: *str*
         """
-        print('Need to add parameter heirarchy to table construction.')
+        def order_df(df):
+            #raise NotImplementedError("THIS IS ALL VERY MESSY. I CAN'T FIGURE OUT HOW TO STRUCTURE THIS TO AVOID DUPLICATNG CODE.")
+
+            def get_ordered_ulens_keys_for_repr(n_sources=1):
+                """
+                define the default order of parameters
+                """
+                print(
+                    'make_ulens_table.order_df(): This code was lifted verbatim from MM. It would be better to refactor it in MM and just use the function. Maybe as a Utils.')
+
+                basic_keys = ['t_0', 'u_0', 't_E', 'rho', 't_star']
+                additional_keys = [
+                    'pi_E_N', 'pi_E_E', 't_0_par', 's', 'q', 'alpha',
+                    'convergence_K', 'shear_G', 'ds_dt', 'dalpha_dt', 's_z',
+                    'ds_z_dt', 't_0_kep',
+                    'x_caustic_in', 'x_caustic_out', 't_caustic_in', 't_caustic_out',
+                    'xi_period', 'xi_semimajor_axis', 'xi_inclination',
+                    'xi_Omega_node', 'xi_argument_of_latitude_reference',
+                    'xi_eccentricity', 'xi_omega_periapsis', 'q_source', 't_0_xi'
+                ]
+
+                ordered_keys = []
+                if n_sources > 1:
+                    for param_head in basic_keys:
+                        if param_head == 't_E':
+                            ordered_keys.append(param_head)
+                        else:
+                            for i in range(n_sources):
+                                ordered_keys.append('{0}_{1}'.format(param_head, i + 1))
+
+                else:
+                    ordered_keys = basic_keys
+
+                for key in additional_keys:
+                    ordered_keys.append(key)
+
+                # New for MMEXOFAST:
+                ordered_keys = ['chi2', 'N_data'] + ordered_keys
+
+                return ordered_keys
+
+            def get_ordered_flux_keys_for_repr():
+                flux_keys = []
+                for i, dataset in enumerate(self.datasets):
+                    if 'label' in dataset.plot_properties.keys():
+                        obs = dataset.plot_properties['label'].split('-')[0]
+                    else:
+                        obs = i
+
+                    if dataset.bandpass is not None:
+                        band = dataset.bandpass
+                    else:
+                        band = 'mag'
+
+                    flux_keys.append('{0}_S_{1}'.format(band, obs))
+                    flux_keys.append('{0}_B_{1}'.format(band, obs))
+
+                return flux_keys
+
+            def get_ordered_keys_for_repr():
+                ulens_keys = get_ordered_ulens_keys_for_repr()
+                flux_keys = get_ordered_flux_keys_for_repr()
+                return ulens_keys + flux_keys
+
+            desired_order = get_ordered_keys_for_repr()
+
+            order_map = {name: i for i, name in enumerate(desired_order)}
+
+            df["sort_key"] = df["parameter_names"].map(order_map)
+            df["orig_pos"] = range(len(df))
+
+            # Anything not in desired_order gets a large sort key → goes to the end
+            max_key = len(desired_order)
+            df["sort_key"] = df["sort_key"].fillna(max_key)
+            df = df.sort_values(["sort_key", "orig_pos"]).reset_index().drop(columns=["index", "sort_key", "orig_pos"])
+            return df
 
         if table_type is None:
             table_type = 'ascii'
@@ -343,8 +453,9 @@ class MMEXOFASTFitter():
             if results_table is None:
                 results_table = new_column
             else:
-                results_table = results_table.merge(new_column, on="parameter_names", how="outer", sort=False)
+                results_table = results_table.merge(new_column, on="parameter_names", how="outer")
 
+        results_table = order_df(results_table)
         if table_type == 'latex':
             def fmt(name):
                 if name == 'chi2':
@@ -442,6 +553,7 @@ class MMEXOFASTFitter():
         if grid is None:
             grid = {'pi_E_E': (-1, 1, 0.05), 'pi_E_N': (-2., 2., 0.1)}
 
+        raise NotImplementedError('Need to refactor for new architecture and u0+/-')
         init_params = self.get_params_from_results(self.pl_parallax_results)
         parameters_to_fit = list(init_params.keys())
         parameters_to_fit.remove('pi_E_E')
