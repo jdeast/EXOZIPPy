@@ -55,10 +55,12 @@ class ParallaxFitter():
             file_.write(self.fitter.make_ulens_table('latex'))
 
     def plot_lc(self, savefig=None, **kwargs):
-        model = self.fitter.get_model()
-        model.parameters = self.fitter.best
+        # These lines suggest the need for some method in self.fitter:
+        # self.fitter.get_model('static PSPL')
+        model = self.fitter.all_fit_results.get(self.fitter._label_to_model_key('static PSPL')).full_result.fitter.get_model()
+        model.parameters = self.fitter.all_fit_results.get(self.fitter._label_to_model_key('static PSPL')).params
         event = mm.Event(datasets=self.fitter.datasets, model=model)
-        event.plot_lc()
+        event.plot()
 
         if savefig is not None:
             plt.savefig(savefig, **kwargs)
@@ -126,6 +128,8 @@ def do_ground_fit():
         data_files=ground_data_files, coords=coords, fit_type='point lens')
     pl_fitter.fit(verbose=True)
 
+    print(pl_fitter.fitter.all_fit_results)
+    print(pl_fitter.fitter.make_ulens_table('ascii'))
     pl_fitter.save_results_table(filename='test_output/OB0939_gr_fits.tex', type='latex')
     pl_fitter.plot_lc(savefig='test_output/OB0939_gr_lc.eps', dpi=300)
     #pl_fitter.plot_parallax_grids(savefig='test_output/OB0939_gr_piEgrid.eps', dpi=300)
