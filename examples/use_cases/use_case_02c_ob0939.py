@@ -22,6 +22,6 @@ cont_fitter.fit()
 
 sponly_fitter = exozippy.mmexofast.MMEXOFASTFitter(
     files=space_data_files, coords=coords, fit_type='space-only piE_grid',
-    init_params={'t_0': 8000., 'u_0': 0.3, 't_E': 30.} # update with results of cont_fitter.
-)
+    init_params={'t_0': 8000., 'u_0': 0.3, 't_E': 30.}, # update with results of cont_fitter.
+    piE_grid_filehead='test_output/OB0939_sponly_')
 sponly_fitter.fit()
