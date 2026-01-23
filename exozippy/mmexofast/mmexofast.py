@@ -206,6 +206,8 @@ class MMEXOFASTFitter():
         else:
             self.datasets = self._create_mulensdata_objects(files)
 
+        self.n_loc = self._count_loc()
+
         self.fit_type = fit_type
         self.finite_source = finite_source
 
@@ -244,12 +246,7 @@ class MMEXOFASTFitter():
 
         self._binary_params = None
 
-        if prev_results is not None:
-            print(
-                'prev_results NEEDS WORK! should create a MMEXOFASTFitResults object so the datasets are not needed '+
-                'when creating prev_results items')
-
-        self._results = prev_results
+        self._results = self._setup_results(prev_results)
 
     def _create_mulensdata_objects(self, files):
         if isinstance(files, (str)):
@@ -266,6 +263,64 @@ class MMEXOFASTFitter():
             datasets.append(data)
 
         return datasets
+
+    def _count_loc(self):
+        """
+        Determine how many locations (e.g. Earth vs. Earth + Space) an event was observed from.
+        :return:
+        """
+
+        if len(self.datasets) == 1:
+            return 1
+
+        else:
+            locs = []
+            for dataset in self.datasets:
+                if dataset.ephemerides_file not in locs:
+                    locs.append(dataset.ephemerides_file)
+
+            return len(locs)
+
+    def _setup_results(self, prev_results):
+        # Types of fits: (might want to make these properties of the class)
+
+        # Types of parallax solutions
+        single_loc_par_key_suffixes = ['u0+', 'u0-']
+        two_loc_par_key_suffixes = ['u0++', 'u0--', 'u0+-', 'u0-+']
+
+        # Point Lenses
+        point_lens_keys = ['static PSPL']
+        if self.finite_source:
+            point_lens_keys.append('FSPL')
+
+        if self.n_loc == 1:
+            par_suffixes = single_loc_par_key_suffixes
+        else:
+            par_suffixes = two_loc_par_key_suffixes
+
+        for suffix in par_suffixes:
+            point_lens_keys.append('PL par' + suffix)
+
+        results = {key: None for key in point_lens_keys}
+
+        # Binary Lenses
+        if self.fit_type == 'binary':
+            binary_lens_keys = ['static 2L1S', ]
+            motion_types = ['par', '2Dorb+par']
+
+            if self.kepler:
+                motion_types.append('kep+par')
+
+            for motion in motion_types:
+                for suffix in par_suffixes:
+                    binary_lens_keys.append('2L1S {0} {1}'.format(motion, suffix))
+
+            for key in binary_lens_keys:
+                results = {key: None for key in binary_lens_keys}
+
+        if prev_results is not None:
+            for key, value in prev_results.items():
+                results[key] = value
 
     def fit(self):
         """
