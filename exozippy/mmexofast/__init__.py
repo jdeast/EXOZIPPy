@@ -1,2 +1,7 @@
+# Import classes
 from exozippy.mmexofast.gridsearches import EventFinderGridSearch, AnomalyFinderGridSearch
-from exozippy.mmexofast import observatories, fitters, estimate_params
+from exozippy.mmexofast.model_types import ModelKey, LensType, SourceType, ParallaxBranch, LensOrbMotion
+from exozippy.mmexofast.results import MMEXOFASTFitResults, FitRecord, AllFitResults
+
+# Import modules for methods
+from exozippy.mmexofast import observatories, fitters, estimate_params, model_types

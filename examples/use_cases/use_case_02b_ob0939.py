@@ -57,8 +57,8 @@ class ParallaxFitter():
     def plot_lc(self, savefig=None, **kwargs):
         # These lines suggest the need for some method in self.fitter:
         # self.fitter.get_model('static PSPL')
-        model = self.fitter.all_fit_results.get(self.fitter._label_to_model_key('static PSPL')).full_result.fitter.get_model()
-        model.parameters = self.fitter.all_fit_results.get(self.fitter._label_to_model_key('static PSPL')).params
+        model = self.fitter.all_fit_results.get('PSPL static ').full_result.fitter.get_model()
+        model.parameters = self.fitter.all_fit_results.get('PSPL static ').params
         event = mm.Event(datasets=self.fitter.datasets, model=model)
         event.plot()
 
@@ -69,8 +69,8 @@ class ParallaxFitter():
         ncols = 2
         fig, axes = plt.subplots(1, ncols, figsize=(2.25*ncols, 5))
         for idx, u0sign in enumerate(['+', '-']):
-            grid = self.fitter.results['PL parallax ({0}u_0)'.format(u0sign)].grid
-            best_chi2 = self.fitter.results['PL parallax ({0}u_0)'.format(u0sign)].best['chi2']
+            grid = self.fitter.results['PSPL par ({0}u_0)'.format(u0sign)].grid
+            best_chi2 = self.fitter.results['PSPL par ({0}u_0)'.format(u0sign)].best['chi2']
             plt.sca(axes[idx])
             plt.scatter(
                 grid['pi_E_E'], grid['pi_E_N'], c=np.sqrt(grid['chi2'] - best_chi2),
