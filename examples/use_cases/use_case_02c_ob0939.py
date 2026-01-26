@@ -13,14 +13,14 @@ space_data_files = [os.path.join(
         exozippy.MULENS_DATA_PATH, 'OB140939', 'n20100310.I.OGLE.OB140939.txt')]
 coords='17:47:12.25 -21:22:58.7'
 
-# print('=== Fit raw data ===')
-# raw_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-#     files=ground_data_files, coords=coords, fit_type='point lens', renormalize_errors=False,
-#     verbose=True,
-#     output_config=OutputConfig(
-#         base_dir=Path('test_output'), file_head='ob0939_uc02c_raw', save_log=True, save_plots=True,
-#         save_latex_tables=True, save_restart_files=True))
-# raw_fitter.fit()
+print('=== Fit raw data ===')
+raw_fitter = exozippy.mmexofast.MMEXOFASTFitter(
+    files=ground_data_files, coords=coords, fit_type='point lens', renormalize_errors=False,
+    verbose=True,
+    output_config=OutputConfig(
+        base_dir=Path('test_output'), file_head='ob0939_uc02c_raw', save_log=True, save_plots=True,
+        save_latex_tables=True, save_restart_files=True))
+raw_fitter.fit()
 # ------
 # Expected workflow: fit_point_lens (incl. 2 parallax fits)
 # output:
@@ -55,9 +55,9 @@ cont_fitter.fit()
 # A log file: ob0939_uc02c_gr.log
 #    with results at each stage of the fitting
 #
-# diagnostic plots: ob0939_uc02c_par_u0[p/m].png
+# diagnostic plots: ob0939_uc02c_gr_par_u0[p/m].png
 #
-# piE grids: ob0939_uc02c_par_grid_u0[p/m].txt
+# piE grids: ob0939_uc02c_gr_par_grid_u0[p/m].txt
 #
 # latex table: ob0939_uc02c_gr_results.tex
 #
@@ -71,6 +71,16 @@ cont_fitter.fit()
 #     restart_file='test_output/ob0939_uc02c_gr_restart.txt',
 #     output_config=OutputConfig(
 #         base_dir=Path('test_output'), file_head='ob0939_uc02c_full', save_log=True, save_plots=True,
+#         save_latex_tables=True, save_restart_files=True, save_grid_results=True)
+#     )
+#
+# fixed_fb_fitter = exozippy.mmexofast.fit(
+#     files=ground_data_files + space_data_files, coords=coords, fit_type='point lens',
+#     parallax_grid=True,
+#     fix_blend_flux={ground_data_files[0]: True},
+#     restart_file='test_output/ob0939_uc02c_full_restart.txt',
+#     output_config=OutputConfig(
+#         base_dir=Path('test_output'), file_head='ob0939_uc02c_fb0', save_log=True, save_plots=True,
 #         save_latex_tables=True, save_restart_files=True, save_grid_results=True)
 #     )
 # 

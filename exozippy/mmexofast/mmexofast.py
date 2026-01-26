@@ -56,6 +56,13 @@ class MMEXOFASTFitter:
     - mmexo.AllFitResults to store/reuse results
     """
 
+    CONFIG_KEYS = [
+        'files', 'fit_type', 'finite_source', 'coords', 'mag_methods',
+        'limb_darkening_coeffs_u', 'limb_darkening_coeffs_gamma',
+        'renormalize_errors', 'parallax_grid', 'verbose', 'fix_blend_flux',
+        'fix_source_flux'
+    ]
+
     def __init__(
             self,
             files=None,
@@ -66,6 +73,8 @@ class MMEXOFASTFitter:
             mag_methods=None,
             limb_darkening_coeffs_u=None,
             limb_darkening_coeffs_gamma=None,
+            fix_blend_flux=None,
+            fix_sourc_flux=None,
             renormalize_errors=False,
             parallax_grid=False,
             verbose=False,
@@ -79,25 +88,21 @@ class MMEXOFASTFitter:
         # Merge provided params with saved config
         config = self._merge_config(saved_config, locals())
 
-        # Set config attributes
-        self.files = config['files']
-        self.fit_type = config['fit_type']
-        self.finite_source = config['finite_source']
-        self.coords = config['coords']
-        self.mag_methods = config['mag_methods']
-        self.limb_darkening_coeffs_u = config['limb_darkening_coeffs_u']
-        self.limb_darkening_coeffs_gamma = config['limb_darkening_coeffs_gamma']
-        self.renormalize_errors = config['renormalize_errors']
-        self.parallax_grid = config['parallax_grid']
-        self.verbose = config['verbose']
+        # Set all config attributes
+        self._set_config_attributes(config)
 
-        # Setup datasets
+        # Setup datasets and filename mapping
         if datasets is not None:
             self.datasets = datasets
+            self.dataset_to_filename = {}  # No filename info if datasets provided directly
         elif self.files is not None:
-            self.datasets = self._create_mulensdata_objects(self.files)
+            self.datasets, self.dataset_to_filename = self._create_mulensdata_objects(self.files)
         else:
             raise ValueError("Must provide files, datasets, or restart_file")
+
+        # Map flux fixing options using filename mapping
+        self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
+        self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
 
         self.n_loc = self._count_loc()
         self.residuals = None
@@ -115,6 +120,27 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # restart helpers:
     # ---------------------------------------------------------------------
+    def _get_config(self) -> dict:
+        """Automatically extract config from attributes."""
+        return {key: getattr(self, key, None) for key in self.CONFIG_KEYS}
+
+    def _merge_config(self, saved_config, provided_params):
+        """Merge saved config with provided params (provided wins)."""
+        merged = {}
+        for key in self.CONFIG_KEYS:
+            if key in provided_params and provided_params[key] is not None:
+                merged[key] = provided_params[key]
+            elif key in saved_config:
+                merged[key] = saved_config[key]
+            else:
+                merged[key] = None
+        return merged
+
+    def _set_config_attributes(self, config):
+        """Set all config attributes from config dict."""
+        for key in self.CONFIG_KEYS:
+            setattr(self, key, config[key])
+
     def _get_fitter_kwargs(self) -> dict:
         """Bundle fitter options for passing to SFitFitter."""
         return {
@@ -122,21 +148,8 @@ class MMEXOFASTFitter:
             'mag_methods': self.mag_methods,
             'limb_darkening_coeffs_u': self.limb_darkening_coeffs_u,
             'limb_darkening_coeffs_gamma': self.limb_darkening_coeffs_gamma,
-        }
-
-    def _get_config(self) -> dict:
-        """Get all configuration parameters (user inputs)."""
-        return {
-            'files': self.files,
-            'fit_type': self.fit_type,
-            'finite_source': self.finite_source,
-            'coords': self.coords,
-            'mag_methods': self.mag_methods,
-            'limb_darkening_coeffs_u': self.limb_darkening_coeffs_u,
-            'limb_darkening_coeffs_gamma': self.limb_darkening_coeffs_gamma,
-            'renormalize_errors': self.renormalize_errors,
-            'parallax_grid': self.parallax_grid,
-            'verbose': self.verbose,
+            'fix_source_flux': self.fix_source_flux_map,
+            'fix_blend_flux': self.fix_blend_flux_map
         }
 
     def _get_state(self) -> dict:
@@ -158,26 +171,6 @@ class MMEXOFASTFitter:
             data = pickle.load(f)
         return data.get('config', {}), data.get('state', {})
 
-    def _merge_config(self, saved_config, provided_params):
-        """Merge saved config with provided params (provided wins)."""
-        config_keys = [
-            'files', 'fit_type', 'finite_source', 'coords', 'mag_methods',
-            'limb_darkening_coeffs_u', 'limb_darkening_coeffs_gamma',
-            'renormalize_errors', 'parallax_grid', 'verbose'
-        ]
-
-        merged = {}
-        for key in config_keys:
-            # Provided param takes precedence (but watch out for None vs not provided)
-            if key in provided_params and provided_params[key] is not None:
-                merged[key] = provided_params[key]
-            elif key in saved_config:
-                merged[key] = saved_config[key]
-            else:
-                merged[key] = None
-
-        return merged
-
     def _restore_state(self, saved_state):
         """Restore computed state from saved data."""
         self.all_fit_results = saved_state.get('all_fit_results', mmexo.AllFitResults())
@@ -189,20 +182,63 @@ class MMEXOFASTFitter:
     # Loading initial (user-supplied) information
     # ---------------------------------------------------------------------
     def _create_mulensdata_objects(self, files):
-        if isinstance(files, (str)):
+        """
+        Create MulensData objects and map them to filenames.
+
+        Returns
+        -------
+        datasets : list
+            List of MulensData objects
+        dataset_to_filename : dict
+            Maps each dataset to its source filename
+        """
+        if isinstance(files, str):
             files = [files]
 
         datasets = []
+        dataset_to_filename = {}
+
         for filename in files:
             if not os.path.exists(filename):
-                raise FileNotFoundError(
-                    "Data file {0} does not exist".format(filename))
+                raise FileNotFoundError(f"Data file {filename} does not exist")
 
             kwargs = mmexo.observatories.get_kwargs(filename)
             data = MulensModel.MulensData(file_name=filename, **kwargs)
             datasets.append(data)
+            dataset_to_filename[data] = filename  # ← Store mapping
 
-        return datasets
+        return datasets, dataset_to_filename
+
+    def _map_filename_dict_to_datasets(self, filename_dict) -> dict:
+        """
+        Map a dict[filename: value] to dict[dataset: value].
+
+        Parameters
+        ----------
+        filename_dict : dict or None
+            Keys are filenames, values are bool
+
+        Returns
+        -------
+        dict
+            Keys are MulensData objects, values from filename_dict
+        """
+        if filename_dict is None:
+            # Default: False for all datasets
+            return {dataset: False for dataset in self.datasets}
+
+        result = {}
+        for dataset in self.datasets:
+            # Use our stored mapping
+            filename = self.dataset_to_filename.get(dataset)
+
+            if filename and filename in filename_dict:
+                result[dataset] = filename_dict[filename]
+            else:
+                # Default if not specified
+                result[dataset] = False
+
+        return result
 
     def _count_loc(self):
         """
@@ -773,6 +809,11 @@ class MMEXOFASTFitter:
         elif self.verbose:
             # Fallback: print to console if no output manager but verbose=True
             print(msg)
+
+    def _log_file_only(self, msg: str) -> None:
+        """Log message to file only (never console)."""
+        if self.output is not None and self.output.logger is not None:
+            self.output.logger.info(msg)
 
     def _output_latex_table(self,  name: str = 'results', models=None) -> None:
         if self.output is not None:

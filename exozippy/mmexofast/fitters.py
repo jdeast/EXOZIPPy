@@ -27,19 +27,26 @@ class MulensFitter():
             self, datasets=None, initial_model_params=None, parameters_to_fit=None, sigmas=None,
             mag_methods=None, coords=None, limb_darkening_coeffs_gamma=None,
             limb_darkening_coeffs_u=None,
+            fix_source_flux=None, fix_blend_flux=None,
             verbose=False, pool=None):
         self._initial_model = None
         self._best = None
         self._results = None
 
         self.datasets = datasets
+
         self.initial_model_params = initial_model_params
         self.parameters_to_fit = parameters_to_fit
         self.sigmas = sigmas
+
         self.mag_methods = mag_methods
         self.limb_darkening_coeffs_gamma = limb_darkening_coeffs_gamma
         self.limb_darkening_coeffs_u = limb_darkening_coeffs_u
+        self.fix_source_flux = fix_source_flux
+        self.fix_blend_flux = fix_blend_flux
+
         self.coords = coords
+
         self.verbose = verbose
         self.pool = pool
 
@@ -64,6 +71,13 @@ class MulensFitter():
 
         #print('fitter 60', model)
         return model
+
+    def get_event(self):
+        event = MulensModel.Event(
+            datasets=self.datasets, model=self.get_model(), coords=self.coords,
+            fix_source_flux=self.fix_source_flux, fix_blend_flux=self.fix_blend_flux)
+
+        return event
 
     @property
     def best(self):
@@ -121,8 +135,7 @@ class SFitFitter(MulensFitter):
         super().__init__(**kwargs)
 
     def run(self):
-        event = MulensModel.Event(
-            datasets=self.datasets, model=self.get_model(), coords=self.coords)
+        event = self.get_event()
         event.fit_fluxes()
 
         my_func = sfit.mm_funcs.PointLensSFitFunction(
