@@ -10,8 +10,8 @@ Architectural sketch for MMEXOFASTFitter with:
 - mmexo.FitRecord for partial/user-supplied vs full results
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Iterable, Tuple
+from typing import Dict, Any, Optional, Iterable
+import pickle
 
 import pandas as pd
 import os.path
@@ -57,51 +57,181 @@ class MMEXOFASTFitter:
     """
 
     def __init__(
-        self,
-        files: list = None,
-        datasets: list = None,
-        fit_type: str = None,
-        finite_source: bool = False,
-        limb_darkening_coeffs_gamma: dict = None,
-        limb_darkening_coeffs_u: dict = None,
-        mag_methods: list = None,
-        coords: str = None,
-        renormalize_errors: bool = False,
-        parallax_grid: bool = False,
-        verbose: bool = False,
-        initial_results: Optional[Dict[str, Dict[str, Any]]] = None,
-        output_config: Optional[mmexo.OutputConfig] = None,
-        restart_file: str = None,  # restart point for setting everything else. Not implemented.
-        output_file: str = None, latex_file: str = None, log_file: str = None #  Output not implemented yet.
+            self,
+            files=None,
+            datasets=None,
+            fit_type=None,
+            finite_source=False,
+            coords=None,
+            mag_methods=None,
+            limb_darkening_coeffs_u=None,
+            limb_darkening_coeffs_gamma=None,
+            renormalize_errors=False,
+            parallax_grid=False,
+            verbose=False,
+            initial_results=None,
+            output_config=None,
+            restart_file=None,
     ):
+        # Load restart data
+        saved_config, saved_state = self._load_restart_data(restart_file)
+
+        # Merge provided params with saved config
+        config = self._merge_config(saved_config, locals())
+
+        # Set config attributes
+        self.files = config['files']
+        self.fit_type = config['fit_type']
+        self.finite_source = config['finite_source']
+        self.coords = config['coords']
+        self.mag_methods = config['mag_methods']
+        self.limb_darkening_coeffs_u = config['limb_darkening_coeffs_u']
+        self.limb_darkening_coeffs_gamma = config['limb_darkening_coeffs_gamma']
+        self.renormalize_errors = config['renormalize_errors']
+        self.parallax_grid = config['parallax_grid']
+        self.verbose = config['verbose']
+
+        # Setup datasets
         if datasets is not None:
             self.datasets = datasets
+        elif self.files is not None:
+            self.datasets = self._create_mulensdata_objects(self.files)
         else:
-            self.datasets = self._create_mulensdata_objects(files)
+            raise ValueError("Must provide files, datasets, or restart_file")
 
+        self.n_loc = self._count_loc()
         self.residuals = None
 
-        self.fit_type = fit_type
-        self.finite_source = finite_source
-        self.n_loc = self._count_loc()
-        self.renormalize_errors = renormalize_errors
-
-        self.fitter_kwargs = {
-            'coords': coords, 'mag_methods': mag_methods,
-            'limb_darkening_coeffs_u': limb_darkening_coeffs_u,
-            'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
-
-        self.verbose = verbose
+        # Output
         self.output = mmexo.OutputManager(output_config, verbose=verbose) if output_config is not None else None
 
-        self.best_ef_grid_point = None  # set by do_ef_grid_search()
-        self.best_af_grid_point = None  # set by do_af_grid_search()
-        self.anomaly_lc_params = None
+        # Restore state
+        self._restore_state(saved_state)
 
-        self.all_fit_results = mmexo.AllFitResults()
-
+        # Load initial results if provided
         if initial_results is not None:
             self._load_initial_results(initial_results)
+
+    #def __init__(
+    #    self,
+    #    files: list = None,
+    #    datasets: list = None,
+    #    fit_type: str = None,
+    #    finite_source: bool = False,
+    #    limb_darkening_coeffs_gamma: dict = None,
+    #    limb_darkening_coeffs_u: dict = None,
+    #    mag_methods: list = None,
+    #    coords: str = None,
+    #    renormalize_errors: bool = False,
+    #    parallax_grid: bool = False,
+    #    verbose: bool = False,
+    #    initial_results: Optional[Dict[str, Dict[str, Any]]] = None,
+    #    output_config: Optional[mmexo.OutputConfig] = None,
+    #    restart_file: str = None,
+    #    output_file: str = None, latex_file: str = None, log_file: str = None #  Output not implemented yet.
+    #):
+    #    self.files = files
+    #    if datasets is not None:
+    #        self.datasets = datasets
+    #    else:
+    #        self.datasets = self._create_mulensdata_objects(files)
+    #    self.n_loc = self._count_loc()
+    #
+    #    self.residuals = None
+    #
+    #    self.fit_type = fit_type
+    #    self.finite_source = finite_source
+    #    self.renormalize_errors = renormalize_errors
+    #
+    #    self.fitter_kwargs = {
+    #        'coords': coords, 'mag_methods': mag_methods,
+    #        'limb_darkening_coeffs_u': limb_darkening_coeffs_u,
+    #        'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
+    #
+    #    self.verbose = verbose
+    #    self.output = mmexo.OutputManager(output_config, verbose=verbose) if output_config is not None else None
+    #
+    #    self.best_ef_grid_point = None  # set by do_ef_grid_search()
+    #    self.best_af_grid_point = None  # set by do_af_grid_search()
+    #    self.anomaly_lc_params = None
+    #
+    #    self.all_fit_results = mmexo.AllFitResults()
+    #
+    #    if initial_results is not None:
+    #        self._load_initial_results(initial_results)
+
+    # ---------------------------------------------------------------------
+    # restart helpers:
+    # ---------------------------------------------------------------------
+    def _get_fitter_kwargs(self) -> dict:
+        """Bundle fitter options for passing to SFitFitter."""
+        return {
+            'coords': self.coords,
+            'mag_methods': self.mag_methods,
+            'limb_darkening_coeffs_u': self.limb_darkening_coeffs_u,
+            'limb_darkening_coeffs_gamma': self.limb_darkening_coeffs_gamma,
+        }
+
+    def _get_config(self) -> dict:
+        """Get all configuration parameters (user inputs)."""
+        return {
+            'files': self.files,
+            'fit_type': self.fit_type,
+            'finite_source': self.finite_source,
+            'coords': self.coords,
+            'mag_methods': self.mag_methods,
+            'limb_darkening_coeffs_u': self.limb_darkening_coeffs_u,
+            'limb_darkening_coeffs_gamma': self.limb_darkening_coeffs_gamma,
+            'renormalize_errors': self.renormalize_errors,
+            'parallax_grid': self.parallax_grid,
+            'verbose': self.verbose,
+        }
+
+    def _get_state(self) -> dict:
+        """Get all computed state (fit results)."""
+        return {
+            'all_fit_results': self.all_fit_results,
+            'best_ef_grid_point': self.best_ef_grid_point,
+            'best_af_grid_point': self.best_af_grid_point,
+            'anomaly_lc_params': self.anomaly_lc_params,
+            'n_loc': self.n_loc,
+        }
+
+    def _load_restart_data(self, restart_file):
+        """Load config and state from restart file."""
+        if restart_file is None:
+            return {}, {}
+
+        with open(restart_file, 'rb') as f:
+            data = pickle.load(f)
+        return data.get('config', {}), data.get('state', {})
+
+    def _merge_config(self, saved_config, provided_params):
+        """Merge saved config with provided params (provided wins)."""
+        config_keys = [
+            'files', 'fit_type', 'finite_source', 'coords', 'mag_methods',
+            'limb_darkening_coeffs_u', 'limb_darkening_coeffs_gamma',
+            'renormalize_errors', 'parallax_grid', 'verbose'
+        ]
+
+        merged = {}
+        for key in config_keys:
+            # Provided param takes precedence (but watch out for None vs not provided)
+            if key in provided_params and provided_params[key] is not None:
+                merged[key] = provided_params[key]
+            elif key in saved_config:
+                merged[key] = saved_config[key]
+            else:
+                merged[key] = None
+
+        return merged
+
+    def _restore_state(self, saved_state):
+        """Restore computed state from saved data."""
+        self.all_fit_results = saved_state.get('all_fit_results', mmexo.AllFitResults())
+        self.best_ef_grid_point = saved_state.get('best_ef_grid_point')
+        self.best_af_grid_point = saved_state.get('best_af_grid_point')
+        self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
 
     # ---------------------------------------------------------------------
     # Loading initial (user-supplied) information
@@ -206,10 +336,18 @@ class MMEXOFASTFitter:
         - optional renormalization + refits
         """
         self._ensure_static_point_lens()  # shared
+        self._save_restart_state()
+
         self._ensure_static_finite_point_lens()  # shared (if finite_source)
+        self._save_restart_state()
+
         self._ensure_point_lens_parallax_models()  # shared (if you want)
+
+        self._save_restart_state()
+
         if self.renormalize_errors:
             self.renormalize_errors_and_refit()
+            self._save_restart_state()
 
     def fit_binary_lens(self) -> None:
         """
@@ -224,10 +362,12 @@ class MMEXOFASTFitter:
         # Reuse the shared pieces you actually need:
         self._ensure_static_point_lens()
         self._ensure_static_finite_point_lens()
+        self._save_restart_state()
 
         # Now do binary-specific stuff:
         self._run_af_grid_search()
         self._fit_binary_models()
+        self._save_restart_state()
 
     # ---------------------------------------------------------------------
     # Core helper: run_fit_if_needed
@@ -368,7 +508,7 @@ class MMEXOFASTFitter:
             self._log(f"Using initial PSPL params (user/previous): {pspl_est_params}")
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=pspl_est_params, datasets=self.datasets, **self.fitter_kwargs)
+            initial_model_params=pspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'Initial SFit {fitter.best}')
 
@@ -403,7 +543,7 @@ class MMEXOFASTFitter:
             fspl_est_params = initial_params
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=fspl_est_params, datasets=self.datasets, **self.fitter_kwargs)
+            initial_model_params=fspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'FSPL: {fitter.best}')
 
@@ -548,7 +688,7 @@ class MMEXOFASTFitter:
         par_est_params = self._get_parallax_initial_params(key, initial_params)
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=par_est_params, datasets=self.datasets, **self.fitter_kwargs)
+            initial_model_params=par_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
 
@@ -686,6 +826,19 @@ class MMEXOFASTFitter:
         if self.output is not None:
             table_str = self.make_ulens_table(table_type='latex', models=models)
             self.output.save_latex_table(name, table_str)
+
+    def _save_restart_state(self) -> None:
+        """Save current state for restarting fits."""
+        if self.output is None:
+            return
+
+        restart_data = {
+            'config': self._get_config(),
+            'state': self._get_state(),
+        }
+
+        state_bytes = pickle.dumps(restart_data)
+        self.output.save_restart_state(state_bytes)
 
     def make_ulens_table(self, table_type: Optional[str], models=None) -> str:
         """
