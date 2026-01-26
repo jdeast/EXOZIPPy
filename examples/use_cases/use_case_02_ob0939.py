@@ -11,11 +11,11 @@ data_file = os.path.join(
 
 fitter = exozippy.mmexofast.fit(
     files=[data_file], fit_type='point lens', renormalize_errors=False, coords='17:47:12.25 -21:22:58.7',
-    verbose=True, log='test_ob0939_raw.log', latex_file='test_ob09393_raw.tex')
-fitter = exozippy.mmexofast.fit(
-    files=[data_file], fit_type='point lens', coords='17:47:12.25 -21:22:58.7',
-    verbose=True, log='test_ob0939.log', latex_file='test_ob09393.tex')
-#print(fitter.initialize_exozippy())
+    verbose=True, log_file='test_output/test_ob0939_raw.log', latex_file='test_output/test_ob09393_raw.tex')
+#fitter = exozippy.mmexofast.fit(
+#    files=[data_file], fit_type='point lens', coords='17:47:12.25 -21:22:58.7',
+#    verbose=True, log_file='test_output/test_ob0939.log', latex_file='test_output/test_ob09393.tex')
+print(fitter.initialize_exozippy())
 
 """
 Desired outputs:

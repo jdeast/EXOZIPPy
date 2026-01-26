@@ -40,13 +40,13 @@ def fit(files=None, fit_type=None, **kwargs):
     # ***
     # Q1: Should this also include an `input_file` option?
     # Q2: What about `initial_param` = *dict* of microlensing parameters option?
-    # Open issue: as written, only supports single solutions.
+    # Open issue: as written, only supports single solutions. 1/26/26 JCY: might be fixed?
     # ***
     #
     """
     fitter = MMEXOFASTFitter(files=files, fit_type=fit_type, **kwargs)
     fitter.fit()
-    return fitter.results
+    return fitter
 
 
 class MMEXOFASTFitter:
@@ -69,11 +69,14 @@ class MMEXOFASTFitter:
         renormalize_errors: bool = False,
         verbose: bool = False,
         initial_results: Optional[Dict[str, Dict[str, Any]]] = None,
+        output_file: str = None, latex_file: str = None, log_file: str = None #  Output not implemented yet.
     ):
         if datasets is not None:
             self.datasets = datasets
         else:
             self.datasets = self._create_mulensdata_objects(files)
+
+        self.residuals = None
 
         self.fit_type = fit_type
         self.finite_source = finite_source
@@ -89,6 +92,7 @@ class MMEXOFASTFitter:
 
         self.best_ef_grid_point = None  # set by do_ef_grid_search()
         self.best_af_grid_point = None  # set by do_af_grid_search()
+        self.anomaly_lc_params = None
 
         self.all_fit_results = mmexo.AllFitResults()
 
@@ -184,82 +188,40 @@ class MMEXOFASTFitter:
             self.fit_point_lens()
 
         elif self.fit_type == 'binary lens':
-            self.best_af_grid_point = self.do_af_grid_search()
-            if self.verbose:
-                print('Best AF grid', self.best_af_grid_point)
-
-            self.anomaly_lc_params = self.get_anomaly_lc_params()
-            if self.verbose:
-                print('Anomaly Params', self.anomaly_lc_params)
-
-            if self.emcee:
-                self.results = self.fit_anomaly()
-                if self.verbose:
-                    print('Results', self.results)
-
+            self.fit_binary_lens()
 
     def fit_point_lens(self) -> None:
         """
-        Run the point-lens sequence:
+        Run the full point-lens workflow.
 
         - static PSPL
         - optional static FSPL
         - parallax branches (PSPL or FSPL depending on finite_source)
         - optional renormalization + refits
         """
-        # 1. static PSPL
-        static_pspl_key = mmexo.ModelKey(
-            lens_type=mmexo.LensType.POINT,
-            source_type=mmexo.SourceType.POINT,
-            parallax_branch=mmexo.ParallaxBranch.NONE,
-            lens_orb_motion=mmexo.LensOrbMotion.NONE,
-        )
-
-        def fit_static_pspl(initial_params=None):
-            return self._fit_initial_pspl_model(initial_params=initial_params)
-
-        self.run_fit_if_needed(static_pspl_key, fit_static_pspl)
-
-        # 2. static FSPL (if requested)
-        if self.finite_source:
-            static_fspl_key = mmexo.ModelKey(
-                lens_type=mmexo.LensType.POINT,
-                source_type=mmexo.SourceType.FINITE,
-                parallax_branch=mmexo.ParallaxBranch.NONE,
-                lens_orb_motion=mmexo.LensOrbMotion.NONE,
-            )
-
-            def fit_static_fspl(initial_params=None):
-                return self._fit_static_fspl_model(initial_params=initial_params)
-
-            self.run_fit_if_needed(static_fspl_key, fit_static_fspl)
-
-        # 3. parallax point-lens models
-        if self.fitter_kwargs['coords'] is None:
-            if self.verbose:
-                print('No coords provided. Not fitting for parallax.')
-
-        else:
-            for par_key in self._iter_parallax_point_lens_keys():
-
-                def make_fit_func(k: mmexo.ModelKey):
-
-                    def fit_func(initial_params=None):
-                        return self._fit_pl_parallax_model(
-                            k, initial_params=initial_params
-                        )
-
-                    return fit_func
-
-                self.run_fit_if_needed(par_key, make_fit_func(par_key))
-
-        # 4. optional renormalization + refits
+        self._ensure_static_point_lens()  # shared
+        self._ensure_static_finite_point_lens()  # shared (if finite_source)
+        self._ensure_point_lens_parallax_models()  # shared (if you want)
         if self.renormalize_errors:
             self.renormalize_errors_and_refit()
 
-    # ---------------------------------------------------------------------
-    # TODO: other workflows (binary lens, anomaly search, etc.)
-    # ---------------------------------------------------------------------
+    def fit_binary_lens(self) -> None:
+        """
+        Run binary-lens workflow, building on point-lens pieces.
+
+        - static PSPL
+        - Anomaly Finder search
+        # TODO: re-fit as needed depending on AF results
+
+
+        """
+        # Reuse the shared pieces you actually need:
+        self._ensure_static_point_lens()
+        self._ensure_static_finite_point_lens()
+
+        # Now do binary-specific stuff:
+        self._run_af_grid_search()
+        self._fit_binary_models()
 
     # ---------------------------------------------------------------------
     # Core helper: run_fit_if_needed
@@ -309,6 +271,54 @@ class MMEXOFASTFitter:
         )
         self.all_fit_results.set(new_record)
         return new_record
+
+    # ------------------------------------------------------------------
+    # Shared point-lens steps
+    # ------------------------------------------------------------------
+
+    # "ensure" means "Make sure that this thing exists and is up to date; if it already does, don’t redo the work.”
+
+    def _ensure_static_point_lens(self) -> None:
+        """Make sure static PSPL exists in all_fit_results."""
+        static_pspl_key = mmexo.ModelKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.POINT,
+            parallax_branch=mmexo.ParallaxBranch.NONE,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE,
+        )
+
+        def fit_static_pspl(initial_params=None):
+            return self._fit_initial_pspl_model(initial_params=initial_params)
+
+        self.run_fit_if_needed(static_pspl_key, fit_static_pspl)
+
+    def _ensure_static_finite_point_lens(self) -> None:
+        """Make sure static FSPL exists, if finite_source is enabled."""
+        if not self.finite_source:
+            return
+
+        static_fspl_key = mmexo.ModelKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.FINITE,
+            parallax_branch=mmexo.ParallaxBranch.NONE,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE,
+        )
+
+        def fit_static_fspl(initial_params=None):
+            return self._fit_static_fspl_model(initial_params=initial_params)
+
+        self.run_fit_if_needed(static_fspl_key, fit_static_fspl)
+
+    def _ensure_point_lens_parallax_models(self) -> None:
+        """Make sure all configured point-lens parallax branches are fitted."""
+        for par_key in self._iter_parallax_point_lens_keys():
+            def make_fit_func(k: mmexo.ModelKey):
+                def fit_func(initial_params=None):
+                    return self._fit_pl_parallax_model(k, initial_params=initial_params)
+
+                return fit_func
+
+            self.run_fit_if_needed(par_key, make_fit_func(par_key))
 
     # ---------------------------------------------------------------------
     # Point-lens helpers:
@@ -548,6 +558,44 @@ class MMEXOFASTFitter:
         return mmexo.MMEXOFASTFitResults(fitter)
 
     # ---------------------------------------------------------------------
+    # Binary-lens helpers:
+    # ---------------------------------------------------------------------
+    def _run_af_grid_search(self):
+        if self.best_af_grid_point is None:
+            self.best_af_grid_point = self.do_af_grid_search()
+            if self.verbose:
+                print('Best AF grid', self.best_af_grid_point)
+
+        if self.anomaly_lc_params is None:
+            self.anomaly_lc_params = self.get_anomaly_lc_params()
+            if self.verbose:
+                print('Anomaly Params', self.anomaly_lc_params)
+
+    def _fit_binary_models(self):
+        if self.emcee:
+            self.results = self.fit_anomaly()
+            if self.verbose:
+                print('Results', self.results)
+
+    # ---------------------------------------------------------------------
+    # Data helpers:
+    # ---------------------------------------------------------------------
+    def set_residuals(self, pspl_params):
+        event = MulensModel.Event(
+            datasets=self.datasets, model=MulensModel.Model(pspl_params))
+        event.fit_fluxes()
+        residuals = []
+        for i, dataset in enumerate(self.datasets):
+            res, err = event.fits[i].get_residuals(phot_fmt='flux')
+            residuals.append(
+                MulensModel.MulensData(
+                    [dataset.time, res, err], phot_fmt='flux',
+                    bandpass=dataset.bandpass,
+                    ephemerides_file=dataset.ephemerides_file))
+
+        self.residuals = residuals
+
+    # ---------------------------------------------------------------------
     # Renormalization helpers:
     # ---------------------------------------------------------------------
     """
@@ -581,6 +629,7 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     """
     #    do_ef_grid_search
+    #    do_af_grid_search
     """
     def do_ef_grid_search(self):
         """
@@ -590,6 +639,18 @@ class MMEXOFASTFitter:
         ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
         ef_grid.run()
         return ef_grid.best
+
+    def do_af_grid_search(self):
+        self.set_residuals(self.initial_pspl_params)
+        af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
+        # May need to update value of teff_min
+        af_grid.run()
+        return af_grid.best
+
+    def get_anomaly_lc_params(self):
+        estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
+            datasets=self.datasets, pspl_params=self.initial_pspl_params, af_results=self.best_af_grid_point)
+        return estimator.get_anomaly_lc_parameters()
 
     # ---------------------------------------------------------------------
     # Output
@@ -806,6 +867,35 @@ class MMEXOFASTFitter:
         else:
             raise NotImplementedError(table_type + " not implemented.")
 
+
+    # ---------------------------------------------------------------------
+    # EXOZIPPy Helpers
+    # ---------------------------------------------------------------------
+    def initialize_exozippy(self):
+           """
+           #Get the best-fit microlensing parameters for initializing exozippy fitting.
+           #
+           #:return: *dict*
+           #    items:
+           #        'fits': *list* of *dict*
+           #            [{'parameters': {*dict* of ulens parameters}, 'sigmas': {*dict* of uncertainties in
+           #            ulensparameters}} ...]
+           #        'errfacs': *list* of error renormalization factors for each dataset. DEFAULT: None
+           #        'mag_methods': *list* of magnification methods following the MulensModel convention. DEFAULT: None
+           """
+           initializations = {'fits': [], 'errfacs': None, 'mag_methods': None}
+
+           if self.fit_type == 'point lens':
+               fits = []
+               for par_key in self._iter_parallax_point_lens_keys():
+                   fits.append({'parameters': self.all_fit_results.get(par_key).params,
+                                'sigmas': self.all_fit_results.get(par_key).sigmas})
+
+               initializations['fits'] = fits
+           else:
+               raise NotImplementedError('initialize_exozippy only implemented for point lens fits')
+
+           return initializations
 
 '''
 # OLD STUFF
