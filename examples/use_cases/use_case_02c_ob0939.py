@@ -41,8 +41,29 @@ cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
     parallax_grid=True,
     output_config=OutputConfig(
         base_dir=Path('test_output'), file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
-        save_latex_tables=True, save_restart_files=True))
+        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
 cont_fitter.fit()
+# ------
+# Expected workflow: Renormalize errors, refit all models, run parallax grids
+#
+# Need to implement:
+# 1. Error Renormalization and outlier removal
+# 2. Refitting
+# 3. Parallax grids
+#
+# output:
+# A log file: ob0939_uc02c_gr.log
+#    with results at each stage of the fitting
+#
+# diagnostic plots: ob0939_uc02c_par_u0[p/m].png
+#
+# piE grids: ob0939_uc02c_par_grid_u0[p/m].txt
+#
+# latex table: ob0939_uc02c_gr_results.tex
+#
+# restart_files: ob0939_uc02c_gr_restart.pkl
+#    containing everything needed to initialize the next step
+# ------
 
 # complete_fitter = exozippy.mmexofast.fit(
 #     files=ground_data_files + space_data_files, coords=coords, fit_type='point lens',
@@ -50,7 +71,7 @@ cont_fitter.fit()
 #     restart_file='test_output/ob0939_uc02c_gr_restart.txt',
 #     output_config=OutputConfig(
 #         base_dir=Path('test_output'), file_head='ob0939_uc02c_full', save_log=True, save_plots=True,
-#         save_latex_tables=True, save_restart_files=True)
+#         save_latex_tables=True, save_restart_files=True, save_grid_results=True)
 #     )
 # 
 # sponly_fitter = exozippy.mmexofast.MMEXOFASTFitter(
