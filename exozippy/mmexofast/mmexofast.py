@@ -67,8 +67,11 @@ class MMEXOFASTFitter:
         mag_methods: list = None,
         coords: str = None,
         renormalize_errors: bool = False,
+        parallax_grid: bool = False,
         verbose: bool = False,
         initial_results: Optional[Dict[str, Dict[str, Any]]] = None,
+        output_config: Optional[mmexo.OutputConfig] = None,
+        restart_file: str = None,  # restart point for setting everything else. Not implemented.
         output_file: str = None, latex_file: str = None, log_file: str = None #  Output not implemented yet.
     ):
         if datasets is not None:
@@ -89,6 +92,7 @@ class MMEXOFASTFitter:
             'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
 
         self.verbose = verbose
+        self.output = mmexo.OutputManager(output_config) if output_config is not None else None
 
         self.best_ef_grid_point = None  # set by do_ef_grid_search()
         self.best_af_grid_point = None  # set by do_af_grid_search()
