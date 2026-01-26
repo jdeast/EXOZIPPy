@@ -49,6 +49,10 @@ class EventFinderGridSearch():
         self.z_t_eff = z_t_eff
         self.n_min = n_min
 
+    # ---------------------------------------------------------------------
+    # Setup functions:
+    # ---------------------------------------------------------------------
+
     def _get_t_0_min(self):
         t_0_min = None
         for dataset in self.datasets:
@@ -87,6 +91,10 @@ class EventFinderGridSearch():
 
             t_eff *= t_eff_factor
 
+    # ---------------------------------------------------------------------
+    # Core functions:
+    # ---------------------------------------------------------------------
+
     def run(self, verbose=False):
         results = []
         for (t_0, t_eff) in zip(self.grid_t_0, self.grid_t_eff):
@@ -98,6 +106,61 @@ class EventFinderGridSearch():
             results.append(dchi2s)
 
         self.results = np.array(results)
+
+    def plot(self, fig=None):
+        """
+        Plot chi2 improvement for j=1 and j=2 grid searches.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure, optional
+            Figure to plot on. If None, creates new figure.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        """
+        import matplotlib.pyplot as plt
+
+        if self.results is None:
+            raise ValueError("Must run grid search before plotting. Call .run() first.")
+
+        if fig is None:
+            fig = plt.figure(figsize=(8, 4))
+
+        if self.grid_params['t_0_min'] > 2460000.:
+            delta = 2460000.
+        elif self.grid_params['t_0_min'] > 2450000.:
+            delta = 2450000.
+        else:
+            delta = 0.
+
+        for j in [1, 2]:
+            plt.subplot(1, 2, j)
+            plt.title(f'j={j}')
+            sorted_idx = np.argsort(self.results[:, j - 1])[::-1]  # smallest chi2 on top
+            plt.scatter(
+                self.grid_t_0[sorted_idx] - delta, self.grid_t_eff[sorted_idx],
+                c=self.results[sorted_idx, j - 1],
+                edgecolors='black', cmap='Set1')
+            plt.colorbar(label='chi2 - chi2_flat')
+
+            if self.best is not None:
+                plt.scatter(
+                    self.best['t_0'] - delta, self.best['t_eff'],
+                    color='black', marker='x', s=100, zorder=5)
+
+            plt.minorticks_on()
+            plt.xlabel(f't_0 - {delta}')
+            plt.ylabel('t_eff')
+            plt.yscale('log')
+
+        plt.tight_layout()
+        return fig
+
+    # ---------------------------------------------------------------------
+    # Helper Functions:
+    # ---------------------------------------------------------------------
 
     def get_trimmed_datasets(self, parameters, verbose=False):
         trimmed_datasets = []
@@ -146,6 +209,9 @@ class EventFinderGridSearch():
 
         return chi2s
 
+    # ---------------------------------------------------------------------
+    # Properties:
+    # ---------------------------------------------------------------------
     @property
     def grid_t_0(self):
         if self._grid_t_0 is None:

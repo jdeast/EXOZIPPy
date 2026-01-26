@@ -25,7 +25,7 @@ raw_fitter.fit()
 # A log file: ob0939_uc02c_raw.log [DONE]
 #    with results at each stage of the fitting
 #
-# diagnostic plots: ob0939_uc02c_ef_grid.png
+# diagnostic plots: ob0939_uc02c_ef_grid.png [DONE]
 #
 # latex table: ob0939_uc02c_raw_results.tex [DONE]
 #

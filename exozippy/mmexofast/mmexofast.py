@@ -651,6 +651,11 @@ class MMEXOFASTFitter:
         """
         ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
         ef_grid.run()
+
+        if self.output is not None and self.output.config.save_plots:
+            fig = ef_grid.plot()
+            self.output.save_plot('ef_grid', fig)
+
         return ef_grid.best
 
     def do_af_grid_search(self):

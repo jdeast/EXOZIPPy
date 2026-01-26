@@ -19,23 +19,7 @@ ef.run(verbose=True)
 print(ef.best)
 
 # Grid search chi2 plot with data (x2 for j=0, 1)
-plt.figure(figsize=(8, 4))
-for j in [1, 2]:
-    plt.subplot(1, 2, j)
-    plt.title('j={0}'.format(j))
-    sorted = np.argsort(ef.results[:, j-1])[::-1]
-    plt.scatter(
-        ef.grid_t_0[sorted], ef.grid_t_eff[sorted],
-        c=ef.results[sorted, j-1],
-        edgecolors='black', cmap='tab20b')
-    plt.colorbar(label='chi2 - chi2_flat')
-    plt.scatter(
-        ef.best['t_0'], ef.best['t_eff'], color='black', marker='x', zorder=5)
-    plt.minorticks_on()
-    plt.xlabel('t_0')
-    plt.ylabel('t_eff')
-    plt.yscale('log')
-    plt.tight_layout()
+ef.plot()
 
 # Plot best-fit and best-fit for other j.
 best_model = mmexo.gridsearches.EFSFitFunction(

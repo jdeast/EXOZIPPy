@@ -186,5 +186,5 @@ class OutputManager:
             return
 
         path = self.config.base_dir / f"{self.config.file_head}_{name}.png"
-        fig.savefig(path, dpi=150)
+        fig.savefig(path, dpi=300)
         fig.clf()
