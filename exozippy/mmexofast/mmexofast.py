@@ -92,7 +92,7 @@ class MMEXOFASTFitter:
             'limb_darkening_coeffs_gamma': limb_darkening_coeffs_gamma}
 
         self.verbose = verbose
-        self.output = mmexo.OutputManager(output_config) if output_config is not None else None
+        self.output = mmexo.OutputManager(output_config, verbose=verbose) if output_config is not None else None
 
         self.best_ef_grid_point = None  # set by do_ef_grid_search()
         self.best_af_grid_point = None  # set by do_af_grid_search()
@@ -193,6 +193,8 @@ class MMEXOFASTFitter:
 
         elif self.fit_type == 'binary lens':
             self.fit_binary_lens()
+
+        self._output_latex_table()
 
     def fit_point_lens(self) -> None:
         """
@@ -354,25 +356,21 @@ class MMEXOFASTFitter:
         if initial_params is None:
             if self.best_ef_grid_point is None:
                 self.best_ef_grid_point = self.do_ef_grid_search()
-                if self.verbose:
-                    print("Best EF grid point", self.best_ef_grid_point)
+                self._log(f"Best EF grid point {self.best_ef_grid_point}")
 
             pspl_est_params = mmexo.estimate_params.get_PSPL_params(
                 self.best_ef_grid_point,
                 self.datasets,
             )
-            if self.verbose:
-                print("Initial PSPL Estimate", pspl_est_params)
+            self._log(f"Initial PSPL Estimate {pspl_est_params}")
         else:
             pspl_est_params = initial_params
-            if self.verbose:
-                print("Using initial PSPL params (user/previous):", pspl_est_params)
+            self._log(f"Using initial PSPL params (user/previous): {pspl_est_params}")
 
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=pspl_est_params, datasets=self.datasets, **self.fitter_kwargs)
         fitter.run()
-        if self.verbose:
-            print('Initial SFit', fitter.best)
+        self._log(f'Initial SFit {fitter.best}')
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -407,8 +405,7 @@ class MMEXOFASTFitter:
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=fspl_est_params, datasets=self.datasets, **self.fitter_kwargs)
         fitter.run()
-        if self.verbose:
-            print(f'FSPL: {fitter.best}')
+        self._log(f'FSPL: {fitter.best}')
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -483,8 +480,7 @@ class MMEXOFASTFitter:
         """
         # 1. Caller-supplied initial params
         if initial_params is not None:
-            if self.verbose:
-                print(
+            self._log(
                     f"Using provided initial params for parallax branch "
                     f"{key.parallax_branch}: {initial_params}"
                 )
@@ -511,8 +507,7 @@ class MMEXOFASTFitter:
                 src_branch=other_branch,
                 target_branch=key.parallax_branch,
             )
-            if self.verbose:
-                print(
+            self._log(
                     f"Seeding parallax branch {key.parallax_branch.value} from "
                     f"existing branch {other_branch.value} with transformed params: {base}"
                 )
@@ -534,8 +529,7 @@ class MMEXOFASTFitter:
         base = dict(static_record.params)
         base['pi_E_N'] = 0.
         base['pi_E_E'] = 0.
-        if self.verbose:
-            print(
+        self._log(
                 f"Seeding parallax branch {key.parallax_branch.value} from "
                 f"static model (source_type={key.source_type.value}): {base}"
             )
@@ -556,8 +550,7 @@ class MMEXOFASTFitter:
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=par_est_params, datasets=self.datasets, **self.fitter_kwargs)
         fitter.run()
-        if self.verbose:
-            print(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
+        self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -567,13 +560,11 @@ class MMEXOFASTFitter:
     def _run_af_grid_search(self):
         if self.best_af_grid_point is None:
             self.best_af_grid_point = self.do_af_grid_search()
-            if self.verbose:
-                print('Best AF grid', self.best_af_grid_point)
+            self._log(f'Best AF grid {self.best_af_grid_point}')
 
         if self.anomaly_lc_params is None:
             self.anomaly_lc_params = self.get_anomaly_lc_params()
-            if self.verbose:
-                print('Anomaly Params', self.anomaly_lc_params)
+            self._log(f'Anomaly Params {self.anomaly_lc_params}')
 
     def _fit_binary_models(self):
 
@@ -584,10 +575,10 @@ class MMEXOFASTFitter:
                 datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
                 #emcee_settings=self.emcee_settings, pool=self.pool)
                 )
-            if self.verbose:
-                wide_planet_fitter.estimate_initial_parameters()
-                print('Initial 2L1S Wide Model', wide_planet_fitter.initial_model)
-                print('mag methods', wide_planet_fitter.mag_methods)
+            wide_planet_fitter.estimate_initial_parameters()
+            self._log(
+                f'Initial 2L1S Wide Model {wide_planet_fitter.initial_model}' +
+                f'\nmag methods {wide_planet_fitter.mag_methods}')
 
             wide_planet_fitter.run()
             return wide_planet_fitter.best
@@ -678,6 +669,19 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # Output
     # ---------------------------------------------------------------------
+    def _log(self, msg: str) -> None:
+        """Log message to console/file based on verbose/save_log settings."""
+        if self.output is not None:
+            self.output.log(msg)
+        elif self.verbose:
+            # Fallback: print to console if no output manager but verbose=True
+            print(msg)
+
+    def _output_latex_table(self,  name: str = 'results', models=None) -> None:
+        if self.output is not None:
+            table_str = self.make_ulens_table(table_type='latex', models=models)
+            self.output.save_latex_table(name, table_str)
+
     def make_ulens_table(self, table_type: Optional[str], models=None) -> str:
         """
         Return a string consisting of a formatted table summarizing the results

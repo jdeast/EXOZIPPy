@@ -79,8 +79,9 @@ class OutputManager:
     The behavior of each is controlled by OutputConfig flags.
     """
 
-    def __init__(self, config: OutputConfig):
+    def __init__(self, config: OutputConfig, verbose: bool = False):
         self.config = config
+        self.verbose = verbose
         self.config.base_dir.mkdir(parents=True, exist_ok=True)
         self._setup_logging_if_needed()
 
@@ -89,28 +90,34 @@ class OutputManager:
     # ------------------------------------------------------------------
 
     def _setup_logging_if_needed(self) -> None:
-        if not self.config.save_log:
-            self.logger = None
-            return
-
         import logging
 
         self.logger = logging.getLogger("mmexofast")
         self.logger.setLevel(logging.INFO)
 
-        logfile = self.config.base_dir / f"{self.config.file_head}.log"
-        fh = logging.FileHandler(logfile)
-        fh.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        self.logger.addHandler(fh)
+        # Clear any existing handlers (avoid duplicates)
+        self.logger.handlers.clear()
+
+        # Console handler (if verbose)
+        if self.verbose:
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(
+                logging.Formatter("%(message)s")  # Simple format for console
+            )
+            self.logger.addHandler(console_handler)
+
+        # File handler (if save_log)
+        if self.config.save_log:
+            logfile = self.config.base_dir / f"{self.config.file_head}.log"
+            file_handler = logging.FileHandler(logfile)
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            )
+            self.logger.addHandler(file_handler)
 
     def log(self, msg: str) -> None:
-        """
-        Log a message to the log file if logging is enabled.
-        """
-        if hasattr(self, "logger") and self.logger is not None:
-            self.logger.info(msg)
+        """Log message to console (if verbose) and/or file (if save_log)."""
+        self.logger.info(msg)
 
     # ------------------------------------------------------------------
     # Grid search results
