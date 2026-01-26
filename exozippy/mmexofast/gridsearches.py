@@ -1,7 +1,13 @@
 import numpy as np
+from abc import ABC, abstractmethod
+
 import MulensModel
 import sfit_minimizer
 
+
+# ---------------------------------------------------------------------
+# EventFinder & AnomalyFinder Grid searches:
+# ---------------------------------------------------------------------
 
 class EventFinderGridSearch():
     """
@@ -501,3 +507,496 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
                           }
 
         return self._best
+
+
+# ---------------------------------------------------------------------
+# General, Rectangular Grid Searches
+# ---------------------------------------------------------------------
+
+class BaseRectGridSearch(ABC):
+    """
+    Abstract base class for rectangular grid searches over independent parameters.
+
+    A rectangular grid search tests all combinations of parameter values where
+    each parameter is varied independently (unlike EventFinderGridSearch where
+    t_0 spacing depends on t_eff).
+
+    Child classes must implement:
+        - _setup_grid(): Define the parameter grid
+        - _fit_grid_point(): Run fit for one grid point
+    """
+
+    def __init__(self, datasets, verbose=False):
+        """
+        Parameters:
+            datasets: MulensData object(s) to fit
+            verbose: *bool*
+                If True, print progress information
+        """
+        if datasets is None:
+            raise ValueError('You must define the datasets!')
+        elif isinstance(datasets, MulensModel.MulensData):
+            self.datasets = [datasets]
+        elif not isinstance(datasets, list):
+            raise TypeError(
+                'datasets must be *list* or *MulensData*! Not',
+                type(datasets))
+
+        self.datasets = datasets
+        self.verbose = verbose
+        self.results = None
+        self._best = None
+        self._grid = None
+
+    @abstractmethod
+    def _setup_grid(self):
+        """
+        Define the parameter grid. Must set self._grid to a list of dicts,
+        where each dict contains the parameters for one grid point.
+
+        Example:
+            self._grid = [
+                {'pi_E_E': 0.1, 'pi_E_N': 0.2},
+                {'pi_E_E': 0.1, 'pi_E_N': 0.3},
+                ...
+            ]
+        """
+        pass
+
+    @abstractmethod
+    def _fit_grid_point(self, grid_params):
+        """
+        Run fit for one grid point.
+
+        Parameters:
+            grid_params: *dict*
+                Parameter values for this grid point
+
+        Returns:
+            result: *dict*
+                Must contain at least 'chi2'. Can include additional keys
+                like 'params', 'converged', etc.
+        """
+        pass
+
+    def run(self):
+        """
+        Execute the grid search by iterating over all grid points.
+        """
+        if self._grid is None:
+            self._setup_grid()
+
+        results = []
+        n_total = len(self._grid)
+
+        for i, grid_params in enumerate(self._grid):
+            if self.verbose:
+                print(f"Grid point {i + 1}/{n_total}: {grid_params}")
+
+            result = self._fit_grid_point(grid_params)
+
+            # Merge grid parameters with fit results
+            full_result = {**grid_params, **result}
+            results.append(full_result)
+
+            if self.verbose:
+                print(f"  chi2 = {result.get('chi2', 'N/A')}")
+
+        self.results = results
+
+    @property
+    def grid(self):
+        """The parameter grid as a list of dicts"""
+        if self._grid is None:
+            self._setup_grid()
+        return self._grid
+
+    @property
+    def best(self):
+        """
+        Find the grid point with minimum chi2.
+
+        Returns:
+            best: *dict*
+                The result dict for the best-fitting grid point
+        """
+        if self._best is None and self.results is not None:
+            # Filter out any results without valid chi2
+            valid_results = [r for r in self.results if
+                             'chi2' in r and np.isfinite(r['chi2'])]
+
+            if len(valid_results) == 0:
+                raise ValueError("No valid results found (all chi2 are NaN or missing)")
+
+            # Find minimum chi2
+            self._best = min(valid_results, key=lambda x: x['chi2'])
+
+        return self._best
+
+    # Utility methods for grid generation
+
+    def _linear_grid_1d(self, param_min, param_max, step):
+        """
+        Generate 1D linear grid.
+
+        Parameters:
+            param_min: *float*
+                Minimum parameter value
+            param_max: *float*
+                Maximum parameter value
+            step: *float*
+                Step size
+
+        Returns:
+            grid: *np.ndarray*
+                1D array of parameter values
+        """
+        return np.arange(param_min, param_max + step / 2., step)
+
+    def _log_grid_1d(self, param_min, param_max, n_steps):
+        """
+        Generate 1D logarithmic grid.
+
+        Parameters:
+            param_min: *float*
+                Minimum parameter value (must be > 0)
+            param_max: *float*
+                Maximum parameter value
+            n_steps: *int*
+                Number of grid points
+
+        Returns:
+            grid: *np.ndarray*
+                1D array of parameter values
+        """
+        if param_min <= 0 or param_max <= 0:
+            raise ValueError("Log grid requires positive values")
+        return np.logspace(np.log10(param_min), np.log10(param_max), n_steps)
+
+    def _make_rect_grid(self, param_arrays, param_names):
+        """
+        Create rectangular grid from 1D parameter arrays.
+
+        Parameters:
+            param_arrays: *list of np.ndarray*
+                1D arrays for each parameter
+            param_names: *list of str*
+                Names for each parameter
+
+        Returns:
+            grid: *list of dict*
+                All combinations of parameters
+        """
+        # Use meshgrid to get all combinations
+        meshes = np.meshgrid(*param_arrays, indexing='ij')
+
+        # Flatten and create list of dicts
+        grid = []
+        for i in range(meshes[0].size):
+            point = {}
+            for name, mesh in zip(param_names, meshes):
+                point[name] = mesh.flat[i]
+            grid.append(point)
+
+        return grid
+
+
+class ParallaxGridSearch(BaseRectGridSearch):
+    """
+    Grid search over parallax parameters pi_E_E and pi_E_N.
+
+    For each grid point, runs mmexo.fitters.SFitFitter with fixed parallax
+    parameters and returns chi2 + fit results.
+    """
+
+    def __init__(self, datasets, static_params, grid_params=None,
+                 pi_E_E_min=-0.5, pi_E_E_max=0.5, pi_E_E_step=0.05,
+                 pi_E_N_min=-0.5, pi_E_N_max=0.5, pi_E_N_step=0.05,
+                 fitter_kwargs=None, verbose=False):
+        """
+        Parameters:
+            datasets: MulensData object(s) to fit
+            static_params: *dict*
+                Dictionary of fixed model parameters (e.g., 'XSPL static' params)
+                Should NOT include pi_E_E or pi_E_N
+            grid_params: *dict* or None
+                If provided, specifies all grid parameters and takes precedence
+                over individual parameters. Expected keys:
+                    'pi_E_E_min', 'pi_E_E_max', 'pi_E_E_step',
+                    'pi_E_N_min', 'pi_E_N_max', 'pi_E_N_step'
+            pi_E_E_min, pi_E_E_max, pi_E_E_step: *float*
+                Grid definition for pi_E_E (East component).
+                Ignored if grid_params is provided.
+            pi_E_N_min, pi_E_N_max, pi_E_N_step: *float*
+                Grid definition for pi_E_N (North component).
+                Ignored if grid_params is provided.
+            fitter_kwargs: *dict* or None
+                Additional keyword arguments to pass to SFitFitter
+            verbose: *bool*
+                If True, print progress information
+        """
+        super().__init__(datasets=datasets, verbose=verbose)
+
+        self.static_params = static_params.copy()
+
+        # If grid_params dict is provided, use it; otherwise build from individual params
+        if grid_params is not None:
+            self.grid_params = grid_params.copy()
+            # Validate required keys
+            required_keys = ['pi_E_E_min', 'pi_E_E_max', 'pi_E_E_step',
+                             'pi_E_N_min', 'pi_E_N_max', 'pi_E_N_step']
+            missing_keys = [k for k in required_keys if k not in self.grid_params]
+            if missing_keys:
+                raise ValueError(f"grid_params missing required keys: {missing_keys}")
+        else:
+            self.grid_params = {
+                'pi_E_E_min': pi_E_E_min,
+                'pi_E_E_max': pi_E_E_max,
+                'pi_E_E_step': pi_E_E_step,
+                'pi_E_N_min': pi_E_N_min,
+                'pi_E_N_max': pi_E_N_max,
+                'pi_E_N_step': pi_E_N_step,
+            }
+
+        self.fitter_kwargs = fitter_kwargs if fitter_kwargs is not None else {}
+
+    def _setup_grid(self):
+        """Set up rectangular grid over pi_E_E and pi_E_N"""
+        pi_E_E_array = self._linear_grid_1d(
+            self.grid_params['pi_E_E_min'],
+            self.grid_params['pi_E_E_max'],
+            self.grid_params['pi_E_E_step']
+        )
+
+        pi_E_N_array = self._linear_grid_1d(
+            self.grid_params['pi_E_N_min'],
+            self.grid_params['pi_E_N_max'],
+            self.grid_params['pi_E_N_step']
+        )
+
+        self._grid = self._make_rect_grid(
+            [pi_E_E_array, pi_E_N_array],
+            ['pi_E_E', 'pi_E_N']
+        )
+
+    def _fit_grid_point(self, grid_params):
+        """
+        Run SFitFitter for one grid point.
+
+        Parameters:
+            grid_params: *dict*
+                Contains 'pi_E_E' and 'pi_E_N' for this grid point
+
+        Returns:
+            result: *dict*
+                Contains 'chi2', 'params' (best-fit parameters),
+                'converged', and any other fitter output
+        """
+        # Import here to avoid circular imports if needed
+        import mmexo.fitters
+
+        # Combine static params with this grid point's parallax values
+        model_params = self.static_params.copy()
+        model_params['pi_E_E'] = grid_params['pi_E_E']
+        model_params['pi_E_N'] = grid_params['pi_E_N']
+
+        # Run fitter
+        try:
+            fitter = mmexo.fitters.SFitFitter(
+                initial_model_params=model_params,
+                datasets=self.datasets,
+                **self.fitter_kwargs
+            )
+            fitter.run()
+
+            result = {
+                'chi2': fitter.chi2,
+                'params': fitter.best_fit_params,
+                'converged': fitter.converged if hasattr(fitter, 'converged') else True,
+            }
+
+        except Exception as e:
+            if self.verbose:
+                print(f"  Fit failed: {e}")
+            result = {
+                'chi2': np.nan,
+                'params': None,
+                'converged': False,
+                'error': str(e)
+            }
+
+        return result
+
+
+class BinaryGridSearch(BaseRectGridSearch):
+    """
+    Grid search over binary lens parameters s (separation), q (mass ratio),
+    and alpha (source trajectory angle).
+
+    For each grid point, runs mmexo.fitters.SFitFitter with fixed binary
+    parameters and returns chi2 + fit results.
+    """
+
+    def __init__(self, datasets, static_params, grid_params=None,
+                 s_min=0.5, s_max=2.0, s_n=10, s_log=True,
+                 q_min=0.001, q_max=1.0, q_n=10, q_log=True,
+                 alpha_min=0.0, alpha_max=360.0, alpha_step=30.0,
+                 fitter_kwargs=None, verbose=False):
+        """
+        Parameters:
+            datasets: MulensData object(s) to fit
+            static_params: *dict*
+                Dictionary of fixed model parameters
+                Should NOT include s, q, or alpha
+            grid_params: *dict* or None
+                If provided, specifies all grid parameters and takes precedence
+                over individual parameters. Expected keys:
+                    's_min', 's_max', 's_n', 's_log',
+                    'q_min', 'q_max', 'q_n', 'q_log',
+                    'alpha_min', 'alpha_max', 'alpha_step'
+            s_min, s_max: *float*
+                Min/max values for separation. Ignored if grid_params provided.
+            s_n: *int*
+                Number of grid points for s (used if s_log=True).
+                Ignored if grid_params provided.
+            s_log: *bool*
+                If True, use logarithmic spacing for s.
+                Ignored if grid_params provided.
+            q_min, q_max: *float*
+                Min/max values for mass ratio. Ignored if grid_params provided.
+            q_n: *int*
+                Number of grid points for q (used if q_log=True).
+                Ignored if grid_params provided.
+            q_log: *bool*
+                If True, use logarithmic spacing for q.
+                Ignored if grid_params provided.
+            alpha_min, alpha_max: *float*
+                Min/max values for source trajectory angle (degrees).
+                Ignored if grid_params provided.
+            alpha_step: *float*
+                Step size for alpha (degrees). Alpha always uses linear spacing.
+                Ignored if grid_params provided.
+            fitter_kwargs: *dict* or None
+                Additional keyword arguments to pass to SFitFitter
+            verbose: *bool*
+                If True, print progress information
+        """
+        super().__init__(datasets=datasets, verbose=verbose)
+
+        self.static_params = static_params.copy()
+
+        # If grid_params dict is provided, use it; otherwise build from individual params
+        if grid_params is not None:
+            self.grid_params = grid_params.copy()
+            # Validate required keys
+            required_keys = ['s_min', 's_max', 's_n', 's_log',
+                             'q_min', 'q_max', 'q_n', 'q_log',
+                             'alpha_min', 'alpha_max', 'alpha_step']
+            missing_keys = [k for k in required_keys if k not in self.grid_params]
+            if missing_keys:
+                raise ValueError(f"grid_params missing required keys: {missing_keys}")
+        else:
+            self.grid_params = {
+                's_min': s_min,
+                's_max': s_max,
+                's_n': s_n,
+                's_log': s_log,
+                'q_min': q_min,
+                'q_max': q_max,
+                'q_n': q_n,
+                'q_log': q_log,
+                'alpha_min': alpha_min,
+                'alpha_max': alpha_max,
+                'alpha_step': alpha_step,
+            }
+
+        self.fitter_kwargs = fitter_kwargs if fitter_kwargs is not None else {}
+
+    def _setup_grid(self):
+        """Set up rectangular grid over s, q, and alpha"""
+        # Create s grid (log or linear)
+        if self.grid_params['s_log']:
+            s_array = self._log_grid_1d(
+                self.grid_params['s_min'],
+                self.grid_params['s_max'],
+                self.grid_params['s_n']
+            )
+        else:
+            # For linear spacing, would need s_step parameter
+            raise NotImplementedError(
+                "Linear spacing for s not implemented. Use s_log=True.")
+
+        # Create q grid (log or linear)
+        if self.grid_params['q_log']:
+            q_array = self._log_grid_1d(
+                self.grid_params['q_min'],
+                self.grid_params['q_max'],
+                self.grid_params['q_n']
+            )
+        else:
+            raise NotImplementedError(
+                "Linear spacing for q not implemented. Use q_log=True.")
+
+        # Create alpha grid (always linear)
+        alpha_array = self._linear_grid_1d(
+            self.grid_params['alpha_min'],
+            self.grid_params['alpha_max'],
+            self.grid_params['alpha_step']
+        )
+
+        self._grid = self._make_rect_grid(
+            [s_array, q_array, alpha_array],
+            ['s', 'q', 'alpha']
+        )
+
+        if self.verbose:
+            print(f"Grid setup: {len(s_array)} s × {len(q_array)} q × "
+                  f"{len(alpha_array)} alpha = {len(self._grid)} total points")
+
+    def _fit_grid_point(self, grid_params):
+        """
+        Run SFitFitter for one grid point.
+
+        Parameters:
+            grid_params: *dict*
+                Contains 's', 'q', and 'alpha' for this grid point
+
+        Returns:
+            result: *dict*
+                Contains 'chi2', 'params' (best-fit parameters),
+                'converged', and any other fitter output
+        """
+        import mmexo.fitters
+
+        # Combine static params with this grid point's binary values
+        model_params = self.static_params.copy()
+        model_params['s'] = grid_params['s']
+        model_params['q'] = grid_params['q']
+        model_params['alpha'] = grid_params['alpha']
+
+        # Run fitter
+        try:
+            fitter = mmexo.fitters.SFitFitter(
+                initial_model_params=model_params,
+                datasets=self.datasets,
+                **self.fitter_kwargs
+            )
+            fitter.run()
+
+            result = {
+                'chi2': fitter.chi2,
+                'params': fitter.best_fit_params,
+                'converged': fitter.converged if hasattr(fitter, 'converged') else True,
+            }
+
+        except Exception as e:
+            if self.verbose:
+                print(f"  Fit failed: {e}")
+            result = {
+                'chi2': np.nan,
+                'params': None,
+                'converged': False,
+                'error': str(e)
+            }
+
+        return result
