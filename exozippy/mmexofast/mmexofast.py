@@ -572,10 +572,28 @@ class MMEXOFASTFitter:
                 print('Anomaly Params', self.anomaly_lc_params)
 
     def _fit_binary_models(self):
-        if self.emcee:
-            self.results = self.fit_anomaly()
+
+        def fit_wide_planet():
+            # So far, this only fits wide planet models in the GG97 limit.
+            # print(self.anomaly_lc_params)
+            wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
+                datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
+                #emcee_settings=self.emcee_settings, pool=self.pool)
+                )
             if self.verbose:
-                print('Results', self.results)
+                wide_planet_fitter.estimate_initial_parameters()
+                print('Initial 2L1S Wide Model', wide_planet_fitter.initial_model)
+                print('mag methods', wide_planet_fitter.mag_methods)
+
+            wide_planet_fitter.run()
+            return wide_planet_fitter.best
+
+        fit_wide_planet()
+        raise NotImplementedError('fitting binary models only partially implemented')
+        #if self.emcee:
+        #    self.results = self.fit_anomaly()
+        #    if self.verbose:
+        #        print('Results', self.results)
 
     # ---------------------------------------------------------------------
     # Data helpers:
@@ -641,7 +659,7 @@ class MMEXOFASTFitter:
         return ef_grid.best
 
     def do_af_grid_search(self):
-        self.set_residuals(self.initial_pspl_params)
+        self.set_residuals(self.all_fit_results.select_best_static_pspl().params)
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
         af_grid.run()
@@ -649,7 +667,8 @@ class MMEXOFASTFitter:
 
     def get_anomaly_lc_params(self):
         estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
-            datasets=self.datasets, pspl_params=self.initial_pspl_params, af_results=self.best_af_grid_point)
+            datasets=self.datasets, pspl_params=self.all_fit_results.select_best_static_pspl().params,
+            af_results=self.best_af_grid_point)
         return estimator.get_anomaly_lc_parameters()
 
     # ---------------------------------------------------------------------

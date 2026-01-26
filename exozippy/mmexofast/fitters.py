@@ -155,6 +155,7 @@ class SFitFitter(MulensFitter):
 
 
 class AnomalyFitter(MulensFitter):
+    default_emcee_settings = {}
 
     def __init__(self, datasets=None, anomaly_lc_params=None, **kwargs):
         super().__init__(**kwargs)

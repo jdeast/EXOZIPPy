@@ -255,6 +255,18 @@ class FitRecord:
             f")>"
         )
 
+    def chi2(self) -> Optional[float]:
+        """
+        Return chi^2 if available (from full_result.best['chi2']),
+        otherwise None.
+        """
+        if self.full_result is None:
+            return None
+        best = self.full_result.best
+        # your existing MMEXOFASTFitResults.best is a dict
+        return best.get("chi2")
+
+
 class AllFitResults:
     """
     Central registry for all fit results, keyed by mmexo.ModelKey.
@@ -299,3 +311,64 @@ class AllFitResults:
             lines.append(f"  {label!r}: {record}")
         lines.append(">")
         return "\n".join(lines)
+
+    def iter_point_lens_records(self):
+        """Yield (key, record) pairs for all point-lens models (PSPL/FSPL)."""
+        for key, record in self._records.items():
+            if key.lens_type == mmexo.LensType.POINT:
+                yield key, record
+
+    def select_best_static_pspl(self) -> Optional[FitRecord]:
+        """
+        Among all static PSPL models (point lens, point source, no parallax, no motion),
+        return the one with lowest chi^2. Returns None if not found or no chi^2.
+        """
+        best_record = None
+        best_chi2 = None
+
+        for key, record in self._records.items():
+            if not (
+                    key.lens_type == mmexo.LensType.POINT
+                    and key.source_type == mmexo.SourceType.POINT
+                    and key.parallax_branch == mmexo.ParallaxBranch.NONE
+                    and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
+            ):
+                continue
+
+            chi2 = record.chi2()
+            if chi2 is None:
+                continue
+
+            if best_chi2 is None or chi2 < best_chi2:
+                best_chi2 = chi2
+                best_record = record
+
+        return best_record
+
+    def select_best_parallax_pspl(self) -> Optional[FitRecord]:
+        """
+        Among all PSPL parallax models (point lens, point source,
+        parallax_branch != NONE, no orbital motion), return the one with
+        lowest chi^2. Returns None if not found or no chi^2.
+        """
+        best_record = None
+        best_chi2 = None
+
+        for key, record in self._records.items():
+            if not (
+                    key.lens_type == mmexo.LensType.POINT
+                    and key.source_type == mmexo.SourceType.POINT
+                    and key.parallax_branch != mmexo.ParallaxBranch.NONE
+                    and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
+            ):
+                continue
+
+            chi2 = record.chi2()
+            if chi2 is None:
+                continue
+
+            if best_chi2 is None or chi2 < best_chi2:
+                best_chi2 = chi2
+                best_record = record
+
+        return best_record

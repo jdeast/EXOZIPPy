@@ -12,14 +12,15 @@ from DC18_classes import dir_, TestDataSet
 def fit_lc(lc_num, verbose=False):
     data = TestDataSet(lc_num)
 
-    results = exozippy.mmexofast.fit(
+    fitter = exozippy.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
-        print_results=True, verbose=verbose, emcee=False, #emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
+        verbose=verbose,
+        # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
         log_file=os.path.join(
             exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
     )
 
-    return results
+    return fitter.all_fit_results
 
 
 def evaluate_results(lc_num):
@@ -36,10 +37,12 @@ for file_ in files:
     elements = file_.split('.')
     lc_nums.append(int(elements[-2]))
 
+# lc_nums = [4]  # favorite test case 004
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:
         results = fit_lc(lc_num, verbose=True)
+        print(results)
         evaluate_results(lc_num)
     except NotImplementedError:
         pass
