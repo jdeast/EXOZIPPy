@@ -267,6 +267,34 @@ class FitRecord:
         return best.get("chi2")
 
 
+@dataclass
+class GridSearchResult:
+    """
+    Results of a grid search, intended to be optionally persisted to disk.
+
+    Attributes
+    ----------
+    name : str
+        Short name of the grid search, e.g. 'EF', 'AF', 'PAR'.
+    param_names : tuple[str, ...]
+        Names of the grid parameters, e.g. ('s', 'q'), ('pi_E_N', 'pi_E_E').
+    grid_points : np.ndarray
+        Array of shape (N_points, n_params) containing grid coordinates.
+    chi2 : np.ndarray
+        Array of shape (N_points,) with chi^2 (or other scalar merit) values.
+    metadata : dict
+        Arbitrary extra info (datasets used, dates, config settings, etc.).
+    best_index : int
+        Index into grid_points / chi2 of the best point.
+    """
+    name: str
+    param_names: tuple[str, ...]
+    grid_points: np.ndarray
+    chi2: np.ndarray
+    metadata: Dict[str, Any]
+    best_index: int
+
+
 class AllFitResults:
     """
     Central registry for all fit results, keyed by mmexo.ModelKey.
