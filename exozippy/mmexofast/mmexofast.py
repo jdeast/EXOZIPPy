@@ -91,10 +91,17 @@ class MMEXOFASTFitter:
         # Set all config attributes
         self._set_config_attributes(config)
 
-        # Setup datasets and filename mapping
+        # Setup datasets - PRIORITY ORDER:
+        # 1. Explicitly provided datasets (highest priority)
+        # 2. Saved datasets from restart (preserves bad flags!)
+        # 3. Create from files
         if datasets is not None:
             self.datasets = datasets
-            self.dataset_to_filename = {}  # No filename info if datasets provided directly
+            self.dataset_to_filename = {}
+        elif 'datasets' in saved_state:
+            # Restore from pickle (preserves bad flags, error renorm, etc.)
+            self.datasets = saved_state['datasets']
+            self.dataset_to_filename = saved_state.get('dataset_to_filename', {})
         elif self.files is not None:
             self.datasets, self.dataset_to_filename = self._create_mulensdata_objects(self.files)
         else:
@@ -160,6 +167,7 @@ class MMEXOFASTFitter:
             'best_af_grid_point': self.best_af_grid_point,
             'anomaly_lc_params': self.anomaly_lc_params,
             'n_loc': self.n_loc,
+            'datasets': self.datasets,
         }
 
     def _load_restart_data(self, restart_file):
