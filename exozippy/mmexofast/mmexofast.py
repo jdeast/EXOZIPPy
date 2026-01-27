@@ -332,18 +332,13 @@ class MMEXOFASTFitter:
         - optional renormalization + refits
         """
         self._ensure_static_point_lens()  # shared
-        self._save_restart_state()
-
         self._ensure_static_finite_point_lens()  # shared (if finite_source)
-        self._save_restart_state()
-
         self._ensure_point_lens_parallax_models()  # shared (if you want)
-
-        self._save_restart_state()
+        if not self.verbose():
+            self._save_restart_state()
 
         if self.renormalize_errors:
             self.renormalize_errors_and_refit()
-            self._save_restart_state()
 
     def fit_binary_lens(self) -> None:
         """
@@ -412,6 +407,10 @@ class MMEXOFASTFitter:
             fixed=False,
         )
         self.all_fit_results.set(new_record)
+
+        if self.verbose:
+            self._save_restart_state()
+
         return new_record
 
     # ------------------------------------------------------------------
