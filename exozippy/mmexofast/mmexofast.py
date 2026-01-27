@@ -511,6 +511,7 @@ class MMEXOFASTFitter:
             initial_model_params=pspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'Initial SFit {fitter.best}')
+        self._log_file_only(fitter.get_diagnostic_str())
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -546,6 +547,7 @@ class MMEXOFASTFitter:
             initial_model_params=fspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'FSPL: {fitter.best}')
+        self._log_file_only(fitter.get_diagnostic_str())
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -691,6 +693,7 @@ class MMEXOFASTFitter:
             initial_model_params=par_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
+        self._log_file_only(fitter.get_diagnostic_str())
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
@@ -763,6 +766,7 @@ class MMEXOFASTFitter:
                 f'\nmag methods {wide_planet_fitter.mag_methods}')
 
             wide_planet_fitter.run()
+            self._log_file_only(wide_planet_fitter.get_diagnostic_str())
             return wide_planet_fitter.best
 
         fit_wide_planet()
@@ -1014,6 +1018,7 @@ class MMEXOFASTFitter:
             self.all_fit_results.set(new_record)
 
             self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
+            self._log_file_only(fitter.get_diagnostic_str())
 
     # ---------------------------------------------------------------------
     # External search helpers:

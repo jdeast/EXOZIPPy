@@ -79,6 +79,20 @@ class MulensFitter():
 
         return event
 
+    def get_diagnostic_str(self):
+        """ Print chi2 for each dataset and fitted fluxes."""
+        event = self.get_event()
+        event.fit_fluxes()
+        msg = f'\nModel:\n{event.model}\n\nDatasets:'
+        for i, dataset in enumerate(event.datasets):
+            msg += ('\n{0:20} {1:4} {2:12.2f} {3} {4}'.format(
+                dataset.plot_properties['label'], np.sum(dataset.good),
+                event.get_chi2_for_dataset(i),
+                event.fits[i].source_fluxes,
+                event.fits[i].blend_flux))
+
+        return msg
+
     @property
     def best(self):
         """
