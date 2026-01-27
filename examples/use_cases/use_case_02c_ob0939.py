@@ -37,7 +37,7 @@ coords='17:47:12.25 -21:22:58.7'
 
 print('=== Restart from pickle and Fit w/Error Renorm ===')
 cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
+    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',  # change "gr" back to "raw" later.
     renormalize_errors=True, parallax_grid=True, verbose=True,
     output_config=OutputConfig(
         base_dir=Path('test_output'), file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
@@ -54,6 +54,7 @@ cont_fitter.fit()
 # output:
 # A log file: ob0939_uc02c_gr.log
 #    with results at each stage of the fitting
+#    [TODO] Include fitted fluxes and full event/model info after major fits.
 #
 # diagnostic plots: ob0939_uc02c_gr_par_u0[p/m].png
 #

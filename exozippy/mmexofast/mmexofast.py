@@ -1002,14 +1002,17 @@ class MMEXOFASTFitter:
             # Use previous fit as starting point
             fitter.initial_model_params = fit_record.params
 
-            # Testing
-            #print(fitter.datasets)
-            #print(fitter.initial_model_params)
-            #print(fitter.get_event())
-            #fitter.verbose = True
-
             # Refit
             fitter.run()
+
+            full_result = mmexo.MMEXOFASTFitResults(fitter)
+            new_record = mmexo.FitRecord.from_full_result(
+                model_key=key,
+                full_result=full_result,
+                fixed=False,
+            )
+            self.all_fit_results.set(new_record)
+
             self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
 
     # ---------------------------------------------------------------------
