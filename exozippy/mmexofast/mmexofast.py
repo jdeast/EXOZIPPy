@@ -12,8 +12,11 @@ Architectural sketch for MMEXOFASTFitter with:
 
 from typing import Dict, Any, Optional, Iterable
 import pickle
+import inspect
 
 import pandas as pd
+from scipy.special import erfcinv
+import numpy as np
 import os.path
 
 import MulensModel
@@ -334,11 +337,12 @@ class MMEXOFASTFitter:
         self._ensure_static_point_lens()  # shared
         self._ensure_static_finite_point_lens()  # shared (if finite_source)
         self._ensure_point_lens_parallax_models()  # shared (if you want)
-        if not self.verbose():
+        if not self.verbose:
             self._save_restart_state()
 
         if self.renormalize_errors:
-            self.renormalize_errors_and_refit()
+            ref_model = self._select_preferred_point_lens().full_result.fitter.get_model()
+            self.renormalize_errors_and_refit(ref_model)
 
     def fit_binary_lens(self) -> None:
         """
@@ -475,6 +479,7 @@ class MMEXOFASTFitter:
     #    _get_parallax_initial_params
     #    _fit_pl_parallax_model
     #
+    #    _select_preferred_point_lens
     """
     # static point lenses
     def _fit_initial_pspl_model(
@@ -689,6 +694,48 @@ class MMEXOFASTFitter:
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
+    def _select_preferred_point_lens(
+            self,
+            delta_chi2_threshold: float = 50.0,
+    ) -> Optional[mmexo.FitRecord]:
+        """
+        Choose the preferred PSPL model for the binary workflow.
+
+        Policy:
+        - If any parallax models exist, pick the best parallax model.
+        - Compare its chi^2 to the best static PL chi^2.
+        - If (chi2_static - chi2_parallax) > delta_chi2_threshold,
+            → use parallax model.
+          Else
+            → use static PL model.
+        - If no parallax models exist, fall back to static PL.
+        - If neither exists (or no chi^2), return None.
+        """
+        # TODO: Expand to cover FSPL cases.
+
+        best_static = self.all_fit_results.select_best_static_pspl()
+        best_par = self.all_fit_results.select_best_parallax_pspl()
+
+        chi2_static = best_static.chi2() if best_static is not None else None
+        chi2_par = best_par.chi2() if best_par is not None else None
+
+        # Case 1: no parallax available or no parallax chi^2
+        if chi2_par is None:
+            return best_static
+
+        # Case 2: no static available or no static chi^2 → default to parallax
+        if chi2_static is None:
+            return best_par
+
+        # Case 3: both exist; apply threshold rule
+        improvement = chi2_static - chi2_par
+        if improvement > delta_chi2_threshold:
+            # parallax is significantly better
+            return best_par
+        else:
+            # static is as good or better (within threshold)
+            return best_static
+
     # ---------------------------------------------------------------------
     # Binary-lens helpers:
     # ---------------------------------------------------------------------
@@ -759,18 +806,211 @@ class MMEXOFASTFitter:
         """
         return None
 
-    def renormalize_errors_and_refit(self) -> None:
+    def renormalize_errors_and_refit(self, reference_model):
         """
-        Renormalize photometric errors based on selected best model, then
-        optionally refit some or all models.
+        Renormalize photometric errors and refit all models.
 
-        TODO: implement:
-        - choose reference model (e.g., best χ² among static PSPL/FSPL/parallax)
-        - compute new renorm factors per dataset
-        - update mmexo.FitRecord.renorm_factors for impacted models
-        - optionally clear is_complete and call run_fit_if_needed again.
+        Args:
+            reference_model (MulensModel.Model): The model to use as reference for
+                error renormalization. Can be obtained from a FitRecord via
+                FitRecord.full_result.get_model()
         """
-        raise NotImplementedError
+        # Renormalize errors using the reference model
+        error_factors = self._remove_outliers_and_calc_errfacs(reference_model)
+        self._apply_error_renormalization(error_factors)
+
+        # Refit all models with renormalized errors
+        self._refit_models()
+
+    def _remove_outliers_and_calc_errfacs(self, reference_model):
+        """
+        Iteratively remove outliers and calculate error renormalization factors.
+
+        Parameters
+        ----------
+        reference_model (MulensModel.Model): The model to use as reference for
+            error renormalization. Can be obtained from a FitRecord via
+            FitRecord.full_result.get_model()
+
+        Returns
+        -------
+        error_factors : list of float
+            Error renormalization factor for each dataset
+        """
+        # Create event for residual calculation
+        event = MulensModel.Event(datasets=self.datasets, model=reference_model)
+        event.fit_fluxes()
+
+        self._log("Starting outlier removal...")
+
+        error_factors = []
+
+        # Process each dataset
+        for i, dataset in enumerate(self.datasets):
+            dataset_name = dataset.plot_properties.get('label', f'Dataset {i}')
+            self._log(f"\nProcessing {dataset_name}:")
+
+            bad_index = -1
+            n_good = np.sum(dataset.good)
+            n_params = len(reference_model.parameters.as_dict())
+            found_bad = []
+
+            # Iteratively remove outliers
+            while (bad_index is not None) and (n_good > 0):
+                event.fit_fluxes()
+
+                n_good = np.sum(dataset.good)
+                dof = n_good - n_params
+
+                if dof <= 0:
+                    self._log(f"  Warning: dof={dof}, stopping outlier removal")
+                    break
+
+                # Calculate significance threshold
+                max_sig = np.max([np.sqrt(2) * erfcinv(1. / dof), 3])
+
+                # Get chi2 and error factor
+                chi2 = event.get_chi2_for_dataset(i)
+                errfac = np.sqrt(chi2 / dof)
+
+                self._log_file_only(f"  errfac={errfac:.3f}, n_good={n_good}, dof={dof}")
+
+                # Get residuals and calculate sigma
+                (res, err) = event.fits[i].get_residuals(phot_fmt='flux', bad=True)
+                sigma = np.abs(res / (err * errfac))
+
+                # Find outliers
+                n_still_bad = np.sum(sigma[dataset.good] > max_sig)
+
+                if n_still_bad > 0:
+                    # Find and mark the worst point
+                    i_worst = np.argmax(sigma[dataset.good])
+                    bad_index = np.argwhere(sigma == sigma[dataset.good][i_worst])[0]
+
+                    new_bad = dataset.bad.copy()
+                    new_bad[bad_index] = True
+                    dataset.bad = new_bad
+
+                    found_bad.append(bad_index[0])
+                    self._log_file_only(
+                        f"  Marked point {bad_index[0]} as bad: "
+                        f"n_bad={np.sum(dataset.bad)}, n_good={np.sum(dataset.good)}"
+                    )
+                else:
+                    bad_index = None
+
+            # Calculate final error factor
+            event.fit_fluxes()
+            final_chi2 = event.get_chi2_for_dataset(i)
+            final_dof = np.sum(dataset.good) - n_params
+
+            if final_dof > 0:
+                final_errfac = np.sqrt(final_chi2 / final_dof)
+            else:
+                final_errfac = 1.0
+
+            error_factors.append(final_errfac)
+
+            # Summary
+            if len(found_bad) > 0:
+                self._log(f"  Removed {len(found_bad)} outliers, errfac={final_errfac:.3f}")
+            else:
+                self._log(f"  No outliers removed, errfac={final_errfac:.3f}")
+
+        return error_factors
+
+    def _apply_error_renormalization(self, error_factors):
+        """
+        Recreate datasets with renormalized errors.
+
+        Parameters
+        ----------
+        error_factors : list of float
+            Error renormalization factor for each dataset
+        """
+        self._log("\nApplying error renormalization...")
+
+        new_datasets = []
+        new_dataset_to_filename = {}
+
+        # Get the signature of MulensData.__init__
+        sig = inspect.signature(MulensModel.MulensData.__init__)
+
+        for dataset, errfac in zip(self.datasets, error_factors):
+            # Get original filename if available
+            original_filename = self.dataset_to_filename.get(dataset)
+
+            # Build kwargs dict from original object's attributes
+            kwargs = {}
+            for param_name in sig.parameters:
+                if param_name in ['self', 'data_list', 'good', 'phot_fmt']:
+                    continue  # Skip these - we'll handle data_list separately
+
+                if hasattr(dataset, param_name):
+                    kwargs[param_name] = getattr(dataset, param_name)
+
+            # Create new dataset with scaled errors
+            new_dataset = MulensModel.MulensData(
+                data_list=[dataset.time, dataset.flux, errfac * dataset.err_flux],
+                phot_fmt='flux',
+                **kwargs
+            )
+
+            self._log(new_dataset)
+
+            ## Preserve important attributes
+            #new_dataset.bad = dataset.bad.copy()
+            #new_dataset.plot_properties = dataset.plot_properties.copy() if hasattr(dataset, 'plot_properties') else {}
+            #
+            #if hasattr(dataset, 'bandpass') and dataset.bandpass is not None:
+            #    new_dataset.bandpass = dataset.bandpass
+            #
+            #if hasattr(dataset, 'ephemerides_file') and dataset.ephemerides_file is not None:
+            #    new_dataset.ephemerides_file = dataset.ephemerides_file
+
+            new_datasets.append(new_dataset)
+
+            # Preserve filename mapping
+            if original_filename is not None:
+                new_dataset_to_filename[new_dataset] = original_filename
+
+        # Replace datasets
+        self.datasets = new_datasets
+        self.dataset_to_filename = new_dataset_to_filename
+
+        # Update flux fixing maps with new dataset objects
+        self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
+        self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
+
+        self._log("Datasets recreated with renormalized errors")
+
+    def _refit_models(self):
+        """
+        Refit all models using current datasets and previous fit results as
+        initial parameters.
+
+        Updates all_fit_results in place with new fit results.
+        """
+        self._log("\nUpdating fits...")
+        for key, fit_record in self.all_fit_results.items():
+            # Get the fitter object
+            fitter = fit_record.full_result.fitter
+
+            # Update with current (potentially renormalized) datasets
+            fitter.datasets = self.datasets
+
+            # Use previous fit as starting point
+            fitter.initial_model_params = fit_record.params
+
+            # Testing
+            #print(fitter.datasets)
+            #print(fitter.initial_model_params)
+            #print(fitter.get_event())
+            #fitter.verbose = True
+
+            # Refit
+            fitter.run()
+            self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
 
     # ---------------------------------------------------------------------
     # External search helpers:
