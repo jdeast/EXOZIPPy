@@ -351,6 +351,8 @@ class MMEXOFASTFitter:
             ref_model = self._select_preferred_point_lens().full_result.fitter.get_model()
             self.renormalize_errors_and_refit(ref_model)
 
+        self._save_restart_state()
+
         if self.parallax_grid:
             self._run_piE_grid_search()
 
@@ -760,34 +762,45 @@ class MMEXOFASTFitter:
             Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
         """
         import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
 
         # Find global minimum chi2 for consistent coloring
         all_chi2 = []
         for grid in grids.values():
             all_chi2.extend([r['chi2'] for r in grid.results])
+
         min_chi2 = min(all_chi2)
 
-        # Create figure with 2 panels
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        # Create figure with gridspec layout: 2 plots + colorbar
+        fig = plt.figure(figsize=(8, 6))
+        gs = gridspec.GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 0.05], wspace=0.3)
+
+        axes = [fig.add_subplot(gs[0]), fig.add_subplot(gs[1])]
+        cax = fig.add_subplot(gs[2])
 
         branches = [mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS]
 
-        for ax, branch in zip(axes, branches):
+        for i, (ax, branch) in enumerate(zip(axes, branches)):
             grid = grids[branch]
 
             # Plot grid points
             scatter = grid.plot_grid_points(ax=ax, min_chi2=min_chi2)
 
             # Formatting
-            ax.set_xlabel('pi_E_E')
-            ax.set_ylabel('pi_E_N')
+            ax.set_xlabel(r'$\pi_{\rm E,E}$')
+            ax.set_ylabel(r'$\pi_{\rm E,N}$')
             ax.set_title(branch.value)
             ax.invert_xaxis()
             ax.set_aspect('equal')
             ax.minorticks_on()
 
-        # Add common colorbar
-        fig.colorbar(scatter, ax=axes, label='sigma')
+            # Turn off y-axis label and tick labels on right plot
+            if i == 1:
+                ax.set_ylabel('')
+                ax.tick_params(labelleft=False)
+
+        # Add colorbar
+        fig.colorbar(scatter, cax=cax, label=r'$\sigma$ (min $\chi^2$ = ' + f'{min_chi2:.2f})')
 
         # Save plot
         self.output.save_plot('piE_grid', fig)
@@ -981,7 +994,6 @@ class MMEXOFASTFitter:
 
         # Refit all models with renormalized errors
         self._refit_models()
-        self._save_restart_state()
 
     def _remove_outliers_and_calc_errfacs(self, reference_model):
         """

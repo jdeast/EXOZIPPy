@@ -122,7 +122,6 @@ class EventFinderGridSearch():
         -------
         fig : matplotlib.figure.Figure
         """
-        import matplotlib.pyplot as plt
 
         if self.results is None:
             raise ValueError("Must run grid search before plotting. Call .run() first.")
@@ -719,7 +718,16 @@ class BaseRectGridSearch(ABC):
             grid: *np.ndarray*
                 1D array of parameter values
         """
-        return np.arange(param_min, param_max + step / 2., step)
+        n_steps = int(np.round((param_max - param_min) / step)) + 1
+
+        # Use linspace for exact spacing without accumulation errors
+        grid = np.linspace(param_min, param_max, n_steps)
+        # Round to eliminate floating-point errors
+        # Determine decimal places based on step size
+        decimal_places = max(0, -int(np.floor(np.log10(abs(step)))) + 1)
+        grid = np.round(grid, decimals=decimal_places)
+        return grid
+
 
     def _log_grid_1d(self, param_min, param_max, n_steps):
         """
@@ -882,35 +890,80 @@ class ParallaxGridSearch(BaseRectGridSearch):
 
     def _spiral_order_grid(self):
         """
-        Reorder grid points to spiral out from (0, 0).
+        Reorder grid points in counter-clockwise rectangular spiral from (0, 0).
 
         Returns
         -------
         list of dict
-            Grid points ordered by distance from closest point to (0, 0)
+            Grid points ordered in counter-clockwise spiral starting from
+            the point closest to (0, 0)
         """
-        # Find grid point closest to (0, 0)
-        min_dist = float('inf')
-        start_idx = 0
+        # Organize grid into 2D array
+        pi_E_E_vals = sorted(set(p['pi_E_E'] for p in self._grid))
+        pi_E_N_vals = sorted(set(p['pi_E_N'] for p in self._grid))
 
-        for i, point in enumerate(self._grid):
+        # Create mapping from (i, j) to grid point
+        grid_2d = {}
+        for point in self._grid:
+            i = pi_E_E_vals.index(point['pi_E_E'])
+            j = pi_E_N_vals.index(point['pi_E_N'])
+            grid_2d[(i, j)] = point
+
+        # Find starting point closest to (0, 0)
+        min_dist = float('inf')
+        start_i, start_j = 0, 0
+        for (i, j), point in grid_2d.items():
             dist = np.sqrt(point['pi_E_E'] ** 2 + point['pi_E_N'] ** 2)
             if dist < min_dist:
                 min_dist = dist
-                start_idx = i
+                start_i, start_j = i, j
 
-        # Sort all points by distance from the starting point
-        start_point = self._grid[start_idx]
+        ni = len(pi_E_E_vals)
+        nj = len(pi_E_N_vals)
 
-        def distance_from_start(point):
-            return np.sqrt(
-                (point['pi_E_E'] - start_point['pi_E_E']) ** 2 +
-                (point['pi_E_N'] - start_point['pi_E_N']) ** 2
-            )
+        spiral_order = [(start_i, start_j)]
+        visited = {(start_i, start_j)}
 
-        spiral_grid = sorted(self._grid, key=distance_from_start)
+        # Spiral outward layer by layer (counter-clockwise)
+        layer = 1
+        while len(visited) < len(grid_2d):
+            # Define bounds for this layer
+            i_min = max(0, start_i - layer)
+            i_max = min(ni - 1, start_i + layer)
+            j_min = max(0, start_j - layer)
+            j_max = min(nj - 1, start_j + layer)
 
-        return spiral_grid
+            # Bottom-left corner, then up left edge
+            for j in range(j_min, j_max + 1):
+                i, j_idx = i_min, j
+                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
+                    spiral_order.append((i, j_idx))
+                    visited.add((i, j_idx))
+
+            # Top edge (left to right), skip first point (already added)
+            for i in range(i_min + 1, i_max + 1):
+                j_idx = j_max
+                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
+                    spiral_order.append((i, j_idx))
+                    visited.add((i, j_idx))
+
+            # Right edge (top to bottom), skip first point
+            for j in range(j_max - 1, j_min - 1, -1):
+                i = i_max
+                if (i, j) not in visited and (i, j) in grid_2d:
+                    spiral_order.append((i, j))
+                    visited.add((i, j))
+
+            # Bottom edge (right to left), skip corners
+            for i in range(i_max - 1, i_min, -1):
+                j_idx = j_min
+                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
+                    spiral_order.append((i, j_idx))
+                    visited.add((i, j_idx))
+
+            layer += 1
+
+        return [grid_2d[idx] for idx in spiral_order]
 
     def _fit_grid_point(self, grid_params):
         """
@@ -930,6 +983,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
             Contains 'chi2', 'params' (best-fit parameters),
             'success', and any other fitter output
         """
+        parameters_to_fit = list(self.static_params.keys())
         # Combine current params with this grid point's parallax values
         model_params = self.current_params.copy()
         model_params['pi_E_E'] = grid_params['pi_E_E']
@@ -940,6 +994,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
             fitter = mmexo.fitters.SFitFitter(
                 initial_model_params=model_params,
                 datasets=self.datasets,
+                parameters_to_fit=parameters_to_fit,
                 **self.fitter_kwargs
             )
             fitter.run()
@@ -1058,7 +1113,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
 
                     f.write('  '.join(row) + '\n')
 
-    def plot_grid_points(self, ax=None, cmap='viridis_r', min_chi2=None):
+    def plot_grid_points(self, ax=None, cmap='Set1', min_chi2=None):
         """
         Plot grid search results as colored points.
 
@@ -1099,7 +1154,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
         sigma = [np.sqrt(c - min_chi2) for c in chi2]
 
         # Create scatter plot
-        scatter = ax.scatter(pi_E_E, pi_E_N, c=sigma, cmap=cmap, s=50)
+        scatter = ax.scatter(pi_E_E, pi_E_N, c=sigma, cmap=cmap, vmin=0, vmax=9, s=50)
 
         return scatter
 

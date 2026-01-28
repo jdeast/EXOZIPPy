@@ -51,20 +51,20 @@ cont_fitter.fit()
 # Need to implement:
 # 1. [DONE] Error Renormalization and outlier removal
 # 2. [DONE] Refitting
-# 3. Parallax grids
+# 3. [INPROGRESS] Parallax grids
 #
 # output:
-# A log file: ob0939_uc02c_gr.log
+# A log file: ob0939_uc02c_gr.log [DONE]
 #    with results at each stage of the fitting
-#    [TODO] Include fitted fluxes and full event/model info after major fits.
+#    [DONE] Include fitted fluxes and full event/model info after major fits.
 #
-# diagnostic plots: ob0939_uc02c_gr_par_u0[p/m].png
+# diagnostic plots: ob0939_uc02c_gr_piE_grid.png [DONE]
 #
-# piE grids: ob0939_uc02c_gr_par_grid_u0[p/m].txt
+# piE grids: ob0939_uc02c_gr_par_grid_u0_[PLUS/MINUS].txt [DONE]
 #
-# latex table: ob0939_uc02c_gr_results.tex
+# latex table: ob0939_uc02c_gr_results.tex [DONE]
 #
-# restart_files: ob0939_uc02c_gr_restart.pkl
+# restart_files: ob0939_uc02c_gr_restart.pkl [TODO: doesn't save the renormalization factors for the datasets.]
 #    containing everything needed to initialize the next step
 # ------
 
