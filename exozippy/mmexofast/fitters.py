@@ -84,6 +84,7 @@ class MulensFitter():
         event = self.get_event()
         event.fit_fluxes()
         msg = f'\nModel:\n{event.model}\n\nDatasets:'
+        msg += '\n{0:20} {1:>4} {2:>12} {3} {4}'.format('Label', 'N_good', 'chi2', 'f_source', 'f_blend')
         for i, dataset in enumerate(event.datasets):
             msg += ('\n{0:20} {1:4} {2:12.2f} {3} {4}'.format(
                 dataset.plot_properties['label'], np.sum(dataset.good),

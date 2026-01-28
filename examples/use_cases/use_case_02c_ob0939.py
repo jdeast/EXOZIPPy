@@ -51,7 +51,7 @@ cont_fitter.fit()
 # Need to implement:
 # 1. [DONE] Error Renormalization and outlier removal
 # 2. [DONE] Refitting
-# 3. [INPROGRESS] Parallax grids
+# 3. [DONE] Parallax grids
 #
 # output:
 # A log file: ob0939_uc02c_gr.log [DONE]
@@ -64,7 +64,7 @@ cont_fitter.fit()
 #
 # latex table: ob0939_uc02c_gr_results.tex [DONE]
 #
-# restart_files: ob0939_uc02c_gr_restart.pkl [TODO: doesn't save the renormalization factors for the datasets.]
+# restart_files: ob0939_uc02c_gr_restart.pkl [DONE]
 #    containing everything needed to initialize the next step
 # ------
 
