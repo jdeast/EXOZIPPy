@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 
 import MulensModel
 import sfit_minimizer
-
+import exozippy.mmexofast as mmexo
 
 # ---------------------------------------------------------------------
 # EventFinder & AnomalyFinder Grid searches:
@@ -641,7 +641,7 @@ class BaseRectGridSearch(ABC):
         Returns:
             result: *dict*
                 Must contain at least 'chi2'. Can include additional keys
-                like 'params', 'converged', etc.
+                like 'params', 'success', etc.
         """
         pass
 
@@ -776,8 +776,8 @@ class ParallaxGridSearch(BaseRectGridSearch):
     """
 
     def __init__(self, datasets, static_params, grid_params=None,
-                 pi_E_E_min=-0.5, pi_E_E_max=0.5, pi_E_E_step=0.05,
-                 pi_E_N_min=-0.5, pi_E_N_max=0.5, pi_E_N_step=0.05,
+                 pi_E_E_min=-0.7, pi_E_E_max=0.7, pi_E_E_step=0.05,
+                 pi_E_N_min=-1.0, pi_E_N_max=1.0, pi_E_N_step=0.1,
                  fitter_kwargs=None, verbose=False):
         """
         Parameters:
@@ -856,11 +856,8 @@ class ParallaxGridSearch(BaseRectGridSearch):
         Returns:
             result: *dict*
                 Contains 'chi2', 'params' (best-fit parameters),
-                'converged', and any other fitter output
+                'success', and any other fitter output
         """
-        # Import here to avoid circular imports if needed
-        import mmexo.fitters
-
         # Combine static params with this grid point's parallax values
         model_params = self.static_params.copy()
         model_params['pi_E_E'] = grid_params['pi_E_E']
@@ -878,16 +875,17 @@ class ParallaxGridSearch(BaseRectGridSearch):
             result = {
                 'chi2': fitter.chi2,
                 'params': fitter.best_fit_params,
-                'converged': fitter.converged if hasattr(fitter, 'converged') else True,
+                'success': fitter.results.success,
             }
 
         except Exception as e:
             if self.verbose:
                 print(f"  Fit failed: {e}")
+                
             result = {
                 'chi2': np.nan,
                 'params': None,
-                'converged': False,
+                'success': False,
                 'error': str(e)
             }
 
@@ -1030,9 +1028,8 @@ class BinaryGridSearch(BaseRectGridSearch):
         Returns:
             result: *dict*
                 Contains 'chi2', 'params' (best-fit parameters),
-                'converged', and any other fitter output
+                'success', and any other fitter output
         """
-        import mmexo.fitters
 
         # Combine static params with this grid point's binary values
         model_params = self.static_params.copy()
@@ -1052,7 +1049,7 @@ class BinaryGridSearch(BaseRectGridSearch):
             result = {
                 'chi2': fitter.chi2,
                 'params': fitter.best_fit_params,
-                'converged': fitter.converged if hasattr(fitter, 'converged') else True,
+                'success': fitter.converged if hasattr(fitter, 'success') else True,
             }
 
         except Exception as e:
@@ -1061,7 +1058,7 @@ class BinaryGridSearch(BaseRectGridSearch):
             result = {
                 'chi2': np.nan,
                 'params': None,
-                'converged': False,
+                'success': False,
                 'error': str(e)
             }
 

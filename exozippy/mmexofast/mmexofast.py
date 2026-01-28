@@ -77,7 +77,7 @@ class MMEXOFASTFitter:
             limb_darkening_coeffs_u=None,
             limb_darkening_coeffs_gamma=None,
             fix_blend_flux=None,
-            fix_sourc_flux=None,
+            fix_source_flux=None,
             renormalize_errors=False,
             parallax_grid=False,
             verbose=False,
