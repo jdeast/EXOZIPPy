@@ -1,5 +1,7 @@
 import numpy as np
 from abc import ABC, abstractmethod
+import datetime
+import matplotlib.pyplot as plt
 
 import MulensModel
 import sfit_minimizer
@@ -804,6 +806,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
         super().__init__(datasets=datasets, verbose=verbose)
 
         self.static_params = static_params.copy()
+        self.current_params = static_params.copy()  # Working copy
 
         # If grid_params dict is provided, use it; otherwise build from individual params
         if grid_params is not None:
@@ -845,21 +848,90 @@ class ParallaxGridSearch(BaseRectGridSearch):
             ['pi_E_E', 'pi_E_N']
         )
 
+    def run(self):
+        """
+        Execute the grid search by iterating over all grid points in spiral order.
+
+        Starts from the grid point closest to (0, 0) and spirals outward,
+        using the best-fit parameters from the previous point as the starting
+        point for each new fit.
+        """
+        if self._grid is None:
+            self._setup_grid()
+
+        # Reorder grid in spiral pattern starting from (0, 0)
+        spiral_grid = self._spiral_order_grid()
+
+        results = []
+        n_total = len(spiral_grid)
+
+        for i, grid_params in enumerate(spiral_grid):
+            if self.verbose:
+                print(f"Grid point {i + 1}/{n_total}: {grid_params}")
+
+            result = self._fit_grid_point(grid_params)
+
+            # Merge grid parameters with fit results
+            full_result = {**grid_params, **result}
+            results.append(full_result)
+
+            if self.verbose:
+                print(f"  chi2 = {result.get('chi2', 'N/A')}")
+
+        self.results = results
+
+    def _spiral_order_grid(self):
+        """
+        Reorder grid points to spiral out from (0, 0).
+
+        Returns
+        -------
+        list of dict
+            Grid points ordered by distance from closest point to (0, 0)
+        """
+        # Find grid point closest to (0, 0)
+        min_dist = float('inf')
+        start_idx = 0
+
+        for i, point in enumerate(self._grid):
+            dist = np.sqrt(point['pi_E_E'] ** 2 + point['pi_E_N'] ** 2)
+            if dist < min_dist:
+                min_dist = dist
+                start_idx = i
+
+        # Sort all points by distance from the starting point
+        start_point = self._grid[start_idx]
+
+        def distance_from_start(point):
+            return np.sqrt(
+                (point['pi_E_E'] - start_point['pi_E_E']) ** 2 +
+                (point['pi_E_N'] - start_point['pi_E_N']) ** 2
+            )
+
+        spiral_grid = sorted(self._grid, key=distance_from_start)
+
+        return spiral_grid
+
     def _fit_grid_point(self, grid_params):
         """
         Run SFitFitter for one grid point.
 
-        Parameters:
-            grid_params: *dict*
-                Contains 'pi_E_E' and 'pi_E_N' for this grid point
+        Uses self.current_params as the starting point, which gets updated
+        with the best-fit from each successful fit.
 
-        Returns:
-            result: *dict*
-                Contains 'chi2', 'params' (best-fit parameters),
-                'success', and any other fitter output
+        Parameters
+        ----------
+        grid_params : dict
+            Contains 'pi_E_E' and 'pi_E_N' for this grid point
+
+        Returns
+        -------
+        dict
+            Contains 'chi2', 'params' (best-fit parameters),
+            'success', and any other fitter output
         """
-        # Combine static params with this grid point's parallax values
-        model_params = self.static_params.copy()
+        # Combine current params with this grid point's parallax values
+        model_params = self.current_params.copy()
         model_params['pi_E_E'] = grid_params['pi_E_E']
         model_params['pi_E_N'] = grid_params['pi_E_N']
 
@@ -872,16 +944,22 @@ class ParallaxGridSearch(BaseRectGridSearch):
             )
             fitter.run()
 
+            params = {key: value for key, value in fitter.best.items()}
+            params.pop("chi2", None)
             result = {
-                'chi2': fitter.chi2,
-                'params': fitter.best_fit_params,
+                'chi2': fitter.best['chi2'],
+                'params': params,
                 'success': fitter.results.success,
             }
+
+            # Update current_params with best fit for next iteration
+            if result['success'] and result['params'] is not None:
+                self.current_params.update(result['params'])
 
         except Exception as e:
             if self.verbose:
                 print(f"  Fit failed: {e}")
-                
+
             result = {
                 'chi2': np.nan,
                 'params': None,
@@ -890,6 +968,140 @@ class ParallaxGridSearch(BaseRectGridSearch):
             }
 
         return result
+
+    def save_results(self, filepath, parallax_branch=None):
+        """
+        Save grid search results to ASCII file.
+
+        Parameters
+        ----------
+        filepath : str or Path
+            Full path where results should be saved
+        parallax_branch : str or None, optional
+            Optional parallax branch identifier for metadata
+
+        Raises
+        ------
+        ValueError
+            If no results exist (grid search hasn't been run yet)
+        """
+        if self.results is None:
+            raise ValueError("No results to save. Run grid search first.")
+
+        # Create a temporary fitter to get diagnostic string for metadata
+        temp_fitter = mmexo.fitters.SFitFitter(
+            initial_model_params=self.static_params,
+            datasets=self.datasets,
+            **self.fitter_kwargs
+        )
+
+        with open(filepath, 'w') as f:
+            # Write metadata header
+            f.write("# ParallaxGridSearch Results\n")
+            f.write(f"# Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            if parallax_branch is not None:
+                f.write(f"# Parallax Branch: {parallax_branch}\n")
+            f.write(f"# Grid: pi_E_E=[{self.grid_params['pi_E_E_min']}, "
+                    f"{self.grid_params['pi_E_E_max']}] step={self.grid_params['pi_E_E_step']}, "
+                    f"pi_E_N=[{self.grid_params['pi_E_N_min']}, "
+                    f"{self.grid_params['pi_E_N_max']}] step={self.grid_params['pi_E_N_step']}\n")
+            f.write("#\n")
+            f.write("# Reference Model:\n")
+
+            # Write diagnostic string with # prefix on each line
+            diagnostic_str = temp_fitter.get_diagnostic_str()
+            for line in diagnostic_str.split('\n'):
+                f.write(f"# {line}\n")
+
+            f.write("#\n")
+
+            # Determine column names from first result
+            if len(self.results) > 0:
+                # Start with grid params, then chi2, success, then fit params
+                first_result = self.results[0]
+
+                # Grid parameters
+                grid_param_names = ['pi_E_E', 'pi_E_N']
+
+                # Standard columns
+                standard_cols = ['chi2', 'success']
+
+                # Best-fit parameter names (if they exist)
+                fit_param_names = []
+                if first_result.get('params') is not None:
+                    fit_param_names = list(first_result['params'].keys())
+
+                all_column_names = grid_param_names + standard_cols + fit_param_names
+
+                # Write column header
+                f.write('# ' + '  '.join(all_column_names) + '\n')
+
+                # Write data rows
+                for result in self.results:
+                    row = []
+
+                    # Grid params
+                    for name in grid_param_names:
+                        row.append(str(result[name]))
+
+                    # Standard columns
+                    row.append(str(result['chi2']))
+                    row.append(str(result['success']))
+
+                    # Fit params
+                    if result.get('params') is not None:
+                        for name in fit_param_names:
+                            row.append(str(result['params'][name]))
+                    else:
+                        # Fill with NaN if fit failed
+                        row.extend(['nan'] * len(fit_param_names))
+
+                    f.write('  '.join(row) + '\n')
+
+    def plot_grid_points(self, ax=None, cmap='viridis_r', min_chi2=None):
+        """
+        Plot grid search results as colored points.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes to plot on. If None, uses current axes.
+        cmap : str, optional
+            Colormap name for chi2 values. Default is 'viridis_r'.
+        min_chi2 : float or None, optional
+            Minimum chi2 value for calculating sigma. If None, uses the
+            minimum chi2 from this grid's results.
+
+        Returns
+        -------
+        matplotlib.collections.PathCollection
+            The scatter plot object (can be used for colorbar)
+
+        Raises
+        ------
+        ValueError
+            If no results exist (grid search hasn't been run yet)
+        """
+        if self.results is None:
+            raise ValueError("No results to plot. Run grid search first.")
+
+        if ax is None:
+            ax = plt.gca()
+
+        # Extract data for plotting
+        pi_E_E = [r['pi_E_E'] for r in self.results]
+        pi_E_N = [r['pi_E_N'] for r in self.results]
+        chi2 = [r['chi2'] for r in self.results]
+
+        # Calculate sigma (delta chi2 from minimum)
+        if min_chi2 is None:
+            min_chi2 = min(chi2)
+        sigma = [np.sqrt(c - min_chi2) for c in chi2]
+
+        # Create scatter plot
+        scatter = ax.scatter(pi_E_E, pi_E_N, c=sigma, cmap=cmap, s=50)
+
+        return scatter
 
 
 class BinaryGridSearch(BaseRectGridSearch):

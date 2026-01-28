@@ -120,6 +120,13 @@ class MMEXOFASTFitter:
         # Output
         self.output = mmexo.OutputManager(output_config, verbose=self.verbose) if output_config is not None else None
 
+        if self.parallax_grid:
+            if not (self.output.config.save_plots or self.output.config.save_grid_results):
+                raise ValueError(
+                    "parallax_grid is enabled but neither save_plots nor save_grid_results "
+                    "is set in output config. At least one must be enabled to use parallax_grid."
+                )
+
         # Restore state
         self._restore_state(saved_state)
 
@@ -343,6 +350,9 @@ class MMEXOFASTFitter:
         if self.renormalize_errors:
             ref_model = self._select_preferred_point_lens().full_result.fitter.get_model()
             self.renormalize_errors_and_refit(ref_model)
+
+        if self.parallax_grid:
+            self._run_piE_grid_search()
 
     def fit_binary_lens(self) -> None:
         """
@@ -697,6 +707,152 @@ class MMEXOFASTFitter:
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
+    def _run_piE_grid_search(self):
+        """
+        Run parallax grid search over pi_E_E and pi_E_N for U0_PLUS and U0_MINUS branches.
+
+        For each branch, performs a grid search and optionally saves results and/or plots.
+        Results are saved to files named: {file_head}_piE_grid_{branch}.txt
+        Plot is saved as: {file_head}_piE_grid.png
+        """
+        # Get reference model
+        reference_fit = self._select_preferred_static_point_lens_model()
+        reference_model = reference_fit.full_result.fitter.get_model()
+        static_params = reference_model.parameters.parameters  # or however you get params dict
+
+        # Iterate over parallax branches
+        branches = [mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS]
+
+        grids = {}  # Store grid objects for plotting
+
+        for branch in branches:
+            self.output.log(f"Running piE grid search for {branch.value}")
+
+            # Create and run grid search
+            grid = mmexo.ParallaxGridSearch(
+                datasets=self.datasets,
+                static_params=static_params,
+                fitter_kwargs=self._get_fitter_kwargs(),
+                verbose=self.verbose,
+            )
+            grid.run()
+
+            grids[branch] = grid
+
+            # Save results if configured
+            if self.output.config.save_grid_results:
+                filename = f"{self.output.config.file_head}_piE_grid_{branch.value.lower()}.txt"
+                filepath = self.output.config.base_dir / filename
+                grid.save_results(filepath, parallax_branch=branch.value)
+                self.output.log(f"Saved grid results to {filepath}")
+
+        # Create plot if configured
+        if self.output.config.save_plots:
+            self._plot_piE_grid_search(grids)
+
+    def _plot_piE_grid_search(self, grids):
+        """
+        Create 2-panel plot of piE grid search results.
+
+        Parameters
+        ----------
+        grids : dict
+            Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
+        """
+        import matplotlib.pyplot as plt
+
+        # Find global minimum chi2 for consistent coloring
+        all_chi2 = []
+        for grid in grids.values():
+            all_chi2.extend([r['chi2'] for r in grid.results])
+        min_chi2 = min(all_chi2)
+
+        # Create figure with 2 panels
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        branches = [mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS]
+
+        for ax, branch in zip(axes, branches):
+            grid = grids[branch]
+
+            # Plot grid points
+            scatter = grid.plot_grid_points(ax=ax, min_chi2=min_chi2)
+
+            # Formatting
+            ax.set_xlabel('pi_E_E')
+            ax.set_ylabel('pi_E_N')
+            ax.set_title(branch.value)
+            ax.invert_xaxis()
+            ax.set_aspect('equal')
+            ax.minorticks_on()
+
+        # Add common colorbar
+        fig.colorbar(scatter, ax=axes, label='sigma')
+
+        # Save plot
+        self.output.save_plot('piE_grid', fig)
+
+    def _select_preferred_static_point_lens_model(self, chi2_threshold=20):
+        """
+        Select the preferred static point lens model from self.all_fit_results.
+
+        If only PSPL or FSPL exists, return that one.
+        If both exist, return FSPL only if its chi2 is better than PSPL by
+        chi2_threshold.
+
+        Parameters
+        ----------
+        chi2_threshold : float, optional
+            Minimum chi2 improvement required to prefer FSPL over PSPL.
+            Default is 20.
+
+        Returns
+        -------
+        FitRecord
+            The preferred static point lens fit result
+
+        Raises
+        ------
+        ValueError
+            If no static point lens models exist
+        """
+        pspl_key = mmexo.ModelKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.POINT,
+            parallax_branch=mmexo.ParallaxBranch.NONE,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE
+        )
+
+        fspl_key = mmexo.ModelKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.FINITE,
+            parallax_branch=mmexo.ParallaxBranch.NONE,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE
+        )
+
+        pspl_fit = self.all_fit_results.get(pspl_key)
+        fspl_fit = self.all_fit_results.get(fspl_key)
+
+        # Check if at least one exists
+        if pspl_fit is None and fspl_fit is None:
+            raise ValueError("No static point lens models found in all_fit_results")
+
+        # If only one exists, return it
+        if pspl_fit is None:
+            return fspl_fit
+        if fspl_fit is None:
+            return pspl_fit
+
+        # Both exist - compare chi2
+        pspl_chi2 = pspl_fit.full_result.fitter.chi2
+        fspl_chi2 = fspl_fit.full_result.fitter.chi2
+
+        # Return FSPL only if significantly better
+        if fspl_chi2 < pspl_chi2 - chi2_threshold:
+            return fspl_fit
+        else:
+            return pspl_fit
+
     def _select_preferred_point_lens(
             self,
             delta_chi2_threshold: float = 50.0,
@@ -716,7 +872,7 @@ class MMEXOFASTFitter:
         """
         # TODO: Expand to cover FSPL cases.
 
-        best_static = self.all_fit_results.select_best_static_pspl()
+        best_static = self._select_preferred_static_point_lens_model()
         best_par = self.all_fit_results.select_best_parallax_pspl()
 
         chi2_static = best_static.chi2() if best_static is not None else None
@@ -825,6 +981,7 @@ class MMEXOFASTFitter:
 
         # Refit all models with renormalized errors
         self._refit_models()
+        self._save_restart_state()
 
     def _remove_outliers_and_calc_errfacs(self, reference_model):
         """
