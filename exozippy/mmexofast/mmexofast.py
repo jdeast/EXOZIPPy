@@ -119,7 +119,17 @@ class MMEXOFASTFitter:
             raise ValueError("Must provide files, datasets, or restart_file")
 
         # Recalculate n_loc based on current datasets
+        old_n_loc = saved_state.get('n_loc')
         self.n_loc = self._count_loc()
+
+        # If datasets were updated, old fit results need to be refit
+        self._datasets_changed = False
+        if (files or datasets) and saved_state.get('all_fit_results'):
+            self._datasets_changed = True
+
+            # If n_loc changed, also remove parallax fits (wrong branches)
+            if old_n_loc is not None and old_n_loc != self.n_loc:
+                self._remove_parallax_fits()
 
         # Map flux fixing options using filename mapping
         self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
@@ -205,6 +215,23 @@ class MMEXOFASTFitter:
         self.best_ef_grid_point = saved_state.get('best_ef_grid_point')
         self.best_af_grid_point = saved_state.get('best_af_grid_point')
         self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
+
+    def _remove_parallax_fits(self):
+        """
+        Remove parallax fits from all_fit_results.
+
+        Called when n_loc changes, since parallax branches depend on n_loc.
+        Keeps static point lens models (PSPL/FSPL) which are n_loc-independent.
+        """
+        keys_to_remove = []
+
+        for key in self.all_fit_results:
+            # Remove if parallax branch is not NONE
+            if key.parallax_branch != mmexo.ParallaxBranch.NONE:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            del self.all_fit_results[key]
 
     # ---------------------------------------------------------------------
     # Loading initial (user-supplied) information
@@ -389,6 +416,10 @@ class MMEXOFASTFitter:
             raise ValueError(
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
+
+        # If datasets changed, refit existing models
+        if self._datasets_changed:
+            self._refit_models()
 
         if self.fit_type == 'point lens':
             self.fit_point_lens()
