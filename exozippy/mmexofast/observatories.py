@@ -259,7 +259,7 @@ register_observatory(Observatory(
     phot_fmt='flux',
     usecols=[0, 1, 2],
     ephemerides_file=os.path.join(
-        exozippy.MULENS_DATA_PATH, 'spitzer_ephemerides_2015_to_2019.txt'),
+        exozippy.MULENS_DATA_PATH, 'spitzer_ephemerides_2014_to_2019.txt'),
     bands={
         'L': {'color': 'red', 'marker': 'o'}
     }
