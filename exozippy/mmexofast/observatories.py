@@ -121,6 +121,13 @@ def register_observatory(observatory):
     OBSERVATORIES[observatory.name] = observatory
 
 
+# Create reverse mapping from ephemerides_file to observatory name
+EPHEMERIDES_TO_OBSERVATORY = {
+    obs.ephemerides_file: name
+    for name, obs in OBSERVATORIES.items()
+    if obs.ephemerides_file is not None
+}
+
 # ============================================================================
 # Utility Functions
 # ============================================================================

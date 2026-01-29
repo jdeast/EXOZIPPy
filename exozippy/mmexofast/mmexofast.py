@@ -216,6 +216,31 @@ class MMEXOFASTFitter:
         self.best_af_grid_point = saved_state.get('best_af_grid_point')
         self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
 
+    def _load_initial_results(self, initial_results: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Load user-supplied initial results into mmexo.AllFitResults.
+
+        Expected format for each entry:
+        {
+            "params": {...},              # required
+            "sigmas": {...},              # optional
+            "renorm_factors": {...},      # optional
+            "fixed": bool,                # optional
+        }
+        """
+        for label, payload in initial_results.items():
+            key = mmexo.model_types.label_to_model_key(label)
+            record = mmexo.FitRecord(
+                model_key=key,
+                params=payload["params"],
+                sigmas=payload.get("sigmas"),
+                renorm_factors=payload.get("renorm_factors"),
+                full_result=None,
+                fixed=payload.get("fixed", False),
+                is_complete=False,
+            )
+            self.all_fit_results.set(record)
+
     def _remove_parallax_fits(self):
         """
         Remove parallax fits from all_fit_results.
@@ -234,8 +259,9 @@ class MMEXOFASTFitter:
             del self.all_fit_results[key]
 
     # ---------------------------------------------------------------------
-    # Loading initial (user-supplied) information
+    # Working with datasets:
     # ---------------------------------------------------------------------
+    # filenames and loading
     def _create_mulensdata_objects(self, files, saved_datasets=None):
         """
         Create MulensData objects, reusing saved datasets when filenames match.
@@ -315,48 +341,6 @@ class MMEXOFASTFitter:
 
         return result
 
-    def _count_loc(self):
-        """
-        # Determine how many locations (e.g. Earth vs. Earth + Space) an event was observed from.
-        # :return:
-        """
-
-        if len(self.datasets) == 1:
-            return 1
-
-        else:
-            locs = []
-            for dataset in self.datasets:
-                if dataset.ephemerides_file not in locs:
-                    locs.append(dataset.ephemerides_file)
-
-            return len(locs)
-
-    def _load_initial_results(self, initial_results: Dict[str, Dict[str, Any]]) -> None:
-        """
-        Load user-supplied initial results into mmexo.AllFitResults.
-
-        Expected format for each entry:
-        {
-            "params": {...},              # required
-            "sigmas": {...},              # optional
-            "renorm_factors": {...},      # optional
-            "fixed": bool,                # optional
-        }
-        """
-        for label, payload in initial_results.items():
-            key = mmexo.model_types.label_to_model_key(label)
-            record = mmexo.FitRecord(
-                model_key=key,
-                params=payload["params"],
-                sigmas=payload.get("sigmas"),
-                renorm_factors=payload.get("renorm_factors"),
-                full_result=None,
-                fixed=payload.get("fixed", False),
-                is_complete=False,
-            )
-            self.all_fit_results.set(record)
-
     def _build_dataset_to_filename_mapping(self):
         """Build dataset_to_filename mapping from dataset.file_name attributes."""
         self.dataset_to_filename = {}
@@ -392,6 +376,145 @@ class MMEXOFASTFitter:
                 # Remove old dataset from mapping if different object
                 if dataset in self.dataset_to_filename:
                     del self.dataset_to_filename[dataset]
+
+    # Location grouping
+    def _count_loc(self):
+        """
+        # Determine how many locations (e.g. Earth vs. Earth + Space) an event was observed from.
+        # :return:
+        """
+
+        if len(self.datasets) == 1:
+            return 1
+
+        else:
+            locs = []
+            for dataset in self.datasets:
+                if dataset.ephemerides_file not in locs:
+                    locs.append(dataset.ephemerides_file)
+
+            return len(locs)
+
+    def _group_datasets_by_location(self):
+        """
+        Group datasets by observing location.
+
+        Returns
+        -------
+        dict
+            Keys are location names ('ground', observatory names, or ephemerides paths).
+            Values are lists of MulensData objects from that location.
+        """
+        groups = {}
+
+        for dataset in self.datasets:
+            ephem_file = getattr(dataset, 'ephemerides_file', None)
+
+            if ephem_file is None:
+                # Ground-based observation
+                location = 'ground'
+            elif ephem_file in mmexo.observatories.EPHEMERIDES_TO_OBSERVATORY:
+                # Registered space observatory
+                location = mmexo.observatories.EPHEMERIDES_TO_OBSERVATORY[ephem_file]
+            else:
+                # Unknown/custom ephemerides file
+                location = ephem_file
+
+            if location not in groups:
+                groups[location] = []
+            groups[location].append(dataset)
+
+        return groups
+
+    def _get_location_group_by_name(self, location_name):
+        """
+        Get datasets for a specific location by name.
+
+        Parameters
+        ----------
+        location_name : str
+            Location name ('ground', observatory name, or ephemerides path)
+
+        Returns
+        -------
+        list
+            Datasets from that location
+
+        Raises
+        ------
+        ValueError
+            If location name not found
+        """
+        groups = self._group_datasets_by_location()
+        if location_name not in groups:
+            available = list(groups.keys())
+            raise ValueError(
+                f"Location '{location_name}' not found. Available locations: {available}"
+            )
+        return groups[location_name]
+
+    def _get_location_group_for_dataset(self, filename):
+        """
+        Get the location group containing a specific dataset.
+
+        Parameters
+        ----------
+        filename : str
+            Filename of the dataset
+
+        Returns
+        -------
+        list
+            All datasets from the same location
+
+        Raises
+        ------
+        ValueError
+            If filename not found
+        """
+        # Find the dataset with this filename
+        target_dataset = None
+        for dataset in self.datasets:
+            if self.dataset_to_filename.get(dataset) == filename:
+                target_dataset = dataset
+                break
+
+        if target_dataset is None:
+            raise ValueError(f"Dataset with filename '{filename}' not found")
+
+        # Find which group it belongs to
+        groups = self._group_datasets_by_location()
+        for location, datasets in groups.items():
+            if target_dataset in datasets:
+                return datasets
+
+        # Should never reach here
+        raise ValueError(f"Dataset not found in any location group")
+
+    def _select_primary_location_by_coverage(self):
+        """
+        Automatically select primary location based on time coverage.
+
+        Returns
+        -------
+        list
+            Datasets from the location with longest time coverage
+        """
+        groups = self._group_datasets_by_location()
+
+        best_location = None
+        max_coverage = 0.0
+
+        for location, datasets in groups.items():
+            # Calculate time coverage for this location
+            all_times = np.concatenate([ds.time for ds in datasets])
+            coverage = np.max(all_times) - np.min(all_times)
+
+            if coverage > max_coverage:
+                max_coverage = coverage
+                best_location = location
+
+        return groups[best_location]
 
     # ---------------------------------------------------------------------
     # Public orchestration methods:
