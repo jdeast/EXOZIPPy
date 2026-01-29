@@ -85,36 +85,46 @@ class MMEXOFASTFitter:
             output_config=None,
             restart_file=None,
     ):
+        # Validate mutually exclusive parameters
+        if files is not None and datasets is not None:
+            raise ValueError("Cannot specify both 'files' and 'datasets'. Provide only one.")
+
+        # Ensure output_config exists
+        if output_config is None:
+            output_config = mmexo.OutputConfig()  # Uses default values
+
         # Load restart data
         saved_config, saved_state = self._load_restart_data(restart_file)
-
-        # Merge provided params with saved config
         config = self._merge_config(saved_config, locals())
-
-        # Set all config attributes
         self._set_config_attributes(config)
 
-        # Setup datasets - PRIORITY ORDER:
-        # 1. Explicitly provided datasets (highest priority)
-        # 2. Saved datasets from restart (preserves bad flags!)
-        # 3. Create from files
-        if datasets is not None:
+        # Restore state
+        self._restore_state(saved_state)
+
+        # Create or use datasets
+        if files:
+            self.datasets, self.dataset_to_filename = self._create_mulensdata_objects(
+                files, saved_datasets=saved_state.get('datasets')
+            )
+        elif datasets:
             self.datasets = datasets
-            self.dataset_to_filename = {}
-        elif 'datasets' in saved_state:
-            # Restore from pickle (preserves bad flags, error renorm, etc.)
+            self._build_dataset_to_filename_mapping()
+            if saved_state.get('datasets'):
+                self._merge_with_saved_datasets(saved_state['datasets'])
+        elif saved_state.get('datasets'):
+            # Using only restart file datasets
             self.datasets = saved_state['datasets']
-            self.dataset_to_filename = saved_state.get('dataset_to_filename', {})
-        elif self.files is not None:
-            self.datasets, self.dataset_to_filename = self._create_mulensdata_objects(self.files)
+            self._build_dataset_to_filename_mapping()
         else:
             raise ValueError("Must provide files, datasets, or restart_file")
+
+        # Recalculate n_loc based on current datasets
+        self.n_loc = self._count_loc()
 
         # Map flux fixing options using filename mapping
         self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
         self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
 
-        self.n_loc = self._count_loc()
         self.residuals = None
 
         # Output
@@ -199,9 +209,16 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # Loading initial (user-supplied) information
     # ---------------------------------------------------------------------
-    def _create_mulensdata_objects(self, files):
+    def _create_mulensdata_objects(self, files, saved_datasets=None):
         """
-        Create MulensData objects and map them to filenames.
+        Create MulensData objects, reusing saved datasets when filenames match.
+
+        Parameters
+        ----------
+        files : str or list
+            File paths to load
+        saved_datasets : list or None
+            Previously saved datasets to reuse if filenames match
 
         Returns
         -------
@@ -213,17 +230,30 @@ class MMEXOFASTFitter:
         if isinstance(files, str):
             files = [files]
 
+        # Build mapping of saved datasets by filename
+        saved_by_filename = {}
+        if saved_datasets:
+            for dataset in saved_datasets:
+                if hasattr(dataset, 'file_name') and dataset.file_name:
+                    saved_by_filename[dataset.file_name] = dataset
+
         datasets = []
         dataset_to_filename = {}
 
         for filename in files:
-            if not os.path.exists(filename):
-                raise FileNotFoundError(f"Data file {filename} does not exist")
+            # Check if we have a saved version
+            if filename in saved_by_filename:
+                data = saved_by_filename[filename]
+            else:
+                # Load fresh from file
+                if not os.path.exists(filename):
+                    raise FileNotFoundError(f"Data file {filename} does not exist")
 
-            kwargs = mmexo.observatories.get_kwargs(filename)
-            data = MulensModel.MulensData(file_name=filename, **kwargs)
+                kwargs = mmexo.observatories.get_kwargs(filename)
+                data = MulensModel.MulensData(file_name=filename, **kwargs)
+
             datasets.append(data)
-            dataset_to_filename[data] = filename  # ← Store mapping
+            dataset_to_filename[data] = filename
 
         return datasets, dataset_to_filename
 
@@ -299,6 +329,42 @@ class MMEXOFASTFitter:
                 is_complete=False,
             )
             self.all_fit_results.set(record)
+
+    def _build_dataset_to_filename_mapping(self):
+        """Build dataset_to_filename mapping from dataset.file_name attributes."""
+        self.dataset_to_filename = {}
+        for dataset in self.datasets:
+            if hasattr(dataset, 'file_name') and dataset.file_name:
+                self.dataset_to_filename[dataset] = dataset.file_name
+
+    def _merge_with_saved_datasets(self, saved_datasets):
+        """
+        Replace current datasets with saved versions if filenames match.
+
+        This ensures renormalized datasets from restart_file are used instead
+        of freshly loaded versions.
+
+        Parameters
+        ----------
+        saved_datasets : list
+            List of MulensData objects from restart file
+        """
+        # Build mapping of filename -> saved dataset
+        saved_by_filename = {}
+        for dataset in saved_datasets:
+            if hasattr(dataset, 'file_name') and dataset.file_name:
+                saved_by_filename[dataset.file_name] = dataset
+
+        # Replace matching datasets
+        for i, dataset in enumerate(self.datasets):
+            filename = getattr(dataset, 'file_name', None)
+            if filename and filename in saved_by_filename:
+                self.datasets[i] = saved_by_filename[filename]
+                self.dataset_to_filename[saved_by_filename[filename]] = filename
+
+                # Remove old dataset from mapping if different object
+                if dataset in self.dataset_to_filename:
+                    del self.dataset_to_filename[dataset]
 
     # ---------------------------------------------------------------------
     # Public orchestration methods:

@@ -26,7 +26,7 @@ Note: all chi2s need to be on the same system.
 ground_data_files = [os.path.join(
         exozippy.MULENS_DATA_PATH, 'OB140939', 'n20100310.I.OGLE.OB140939.txt')]
 space_data_files = [os.path.join(
-        exozippy.MULENS_DATA_PATH, 'OB140939', 'n20100310.I.OGLE.OB140939.txt')]
+        exozippy.MULENS_DATA_PATH, 'OB140939', 'n20140605.L.Spitzer.OB140939.txt')]
 coords='17:47:12.25 -21:22:58.7'
 
 

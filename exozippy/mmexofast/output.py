@@ -50,8 +50,8 @@ class OutputConfig:
     save_grid_results : bool
         If True, enable saving grid search results (EF/AF/PAR/etc.).
     """
-    base_dir: Path
-    file_head: str
+    base_dir: Path = Path('.')
+    file_head: str = 'mmexo'
 
     save_log: bool = True
     save_plots: bool = False
