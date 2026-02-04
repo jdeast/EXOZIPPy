@@ -66,6 +66,25 @@ class MMEXOFASTFitter:
         'fix_source_flux'
     ]
 
+    # Parallax grid search parameters
+    PARALLAX_GRID_PARAMS_COARSE = {
+        'pi_E_E_min': -1.0,
+        'pi_E_E_max': 1.0,
+        'pi_E_E_step': 0.15,
+        'pi_E_N_min': -1.5,
+        'pi_E_N_max': 1.5,
+        'pi_E_N_step': 0.3
+    }
+
+    PARALLAX_GRID_PARAMS_FINE = {
+        'pi_E_E_min': -0.7,
+        'pi_E_E_max': 0.7,
+        'pi_E_E_step': 0.025,
+        'pi_E_N_min': -1.0,
+        'pi_E_N_max': 1.0,
+        'pi_E_N_step': 0.05
+    }
+
     def __init__(
             self,
             files=None,

@@ -591,9 +591,10 @@ class BaseRectGridSearch(ABC):
     Child classes must implement:
         - _setup_grid(): Define the parameter grid
         - _fit_grid_point(): Run fit for one grid point
+        - Set self.grid_params: Dict with keys like 'param_min', 'param_max', 'param_step'
     """
 
-    def __init__(self, datasets, verbose=False):
+    def __init__(self, datasets, grid_params=None, verbose=False):
         """
         Parameters:
             datasets: MulensData object(s) to fit
@@ -614,6 +615,7 @@ class BaseRectGridSearch(ABC):
         self.results = None
         self._best = None
         self._grid = None
+        self.grid_params = grid_params
 
     @abstractmethod
     def _setup_grid(self):
@@ -670,6 +672,208 @@ class BaseRectGridSearch(ABC):
                 print(f"  chi2 = {result.get('chi2', 'N/A')}")
 
         self.results = results
+
+    def find_local_minima(self):
+        """
+        Find all local minima in the grid search results.
+
+        First attempts to find strict local minima (chi2 strictly lower than all
+        neighbors). If none exist, identifies constant chi2 regions at the global
+        minimum and returns one representative.
+
+        Returns
+        -------
+        list of tuple
+            List of (chi2, params) tuples sorted by chi2 (best first).
+            params is the result['params'] dict containing fitted parameters.
+        """
+        if self.results is None:
+            raise ValueError("No results available. Run grid search first.")
+
+        if self.grid_params is None:
+            raise ValueError("grid_params not set. Child class must initialize grid_params.")
+
+        # Filter successful results
+        valid_results = [r for r in self.results if r.get('success', False)]
+
+        if len(valid_results) == 0:
+            return []
+
+        # Get parameter names and step sizes
+        param_names = []
+        for key in self.grid_params:
+            if key.endswith('_step'):
+                param_name = key[:-5]
+                param_names.append(param_name)
+
+        steps = [self.grid_params[f'{param}_step'] for param in param_names]
+
+        # Build mapping: grid point -> result
+        grid_point_to_result = {}
+        for result in valid_results:
+            point = tuple(round(result[param], 10) for param in param_names)
+            grid_point_to_result[point] = result
+
+        # STEP 1: Find strict local minima (chi2 < all neighbors)
+        strict_minima = []
+
+        from itertools import product
+
+        for result in valid_results:
+            point = tuple(round(result[param], 10) for param in param_names)
+            chi2 = result['chi2']
+
+            is_local_min = True
+
+            for deltas in product([-1, 0, 1], repeat=len(param_names)):
+                if all(d == 0 for d in deltas):
+                    continue
+
+                neighbor = tuple(round(point[i] + deltas[i] * steps[i], 10)
+                                 for i in range(len(param_names)))
+
+                if neighbor in grid_point_to_result:
+                    neighbor_chi2 = grid_point_to_result[neighbor]['chi2']
+                    if neighbor_chi2 <= chi2:  # Not strictly lower
+                        is_local_min = False
+                        break
+
+            if is_local_min:
+                strict_minima.append((chi2, result['params']))
+
+        # If we found strict minima, return them
+        if len(strict_minima) > 0:
+            strict_minima.sort(key=lambda x: x[0])
+            return strict_minima
+
+        # STEP 2: Handle constant chi2 regions (no strict minima exist)
+        # Find global minimum chi2
+        min_chi2 = min(r['chi2'] for r in valid_results)
+
+        # Find all points at global minimum
+        min_points = [
+            tuple(round(r[param], 10) for param in param_names)
+            for r in valid_results
+            if abs(r['chi2'] - min_chi2) < 1e-10
+        ]
+
+        if len(min_points) == 0:
+            return []
+
+        # Cluster connected points at global minimum
+        visited = set()
+        clusters = []
+
+        def get_cluster(start_point):
+            """BFS to find all connected points at same chi2."""
+            cluster = []
+            queue = [start_point]
+            cluster_visited = {start_point}
+
+            while queue:
+                point = queue.pop(0)
+                cluster.append(point)
+
+                for deltas in product([-1, 0, 1], repeat=len(param_names)):
+                    if all(d == 0 for d in deltas):
+                        continue
+
+                    neighbor = tuple(round(point[i] + deltas[i] * steps[i], 10)
+                                     for i in range(len(param_names)))
+
+                    if (neighbor in min_points and
+                            neighbor not in cluster_visited):
+                        cluster_visited.add(neighbor)
+                        queue.append(neighbor)
+
+            return cluster
+
+        for point in min_points:
+            if point not in visited:
+                cluster = get_cluster(point)
+                visited.update(cluster)
+                clusters.append(cluster)
+
+        # Return one representative per cluster
+        local_minima = []
+        for cluster in clusters:
+            # Pick first point (arbitrary but consistent)
+            representative = cluster[0]
+            result = grid_point_to_result[representative]
+            local_minima.append((result['chi2'], result['params']))
+
+        local_minima.sort(key=lambda x: x[0])
+        return local_minima
+
+    def select_separated_minima(self, local_minima, min_separation=1.0, n=None):
+        """
+        Select well-separated minima from a list of local minima.
+
+        Selects minima greedily by chi2, keeping only those that are sufficiently
+        separated from already-selected minima. Separation is normalized by grid
+        step sizes to handle parameters on different scales.
+
+        Parameters
+        ----------
+        local_minima : list of tuple
+            List of (chi2, params) tuples from find_local_minima()
+        min_separation : float, optional
+            Minimum normalized separation between minima. Default is 1.0,
+            meaning minima must differ by at least 1 grid step in at least
+            one parameter.
+        n : int or None, optional
+            Maximum number of minima to return. If None, returns all that
+            meet the separation criteria.
+
+        Returns
+        -------
+        list of tuple
+            List of (chi2, params) for selected minima, sorted by chi2
+        """
+        if len(local_minima) == 0:
+            return []
+
+        if self.grid_params is None:
+            raise ValueError("grid_params not set. Child class must initialize grid_params.")
+
+        # Get parameter names and step sizes from grid_params
+        param_names = []
+        step_sizes = {}
+        for key in self.grid_params:
+            if key.endswith('_step'):
+                param_name = key[:-5]
+                param_names.append(param_name)
+                step_sizes[param_name] = self.grid_params[key]
+
+        # Select separated minima
+        selected = [local_minima[0]]  # Always take the best
+
+        for chi2, params in local_minima[1:]:
+            # Check if this minimum is separated from all already-selected ones
+            is_separated = True
+
+            for selected_chi2, selected_params in selected:
+                # Calculate normalized separation
+                separations = []
+                for param in param_names:
+                    diff = abs(params[param] - selected_params[param])
+                    normalized_sep = diff / step_sizes[param]
+                    separations.append(normalized_sep)
+
+                max_separation = max(separations)
+
+                if max_separation < min_separation:
+                    is_separated = False
+                    break
+
+            if is_separated:
+                selected.append((chi2, params))
+
+                # Stop if we've reached the requested number
+                if n is not None and len(selected) >= n:
+                    break
+
+        return selected
 
     @property
     def grid(self):
