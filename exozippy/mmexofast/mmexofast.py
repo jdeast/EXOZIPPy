@@ -16,6 +16,7 @@ import inspect
 
 import pandas as pd
 from scipy.special import erfcinv
+from scipy.optimize import minimize_scalar
 import numpy as np
 import os.path
 
@@ -63,7 +64,7 @@ class MMEXOFASTFitter:
         'files', 'fit_type', 'finite_source', 'coords', 'mag_methods',
         'limb_darkening_coeffs_u', 'limb_darkening_coeffs_gamma',
         'renormalize_errors', 'parallax_grid', 'verbose', 'fix_blend_flux',
-        'fix_source_flux'
+        'fix_source_flux', 'primary_location', 'primary_dataset'
     ]
 
     # Parallax grid search parameters
@@ -140,6 +141,7 @@ class MMEXOFASTFitter:
         # Recalculate n_loc based on current datasets
         old_n_loc = saved_state.get('n_loc')
         self.n_loc = self._count_loc()
+        self._location_groups = None
 
         # If datasets were updated, old fit results need to be refit
         self._datasets_changed = False
@@ -248,7 +250,7 @@ class MMEXOFASTFitter:
         }
         """
         for label, payload in initial_results.items():
-            key = mmexo.model_types.label_to_model_key(label)
+            key = mmexo.fit_types.label_to_model_key(label)
             record = mmexo.FitRecord(
                 model_key=key,
                 params=payload["params"],
@@ -414,6 +416,23 @@ class MMEXOFASTFitter:
 
             return len(locs)
 
+    @property
+    def location_groups(self):
+        """
+        Dictionary mapping location names to lists of datasets.
+
+        Cached after first access. Keys are location names like 'ground',
+        'Spitzer', or ephemerides file paths for unregistered observatories.
+
+        Returns
+        -------
+        dict
+            Keys are location names (str), values are lists of MulensData objects
+        """
+        if not hasattr(self, '_location_groups') or self._location_groups is None:
+            self._location_groups = self._group_datasets_by_location()
+        return self._location_groups
+
     def _group_datasets_by_location(self):
         """
         Group datasets by observing location.
@@ -444,6 +463,28 @@ class MMEXOFASTFitter:
             groups[location].append(dataset)
 
         return groups
+
+    def _count_locations_used(self, locations_used):
+        """
+        Count number of locations represented in locations_used string.
+
+        Parameters
+        ----------
+        locations_used : str or None
+            Location identifier from FitKey
+
+        Returns
+        -------
+        int
+            Number of locations (higher is more complete)
+        """
+        if locations_used == 'All':
+            return self.n_loc  # All available locations
+        elif locations_used is None:
+            return 0  # Lowest priority (single location, n_loc=1)
+        else:
+            # Count locations in string like 'ground+Spitzer'
+            return locations_used.count('+') + 1
 
     def _get_location_group_by_name(self, location_name):
         """
@@ -535,6 +576,42 @@ class MMEXOFASTFitter:
 
         return groups[best_location]
 
+    def _get_location_for_datasets(self, datasets):
+        """
+        Determine which location(s) a set of datasets belongs to.
+
+        Parameters
+        ----------
+        datasets : list
+            List of MulensData objects
+
+        Returns
+        -------
+        str or None
+            Location name ('ground', 'Spitzer', etc.), 'All' if multiple
+            locations when n_loc > 1, or None if single location (n_loc == 1)
+        """
+        dataset_set = set(datasets)
+
+        # Check if using all datasets
+        if dataset_set == set(self.datasets):
+            return 'All' if self.n_loc > 1 else None
+
+        # Find which location(s) match
+        matching_locations = []
+        for loc, loc_datasets in self.location_groups.items():
+            if dataset_set == set(loc_datasets):
+                matching_locations.append(loc)
+
+        if len(matching_locations) == 1:
+            return matching_locations[0]
+        elif len(matching_locations) > 1:
+            # Datasets span multiple locations
+            return 'All' if self.n_loc > 1 else None
+        else:
+            # Partial subset - best guess
+            return 'All' if self.n_loc > 1 else None
+
     # ---------------------------------------------------------------------
     # Public orchestration methods:
     # ---------------------------------------------------------------------
@@ -564,14 +641,18 @@ class MMEXOFASTFitter:
             self._refit_models()
 
         if self.fit_type == 'point lens':
-            self.fit_point_lens()
+            # Choose workflow based on n_loc
+            if self.n_loc >= 2:
+                self.fit_point_lens_multi_location_parallax()
+            else:
+                self.fit_point_lens()
 
         elif self.fit_type == 'binary lens':
             self.fit_binary_lens()
 
         self._output_latex_table()
 
-    def fit_point_lens(self) -> None:
+    def fit_point_lens(self, datasets=None, skip_parallax=False) -> None:
         """
         Run the full point-lens workflow.
 
@@ -579,21 +660,103 @@ class MMEXOFASTFitter:
         - optional static FSPL
         - parallax branches (PSPL or FSPL depending on finite_source)
         - optional renormalization + refits
+
+        Parameters
+        ----------
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+        skip_parallax : bool, optional
+            If True, skip fitting parallax models. Default is False.
         """
-        self._ensure_static_point_lens()  # shared
-        self._ensure_static_finite_point_lens()  # shared (if finite_source)
-        self._ensure_point_lens_parallax_models()  # shared (if you want)
+        if datasets is None:
+            datasets = self.datasets
+
+        self._ensure_static_point_lens(datasets)
+        self._ensure_static_finite_point_lens(datasets)
+
+        if not skip_parallax:
+            self._ensure_point_lens_parallax_models(datasets)
+
         if not self.verbose:
             self._save_restart_state()
 
         if self.renormalize_errors:
             ref_model = self._select_preferred_point_lens().full_result.fitter.get_model()
-            self.renormalize_errors_and_refit(ref_model)
+            self.renormalize_errors_and_refit(ref_model, datasets=datasets)
 
         self._save_restart_state()
 
-        if self.parallax_grid:
-            self._run_piE_grid_search()
+        if (not skip_parallax) and self.parallax_grid:
+            self._run_piE_grid_search(datasets=datasets)
+
+    def fit_point_lens_multi_location_parallax(self):
+        """
+        Orchestrate multi-location parallax fitting workflow.
+
+        Workflow:
+        1. Fit primary location with static models
+        2. Run coarse parallax grid with all data
+        3. Optimize best solution from coarse grid
+        4. Renormalize secondary location errors
+        5. Run fine parallax grid with all data
+        6. Extract and optimize all parallax solutions
+        """
+        self._log("=" * 60)
+        self._log("Starting multi-location parallax workflow")
+        self._log(f"n_loc = {self.n_loc}")
+        self._log("=" * 60)
+
+        # Step 1: Fit primary location
+        self._log("\nStep 1: Fitting primary location")
+        primary_datasets = self._fit_primary_location()
+
+        # Step 2: Run coarse grid with all datasets
+        self._log("\nStep 2: Running coarse parallax grid")
+        coarse_grids = self._add_location_and_grid_search(
+            datasets=self.datasets,
+            grid_params=self.PARALLAX_GRID_PARAMS_COARSE
+        )
+
+        # Step 3: Optimize best from coarse grid
+        self._log("\nStep 3: Optimizing best solution from coarse grid")
+        best_coarse = self._get_best_from_grids(coarse_grids)
+        coarse_fit = self._optimize_parallax_solution(best_coarse[1], self.datasets)
+        self._log(f"Best coarse solution: chi2={coarse_fit.chi2:.2f}")
+
+        # Step 4: Renormalize secondary location(s) errors
+        if self.renormalize_errors:
+            self._log("\nStep 4: Renormalizing secondary location errors")
+            # Get secondary datasets (all non-primary)
+            secondary_datasets = [ds for ds in self.datasets if ds not in primary_datasets]
+
+            # Create model from coarse fit
+            coarse_model = coarse_fit.fitter.get_model()
+
+            # Renormalize only secondary datasets (but include all in event)
+            error_factors = self._remove_outliers_and_calc_errfacs(
+                coarse_model,
+                datasets_to_process=secondary_datasets,
+                all_datasets=self.datasets
+            )
+            self._apply_error_renormalization(error_factors, datasets=secondary_datasets)
+
+        # Step 5: Run fine grid with all (now renormalized) datasets
+        self._log("\nStep 5: Running fine parallax grid")
+        fine_grids = self._add_location_and_grid_search(
+            datasets=self.datasets,
+            grid_params=self.PARALLAX_GRID_PARAMS_FINE
+        )
+
+        # Step 6: Extract and optimize all solutions
+        self._log("\nStep 6: Extracting and optimizing all parallax solutions")
+        self._extract_and_optimize_parallax_solutions(
+            u0_plus_grid=fine_grids[mmexo.ParallaxBranch.U0_PLUS],
+            u0_minus_grid=fine_grids[mmexo.ParallaxBranch.U0_MINUS],
+            datasets=self.datasets
+        )
+
+        self._log("\nMulti-location parallax workflow complete")
+        self._log("=" * 60)
 
     def fit_binary_lens(self) -> None:
         """
@@ -621,25 +784,31 @@ class MMEXOFASTFitter:
 
     def run_fit_if_needed(
             self,
-            key: mmexo.ModelKey,
+            key: mmexo.FitKey,
             fit_func,
+            datasets=None,
     ) -> mmexo.FitRecord:
         """
         Ensure there is an up-to-date mmexo.FitRecord for `key`.
 
         Parameters
         ----------
-        key : mmexo.ModelKey
-            Which model to fit.
+        key : mmexo.FitKey
+            Which fit to run.
         fit_func : callable
             Function that runs the fit:
-            `fit_func(initial_params: Optional[dict]) -> mmexo.MMEXOFASTFitResults`.
+            `fit_func(initial_params: Optional[dict], datasets: Optional[list]) -> mmexo.MMEXOFASTFitResults`.
+        datasets : list or None, optional
+            Datasets to use for fitting. If None, uses self.datasets.
 
         Returns
         -------
         mmexo.FitRecord
-            The current record for this model (existing or newly fitted).
+            The current record for this fit (existing or newly fitted).
         """
+        if datasets is None:
+            datasets = self.datasets
+
         record = self.all_fit_results.get(key)
 
         # If we have a fixed or complete result, reuse it
@@ -650,7 +819,7 @@ class MMEXOFASTFitter:
         initial_params = record.params if record is not None else None
 
         # Run the actual fit
-        full_result = fit_func(initial_params=initial_params)
+        full_result = fit_func(initial_params=initial_params, datasets=datasets)
 
         # Derive renorm factors from current state, if any
         renorm_factors = self._current_renorm_factors()
@@ -674,47 +843,97 @@ class MMEXOFASTFitter:
 
     # "ensure" means "Make sure that this thing exists and is up to date; if it already does, don’t redo the work.”
 
-    def _ensure_static_point_lens(self) -> None:
-        """Make sure static PSPL exists in all_fit_results."""
-        static_pspl_key = mmexo.ModelKey(
+    def _ensure_static_point_lens(self, datasets=None) -> None:
+        """
+        Make sure static PSPL exists in all_fit_results.
+
+        Parameters
+        ----------
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+        """
+        if datasets is None:
+            datasets = self.datasets
+
+        # Determine locations_used for the key
+        locations_used = self._get_location_for_datasets(datasets)
+
+        static_pspl_key = mmexo.FitKey(
             lens_type=mmexo.LensType.POINT,
             source_type=mmexo.SourceType.POINT,
             parallax_branch=mmexo.ParallaxBranch.NONE,
             lens_orb_motion=mmexo.LensOrbMotion.NONE,
+            locations_used=locations_used,
         )
 
-        def fit_static_pspl(initial_params=None):
-            return self._fit_initial_pspl_model(initial_params=initial_params)
+        def fit_static_pspl(initial_params=None, datasets=None):
+            return self._fit_initial_pspl_model(initial_params=initial_params, datasets=datasets)
 
-        self.run_fit_if_needed(static_pspl_key, fit_static_pspl)
+        self.run_fit_if_needed(static_pspl_key, fit_static_pspl, datasets=datasets)
 
-    def _ensure_static_finite_point_lens(self) -> None:
-        """Make sure static FSPL exists, if finite_source is enabled."""
+    def _ensure_static_finite_point_lens(self, datasets=None) -> None:
+        """
+        Make sure static FSPL exists, if finite_source is enabled.
+
+        Parameters
+        ----------
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+        """
         if not self.finite_source:
             return
 
-        static_fspl_key = mmexo.ModelKey(
+        if datasets is None:
+            datasets = self.datasets
+
+        # Determine locations_used for the key
+        locations_used = self._get_location_for_datasets(datasets)
+
+        static_fspl_key = mmexo.FitKey(
             lens_type=mmexo.LensType.POINT,
             source_type=mmexo.SourceType.FINITE,
             parallax_branch=mmexo.ParallaxBranch.NONE,
             lens_orb_motion=mmexo.LensOrbMotion.NONE,
+            locations_used=locations_used,
         )
 
-        def fit_static_fspl(initial_params=None):
-            return self._fit_static_fspl_model(initial_params=initial_params)
+        def fit_static_fspl(initial_params=None, datasets=None):
+            return self._fit_static_fspl_model(initial_params=initial_params, datasets=datasets)
 
-        self.run_fit_if_needed(static_fspl_key, fit_static_fspl)
+        self.run_fit_if_needed(static_fspl_key, fit_static_fspl, datasets=datasets)
 
-    def _ensure_point_lens_parallax_models(self) -> None:
-        """Make sure all configured point-lens parallax branches are fitted."""
-        for par_key in self._iter_parallax_point_lens_keys():
-            def make_fit_func(k: mmexo.ModelKey):
-                def fit_func(initial_params=None):
-                    return self._fit_pl_parallax_model(k, initial_params=initial_params)
+    def _ensure_point_lens_parallax_models(self, datasets=None) -> None:
+        """
+        Make sure all configured point-lens parallax branches are fitted.
+
+        Parameters
+        ----------
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+        """
+        if datasets is None:
+            datasets = self.datasets
+
+        # Determine locations_used for the key
+        locations_used = self._get_location_for_datasets(datasets)
+
+        for par_key_base in self._iter_parallax_point_lens_keys():
+            # Add locations_used to the key
+            par_key = mmexo.FitKey(
+                lens_type=par_key_base.lens_type,
+                source_type=par_key_base.source_type,
+                parallax_branch=par_key_base.parallax_branch,
+                lens_orb_motion=par_key_base.lens_orb_motion,
+                locations_used=locations_used,
+            )
+
+            def make_fit_func(k: mmexo.FitKey):
+                def fit_func(initial_params=None, datasets=None):
+                    return self._fit_pl_parallax_model(k, initial_params=initial_params, datasets=datasets)
 
                 return fit_func
 
-            self.run_fit_if_needed(par_key, make_fit_func(par_key))
+            self.run_fit_if_needed(par_key, make_fit_func(par_key), datasets=datasets)
 
     # ---------------------------------------------------------------------
     # Point-lens helpers:
@@ -734,8 +953,9 @@ class MMEXOFASTFitter:
     """
     # static point lenses
     def _fit_initial_pspl_model(
-        self,
-        initial_params: Optional[Dict[str, float]] = None,
+            self,
+            initial_params: Optional[Dict[str, float]] = None,
+            datasets=None,
     ) -> mmexo.MMEXOFASTFitResults:
         """
         Estimate or accept starting point for PSPL, then run SFitFitter.
@@ -743,7 +963,17 @@ class MMEXOFASTFitter:
 
         EF grid is only used if `initial_params` is None and
         best_ef_grid_point is not yet available.
+
+        Parameters
+        ----------
+        initial_params : dict or None, optional
+            Starting parameters for fit
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
         """
+        if datasets is None:
+            datasets = self.datasets
+
         if initial_params is None:
             if self.best_ef_grid_point is None:
                 self.best_ef_grid_point = self.do_ef_grid_search()
@@ -751,7 +981,7 @@ class MMEXOFASTFitter:
 
             pspl_est_params = mmexo.estimate_params.get_PSPL_params(
                 self.best_ef_grid_point,
-                self.datasets,
+                datasets,  # Use provided datasets
             )
             self._log(f"Initial PSPL Estimate {pspl_est_params}")
         else:
@@ -759,7 +989,7 @@ class MMEXOFASTFitter:
             self._log(f"Using initial PSPL params (user/previous): {pspl_est_params}")
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=pspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
+            initial_model_params=pspl_est_params, datasets=datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'Initial SFit {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
@@ -767,17 +997,29 @@ class MMEXOFASTFitter:
         return mmexo.MMEXOFASTFitResults(fitter)
 
     def _fit_static_fspl_model(
-        self,
-        initial_params: Optional[Dict[str, float]] = None,
+            self,
+            initial_params: Optional[Dict[str, float]] = None,
+            datasets=None,
     ) -> mmexo.MMEXOFASTFitResults:
         """
         Fit a finite-source point-lens (FSPL) model.
 
+        Parameters
+        ----------
+        initial_params : dict or None, optional
+            Starting parameters for fit
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+
+
         TODO: implement actual FSPL parameter estimation and fitting logic.
         """
+        if datasets is None:
+            datasets = self.datasets
+
         if initial_params is None:
             # Example: seed from static PSPL record if available.
-            static_pspl_key = mmexo.ModelKey(
+            static_pspl_key = mmexo.FitKey(
                 lens_type=mmexo.LensType.POINT,
                 source_type=mmexo.SourceType.POINT,
                 parallax_branch=mmexo.ParallaxBranch.NONE,
@@ -795,7 +1037,7 @@ class MMEXOFASTFitter:
             fspl_est_params = initial_params
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=fspl_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
+            initial_model_params=fspl_est_params, datasets=datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'FSPL: {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
@@ -834,7 +1076,7 @@ class MMEXOFASTFitter:
         if "pi_E_N" in params:
             params["pi_E_N"] *= piN_factor
 
-    def _iter_parallax_point_lens_keys(self) -> Iterable[mmexo.ModelKey]:
+    def _iter_parallax_point_lens_keys(self) -> Iterable[mmexo.FitKey]:
         """
         Yield mmexo.ModelKeys for all point-lens parallax models consistent with n_loc.
         """
@@ -849,7 +1091,7 @@ class MMEXOFASTFitter:
             ]
 
         for branch in branches:
-            yield mmexo.ModelKey(
+            yield mmexo.FitKey(
                 lens_type=mmexo.LensType.POINT,
                 source_type=(
                     mmexo.SourceType.FINITE if self.finite_source else mmexo.SourceType.POINT
@@ -860,7 +1102,7 @@ class MMEXOFASTFitter:
 
     def _get_parallax_initial_params(
             self,
-            key: mmexo.ModelKey,
+            key: mmexo.FitKey,
             initial_params: Optional[Dict[str, float]],
     ) -> Dict[str, float]:
         """
@@ -884,7 +1126,7 @@ class MMEXOFASTFitter:
             if other_branch == key.parallax_branch:
                 continue
 
-            other_key = mmexo.ModelKey(
+            other_key = mmexo.FitKey(
                 lens_type=key.lens_type,
                 source_type=key.source_type,
                 parallax_branch=other_branch,
@@ -907,7 +1149,7 @@ class MMEXOFASTFitter:
             return base
 
         # 3. Fallback: static point-lens
-        static_key = mmexo.ModelKey(
+        static_key = mmexo.FitKey(
             lens_type=mmexo.LensType.POINT,
             source_type=key.source_type,
             parallax_branch=mmexo.ParallaxBranch.NONE,
@@ -932,7 +1174,7 @@ class MMEXOFASTFitter:
 
     def _fit_pl_parallax_model(
             self,
-            key: mmexo.ModelKey,
+            key: mmexo.FitKey,
             initial_params: Optional[Dict[str, float]] = None,
     ) -> mmexo.MMEXOFASTFitResults:
         """
@@ -943,23 +1185,42 @@ class MMEXOFASTFitter:
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=par_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
         fitter.run()
-        self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
+        self._log(f'{mmexo.fit_types.model_key_to_label(key)}: {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
-    def _run_piE_grid_search(self):
+    def _run_piE_grid_search(self, datasets=None, grid_params=None):
         """
         Run parallax grid search over pi_E_E and pi_E_N for U0_PLUS and U0_MINUS branches.
 
         For each branch, performs a grid search and optionally saves results and/or plots.
         Results are saved to files named: {file_head}_piE_grid_{branch}.txt
         Plot is saved as: {file_head}_piE_grid.png
+
+        Parameters
+        ----------
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
+        grid_params : dict or None, optional
+            Grid parameters (min, max, step for pi_E_E and pi_E_N).
+            If None, uses self.PARALLAX_GRID_PARAMS_FINE.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
         """
+        if datasets is None:
+            datasets = self.datasets
+
+        if grid_params is None:
+            grid_params = self.PARALLAX_GRID_PARAMS_FINE
+
         # Get reference model
         reference_fit = self._select_preferred_static_point_lens_model()
         reference_model = reference_fit.full_result.fitter.get_model()
-        static_params = reference_model.parameters.parameters  # or however you get params dict
+        static_params = reference_model.parameters.parameters
 
         # Iterate over parallax branches
         branches = [mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS]
@@ -967,12 +1228,13 @@ class MMEXOFASTFitter:
         grids = {}  # Store grid objects for plotting
 
         for branch in branches:
-            self.output.log(f"Running piE grid search for {branch.value}")
+            self._log(f"Running piE grid search for {branch.value}")
 
             # Create and run grid search
             grid = mmexo.ParallaxGridSearch(
-                datasets=self.datasets,
+                datasets=datasets,
                 static_params=static_params,
+                grid_params=grid_params,
                 fitter_kwargs=self._get_fitter_kwargs(),
                 verbose=self.verbose,
             )
@@ -985,11 +1247,13 @@ class MMEXOFASTFitter:
                 filename = f"{self.output.config.file_head}_piE_grid_{branch.value.lower()}.txt"
                 filepath = self.output.config.base_dir / filename
                 grid.save_results(filepath, parallax_branch=branch.value)
-                self.output.log(f"Saved grid results to {filepath}")
+                self._log(f"Saved grid results to {filepath}")
 
         # Create plot if configured
         if self.output.config.save_plots:
             self._plot_piE_grid_search(grids)
+
+        return grids
 
     def _plot_piE_grid_search(self, grids):
         """
@@ -1044,13 +1308,299 @@ class MMEXOFASTFitter:
         # Save plot
         self.output.save_plot('piE_grid', fig)
 
+    def _get_best_from_grids(self, grids):
+        """
+        Get the best solution across multiple grid searches.
+
+        Parameters
+        ----------
+        grids : dict
+            Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
+
+        Returns
+        -------
+        tuple
+            (chi2, params) of the best solution across all grids
+        """
+        best_overall = None
+        best_chi2 = float('inf')
+
+        for branch, grid in grids.items():
+            minima = grid.find_local_minima()
+            if len(minima) > 0:
+                # Get best from this grid
+                chi2, params = minima[0]  # Already sorted by chi2
+                if chi2 < best_chi2:
+                    best_chi2 = chi2
+                    best_overall = (chi2, params)
+
+        if best_overall is None:
+            raise ValueError("No valid minima found in any grid")
+
+        return best_overall
+
+    # space parallax
+    def _get_space_u0_sign(self, fit_result, space_ephemerides_file):
+        """
+        Determine the sign of u0 for the space observatory trajectory.
+
+        Parameters
+        ----------
+        fit_result : FitRecord
+            Fit result containing the model
+        space_ephemerides_file : str
+            Path to ephemerides file for the space observatory
+
+        Returns
+        -------
+        str
+            'P' for positive u0, 'M' for negative u0
+        """
+        # Get model from fit_result
+        model = MulensModel.Model(
+            parameters=fit_result.params,
+            coords=self.coords,
+            ephemerides_file=space_ephemerides_file
+        )
+
+        # Define function to minimize: u(t) = sqrt(x^2 + y^2)
+        def u_squared(time):
+            trajectory = model.get_trajectory([time])
+            return trajectory.x[0] ** 2 + trajectory.y[0] ** 2
+
+        # Find time of minimum u
+        t_0 = fit_result.params['t_0']
+        t_E = fit_result.params['t_E']
+
+        result = minimize_scalar(
+            u_squared,
+            bounds=(t_0 - 2 * t_E, t_0 + 2 * t_E),
+            method='bounded'
+        )
+
+        # Get y-coordinate at minimum
+        t_min = result.x
+        trajectory = model.get_trajectory([t_min])
+        y_min = trajectory.y[0]
+
+        # Return sign
+        if y_min >= 0:
+            return 'P'
+        else:
+            return 'M'
+
+    def _fit_primary_location(self, primary_location=None, primary_dataset=None):
+        """
+        Fit primary location with static point lens models.
+
+        Selects the primary location (automatically or by specification),
+        fits static PSPL/FSPL, and renormalizes errors if configured.
+
+        Parameters
+        ----------
+        primary_location : str or None, optional
+            Location name to use as primary ('ground', 'Spitzer', etc.).
+            If None, automatically selects location with longest time coverage.
+        primary_dataset : str or None, optional
+            Filename of dataset to use for identifying primary location.
+            Takes precedence over primary_location.
+
+        Returns
+        -------
+        list
+            Primary location datasets that were fit
+        """
+        # Select primary location datasets
+        if primary_dataset is not None:
+            primary_datasets = self._get_location_group_for_dataset(primary_dataset)
+            # Find location name
+            for loc, datasets in self.location_groups.items():
+                if set(datasets) == set(primary_datasets):
+                    self._primary_location = loc
+                    break
+            self._log(f"Using primary dataset: {primary_dataset} (location: {self._primary_location})")
+        elif primary_location is not None:
+            primary_datasets = self._get_location_group_by_name(primary_location)
+            self._primary_location = primary_location
+            self._log(f"Using primary location: {primary_location}")
+        else:
+            primary_datasets = self._select_primary_location_by_coverage()
+            # Determine location name
+            self._primary_location = None
+            for loc, datasets in self.location_groups.items():
+                if set(datasets) == set(primary_datasets):
+                    self._primary_location = loc
+                    break
+            self._log(f"Auto-selected primary location: {self._primary_location}")
+
+        # Fit static models with primary location only (skip parallax)
+        self._log(f"Fitting static models with {len(primary_datasets)} primary location datasets")
+        self.fit_point_lens(datasets=primary_datasets, skip_parallax=True)
+
+        return primary_datasets
+
+    def _add_location_and_grid_search(self, datasets, grid_params):
+        """
+        Run parallax grid search with specified datasets and grid parameters.
+
+        Parameters
+        ----------
+        datasets : list
+            Datasets to use for grid search
+        grid_params : dict
+            Grid parameters (pi_E_E_min, pi_E_E_max, pi_E_E_step, etc.)
+
+        Returns
+        -------
+        dict
+            Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
+            Keys: mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS
+        """
+        locations_used = self._get_location_for_datasets(datasets)
+        self._log(f"Running parallax grid search with locations: {locations_used}")
+
+        # Run grid search and return the grids
+        grids = self._run_piE_grid_search(datasets=datasets, grid_params=grid_params)
+
+        return grids
+
+    def _extract_and_optimize_parallax_solutions(self, u0_plus_grid, u0_minus_grid, datasets):
+        """
+        Extract minima from parallax grids and optimize each solution.
+
+        For n_loc=2, extracts minima from both grids, optimizes each, determines
+        u0 signs for both locations, and stores as PP/PM/MP/MM solutions.
+
+        For n_loc>2, stores solutions as U0_PLUS or U0_MINUS based on primary
+        location u0 sign only.
+
+        Parameters
+        ----------
+        u0_plus_grid : ParallaxGridSearch
+            Grid search results for U0_PLUS branch
+        u0_minus_grid : ParallaxGridSearch
+            Grid search results for U0_MINUS branch
+        datasets : list
+            Datasets to use for optimization (typically all available)
+
+        Returns
+        -------
+        None
+            Stores results in self.all_fit_results
+        """
+        locations_used = self._get_location_for_datasets(datasets)
+
+        # For n_loc=2, identify secondary location and get its ephemerides
+        secondary_ephem = None
+        if self.n_loc == 2:
+            for loc, loc_datasets in self.location_groups.items():
+                if loc != self._primary_location:
+                    # Found secondary location
+                    if len(loc_datasets) > 0:
+                        # Get ephemerides file (could be None for ground)
+                        secondary_ephem = getattr(loc_datasets[0], 'ephemerides_file', None)
+                    break
+
+            if secondary_ephem is None and self._primary_location != 'ground':
+                # Secondary must be ground (no ephemerides)
+                pass  # secondary_ephem stays None, which is correct for ground
+
+        # Process both grids in a loop
+        grid_configs = [
+            (u0_plus_grid, mmexo.ParallaxBranch.U0_PLUS, 'U0_PLUS'),
+            (u0_minus_grid, mmexo.ParallaxBranch.U0_MINUS, 'U0_MINUS')
+        ]
+
+        for grid, base_branch, grid_name in grid_configs:
+            # Extract minima from this grid
+            minima = grid.find_local_minima()
+            self._log(f"Found {len(minima)} minima in {grid_name} grid")
+
+            # Optimize each minimum
+            for i, (chi2, params) in enumerate(minima):
+                self._log(f"Optimizing {grid_name} minimum {i + 1}/{len(minima)}")
+
+                # Optimize with full datasets
+                fit_result = self._optimize_parallax_solution(params, datasets)
+
+                # Determine branch based on n_loc
+                if self.n_loc == 2:
+                    # Check secondary location u0 sign
+                    secondary_sign = self._get_space_u0_sign(fit_result, secondary_ephem)
+
+                    # Map to PP/PM/MP/MM based on primary (base_branch) and secondary signs
+                    if base_branch == mmexo.ParallaxBranch.U0_PLUS:
+                        branch = mmexo.ParallaxBranch.U0_PP if secondary_sign == 'P' else mmexo.ParallaxBranch.U0_PM
+                    else:  # U0_MINUS
+                        branch = mmexo.ParallaxBranch.U0_MP if secondary_sign == 'P' else mmexo.ParallaxBranch.U0_MM
+                else:
+                    # n_loc > 2: just use base branch (U0_PLUS or U0_MINUS)
+                    branch = base_branch
+
+                # Create FitKey
+                fit_key = mmexo.FitKey(
+                    lens_type=mmexo.LensType.POINT,
+                    source_type=mmexo.SourceType.FINITE if self.finite_source else mmexo.SourceType.POINT,
+                    parallax_branch=branch,
+                    lens_orb_motion=mmexo.LensOrbMotion.NONE,
+                    locations_used=locations_used,
+                )
+
+                # Check if this key already exists (edge case warning)
+                if fit_key in self.all_fit_results:
+                    self._log(f"WARNING: FitKey {branch.value} already exists in all_fit_results. "
+                                    f"This may indicate multiple minima with the same u0 sign combination. "
+                                    f"Overwriting previous result.")
+
+                # Create and store FitRecord
+                record = mmexo.FitRecord.from_full_result(
+                    model_key=fit_key,
+                    full_result=fit_result,
+                    renorm_factors=self._current_renorm_factors(),
+                    fixed=False,
+                )
+                self.all_fit_results.set(record)
+                self._log(f"Stored {branch.value} solution (chi2={fit_result.chi2:.2f})")
+
+    def _optimize_parallax_solution(self, initial_params, datasets):
+        """
+        Optimize a parallax solution starting from grid parameters.
+
+        Parameters
+        ----------
+        initial_params : dict
+            Starting parameters from grid search minimum
+        datasets : list
+            Datasets to use for optimization
+
+        Returns
+        -------
+        MMEXOFASTFitResults
+            Optimized fit results
+        """
+        self._log(f"Optimizing from grid point: pi_E_E={initial_params.get('pi_E_E', 'N/A'):.3f}, "
+                        f"pi_E_N={initial_params.get('pi_E_N', 'N/A'):.3f}")
+
+        # Run SFitFitter with all parameters free
+        fitter = mmexo.fitters.SFitFitter(
+            initial_model_params=initial_params,
+            datasets=datasets,
+            **self._get_fitter_kwargs()
+        )
+        fitter.run()
+
+        self._log(f"Optimized: chi2={fitter.chi2:.2f}")
+
+        return mmexo.MMEXOFASTFitResults(fitter)
+
+    # other parallax helpers
     def _select_preferred_static_point_lens_model(self, chi2_threshold=20):
         """
         Select the preferred static point lens model from self.all_fit_results.
 
-        If only PSPL or FSPL exists, return that one.
-        If both exist, return FSPL only if its chi2 is better than PSPL by
-        chi2_threshold.
+        Prefers models with more complete location coverage. Among models with
+        the same location coverage, prefers FSPL over PSPL if chi2 improvement
+        exceeds chi2_threshold.
 
         Parameters
         ----------
@@ -1068,28 +1618,38 @@ class MMEXOFASTFitter:
         ValueError
             If no static point lens models exist
         """
-        pspl_key = mmexo.ModelKey(
-            lens_type=mmexo.LensType.POINT,
-            source_type=mmexo.SourceType.POINT,
-            parallax_branch=mmexo.ParallaxBranch.NONE,
-            lens_orb_motion=mmexo.LensOrbMotion.NONE
-        )
+        # Find all PSPL and FSPL fits regardless of locations_used
+        pspl_fits = []
+        fspl_fits = []
 
-        fspl_key = mmexo.ModelKey(
-            lens_type=mmexo.LensType.POINT,
-            source_type=mmexo.SourceType.FINITE,
-            parallax_branch=mmexo.ParallaxBranch.NONE,
-            lens_orb_motion=mmexo.LensOrbMotion.NONE
-        )
+        for key, fit in self.all_fit_results.items():
+            if (key.lens_type == mmexo.LensType.POINT and
+                    key.parallax_branch == mmexo.ParallaxBranch.NONE and
+                    key.lens_orb_motion == mmexo.LensOrbMotion.NONE):
 
-        pspl_fit = self.all_fit_results.get(pspl_key)
-        fspl_fit = self.all_fit_results.get(fspl_key)
+                if key.source_type == mmexo.SourceType.POINT:
+                    pspl_fits.append((key, fit))
+                elif key.source_type == mmexo.SourceType.FINITE:
+                    fspl_fits.append((key, fit))
 
         # Check if at least one exists
-        if pspl_fit is None and fspl_fit is None:
+        if len(pspl_fits) == 0 and len(fspl_fits) == 0:
             raise ValueError("No static point lens models found in all_fit_results")
 
-        # If only one exists, return it
+        # Select most complete version of each type
+        def get_most_complete(fits_list):
+            if len(fits_list) == 0:
+                return None
+            # Sort by location completeness (descending), then by chi2 (ascending)
+            return max(fits_list, key=lambda x: (
+                self._count_locations_used(x[0].locations_used),
+                -x[1].full_result.fitter.chi2  # Negative for ascending chi2
+            ))[1]
+
+        pspl_fit = get_most_complete(pspl_fits)
+        fspl_fit = get_most_complete(fspl_fits)
+
+        # If only one type exists, return it
         if pspl_fit is None:
             return fspl_fit
         if fspl_fit is None:
@@ -1234,31 +1794,46 @@ class MMEXOFASTFitter:
         # Refit all models with renormalized errors
         self._refit_models()
 
-    def _remove_outliers_and_calc_errfacs(self, reference_model):
+    def _remove_outliers_and_calc_errfacs(self, reference_model, datasets_to_process=None, all_datasets=None):
         """
         Iteratively remove outliers and calculate error renormalization factors.
 
         Parameters
         ----------
-        reference_model (MulensModel.Model): The model to use as reference for
-            error renormalization. Can be obtained from a FitRecord via
-            FitRecord.full_result.get_model()
+        reference_model : MulensModel.Model
+            The model to use as reference for error renormalization.
+        datasets_to_process : list or None, optional
+            Datasets to calculate error factors for. If None, uses self.datasets.
+        all_datasets : list or None, optional
+            All datasets to include in Event for flux fitting.
+            If None, uses self.datasets.
 
         Returns
         -------
         error_factors : list of float
-            Error renormalization factor for each dataset
+            Error renormalization factor for each dataset in datasets_to_process
         """
-        # Create event for residual calculation
-        event = MulensModel.Event(datasets=self.datasets, model=reference_model)
+        if datasets_to_process is None:
+            datasets_to_process = self.datasets
+
+        if all_datasets is None:
+            all_datasets = self.datasets
+
+        # Create event with ALL datasets for proper flux fitting
+        event = MulensModel.Event(datasets=all_datasets, model=reference_model)
         event.fit_fluxes()
 
         self._log("Starting outlier removal...")
 
         error_factors = []
 
-        # Process each dataset
-        for i, dataset in enumerate(self.datasets):
+        # Process only the specified datasets
+        for dataset in datasets_to_process:
+            # Find index in all_datasets
+            if dataset not in all_datasets:
+                raise ValueError(f"Dataset {dataset} not found in all_datasets")
+
+            i = all_datasets.index(dataset)
             dataset_name = dataset.plot_properties.get('label', f'Dataset {i}')
             self._log(f"\nProcessing {dataset_name}:")
 
@@ -1331,7 +1906,7 @@ class MMEXOFASTFitter:
 
         return error_factors
 
-    def _apply_error_renormalization(self, error_factors):
+    def _apply_error_renormalization(self, error_factors, datasets=None):
         """
         Recreate datasets with renormalized errors.
 
@@ -1339,24 +1914,28 @@ class MMEXOFASTFitter:
         ----------
         error_factors : list of float
             Error renormalization factor for each dataset
+        datasets : list or None, optional
+            Datasets to renormalize. If None, renormalizes all self.datasets.
+            If provided, only those datasets are recreated and replaced in self.datasets.
         """
-        self._log("\nApplying error renormalization...")
+        if datasets is None:
+            datasets = self.datasets
+            replace_all = True
+        else:
+            replace_all = False
 
-        new_datasets = []
-        new_dataset_to_filename = {}
+        self._log("\nApplying error renormalization...")
 
         # Get the signature of MulensData.__init__
         sig = inspect.signature(MulensModel.MulensData.__init__)
 
-        for dataset, errfac in zip(self.datasets, error_factors):
-            # Get original filename if available
-            original_filename = self.dataset_to_filename.get(dataset)
-
+        new_datasets = []
+        for dataset, errfac in zip(datasets, error_factors):
             # Build kwargs dict from original object's attributes
             kwargs = {}
             for param_name in sig.parameters:
                 if param_name in ['self', 'data_list', 'good', 'phot_fmt']:
-                    continue  # Skip these - we'll handle data_list separately
+                    continue
 
                 if hasattr(dataset, param_name):
                     kwargs[param_name] = getattr(dataset, param_name)
@@ -1369,26 +1948,18 @@ class MMEXOFASTFitter:
             )
 
             self._log(new_dataset)
-
-            ## Preserve important attributes
-            #new_dataset.bad = dataset.bad.copy()
-            #new_dataset.plot_properties = dataset.plot_properties.copy() if hasattr(dataset, 'plot_properties') else {}
-            #
-            #if hasattr(dataset, 'bandpass') and dataset.bandpass is not None:
-            #    new_dataset.bandpass = dataset.bandpass
-            #
-            #if hasattr(dataset, 'ephemerides_file') and dataset.ephemerides_file is not None:
-            #    new_dataset.ephemerides_file = dataset.ephemerides_file
-
             new_datasets.append(new_dataset)
 
-            # Preserve filename mapping
-            if original_filename is not None:
-                new_dataset_to_filename[new_dataset] = original_filename
-
         # Replace datasets
-        self.datasets = new_datasets
-        self.dataset_to_filename = new_dataset_to_filename
+        if replace_all:
+            self.datasets = new_datasets
+        else:
+            # Build mapping old -> new and replace in self.datasets
+            old_to_new = dict(zip(datasets, new_datasets))
+            self.datasets = [old_to_new.get(ds, ds) for ds in self.datasets]
+
+        # Rebuild filename mapping from scratch
+        self._build_dataset_to_filename_mapping()
 
         # Update flux fixing maps with new dataset objects
         self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
@@ -1425,7 +1996,7 @@ class MMEXOFASTFitter:
             )
             self.all_fit_results.set(new_record)
 
-            self._log(f'{mmexo.model_types.model_key_to_label(key)}: {fitter.best}')
+            self._log(f'{mmexo.fit_types.model_key_to_label(key)}: {fitter.best}')
             self._log_file_only(fitter.get_diagnostic_str())
 
     # ---------------------------------------------------------------------
@@ -1642,11 +2213,11 @@ class MMEXOFASTFitter:
                 model_label_record_pairs.append((label, record))
         else:
             for m in models:
-                if isinstance(m, mmexo.ModelKey):
+                if isinstance(m, mmexo.FitKey):
                     key = m
                 else:
                     # assume string label
-                    key = mmexo.model_types.label_to_model_key(m)
+                    key = mmexo.fit_types.label_to_model_key(m)
                 record = self.all_fit_results.get(key)
                 if record is None:
                     raise ValueError(f"No mmexo.FitRecord found for model {m!r}")

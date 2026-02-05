@@ -150,7 +150,7 @@ class MMEXOFASTFitResults:
 
 @dataclass
 class FitRecord:
-    model_key: mmexo.ModelKey
+    model_key: mmexo.FitKey
 
     # Core downstream data
     params: Dict[str, float]
@@ -168,11 +168,11 @@ class FitRecord:
 
     @classmethod
     def from_full_result(
-        cls,
-        model_key: mmexo.ModelKey,
-        full_result: MMEXOFASTFitResults,
-        renorm_factors: Optional[Dict[str, Any]] = None,
-        fixed: bool = False,
+            cls,
+            model_key: mmexo.FitKey,
+            full_result: MMEXOFASTFitResults,
+            renorm_factors: Optional[Dict[str, Any]] = None,
+            fixed: bool = False,
     ) -> "FitRecord":
         params = full_result.get_params_from_results()
         try:
@@ -300,22 +300,22 @@ class AllFitResults:
     Central registry for all fit results, keyed by mmexo.ModelKey.
     """
     def __init__(self):
-        self._records: Dict[mmexo.ModelKey, FitRecord] = {}
+        self._records: Dict[mmexo.FitKey, FitRecord] = {}
 
     # --- internal helper ---
-    def _normalize_key(self, key_or_label: str | mmexo.ModelKey) -> mmexo.ModelKey:
-        if isinstance(key_or_label, mmexo.ModelKey):
+    def _normalize_key(self, key_or_label: str | mmexo.FitKey) -> mmexo.FitKey:
+        if isinstance(key_or_label, mmexo.FitKey):
             return key_or_label
-        return mmexo.model_types.label_to_model_key(key_or_label)
+        return mmexo.fit_types.label_to_model_key(key_or_label)
 
-    def get(self, key_or_label: str | mmexo.ModelKey) -> Optional[FitRecord]:
+    def get(self, key_or_label: str | mmexo.FitKey) -> Optional[FitRecord]:
         key = self._normalize_key(key_or_label)
         return self._records.get(key)
 
     def set(self, record: FitRecord) -> None:
         self._records[record.model_key] = record
 
-    def has(self, key_or_label: str | mmexo.ModelKey) -> bool:
+    def has(self, key_or_label: str | mmexo.FitKey) -> bool:
         key = self._normalize_key(key_or_label)
         return key in self._records
 
