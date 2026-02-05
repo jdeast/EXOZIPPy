@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict
+from typing import Dict, Optional
 
 
 # ============================================================================
@@ -75,7 +75,7 @@ class LensOrbMotion(Enum):
 
 
 # ============================================================================
-# ModelKey
+# FitKey
 # ============================================================================
 
 
@@ -85,6 +85,7 @@ class FitKey:
     source_type: SourceType
     parallax_branch: ParallaxBranch
     lens_orb_motion: LensOrbMotion
+    locations_used: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Enforce: point lens cannot have orbital motion.
