@@ -675,7 +675,7 @@ class MMEXOFASTFitter:
         self._ensure_static_finite_point_lens(datasets)
 
         if not skip_parallax:
-            self._ensure_point_lens_parallax_models(datasets)
+            self._ensure_point_lens_parallax_models()
 
         if not self.verbose:
             self._save_restart_state()
@@ -1176,14 +1176,27 @@ class MMEXOFASTFitter:
             self,
             key: mmexo.FitKey,
             initial_params: Optional[Dict[str, float]] = None,
+            datasets=None,
     ) -> mmexo.MMEXOFASTFitResults:
         """
         Fit a point-lens parallax model for the given parallax branch.
+
+        Parameters
+        ----------
+        key : mmexo.FitKey
+            Fit key identifying the parallax model
+        initial_params : dict or None, optional
+            Starting parameters for fit
+        datasets : list or None, optional
+            Datasets to use. If None, uses self.datasets.
         """
+        if datasets is None:
+            datasets = self.datasets
+
         par_est_params = self._get_parallax_initial_params(key, initial_params)
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=par_est_params, datasets=self.datasets, **self._get_fitter_kwargs())
+            initial_model_params=par_est_params, datasets=datasets, **self._get_fitter_kwargs())
         fitter.run()
         self._log(f'{mmexo.fit_types.model_key_to_label(key)}: {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
