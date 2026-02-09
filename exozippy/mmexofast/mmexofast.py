@@ -219,6 +219,7 @@ class MMEXOFASTFitter:
             'anomaly_lc_params': self.anomaly_lc_params,
             'n_loc': self.n_loc,
             'datasets': self.datasets,
+            'renorm_factors': self.renorm_factors,
         }
 
     def _load_restart_data(self, restart_file):
@@ -236,6 +237,7 @@ class MMEXOFASTFitter:
         self.best_ef_grid_point = saved_state.get('best_ef_grid_point')
         self.best_af_grid_point = saved_state.get('best_af_grid_point')
         self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
+        self.renorm_factors = saved_state.get('renorm_factors', {})
 
     def _load_initial_results(self, initial_results: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -841,7 +843,7 @@ class MMEXOFASTFitter:
         full_result = fit_func(initial_params=initial_params, datasets=datasets)
 
         # Derive renorm factors from current state, if any
-        renorm_factors = self._current_renorm_factors()
+        renorm_factors = self.renorm_factors
 
         new_record = mmexo.FitRecord.from_full_result(
             model_key=key,
@@ -1588,7 +1590,7 @@ class MMEXOFASTFitter:
                 record = mmexo.FitRecord.from_full_result(
                     model_key=fit_key,
                     full_result=fit_result,
-                    renorm_factors=self._current_renorm_factors(),
+                    renorm_factors=self.renorm_factors,
                     fixed=False,
                 )
                 self.all_fit_results.set(record)
@@ -1799,18 +1801,8 @@ class MMEXOFASTFitter:
     # Renormalization helpers:
     # ---------------------------------------------------------------------
     """
-    #    _current_renorm_factors
     #    renormalize_errors_and_refit
     """
-
-    def _current_renorm_factors(self) -> Optional[Dict[str, Any]]:
-        """
-        Return the current renormalization factors, if any.
-
-        TODO: Implement this based on how you store per-dataset renorm info.
-        """
-        return None
-
     def renormalize_errors_and_refit(
             self,
             reference_model,
@@ -1834,30 +1826,35 @@ class MMEXOFASTFitter:
         # Refit all models with renormalized errors
         self._refit_models()
 
-    def _remove_outliers_and_calc_errfacs(self, reference_model, datasets_to_process=None, fit_datasets=None):
+    def _remove_outliers_and_calc_errfacs(self, reference_model, fit_datasets=None):
         """
-        Iteratively remove outliers and calculate error renormalization factors.
+        Remove outliers and calculate error renormalization factors.
 
         Parameters
         ----------
-        reference_model : MulensModel.Model
-            The model to use as reference for error renormalization.
-        datasets_to_process : list or None, optional
-            Datasets to calculate error factors for. If None, uses self.datasets.
+        reference_model : mmexo.Model
+            Model to use for outlier detection
         fit_datasets : list or None, optional
-            All datasets to include in Event for flux fitting.
-            If None, uses datasets_to_process.
+            Datasets to fit. If None, uses self.datasets.
 
         Returns
         -------
-        error_factors : list of float
-            Error renormalization factor for each dataset in datasets_to_process
+        error_factors : dict
+            Dictionary mapping filename to error renormalization factor
+            for each dataset that was processed.
         """
-        if datasets_to_process is None:
-            datasets_to_process = self.datasets
-
         if fit_datasets is None:
-            fit_datasets = datasets_to_process
+            fit_datasets = self.datasets
+
+        # Determine which datasets need processing
+        datasets_to_process = [
+            dataset for dataset in fit_datasets
+            if dataset.filename not in self.renorm_factors
+        ]
+
+        if not datasets_to_process:
+            self._log("All datasets already have renormalization factors applied.")
+            return {}
 
         # Create event with ALL datasets for proper flux fitting
         event = MulensModel.Event(datasets=fit_datasets, model=reference_model)
@@ -1865,7 +1862,7 @@ class MMEXOFASTFitter:
 
         self._log("Starting outlier removal...")
 
-        error_factors = []
+        error_factors_dict = {}
 
         # Process only the specified datasets
         for dataset in datasets_to_process:
@@ -1936,7 +1933,7 @@ class MMEXOFASTFitter:
             else:
                 final_errfac = 1.0
 
-            error_factors.append(final_errfac)
+            error_factors_dict[dataset.filename] = final_errfac
 
             # Summary
             if len(found_bad) > 0:
@@ -1944,7 +1941,7 @@ class MMEXOFASTFitter:
             else:
                 self._log(f"  No outliers removed, errfac={final_errfac:.3f}")
 
-        return error_factors
+        return error_factors_dict
 
     def _apply_error_renormalization(self, error_factors, datasets=None):
         """
@@ -2004,6 +2001,7 @@ class MMEXOFASTFitter:
         # Update flux fixing maps with new dataset objects
         self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
         self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
+        self.renorm_factors.update(error_factors)
 
         self._log("Datasets recreated with renormalized errors")
 
