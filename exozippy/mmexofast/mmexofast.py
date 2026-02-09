@@ -753,7 +753,6 @@ class MMEXOFASTFitter:
                 # Renormalize only secondary datasets (but include all in event)
                 error_factors = self._remove_outliers_and_calc_errfacs(
                     coarse_model,
-                    datasets_to_process=new_datasets,
                     fit_datasets=current_datasets
                 )
                 self._apply_error_renormalization(error_factors, datasets=new_datasets)
@@ -1820,7 +1819,7 @@ class MMEXOFASTFitter:
                 If None, use all datasets.
         """
         # Renormalize errors using the reference model
-        error_factors = self._remove_outliers_and_calc_errfacs(reference_model, datasets_to_process=None, fit_datasets=None)
+        error_factors = self._remove_outliers_and_calc_errfacs(reference_model, fit_datasets=None)
         self._apply_error_renormalization(error_factors)
 
         # Refit all models with renormalized errors
@@ -1849,7 +1848,7 @@ class MMEXOFASTFitter:
         # Determine which datasets need processing
         datasets_to_process = [
             dataset for dataset in fit_datasets
-            if dataset.filename not in self.renorm_factors
+            if self.dataset_to_filename.get(dataset) not in self.renorm_factors
         ]
 
         if not datasets_to_process:
@@ -1933,7 +1932,7 @@ class MMEXOFASTFitter:
             else:
                 final_errfac = 1.0
 
-            error_factors_dict[dataset.filename] = final_errfac
+            error_factors_dict[self.dataset_to_filename.get(dataset)] = final_errfac
 
             # Summary
             if len(found_bad) > 0:
@@ -1949,17 +1948,20 @@ class MMEXOFASTFitter:
 
         Parameters
         ----------
-        error_factors : list of float
-            Error renormalization factor for each dataset
+        error_factors : dict
+            Dictionary mapping filename to error renormalization factor
         datasets : list or None, optional
-            Datasets to renormalize. If None, renormalizes all self.datasets.
-            If provided, only those datasets are recreated and replaced in self.datasets.
+            Datasets to renormalize. If None, renormalizes all datasets
+            that have filenames in error_factors.
         """
         if datasets is None:
-            datasets = self.datasets
-            replace_all = True
-        else:
-            replace_all = False
+            # Apply to all datasets that have factors
+            datasets = [ds for ds in self.datasets
+                        if self.dataset_to_filename.get(ds) in error_factors]
+
+        if not datasets:
+            self._log("No datasets to renormalize.")
+            return
 
         self._log("\nApplying error renormalization...")
 
@@ -1967,7 +1969,14 @@ class MMEXOFASTFitter:
         sig = inspect.signature(MulensModel.MulensData.__init__)
 
         new_datasets = []
-        for dataset, errfac in zip(datasets, error_factors):
+        for dataset in datasets:
+            # Get error factor for this dataset
+            filename = self.dataset_to_filename.get(dataset)
+            errfac = error_factors.get(filename)
+            if errfac is None:
+                self._log(f"Warning: No error factor for {filename}, skipping")
+                continue
+
             # Build kwargs dict from original object's attributes
             kwargs = {}
             for param_name in sig.parameters:
@@ -1987,13 +1996,9 @@ class MMEXOFASTFitter:
             self._log(new_dataset)
             new_datasets.append(new_dataset)
 
-        # Replace datasets
-        if replace_all:
-            self.datasets = new_datasets
-        else:
-            # Build mapping old -> new and replace in self.datasets
-            old_to_new = dict(zip(datasets, new_datasets))
-            self.datasets = [old_to_new.get(ds, ds) for ds in self.datasets]
+        # Build mapping old -> new and replace in self.datasets
+        old_to_new = dict(zip(datasets, new_datasets))
+        self.datasets = [old_to_new.get(ds, ds) for ds in self.datasets]
 
         # Rebuild filename mapping from scratch
         self._build_dataset_to_filename_mapping()
@@ -2001,6 +2006,8 @@ class MMEXOFASTFitter:
         # Update flux fixing maps with new dataset objects
         self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
         self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
+
+        # Store applied factors in state
         self.renorm_factors.update(error_factors)
 
         self._log("Datasets recreated with renormalized errors")
