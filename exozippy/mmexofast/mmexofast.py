@@ -694,10 +694,15 @@ class MMEXOFASTFitter:
         Orchestrate multi-location parallax fitting workflow.
 
         Workflow:
-        1. Fit primary location with static models
-        2. Run coarse parallax grid with all data
+        1. Fit primary location with static models and renormalize errors for
+           all datasets from that that location.
+
+        Successively add datasets from each additional location:
+        2. Run coarse parallax grid with data from all locations that have been checked so far
         3. Optimize best solution from coarse grid
-        4. Renormalize secondary location errors
+        4. Renormalize errors for datasets from the new location
+
+        Finally,
         5. Run fine parallax grid with all data
         6. Extract and optimize all parallax solutions
         """
@@ -710,50 +715,64 @@ class MMEXOFASTFitter:
         self._log("\nStep 1: Fitting primary location")
         primary_datasets = self._fit_primary_location()
 
-        # Step 2: Run coarse grid with all datasets
-        self._log("\nStep 2: Running coarse parallax grid")
-        coarse_grids = self._add_location_and_grid_search(
-            datasets=self.datasets,
-            grid_params=self.PARALLAX_GRID_PARAMS_COARSE
-        )
+        current_datasets = primary_datasets
+        current_locations = [self._primary_location]
+        for location in self.location_groups.keys():
+            if location == self._primary_location:
+                continue
 
-        # Step 3: Optimize best from coarse grid
-        self._log("\nStep 3: Optimizing best solution from coarse grid")
-        best_coarse = self._get_best_from_grids(coarse_grids)
-        coarse_fit = self._optimize_parallax_solution(best_coarse[1], self.datasets)
-        self._log(f"Best coarse solution: chi2={coarse_fit.chi2:.2f}")
+            self._log(f'\n Adding data for {location}.')
+            current_locations.append(location)
+            new_datasets = self.location_groups[location]
+            current_datasets += new_datasets
 
-        # Step 4: Renormalize secondary location(s) errors
-        if self.renormalize_errors:
-            self._log("\nStep 4: Renormalizing secondary location errors")
-            # Get secondary datasets (all non-primary)
-            secondary_datasets = [ds for ds in self.datasets if ds not in primary_datasets]
-
-            # Create model from coarse fit
-            coarse_model = coarse_fit.fitter.get_model()
-
-            # Renormalize only secondary datasets (but include all in event)
-            error_factors = self._remove_outliers_and_calc_errfacs(
-                coarse_model,
-                datasets_to_process=secondary_datasets,
-                all_datasets=self.datasets
+            # Step 2: Run coarse grid with additional datasets
+            self._log("\nStep 2: Running coarse parallax grid")
+            coarse_grids = self._add_location_and_grid_search(
+                datasets=current_datasets,
+                grid_params=self.PARALLAX_GRID_PARAMS_COARSE
             )
-            self._apply_error_renormalization(error_factors, datasets=secondary_datasets)
 
-        # Step 5: Run fine grid with all (now renormalized) datasets
-        self._log("\nStep 5: Running fine parallax grid")
-        fine_grids = self._add_location_and_grid_search(
-            datasets=self.datasets,
-            grid_params=self.PARALLAX_GRID_PARAMS_FINE
-        )
+            # Step 3: Optimize best from coarse grid
+            self._log("\nStep 3: Optimizing best solution from coarse grid")
+            best_coarse = self._get_best_from_grids(coarse_grids)
+            coarse_fit = self._optimize_parallax_solution(best_coarse[1], current_datasets)
+            self._log(f"Best coarse solution: chi2={coarse_fit.chi2:.2f}")
 
-        # Step 6: Extract and optimize all solutions
-        self._log("\nStep 6: Extracting and optimizing all parallax solutions")
-        self._extract_and_optimize_parallax_solutions(
-            u0_plus_grid=fine_grids[mmexo.ParallaxBranch.U0_PLUS],
-            u0_minus_grid=fine_grids[mmexo.ParallaxBranch.U0_MINUS],
-            datasets=self.datasets
-        )
+            # Step 4: Renormalize secondary location(s) errors
+            if self.renormalize_errors:
+                self._log("\nStep 4: Renormalizing secondary location errors")
+                # Get secondary datasets (all non-primary)
+                #secondary_datasets = [ds for ds in self.datasets if ds not in primary_datasets]
+
+                # Create model from coarse fit
+                coarse_model = coarse_fit.fitter.get_model()
+
+                # Renormalize only secondary datasets (but include all in event)
+                error_factors = self._remove_outliers_and_calc_errfacs(
+                    coarse_model,
+                    datasets_to_process=new_datasets,
+                    fit_datasets=current_datasets
+                )
+                self._apply_error_renormalization(error_factors, datasets=new_datasets)
+                self._group_datasets_by_location()
+                current_datasets = sum([self.location_groups[location] for location in current_locations if location in self.location_groups.keys()], [])
+
+
+            # Step 5: Run fine grid with all (now renormalized) datasets
+            self._log("\nStep 5: Running fine parallax grid")
+            fine_grids = self._add_location_and_grid_search(
+                datasets=current_datasets,
+                grid_params=self.PARALLAX_GRID_PARAMS_FINE
+            )
+
+            # Step 6: Extract and optimize all solutions
+            self._log("\nStep 6: Extracting and optimizing all parallax solutions")
+            self._extract_and_optimize_parallax_solutions(
+                u0_plus_grid=fine_grids[mmexo.ParallaxBranch.U0_PLUS],
+                u0_minus_grid=fine_grids[mmexo.ParallaxBranch.U0_MINUS],
+                datasets=current_datasets
+            )
 
         self._log("\nMulti-location parallax workflow complete")
         self._log("=" * 60)
@@ -1651,12 +1670,13 @@ class MMEXOFASTFitter:
 
         # Select most complete version of each type
         def get_most_complete(fits_list):
+
             if len(fits_list) == 0:
                 return None
             # Sort by location completeness (descending), then by chi2 (ascending)
             return max(fits_list, key=lambda x: (
                 self._count_locations_used(x[0].locations_used),
-                -x[1].full_result.fitter.chi2  # Negative for ascending chi2
+                -x[1].chi2()  # Negative for ascending chi2
             ))[1]
 
         pspl_fit = get_most_complete(pspl_fits)
@@ -1669,8 +1689,8 @@ class MMEXOFASTFitter:
             return pspl_fit
 
         # Both exist - compare chi2
-        pspl_chi2 = pspl_fit.full_result.fitter.chi2
-        fspl_chi2 = fspl_fit.full_result.fitter.chi2
+        pspl_chi2 = pspl_fit.chi2()
+        fspl_chi2 = fspl_fit.chi2()
 
         # Return FSPL only if significantly better
         if fspl_chi2 < pspl_chi2 - chi2_threshold:
@@ -1791,7 +1811,11 @@ class MMEXOFASTFitter:
         """
         return None
 
-    def renormalize_errors_and_refit(self, reference_model):
+    def renormalize_errors_and_refit(
+            self,
+            reference_model,
+            datasets=None,
+    ):
         """
         Renormalize photometric errors and refit all models.
 
@@ -1799,15 +1823,18 @@ class MMEXOFASTFitter:
             reference_model (MulensModel.Model): The model to use as reference for
                 error renormalization. Can be obtained from a FitRecord via
                 FitRecord.full_result.get_model()
+
+            datasets (list or None): List of dataset IDs/indices to process.
+                If None, use all datasets.
         """
         # Renormalize errors using the reference model
-        error_factors = self._remove_outliers_and_calc_errfacs(reference_model)
+        error_factors = self._remove_outliers_and_calc_errfacs(reference_model, datasets_to_process=None, fit_datasets=None)
         self._apply_error_renormalization(error_factors)
 
         # Refit all models with renormalized errors
         self._refit_models()
 
-    def _remove_outliers_and_calc_errfacs(self, reference_model, datasets_to_process=None, all_datasets=None):
+    def _remove_outliers_and_calc_errfacs(self, reference_model, datasets_to_process=None, fit_datasets=None):
         """
         Iteratively remove outliers and calculate error renormalization factors.
 
@@ -1817,9 +1844,9 @@ class MMEXOFASTFitter:
             The model to use as reference for error renormalization.
         datasets_to_process : list or None, optional
             Datasets to calculate error factors for. If None, uses self.datasets.
-        all_datasets : list or None, optional
+        fit_datasets : list or None, optional
             All datasets to include in Event for flux fitting.
-            If None, uses self.datasets.
+            If None, uses datasets_to_process.
 
         Returns
         -------
@@ -1829,11 +1856,11 @@ class MMEXOFASTFitter:
         if datasets_to_process is None:
             datasets_to_process = self.datasets
 
-        if all_datasets is None:
-            all_datasets = self.datasets
+        if fit_datasets is None:
+            fit_datasets = datasets_to_process
 
         # Create event with ALL datasets for proper flux fitting
-        event = MulensModel.Event(datasets=all_datasets, model=reference_model)
+        event = MulensModel.Event(datasets=fit_datasets, model=reference_model)
         event.fit_fluxes()
 
         self._log("Starting outlier removal...")
@@ -1843,10 +1870,10 @@ class MMEXOFASTFitter:
         # Process only the specified datasets
         for dataset in datasets_to_process:
             # Find index in all_datasets
-            if dataset not in all_datasets:
+            if dataset not in fit_datasets:
                 raise ValueError(f"Dataset {dataset} not found in all_datasets")
 
-            i = all_datasets.index(dataset)
+            i = fit_datasets.index(dataset)
             dataset_name = dataset.plot_properties.get('label', f'Dataset {i}')
             self._log(f"\nProcessing {dataset_name}:")
 
@@ -2222,7 +2249,7 @@ class MMEXOFASTFitter:
         if models is None:
             # All models currently in mmexo.AllFitResults
             for key, record in self.all_fit_results.items():
-                label = mmexo.model_types.model_key_to_label(key)
+                label = mmexo.fit_types.model_key_to_label(key)
                 model_label_record_pairs.append((label, record))
         else:
             for m in models:
@@ -2234,7 +2261,7 @@ class MMEXOFASTFitter:
                 record = self.all_fit_results.get(key)
                 if record is None:
                     raise ValueError(f"No mmexo.FitRecord found for model {m!r}")
-                label = mmexo.model_types.model_key_to_label(key)
+                label = mmexo.fit_types.model_key_to_label(key)
                 model_label_record_pairs.append((label, record))
 
         results_table: Optional[pd.DataFrame] = None

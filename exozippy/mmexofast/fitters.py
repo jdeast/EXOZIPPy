@@ -83,7 +83,7 @@ class MulensFitter():
         """ Print chi2 for each dataset and fitted fluxes."""
         event = self.get_event()
         event.fit_fluxes()
-        msg = f'\nModel:\n{event.model}\n\nDatasets:'
+        msg = f'\n---- Event Info ----\nModel:\n{event.model}\n\nDatasets:'
         msg += '\n{0:20} {1:>4} {2:>12} {3} {4}'.format('Label', 'N_good', 'chi2', 'f_source', 'f_blend')
         for i, dataset in enumerate(event.datasets):
             msg += ('\n{0:20} {1:4} {2:12.2f} {3} {4}'.format(
@@ -92,6 +92,7 @@ class MulensFitter():
                 event.fits[i].source_fluxes,
                 event.fits[i].blend_flux))
 
+        msg += '\n--------------------\n'
         return msg
 
     @property
