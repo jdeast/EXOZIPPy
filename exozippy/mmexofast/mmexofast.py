@@ -684,7 +684,7 @@ class MMEXOFASTFitter:
 
         if self.renormalize_errors:
             ref_model = self._select_preferred_point_lens().full_result.fitter.get_model()
-            self.renormalize_errors_and_refit(ref_model, datasets=datasets)
+            datasets = self.renormalize_errors_and_refit(ref_model, datasets=datasets)
 
         self._save_restart_state()
 
@@ -1810,20 +1810,47 @@ class MMEXOFASTFitter:
         """
         Renormalize photometric errors and refit all models.
 
-        Args:
-            reference_model (MulensModel.Model): The model to use as reference for
-                error renormalization. Can be obtained from a FitRecord via
-                FitRecord.full_result.get_model()
+        Parameters
+        ----------
+        reference_model : MulensModel.Model
+            The model to use as reference for error renormalization.
+            Can be obtained from a FitRecord via
+            FitRecord.full_result.get_model()
+        datasets : list or None, optional
+            List of datasets to process. If None, use all datasets.
 
-            datasets (list or None): List of dataset IDs/indices to process.
-                If None, use all datasets.
+        Returns
+        -------
+        list
+            Updated list of dataset objects after renormalization.
+            If datasets=None was passed, returns self.datasets.
         """
+        if datasets is None:
+            datasets = self.datasets
+            return_all = True
+        else:
+            return_all = False
+            # Track filenames of input datasets
+            input_filenames = [self.dataset_to_filename.get(ds) for ds in datasets]
+
         # Renormalize errors using the reference model
-        error_factors = self._remove_outliers_and_calc_errfacs(reference_model, fit_datasets=None)
+        error_factors = self._remove_outliers_and_calc_errfacs(
+            reference_model,
+            fit_datasets=datasets
+        )
         self._apply_error_renormalization(error_factors)
 
         # Refit all models with renormalized errors
         self._refit_models()
+
+        # Return updated dataset objects
+        if return_all:
+            return self.datasets
+        else:
+            # Map filenames back to new dataset objects
+            filename_to_dataset = {self.dataset_to_filename.get(ds): ds
+                                   for ds in self.datasets}
+            return [filename_to_dataset[fn] for fn in input_filenames]
 
     def _remove_outliers_and_calc_errfacs(self, reference_model, fit_datasets=None):
         """
