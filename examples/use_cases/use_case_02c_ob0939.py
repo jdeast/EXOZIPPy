@@ -37,14 +37,14 @@ base_dir = Path('test_output')
 #    containing everything needed to initialize the next step (below)
 # ------
 
-print('=== Restart from pickle and Fit w/Error Renorm ===')
-cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
-    renormalize_errors=True, verbose=True, parallax_grid=True,
-    output_config=OutputConfig(
-        base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
-        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
-cont_fitter.fit()
+#print('=== Restart from pickle and Fit w/Error Renorm ===')
+#cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
+#    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
+#    renormalize_errors=True, verbose=True, parallax_grid=True,
+#    output_config=OutputConfig(
+#        base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
+#        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
+#cont_fitter.fit()
 # ------
 # Expected workflow: Renormalize errors, refit all models, run parallax grids
 #
@@ -68,17 +68,17 @@ cont_fitter.fit()
 #    containing everything needed to initialize the next step
 # ------
 
-#print('=== Restart from pickle and ADD Spitzer Data ===')
-#complete_fitter = exozippy.mmexofast.fit(
-#    files=ground_data_files + space_data_files,
-#    parallax_grid=True, renormalize_errors=True,
-#    verbose=True,
-#    restart_file='test_output/ob0939_uc02c_gr_restart.pkl',
-#    output_config=OutputConfig(
-#        base_dir=base_dir, file_head='ob0939_uc02c_complete', save_log=True, save_plots=True,
-#        save_latex_tables=True, save_restart_files=True, save_grid_results=True)
-#    )
-#complete_fitter.fit()
+print('=== Restart from pickle and ADD Spitzer Data ===')
+complete_fitter = exozippy.mmexofast.fit(
+    files=ground_data_files + space_data_files,
+    parallax_grid=True, renormalize_errors=True,
+    verbose=True,
+    restart_file='test_output/ob0939_uc02c_gr_restart.pkl',
+    output_config=OutputConfig(
+        base_dir=base_dir, file_head='ob0939_uc02c_complete', save_log=True, save_plots=True,
+        save_latex_tables=True, save_restart_files=True, save_grid_results=True)
+    )
+complete_fitter.fit()
 # ------
 # Need to implement:
 # 1. Adding datafiles with a pickle
