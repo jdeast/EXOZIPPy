@@ -130,7 +130,10 @@ class MMEXOFASTFitter:
             self.datasets = datasets
             self._build_dataset_to_filename_mapping()
             if saved_state.get('datasets'):
-                self._merge_with_saved_datasets(saved_state['datasets'])
+                self._merge_with_saved_datasets(
+                    saved_state['datasets'],
+                    saved_state.get('dataset_to_filename', {})
+                )
         elif saved_state.get('datasets'):
             # Using only restart file datasets
             self.datasets = saved_state['datasets']
@@ -219,6 +222,7 @@ class MMEXOFASTFitter:
             'anomaly_lc_params': self.anomaly_lc_params,
             'n_loc': self.n_loc,
             'datasets': self.datasets,
+            'dataset_to_filename': self.dataset_to_filename,
             'renorm_factors': self.renorm_factors,
         }
 
@@ -238,6 +242,7 @@ class MMEXOFASTFitter:
         self.best_af_grid_point = saved_state.get('best_af_grid_point')
         self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
         self.renorm_factors = saved_state.get('renorm_factors', {})
+        self.dataset_to_filename = saved_state.get('dataset_to_filename', {})
 
     def _load_initial_results(self, initial_results: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -371,7 +376,7 @@ class MMEXOFASTFitter:
             if hasattr(dataset, 'file_name') and dataset.file_name:
                 self.dataset_to_filename[dataset] = dataset.file_name
 
-    def _merge_with_saved_datasets(self, saved_datasets):
+    def _merge_with_saved_datasets(self, saved_datasets, saved_dataset_to_filename):
         """
         Replace current datasets with saved versions if filenames match.
 
@@ -382,21 +387,20 @@ class MMEXOFASTFitter:
         ----------
         saved_datasets : list
             List of MulensData objects from restart file
+        saved_dataset_to_filename : dict
+            Mapping of saved dataset objects to filenames
         """
-        # Build mapping of filename -> saved dataset
-        saved_by_filename = {}
-        for dataset in saved_datasets:
-            if hasattr(dataset, 'file_name') and dataset.file_name:
-                saved_by_filename[dataset.file_name] = dataset
+        # Build reverse mapping: filename -> saved dataset
+        saved_by_filename = {filename: dataset
+                             for dataset, filename in saved_dataset_to_filename.items()}
 
         # Replace matching datasets
         for i, dataset in enumerate(self.datasets):
-            filename = getattr(dataset, 'file_name', None)
+            filename = self.dataset_to_filename.get(dataset)
             if filename and filename in saved_by_filename:
                 self.datasets[i] = saved_by_filename[filename]
+                # Update mapping
                 self.dataset_to_filename[saved_by_filename[filename]] = filename
-
-                # Remove old dataset from mapping if different object
                 if dataset in self.dataset_to_filename:
                     del self.dataset_to_filename[dataset]
 
