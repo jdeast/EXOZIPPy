@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
+from collections.abc import MutableMapping
 
 import MulensModel
 import exozippy.mmexofast as mmexo
@@ -295,12 +296,31 @@ class GridSearchResult:
     best_index: int
 
 
-class AllFitResults:
+class AllFitResults(MutableMapping):
     """
-    Central registry for all fit results, keyed by mmexo.ModelKey.
+    Central registry for all fit results, keyed by mmexo.FitKey.
     """
     def __init__(self):
         self._records: Dict[mmexo.FitKey, FitRecord] = {}
+
+    # --- Required MutableMapping methods ---
+    def __getitem__(self, key_or_label: str | mmexo.FitKey) -> FitRecord:
+        key = self._normalize_key(key_or_label)
+        return self._records[key]
+
+    def __setitem__(self, key_or_label: str | mmexo.FitKey, record: FitRecord) -> None:
+        key = self._normalize_key(key_or_label)
+        self._records[key] = record
+
+    def __delitem__(self, key_or_label: str | mmexo.FitKey) -> None:
+        key = self._normalize_key(key_or_label)
+        del self._records[key]
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def __len__(self):
+        return len(self._records)
 
     # --- internal helper ---
     def _normalize_key(self, key_or_label: str | mmexo.FitKey) -> mmexo.FitKey:
@@ -308,6 +328,7 @@ class AllFitResults:
             return key_or_label
         return mmexo.fit_types.label_to_model_key(key_or_label)
 
+    # --- custom convenience methods ---
     def get(self, key_or_label: str | mmexo.FitKey) -> Optional[FitRecord]:
         key = self._normalize_key(key_or_label)
         return self._records.get(key)
