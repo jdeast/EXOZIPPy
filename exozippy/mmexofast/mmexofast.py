@@ -171,9 +171,6 @@ class MMEXOFASTFitter:
                     "is set in output config. At least one must be enabled to use parallax_grid."
                 )
 
-        # Restore state
-        self._restore_state(saved_state)
-
         # Load initial results if provided
         if initial_results is not None:
             self._load_initial_results(initial_results)

@@ -3,6 +3,7 @@ from exozippy.mmexofast.gridsearches import EventFinderGridSearch, AnomalyFinder
 from exozippy.mmexofast.fit_types import FitKey, LensType, SourceType, ParallaxBranch, LensOrbMotion
 from exozippy.mmexofast.results import MMEXOFASTFitResults, FitRecord, AllFitResults
 from exozippy.mmexofast.output import OutputConfig, OutputManager
+from exozippy.mmexofast.mmexofast import MMEXOFASTFitter
 
 # Import modules for methods
 from exozippy.mmexofast import observatories, fitters, estimate_params, fit_types
