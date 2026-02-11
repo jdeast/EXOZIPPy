@@ -59,6 +59,11 @@ class OutputConfig:
     save_restart_files: bool = False
     save_grid_results: bool = False
 
+    def __post_init__(self):
+        """Convert base_dir to Path if it's a string."""
+        if isinstance(self.base_dir, str):
+            self.base_dir = Path(self.base_dir)
+
 
 # ============================================================================
 # Output manager
