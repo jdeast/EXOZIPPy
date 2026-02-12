@@ -30,23 +30,21 @@ import exozippy.mmexofast as mmexo
 # ============================================================================
 def fit(files=None, fit_type=None, **kwargs):
     """
-    # Fit a microlensing light curve using MMEXOFAST
-    #
-    # :param files:
-    # :param coords:
-    # :param priors:
-    # :param fit_type:
-    # :param print_results:
-    # :param verbose:
-    # :param output_file:
-    # :return:
-    #
-    # ***
-    # Q1: Should this also include an `input_file` option?
-    # Q2: What about `initial_param` = *dict* of microlensing parameters option?
-    # Open issue: as written, only supports single solutions. 1/26/26 JCY: might be fixed?
-    # ***
-    #
+    Fit a microlensing light curve using MMEXOFAST.
+
+    Parameters
+    ----------
+    files : str or list, optional
+        Data file(s) to fit
+    fit_type : str, optional
+        Type of fit ('point lens', 'binary lens')
+    **kwargs : dict
+        Additional arguments passed to MMEXOFASTFitter
+
+    Returns
+    -------
+    MMEXOFASTFitter
+        Fitted fitter object
     """
     fitter = MMEXOFASTFitter(files=files, fit_type=fit_type, **kwargs)
     fitter.fit()
@@ -123,23 +121,21 @@ class MMEXOFASTFitter:
 
         # Create or use datasets
         if files:
-            self.datasets, self.dataset_to_filename = self._create_mulensdata_objects(
+            self.datasets = self._create_mulensdata_objects(
                 files, saved_datasets=saved_state.get('datasets')
             )
         elif datasets:
             self.datasets = datasets
-            self._build_dataset_to_filename_mapping()
             if saved_state.get('datasets'):
-                self._merge_with_saved_datasets(
-                    saved_state['datasets'],
-                    saved_state.get('dataset_to_filename', {})
-                )
+                self._merge_with_saved_datasets(saved_state['datasets'])
         elif saved_state.get('datasets'):
             # Using only restart file datasets
             self.datasets = saved_state['datasets']
-            self._build_dataset_to_filename_mapping()
         else:
             raise ValueError("Must provide files, datasets, or restart_file")
+
+        # Verify dataset labels are unique
+        self._check_dataset_labels_unique()
 
         # Recalculate n_loc based on current datasets
         old_n_loc = saved_state.get('n_loc')
@@ -155,9 +151,9 @@ class MMEXOFASTFitter:
             if old_n_loc is not None and old_n_loc != self.n_loc:
                 self._remove_parallax_fits()
 
-        # Map flux fixing options using filename mapping
-        self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
-        self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
+        # Map flux fixing options using label mapping
+        self.fix_blend_flux_map = self._map_label_dict_to_datasets(self.fix_blend_flux)
+        self.fix_source_flux_map = self._map_label_dict_to_datasets(self.fix_source_flux)
 
         self.residuals = None
 
@@ -179,11 +175,32 @@ class MMEXOFASTFitter:
     # restart helpers:
     # ---------------------------------------------------------------------
     def _get_config(self) -> dict:
-        """Automatically extract config from attributes."""
+        """
+        Automatically extract config from attributes.
+
+        Returns
+        -------
+        dict
+            Configuration dictionary with all CONFIG_KEYS
+        """
         return {key: getattr(self, key, None) for key in self.CONFIG_KEYS}
 
     def _merge_config(self, saved_config, provided_params):
-        """Merge saved config with provided params (provided wins)."""
+        """
+        Merge saved config with provided params (provided wins).
+
+        Parameters
+        ----------
+        saved_config : dict
+            Configuration from restart file
+        provided_params : dict
+            Parameters provided to __init__
+
+        Returns
+        -------
+        dict
+            Merged configuration
+        """
         merged = {}
         for key in self.CONFIG_KEYS:
             if key in provided_params and provided_params[key] is not None:
@@ -195,12 +212,26 @@ class MMEXOFASTFitter:
         return merged
 
     def _set_config_attributes(self, config):
-        """Set all config attributes from config dict."""
+        """
+        Set all config attributes from config dict.
+
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary
+        """
         for key in self.CONFIG_KEYS:
             setattr(self, key, config[key])
 
     def _get_fitter_kwargs(self) -> dict:
-        """Bundle fitter options for passing to SFitFitter."""
+        """
+        Bundle fitter options for passing to SFitFitter.
+
+        Returns
+        -------
+        dict
+            Fitter configuration options
+        """
         return {
             'coords': self.coords,
             'mag_methods': self.mag_methods,
@@ -211,7 +242,14 @@ class MMEXOFASTFitter:
         }
 
     def _get_state(self) -> dict:
-        """Get all computed state (fit results)."""
+        """
+        Get all computed state (fit results).
+
+        Returns
+        -------
+        dict
+            State dictionary for pickling
+        """
         return {
             'all_fit_results': self.all_fit_results,
             'best_ef_grid_point': self.best_ef_grid_point,
@@ -219,12 +257,23 @@ class MMEXOFASTFitter:
             'anomaly_lc_params': self.anomaly_lc_params,
             'n_loc': self.n_loc,
             'datasets': self.datasets,
-            'dataset_to_filename': self.dataset_to_filename,
             'renorm_factors': self.renorm_factors,
         }
 
     def _load_restart_data(self, restart_file):
-        """Load config and state from restart file."""
+        """
+        Load config and state from restart file.
+
+        Parameters
+        ----------
+        restart_file : str or None
+            Path to restart pickle file
+
+        Returns
+        -------
+        tuple
+            (config_dict, state_dict)
+        """
         if restart_file is None:
             return {}, {}
 
@@ -233,13 +282,19 @@ class MMEXOFASTFitter:
         return data.get('config', {}), data.get('state', {})
 
     def _restore_state(self, saved_state):
-        """Restore computed state from saved data."""
+        """
+        Restore computed state from saved data.
+
+        Parameters
+        ----------
+        saved_state : dict
+            State dictionary from restart file
+        """
         self.all_fit_results = saved_state.get('all_fit_results', mmexo.AllFitResults())
         self.best_ef_grid_point = saved_state.get('best_ef_grid_point')
         self.best_af_grid_point = saved_state.get('best_af_grid_point')
         self.anomaly_lc_params = saved_state.get('anomaly_lc_params')
         self.renorm_factors = saved_state.get('renorm_factors', {})
-        self.dataset_to_filename = saved_state.get('dataset_to_filename', {})
 
     def _load_initial_results(self, initial_results: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -252,6 +307,11 @@ class MMEXOFASTFitter:
             "renorm_factors": {...},      # optional
             "fixed": bool,                # optional
         }
+
+        Parameters
+        ----------
+        initial_results : dict
+            Dictionary mapping model labels to result dictionaries
         """
         for label, payload in initial_results.items():
             key = mmexo.fit_types.label_to_model_key(label)
@@ -286,42 +346,42 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # Working with datasets:
     # ---------------------------------------------------------------------
-    # filenames and loading
     def _create_mulensdata_objects(self, files, saved_datasets=None):
         """
-        Create MulensData objects, reusing saved datasets when filenames match.
+        Create MulensData objects, reusing saved datasets when labels match.
 
         Parameters
         ----------
         files : str or list
             File paths to load
         saved_datasets : list or None
-            Previously saved datasets to reuse if filenames match
+            Previously saved datasets to reuse if labels match
 
         Returns
         -------
-        datasets : list
+        list
             List of MulensData objects
-        dataset_to_filename : dict
-            Maps each dataset to its source filename
         """
         if isinstance(files, str):
             files = [files]
 
-        # Build mapping of saved datasets by filename
-        saved_by_filename = {}
+        # Build mapping of saved datasets by label
+        saved_by_label = {}
         if saved_datasets:
             for dataset in saved_datasets:
-                if hasattr(dataset, 'file_name') and dataset.file_name:
-                    saved_by_filename[dataset.file_name] = dataset
+                label = dataset.plot_properties.get('label')
+                if label:
+                    saved_by_label[label] = dataset
 
         datasets = []
-        dataset_to_filename = {}
 
         for filename in files:
-            # Check if we have a saved version
-            if filename in saved_by_filename:
-                data = saved_by_filename[filename]
+            # Extract label from filename (basename)
+            label = os.path.basename(filename)
+
+            # Check if we have a saved version with this label
+            if label in saved_by_label:
+                data = saved_by_label[label]
             else:
                 # Load fresh from file
                 if not os.path.exists(filename):
@@ -331,51 +391,69 @@ class MMEXOFASTFitter:
                 data = MulensModel.MulensData(file_name=filename, **kwargs)
 
             datasets.append(data)
-            dataset_to_filename[data] = filename
 
-        return datasets, dataset_to_filename
+        return datasets
 
-    def _map_filename_dict_to_datasets(self, filename_dict) -> dict:
+    def _map_label_dict_to_datasets(self, label_dict) -> dict:
         """
-        Map a dict[filename: value] to dict[dataset: value].
+        Map a dict[label: value] to dict[dataset: value].
 
         Parameters
         ----------
-        filename_dict : dict or None
-            Keys are filenames, values are bool
+        label_dict : dict or None
+            Keys are dataset labels, values are bool or other values
 
         Returns
         -------
         dict
-            Keys are MulensData objects, values from filename_dict
+            Keys are MulensData objects, values from label_dict
         """
-        if filename_dict is None:
+        if label_dict is None:
             # Default: False for all datasets
             return {dataset: False for dataset in self.datasets}
 
         result = {}
         for dataset in self.datasets:
-            # Use our stored mapping
-            filename = self.dataset_to_filename.get(dataset)
+            # Get label from dataset
+            label = dataset.plot_properties.get('label')
 
-            if filename and filename in filename_dict:
-                result[dataset] = filename_dict[filename]
+            if label and label in label_dict:
+                result[dataset] = label_dict[label]
             else:
                 # Default if not specified
                 result[dataset] = False
 
         return result
 
-    def _build_dataset_to_filename_mapping(self):
-        """Build dataset_to_filename mapping from dataset.file_name attributes."""
-        self.dataset_to_filename = {}
-        for dataset in self.datasets:
-            if hasattr(dataset, 'file_name') and dataset.file_name:
-                self.dataset_to_filename[dataset] = dataset.file_name
-
-    def _merge_with_saved_datasets(self, saved_datasets, saved_dataset_to_filename):
+    def _check_dataset_labels_unique(self):
         """
-        Replace current datasets with saved versions if filenames match.
+        Verify that all dataset labels are unique.
+
+        Raises
+        ------
+        ValueError
+            If duplicate labels are found
+        """
+        labels = [ds.plot_properties.get('label') for ds in self.datasets]
+
+        # Check for None labels
+        if None in labels:
+            raise ValueError(
+                "Some datasets do not have labels set in plot_properties['label']. "
+                "All datasets must have unique labels."
+            )
+
+        # Check for duplicates
+        duplicates = [label for label in set(labels) if labels.count(label) > 1]
+        if duplicates:
+            raise ValueError(
+                f"Duplicate dataset labels found: {duplicates}. "
+                "All datasets must have unique labels in plot_properties['label']."
+            )
+
+    def _merge_with_saved_datasets(self, saved_datasets):
+        """
+        Replace current datasets with saved versions if labels match.
 
         This ensures renormalized datasets from restart_file are used instead
         of freshly loaded versions.
@@ -384,30 +462,30 @@ class MMEXOFASTFitter:
         ----------
         saved_datasets : list
             List of MulensData objects from restart file
-        saved_dataset_to_filename : dict
-            Mapping of saved dataset objects to filenames
         """
-        # Build reverse mapping: filename -> saved dataset
-        saved_by_filename = {filename: dataset
-                             for dataset, filename in saved_dataset_to_filename.items()}
+        # Build mapping: label -> saved dataset
+        saved_by_label = {}
+        for dataset in saved_datasets:
+            label = dataset.plot_properties.get('label')
+            if label:
+                saved_by_label[label] = dataset
 
         # Replace matching datasets
         for i, dataset in enumerate(self.datasets):
-            filename = self.dataset_to_filename.get(dataset)
-            if filename and filename in saved_by_filename:
-                self.datasets[i] = saved_by_filename[filename]
-                # Update mapping
-                self.dataset_to_filename[saved_by_filename[filename]] = filename
-                if dataset in self.dataset_to_filename:
-                    del self.dataset_to_filename[dataset]
+            label = dataset.plot_properties.get('label')
+            if label and label in saved_by_label:
+                self.datasets[i] = saved_by_label[label]
 
     # Location grouping
     def _count_loc(self):
         """
-        # Determine how many locations (e.g. Earth vs. Earth + Space) an event was observed from.
-        # :return:
-        """
+        Determine how many locations an event was observed from.
 
+        Returns
+        -------
+        int
+            Number of distinct observing locations
+        """
         if len(self.datasets) == 1:
             return 1
 
@@ -516,14 +594,14 @@ class MMEXOFASTFitter:
             )
         return groups[location_name]
 
-    def _get_location_group_for_dataset(self, filename):
+    def _get_location_group_for_dataset(self, label):
         """
         Get the location group containing a specific dataset.
 
         Parameters
         ----------
-        filename : str
-            Filename of the dataset
+        label : str
+            Label of the dataset
 
         Returns
         -------
@@ -533,17 +611,17 @@ class MMEXOFASTFitter:
         Raises
         ------
         ValueError
-            If filename not found
+            If label not found
         """
-        # Find the dataset with this filename
+        # Find the dataset with this label
         target_dataset = None
         for dataset in self.datasets:
-            if self.dataset_to_filename.get(dataset) == filename:
+            if dataset.plot_properties.get('label') == label:
                 target_dataset = dataset
                 break
 
         if target_dataset is None:
-            raise ValueError(f"Dataset with filename '{filename}' not found")
+            raise ValueError(f"Dataset with label '{label}' not found")
 
         # Find which group it belongs to
         groups = self._group_datasets_by_location()
@@ -618,23 +696,12 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # Public orchestration methods:
     # ---------------------------------------------------------------------
-    """
-    #
-    #    fit
-    #    fit_point_lens
-    #    fit_binary_lens
-    # 
-    """
-
     def fit(self):
         """
-        Perform the fit according to the settings established when the MMEXOFASTFitter object was created.
-
-        :return: None
+        Perform the fit according to the settings established when the
+        MMEXOFASTFitter object was created.
         """
         if self.fit_type is None:
-            # Maybe "None" means initial mulens parameters were passed,
-            # so we can go straight to a mmexofast_fit?
             raise ValueError(
                 'You must set the fit_type when initializing the ' +
                 'MMEXOFASTFitter(): fit_type=("point lens", "binary lens")')
@@ -745,21 +812,19 @@ class MMEXOFASTFitter:
             # Step 4: Renormalize secondary location(s) errors
             if self.renormalize_errors:
                 self._log("\nStep 4: Renormalizing secondary location errors")
-                # Get secondary datasets (all non-primary)
-                #secondary_datasets = [ds for ds in self.datasets if ds not in primary_datasets]
 
                 # Create model from coarse fit
                 coarse_model = coarse_fit.fitter.get_model()
 
-                # Renormalize only secondary datasets (but include all in event)
+                # Renormalize only new datasets
                 error_factors = self._remove_outliers_and_calc_errfacs(
                     coarse_model,
                     fit_datasets=current_datasets
                 )
                 self._apply_error_renormalization(error_factors, datasets=new_datasets)
                 self._group_datasets_by_location()
-                current_datasets = sum([self.location_groups[location] for location in current_locations if location in self.location_groups.keys()], [])
-
+                current_datasets = sum([self.location_groups[location] for location in current_locations if
+                                        location in self.location_groups.keys()], [])
 
             # Step 5: Run fine grid with all (now renormalized) datasets
             self._log("\nStep 5: Running fine parallax grid")
@@ -785,9 +850,6 @@ class MMEXOFASTFitter:
 
         - static PSPL
         - Anomaly Finder search
-        # TODO: re-fit as needed depending on AF results
-
-
         """
         # Reuse the shared pieces you actually need:
         self._ensure_static_point_lens()
@@ -858,11 +920,9 @@ class MMEXOFASTFitter:
 
         return new_record
 
-    # ------------------------------------------------------------------
+# ------------------------------------------------------------------
     # Shared point-lens steps
     # ------------------------------------------------------------------
-
-    # "ensure" means "Make sure that this thing exists and is up to date; if it already does, don’t redo the work.”
 
     def _ensure_static_point_lens(self, datasets=None) -> None:
         """
@@ -959,20 +1019,7 @@ class MMEXOFASTFitter:
     # ---------------------------------------------------------------------
     # Point-lens helpers:
     # ---------------------------------------------------------------------
-    """
-    #
-    #    _fit_initial_pspl_model
-    #    _fit_static_fspl_model
-    #
-    #    _iter_parallax_point_lens_keys
-    #    BRANCH_SIGNS
-    #    _apply_branch_signs
-    #    _get_parallax_initial_params
-    #    _fit_pl_parallax_model
-    #
-    #    _select_preferred_point_lens
-    """
-    # static point lenses
+
     def _fit_initial_pspl_model(
             self,
             initial_params: Optional[Dict[str, float]] = None,
@@ -980,7 +1027,6 @@ class MMEXOFASTFitter:
     ) -> mmexo.MMEXOFASTFitResults:
         """
         Estimate or accept starting point for PSPL, then run SFitFitter.
-        Returns mmexo.MMEXOFASTFitResults.
 
         EF grid is only used if `initial_params` is None and
         best_ef_grid_point is not yet available.
@@ -991,6 +1037,11 @@ class MMEXOFASTFitter:
             Starting parameters for fit
         datasets : list or None, optional
             Datasets to use. If None, uses self.datasets.
+
+        Returns
+        -------
+        mmexo.MMEXOFASTFitResults
+            Fit results
         """
         if datasets is None:
             datasets = self.datasets
@@ -1002,7 +1053,7 @@ class MMEXOFASTFitter:
 
             pspl_est_params = mmexo.estimate_params.get_PSPL_params(
                 self.best_ef_grid_point,
-                datasets,  # Use provided datasets
+                datasets,
             )
             self._log(f"Initial PSPL Estimate {pspl_est_params}")
         else:
@@ -1032,14 +1083,16 @@ class MMEXOFASTFitter:
         datasets : list or None, optional
             Datasets to use. If None, uses self.datasets.
 
-
-        TODO: implement actual FSPL parameter estimation and fitting logic.
+        Returns
+        -------
+        mmexo.MMEXOFASTFitResults
+            Fit results
         """
         if datasets is None:
             datasets = self.datasets
 
         if initial_params is None:
-            # Example: seed from static PSPL record if available.
+            # Seed from static PSPL record if available
             static_pspl_key = mmexo.FitKey(
                 lens_type=mmexo.LensType.POINT,
                 source_type=mmexo.SourceType.POINT,
@@ -1084,7 +1137,17 @@ class MMEXOFASTFitter:
     ) -> None:
         """
         In-place: adjust params from src_branch convention to target_branch.
+
         Flips signs of u_0 and/or pi_E_N as needed.
+
+        Parameters
+        ----------
+        params : dict
+            Parameter dictionary to modify in place
+        src_branch : mmexo.ParallaxBranch
+            Source parallax branch
+        target_branch : mmexo.ParallaxBranch
+            Target parallax branch
         """
         su0_src, spi_src = self.BRANCH_SIGNS[src_branch]
         su0_tgt, spi_tgt = self.BRANCH_SIGNS[target_branch]
@@ -1100,6 +1163,11 @@ class MMEXOFASTFitter:
     def _iter_parallax_point_lens_keys(self) -> Iterable[mmexo.FitKey]:
         """
         Yield mmexo.ModelKeys for all point-lens parallax models consistent with n_loc.
+
+        Yields
+        ------
+        mmexo.FitKey
+            Parallax model keys
         """
         if self.n_loc == 1:
             branches = [mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS]
@@ -1133,13 +1201,25 @@ class MMEXOFASTFitter:
         1. Use provided initial_params if not None.
         2. Seed from an existing parallax branch result, transformed via sign flips.
         3. Fallback to static point-lens params (PSPL/FSPL) for this source_type.
+
+        Parameters
+        ----------
+        key : mmexo.FitKey
+            Fit key for the parallax model
+        initial_params : dict or None
+            Provided initial parameters
+
+        Returns
+        -------
+        dict
+            Initial parameters for the fit
         """
         # 1. Caller-supplied initial params
         if initial_params is not None:
             self._log(
-                    f"Using provided initial params for parallax branch "
-                    f"{key.parallax_branch}: {initial_params}"
-                )
+                f"Using provided initial params for parallax branch "
+                f"{key.parallax_branch}: {initial_params}"
+            )
             return dict(initial_params)
 
         # 2. Seed from any existing parallax branch
@@ -1164,9 +1244,9 @@ class MMEXOFASTFitter:
                 target_branch=key.parallax_branch,
             )
             self._log(
-                    f"Seeding parallax branch {key.parallax_branch.value} from "
-                    f"existing branch {other_branch.value} with transformed params: {base}"
-                )
+                f"Seeding parallax branch {key.parallax_branch.value} from "
+                f"existing branch {other_branch.value} with transformed params: {base}"
+            )
             return base
 
         # 3. Fallback: static point-lens
@@ -1186,12 +1266,10 @@ class MMEXOFASTFitter:
         base['pi_E_N'] = 0.
         base['pi_E_E'] = 0.
         self._log(
-                f"Seeding parallax branch {key.parallax_branch.value} from "
-                f"static model (source_type={key.source_type.value}): {base}"
-            )
+            f"Seeding parallax branch {key.parallax_branch.value} from "
+            f"static model (source_type={key.source_type.value}): {base}"
+        )
         return base
-
-    # --- UPDATED: parallax fitter uses the helpers ------------------------
 
     def _fit_pl_parallax_model(
             self,
@@ -1210,6 +1288,11 @@ class MMEXOFASTFitter:
             Starting parameters for fit
         datasets : list or None, optional
             Datasets to use. If None, uses self.datasets.
+
+        Returns
+        -------
+        mmexo.MMEXOFASTFitResults
+            Fit results
         """
         if datasets is None:
             datasets = self.datasets
@@ -1436,7 +1519,7 @@ class MMEXOFASTFitter:
             Location name to use as primary ('ground', 'Spitzer', etc.).
             If None, automatically selects location with longest time coverage.
         primary_dataset : str or None, optional
-            Filename of dataset to use for identifying primary location.
+            Label of dataset to use for identifying primary location.
             Takes precedence over primary_location.
 
         Returns
@@ -1516,11 +1599,6 @@ class MMEXOFASTFitter:
             Grid search results for U0_MINUS branch
         datasets : list
             Datasets to use for optimization (typically all available)
-
-        Returns
-        -------
-        None
-            Stores results in self.all_fit_results
         """
         locations_used = self._get_location_for_datasets(datasets)
 
@@ -1672,7 +1750,6 @@ class MMEXOFASTFitter:
 
         # Select most complete version of each type
         def get_most_complete(fits_list):
-
             if len(fits_list) == 0:
                 return None
             # Sort by location completeness (descending), then by chi2 (ascending)
@@ -1716,9 +1793,17 @@ class MMEXOFASTFitter:
             → use static PL model.
         - If no parallax models exist, fall back to static PL.
         - If neither exists (or no chi^2), return None.
-        """
-        # TODO: Expand to cover FSPL cases.
 
+        Parameters
+        ----------
+        delta_chi2_threshold : float, optional
+            Minimum chi2 improvement for parallax to be preferred. Default is 50.
+
+        Returns
+        -------
+        FitRecord or None
+            Preferred point lens model
+        """
         best_static = self._select_preferred_static_point_lens_model()
         best_par = self.all_fit_results.select_best_parallax_pspl()
 
@@ -1746,6 +1831,9 @@ class MMEXOFASTFitter:
     # Binary-lens helpers:
     # ---------------------------------------------------------------------
     def _run_af_grid_search(self):
+        """
+        Run Anomaly Finder grid search if not already done.
+        """
         if self.best_af_grid_point is None:
             self.best_af_grid_point = self.do_af_grid_search()
             self._log(f'Best AF grid {self.best_af_grid_point}')
@@ -1755,14 +1843,19 @@ class MMEXOFASTFitter:
             self._log(f'Anomaly Params {self.anomaly_lc_params}')
 
     def _fit_binary_models(self):
+        """
+        Fit binary lens models (currently only wide planet in GG97 limit).
+
+        Raises
+        ------
+        NotImplementedError
+            Binary fitting only partially implemented
+        """
 
         def fit_wide_planet():
-            # So far, this only fits wide planet models in the GG97 limit.
-            # print(self.anomaly_lc_params)
             wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
                 datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
-                #emcee_settings=self.emcee_settings, pool=self.pool)
-                )
+            )
             wide_planet_fitter.estimate_initial_parameters()
             self._log(
                 f'Initial 2L1S Wide Model {wide_planet_fitter.initial_model}' +
@@ -1774,15 +1867,19 @@ class MMEXOFASTFitter:
 
         fit_wide_planet()
         raise NotImplementedError('fitting binary models only partially implemented')
-        #if self.emcee:
-        #    self.results = self.fit_anomaly()
-        #    if self.verbose:
-        #        print('Results', self.results)
 
     # ---------------------------------------------------------------------
     # Data helpers:
     # ---------------------------------------------------------------------
     def set_residuals(self, pspl_params):
+        """
+        Calculate and store residuals from a PSPL model.
+
+        Parameters
+        ----------
+        pspl_params : dict
+            PSPL model parameters
+        """
         event = MulensModel.Event(
             datasets=self.datasets, model=MulensModel.Model(pspl_params))
         event.fit_fluxes()
@@ -1797,12 +1894,9 @@ class MMEXOFASTFitter:
 
         self.residuals = residuals
 
-    # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
     # Renormalization helpers:
     # ---------------------------------------------------------------------
-    """
-    #    renormalize_errors_and_refit
-    """
     def renormalize_errors_and_refit(
             self,
             reference_model,
@@ -1831,8 +1925,8 @@ class MMEXOFASTFitter:
             return_all = True
         else:
             return_all = False
-            # Track filenames of input datasets
-            input_filenames = [self.dataset_to_filename.get(ds) for ds in datasets]
+            # Track labels of input datasets
+            input_labels = [ds.plot_properties['label'] for ds in datasets]
 
         # Renormalize errors using the reference model
         error_factors = self._remove_outliers_and_calc_errfacs(
@@ -1848,10 +1942,10 @@ class MMEXOFASTFitter:
         if return_all:
             return self.datasets
         else:
-            # Map filenames back to new dataset objects
-            filename_to_dataset = {self.dataset_to_filename.get(ds): ds
-                                   for ds in self.datasets}
-            return [filename_to_dataset[fn] for fn in input_filenames]
+            # Map labels back to new dataset objects
+            label_to_dataset = {ds.plot_properties['label']: ds
+                               for ds in self.datasets}
+            return [label_to_dataset[label] for label in input_labels]
 
     def _remove_outliers_and_calc_errfacs(self, reference_model, fit_datasets=None):
         """
@@ -1866,8 +1960,8 @@ class MMEXOFASTFitter:
 
         Returns
         -------
-        error_factors : dict
-            Dictionary mapping filename to error renormalization factor
+        dict
+            Dictionary mapping label to error renormalization factor
             for each dataset that was processed.
         """
         if fit_datasets is None:
@@ -1876,7 +1970,7 @@ class MMEXOFASTFitter:
         # Determine which datasets need processing
         datasets_to_process = [
             dataset for dataset in fit_datasets
-            if self.dataset_to_filename.get(dataset) not in self.renorm_factors
+            if dataset.plot_properties['label'] not in self.renorm_factors
         ]
 
         if not datasets_to_process:
@@ -1893,9 +1987,9 @@ class MMEXOFASTFitter:
 
         # Process only the specified datasets
         for dataset in datasets_to_process:
-            # Find index in all_datasets
+            # Find index in fit_datasets
             if dataset not in fit_datasets:
-                raise ValueError(f"Dataset {dataset} not found in all_datasets")
+                raise ValueError(f"Dataset {dataset} not found in fit_datasets")
 
             i = fit_datasets.index(dataset)
             dataset_name = dataset.plot_properties.get('label', f'Dataset {i}')
@@ -1960,7 +2054,7 @@ class MMEXOFASTFitter:
             else:
                 final_errfac = 1.0
 
-            error_factors_dict[self.dataset_to_filename.get(dataset)] = final_errfac
+            error_factors_dict[dataset.plot_properties['label']] = final_errfac
 
             # Summary
             if len(found_bad) > 0:
@@ -1977,15 +2071,15 @@ class MMEXOFASTFitter:
         Parameters
         ----------
         error_factors : dict
-            Dictionary mapping filename to error renormalization factor
+            Dictionary mapping label to error renormalization factor
         datasets : list or None, optional
             Datasets to renormalize. If None, renormalizes all datasets
-            that have filenames in error_factors.
+            that have labels in error_factors.
         """
         if datasets is None:
             # Apply to all datasets that have factors
             datasets = [ds for ds in self.datasets
-                        if self.dataset_to_filename.get(ds) in error_factors]
+                        if ds.plot_properties['label'] in error_factors]
 
         if not datasets:
             self._log("No datasets to renormalize.")
@@ -1999,10 +2093,10 @@ class MMEXOFASTFitter:
         new_datasets = []
         for dataset in datasets:
             # Get error factor for this dataset
-            filename = self.dataset_to_filename.get(dataset)
-            errfac = error_factors.get(filename)
+            label = dataset.plot_properties['label']
+            errfac = error_factors.get(label)
             if errfac is None:
-                self._log(f"Warning: No error factor for {filename}, skipping")
+                self._log(f"Warning: No error factor for {label}, skipping")
                 continue
 
             # Build kwargs dict from original object's attributes
@@ -2028,12 +2122,9 @@ class MMEXOFASTFitter:
         old_to_new = dict(zip(datasets, new_datasets))
         self.datasets = [old_to_new.get(ds, ds) for ds in self.datasets]
 
-        # Rebuild filename mapping from scratch
-        self._build_dataset_to_filename_mapping()
-
         # Update flux fixing maps with new dataset objects
-        self.fix_blend_flux_map = self._map_filename_dict_to_datasets(self.fix_blend_flux)
-        self.fix_source_flux_map = self._map_filename_dict_to_datasets(self.fix_source_flux)
+        self.fix_blend_flux_map = self._map_label_dict_to_datasets(self.fix_blend_flux)
+        self.fix_source_flux_map = self._map_label_dict_to_datasets(self.fix_source_flux)
 
         # Store applied factors in state
         self.renorm_factors.update(error_factors)
@@ -2072,17 +2163,17 @@ class MMEXOFASTFitter:
             self._log(f'{mmexo.fit_types.model_key_to_label(key)}: {fitter.best}')
             self._log_file_only(fitter.get_diagnostic_str())
 
-    # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
     # External search helpers:
     # ---------------------------------------------------------------------
-    """
-    #    do_ef_grid_search
-    #    do_af_grid_search
-    """
     def do_ef_grid_search(self):
         """
-        Run a :py:class:`mmexofast.gridsearches.EventFinderGridSearch`
-        :return: *dict* of best EventFinder grid point.
+        Run a EventFinderGridSearch.
+
+        Returns
+        -------
+        dict
+            Best EventFinder grid point parameters
         """
         ef_grid = mmexo.EventFinderGridSearch(datasets=self.datasets)
         ef_grid.run()
@@ -2094,6 +2185,14 @@ class MMEXOFASTFitter:
         return ef_grid.best
 
     def do_af_grid_search(self):
+        """
+        Run an AnomalyFinderGridSearch.
+
+        Returns
+        -------
+        dict
+            Best AnomalyFinder grid point parameters
+        """
         self.set_residuals(self.all_fit_results.select_best_static_pspl().params)
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
@@ -2101,6 +2200,14 @@ class MMEXOFASTFitter:
         return af_grid.best
 
     def get_anomaly_lc_params(self):
+        """
+        Estimate anomaly light curve parameters.
+
+        Returns
+        -------
+        dict
+            Anomaly light curve parameters
+        """
         estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
             datasets=self.datasets, pspl_params=self.all_fit_results.select_best_static_pspl().params,
             af_results=self.best_af_grid_point)
@@ -2110,7 +2217,14 @@ class MMEXOFASTFitter:
     # Output
     # ---------------------------------------------------------------------
     def _log(self, msg: str) -> None:
-        """Log message to console/file based on verbose/save_log settings."""
+        """
+        Log message to console/file based on verbose/save_log settings.
+
+        Parameters
+        ----------
+        msg : str
+            Message to log
+        """
         if self.output is not None:
             self.output.log(msg)
         elif self.verbose:
@@ -2118,11 +2232,28 @@ class MMEXOFASTFitter:
             print(msg)
 
     def _log_file_only(self, msg: str) -> None:
-        """Log message to file only (never console)."""
+        """
+        Log message to file only (never console).
+
+        Parameters
+        ----------
+        msg : str
+            Message to log to file
+        """
         if self.output is not None and self.output.logger is not None:
             self.output.logger.info(msg)
 
-    def _output_latex_table(self,  name: str = 'results', models=None) -> None:
+    def _output_latex_table(self, name: str = 'results', models=None) -> None:
+        """
+        Output LaTeX table of results.
+
+        Parameters
+        ----------
+        name : str, optional
+            Table name. Default is 'results'.
+        models : list or None, optional
+            Models to include in table. If None, includes all.
+        """
         if self.output is not None:
             table_str = self.make_ulens_table(table_type='latex', models=models)
             self.output.save_latex_table(name, table_str)
@@ -2146,36 +2277,7 @@ class MMEXOFASTFitter:
         of the microlensing fits.
 
         Parameters
-        ----------class mmexo.AllFitResults:
-    def __init__(self):
-        self._records: Dict[ModelKey, mmexo.FitRecord] = {}
-
-    # --- internal helper ---
-    def _normalize_key(self, key_or_label: str | ModelKey) -> ModelKey:
-        if isinstance(key_or_label, ModelKey):
-            return key_or_label
-        return label_to_model_key(key_or_label)
-
-    def get(self, key_or_label: str | ModelKey) -> Optional[mmexo.FitRecord]:
-        key = self._normalize_key(key_or_label)
-        return self._records.get(key)
-
-    def set(self, record: mmexo.FitRecord) -> None:
-        self._records[record.model_key] = record
-
-    def has(self, key_or_label: str | ModelKey) -> bool:
-        key = self._normalize_key(key_or_label)
-        return key in self._records
-
-    def keys(self, labels: bool = False):
-        if labels:
-            return [model_key_to_label(k) for k in self._records.keys()]
-        return list(self._records.keys())
-
-    def items(self, labels: bool = False):
-        if labels:
-            return [(model_key_to_label(k), r) for k, r in self._records.items()]
-        return list(self._records.items())
+        ----------
         table_type : str or None
             'ascii' (default) or 'latex'.
         models : list, optional
@@ -2193,18 +2295,32 @@ class MMEXOFASTFitter:
             """
             Order parameters in a human-friendly way (ulens params first,
             then fluxes).
+
+            Parameters
+            ----------
+            df : pd.DataFrame
+                DataFrame to order
+
+            Returns
+            -------
+            pd.DataFrame
+                Ordered DataFrame
             """
 
             def get_ordered_ulens_keys_for_repr(n_sources: int = 1):
                 """
                 Define the default order of microlensing parameters.
-                """
-                print(
-                    "make_ulens_table.order_df(): This code was lifted verbatim "
-                    "from MM. It would be better to refactor it in MM and just "
-                    "use the function. Maybe as a Utils."
-                )
 
+                Parameters
+                ----------
+                n_sources : int, optional
+                    Number of sources. Default is 1.
+
+                Returns
+                -------
+                list
+                    Ordered list of parameter names
+                """
                 basic_keys = ["t_0", "u_0", "t_E", "rho", "t_star"]
                 additional_keys = [
                     "pi_E_N", "pi_E_E", "t_0_par", "s", "q", "alpha",
@@ -2235,6 +2351,14 @@ class MMEXOFASTFitter:
                 return ordered_keys
 
             def get_ordered_flux_keys_for_repr() -> list[str]:
+                """
+                Get ordered list of flux parameter names.
+
+                Returns
+                -------
+                list
+                    Ordered list of flux parameter names
+                """
                 flux_keys: list[str] = []
                 for i, dataset in enumerate(self.datasets):
                     if "label" in dataset.plot_properties.keys():
@@ -2253,6 +2377,14 @@ class MMEXOFASTFitter:
                 return flux_keys
 
             def get_ordered_keys_for_repr() -> list[str]:
+                """
+                Get complete ordered list of parameter names.
+
+                Returns
+                -------
+                list
+                    Ordered list of all parameter names
+                """
                 ulens_keys = get_ordered_ulens_keys_for_repr()
                 flux_keys = get_ordered_flux_keys_for_repr()
                 return ulens_keys + flux_keys
@@ -2268,8 +2400,8 @@ class MMEXOFASTFitter:
             df["sort_key"] = df["sort_key"].fillna(max_key)
             df = (
                 df.sort_values(["sort_key", "orig_pos"])
-                  .reset_index()
-                  .drop(columns=["index", "sort_key", "orig_pos"])
+                    .reset_index()
+                    .drop(columns=["index", "sort_key", "orig_pos"])
             )
             return df
 
@@ -2325,6 +2457,19 @@ class MMEXOFASTFitter:
 
         if table_type == "latex":
             def fmt(name: str) -> str:
+                """
+                Format parameter name for LaTeX.
+
+                Parameters
+                ----------
+                name : str
+                    Parameter name
+
+                Returns
+                -------
+                str
+                    LaTeX formatted name
+                """
                 if name == "chi2":
                     return r"$\chi^2$"
 
@@ -2342,42 +2487,45 @@ class MMEXOFASTFitter:
 
         elif table_type == "ascii":
             with pd.option_context(
-                "display.max_rows", None,
-                "display.max_columns", None,
-                "display.width", None,
-                "display.float_format", "{:f}".format,
+                    "display.max_rows", None,
+                    "display.max_columns", None,
+                    "display.width", None,
+                    "display.float_format", "{:f}".format,
             ):
                 return results_table.to_string(index=False)
 
         else:
             raise NotImplementedError(table_type + " not implemented.")
 
-
     # ---------------------------------------------------------------------
     # EXOZIPPy Helpers
     # ---------------------------------------------------------------------
     def initialize_exozippy(self):
-           """
-           #Get the best-fit microlensing parameters for initializing exozippy fitting.
-           #
-           #:return: *dict*
-           #    items:
-           #        'fits': *list* of *dict*
-           #            [{'parameters': {*dict* of ulens parameters}, 'sigmas': {*dict* of uncertainties in
-           #            ulensparameters}} ...]
-           #        'errfacs': *list* of error renormalization factors for each dataset. DEFAULT: None
-           #        'mag_methods': *list* of magnification methods following the MulensModel convention. DEFAULT: None
-           """
-           initializations = {'fits': [], 'errfacs': None, 'mag_methods': None}
+        """
+        Get the best-fit microlensing parameters for initializing exozippy fitting.
 
-           if self.fit_type == 'point lens':
-               fits = []
-               for par_key in self._iter_parallax_point_lens_keys():
-                   fits.append({'parameters': self.all_fit_results.get(par_key).params,
-                                'sigmas': self.all_fit_results.get(par_key).sigmas})
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+                'fits': list of dict
+                    [{'parameters': {dict of ulens parameters},
+                      'sigmas': {dict of uncertainties in ulens parameters}} ...]
+                'errfacs': list of error renormalization factors for each dataset.
+                    DEFAULT: None
+                'mag_methods': list of magnification methods following the MulensModel
+                    convention. DEFAULT: None
+        """
+        initializations = {'fits': [], 'errfacs': None, 'mag_methods': None}
 
-               initializations['fits'] = fits
-           else:
-               raise NotImplementedError('initialize_exozippy only implemented for point lens fits')
+        if self.fit_type == 'point lens':
+            fits = []
+            for par_key in self._iter_parallax_point_lens_keys():
+                fits.append({'parameters': self.all_fit_results.get(par_key).params,
+                             'sigmas': self.all_fit_results.get(par_key).sigmas})
 
-           return initializations
+            initializations['fits'] = fits
+        else:
+            raise NotImplementedError('initialize_exozippy only implemented for point lens fits')
+
+        return initializations
