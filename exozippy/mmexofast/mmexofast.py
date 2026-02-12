@@ -126,6 +126,7 @@ class MMEXOFASTFitter:
             )
         elif datasets:
             self.datasets = datasets
+            self._validate_dataset_labels()  # NEW: Validate user-provided datasets
             if saved_state.get('datasets'):
                 self._merge_with_saved_datasets(saved_state['datasets'])
         elif saved_state.get('datasets'):
@@ -389,10 +390,39 @@ class MMEXOFASTFitter:
 
                 kwargs = mmexo.observatories.get_kwargs(filename)
                 data = MulensModel.MulensData(file_name=filename, **kwargs)
+                # Label is already set by get_kwargs()
 
             datasets.append(data)
 
         return datasets
+
+    def _validate_dataset_labels(self):
+        """
+        Validate that all user-provided datasets have labels set.
+
+        For datasets with file_name but no label, sets label to basename.
+        For datasets without file_name or label, raises an error.
+
+        Raises
+        ------
+        ValueError
+            If any dataset lacks both file_name and label
+        """
+        for i, dataset in enumerate(self.datasets):
+            label = dataset.plot_properties.get('label')
+
+            if not label:
+                # Try to get from file_name
+                if hasattr(dataset, 'file_name') and dataset.file_name:
+                    label = os.path.basename(dataset.file_name)
+                    dataset.plot_properties['label'] = label
+                else:
+                    raise ValueError(
+                        f"Dataset at index {i} does not have a label set in "
+                        f"plot_properties['label'] and was not created from a file. "
+                        f"Please set dataset.plot_properties['label'] to a unique "
+                        f"identifier before passing to MMEXOFASTFitter."
+                    )
 
     def _map_label_dict_to_datasets(self, label_dict) -> dict:
         """

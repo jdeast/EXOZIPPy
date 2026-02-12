@@ -3,7 +3,6 @@
 import unittest
 import tempfile
 import os
-import pickle
 from pathlib import Path
 
 import MulensModel
@@ -34,6 +33,28 @@ class TestDatasetInitialization(unittest.TestCase):
         cls.ob05390_ogle = str(cls.ob05390_dir / 'n20010804.I.OGLE.OB05390.txt')
         cls.ob05390_moa = str(cls.ob05390_dir / 'n20050724.r.MOA.OB05390.txt')
 
+        # Define labels (basenames of files)
+        cls.ob140939_ogle_label = 'n20100310.I.OGLE.OB140939.txt'
+        cls.ob140939_spitzer_label = 'n20140605.L.Spitzer.OB140939.txt'
+        cls.ob05390_ogle_label = 'n20010804.I.OGLE.OB05390.txt'
+        cls.ob05390_moa_label = 'n20050724.r.MOA.OB05390.txt'
+
+    def _get_dataset_labels(self, fitter):
+        """
+        Get list of dataset labels from fitter.
+
+        Parameters
+        ----------
+        fitter : MMEXOFASTFitter
+            Fitter object
+
+        Returns
+        -------
+        list
+            List of dataset labels
+        """
+        return [ds.plot_properties['label'] for ds in fitter.datasets]
+
     def test_1_datasets_only_single_ground(self):
         """Test initialization with datasets parameter only (single ground-based dataset)."""
         # Create dataset manually
@@ -48,7 +69,11 @@ class TestDatasetInitialization(unittest.TestCase):
 
         # Check datasets
         self.assertEqual(len(fitter.datasets), 1)
-        self.assertIn(fitter.datasets[0], fitter.dataset_to_filename)
+
+        # Check that label exists
+        labels = self._get_dataset_labels(fitter)
+        self.assertEqual(len(labels), 1)
+        self.assertIsNotNone(labels[0])
 
         # Check renormalization tracking
         self.assertEqual(len(fitter.renorm_factors), 0)
@@ -67,11 +92,10 @@ class TestDatasetInitialization(unittest.TestCase):
 
         # Check datasets
         self.assertEqual(len(fitter.datasets), 1)
-        self.assertIn(fitter.datasets[0], fitter.dataset_to_filename)
-        self.assertEqual(
-            fitter.dataset_to_filename[fitter.datasets[0]],
-            self.ob140939_ogle
-        )
+
+        # Check that label is set correctly
+        labels = self._get_dataset_labels(fitter)
+        self.assertIn(self.ob140939_ogle_label, labels)
 
         # Check renormalization tracking
         self.assertEqual(len(fitter.renorm_factors), 0)
@@ -93,7 +117,6 @@ class TestDatasetInitialization(unittest.TestCase):
                 verbose=False
             )
             fitter1._save_restart_state()
-            # Debug: check what files exist
 
             # Load from pickle
             restart_file = os.path.join(tmpdir, f'{file_head}_restart.pkl')
@@ -106,11 +129,10 @@ class TestDatasetInitialization(unittest.TestCase):
 
             # Check datasets
             self.assertEqual(len(fitter2.datasets), 1)
-            self.assertIn(fitter2.datasets[0], fitter2.dataset_to_filename)
-            self.assertEqual(
-                fitter2.dataset_to_filename[fitter2.datasets[0]],
-                self.ob140939_ogle
-            )
+
+            # Check that label is correct
+            labels = self._get_dataset_labels(fitter2)
+            self.assertIn(self.ob140939_ogle_label, labels)
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 0)
@@ -136,8 +158,8 @@ class TestDatasetInitialization(unittest.TestCase):
                 verbose=False
             )
 
-            # Manually set renorm factors to simulate renormalization
-            fitter1.renorm_factors[self.ob140939_ogle] = 1.5
+            # Manually set renorm factors to simulate renormalization (use label)
+            fitter1.renorm_factors[self.ob140939_ogle_label] = 1.5
             fitter1._save_restart_state()
 
             # Load from pickle
@@ -154,7 +176,7 @@ class TestDatasetInitialization(unittest.TestCase):
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 1)
-            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle], 1.5)
+            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle_label], 1.5)
 
             # Check number of locations
             self.assertEqual(fitter2.n_loc, 1)
@@ -193,10 +215,10 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 1 dataset: only MOA
             self.assertEqual(len(fitter2.datasets), 1)
 
-            # Check that only MOA filename is tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertNotIn(self.ob05390_ogle, filenames)
-            self.assertIn(self.ob05390_moa, filenames)
+            # Check that only MOA label is present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertNotIn(self.ob05390_ogle_label, labels)
+            self.assertIn(self.ob05390_moa_label, labels)
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 0)
@@ -240,10 +262,10 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 2 datasets: OGLE from pickle + new MOA
             self.assertEqual(len(fitter2.datasets), 2)
 
-            # Check that both filenames are tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertIn(self.ob05390_ogle, filenames)
-            self.assertIn(self.ob05390_moa, filenames)
+            # Check that both labels are present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertIn(self.ob05390_ogle_label, labels)
+            self.assertIn(self.ob05390_moa_label, labels)
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 0)
@@ -268,7 +290,7 @@ class TestDatasetInitialization(unittest.TestCase):
                 ),
                 verbose=False
             )
-            fitter1.renorm_factors[self.ob05390_ogle] = 1.3
+            fitter1.renorm_factors[self.ob05390_ogle_label] = 1.3
             fitter1._save_restart_state()
 
             # Load from pickle with only MOA (new dataset)
@@ -285,15 +307,15 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 1 dataset: only MOA
             self.assertEqual(len(fitter2.datasets), 1)
 
-            # Check that only MOA filename is tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertNotIn(self.ob05390_ogle, filenames)
-            self.assertIn(self.ob05390_moa, filenames)
+            # Check that only MOA label is present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertNotIn(self.ob05390_ogle_label, labels)
+            self.assertIn(self.ob05390_moa_label, labels)
 
             # Check renorm factors - should have OGLE from pickle but not MOA yet
             self.assertEqual(len(fitter2.renorm_factors), 1)
-            self.assertEqual(fitter2.renorm_factors[self.ob05390_ogle], 1.3)
-            self.assertNotIn(self.ob05390_moa, fitter2.renorm_factors)
+            self.assertEqual(fitter2.renorm_factors[self.ob05390_ogle_label], 1.3)
+            self.assertNotIn(self.ob05390_moa_label, fitter2.renorm_factors)
 
             # Check number of locations (ground-based)
             self.assertEqual(fitter2.n_loc, 1)
@@ -315,7 +337,7 @@ class TestDatasetInitialization(unittest.TestCase):
                 ),
                 verbose=False
             )
-            fitter1.renorm_factors[self.ob05390_ogle] = 1.3
+            fitter1.renorm_factors[self.ob05390_ogle_label] = 1.3
             fitter1._save_restart_state()
 
             # Load from pickle with both OGLE and MOA
@@ -332,15 +354,15 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 2 datasets: OGLE from pickle + new MOA
             self.assertEqual(len(fitter2.datasets), 2)
 
-            # Check that both filenames are tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertIn(self.ob05390_ogle, filenames)
-            self.assertIn(self.ob05390_moa, filenames)
+            # Check that both labels are present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertIn(self.ob05390_ogle_label, labels)
+            self.assertIn(self.ob05390_moa_label, labels)
 
             # Check renorm factors - should have OGLE but not MOA yet
             self.assertEqual(len(fitter2.renorm_factors), 1)
-            self.assertEqual(fitter2.renorm_factors[self.ob05390_ogle], 1.3)
-            self.assertNotIn(self.ob05390_moa, fitter2.renorm_factors)
+            self.assertEqual(fitter2.renorm_factors[self.ob05390_ogle_label], 1.3)
+            self.assertNotIn(self.ob05390_moa_label, fitter2.renorm_factors)
 
             # Check number of locations (both ground-based)
             self.assertEqual(fitter2.n_loc, 1)
@@ -378,15 +400,15 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 1 dataset: only Spitzer
             self.assertEqual(len(fitter2.datasets), 1)
 
-            # Check that only Spitzer filename is tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertNotIn(self.ob140939_ogle, filenames)
-            self.assertIn(self.ob140939_spitzer, filenames)
+            # Check that only Spitzer label is present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertNotIn(self.ob140939_ogle_label, labels)
+            self.assertIn(self.ob140939_spitzer_label, labels)
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 0)
 
-            # Check number of locations (only Spitzer loaded, but should still be 1?)
+            # Check number of locations
             self.assertEqual(fitter2.n_loc, 1)
 
     def test_7b_pickle_plus_old_and_new_different_location_no_renorm(self):
@@ -422,10 +444,10 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 2 datasets: OGLE from pickle + new Spitzer
             self.assertEqual(len(fitter2.datasets), 2)
 
-            # Check that both filenames are tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertIn(self.ob140939_ogle, filenames)
-            self.assertIn(self.ob140939_spitzer, filenames)
+            # Check that both labels are present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertIn(self.ob140939_ogle_label, labels)
+            self.assertIn(self.ob140939_spitzer_label, labels)
 
             # Check renormalization tracking
             self.assertEqual(len(fitter2.renorm_factors), 0)
@@ -450,7 +472,7 @@ class TestDatasetInitialization(unittest.TestCase):
                 ),
                 verbose=False
             )
-            fitter1.renorm_factors[self.ob140939_ogle] = 1.2
+            fitter1.renorm_factors[self.ob140939_ogle_label] = 1.2
             fitter1._save_restart_state()
 
             # Load from pickle with only Spitzer (satellite - different location)
@@ -467,15 +489,15 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 1 dataset: only Spitzer
             self.assertEqual(len(fitter2.datasets), 1)
 
-            # Check that only Spitzer filename is tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertNotIn(self.ob140939_ogle, filenames)
-            self.assertIn(self.ob140939_spitzer, filenames)
+            # Check that only Spitzer label is present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertNotIn(self.ob140939_ogle_label, labels)
+            self.assertIn(self.ob140939_spitzer_label, labels)
 
             # Check renorm factors - should have OGLE from pickle but not Spitzer yet
             self.assertEqual(len(fitter2.renorm_factors), 1)
-            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle], 1.2)
-            self.assertNotIn(self.ob140939_spitzer, fitter2.renorm_factors)
+            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle_label], 1.2)
+            self.assertNotIn(self.ob140939_spitzer_label, fitter2.renorm_factors)
 
             # Check number of locations
             self.assertEqual(fitter2.n_loc, 1)
@@ -497,7 +519,7 @@ class TestDatasetInitialization(unittest.TestCase):
                 ),
                 verbose=False
             )
-            fitter1.renorm_factors[self.ob140939_ogle] = 1.2
+            fitter1.renorm_factors[self.ob140939_ogle_label] = 1.2
             fitter1._save_restart_state()
 
             # Load from pickle with both OGLE and Spitzer
@@ -514,15 +536,15 @@ class TestDatasetInitialization(unittest.TestCase):
             # Should have 2 datasets: OGLE from pickle + new Spitzer
             self.assertEqual(len(fitter2.datasets), 2)
 
-            # Check that both filenames are tracked
-            filenames = list(fitter2.dataset_to_filename.values())
-            self.assertIn(self.ob140939_ogle, filenames)
-            self.assertIn(self.ob140939_spitzer, filenames)
+            # Check that both labels are present
+            labels = self._get_dataset_labels(fitter2)
+            self.assertIn(self.ob140939_ogle_label, labels)
+            self.assertIn(self.ob140939_spitzer_label, labels)
 
             # Check renorm factors - should have OGLE but not Spitzer yet
             self.assertEqual(len(fitter2.renorm_factors), 1)
-            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle], 1.2)
-            self.assertNotIn(self.ob140939_spitzer, fitter2.renorm_factors)
+            self.assertEqual(fitter2.renorm_factors[self.ob140939_ogle_label], 1.2)
+            self.assertNotIn(self.ob140939_spitzer_label, fitter2.renorm_factors)
 
             # Check number of locations (ground + satellite)
             self.assertEqual(fitter2.n_loc, 2)

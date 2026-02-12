@@ -22,17 +22,22 @@ def get_kwargs(filename):
     """
     telescope, band = get_telescope_band_from_filename(filename)
 
+    # Use filename basename as unique label
+    label = os.path.basename(filename)
+
     if telescope in OBSERVATORIES:
         obs = OBSERVATORIES[telescope]
         kwargs = obs.get_kwargs()
         kwargs['bandpass'] = band
         kwargs['plot_properties'] = obs.get_plot_properties(band)
+        # Override label with filename
+        kwargs['plot_properties']['label'] = label
     else:
         # Default for unknown telescopes
         kwargs = {
             'phot_fmt': 'flux',
             'bandpass': band,
-            'plot_properties': {'label': f'{telescope}-{band}', 'marker': 'o'}
+            'plot_properties': {'label': label, 'marker': 'o'}
         }
 
     return kwargs
