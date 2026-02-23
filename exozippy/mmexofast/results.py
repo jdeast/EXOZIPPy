@@ -143,6 +143,10 @@ class MMEXOFASTFitResults:
     def all_model_parameters(self):
         return self.fitter.best.keys()
 
+    @property
+    def chi2(self):
+        return self.fitter.best.get('chi2')
+
 
 # ============================================================================
 # FitRecord and AllFitResults
@@ -263,9 +267,9 @@ class FitRecord:
         """
         if self.full_result is None:
             return None
-        best = self.full_result.best
-        # your existing MMEXOFASTFitResults.best is a dict
-        return best.get("chi2")
+
+        # your existing MMEXOFASTFitResults has a chi2 property
+        return self.full_result.chi2
 
 
 @dataclass

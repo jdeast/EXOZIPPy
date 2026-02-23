@@ -594,12 +594,15 @@ class BaseRectGridSearch(ABC):
         - Set self.grid_params: Dict with keys like 'param_min', 'param_max', 'param_step'
     """
 
-    def __init__(self, datasets, grid_params=None, verbose=False):
+    def __init__(self, datasets, grid_params=None, skip_optimization=False, verbose=False):
         """
         Parameters:
             datasets: MulensData object(s) to fit
             verbose: *bool*
                 If True, print progress information
+            skip_optimization : bool, optional
+                If True, calculate chi2 without optimization (much faster).
+                If False, optimize parameters at each grid point. Default is False.
         """
         if datasets is None:
             raise ValueError('You must define the datasets!')
@@ -612,6 +615,8 @@ class BaseRectGridSearch(ABC):
 
         self.datasets = datasets
         self.verbose = verbose
+        self.skip_optimization = skip_optimization
+
         self.results = None
         self._best = None
         self._grid = None
@@ -992,7 +997,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
     def __init__(self, datasets, static_params, grid_params=None,
                  pi_E_E_min=-0.7, pi_E_E_max=0.7, pi_E_E_step=0.05,
                  pi_E_N_min=-1.0, pi_E_N_max=1.0, pi_E_N_step=0.1,
-                 fitter_kwargs=None, verbose=False):
+                 fitter_kwargs=None, skip_optimization=False, verbose=False):
         """
         Parameters:
             datasets: MulensData object(s) to fit
@@ -1012,10 +1017,13 @@ class ParallaxGridSearch(BaseRectGridSearch):
                 Ignored if grid_params is provided.
             fitter_kwargs: *dict* or None
                 Additional keyword arguments to pass to SFitFitter
+            skip_optimization : bool, optional
+                If True, calculate chi2 without optimization (much faster).
+                If False, optimize parameters at each grid point. Default is False.
             verbose: *bool*
                 If True, print progress information
         """
-        super().__init__(datasets=datasets, verbose=verbose)
+        super().__init__(datasets=datasets, skip_optimization=skip_optimization, verbose=verbose)
 
         self.static_params = static_params.copy()
         self.current_params = static_params.copy()  # Working copy
@@ -1171,10 +1179,10 @@ class ParallaxGridSearch(BaseRectGridSearch):
 
     def _fit_grid_point(self, grid_params):
         """
-        Run SFitFitter for one grid point.
+        Evaluate or optimize one grid point.
 
-        Uses self.current_params as the starting point, which gets updated
-        with the best-fit from each successful fit.
+        If skip_optimization=True, calculates chi2 directly with fixed parameters.
+        Otherwise, uses self.current_params as the starting point and optimizes.
 
         Parameters
         ----------
@@ -1184,47 +1192,77 @@ class ParallaxGridSearch(BaseRectGridSearch):
         Returns
         -------
         dict
-            Contains 'chi2', 'params' (best-fit parameters),
-            'success', and any other fitter output
+            Contains 'chi2', 'params' (best-fit or input parameters),
+            'success', and any other output
         """
-        parameters_to_fit = list(self.static_params.keys())
         # Combine current params with this grid point's parallax values
         model_params = self.current_params.copy()
         model_params['pi_E_E'] = grid_params['pi_E_E']
         model_params['pi_E_N'] = grid_params['pi_E_N']
 
-        # Run fitter
-        try:
-            fitter = mmexo.fitters.SFitFitter(
-                initial_model_params=model_params,
-                datasets=self.datasets,
-                parameters_to_fit=parameters_to_fit,
-                **self.fitter_kwargs
-            )
-            fitter.run()
+        if self.skip_optimization:
+            # Just calculate chi2 without optimization
+            try:
+                # Create fitter but don't run optimization
+                fitter = mmexo.fitters.SFitFitter(
+                    initial_model_params=model_params,
+                    datasets=self.datasets,
+                    parameters_to_fit=[],  # Empty list - no optimization
+                    **self.fitter_kwargs
+                )
+                event = fitter.get_event()
+                chi2 = event.get_chi2()
 
-            params = {key: value for key, value in fitter.best.items()}
-            params.pop("chi2", None)
-            result = {
-                'chi2': fitter.best['chi2'],
-                'params': params,
-                'success': fitter.results.success,
-            }
+                result = {
+                    'chi2': chi2,
+                    'params': model_params,
+                    'success': True,
+                }
+            except Exception as e:
+                if self.verbose:
+                    print(f"  Chi2 calculation failed: {e}")
 
-            # Update current_params with best fit for next iteration
-            if result['success'] and result['params'] is not None:
-                self.current_params.update(result['params'])
+                result = {
+                    'chi2': np.nan,
+                    'params': None,
+                    'success': False,
+                    'error': str(e)
+                }
+        else:
+            # Optimize parameters
+            parameters_to_fit = list(self.static_params.keys())
 
-        except Exception as e:
-            if self.verbose:
-                print(f"  Fit failed: {e}")
+            try:
+                fitter = mmexo.fitters.SFitFitter(
+                    initial_model_params=model_params,
+                    datasets=self.datasets,
+                    parameters_to_fit=parameters_to_fit,
+                    **self.fitter_kwargs
+                )
+                fitter.run()
 
-            result = {
-                'chi2': np.nan,
-                'params': None,
-                'success': False,
-                'error': str(e)
-            }
+                params = {key: value for key, value in fitter.best.items()}
+                params.pop("chi2", None)
+                result = {
+                    'chi2': fitter.best['chi2'],
+                    'params': params,
+                    'success': fitter.results.success,
+                }
+
+                # Update current_params with best fit for next iteration
+                if result['success'] and result['params'] is not None:
+                    self.current_params.update(result['params'])
+
+            except Exception as e:
+                if self.verbose:
+                    print(f"  Fit failed: {e}")
+
+                result = {
+                    'chi2': np.nan,
+                    'params': None,
+                    'success': False,
+                    'error': str(e)
+                }
 
         return result
 
