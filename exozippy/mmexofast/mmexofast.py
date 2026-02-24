@@ -1949,13 +1949,12 @@ class MMEXOFASTFitter:
         best_chi2 = float('inf')
 
         for branch, grid in grids.items():
-            minima = grid.find_local_minima()
-            if len(minima) > 0:
-                # Get best from this grid
-                chi2, params = minima[0]  # Already sorted by chi2
-                if chi2 < best_chi2:
-                    best_chi2 = chi2
-                    best_overall = (chi2, params)
+            best = np.nanargmin([r.get('chi2', np.nan) for r in grid.results])
+            chi2 = grid.results[best].get('chi2')
+            params = grid.results[best].get('params')
+            if chi2 < best_chi2:
+                best_chi2 = chi2
+                best_overall = (chi2, params)
 
         if best_overall is None:
             raise ValueError("No valid minima found in any grid")

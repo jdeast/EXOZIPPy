@@ -883,6 +883,9 @@ class BaseRectGridSearch(ABC):
             if len(minimum_results) == 0:
                 return []
 
+            #for r in minimum_results:
+            #    print(r)
+
             # Build result map
             result_map = {tuple(round(r[param], 10) for param in param_names): r
                           for r in minimum_results}
@@ -909,8 +912,14 @@ class BaseRectGridSearch(ABC):
                 best_in_cluster = min(cluster, key=lambda p: result_map[p]['chi2'])
                 result = result_map[best_in_cluster]
                 local_minima.append((result['chi2'], result['params']))
+                #print('cluster\n', cluster)
+                #print('best_in_cluster\n', best_in_cluster)
 
             local_minima.sort(key=lambda x: x[0])
+            #print('final minima')
+            #for m in local_minima:
+            #    print(m)
+
             return local_minima
 
         # ----------------------------------------------------------------
