@@ -276,7 +276,7 @@ class TestObservatoryManagement(unittest.TestCase):
 
         # Create test observatory
         test_obs = observatories.Observatory(name='TestObs', phot_fmt='flux')
-        observatories.register_observatory('TestObs', test_obs)
+        observatories.register_observatory(test_obs)
 
         # Check it was added
         self.assertIn('TestObs', observatories.OBSERVATORIES)
