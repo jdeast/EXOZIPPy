@@ -137,7 +137,7 @@ class TestObservatory(unittest.TestCase):
         props = wfirst.get_plot_properties('Z087')
 
         self.assertEqual(props['label'], 'WFIRST18-Z087')
-        self.assertEqual(props['color'], 'blue')
+        self.assertEqual(props['color'], 'darkcyan')
         self.assertEqual(props['marker'], 's')
         self.assertEqual(props['zorder'], 5)
 
@@ -147,7 +147,7 @@ class TestObservatory(unittest.TestCase):
         props = wfirst.get_plot_properties('W149')
 
         self.assertEqual(props['label'], 'WFIRST18-W149')
-        self.assertEqual(props['color'], 'magenta')
+        self.assertEqual(props['color'], 'darkorange')
         self.assertEqual(props['marker'], 'o')
 
 
@@ -173,7 +173,7 @@ class TestGetKwargs(unittest.TestCase):
         # Check plot_properties (but label is now filename basename, not TELESCOPE-BAND)
         self.assertIn('plot_properties', results)
         self.assertEqual(results['plot_properties']['zorder'], 5)
-        self.assertEqual(results['plot_properties']['color'], 'blue')
+        self.assertEqual(results['plot_properties']['color'], 'darkcyan')
         self.assertEqual(results['plot_properties']['marker'], 's')
         self.assertEqual(results['plot_properties']['label'], 'n20180816.Z087.WFIRST18.004.txt')
 
