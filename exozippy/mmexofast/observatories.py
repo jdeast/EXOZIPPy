@@ -282,5 +282,13 @@ register_observatory(Observatory(
 ))
 
 # Ground-based
-
+register_observatory(Observatory(
+    name='OGLE',
+    phot_fmt='flux',
+    usecols=[0, 1, 2],
+    bands={
+        'I': {'color': 'black', 'marker': 'o'},
+        'V': {'color': 'black', 'marker': 'v', 'facecolor': 'none'}
+    }
+))
 
