@@ -682,9 +682,12 @@ class BaseRectGridSearch(ABC):
         """
         Find all local minima in the grid search results.
 
+        For variable-density grids (from refinement), compares each point only to
+        neighbors at the appropriate step distance for that point's refinement level.
+
         First attempts to find strict local minima (chi2 strictly lower than all
         neighbors). If none exist, identifies constant chi2 regions at the global
-        minimum and returns one representative.
+        minimum and returns one representative per cluster.
 
         Returns
         -------
@@ -704,24 +707,69 @@ class BaseRectGridSearch(ABC):
         if len(valid_results) == 0:
             return []
 
-        # Get parameter names and step sizes
+        # Get parameter names and original step sizes
         param_names = []
+        original_steps = {}
         for key in self.grid_params:
             if key.endswith('_step'):
                 param_name = key[:-5]
                 param_names.append(param_name)
+                original_steps[param_name] = self.grid_params[key]
 
-        steps = [self.grid_params[f'{param}_step'] for param in param_names]
+        # Set tolerance for neighbor matching
+        tolerance = getattr(self, 'min_step_size', min(original_steps.values())) / 10
 
-        # Build mapping: grid point -> result
-        grid_point_to_result = {}
+        # Build spatial index: map positions to results
+        # Use rounded positions as keys
+        position_to_results = {}
         for result in valid_results:
             point = tuple(round(result[param], 10) for param in param_names)
-            grid_point_to_result[point] = result
+            if point not in position_to_results:
+                position_to_results[point] = []
+            position_to_results[point].append(result)
+
+        def find_neighbor(center_point, center_result, deltas):
+            """
+            Find neighbor at specified delta from center point.
+
+            Parameters
+            ----------
+            center_point : tuple
+                Center point coordinates
+            center_result : dict
+                Result dict for center point
+            deltas : tuple
+                Delta in each dimension (-1, 0, or 1)
+
+            Returns
+            -------
+            dict or None
+                Neighbor result if exists, None otherwise
+            """
+            # Get step size for this point
+            refinement_level = center_result.get('refinement_level', 0)
+            step_sizes = {param: original_steps[param] / (2 ** refinement_level)
+                          for param in param_names}
+
+            # Calculate expected neighbor position
+            expected_neighbor = tuple(
+                center_point[i] + deltas[i] * step_sizes[param_names[i]]
+                for i in range(len(param_names))
+            )
+
+            # Look for any point within tolerance
+            for candidate_point, candidate_results in position_to_results.items():
+                distance = sum((candidate_point[i] - expected_neighbor[i]) ** 2
+                               for i in range(len(param_names))) ** 0.5
+
+                if distance < tolerance:
+                    # Found neighbor - return first result at this position
+                    return candidate_results[0]
+
+            return None
 
         # STEP 1: Find strict local minima (chi2 < all neighbors)
         strict_minima = []
-
         from itertools import product
 
         for result in valid_results:
@@ -729,21 +777,26 @@ class BaseRectGridSearch(ABC):
             chi2 = result['chi2']
 
             is_local_min = True
+            all_neighbors_exist = True
 
             for deltas in product([-1, 0, 1], repeat=len(param_names)):
                 if all(d == 0 for d in deltas):
                     continue
 
-                neighbor = tuple(round(point[i] + deltas[i] * steps[i], 10)
-                                 for i in range(len(param_names)))
+                neighbor = find_neighbor(point, result, deltas)
 
-                if neighbor in grid_point_to_result:
-                    neighbor_chi2 = grid_point_to_result[neighbor]['chi2']
-                    if neighbor_chi2 <= chi2:  # Not strictly lower
-                        is_local_min = False
-                        break
+                if neighbor is None:
+                    all_neighbors_exist = False
+                    # Missing neighbor - not a complete minimum
+                    is_local_min = False
+                    break
 
-            if is_local_min:
+                neighbor_chi2 = neighbor['chi2']
+                if neighbor_chi2 <= chi2:  # Not strictly lower
+                    is_local_min = False
+                    break
+
+            if is_local_min and all_neighbors_exist:
                 strict_minima.append((chi2, result['params']))
 
         # If we found strict minima, return them
@@ -755,19 +808,21 @@ class BaseRectGridSearch(ABC):
         # Find global minimum chi2
         min_chi2 = min(r['chi2'] for r in valid_results)
 
-        # Find all points at global minimum
-        min_points = [
-            tuple(round(r[param], 10) for param in param_names)
-            for r in valid_results
-            if abs(r['chi2'] - min_chi2) < 1e-10
-        ]
-
-        if len(min_points) == 0:
+        # Find all points within 1 sigma of global minimum
+        sigma_threshold = 1.0
+        min_results = [r for r in valid_results
+                       if np.sqrt(r['chi2'] - min_chi2) < sigma_threshold]
+        if len(min_results) == 0:
             return []
 
-        # Cluster connected points at global minimum
+        min_points = [tuple(round(r[param], 10) for param in param_names)
+                      for r in min_results]
+
+        # Cluster connected points at global minimum using BFS
         visited = set()
         clusters = []
+        result_map = {tuple(round(r[param], 10) for param in param_names): r
+                      for r in min_results}
 
         def get_cluster(start_point):
             """BFS to find all connected points at same chi2."""
@@ -779,17 +834,29 @@ class BaseRectGridSearch(ABC):
                 point = queue.pop(0)
                 cluster.append(point)
 
+                point_result = result_map[point]
+
+                # Check all neighbors using refinement-aware logic
                 for deltas in product([-1, 0, 1], repeat=len(param_names)):
                     if all(d == 0 for d in deltas):
                         continue
 
-                    neighbor = tuple(round(point[i] + deltas[i] * steps[i], 10)
-                                     for i in range(len(param_names)))
+                    neighbor_result = find_neighbor(point, point_result, deltas)
 
-                    if (neighbor in min_points and
-                            neighbor not in cluster_visited):
-                        cluster_visited.add(neighbor)
-                        queue.append(neighbor)
+                    if neighbor_result is not None:
+                        neighbor_point = tuple(round(neighbor_result[param], 10)
+                                               for param in param_names)
+
+                        # Check if neighbor is also at global min
+                        # Check if neighbor is within 1 sigma of center point
+                        neighbor_chi2 = neighbor_result['chi2']
+                        center_chi2 = result_map[point]['chi2']
+                        if (np.sqrt(abs(neighbor_chi2 - center_chi2)) < 1.0 and
+                                neighbor_point not in cluster_visited and
+                                np.sqrt(neighbor_chi2 - min_chi2) < sigma_threshold):
+
+                            cluster_visited.add(neighbor_point)
+                            queue.append(neighbor_point)
 
             return cluster
 
@@ -804,7 +871,7 @@ class BaseRectGridSearch(ABC):
         for cluster in clusters:
             # Pick first point (arbitrary but consistent)
             representative = cluster[0]
-            result = grid_point_to_result[representative]
+            result = result_map[representative]
             local_minima.append((result['chi2'], result['params']))
 
         local_minima.sort(key=lambda x: x[0])
@@ -1266,6 +1333,375 @@ class ParallaxGridSearch(BaseRectGridSearch):
 
         return result
 
+    def run_with_refinement(self, chi2_threshold=200, min_step_size=0.005, radius_steps=2):
+        """
+        Execute grid search with iterative refinement around minima.
+
+        Prioritizes global minimum - refines it completely before processing other minima.
+
+        Workflow:
+        1. Run initial grid
+        2. Find global minimum
+        3. If has incomplete neighbors: extend edges at current level
+        4. Else if can refine further: refine to next level
+        5. Else: global min complete, process other minima within chi2_threshold
+        6. Repeat until all minima complete or step size < min_step_size
+
+        Parameters
+        ----------
+        chi2_threshold : float, optional
+            After global min complete, refine other minima within this chi2. Default is 200.
+        min_step_size : float, optional
+            Stop refining when step size reaches this value. Default is 0.005.
+        radius_steps : int, optional
+            Number of steps (at current resolution) to extend around each minimum.
+            Default is 2.
+        """
+        # Run initial grid
+        self.run()
+
+        # Store min_step_size for use in find_local_minima()
+        self.min_step_size = min_step_size
+
+        # Add refinement_level to initial results
+        for result in self.results:
+            result['refinement_level'] = 0
+
+        # Get parameter names and initial step sizes
+        param_names = []
+        original_steps = {}
+        for key in self.grid_params:
+            if key.endswith('_step'):
+                param_name = key[:-5]
+                param_names.append(param_name)
+                original_steps[param_name] = self.grid_params[key]
+
+        # Track evaluated points to avoid duplicates
+        evaluated_points = set()
+        for result in self.results:
+            point = tuple(round(result[param], 10) for param in param_names)
+            evaluated_points.add(point)
+
+        # Tolerance for neighbor matching
+        tolerance = min_step_size / 10
+
+        # Iterative refinement
+        iteration = 0
+        global_min_complete = False
+
+        while True:
+            iteration += 1
+
+            if self.verbose:
+                print(f"\nRefinement iteration {iteration}")
+
+            # Filter successful results
+            valid_results = [r for r in self.results if r.get('success', False)]
+
+            # Find local minima
+            local_minima = self.find_local_minima()
+
+            if len(local_minima) == 0:
+                if self.verbose:
+                    print("No local minima found, stopping refinement")
+                break
+
+            min_chi2 = local_minima[0][0]
+
+            # Determine which minima to process
+            if not global_min_complete:
+                # Focus on global minimum only
+                minima_to_process = [local_minima[0]]
+                if self.verbose:
+                    print(f"Processing global minimum: chi2={min_chi2:.2f}")
+            else:
+                # Global min done, process others within threshold
+                other_minima = [(chi2, params) for chi2, params in local_minima[1:]
+                                if np.sqrt(chi2 - min_chi2) < np.sqrt(chi2_threshold)]
+
+                if len(other_minima) == 0:
+                    if self.verbose:
+                        print("No other minima within threshold, refinement complete")
+                    break
+
+                minima_to_process = other_minima
+                if self.verbose:
+                    print(f"Processing {len(other_minima)} other minima within threshold")
+
+            # Check which minima need edge extension vs refinement
+            needs_edge_extension = []
+            can_refine = []
+            already_at_finest = []
+
+            for chi2, params in minima_to_process:
+                # Get this point's refinement level and step size
+                refinement_level = None
+                for r in valid_results:
+                    if all(abs(r[param] - params[param]) < tolerance for param in param_names):
+                        refinement_level = r.get('refinement_level', 0)
+                        break
+
+                if refinement_level is None:
+                    continue  # Shouldn't happen
+
+                current_point_steps = {param: original_steps[param] / (2 ** refinement_level)
+                                       for param in param_names}
+
+                # Check if has incomplete neighbors at current level
+                if self._has_incomplete_neighbors_at_level(params, current_point_steps,
+                                                           evaluated_points, tolerance):
+                    needs_edge_extension.append((chi2, params, refinement_level))
+                elif min(current_point_steps.values()) / 2 > min_step_size:
+                    # Can refine to next level
+                    can_refine.append((chi2, params, refinement_level))
+                else:
+                    # Already at finest resolution
+                    already_at_finest.append((chi2, params))
+
+            if self.verbose:
+                print(f"  {len(needs_edge_extension)} need edge extension")
+                print(f"  {len(can_refine)} can be refined")
+                print(f"  {len(already_at_finest)} at finest resolution")
+
+            # Extend edges first (at current level)
+            if needs_edge_extension:
+                if self.verbose:
+                    print(f"Extending edges at current level")
+
+                new_grid_points = []
+                for chi2, params, ref_level in needs_edge_extension:
+                    step_sizes_at_level = {param: original_steps[param] / (2 ** ref_level)
+                                           for param in param_names}
+
+                    # Find missing neighbors
+                    for deltas in product([-1, 0, 1], repeat=len(param_names)):
+                        if all(d == 0 for d in deltas):
+                            continue
+
+                        expected_neighbor = tuple(
+                            round(params[param_names[i]] + deltas[i] * step_sizes_at_level[param_names[i]], 10)
+                            for i in range(len(param_names))
+                        )
+
+                        # Check if this neighbor exists (within tolerance)
+                        neighbor_exists = False
+                        for eval_point in evaluated_points:
+                            distance = sum((eval_point[i] - expected_neighbor[i]) ** 2
+                                           for i in range(len(param_names))) ** 0.5
+                            if distance < tolerance:
+                                neighbor_exists = True
+                                break
+
+                        if not neighbor_exists:
+                            # Add this missing neighbor
+                            point_dict = {param_names[i]: expected_neighbor[i]
+                                          for i in range(len(param_names))}
+                            new_grid_points.append((point_dict, ref_level))
+                            evaluated_points.add(expected_neighbor)
+
+                if len(new_grid_points) == 0:
+                    if self.verbose:
+                        print("No new edge points to add")
+                    continue
+
+                if self.verbose:
+                    print(f"Evaluating {len(new_grid_points)} edge points")
+
+                # Evaluate new edge points
+                for i, (grid_params, ref_level) in enumerate(new_grid_points):
+                    if self.verbose and (i + 1) % 10 == 0:
+                        print(f"  Edge point {i + 1}/{len(new_grid_points)}")
+
+                    result = self._fit_grid_point(grid_params)
+                    full_result = {**grid_params, **result}
+                    full_result['refinement_level'] = ref_level
+
+                    self.results.append(full_result)
+                    self._grid.append(grid_params)
+
+                # Reset cached best and continue
+                self._best = None
+                continue
+
+            # No edges to extend - refine to next level
+            if len(can_refine) == 0:
+                if not global_min_complete:
+                    # Global minimum is now complete
+                    if self.verbose:
+                        print("Global minimum refinement complete")
+                    global_min_complete = True
+                    continue  # Process other minima
+                else:
+                    # All minima complete
+                    if self.verbose:
+                        print("All minima complete, stopping refinement")
+                    break
+
+            if self.verbose:
+                print(f"Refining {len(can_refine)} minima to next level")
+
+            # Generate refined grid points around each minimum
+            new_grid_points = []
+            for chi2, params, ref_level in can_refine:
+                step_sizes_at_level = {param: original_steps[param] / (2 ** ref_level)
+                                       for param in param_names}
+
+                # Create sub-grid around this minimum
+                param_ranges = []
+                for param in param_names:
+                    center = params[param]
+                    step = step_sizes_at_level[param] / 2  # Half the step for next level
+                    radius = radius_steps * step
+
+                    # Generate points in this dimension
+                    param_min_local = center - radius
+                    param_max_local = center + radius
+                    n_points = 2 * radius_steps + 1
+                    param_grid = np.linspace(param_min_local, param_max_local, n_points)
+                    param_grid = np.round(param_grid, decimals=10)
+                    param_ranges.append(param_grid)
+
+                # Create rectangular sub-grid
+                sub_grid = self._make_rect_grid(param_ranges, param_names)
+
+                # Filter out already-evaluated points
+                for point_dict in sub_grid:
+                    point = tuple(round(point_dict[param], 10) for param in param_names)
+
+                    # Check with tolerance
+                    point_exists = False
+                    for eval_point in evaluated_points:
+                        distance = sum((eval_point[i] - point[i]) ** 2
+                                       for i in range(len(param_names))) ** 0.5
+                        if distance < tolerance:
+                            point_exists = True
+                            break
+
+                    if not point_exists:
+                        new_grid_points.append((point_dict, ref_level + 1))
+                        evaluated_points.add(point)
+
+            if len(new_grid_points) == 0:
+                if self.verbose:
+                    print("No new points to evaluate")
+                if not global_min_complete:
+                    global_min_complete = True
+                    continue
+                else:
+                    break
+
+            if self.verbose:
+                print(f"Evaluating {len(new_grid_points)} refined points")
+
+            # Evaluate new points
+            for i, (grid_params, ref_level) in enumerate(new_grid_points):
+                if self.verbose and (i + 1) % 10 == 0:
+                    print(f"  Refined point {i + 1}/{len(new_grid_points)}")
+
+                result = self._fit_grid_point(grid_params)
+                full_result = {**grid_params, **result}
+                full_result['refinement_level'] = ref_level
+
+                # Add to results and grid
+                self.results.append(full_result)
+                self._grid.append(grid_params)
+
+            # Reset cached best
+            self._best = None
+
+        if self.verbose:
+            print(f"\nRefinement complete after {iteration} iterations")
+            print(f"Total grid points evaluated: {len(self.results)}")
+
+    def _has_incomplete_neighbors_at_level(self, params, step_sizes_at_level, evaluated_points, tolerance):
+        """
+        Check if a point is missing any neighbors at a specific refinement level.
+
+        Parameters
+        ----------
+        params : dict
+            Parameter values for the point to check
+        step_sizes_at_level : dict
+            Step size for each parameter at this refinement level
+        evaluated_points : set
+            Set of already-evaluated points as tuples
+        tolerance : float
+            Distance tolerance for considering a point as a neighbor
+
+        Returns
+        -------
+        bool
+            True if any neighbors are missing (point is at edge), False if all neighbors exist
+        """
+        from itertools import product
+
+        param_names = list(step_sizes_at_level.keys())
+
+        # Check all neighbors
+        for deltas in product([-1, 0, 1], repeat=len(param_names)):
+            if all(d == 0 for d in deltas):
+                continue  # Skip center point
+
+            # Calculate expected neighbor position
+            expected_neighbor = tuple(
+                round(params[param_names[i]] + deltas[i] * step_sizes_at_level[param_names[i]], 10)
+                for i in range(len(param_names))
+            )
+
+            # Check if neighbor exists within tolerance
+            neighbor_exists = False
+            for eval_point in evaluated_points:
+                distance = sum((eval_point[i] - expected_neighbor[i]) ** 2
+                               for i in range(len(param_names))) ** 0.5
+                if distance < tolerance:
+                    neighbor_exists = True
+                    break
+
+            if not neighbor_exists:
+                return True  # Missing at least one neighbor
+
+        return False  # All neighbors exist
+
+    def _has_incomplete_neighbors(self, params, current_step_sizes, evaluated_points):
+        """
+        Check if a point is missing any neighbors at the current refinement level.
+
+        Parameters
+        ----------
+        params : dict
+            Parameter values for the point to check
+        current_step_sizes : dict
+            Current step size for each parameter
+        evaluated_points : set
+            Set of already-evaluated points as tuples
+
+        Returns
+        -------
+        bool
+            True if any neighbors are missing (point is at edge), False if all neighbors exist
+        """
+        from itertools import product
+
+        # Get parameter names
+        param_names = list(current_step_sizes.keys())
+
+        # Check all neighbors (3^N - 1 combinations, excluding center)
+        for deltas in product([-1, 0, 1], repeat=len(param_names)):
+            if all(d == 0 for d in deltas):
+                continue  # Skip center point
+
+            # Calculate neighbor position
+            neighbor = tuple(
+                round(params[param_names[i]] + deltas[i] * current_step_sizes[param_names[i]], 10)
+                for i in range(len(param_names))
+            )
+
+            # Check if neighbor exists
+            if neighbor not in evaluated_points:
+                return True  # Missing at least one neighbor
+
+        return False  # All neighbors exist
+
     def save_results(self, filepath, parallax_branch=None):
         """
         Save grid search results to ASCII file.
@@ -1331,7 +1767,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
                 all_column_names = grid_param_names + standard_cols + fit_param_names
 
                 # Write column header
-                f.write('# ' + '  '.join(all_column_names) + '\n')
+                f.write('  '.join(all_column_names) + '\n')
 
                 # Write data rows
                 for result in self.results:
