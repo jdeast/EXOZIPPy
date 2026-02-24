@@ -418,7 +418,7 @@ class MMEXOFASTFitter:
                     break
 
         # 5. Infer from static fits
-        elif self.all_fit_results.select_best_static_pspl() is not None:
+        elif self._select_best_static_pspl() is not None:
             best_static = self._select_preferred_static_point_lens_model()
             static_key = None
             for key, record in self.all_fit_results.items():
@@ -822,10 +822,8 @@ class MMEXOFASTFitter:
         int
             Number of locations (higher is more complete)
         """
-        if locations_used == 'All':
-            return self.n_loc  # All available locations
-        elif locations_used is None:
-            return 0  # Lowest priority (single location, n_loc=1)
+        if locations_used is None:
+            return 1  # Single location when n_loc=1
         else:
             # Count locations in string like 'ground+Spitzer'
             return locations_used.count('+') + 1
@@ -1060,18 +1058,12 @@ class MMEXOFASTFitter:
             self._log("INITIAL PARALLAX FITTING")
             self._log(f"{'=' * 60}")
 
-            # Ensure appropriate static fit exists for all datasets
-            if self.finite_source:
-                self._ensure_static_finite_point_lens(all_datasets)
-            else:
-                self._ensure_static_point_lens(all_datasets)
-
             self._log("\nRunning initial parallax grid with all datasets")
 
             # Run initial grid with ALL datasets
             initial_grids = self._run_piE_grid_search(
                 datasets=all_datasets,
-                grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
+                grid_params=self.PARALLAX_GRID_PARAMS_FINE,
                 skip_optimization=True,
                 save_results=True,
                 file_suffix='_initial'
@@ -1105,6 +1097,13 @@ class MMEXOFASTFitter:
             )
             self.all_fit_results.set(temp_record)
             self._log(f"Stored temporary parallax fit: {temp_branch.value}, chi2={parallax_fit.chi2:.2f}")
+
+            # Fit static model for all datasets (after parallax to avoid distortion from satellite data)
+            self._log("\nFitting static model for all datasets")
+            if self.finite_source:
+                self._ensure_static_finite_point_lens(all_datasets)
+            else:
+                self._ensure_static_point_lens(all_datasets)
 
             self._save_restart_state()
 
@@ -1148,7 +1147,7 @@ class MMEXOFASTFitter:
                 skip_optimization=False,
                 save_results=True,
                 file_suffix='_final',
-                refinement_params={'chi2_threshold': 9, 'min_step_size': 0.01, 'radius_steps': 3}
+                refinement_params={'chi2_threshold': 25, 'min_step_size': 0.005, 'radius_steps': 5}
             )
 
             # Extract and optimize all solutions from final grid
@@ -1235,6 +1234,13 @@ class MMEXOFASTFitter:
         # Use existing params as a starting point, if present
         initial_params = record.params if record is not None else None
 
+        # If no initial params, look for related fit to seed from
+        if initial_params is None:
+            related_fit = self._find_related_fit(key)
+            if related_fit is not None:
+                initial_params = related_fit.params
+                self._log(f"Seeding from related fit: {mmexo.fit_types.model_key_to_label(related_fit.model_key)}")
+
         # Run the actual fit
         full_result = fit_func(initial_params=initial_params, datasets=datasets)
 
@@ -1253,6 +1259,42 @@ class MMEXOFASTFitter:
             self._save_restart_state()
 
         return new_record
+
+    def _find_related_fit(self, key):
+        """
+        Find existing fit with same model type but different locations_used.
+
+        Useful for seeding fits when location coverage changes.
+
+        Parameters
+        ----------
+        key : mmexo.FitKey
+            The fit key to find related fits for
+
+        Returns
+        -------
+        FitRecord or None
+            Best matching fit with same model but different locations, or None if not found
+        """
+        # Find all fits matching model type
+        related_fits = []
+        for existing_key, fit in self.all_fit_results.items():
+            if (existing_key.lens_type == key.lens_type and
+                    existing_key.source_type == key.source_type and
+                    existing_key.parallax_branch == key.parallax_branch and
+                    existing_key.lens_orb_motion == key.lens_orb_motion and
+                    existing_key.locations_used != key.locations_used):  # Different locations
+
+                related_fits.append((existing_key, fit))
+
+        if len(related_fits) == 0:
+            return None
+
+        # Prefer most complete (by location count), then best chi2
+        return max(related_fits, key=lambda x: (
+            self._count_locations_used(x[0].locations_used),
+            -x[1].chi2()
+        ))[1]
 
     # ------------------------------------------------------------------
     # Shared point-lens steps
@@ -2190,6 +2232,150 @@ class MMEXOFASTFitter:
 
         return mmexo.MMEXOFASTFitResults(fitter)
 
+    def _select_best_static_pspl(self) -> Optional[mmexo.FitRecord]:
+        """
+        Select the best static PSPL model for current datasets.
+
+        Priority order:
+        1. Exact match to current locations_used
+        2. Partial match including primary_location
+        3. Partial match not including primary_location
+        4. Any static PSPL
+
+        Among same priority, prefers lowest chi2.
+
+        Returns
+        -------
+        FitRecord or None
+            Best static PSPL fit, or None if not found
+        """
+        # Get current locations
+        current_locations_used = self._get_location_for_datasets(self.datasets)
+        current_locs_set = set(current_locations_used.split('+')) if current_locations_used else set()
+
+        # Find all static PSPL fits
+        pspl_fits = []
+        for key, fit in self.all_fit_results.items():
+            if (key.lens_type == mmexo.LensType.POINT and
+                    key.source_type == mmexo.SourceType.POINT and
+                    key.parallax_branch == mmexo.ParallaxBranch.NONE and
+                    key.lens_orb_motion == mmexo.LensOrbMotion.NONE):
+
+                chi2 = fit.chi2()
+                if chi2 is not None:
+                    pspl_fits.append((key, fit, chi2))
+
+        if len(pspl_fits) == 0:
+            return None
+
+        # Categorize by priority
+        def get_priority(key):
+            """Return (priority, chi2) for sorting. Lower priority number = higher priority."""
+            fit_locs = key.locations_used
+
+            # Exact match
+            if fit_locs == current_locations_used:
+                return (0, None)
+
+            # Parse fit locations
+            if fit_locs is None:
+                fit_locs_set = set()
+            else:
+                fit_locs_set = set(fit_locs.split('+'))
+
+            # Check for partial match
+            if fit_locs_set & current_locs_set:  # Has overlap
+                if self._primary_location in fit_locs_set:
+                    return (1, None)  # Includes primary
+                else:
+                    return (2, None)  # Doesn't include primary
+
+            # No match
+            return (3, None)
+
+        # Sort by priority, then chi2
+        pspl_fits.sort(key=lambda x: (get_priority(x[0])[0], x[2]))
+
+        return pspl_fits[0][1]
+
+    def _select_best_parallax_pspl(self) -> Optional[mmexo.FitRecord]:
+        """
+        Select the best parallax PSPL model for current datasets.
+
+        Only considers fits that match current n_loc. Among those:
+
+        Priority order:
+        1. Exact match to current locations_used
+        2. Partial match including primary_location
+        3. Partial match not including primary_location
+        4. Any parallax PSPL matching n_loc
+
+        Among same priority, prefers lowest chi2.
+
+        Returns
+        -------
+        FitRecord or None
+            Best parallax PSPL fit, or None if not found
+        """
+        # Get current locations
+        current_locations_used = self._get_location_for_datasets(self.datasets)
+        current_locs_set = set(current_locations_used.split('+')) if current_locations_used else set()
+
+        # Find all parallax PSPL fits matching current n_loc
+        parallax_fits = []
+        for key, fit in self.all_fit_results.items():
+            if (key.lens_type == mmexo.LensType.POINT and
+                    key.source_type == mmexo.SourceType.POINT and
+                    key.parallax_branch != mmexo.ParallaxBranch.NONE and
+                    key.lens_orb_motion == mmexo.LensOrbMotion.NONE):
+
+                # Check if parallax branch matches n_loc
+                if self.n_loc == 1:
+                    expected_branches = {mmexo.ParallaxBranch.U0_PLUS, mmexo.ParallaxBranch.U0_MINUS}
+                else:
+                    expected_branches = {mmexo.ParallaxBranch.U0_PP, mmexo.ParallaxBranch.U0_PM,
+                                         mmexo.ParallaxBranch.U0_MP, mmexo.ParallaxBranch.U0_MM}
+
+                if key.parallax_branch not in expected_branches:
+                    continue  # Skip fits for wrong n_loc
+
+                chi2 = fit.chi2()
+                if chi2 is not None:
+                    parallax_fits.append((key, fit, chi2))
+
+        if len(parallax_fits) == 0:
+            return None
+
+        # Categorize by priority
+        def get_priority(key):
+            """Return (priority, chi2) for sorting. Lower priority number = higher priority."""
+            fit_locs = key.locations_used
+
+            # Exact match
+            if fit_locs == current_locations_used:
+                return (0, None)
+
+            # Parse fit locations
+            if fit_locs is None:
+                fit_locs_set = set()
+            else:
+                fit_locs_set = set(fit_locs.split('+'))
+
+            # Check for partial match
+            if fit_locs_set & current_locs_set:  # Has overlap
+                if self._primary_location in fit_locs_set:
+                    return (1, None)  # Includes primary
+                else:
+                    return (2, None)  # Doesn't include primary
+
+            # No match
+            return (3, None)
+
+        # Sort by priority, then chi2
+        parallax_fits.sort(key=lambda x: (get_priority(x[0])[0], x[2]))
+
+        return parallax_fits[0][1]
+
     # other parallax helpers
     def _select_preferred_static_point_lens_model(self, chi2_threshold=20):
         """
@@ -2290,7 +2476,7 @@ class MMEXOFASTFitter:
             Preferred point lens model
         """
         best_static = self._select_preferred_static_point_lens_model()
-        best_par = self.all_fit_results.select_best_parallax_pspl()
+        best_par = self._select_best_parallax_pspl()  # Changed from self.all_fit_results.select_best_parallax_pspl()
 
         chi2_static = best_static.chi2() if best_static is not None else None
         chi2_par = best_par.chi2() if best_par is not None else None
@@ -2462,6 +2648,7 @@ class MMEXOFASTFitter:
             self._log("All datasets already have renormalization factors applied.")
             return {}
 
+        self._log(f'Initial reference model: \n{reference_model}')
         # Create event with ALL datasets for proper flux fitting
         event = MulensModel.Event(
             datasets=fit_datasets, model=reference_model, coords=self.coords)
@@ -2679,7 +2866,7 @@ class MMEXOFASTFitter:
         dict
             Best AnomalyFinder grid point parameters
         """
-        self.set_residuals(self.all_fit_results.select_best_static_pspl().params)
+        self.set_residuals(self._select_best_static_pspl().params)
         af_grid = mmexo.AnomalyFinderGridSearch(residuals=self.residuals)
         # May need to update value of teff_min
         af_grid.run()
@@ -2695,7 +2882,7 @@ class MMEXOFASTFitter:
             Anomaly light curve parameters
         """
         estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
-            datasets=self.datasets, pspl_params=self.all_fit_results.select_best_static_pspl().params,
+            datasets=self.datasets, pspl_params=self._select_best_static_pspl().params,
             af_results=self.best_af_grid_point)
         return estimator.get_anomaly_lc_parameters()
 

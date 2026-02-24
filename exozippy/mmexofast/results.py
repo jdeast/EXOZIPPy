@@ -371,57 +371,57 @@ class AllFitResults(MutableMapping):
             if key.lens_type == mmexo.LensType.POINT:
                 yield key, record
 
-    def select_best_static_pspl(self) -> Optional[FitRecord]:
-        """
-        Among all static PSPL models (point lens, point source, no parallax, no motion),
-        return the one with lowest chi^2. Returns None if not found or no chi^2.
-        """
-        best_record = None
-        best_chi2 = None
+    #def select_best_static_pspl(self) -> Optional[FitRecord]:
+    #    """
+    #    Among all static PSPL models (point lens, point source, no parallax, no motion),
+    #    return the one with lowest chi^2. Returns None if not found or no chi^2.
+    #    """
+    #    best_record = None
+    #    best_chi2 = None
+    #
+    #    for key, record in self._records.items():
+    #        if not (
+    #                key.lens_type == mmexo.LensType.POINT
+    #                and key.source_type == mmexo.SourceType.POINT
+    #                and key.parallax_branch == mmexo.ParallaxBranch.NONE
+    #                and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
+    #        ):
+    #            continue
+    #
+    #        chi2 = record.chi2()
+    #        if chi2 is None:
+    #            continue
+    #
+    #        if best_chi2 is None or chi2 < best_chi2:
+    #            best_chi2 = chi2
+    #            best_record = record
+    #
+    #    return best_record
 
-        for key, record in self._records.items():
-            if not (
-                    key.lens_type == mmexo.LensType.POINT
-                    and key.source_type == mmexo.SourceType.POINT
-                    and key.parallax_branch == mmexo.ParallaxBranch.NONE
-                    and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
-            ):
-                continue
-
-            chi2 = record.chi2()
-            if chi2 is None:
-                continue
-
-            if best_chi2 is None or chi2 < best_chi2:
-                best_chi2 = chi2
-                best_record = record
-
-        return best_record
-
-    def select_best_parallax_pspl(self) -> Optional[FitRecord]:
-        """
-        Among all PSPL parallax models (point lens, point source,
-        parallax_branch != NONE, no orbital motion), return the one with
-        lowest chi^2. Returns None if not found or no chi^2.
-        """
-        best_record = None
-        best_chi2 = None
-
-        for key, record in self._records.items():
-            if not (
-                    key.lens_type == mmexo.LensType.POINT
-                    and key.source_type == mmexo.SourceType.POINT
-                    and key.parallax_branch != mmexo.ParallaxBranch.NONE
-                    and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
-            ):
-                continue
-
-            chi2 = record.chi2()
-            if chi2 is None:
-                continue
-
-            if best_chi2 is None or chi2 < best_chi2:
-                best_chi2 = chi2
-                best_record = record
-
-        return best_record
+    #def select_best_parallax_pspl(self) -> Optional[FitRecord]:
+    #    """
+    #    Among all PSPL parallax models (point lens, point source,
+    #    parallax_branch != NONE, no orbital motion), return the one with
+    #    lowest chi^2. Returns None if not found or no chi^2.
+    #    """
+    #    best_record = None
+    #    best_chi2 = None
+    #
+    #    for key, record in self._records.items():
+    #        if not (
+    #                key.lens_type == mmexo.LensType.POINT
+    #                and key.source_type == mmexo.SourceType.POINT
+    #                and key.parallax_branch != mmexo.ParallaxBranch.NONE
+    #                and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
+    #        ):
+    #            continue
+    #
+    #        chi2 = record.chi2()
+    #        if chi2 is None:
+    #            continue
+    #
+    #        if best_chi2 is None or chi2 < best_chi2:
+    #            best_chi2 = chi2
+    #            best_record = record
+    #
+    #    return best_record

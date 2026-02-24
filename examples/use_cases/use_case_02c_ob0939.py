@@ -72,7 +72,7 @@ base_dir = Path('test_output')
 print('=== Restart from pickle and ADD Spitzer Data ===')
 complete_fitter = exozippy.mmexofast.fit(
     files=ground_data_files + space_data_files,
-    #parallax_grid=True,
+    parallax_grid=True,
     renormalize_errors=True,
     verbose=True,
     restart_file='test_output/ob0939_uc02c_gr_restart.pkl',
