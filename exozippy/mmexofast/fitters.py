@@ -54,13 +54,28 @@ class MulensFitter():
         pass
 
     def get_model(self):
-        model = MulensModel.Model(self.initial_model_params)
-        #print('fitter 49', self.mag_methods)
-        if self.mag_methods is not None:
-            #print('setting mag_methods')
-            model.set_magnification_methods(self.mag_methods)
-            #print('results', model.get_magnification_methods())
+        """
+        Create MulensModel.Model with best-fit parameters, or initial if no fit yet.
 
+        Returns
+        -------
+        MulensModel.Model
+            Model with best-fit or initial parameters
+        """
+        # Use best-fit if available, else initial
+        if self.best is not None:
+            params = dict(self.best)
+            params.pop('chi2', None)  # Remove chi2 key
+        else:
+            params = self.initial_model_params
+
+        model = MulensModel.Model(params)
+
+        # Apply magnification methods
+        if self.mag_methods is not None:
+            model.set_magnification_methods(self.mag_methods)
+
+        # Apply limb darkening coefficients
         if self.limb_darkening_coeffs_u is not None:
             for band, value in self.limb_darkening_coeffs_u.items():
                 model.set_limb_coeff_u(band, value)
@@ -69,7 +84,6 @@ class MulensFitter():
             for band, value in self.limb_darkening_coeffs_gamma.items():
                 model.set_limb_coeff_gamma(band, value)
 
-        #print('fitter 60', model)
         return model
 
     def get_event(self):

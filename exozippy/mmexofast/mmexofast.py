@@ -173,8 +173,6 @@ class MMEXOFASTFitter:
         if initial_results is not None:
             self._load_initial_results(initial_results)
 
-        self._log_workflow_state()
-
     # ---------------------------------------------------------------------
     # restart helpers:
     # ---------------------------------------------------------------------
@@ -433,7 +431,7 @@ class MMEXOFASTFitter:
                     primary_location = static_key.locations_used.split('+')[0]
 
         # 6. Fall back to longest coverage
-        if primary_location is None and self.n_loc > 1:
+        if primary_location is None:
             primary_datasets = self._select_primary_location_by_coverage()
             for loc, datasets in self.location_groups.items():
                 if set(datasets) == set(primary_datasets):
@@ -1003,25 +1001,32 @@ class MMEXOFASTFitter:
         - Renormalize datasets (if needed)
         - Comprehensive parallax fitting (extract/optimize solutions or run detailed grid)
         """
-        # Infer current state
+        # ----------------------------------------------------------------
+        # Infer current state and setup
+        # ----------------------------------------------------------------
         state = self._infer_workflow_state()
         self._log_workflow_state(state)
 
         primary_loc = state['primary_location']
         self._primary_location = primary_loc  # Store for use by other methods
+        all_datasets = self.datasets
 
         # ----------------------------------------------------------------
-        # FITTING PRIMARY LOCATION
+        # Nested workflow sections
         # ----------------------------------------------------------------
-        primary_needs_fitting = (
-                not state['has_static_fits'] or
-                (self.renormalize_errors and
-                 len(state['renorm_by_location'][primary_loc]['not_renormalized']) > 0) or
-                (state['locations_in_static_fits'] and
-                 primary_loc not in state['locations_in_static_fits'])
-        )
+        def fit_primary_location_if_needed():
+            """Fit static models for primary location if needed."""
+            primary_needs_fitting = (
+                    not state['has_static_fits'] or
+                    (self.renormalize_errors and
+                     len(state['renorm_by_location'][primary_loc]['not_renormalized']) > 0) or
+                    (state['locations_in_static_fits'] and
+                     primary_loc not in state['locations_in_static_fits'])
+            )
 
-        if primary_needs_fitting:
+            if not primary_needs_fitting:
+                return
+
             self._log(f"\n{'=' * 60}")
             self._log("FITTING PRIMARY LOCATION")
             self._log(f"Primary location: {primary_loc}")
@@ -1037,81 +1042,96 @@ class MMEXOFASTFitter:
 
             self._save_restart_state()
 
-        # ----------------------------------------------------------------
-        # Setup for parallax fitting
-        # ----------------------------------------------------------------
-        all_datasets = self.datasets
+        def run_initial_parallax_if_needed():
+            """Run initial parallax grid or direct fitting based on n_loc."""
+            # Determine if we need initial parallax fitting
+            need_grid = (self.n_loc > 1 and
+                         not (state['has_parallax_fits'] and self._parallax_fits_match_n_loc()))
 
-        # Determine if we need to run initial parallax grid
-        need_initial_grid = not (state['has_parallax_fits'] and self._parallax_fits_match_n_loc())
-        initial_grids = None  # Will be populated if grid is run
+            need_direct_fit = (self.n_loc == 1 and not state['has_parallax_fits'])
 
-        # Check if any datasets need renormalization
-        has_unrennormalized = any(len(info['not_renormalized']) > 0
-                                  for info in state['renorm_by_location'].values())
+            if not (need_grid or need_direct_fit):
+                return None  # Return None to signal no grids were created
 
-        # ----------------------------------------------------------------
-        # INITIAL PARALLAX FITTING
-        # ----------------------------------------------------------------
-        if need_initial_grid:
             self._log(f"\n{'=' * 60}")
             self._log("INITIAL PARALLAX FITTING")
             self._log(f"{'=' * 60}")
 
-            self._log("\nRunning initial parallax grid with all datasets")
+            if need_grid:
+                # Multi-location: run grid search
+                self._log("\nRunning initial parallax grid with all datasets")
 
-            # Run initial grid with ALL datasets
-            initial_grids = self._run_piE_grid_search(
-                datasets=all_datasets,
-                grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
-                skip_optimization=True,
-                save_results=True,
-                file_suffix='_initial',
-                refinement_params={'chi2_threshold': 200, 'min_step_size': 0.005, 'radius_steps': 3}
-            )
+                initial_grids = self._run_piE_grid_search(
+                    datasets=all_datasets,
+                    grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
+                    skip_optimization=True,
+                    save_results=True,
+                    file_suffix='_initial'
+                )
 
-            # Optimize best solution
-            self._log("\nOptimizing best parallax solution")
-            best_solution = self._get_best_from_grids(initial_grids)
-            parallax_fit = self._optimize_parallax_solution(best_solution[1], all_datasets)
+                # Optimize best solution
+                self._log("\nOptimizing best parallax solution")
+                best_solution = self._get_best_from_grids(initial_grids)
+                parallax_fit = self._optimize_parallax_solution(best_solution[1], all_datasets)
 
-            # Store temporarily in all_fit_results
-            u_0 = best_solution[1]['u_0']
-            if u_0 >= 0:
-                temp_branch = mmexo.ParallaxBranch.U0_PLUS
+                # Store temporarily in all_fit_results
+                u_0 = best_solution[1]['u_0']
+                if u_0 >= 0:
+                    temp_branch = mmexo.ParallaxBranch.U0_PLUS
+                else:
+                    temp_branch = mmexo.ParallaxBranch.U0_MINUS
+
+                temp_key = mmexo.FitKey(
+                    lens_type=mmexo.LensType.POINT,
+                    source_type=mmexo.SourceType.FINITE if self.finite_source else mmexo.SourceType.POINT,
+                    parallax_branch=temp_branch,
+                    lens_orb_motion=mmexo.LensOrbMotion.NONE,
+                    locations_used=self._get_location_for_datasets(all_datasets)
+                )
+
+                temp_record = mmexo.FitRecord.from_full_result(
+                    model_key=temp_key,
+                    full_result=parallax_fit,
+                    renorm_factors=self.renorm_factors,
+                    fixed=False,
+                )
+                self.all_fit_results.set(temp_record)
+                self._log(f"Stored temporary parallax fit: {temp_branch.value}, chi2={parallax_fit.chi2:.2f}")
+
+                # Fit static model for all datasets (after parallax)
+                self._log("\nFitting static model for all datasets")
+                if self.finite_source:
+                    self._ensure_static_finite_point_lens(all_datasets)
+                else:
+                    self._ensure_static_point_lens(all_datasets)
+
+                self._save_restart_state()
+                return initial_grids
+
             else:
-                temp_branch = mmexo.ParallaxBranch.U0_MINUS
+                # Single location: fit branches directly
+                self._log("\nFitting parallax branches directly (single location)")
 
-            temp_key = mmexo.FitKey(
-                lens_type=mmexo.LensType.POINT,
-                source_type=mmexo.SourceType.FINITE if self.finite_source else mmexo.SourceType.POINT,
-                parallax_branch=temp_branch,
-                lens_orb_motion=mmexo.LensOrbMotion.NONE,
-                locations_used=self._get_location_for_datasets(all_datasets)
-            )
+                # Ensure static fit exists
+                if self.finite_source:
+                    self._ensure_static_finite_point_lens(all_datasets)
+                else:
+                    self._ensure_static_point_lens(all_datasets)
 
-            temp_record = mmexo.FitRecord.from_full_result(
-                model_key=temp_key,
-                full_result=parallax_fit,
-                renorm_factors=self.renorm_factors,
-                fixed=False,
-            )
-            self.all_fit_results.set(temp_record)
-            self._log(f"Stored temporary parallax fit: {temp_branch.value}, chi2={parallax_fit.chi2:.2f}")
+                # Fit parallax branches
+                self._ensure_point_lens_parallax_models(all_datasets)
 
-            # Fit static model for all datasets (after parallax to avoid distortion from satellite data)
-            self._log("\nFitting static model for all datasets")
-            if self.finite_source:
-                self._ensure_static_finite_point_lens(all_datasets)
-            else:
-                self._ensure_static_point_lens(all_datasets)
+                self._save_restart_state()
+                return None  # No grids created
 
-            self._save_restart_state()
+        def renormalize_if_needed():
+            """Renormalize unrennormalized datasets using best model."""
+            has_unrennormalized = any(len(info['not_renormalized']) > 0
+                                      for info in state['renorm_by_location'].values())
 
-        # ----------------------------------------------------------------
-        # RENORMALIZATION
-        # ----------------------------------------------------------------
-        if self.renormalize_errors and has_unrennormalized:
+            if not (self.renormalize_errors and has_unrennormalized):
+                return
+
             self._log(f"\n{'=' * 60}")
             self._log("RENORMALIZATION")
             self._log(f"{'=' * 60}")
@@ -1132,47 +1152,61 @@ class MMEXOFASTFitter:
 
             self._save_restart_state()
 
-        # ----------------------------------------------------------------
-        # COMPREHENSIVE PARALLAX FITTING
-        # ----------------------------------------------------------------
-        self._log(f"\n{'=' * 60}")
-        self._log("COMPREHENSIVE PARALLAX FITTING")
-        self._log(f"{'=' * 60}")
+        def comprehensive_parallax_fitting(initial_grids):
+            """Run comprehensive parallax fitting - final grid or optimize from initial."""
+            self._log(f"\n{'=' * 60}")
+            self._log("COMPREHENSIVE PARALLAX FITTING")
+            self._log(f"{'=' * 60}")
 
-        if self.parallax_grid:
-            # Run final detailed grid
-            self._log("\nRunning detailed parallax grid")
-            final_grids = self._run_piE_grid_search(
-                datasets=all_datasets,
-                grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
-                skip_optimization=False,
-                save_results=True,
-                file_suffix='_final',
-                refinement_params={'chi2_threshold': 25, 'min_step_size': 0.005, 'radius_steps': 5}
-            )
-
-            # Extract and optimize all solutions from final grid
-            self._extract_and_optimize_parallax_solutions(
-                final_grids[mmexo.ParallaxBranch.U0_PLUS],
-                final_grids[mmexo.ParallaxBranch.U0_MINUS],
-                datasets=all_datasets
-            )
-        else:
-            # Use initial grids or existing fits
-            if need_initial_grid:
-                # Extract and optimize minima from initial grids
-                self._log("\nExtracting and optimizing parallax solutions from initial grid")
-                self._extract_and_optimize_parallax_solutions(
-                    initial_grids[mmexo.ParallaxBranch.U0_PLUS],
-                    initial_grids[mmexo.ParallaxBranch.U0_MINUS],
-                    datasets=all_datasets
+            if self.parallax_grid:
+                # Run final detailed grid
+                self._log("\nRunning detailed parallax grid")
+                final_grids = self._run_piE_grid_search(
+                    datasets=all_datasets,
+                    grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
+                    skip_optimization=False,
+                    save_results=True,
+                    file_suffix='_final',
+                    refinement_params={'chi2_threshold': 9, 'min_step_size': 0.01, 'radius_steps': 3}
                 )
-            elif state['has_parallax_fits']:
-                # Re-optimize existing fits
-                self._log("\nRe-optimizing existing parallax fits")
-                self._reoptimize_existing_parallax_fits(datasets=all_datasets)
 
-        self._save_restart_state()
+                # Extract and optimize solutions (skip if single location with existing fits)
+                if self.n_loc > 1 or not state['has_parallax_fits']:
+                    self._extract_and_optimize_parallax_solutions(
+                        final_grids[mmexo.ParallaxBranch.U0_PLUS],
+                        final_grids[mmexo.ParallaxBranch.U0_MINUS],
+                        datasets=all_datasets
+                    )
+                else:
+                    self._log("Skipping extraction - using existing direct fits")
+            else:
+                # Use initial grids or existing fits
+                need_grid = (self.n_loc > 1 and
+                             not (state['has_parallax_fits'] and self._parallax_fits_match_n_loc()))
+
+                if initial_grids is not None:
+                    # Multi-location: extract and optimize minima from initial grids
+                    self._log("\nExtracting and optimizing parallax solutions from initial grid")
+                    self._extract_and_optimize_parallax_solutions(
+                        initial_grids[mmexo.ParallaxBranch.U0_PLUS],
+                        initial_grids[mmexo.ParallaxBranch.U0_MINUS],
+                        datasets=all_datasets
+                    )
+                elif state['has_parallax_fits']:
+                    # Re-optimize existing fits
+                    self._log("\nRe-optimizing existing parallax fits")
+                    self._reoptimize_existing_parallax_fits(datasets=all_datasets)
+                # If n_loc==1 and no grid, direct fits already done in initial section
+
+            self._save_restart_state()
+
+        # ----------------------------------------------------------------
+        # Execute workflow
+        # ----------------------------------------------------------------
+        fit_primary_location_if_needed()
+        initial_grids = run_initial_parallax_if_needed()
+        renormalize_if_needed()
+        comprehensive_parallax_fitting(initial_grids)
 
     def fit_binary_lens(self) -> None:
         """
@@ -1467,7 +1501,7 @@ class MMEXOFASTFitter:
             )
             self.all_fit_results.set(new_record)
 
-            self._log(f"    chi2 = {fitter.chi2:.2f}")
+            self._log(f"    chi2 = {full_result.chi2:.2f}")
 
     def _parallax_fits_match_n_loc(self):
         """
@@ -2568,55 +2602,55 @@ class MMEXOFASTFitter:
 # ---------------------------------------------------------------------
     # Renormalization helpers:
     # ---------------------------------------------------------------------
-    def renormalize_errors_and_refit(
-            self,
-            reference_model,
-            datasets=None,
-    ):
-        """
-        Renormalize photometric errors and refit all models.
-
-        Parameters
-        ----------
-        reference_model : MulensModel.Model
-            The model to use as reference for error renormalization.
-            Can be obtained from a FitRecord via
-            FitRecord.full_result.get_model()
-        datasets : list or None, optional
-            List of datasets to process. If None, use all datasets.
-
-        Returns
-        -------
-        list
-            Updated list of dataset objects after renormalization.
-            If datasets=None was passed, returns self.datasets.
-        """
-        if datasets is None:
-            datasets = self.datasets
-            return_all = True
-        else:
-            return_all = False
-            # Track labels of input datasets
-            input_labels = [ds.plot_properties['label'] for ds in datasets]
-
-        # Renormalize errors using the reference model
-        error_factors = self._remove_outliers_and_calc_errfacs(
-            reference_model,
-            fit_datasets=datasets
-        )
-        self._apply_error_renormalization(error_factors)
-
-        # Refit all models with renormalized errors
-        self._refit_models()
-
-        # Return updated dataset objects
-        if return_all:
-            return self.datasets
-        else:
-            # Map labels back to new dataset objects
-            label_to_dataset = {ds.plot_properties['label']: ds
-                               for ds in self.datasets}
-            return [label_to_dataset[label] for label in input_labels]
+    #def renormalize_errors_and_refit(
+    #        self,
+    #        reference_model,
+    #        datasets=None,
+    #):
+    #    """
+    #    Renormalize photometric errors and refit all models.
+    #
+    #    Parameters
+    #    ----------
+    #    reference_model : MulensModel.Model
+    #        The model to use as reference for error renormalization.
+    #        Can be obtained from a FitRecord via
+    #        FitRecord.full_result.get_model()
+    #    datasets : list or None, optional
+    #        List of datasets to process. If None, use all datasets.
+    #
+    #    Returns
+    #    -------
+    #    list
+    #        Updated list of dataset objects after renormalization.
+    #        If datasets=None was passed, returns self.datasets.
+    #    """
+    #    if datasets is None:
+    #        datasets = self.datasets
+    #        return_all = True
+    #    else:
+    #        return_all = False
+    #        # Track labels of input datasets
+    #        input_labels = [ds.plot_properties['label'] for ds in datasets]
+    #
+    #    # Renormalize errors using the reference model
+    #    error_factors = self._remove_outliers_and_calc_errfacs(
+    #        reference_model,
+    #        fit_datasets=datasets
+    #    )
+    #    self._apply_error_renormalization(error_factors)
+    #
+    #    # Refit all models with renormalized errors
+    #    self._refit_models()
+    #
+    #    # Return updated dataset objects
+    #    if return_all:
+    #        return self.datasets
+    #    else:
+    #        # Map labels back to new dataset objects
+    #        label_to_dataset = {ds.plot_properties['label']: ds
+    #                           for ds in self.datasets}
+    #        return [label_to_dataset[label] for label in input_labels]
 
     def _remove_outliers_and_calc_errfacs(self, reference_model, fit_datasets=None):
         """

@@ -37,15 +37,15 @@ base_dir = Path('test_output')
 #    containing everything needed to initialize the next step (below)
 # ------
 
-#print('=== Restart from pickle and Fit w/Error Renorm ===')
-#cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-#    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
-#    renormalize_errors=True, verbose=True,
-#    # parallax_grid=True,
-#    output_config=OutputConfig(
-#        base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
-#        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
-#cont_fitter.fit()
+print('=== Restart from pickle and Fit w/Error Renorm ===')
+cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
+    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
+    renormalize_errors=True, verbose=True,
+    #parallax_grid=True,
+    output_config=OutputConfig(
+        base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
+        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
+cont_fitter.fit()
 # ------
 # Expected workflow: Renormalize errors, refit all models, run parallax grids
 #
