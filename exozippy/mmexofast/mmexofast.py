@@ -1063,10 +1063,11 @@ class MMEXOFASTFitter:
             # Run initial grid with ALL datasets
             initial_grids = self._run_piE_grid_search(
                 datasets=all_datasets,
-                grid_params=self.PARALLAX_GRID_PARAMS_FINE,
+                grid_params=self.PARALLAX_GRID_PARAMS_COARSE,
                 skip_optimization=True,
                 save_results=True,
-                file_suffix='_initial'
+                file_suffix='_initial',
+                refinement_params={'chi2_threshold': 200, 'min_step_size': 0.005, 'radius_steps': 3}
             )
 
             # Optimize best solution

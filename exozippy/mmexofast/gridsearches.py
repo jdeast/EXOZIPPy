@@ -2,6 +2,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 import datetime
 import matplotlib.pyplot as plt
+from itertools import product
 
 import MulensModel
 import sfit_minimizer
@@ -685,9 +686,8 @@ class BaseRectGridSearch(ABC):
         For variable-density grids (from refinement), compares each point only to
         neighbors at the appropriate step distance for that point's refinement level.
 
-        First attempts to find strict local minima (chi2 strictly lower than all
-        neighbors). If none exist, identifies constant chi2 regions at the global
-        minimum and returns one representative per cluster.
+        Uses clustering to handle both distinct minima and flat minimum regions.
+        Edge points (missing neighbors) are included if they're minima of existing neighbors.
 
         Returns
         -------
@@ -695,6 +695,9 @@ class BaseRectGridSearch(ABC):
             List of (chi2, params) tuples sorted by chi2 (best first).
             params is the result['params'] dict containing fitted parameters.
         """
+        # ----------------------------------------------------------------
+        # Validation
+        # ----------------------------------------------------------------
         if self.results is None:
             raise ValueError("No results available. Run grid search first.")
 
@@ -703,10 +706,12 @@ class BaseRectGridSearch(ABC):
 
         # Filter successful results
         valid_results = [r for r in self.results if r.get('success', False)]
-
         if len(valid_results) == 0:
             return []
 
+        # ----------------------------------------------------------------
+        # Setup
+        # ----------------------------------------------------------------
         # Get parameter names and original step sizes
         param_names = []
         original_steps = {}
@@ -720,7 +725,6 @@ class BaseRectGridSearch(ABC):
         tolerance = getattr(self, 'min_step_size', min(original_steps.values())) / 10
 
         # Build spatial index: map positions to results
-        # Use rounded positions as keys
         position_to_results = {}
         for result in valid_results:
             point = tuple(round(result[param], 10) for param in param_names)
@@ -728,6 +732,9 @@ class BaseRectGridSearch(ABC):
                 position_to_results[point] = []
             position_to_results[point].append(result)
 
+        # ----------------------------------------------------------------
+        # Helper Functions
+        # ----------------------------------------------------------------
         def find_neighbor(center_point, center_result, deltas):
             """
             Find neighbor at specified delta from center point.
@@ -746,7 +753,7 @@ class BaseRectGridSearch(ABC):
             dict or None
                 Neighbor result if exists, None otherwise
             """
-            # Get step size for this point
+            # Get step size for this point's refinement level
             refinement_level = center_result.get('refinement_level', 0)
             step_sizes = {param: original_steps[param] / (2 ** refinement_level)
                           for param in param_names}
@@ -768,64 +775,22 @@ class BaseRectGridSearch(ABC):
 
             return None
 
-        # STEP 1: Find strict local minima (chi2 < all neighbors)
-        strict_minima = []
-        from itertools import product
+        def get_cluster(start_point, result_map):
+            """
+            BFS to find all connected points within 1 sigma of each other.
 
-        for result in valid_results:
-            point = tuple(round(result[param], 10) for param in param_names)
-            chi2 = result['chi2']
+            Parameters
+            ----------
+            start_point : tuple
+                Starting point coordinates
+            result_map : dict
+                Map from point tuples to results
 
-            is_local_min = True
-            all_neighbors_exist = True
-
-            for deltas in product([-1, 0, 1], repeat=len(param_names)):
-                if all(d == 0 for d in deltas):
-                    continue
-
-                neighbor = find_neighbor(point, result, deltas)
-
-                if neighbor is None:
-                    all_neighbors_exist = False
-                    # Missing neighbor - not a complete minimum
-                    is_local_min = False
-                    break
-
-                neighbor_chi2 = neighbor['chi2']
-                if neighbor_chi2 <= chi2:  # Not strictly lower
-                    is_local_min = False
-                    break
-
-            if is_local_min and all_neighbors_exist:
-                strict_minima.append((chi2, result['params']))
-
-        # If we found strict minima, return them
-        if len(strict_minima) > 0:
-            strict_minima.sort(key=lambda x: x[0])
-            return strict_minima
-
-        # STEP 2: Handle constant chi2 regions (no strict minima exist)
-        # Find global minimum chi2
-        min_chi2 = min(r['chi2'] for r in valid_results)
-
-        # Find all points within 1 sigma of global minimum
-        sigma_threshold = 1.0
-        min_results = [r for r in valid_results
-                       if np.sqrt(r['chi2'] - min_chi2) < sigma_threshold]
-        if len(min_results) == 0:
-            return []
-
-        min_points = [tuple(round(r[param], 10) for param in param_names)
-                      for r in min_results]
-
-        # Cluster connected points at global minimum using BFS
-        visited = set()
-        clusters = []
-        result_map = {tuple(round(r[param], 10) for param in param_names): r
-                      for r in min_results}
-
-        def get_cluster(start_point):
-            """BFS to find all connected points at same chi2."""
+            Returns
+            -------
+            list
+                Cluster of connected points
+            """
             cluster = []
             queue = [start_point]
             cluster_visited = {start_point}
@@ -835,6 +800,7 @@ class BaseRectGridSearch(ABC):
                 cluster.append(point)
 
                 point_result = result_map[point]
+                center_chi2 = point_result['chi2']
 
                 # Check all neighbors using refinement-aware logic
                 for deltas in product([-1, 0, 1], repeat=len(param_names)):
@@ -847,35 +813,110 @@ class BaseRectGridSearch(ABC):
                         neighbor_point = tuple(round(neighbor_result[param], 10)
                                                for param in param_names)
 
-                        # Check if neighbor is also at global min
-                        # Check if neighbor is within 1 sigma of center point
-                        neighbor_chi2 = neighbor_result['chi2']
-                        center_chi2 = result_map[point]['chi2']
-                        if (np.sqrt(abs(neighbor_chi2 - center_chi2)) < 1.0 and
-                                neighbor_point not in cluster_visited and
-                                np.sqrt(neighbor_chi2 - min_chi2) < sigma_threshold):
+                        # Skip if already visited
+                        if neighbor_point in cluster_visited:
+                            continue
 
+                        # Skip if not in result_map (not a minimum point)
+                        if neighbor_point not in result_map:
+                            continue
+
+                        neighbor_chi2 = neighbor_result['chi2']
+
+                        # Include if within 1 sigma of center point
+                        if np.sqrt(abs(neighbor_chi2 - center_chi2)) < 1.0:
                             cluster_visited.add(neighbor_point)
                             queue.append(neighbor_point)
 
             return cluster
 
-        for point in min_points:
-            if point not in visited:
-                cluster = get_cluster(point)
-                visited.update(cluster)
-                clusters.append(cluster)
+        # ----------------------------------------------------------------
+        # Find Local Minimum Points
+        # ----------------------------------------------------------------
+        def find_minimum_points():
+            """
+            Find all points that are local minima (chi2 <= all existing neighbors).
 
-        # Return one representative per cluster
-        local_minima = []
-        for cluster in clusters:
-            # Pick first point (arbitrary but consistent)
-            representative = cluster[0]
-            result = result_map[representative]
-            local_minima.append((result['chi2'], result['params']))
+            Includes edge points (missing neighbors) if they're minima of neighbors that exist.
 
-        local_minima.sort(key=lambda x: x[0])
-        return local_minima
+            Returns
+            -------
+            list
+                List of results that are local minima
+            """
+            minimum_results = []
+
+            for result in valid_results:
+                point = tuple(round(result[param], 10) for param in param_names)
+                chi2 = result['chi2']
+
+                # Check all potential neighbors
+                is_minimum = True
+
+                for deltas in product([-1, 0, 1], repeat=len(param_names)):
+                    if all(d == 0 for d in deltas):
+                        continue
+
+                    neighbor = find_neighbor(point, result, deltas)
+
+                    # If neighbor exists and has lower chi2, this isn't a minimum
+                    if neighbor is not None and neighbor['chi2'] < chi2:
+                        is_minimum = False
+                        break
+
+                if is_minimum:
+                    minimum_results.append(result)
+
+            return minimum_results
+
+        def cluster_and_select_representatives():
+            """
+            Cluster minimum points and return one representative per cluster.
+
+            Returns
+            -------
+            list of tuple
+                List of (chi2, params) tuples, one per cluster, sorted by chi2
+            """
+            minimum_results = find_minimum_points()
+
+            if len(minimum_results) == 0:
+                return []
+
+            # Build result map
+            result_map = {tuple(round(r[param], 10) for param in param_names): r
+                          for r in minimum_results}
+
+            min_points = list(result_map.keys())
+
+            # Find global min for reference
+            min_chi2 = min(r['chi2'] for r in minimum_results)
+
+            # Cluster connected points
+            visited = set()
+            clusters = []
+
+            for point in min_points:
+                if point not in visited:
+                    cluster = get_cluster(point, result_map)
+                    visited.update(cluster)
+                    clusters.append(cluster)
+
+            # Return one representative per cluster
+            local_minima = []
+            for cluster in clusters:
+                # Pick point with lowest chi2 in cluster
+                best_in_cluster = min(cluster, key=lambda p: result_map[p]['chi2'])
+                result = result_map[best_in_cluster]
+                local_minima.append((result['chi2'], result['params']))
+
+            local_minima.sort(key=lambda x: x[0])
+            return local_minima
+
+        # ----------------------------------------------------------------
+        # Execute
+        # ----------------------------------------------------------------
+        return cluster_and_select_representatives()
 
     def select_separated_minima(self, local_minima, min_separation=1.0, n=None):
         """
@@ -1448,8 +1489,8 @@ class ParallaxGridSearch(BaseRectGridSearch):
                                        for param in param_names}
 
                 # Check if has incomplete neighbors at current level
-                if self._has_incomplete_neighbors_at_level(params, current_point_steps,
-                                                           evaluated_points, tolerance):
+                if self._has_incomplete_neighbors(params, current_point_steps,
+                                                  evaluated_points, tolerance):
                     needs_edge_extension.append((chi2, params, refinement_level))
                 elif min(current_point_steps.values()) / 2 > min_step_size:
                     # Can refine to next level
@@ -1613,7 +1654,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
             print(f"\nRefinement complete after {iteration} iterations")
             print(f"Total grid points evaluated: {len(self.results)}")
 
-    def _has_incomplete_neighbors_at_level(self, params, step_sizes_at_level, evaluated_points, tolerance):
+    def _has_incomplete_neighbors(self, params, step_sizes_at_level, evaluated_points, tolerance):
         """
         Check if a point is missing any neighbors at a specific refinement level.
 
@@ -1633,7 +1674,6 @@ class ParallaxGridSearch(BaseRectGridSearch):
         bool
             True if any neighbors are missing (point is at edge), False if all neighbors exist
         """
-        from itertools import product
 
         param_names = list(step_sizes_at_level.keys())
 
@@ -1658,46 +1698,6 @@ class ParallaxGridSearch(BaseRectGridSearch):
                     break
 
             if not neighbor_exists:
-                return True  # Missing at least one neighbor
-
-        return False  # All neighbors exist
-
-    def _has_incomplete_neighbors(self, params, current_step_sizes, evaluated_points):
-        """
-        Check if a point is missing any neighbors at the current refinement level.
-
-        Parameters
-        ----------
-        params : dict
-            Parameter values for the point to check
-        current_step_sizes : dict
-            Current step size for each parameter
-        evaluated_points : set
-            Set of already-evaluated points as tuples
-
-        Returns
-        -------
-        bool
-            True if any neighbors are missing (point is at edge), False if all neighbors exist
-        """
-        from itertools import product
-
-        # Get parameter names
-        param_names = list(current_step_sizes.keys())
-
-        # Check all neighbors (3^N - 1 combinations, excluding center)
-        for deltas in product([-1, 0, 1], repeat=len(param_names)):
-            if all(d == 0 for d in deltas):
-                continue  # Skip center point
-
-            # Calculate neighbor position
-            neighbor = tuple(
-                round(params[param_names[i]] + deltas[i] * current_step_sizes[param_names[i]], 10)
-                for i in range(len(param_names))
-            )
-
-            # Check if neighbor exists
-            if neighbor not in evaluated_points:
                 return True  # Missing at least one neighbor
 
         return False  # All neighbors exist
