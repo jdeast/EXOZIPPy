@@ -57,8 +57,12 @@ def get_telescope_band_from_filename(filename):
     tuple
         (telescope, band)
     """
+    if filename[-1] == '.':
+        filename += ' '
+
     basename = os.path.basename(filename).split('.')
-    if len(basename) < 3:
+    print(len(basename), basename)
+    if len(basename) < 4:
         raise ValueError(
             f"Filename ({filename}) must have the format " +
             "nYYYYMMDD.BAND.TELESCOPE.whateveryouwant")

@@ -56,6 +56,14 @@ class TestGetTelescopeBandFromFilename(unittest.TestCase):
                 self.assertEqual(telescope, expected_tel)
                 self.assertEqual(band, expected_band)
 
+    def test_standard_format_without_suffix(self):
+        """Test format without suffix (just date, band, observatory)."""
+        telescope, band = observatories.get_telescope_band_from_filename(
+            'n20100101.I.OGLE.'
+        )
+        self.assertEqual(telescope, 'OGLE')
+        self.assertEqual(band, 'I')
+
     def test_malformed_filename_no_dots(self):
         """Test error on filename without proper format."""
         with self.assertRaises(ValueError):
