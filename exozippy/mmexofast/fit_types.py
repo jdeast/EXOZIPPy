@@ -260,22 +260,14 @@ def model_key_to_label(key: FitKey) -> str:
     -------
     str
     """
-    # Find base tag with priority logic
-    if key.lens_type == LensType.BINARY and key.source_type == SourceType.POINT:
-        base = '2L1S'
-    elif key.lens_type == LensType.POINT and key.source_type == SourceType.POINT:
-        base = 'PSPL'
-    elif key.lens_type == LensType.POINT and key.source_type == SourceType.FINITE:
-        base = 'FSPL'
-    else:
-        # Fallback to tag search
-        base = None
-        for candidate, lt in LENS_TAGS.items():
-            if lt == key.lens_type and SOURCE_TAGS[candidate] == key.source_type:
-                base = candidate
-                break
+    # Find a base tag that matches lens_type+source_type
+    base = None
+    for candidate, lt in LENS_TAGS.items():
+        if lt == key.lens_type and SOURCE_TAGS[candidate] == key.source_type:
+            base = candidate
+            break
 
-        assert base is not None, f"No base label mapping for ModelKey {key!r}"
+    assert base is not None, f"No base label mapping for ModelKey {key!r}"
 
     # Static
     if (
