@@ -462,5 +462,36 @@ class TestInvalidLabels(unittest.TestCase):
                     fit_types.label_to_model_key(label)
 
 
+class TestInvalidKeys(unittest.TestCase):
+    """Test that TAGS mappings are complete (preventing unmapped errors)."""
+
+    def test_tags_completeness(self):
+        """Verify that all enum values have corresponding TAGS entries.
+
+        NOTE: This test currently fails for (BINARY, FINITE) combination.
+        This is a known limitation - binary lens with finite source not yet
+        implemented. Will need multi-source type system in the future.
+    """
+        # Check LENS_TAGS and SOURCE_TAGS cover all combinations
+        for lens in fit_types.LensType:
+            for source in fit_types.SourceType:
+                # Should find at least one base tag for this combo
+                found = any(
+                    fit_types.LENS_TAGS[tag] == lens and fit_types.SOURCE_TAGS[tag] == source
+                    for tag in fit_types.LENS_TAGS.keys()
+                )
+                self.assertTrue(found, f"No tag for {lens}+{source}")
+
+        # Check all LensOrbMotion values in LENS_MOTION_TAGS
+        for motion in fit_types.LensOrbMotion:
+            found = motion in fit_types.LENS_MOTION_TAGS.values()
+            self.assertTrue(found, f"LensOrbMotion.{motion} not in LENS_MOTION_TAGS")
+
+        # Check all ParallaxBranch values in PARALLAX_BRANCH_TAGS
+        for branch in fit_types.ParallaxBranch:
+            found = branch in fit_types.PARALLAX_BRANCH_TAGS.values()
+            self.assertTrue(found, f"ParallaxBranch.{branch} not in PARALLAX_BRANCH_TAGS")
+
+
 if __name__ == '__main__':
     unittest.main()

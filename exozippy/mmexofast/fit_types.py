@@ -248,6 +248,7 @@ def model_key_to_label(key: FitKey) -> str:
     - Choose a base tag that matches (lens_type, source_type).
     - If parallax_branch == NONE and lens_orb_motion == NONE -> "<base> static"
     - If lens_orb_motion == NONE and parallax_branch != NONE -> "<base> par <branch>"
+    - If lens_orb_motion != NONE and parallax_branch == NONE -> "<base> <motion>"
     - If lens_orb_motion != NONE and parallax_branch != NONE ->
           "<base> <motion> par <branch>"
 
@@ -258,26 +259,28 @@ def model_key_to_label(key: FitKey) -> str:
     Returns
     -------
     str
-
-    Raises
-    ------
-    ValueError
-        If no suitable base tag or motion/branch tag is found.
     """
-    # Find a base tag that matches lens_type+source_type
-    base = None
-    for candidate, lt in LENS_TAGS.items():
-        if lt == key.lens_type and SOURCE_TAGS[candidate] == key.source_type:
-            base = candidate
-            break
+    # Find base tag with priority logic
+    if key.lens_type == LensType.BINARY and key.source_type == SourceType.POINT:
+        base = '2L1S'
+    elif key.lens_type == LensType.POINT and key.source_type == SourceType.POINT:
+        base = 'PSPL'
+    elif key.lens_type == LensType.POINT and key.source_type == SourceType.FINITE:
+        base = 'FSPL'
+    else:
+        # Fallback to tag search
+        base = None
+        for candidate, lt in LENS_TAGS.items():
+            if lt == key.lens_type and SOURCE_TAGS[candidate] == key.source_type:
+                base = candidate
+                break
 
-    if base is None:
-        raise ValueError(f"No base label mapping for ModelKey {key!r}")
+        assert base is not None, f"No base label mapping for ModelKey {key!r}"
 
     # Static
     if (
-        key.parallax_branch == ParallaxBranch.NONE
-        and key.lens_orb_motion == LensOrbMotion.NONE
+            key.parallax_branch == ParallaxBranch.NONE
+            and key.lens_orb_motion == LensOrbMotion.NONE
     ):
         return f"{base} static"
 
@@ -287,10 +290,9 @@ def model_key_to_label(key: FitKey) -> str:
         if motion == key.lens_orb_motion:
             lens_motion_label = lbl
             break
-    if lens_motion_label is None:
-        raise ValueError(
-            f"No lens motion label mapping for LensOrbMotion {key.lens_orb_motion!r}"
-        )
+
+    assert lens_motion_label is not None, \
+        f"No lens motion label mapping for LensOrbMotion {key.lens_orb_motion!r}"
 
     # Find branch label
     branch_label = None
@@ -298,14 +300,17 @@ def model_key_to_label(key: FitKey) -> str:
         if br == key.parallax_branch:
             branch_label = lbl
             break
-    if branch_label is None:
-        raise ValueError(
-            f"No parallax branch label mapping for {key.parallax_branch!r}"
-        )
+
+    assert branch_label is not None, \
+        f"No parallax branch label mapping for {key.parallax_branch!r}"
 
     if lens_motion_label == "none":
         # Pure parallax, no orbital motion: "<base> par u0+"
         return f"{base} par {branch_label}"
 
-    # Orbital motion + parallax: "<base> 2Dorb par u0+"
+    if branch_label == "none":
+        # Orbital motion, no parallax: "<base> <motion>"
+        return f"{base} {lens_motion_label}"
+
+    # Orbital motion + parallax: "<base> <motion> par u0+"
     return f"{base} {lens_motion_label} par {branch_label}"
