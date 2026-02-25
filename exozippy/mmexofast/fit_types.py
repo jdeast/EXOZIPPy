@@ -70,7 +70,7 @@ class ParallaxBranch(Enum):
 class LensOrbMotion(Enum):
     NONE = "none"
     ORB_2D = "2Dorb"    # 2L1S 2-parameter orbital motion
-    KEP = "kep"         # 2L1S full Keplerian orbital motion
+    KEPLER = "kep"         # 2L1S full Keplerian orbital motion
     # extendable
 
 
@@ -124,7 +124,7 @@ PARALLAX_BRANCH_TAGS: Dict[str, ParallaxBranch] = {
 LENS_MOTION_TAGS: Dict[str, LensOrbMotion] = {
     "none": LensOrbMotion.NONE,
     "2Dorb": LensOrbMotion.ORB_2D,
-    "kep": LensOrbMotion.KEP,
+    "kep": LensOrbMotion.KEPLER,
 }
 
 
@@ -301,126 +301,3 @@ def model_key_to_label(key: FitKey) -> str:
 
     # Orbital motion + parallax: "<base> 2Dorb par u0+"
     return f"{base} {lens_motion_label} par {branch_label}"
-
-'''
-
-# ============================================================================
-# Enums and ModelKey
-# ============================================================================
-
-class LensType(Enum):
-    POINT = "point"
-    BINARY = "binary"   # for 2L1S, etc.
-
-
-class SourceType(Enum):
-    POINT = "point"
-    FINITE = "finite"
-
-
-class ParallaxBranch(Enum):
-    NONE = "none"
-    U0_PLUS = "u0+"
-    U0_MINUS = "u0-"
-    U0_PP = "u0++"
-    U0_MM = "u0--"
-    U0_PM = "u0+-"
-    U0_MP = "u0-+"
-
-
-class LensOrbMotion(Enum):
-    NONE = "none"
-    ORB_2D = "2Dorb"  # 2L1S 2-parameter orbital motion
-    KEP = "kep"       # 2L1S Full Keplerian orbital motion
-    # extendable
-
-
-@dataclass(frozen=True)
-class ModelKey:
-    lens_type: LensType
-    source_type: SourceType
-    parallax_branch: ParallaxBranch
-    lens_orb_motion: LensOrbMotion
-
-    def __post_init__(self):
-        # Enforce: point lens cannot have orbital motion.
-        if (
-            self.lens_type == LensType.POINT
-            and self.lens_orb_motion is not LensOrbMotion.NONE
-        ):
-            raise ValueError("Point lenses must have lens_orb_motion == NONE")
-
-
-# ============================================================================
-# Conversion Functions
-# ============================================================================
-
-def label_to_model_key(label: str) -> ModelKey:
-    """
-            Map user-facing string labels (e.g. 'static PSPL', 'PL par u0+')
-            to structured ModelKey.
-
-            TODO: Implement mapping rules that correspond to your current labels.
-            """
-    if label == "static PSPL":
-        return ModelKey(
-            lens_type=LensType.POINT,
-            source_type=SourceType.POINT,
-            parallax_branch=ParallaxBranch.NONE,
-            lens_orb_motion=LensOrbMotion.NONE,
-        )
-    if label == "static FSPL":
-        return ModelKey(
-            lens_type=LensType.POINT,
-            source_type=SourceType.FINITE,
-            parallax_branch=ParallaxBranch.NONE,
-            lens_orb_motion=LensOrbMotion.NONE,
-        )
-
-    if label == "PL par u0+":
-        return ModelKey(
-            lens_type=LensType.POINT,
-            source_type=(
-                SourceType.FINITE if self.finite_source else SourceType.POINT
-            ),
-            parallax_branch=ParallaxBranch.U0_PLUS,
-            lens_orb_motion=LensOrbMotion.NONE,
-        )
-
-    if label == "PL par u0-":
-        return ModelKey(
-            lens_type=LensType.POINT,
-            source_type=(
-                SourceType.FINITE if self.finite_source else SourceType.POINT
-            ),
-            parallax_branch=ParallaxBranch.U0_MINUS,
-            lens_orb_motion=LensOrbMotion.NONE,
-        )
-
-    # TODO: add mappings for other parallax branches and binary models.
-    raise ValueError(f"Unknown model label: {label}")
-
-
-def model_key_to_label(key: ModelKey) -> str:
-    if key.lens_type == LensType.POINT and key.parallax_branch == ParallaxBranch.NONE:
-        if key.source_type == SourceType.POINT:
-            return "static PSPL"
-        elif key.source_type == SourceType.FINITE:
-            return "static FSPL"
-
-    if key.lens_type == LensType.POINT and key.parallax_branch in (
-            ParallaxBranch.U0_PLUS,
-            ParallaxBranch.U0_MINUS,
-            ParallaxBranch.U0_PP,
-            ParallaxBranch.U0_MM,
-            ParallaxBranch.U0_PM,
-            ParallaxBranch.U0_MP,
-    ):
-        return f"PL par {key.parallax_branch.value}"
-
-    # TODO: extend for binary models, motion models, etc.
-    return f"{key.lens_type.value} / {key.source_type.value} / " \
-           f"{key.parallax_branch.value} / {key.lens_orb_motion.value}"
-
-
-'''
