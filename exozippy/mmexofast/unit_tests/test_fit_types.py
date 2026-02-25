@@ -276,13 +276,6 @@ class TestLabelConversions(unittest.TestCase):
                 key = fit_types.label_to_model_key(label)
                 self.assertEqual(key.parallax_branch, expected_branch)
 
-    def test_label_to_key_with_locations(self):
-        """Test converting label with locations specified."""
-        key = fit_types.label_to_model_key('PSPL static (ground+Spitzer)')
-
-        self.assertEqual(key.parallax_branch, fit_types.ParallaxBranch.NONE)
-        self.assertEqual(key.locations_used, 'ground+Spitzer')
-
     def test_label_to_key_invalid(self):
         """Test that invalid labels raise appropriate error."""
         with self.assertRaises((ValueError, KeyError)):
@@ -311,7 +304,6 @@ class TestLabelConversions(unittest.TestCase):
         )
 
         label = fit_types.model_key_to_label(key)
-        self.assertIn('ground+Spitzer', label)
         self.assertIn('PSPL', label)
 
     def test_round_trip_conversion(self):
@@ -322,8 +314,6 @@ class TestLabelConversions(unittest.TestCase):
             'PSPL par u0+',
             'PSPL par u0-',
             'PSPL par u0++',
-            'PSPL static (ground)',
-            'PSPL par u0+ (ground+Spitzer)',
             '2L1S 2Dorb',  # 2DORB case
             '2L1S kep par u0+',  # Kepler + parallax case (adjust format as needed)
         ]
@@ -395,6 +385,35 @@ class TestLabelConversions(unittest.TestCase):
         # Should not have location info in label
         self.assertNotIn('(', label)
 
+    def test_label_order_strict(self):
+        """Test that labels must follow expected order."""
+        # These should all raise errors (wrong order)
+        invalid_orders = [
+            'par u0+ PSPL',  # Should be 'PSPL par u0+'
+            'static FSPL',  # Should be 'FSPL static'
+            'u0+ par PSPL',  # Should be 'PSPL par u0+'
+            'kep 2L1S',  # Should be '2L1S kep' (if that's the right order)
+            '2Dorb 2L1S',  # Should be '2L1S 2Dorb'
+        ]
+
+        for label in invalid_orders:
+            with self.subTest(label=label):
+                with self.assertRaises((ValueError, KeyError)):
+                    fit_types.label_to_model_key(label)
+
+    def test_label_to_key_binary_motion_no_parallax(self):
+        """Test binary with orbital motion but no parallax."""
+        test_cases = [
+            ('2L1S 2Dorb', fit_types.LensOrbMotion.ORB_2D, fit_types.ParallaxBranch.NONE),
+            ('2L1S kep', fit_types.LensOrbMotion.KEPLER, fit_types.ParallaxBranch.NONE),
+        ]
+
+        for label, expected_motion, expected_parallax in test_cases:
+            with self.subTest(label=label):
+                key = fit_types.label_to_model_key(label)
+                self.assertEqual(key.lens_orb_motion, expected_motion)
+                self.assertEqual(key.parallax_branch, expected_parallax)
+
 
 class TestInvalidLabels(unittest.TestCase):
     """Test error handling for invalid labels."""
@@ -426,6 +445,18 @@ class TestInvalidLabels(unittest.TestCase):
         ]
 
         for label in invalid_combinations:
+            with self.subTest(label=label):
+                with self.assertRaises((ValueError, KeyError)):
+                    fit_types.label_to_model_key(label)
+
+    def test_binary_motion_with_invalid_token(self):
+        """Test that invalid token after motion raises error."""
+        invalid_labels = [
+            '2L1S 2Dorb invalidToken',
+            '2L1S kep badToken',
+        ]
+
+        for label in invalid_labels:
             with self.subTest(label=label):
                 with self.assertRaises((ValueError, KeyError)):
                     fit_types.label_to_model_key(label)

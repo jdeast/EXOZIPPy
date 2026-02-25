@@ -132,7 +132,6 @@ LENS_MOTION_TAGS: Dict[str, LensOrbMotion] = {
 # Label <-> ModelKey conversion
 # ============================================================================
 
-
 def label_to_model_key(label: str) -> FitKey:
     """
     Parse a human-readable label into a ModelKey.
@@ -141,8 +140,8 @@ def label_to_model_key(label: str) -> FitKey:
 
         "<base> static"
         "<base> par <branch>"
-        "<base> 2Dorb par <branch>"
-        "<base> kep par <branch>"
+        "<base> <motion>"
+        "<base> <motion> par <branch>"
 
     As a convenience, "<base>" alone is treated as "<base> static".
 
@@ -182,8 +181,8 @@ def label_to_model_key(label: str) -> FitKey:
     else:
         # More complex forms:
         #   "<base> par u0+"
-        #   "<base> 2Dorb par u0+"
-        #   "<base> kep par u0--"
+        #   "<base> <motion>"
+        #   "<base> <motion> par u0+"
         tail = tokens[1:]
 
         # Case 1: 'par <branch>'
@@ -191,15 +190,24 @@ def label_to_model_key(label: str) -> FitKey:
             lens_motion_token = "none"
             branch_token = tail[1] if len(tail) > 1 else "none"
 
-        # Case 2: '<motion> par <branch>'
+        # Case 2: '<motion> ...'
         else:
-            lens_motion_token = tail[0]                # '2Dorb' or 'kep'
-            if len(tail) < 2 or tail[1] != "par":
+            lens_motion_token = tail[0]  # '2Dorb' or 'kep'
+
+            # Check what follows the motion token
+            if len(tail) >= 2 and tail[1] == "par":
+                # Has parallax: '<base> <motion> par <branch>'
+                branch_token = tail[2] if len(tail) > 2 else "none"
+            elif len(tail) == 1:
+                # Just motion, no parallax: '<base> <motion>'
+                branch_token = "none"
+            else:
+                # Has something after motion that isn't 'par' - invalid
                 raise ValueError(
                     f"Cannot parse label {label!r}: "
-                    f"expected 'par' after lens motion token {lens_motion_token!r}"
+                    f"expected 'par' or end of label after lens motion token {lens_motion_token!r}, "
+                    f"got {tail[1]!r}"
                 )
-            branch_token = tail[2] if len(tail) > 2 else "none"
 
         lens_orb_motion = LENS_MOTION_TAGS.get(lens_motion_token)
         if lens_orb_motion is None:
