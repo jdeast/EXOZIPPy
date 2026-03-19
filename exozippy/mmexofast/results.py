@@ -163,22 +163,22 @@ class FitRecord:
 
     Attributes
     ----------
-    model_key
+    model_key : mmexo.FitKey
         Key identifying the model configuration (lens type, source type, etc.).
-    params
+    params : dict
         Dictionary mapping parameter names to fitted values.
-    sigmas
+    sigmas : dict, optional
         Dictionary mapping parameter names to 1-sigma uncertainties.
-        Optional; None if uncertainties were not computed.
-    renorm_factors
+        None if uncertainties were not computed.
+    renorm_factors : dict, optional
         Dictionary of renormalization/systematics factors applied.
-        Optional; None if no renormalization was needed.
-    full_result
+        None if no renormalization was needed.
+    full_result : object, optional
         Complete fit results object from MMEXOFAST.
-        Optional; None if only summary data is retained.
-    fixed
+        None if only summary data is retained.
+    fixed : bool
         Whether the fit was performed with fixed parameters.
-    is_complete
+    is_complete : bool
         Whether the fit completed successfully.
 
     """
@@ -197,13 +197,13 @@ class FitRecord:
 
         Parameters
         ----------
-        model_key
+        model_key : mmexo.FitKey
             Key identifying the model configuration.
-        full_result
+        full_result : MMEXOFASTFitResults
             Complete fit results from MMEXOFAST.
-        renorm_factors, optional
+        renorm_factors : dict, optional
             Dictionary of renormalization factors. Default is None.
-        fixed, optional
+        fixed : bool, optional
             Whether the fit used fixed parameters. Default is False.
 
         Returns
@@ -325,8 +325,7 @@ class FitRecord:
         Returns the best-fit chi-squared statistic if full_result is available,
         otherwise returns None.
 
-        Returns
-        -------
+        Returns        -------
         float or None
             Chi-squared value, or None if full_result is unavailable.
 
@@ -335,7 +334,6 @@ class FitRecord:
             return None
 
         return self.full_result.chi2
-
 
 @dataclass
 class GridSearchResult:
