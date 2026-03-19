@@ -798,6 +798,26 @@ class TestAllFitResults(TestFitRecord):
         for label in items_dict.keys():
             self.assertIsInstance(label, str)
 
+    def test_iter_point_lens_records_excludes_binary(self):
+        """Test A: iter_point_lens_records() does not yield binary lens records."""
+        yielded_keys = [key for key, _ in self.all_results.iter_point_lens_records()]
+        self.assertNotIn(self.model_key_binary, yielded_keys)
+
+    def test_iter_point_lens_records_yields_all_point_lens(self):
+        """Test B: iter_point_lens_records() yields all point lens records."""
+        yielded_keys = [key for key, _ in self.all_results.iter_point_lens_records()]
+        self.assertIn(self.model_key_pspl_static, yielded_keys)
+        self.assertIn(self.model_key_pspl_parallax, yielded_keys)
+        self.assertEqual(len(yielded_keys), 2)
+
+    def test_iter_point_lens_records_yields_key_record_tuples(self):
+        """Test C: iter_point_lens_records() yields (key, record) tuples."""
+        for item in self.all_results.iter_point_lens_records():
+            self.assertIsInstance(item, tuple)
+            key, record = item
+            self.assertIsInstance(key, fit_types.FitKey)
+            self.assertIsInstance(record, results.FitRecord)
+
 
 if __name__ == '__main__':
     unittest.main()
