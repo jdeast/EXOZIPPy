@@ -424,5 +424,380 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         self.assertIsNone(record.chi2())
 
 
+class TestAllFitResults(TestFitRecord):
+    """Test AllFitResults class."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        super().setUp()
+
+        # Create the 3 model keys
+        self.model_key_pspl_static = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.POINT,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        self.model_key_pspl_parallax = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.POINT,
+            parallax_branch=fit_types.ParallaxBranch.U0_MINUS,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        self.model_key_binary = fit_types.FitKey(
+            lens_type=fit_types.LensType.BINARY,
+            source_type=fit_types.SourceType.POINT,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        # Create AllFitResults with 3 FitRecords
+        self.all_results = results.AllFitResults()
+
+        self.record_pspl_static = results.FitRecord.from_full_result(
+            model_key=self.model_key_pspl_static,
+            full_result=self.full_result,
+            fixed=False,
+        )
+        self.all_results[self.model_key_pspl_static] = self.record_pspl_static
+
+        self.record_pspl_parallax = results.FitRecord.from_full_result(
+            model_key=self.model_key_pspl_parallax,
+            full_result=self.full_result,
+            fixed=False,
+        )
+        self.all_results[self.model_key_pspl_parallax] = self.record_pspl_parallax
+
+        self.record_binary = results.FitRecord.from_full_result(
+            model_key=self.model_key_binary,
+            full_result=self.full_result,
+            fixed=False,
+        )
+        self.all_results[self.model_key_binary] = self.record_binary
+
+    def test_getitem_by_fitkey(self):
+        """Test __getitem__ retrieves record by FitKey."""
+        retrieved = self.all_results[self.model_key_pspl_static]
+        self.assertEqual(retrieved, self.record_pspl_static)
+
+    def test_getitem_by_label(self):
+        """Test __getitem__ retrieves record by string label."""
+        label = fit_types.model_key_to_label(self.model_key_pspl_static)
+        retrieved = self.all_results[label]
+        self.assertEqual(retrieved, self.record_pspl_static)
+
+    def test_getitem_keyerror(self):
+        """Test __getitem__ raises KeyError for non-existent record."""
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        with self.assertRaises(KeyError):
+            _ = self.all_results[fake_key]
+
+    def test_setitem_new_record(self):
+        """Test __setitem__ adds a new record."""
+        new_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        new_record = results.FitRecord.from_full_result(
+            model_key=new_key,
+            full_result=self.full_result,
+            fixed=False,
+        )
+
+        self.all_results[new_key] = new_record
+
+        retrieved = self.all_results[new_key]
+        self.assertEqual(retrieved, new_record)
+        self.assertEqual(len(self.all_results), 4)  # Was 3, now 4
+
+    def test_setitem_overwrite_record(self):
+        """Test __setitem__ overwrites an existing record."""
+        new_record = results.FitRecord.from_full_result(
+            model_key=self.model_key_pspl_static,
+            full_result=self.full_result,
+            fixed=True,  # Different from original
+        )
+
+        original_length = len(self.all_results)
+        self.all_results[self.model_key_pspl_static] = new_record
+
+        retrieved = self.all_results[self.model_key_pspl_static]
+        self.assertEqual(retrieved, new_record)
+        self.assertEqual(len(self.all_results), original_length)  # Length unchanged
+        self.assertTrue(retrieved.fixed)
+
+    def test_delitem_existing_record(self):
+        """Test __delitem__ removes an existing record."""
+        original_length = len(self.all_results)
+
+        del self.all_results[self.model_key_pspl_static]
+
+        self.assertEqual(len(self.all_results), original_length - 1)
+        with self.assertRaises(KeyError):
+            _ = self.all_results[self.model_key_pspl_static]
+
+    def test_delitem_by_label(self):
+        """Test __delitem__ removes record by string label."""
+        label = fit_types.model_key_to_label(self.model_key_pspl_parallax)
+        original_length = len(self.all_results)
+
+        del self.all_results[label]
+
+        self.assertEqual(len(self.all_results), original_length - 1)
+        with self.assertRaises(KeyError):
+            _ = self.all_results[self.model_key_pspl_parallax]
+
+    def test_delitem_keyerror(self):
+        """Test __delitem__ raises KeyError for non-existent record."""
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        with self.assertRaises(KeyError):
+            del self.all_results[fake_key]
+
+    def test_iter_len_contains(self):
+        """Test __iter__, __len__, and __contains__ work together."""
+        # Test __len__
+        self.assertEqual(len(self.all_results), 3)
+
+        # Test __iter__ and __contains__
+        keys_from_iter = list(self.all_results)
+        self.assertEqual(len(keys_from_iter), 3)
+
+        # Verify all expected keys are in the iterator
+        self.assertIn(self.model_key_pspl_static, keys_from_iter)
+        self.assertIn(self.model_key_pspl_parallax, keys_from_iter)
+        self.assertIn(self.model_key_binary, keys_from_iter)
+
+        # Test __contains__ for existing keys
+        self.assertIn(self.model_key_pspl_static, self.all_results)
+        self.assertIn(self.model_key_pspl_parallax, self.all_results)
+        self.assertIn(self.model_key_binary, self.all_results)
+
+        # Test __contains__ for non-existent key
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+        self.assertNotIn(fake_key, self.all_results)
+
+    def test_normalize_key_fitkey_unchanged(self):
+        """Test that FitKey objects are returned unchanged by _normalize_key()."""
+        all_results = results.AllFitResults()
+
+        # Access _normalize_key through the object
+        normalized = all_results._normalize_key(self.model_key_pspl_static)
+
+        self.assertEqual(normalized, self.model_key_pspl_static)
+
+    def test_normalize_key_label_to_fitkey(self):
+        """Test that string labels are converted to FitKey by _normalize_key()."""
+        all_results = results.AllFitResults()
+
+        label = fit_types.model_key_to_label(self.model_key_pspl_static)
+        normalized = all_results._normalize_key(label)
+
+        self.assertEqual(normalized, self.model_key_pspl_static)
+
+    def test_key_normalization_consistency(self):
+        """Test that label and FitKey access retrieve the same record."""
+        label = fit_types.model_key_to_label(self.model_key_pspl_static)
+
+        # Access by label
+        retrieved_by_label = self.all_results[label]
+
+        # Access by FitKey
+        retrieved_by_key = self.all_results[self.model_key_pspl_static]
+
+        self.assertEqual(retrieved_by_label, retrieved_by_key)
+        self.assertEqual(retrieved_by_label, self.record_pspl_static)
+
+    def test_get_by_fitkey(self):
+        """Test get() retrieves record by FitKey."""
+        retrieved = self.all_results.get(self.model_key_pspl_static)
+        self.assertEqual(retrieved, self.record_pspl_static)
+
+    def test_get_by_label(self):
+        """Test get() retrieves record by string label."""
+        label = fit_types.model_key_to_label(self.model_key_pspl_static)
+        retrieved = self.all_results.get(label)
+        self.assertEqual(retrieved, self.record_pspl_static)
+
+    def test_get_nonexistent_returns_none(self):
+        """Test get() returns None for non-existent record."""
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        retrieved = self.all_results.get(fake_key)
+        self.assertIsNone(retrieved)
+
+    def test_set_new_record(self):
+        """Test set() adds a new record."""
+        new_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        new_record = results.FitRecord.from_full_result(
+            model_key=new_key,
+            full_result=self.full_result,
+            fixed=False,
+        )
+
+        original_length = len(self.all_results)
+        self.all_results.set(new_record)
+
+        self.assertEqual(len(self.all_results), original_length + 1)
+        self.assertEqual(self.all_results.get(new_key), new_record)
+
+    def test_set_overwrite_record(self):
+        """Test set() overwrites an existing record."""
+        new_record = results.FitRecord.from_full_result(
+            model_key=self.model_key_pspl_static,
+            full_result=self.full_result,
+            fixed=True,
+        )
+
+        original_length = len(self.all_results)
+        self.all_results.set(new_record)
+
+        self.assertEqual(len(self.all_results), original_length)
+        self.assertEqual(self.all_results.get(self.model_key_pspl_static), new_record)
+        self.assertTrue(self.all_results.get(self.model_key_pspl_static).fixed)
+
+    def test_has_by_fitkey(self):
+        """Test has() returns True for existing record by FitKey."""
+        self.assertTrue(self.all_results.has(self.model_key_pspl_static))
+
+    def test_has_by_label(self):
+        """Test has() returns True for existing record by label."""
+        label = fit_types.model_key_to_label(self.model_key_pspl_static)
+        self.assertTrue(self.all_results.has(label))
+
+    def test_has_nonexistent_returns_false(self):
+        """Test has() returns False for non-existent record."""
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        self.assertFalse(self.all_results.has(fake_key))
+
+    def test_get_returns_none_not_keyerror(self):
+        """Test get() returns None instead of raising KeyError for non-existent."""
+        fake_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        result = self.all_results.get(fake_key)
+        self.assertIsNone(result)
+
+    def test_set_uses_record_model_key(self):
+        """Test set() automatically uses record.model_key for storage."""
+        new_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.FINITE,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        new_record = results.FitRecord.from_full_result(
+            model_key=new_key,
+            full_result=self.full_result,
+            fixed=False,
+        )
+
+        # set() should use new_record.model_key automatically
+        self.all_results.set(new_record)
+
+        # Should be retrievable by the record's model_key
+        self.assertEqual(self.all_results.get(new_key), new_record)
+
+    def test_keys_labels_false(self):
+        """Test keys() returns FitKey objects when labels=False."""
+        keys = self.all_results.keys(labels=False)
+
+        self.assertEqual(len(keys), 3)
+        self.assertIn(self.model_key_pspl_static, keys)
+        self.assertIn(self.model_key_pspl_parallax, keys)
+        self.assertIn(self.model_key_binary, keys)
+
+    def test_keys_labels_true(self):
+        """Test keys() returns string labels when labels=True."""
+        keys = self.all_results.keys(labels=True)
+
+        self.assertEqual(len(keys), 3)
+
+        label_pspl_static = fit_types.model_key_to_label(self.model_key_pspl_static)
+        label_pspl_parallax = fit_types.model_key_to_label(self.model_key_pspl_parallax)
+        label_binary = fit_types.model_key_to_label(self.model_key_binary)
+
+        self.assertIn(label_pspl_static, keys)
+        self.assertIn(label_pspl_parallax, keys)
+        self.assertIn(label_binary, keys)
+
+        # Verify they are strings
+        for key in keys:
+            self.assertIsInstance(key, str)
+
+    def test_items_labels_false(self):
+        """Test items() returns (FitKey, record) tuples when labels=False."""
+        items = self.all_results.items(labels=False)
+
+        self.assertEqual(len(items), 3)
+
+        items_dict = dict(items)
+        self.assertEqual(items_dict[self.model_key_pspl_static], self.record_pspl_static)
+        self.assertEqual(items_dict[self.model_key_pspl_parallax], self.record_pspl_parallax)
+        self.assertEqual(items_dict[self.model_key_binary], self.record_binary)
+
+    def test_items_labels_true(self):
+        """Test items() returns (label, record) tuples when labels=True."""
+        items = self.all_results.items(labels=True)
+
+        self.assertEqual(len(items), 3)
+
+        label_pspl_static = fit_types.model_key_to_label(self.model_key_pspl_static)
+        label_pspl_parallax = fit_types.model_key_to_label(self.model_key_pspl_parallax)
+        label_binary = fit_types.model_key_to_label(self.model_key_binary)
+
+        items_dict = dict(items)
+        self.assertEqual(items_dict[label_pspl_static], self.record_pspl_static)
+        self.assertEqual(items_dict[label_pspl_parallax], self.record_pspl_parallax)
+        self.assertEqual(items_dict[label_binary], self.record_binary)
+
+        # Verify all keys are strings
+        for label in items_dict.keys():
+            self.assertIsInstance(label, str)
+
+
 if __name__ == '__main__':
     unittest.main()

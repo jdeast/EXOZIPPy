@@ -409,12 +409,12 @@ class AllFitResults(MutableMapping):
 
     def keys(self, labels: bool = False):
         if labels:
-            return [mmexo.model_types.model_key_to_label(k) for k in self._records.keys()]
+            return [mmexo.fit_types.model_key_to_label(k) for k in self._records.keys()]
         return list(self._records.keys())
 
     def items(self, labels: bool = False):
         if labels:
-            return [(mmexo.model_types.model_key_to_label(k), r) for k, r in self._records.items()]
+            return [(mmexo.fit_types.model_key_to_label(k), r) for k, r in self._records.items()]
         return list(self._records.items())
 
     def __repr__(self) -> str:
@@ -423,7 +423,7 @@ class AllFitResults(MutableMapping):
 
         lines = ["<AllFitResults:"]
         for key, record in self._records.items():
-            label = mmexo.model_types.model_key_to_label(key)
+            label = mmexo.fit_types.model_key_to_label(key)
             lines.append(f"  {label!r}: {record}")
         lines.append(">")
         return "\n".join(lines)
