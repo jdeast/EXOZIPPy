@@ -367,6 +367,62 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         # Verify sigmas match
         self.assertEqual(list(df['sigmas']), list(self.sigmas.values()))
 
+    def test_from_full_result_sigmas_exception(self):
+        """Test that sigmas is None when get_sigmas_from_results() raises exception."""
+        # Mock full_result to raise exception on get_sigmas_from_results()
+        mock_full_result = Mock(spec=results.MMEXOFASTFitResults)
+        mock_full_result.get_params_from_results.return_value = self.params
+        mock_full_result.get_sigmas_from_results.side_effect = Exception("Sigmas not available")
+        mock_full_result.chi2 = 100.0
+
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=mock_full_result,
+            fixed=False,
+        )
+
+        self.assertIsNone(record.sigmas)
+
+    def test_to_dataframe_without_sigmas(self):
+        """Test to_dataframe() when params defined but sigmas is None."""
+        record = results.FitRecord(
+            model_key=self.model_key,
+            params=self.params,
+            sigmas=None,
+            renorm_factors=self.test_renorm_factors,
+            full_result=None,
+            fixed=False,
+            is_complete=False,
+        )
+
+        df = record.to_dataframe()
+
+        # Validate DataFrame format
+        self._assert_dataframe_format(df, len(self.params))
+
+        # Verify parameter names match
+        self.assertEqual(list(df['parameter_names']), list(self.params.keys()))
+
+        # Verify values match
+        self.assertEqual(list(df['values']), list(self.params.values()))
+
+        # Verify all sigmas are None
+        self.assertTrue(df['sigmas'].isna().all())
+
+    def test_chi2_returns_none_without_full_result(self):
+        """Test that chi2() returns None when full_result is None."""
+        record = results.FitRecord(
+            model_key=self.model_key,
+            params=self.params,
+            sigmas=self.sigmas,
+            renorm_factors=self.test_renorm_factors,
+            full_result=None,
+            fixed=False,
+            is_complete=False,
+        )
+
+        self.assertIsNone(record.chi2())
+
 
 if __name__ == '__main__':
     unittest.main()
