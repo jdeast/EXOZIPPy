@@ -34,3 +34,8 @@ def __init__(
             files: list=None,
             datasets: list=None,
             fit_type: str=None)
+
+# Check code coverage
+
+pytest --cov=exozippy/mmexofast/ --cov-report=html exozippy/mmexofast/unit_tests/
+

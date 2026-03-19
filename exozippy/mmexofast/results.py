@@ -79,15 +79,16 @@ class MMEXOFASTFitResults:
             sigmas: list[float] = []
 
             for i, dataset in enumerate(self.datasets):
-                if "label" in dataset.plot_properties.keys():
-                    obs = dataset.plot_properties["label"].split("-")[0]
-                else:
-                    obs = i
-
-                if dataset.bandpass is not None:
-                    band = dataset.bandpass
-                else:
-                    band = "mag"
+                #if "label" in dataset.plot_properties.keys():
+                #    obs = dataset.plot_properties["label"].split("-")[0]
+                #else:
+                #    obs = i
+                #
+                #if dataset.bandpass is not None:
+                #    band = dataset.bandpass
+                #else:
+                #    band = "mag"
+                obs, band = mmexo.observatories.get_telescope_band_from_filename(dataset.plot_properties['label'])
 
                 parameters.append(f"{band}_S_{obs}")
                 parameters.append(f"{band}_B_{obs}")
