@@ -152,34 +152,66 @@ class MMEXOFASTFitResults:
 # ============================================================================
 # FitRecord and AllFitResults
 # ============================================================================
-
-
 @dataclass
 class FitRecord:
+    """
+    Container for a fit result from MMEXOFAST.
+
+    Stores model parameters, uncertainties, and associated fit metadata for a
+    single model configuration (lens type, source type, parallax branch, etc.).
+    Optionally retains the full fit result object for downstream analysis.
+
+    Attributes
+    ----------
+    model_key
+        Key identifying the model configuration (lens type, source type, etc.).
+    params
+        Dictionary mapping parameter names to fitted values.
+    sigmas
+        Dictionary mapping parameter names to 1-sigma uncertainties.
+        Optional; None if uncertainties were not computed.
+    renorm_factors
+        Dictionary of renormalization/systematics factors applied.
+        Optional; None if no renormalization was needed.
+    full_result
+        Complete fit results object from MMEXOFAST.
+        Optional; None if only summary data is retained.
+    fixed
+        Whether the fit was performed with fixed parameters.
+    is_complete
+        Whether the fit completed successfully.
+
+    """
     model_key: mmexo.FitKey
-
-    # Core downstream data
-    params: Dict[str, float]
-    sigmas: Optional[Dict[str, float]] = None
-
-    # Dataset / systematics state
-    renorm_factors: Optional[Dict[str, Any]] = None
-
-    # Rich fit output
-    full_result: Optional[MMEXOFASTFitResults] = None
-
-    # Control flags
+    params: dict
+    sigmas: dict = None
+    renorm_factors: dict = None
+    full_result: object = None
     fixed: bool = False
     is_complete: bool = False
 
     @classmethod
-    def from_full_result(
-            cls,
-            model_key: mmexo.FitKey,
-            full_result: MMEXOFASTFitResults,
-            renorm_factors: Optional[Dict[str, Any]] = None,
-            fixed: bool = False,
-    ) -> "FitRecord":
+    def from_full_result(cls, model_key, full_result, renorm_factors=None, fixed=False):
+        """
+        Construct a FitRecord from a full MMEXOFASTFitResults object.
+
+        Parameters
+        ----------
+        model_key
+            Key identifying the model configuration.
+        full_result
+            Complete fit results from MMEXOFAST.
+        renorm_factors, optional
+            Dictionary of renormalization factors. Default is None.
+        fixed, optional
+            Whether the fit used fixed parameters. Default is False.
+
+        Returns
+        -------
+        FitRecord
+            New FitRecord instance populated from the full result.
+
+        """
         params = full_result.get_params_from_results()
         try:
             sigmas = full_result.get_sigmas_from_results()
@@ -196,23 +228,36 @@ class FitRecord:
             is_complete=True,
         )
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self):
         """
-        Return a DataFrame with columns:
-        - 'parameter_names'
-        - 'values'
-        - 'sigmas'
+        Export fit results as a pandas DataFrame.
 
-        If full_result is available, delegate to it. Otherwise build a minimal
-        DataFrame from params/sigmas (no fluxes, N_data, etc.).
+        Returns a DataFrame with columns 'parameter_names', 'values', and 'sigmas'.
+        If full_result is available, delegates to its formatting method.
+        Otherwise returns a minimal DataFrame constructed from params and sigmas.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: 'parameter_names', 'values', 'sigmas'.
+
         """
         if self.full_result is not None:
             return self.full_result.format_results_as_df()
         return self._minimal_dataframe()
 
-    def _minimal_dataframe(self) -> pd.DataFrame:
+    def _minimal_dataframe(self):
         """
-        Minimal fallback when we only have params/sigmas and no full_result.
+        Construct a minimal DataFrame from params and sigmas only.
+
+        Used when full_result is unavailable. Returns basic parameter values
+        and uncertainties without additional fit metadata (e.g., fluxes, N_data).
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: 'parameter_names', 'values', 'sigmas'.
+
         """
         param_names = list(self.params.keys())
         values = [self.params[name] for name in param_names]
@@ -229,15 +274,27 @@ class FitRecord:
             }
         )
 
-    def __repr__(self) -> str:
+    def __repr__(self):
+        """
+        Return a compact string representation of the FitRecord.
+
+        Displays model configuration, parameter count, and fit status.
+        Parameter dictionaries are truncated for readability if they exceed
+        5 items.
+
+        Returns
+        -------
+        str
+            String representation of the FitRecord.
+
+        """
         has_full = self.full_result is not None
         has_sigmas = self.sigmas is not None
         has_renorm = self.renorm_factors is not None
         n_params = len(self.params) if self.params is not None else 0
 
-        # Display the actual fit set (params + sigmas) in a compact way
-        # Truncate long dicts for readability if desired.
-        def _short_dict(d: Optional[Dict[str, float]], max_items: int = 5) -> str:
+        def _short_dict(d, max_items=5):
+            """Truncate dictionary representation for display."""
             if not d:
                 return "{}"
             items = list(d.items())
@@ -261,15 +318,22 @@ class FitRecord:
             f")>"
         )
 
-    def chi2(self) -> Optional[float]:
+    def chi2(self):
         """
-        Return chi^2 if available (from full_result.best['chi2']),
-        otherwise None.
+        Extract chi-squared value from the fit result.
+
+        Returns the best-fit chi-squared statistic if full_result is available,
+        otherwise returns None.
+
+        Returns
+        -------
+        float or None
+            Chi-squared value, or None if full_result is unavailable.
+
         """
         if self.full_result is None:
             return None
 
-        # your existing MMEXOFASTFitResults has a chi2 property
         return self.full_result.chi2
 
 
