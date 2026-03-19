@@ -11,9 +11,6 @@ from sfit_minimizer.mm_funcs import PointLensSFitFunction
 from exozippy.mmexofast import results, fit_types
 
 
-from exozippy.mmexofast import results, fit_types
-
-
 class TestMMEXOFASTFitResults(unittest.TestCase):
     """Test MMEXOFASTFitResults class."""
 
@@ -25,6 +22,7 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         t_E = 20.0
         pi_E_N = 0.0
         pi_E_E = 0.0
+        self.params = {'t_0': t_0, 'u_0': u_0, 't_E': t_E, 'pi_E_N': pi_E_N, 'pi_E_E': pi_E_E}
 
         # Flux parameters
         f1_S = 1.5  # log(1.5) ≈ 0.4 (within [-1, 1])
@@ -42,6 +40,7 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         f2_B_sigma = 0.08
 
         parameters_to_fit = ['t_0', 'u_0', 't_E']
+        self.sigmas = {'t_0': t_0_sigma, 'u_0': u_0_sigma, 't_E': t_E_sigma, 'pi_E_E': 'nan', 'pi_E_N': 'nan'}
 
         # Create MulensData objects
         dataset1 = MulensModel.MulensData(
@@ -57,10 +56,8 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         dataset2.plot_properties['label'] = 'n20200101.I.test.dataset_2.txt'
 
         mock_event = MulensModel.Event(
-            datasets=[dataset1, dataset2],
-            model=MulensModel.Model(
-                {'t_0': t_0, 'u_0': u_0, 't_E': t_E, 'pi_E_N': pi_E_N, 'pi_E_E': pi_E_E},
-                coords='18:00:00 -30:00:00')
+            datasets=[dataset1, dataset2], model=MulensModel.Model(self.params,
+            coords='18:00:00 -30:00:00')
         )
         mock_event.fit_fluxes()
         chi2 = mock_event.get_chi2()
@@ -189,25 +186,30 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
                 self.assertIn(param, sigmas)
                 self.assertEqual(sigmas[param], self.mock_fitter.results.sigmas[i])
 
+    def _assert_dataframe_format(self, df, expected_param_count):
+        """Helper method to validate DataFrame structure and content."""
+        # Should return DataFrame
+        self.assertIsInstance(df, pd.DataFrame)
+
+        # Should have required columns
+        self.assertIn('parameter_names', df.columns)
+        self.assertIn('values', df.columns)
+        self.assertIn('sigmas', df.columns)
+
+        # Should have correct number of rows
+        self.assertEqual(len(df), expected_param_count)
+
     def test_format_results_as_df(self):
         """Test format_results_as_df creates proper DataFrame."""
         result = results.MMEXOFASTFitResults(self.mock_fitter)
         df = result.format_results_as_df()
-
-        # Should return DataFrame
-        self.assertIsInstance(df, pd.DataFrame)
 
         # Should have rows for:
         # - All model parameters (5: t_0, u_0, t_E, pi_E_N, pi_E_E)
         # - 4 flux parameters (f1_S, f1_B, f2_S, f2_B)
         # - 2 metadata (chi2, N_data)
         expected_length = len(self.mock_fitter.best) - 1 + 2 * len(self.mock_fitter.datasets) + 2  # 5 + 4 + 2 = 11
-        self.assertEqual(len(df), expected_length)
-
-        # Should have required columns
-        self.assertIn('parameter_names', df.columns)
-        self.assertIn('values', df.columns)
-        self.assertIn('sigmas', df.columns)
+        self._assert_dataframe_format(df, expected_length)
 
         # Check that all model parameters are in the DataFrame
         param_names = df['parameter_names'].tolist()
@@ -224,6 +226,146 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         self.assertEqual(len(t_0_row), 1)
         self.assertAlmostEqual(t_0_row['values'].iloc[0], self.mock_fitter.best['t_0'])
         self.assertAlmostEqual(t_0_row['sigmas'].iloc[0], 0.1)
+
+
+class TestFitRecord(TestMMEXOFASTFitResults):
+    """Test FitRecord class."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        super().setUp()
+
+        # Create MMEXOFASTFitResults from mock_fitter
+        self.full_result = results.MMEXOFASTFitResults(self.mock_fitter)
+
+        # Create model key
+        self.model_key = fit_types.FitKey(
+            lens_type=fit_types.LensType.POINT,
+            source_type=fit_types.SourceType.POINT,
+            parallax_branch=fit_types.ParallaxBranch.NONE,
+            lens_orb_motion=fit_types.LensOrbMotion.NONE,
+        )
+
+        self.test_renorm_factors = {'factor1': 1.5, 'factor2': 0.9}
+
+    def test_from_full_result_populates_all_fields(self):
+        """Test that from_full_result() populates all fields correctly."""
+        # Call from_full_result
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors=self.test_renorm_factors,
+            fixed=False,
+        )
+
+        # Verify all fields are set correctly
+        self.assertEqual(record.model_key, self.model_key)
+        self.assertEqual(record.params, self.full_result.get_params_from_results())
+        self.assertEqual(record.sigmas, self.full_result.get_sigmas_from_results())
+        self.assertEqual(record.renorm_factors, self.test_renorm_factors)
+        self.assertEqual(record.full_result, self.full_result)
+        self.assertFalse(record.fixed)
+        self.assertTrue(record.is_complete)
+        self.assertEqual(record.chi2(), self.full_result.chi2)
+
+    def test_renorm_factors_stores_values(self):
+        """Test that renorm_factors dict is stored and accessible."""
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors=self.test_renorm_factors,
+            fixed=False,
+        )
+
+        self.assertEqual(record.renorm_factors, self.test_renorm_factors)
+
+    def test_renorm_factors_none(self):
+        """Test that renorm_factors can be None."""
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors=None,
+            fixed=False,
+        )
+
+        self.assertIsNone(record.renorm_factors)
+
+    def test_renorm_factors_empty_dict(self):
+        """Test that renorm_factors can be an empty dict."""
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors={},
+            fixed=False,
+        )
+
+        self.assertEqual(record.renorm_factors, {})
+
+    def test_is_complete_true_from_full_result(self):
+        """Test that is_complete is True when created via from_full_result()."""
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors=self.test_renorm_factors,
+            fixed=False,
+        )
+
+        self.assertTrue(record.is_complete)
+
+    def test_is_complete_false_user_supplied(self):
+        """Test that is_complete is False when user supplies params/sigmas only."""
+        record = results.FitRecord(
+            model_key=self.model_key,
+            params=self.params,
+            sigmas=self.sigmas,
+            renorm_factors=self.test_renorm_factors,
+            full_result=None,
+            fixed=False,
+            is_complete=False,
+        )
+
+        self.assertFalse(record.is_complete)
+
+    def test_to_dataframe_with_full_result(self):
+        """Test to_dataframe() when full_result is available."""
+        record = results.FitRecord.from_full_result(
+            model_key=self.model_key,
+            full_result=self.full_result,
+            renorm_factors=self.test_renorm_factors,
+            fixed=False,
+        )
+
+        df = record.to_dataframe()
+
+        # Verify it matches what full_result.format_results_as_df() returns
+        expected_df = self.full_result.format_results_as_df()
+        pd.testing.assert_frame_equal(df, expected_df)
+
+    def test_to_dataframe_without_full_result(self):
+        """Test to_dataframe() when user supplies params/sigmas only."""
+        record = results.FitRecord(
+            model_key=self.model_key,
+            params=self.params,
+            sigmas=self.sigmas,
+            renorm_factors=self.test_renorm_factors,
+            full_result=None,
+            fixed=False,
+            is_complete=False,
+        )
+
+        df = record.to_dataframe()
+
+        # Validate DataFrame format
+        self._assert_dataframe_format(df, len(self.params))
+
+        # Verify parameter names match
+        self.assertEqual(list(df['parameter_names']), list(self.params.keys()))
+
+        # Verify values match
+        self.assertEqual(list(df['values']), list(self.params.values()))
+
+        # Verify sigmas match
+        self.assertEqual(list(df['sigmas']), list(self.sigmas.values()))
 
 
 if __name__ == '__main__':
