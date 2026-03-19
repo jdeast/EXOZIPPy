@@ -30,7 +30,7 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         f1_S = 1.5  # log(1.5) ≈ 0.4 (within [-1, 1])
         f1_B = 0.3
         f2_S = 2.0  # log(2.0) ≈ 0.7 (within [-1, 1])
-        f2_B = 0.5
+        f2_B = -0.5
 
         # Uncertainties
         t_0_sigma = 0.1
@@ -48,13 +48,13 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
             data_list=[[t_0, t_0 + 1.0], [110.0, 100.0], [1.0, 1.0]],
             phot_fmt='flux'
         )
-        dataset1.plot_properties['label'] = 'test_dataset_1.txt'
+        dataset1.plot_properties['label'] = 'n20200101.I.test.dataset_1.txt'
 
         dataset2 = MulensModel.MulensData(
             data_list=[[t_0 + 0.01, t_0 + 1.01], [210.0, 200.0], [2.0, 2.0]],
             phot_fmt='flux'
         )
-        dataset2.plot_properties['label'] = 'test_dataset_2.txt'
+        dataset2.plot_properties['label'] = 'n20200101.I.test.dataset_2.txt'
 
         mock_event = MulensModel.Event(
             datasets=[dataset1, dataset2],
