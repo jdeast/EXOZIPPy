@@ -4,11 +4,11 @@ import unittest
 import pandas as pd
 from unittest.mock import Mock
 
-import MulensModel
-from sfit_minimizer.sfit_classes import SFitResults
-from sfit_minimizer.mm_funcs import PointLensSFitFunction
-
 from exozippy.mmexofast import results, fit_types
+from exozippy.mmexofast.unit_tests.test_utils import (
+    create_mock_fitter,
+    create_mock_params_and_sigmas,
+)
 
 
 class TestMMEXOFASTFitResults(unittest.TestCase):
@@ -16,73 +16,8 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
 
     def setUp(self):
         """Create mock fitter for testing."""
-        # Define parameter values once
-        t_0 = 2456789.0
-        u_0 = 0.5
-        t_E = 20.0
-        pi_E_N = 0.0
-        pi_E_E = 0.0
-        self.params = {'t_0': t_0, 'u_0': u_0, 't_E': t_E, 'pi_E_N': pi_E_N, 'pi_E_E': pi_E_E}
-
-        # Flux parameters
-        f1_S = 1.5  # log(1.5) ≈ 0.4 (within [-1, 1])
-        f1_B = 0.3
-        f2_S = 2.0  # log(2.0) ≈ 0.7 (within [-1, 1])
-        f2_B = -0.5
-
-        # Uncertainties
-        t_0_sigma = 0.1
-        u_0_sigma = 0.05
-        t_E_sigma = 0.5
-        f1_S_sigma = 0.1
-        f1_B_sigma = 0.05
-        f2_S_sigma = 0.15
-        f2_B_sigma = 0.08
-
-        parameters_to_fit = ['t_0', 'u_0', 't_E']
-        self.sigmas = {'t_0': t_0_sigma, 'u_0': u_0_sigma, 't_E': t_E_sigma, 'pi_E_E': 'nan', 'pi_E_N': 'nan'}
-
-        # Create MulensData objects
-        dataset1 = MulensModel.MulensData(
-            data_list=[[t_0, t_0 + 1.0], [110.0, 100.0], [1.0, 1.0]],
-            phot_fmt='flux'
-        )
-        dataset1.plot_properties['label'] = 'n20200101.I.test.dataset_1.txt'
-
-        dataset2 = MulensModel.MulensData(
-            data_list=[[t_0 + 0.01, t_0 + 1.01], [210.0, 200.0], [2.0, 2.0]],
-            phot_fmt='flux'
-        )
-        dataset2.plot_properties['label'] = 'n20200101.I.test.dataset_2.txt'
-
-        mock_event = MulensModel.Event(
-            datasets=[dataset1, dataset2], model=MulensModel.Model(self.params,
-            coords='18:00:00 -30:00:00')
-        )
-        mock_event.fit_fluxes()
-        chi2 = mock_event.get_chi2()
-
-        mock_func = PointLensSFitFunction(mock_event, parameters_to_fit, estimate_fluxes=True)
-        mock_func.update_all([t_0, u_0, t_E, f1_S, f1_B, f2_S, f2_B])
-
-        # Create SFitResults object
-        fit_results = SFitResults(mock_func)
-        fit_results.x = [t_0, u_0, t_E, f1_S, f1_B, f2_S, f2_B]
-        fit_results.fun = chi2
-        fit_results.sigmas = [t_0_sigma, u_0_sigma, t_E_sigma, f1_S_sigma, f1_B_sigma, f2_S_sigma, f2_B_sigma]
-        fit_results.success = True
-        fit_results.nit = 10
-
-        self.mock_fitter = Mock()
-        self.mock_fitter.datasets = [dataset1, dataset2]
-        # best has all model params (fitted + fixed) but NO flux params
-        self.mock_fitter.best = {'t_0': t_0, 'u_0': u_0, 't_E': t_E,
-                                 'pi_E_N': pi_E_N, 'pi_E_E': pi_E_E,
-                                 'chi2': chi2}
-        self.mock_fitter.results = fit_results
-        self.mock_fitter.parameters_to_fit = parameters_to_fit
-        self.mock_fitter.initial_model_params = {'t_0': t_0, 'u_0': u_0, 't_E': t_E,
-                                                 'pi_E_N': pi_E_N, 'pi_E_E': pi_E_E}
+        self.params, self.sigmas = create_mock_params_and_sigmas()
+        self.mock_fitter = create_mock_fitter()
 
     def test_init(self):
         """Test MMEXOFASTFitResults initialization."""
@@ -130,7 +65,6 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         result = results.MMEXOFASTFitResults(self.mock_fitter)
         all_params = result.all_model_parameters
 
-        # Should include all parameters from initial_model_params
         for param in self.mock_fitter.initial_model_params:
             self.assertIn(param, all_params)
 
@@ -144,21 +78,15 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         result = results.MMEXOFASTFitResults(self.mock_fitter)
         params = result.get_params_from_results()
 
-        # Should return dict
         self.assertIsInstance(params, dict)
-
-        # Should NOT include chi2
         self.assertNotIn('chi2', params)
 
-        # Should match best (all model params, no flux)
         expected_len = len(self.mock_fitter.best) - 1  # Exclude chi2
         self.assertEqual(len(params), expected_len)
 
-        # Explicit check for t_0
         self.assertIn('t_0', params)
         self.assertEqual(params['t_0'], self.mock_fitter.best['t_0'])
 
-        # Loop over all parameters in best (except chi2)
         for param in self.mock_fitter.best:
             if param != 'chi2':
                 with self.subTest(param=param):
@@ -170,17 +98,12 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         result = results.MMEXOFASTFitResults(self.mock_fitter)
         sigmas = result.get_sigmas_from_results()
 
-        # Should return dict
         self.assertIsInstance(sigmas, dict)
-
-        # Check length matches parameters_to_fit only (sigmas only for fitted params)
         self.assertEqual(len(sigmas), len(self.mock_fitter.parameters_to_fit))
 
-        # Explicit check for t_0
         self.assertIn('t_0', sigmas)
         self.assertAlmostEqual(sigmas['t_0'], 0.1)
 
-        # Loop over fitted parameters
         for i, param in enumerate(self.mock_fitter.parameters_to_fit):
             with self.subTest(param=param):
                 self.assertIn(param, sigmas)
@@ -188,15 +111,10 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
 
     def _assert_dataframe_format(self, df, expected_param_count):
         """Helper method to validate DataFrame structure and content."""
-        # Should return DataFrame
         self.assertIsInstance(df, pd.DataFrame)
-
-        # Should have required columns
         self.assertIn('parameter_names', df.columns)
         self.assertIn('values', df.columns)
         self.assertIn('sigmas', df.columns)
-
-        # Should have correct number of rows
         self.assertEqual(len(df), expected_param_count)
 
     def test_format_results_as_df(self):
@@ -204,24 +122,21 @@ class TestMMEXOFASTFitResults(unittest.TestCase):
         result = results.MMEXOFASTFitResults(self.mock_fitter)
         df = result.format_results_as_df()
 
-        # Should have rows for:
-        # - All model parameters (5: t_0, u_0, t_E, pi_E_N, pi_E_E)
-        # - 4 flux parameters (f1_S, f1_B, f2_S, f2_B)
-        # - 2 metadata (chi2, N_data)
-        expected_length = len(self.mock_fitter.best) - 1 + 2 * len(self.mock_fitter.datasets) + 2  # 5 + 4 + 2 = 11
+        expected_length = (
+            len(self.mock_fitter.best) - 1          # model params (no chi2)
+            + 2 * len(self.mock_fitter.datasets)     # flux params
+            + 2                                       # chi2 + N_data
+        )
         self._assert_dataframe_format(df, expected_length)
 
-        # Check that all model parameters are in the DataFrame
         param_names = df['parameter_names'].tolist()
         for param in self.mock_fitter.best:
             if param != 'chi2':
                 with self.subTest(param=param):
                     self.assertIn(param, param_names)
 
-        # Check chi2 is included
         self.assertIn('chi2', param_names)
 
-        # Check specific value
         t_0_row = df[df['parameter_names'] == 't_0']
         self.assertEqual(len(t_0_row), 1)
         self.assertAlmostEqual(t_0_row['values'].iloc[0], self.mock_fitter.best['t_0'])
@@ -235,10 +150,8 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         """Set up test fixtures."""
         super().setUp()
 
-        # Create MMEXOFASTFitResults from mock_fitter
         self.full_result = results.MMEXOFASTFitResults(self.mock_fitter)
 
-        # Create model key
         self.model_key = fit_types.FitKey(
             lens_type=fit_types.LensType.POINT,
             source_type=fit_types.SourceType.POINT,
@@ -250,7 +163,6 @@ class TestFitRecord(TestMMEXOFASTFitResults):
 
     def test_from_full_result_populates_all_fields(self):
         """Test that from_full_result() populates all fields correctly."""
-        # Call from_full_result
         record = results.FitRecord.from_full_result(
             model_key=self.model_key,
             full_result=self.full_result,
@@ -258,7 +170,6 @@ class TestFitRecord(TestMMEXOFASTFitResults):
             fixed=False,
         )
 
-        # Verify all fields are set correctly
         self.assertEqual(record.model_key, self.model_key)
         self.assertEqual(record.params, self.full_result.get_params_from_results())
         self.assertEqual(record.sigmas, self.full_result.get_sigmas_from_results())
@@ -336,8 +247,6 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         )
 
         df = record.to_dataframe()
-
-        # Verify it matches what full_result.format_results_as_df() returns
         expected_df = self.full_result.format_results_as_df()
         pd.testing.assert_frame_equal(df, expected_df)
 
@@ -354,22 +263,13 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         )
 
         df = record.to_dataframe()
-
-        # Validate DataFrame format
         self._assert_dataframe_format(df, len(self.params))
-
-        # Verify parameter names match
         self.assertEqual(list(df['parameter_names']), list(self.params.keys()))
-
-        # Verify values match
         self.assertEqual(list(df['values']), list(self.params.values()))
-
-        # Verify sigmas match
         self.assertEqual(list(df['sigmas']), list(self.sigmas.values()))
 
     def test_from_full_result_sigmas_exception(self):
         """Test that sigmas is None when get_sigmas_from_results() raises exception."""
-        # Mock full_result to raise exception on get_sigmas_from_results()
         mock_full_result = Mock(spec=results.MMEXOFASTFitResults)
         mock_full_result.get_params_from_results.return_value = self.params
         mock_full_result.get_sigmas_from_results.side_effect = Exception("Sigmas not available")
@@ -396,17 +296,9 @@ class TestFitRecord(TestMMEXOFASTFitResults):
         )
 
         df = record.to_dataframe()
-
-        # Validate DataFrame format
         self._assert_dataframe_format(df, len(self.params))
-
-        # Verify parameter names match
         self.assertEqual(list(df['parameter_names']), list(self.params.keys()))
-
-        # Verify values match
         self.assertEqual(list(df['values']), list(self.params.values()))
-
-        # Verify all sigmas are None
         self.assertTrue(df['sigmas'].isna().all())
 
     def test_chi2_returns_none_without_full_result(self):
@@ -431,7 +323,6 @@ class TestAllFitResults(TestFitRecord):
         """Set up test fixtures."""
         super().setUp()
 
-        # Create the 3 model keys
         self.model_key_pspl_static = fit_types.FitKey(
             lens_type=fit_types.LensType.POINT,
             source_type=fit_types.SourceType.POINT,
@@ -453,7 +344,6 @@ class TestAllFitResults(TestFitRecord):
             lens_orb_motion=fit_types.LensOrbMotion.NONE,
         )
 
-        # Create AllFitResults with 3 FitRecords
         self.all_results = results.AllFitResults()
 
         self.record_pspl_static = results.FitRecord.from_full_result(
@@ -516,17 +406,15 @@ class TestAllFitResults(TestFitRecord):
         )
 
         self.all_results[new_key] = new_record
-
-        retrieved = self.all_results[new_key]
-        self.assertEqual(retrieved, new_record)
-        self.assertEqual(len(self.all_results), 4)  # Was 3, now 4
+        self.assertEqual(self.all_results[new_key], new_record)
+        self.assertEqual(len(self.all_results), 4)
 
     def test_setitem_overwrite_record(self):
         """Test __setitem__ overwrites an existing record."""
         new_record = results.FitRecord.from_full_result(
             model_key=self.model_key_pspl_static,
             full_result=self.full_result,
-            fixed=True,  # Different from original
+            fixed=True,
         )
 
         original_length = len(self.all_results)
@@ -534,13 +422,12 @@ class TestAllFitResults(TestFitRecord):
 
         retrieved = self.all_results[self.model_key_pspl_static]
         self.assertEqual(retrieved, new_record)
-        self.assertEqual(len(self.all_results), original_length)  # Length unchanged
+        self.assertEqual(len(self.all_results), original_length)
         self.assertTrue(retrieved.fixed)
 
     def test_delitem_existing_record(self):
         """Test __delitem__ removes an existing record."""
         original_length = len(self.all_results)
-
         del self.all_results[self.model_key_pspl_static]
 
         self.assertEqual(len(self.all_results), original_length - 1)
@@ -551,7 +438,6 @@ class TestAllFitResults(TestFitRecord):
         """Test __delitem__ removes record by string label."""
         label = fit_types.model_key_to_label(self.model_key_pspl_parallax)
         original_length = len(self.all_results)
-
         del self.all_results[label]
 
         self.assertEqual(len(self.all_results), original_length - 1)
@@ -572,24 +458,19 @@ class TestAllFitResults(TestFitRecord):
 
     def test_iter_len_contains(self):
         """Test __iter__, __len__, and __contains__ work together."""
-        # Test __len__
         self.assertEqual(len(self.all_results), 3)
 
-        # Test __iter__ and __contains__
         keys_from_iter = list(self.all_results)
         self.assertEqual(len(keys_from_iter), 3)
 
-        # Verify all expected keys are in the iterator
         self.assertIn(self.model_key_pspl_static, keys_from_iter)
         self.assertIn(self.model_key_pspl_parallax, keys_from_iter)
         self.assertIn(self.model_key_binary, keys_from_iter)
 
-        # Test __contains__ for existing keys
         self.assertIn(self.model_key_pspl_static, self.all_results)
         self.assertIn(self.model_key_pspl_parallax, self.all_results)
         self.assertIn(self.model_key_binary, self.all_results)
 
-        # Test __contains__ for non-existent key
         fake_key = fit_types.FitKey(
             lens_type=fit_types.LensType.POINT,
             source_type=fit_types.SourceType.FINITE,
@@ -601,31 +482,21 @@ class TestAllFitResults(TestFitRecord):
     def test_normalize_key_fitkey_unchanged(self):
         """Test that FitKey objects are returned unchanged by _normalize_key()."""
         all_results = results.AllFitResults()
-
-        # Access _normalize_key through the object
         normalized = all_results._normalize_key(self.model_key_pspl_static)
-
         self.assertEqual(normalized, self.model_key_pspl_static)
 
     def test_normalize_key_label_to_fitkey(self):
         """Test that string labels are converted to FitKey by _normalize_key()."""
         all_results = results.AllFitResults()
-
         label = fit_types.model_key_to_label(self.model_key_pspl_static)
         normalized = all_results._normalize_key(label)
-
         self.assertEqual(normalized, self.model_key_pspl_static)
 
     def test_key_normalization_consistency(self):
         """Test that label and FitKey access retrieve the same record."""
         label = fit_types.model_key_to_label(self.model_key_pspl_static)
-
-        # Access by label
         retrieved_by_label = self.all_results[label]
-
-        # Access by FitKey
         retrieved_by_key = self.all_results[self.model_key_pspl_static]
-
         self.assertEqual(retrieved_by_label, retrieved_by_key)
         self.assertEqual(retrieved_by_label, self.record_pspl_static)
 
@@ -648,9 +519,7 @@ class TestAllFitResults(TestFitRecord):
             parallax_branch=fit_types.ParallaxBranch.NONE,
             lens_orb_motion=fit_types.LensOrbMotion.NONE,
         )
-
-        retrieved = self.all_results.get(fake_key)
-        self.assertIsNone(retrieved)
+        self.assertIsNone(self.all_results.get(fake_key))
 
     def test_set_new_record(self):
         """Test set() adds a new record."""
@@ -705,7 +574,6 @@ class TestAllFitResults(TestFitRecord):
             parallax_branch=fit_types.ParallaxBranch.NONE,
             lens_orb_motion=fit_types.LensOrbMotion.NONE,
         )
-
         self.assertFalse(self.all_results.has(fake_key))
 
     def test_get_returns_none_not_keyerror(self):
@@ -716,9 +584,7 @@ class TestAllFitResults(TestFitRecord):
             parallax_branch=fit_types.ParallaxBranch.NONE,
             lens_orb_motion=fit_types.LensOrbMotion.NONE,
         )
-
-        result = self.all_results.get(fake_key)
-        self.assertIsNone(result)
+        self.assertIsNone(self.all_results.get(fake_key))
 
     def test_set_uses_record_model_key(self):
         """Test set() automatically uses record.model_key for storage."""
@@ -735,10 +601,7 @@ class TestAllFitResults(TestFitRecord):
             fixed=False,
         )
 
-        # set() should use new_record.model_key automatically
         self.all_results.set(new_record)
-
-        # Should be retrievable by the record's model_key
         self.assertEqual(self.all_results.get(new_key), new_record)
 
     def test_keys_labels_false(self):
@@ -764,7 +627,6 @@ class TestAllFitResults(TestFitRecord):
         self.assertIn(label_pspl_parallax, keys)
         self.assertIn(label_binary, keys)
 
-        # Verify they are strings
         for key in keys:
             self.assertIsInstance(key, str)
 
@@ -794,7 +656,6 @@ class TestAllFitResults(TestFitRecord):
         self.assertEqual(items_dict[label_pspl_parallax], self.record_pspl_parallax)
         self.assertEqual(items_dict[label_binary], self.record_binary)
 
-        # Verify all keys are strings
         for label in items_dict.keys():
             self.assertIsInstance(label, str)
 
