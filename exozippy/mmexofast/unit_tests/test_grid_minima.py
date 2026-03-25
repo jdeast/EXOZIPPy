@@ -4,41 +4,20 @@ Unit tests for grid minima extraction.
 To visualize the test grids and minima, run:
     pytest test_grid_minima.py --plot-grids
 """
-
 import numpy as np
 import pytest
 import matplotlib.pyplot as plt
+
 from exozippy.mmexofast.gridsearches import BaseRectGridSearch
 
+
+# ----------------------------------------------------------------
+# Mock infrastructure
+# ----------------------------------------------------------------
 
 @pytest.fixture
 def plot_grids(request):
     return request.config.getoption("--plot-grids")
-
-
-class MockGridSearch(BaseRectGridSearch):
-    """Mock grid search for testing minima extraction."""
-
-    def __init__(self, datasets=None, verbose=False):
-        super().__init__(datasets=datasets if datasets else [], verbose=verbose)
-        self.grid_params = {
-            'param1_min': 0.0,
-            'param1_max': 1.0,
-            'param1_step': 0.1,
-            'param2_min': 0.0,
-            'param2_max': 1.0,
-            'param2_step': 0.1
-        }
-
-    def _setup_grid(self):
-        pass  # Not needed for tests
-
-    def _fit_grid_point(self, grid_params):
-        pass  # Not needed for tests
-
-    def set_mock_results(self, results):
-        """Set mock results for testing."""
-        self.results = results
 
 
 def plot_grid(grid, title, ax=None):
@@ -48,7 +27,7 @@ def plot_grid(grid, title, ax=None):
     Parameters
     ----------
     grid : MockGridSearch
-        Grid search object with results
+        Grid search object with results_history populated
     title : str
         Plot title
     ax : matplotlib.axes.Axes or None, optional
@@ -56,40 +35,36 @@ def plot_grid(grid, title, ax=None):
 
     Returns
     -------
-    fig, ax, im
-        Figure, axes, and image objects
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    im : matplotlib.image.AxesImage
     """
-    # Extract grid dimensions
-    param1_vals = sorted(set(r['param1'] for r in grid.results))
-    param2_vals = sorted(set(r['param2'] for r in grid.results))
+    level = grid.results_history[0]
+    chi2_grid = level['chi2_grid']
+    param_arrays = level['metadata']['param_arrays']
+    param_names = level['metadata']['param_names']
 
-    # Create chi2 grid
-    chi2_grid = np.full((len(param2_vals), len(param1_vals)), np.nan)
+    param1_vals = param_arrays[param_names[0]]
+    param2_vals = param_arrays[param_names[1]]
 
-    for result in grid.results:
-        i = param1_vals.index(result['param1'])
-        j = param2_vals.index(result['param2'])
-        chi2_grid[j, i] = result['chi2']
-
-    # Plot
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     else:
         fig = ax.figure
 
-    im = ax.imshow(chi2_grid, cmap='Set1', origin='lower',
+    im = ax.imshow(chi2_grid.T, cmap='Set1', origin='lower',
                    extent=[param1_vals[0], param1_vals[-1],
                            param2_vals[0], param2_vals[-1]],
                    aspect='equal', vmin=100, vmax=190)
 
-    ax.set_xlabel('param1')
-    ax.set_ylabel('param2')
+    ax.set_xlabel(param_names[0])
+    ax.set_ylabel(param_names[1])
     ax.set_title(title)
 
     return fig, ax, im
 
 
-def add_minima_to_plot(ax, local_minima, separated_minima):
+def add_minima_to_plot(ax, local_minima):
     """
     Add minima markers to an existing plot.
 
@@ -98,398 +73,330 @@ def add_minima_to_plot(ax, local_minima, separated_minima):
     ax : matplotlib.axes.Axes
         Axes to add markers to
     local_minima : list of tuple
-        All local minima as (chi2, params) tuples
-    separated_minima : list of tuple
-        Selected separated minima as (chi2, params) tuples
+        All local minima as (chi2, params, level) tuples
     """
-    # Mark all local minima with black x
     if local_minima:
-        local_x = [params['param1'] for _, params in local_minima]
-        local_y = [params['param2'] for _, params in local_minima]
+        local_x = [params['param1'] for _, params, _ in local_minima]
+        local_y = [params['param2'] for _, params, _ in local_minima]
         ax.plot(local_x, local_y, 'kx', markersize=10, markeredgewidth=2,
                 label='Local minima')
-
-    # Mark selected separated minima with red o
-    if separated_minima:
-        sep_x = [params['param1'] for _, params in separated_minima]
-        sep_y = [params['param2'] for _, params in separated_minima]
-        ax.plot(sep_x, sep_y, 'ro', markersize=12, markerfacecolor='none',
-                markeredgewidth=2, label='Separated minima')
-
-    ax.legend()
+        ax.legend()
 
 
-def plot_grid_with_minima(grid, local_minima, separated_minima, title):
+def plot_grid_with_minima(grid, local_minima, title):
     """
-    Plot chi2 grid with local and separated minima marked.
+    Plot chi2 grid with local minima marked.
 
     Parameters
     ----------
     grid : MockGridSearch
-        Grid search object with results
+        Grid search object with results_history populated
     local_minima : list of tuple
-        All local minima as (chi2, params) tuples
-    separated_minima : list of tuple
-        Selected separated minima as (chi2, params) tuples
+        All local minima as (chi2, params, level) tuples
     title : str
         Plot title
     """
     fig, ax, im = plot_grid(grid, title)
-    add_minima_to_plot(ax, local_minima, separated_minima)
+    add_minima_to_plot(ax, local_minima)
     plt.colorbar(im, ax=ax, label='chi2')
     plt.tight_layout()
     plt.show()
 
 
-def test_clear_4_minima(plot_grids):
-    """Test case A: 4 distinct minima, well-separated."""
-    grid = MockGridSearch()
+class MockGridSearch(BaseRectGridSearch):
+    """Minimal mock for testing find_local_minima()."""
 
-    # Create mock results with 4 clear minima at different chi2 levels
-    results = []
-    minima_dict = {
-        (2, 2): 115.0,
-        (2, 8): 125.0,
-        (8, 2): 135.0,
-        (8, 8): 145.0
+    def __init__(self):
+        super().__init__(
+            grid_params={
+                'param1': [0.0, 1.0, 0.1],
+                'param2': [0.0, 1.0, 0.1]
+            }
+        )
+
+    def _fit_grid_point(self, grid_params):
+        pass
+
+    def set_mock_results(self, results):
+        """Convert flat results list to structured grid arrays.
+
+        Parameters
+        ----------
+        results : list of dict
+            Each dict must contain 'param1', 'param2', 'chi2',
+            'params', and 'success' keys.
+        """
+        param_names = list(self.grid_params.keys())
+
+        param_arrays = {}
+        for name in param_names:
+            min_val, max_val, step = self.grid_params[name]
+            n = int(np.round((max_val - min_val) / step)) + 1
+            param_arrays[name] = np.linspace(min_val, max_val, n)
+
+        grid_shape = tuple(len(param_arrays[name]) for name in param_names)
+
+        chi2_grid = np.full(grid_shape, np.nan)
+        result_grid = np.empty(grid_shape, dtype=object)
+
+        for result in results:
+            if not result.get('success', False):
+                continue
+            indices = tuple(
+                np.argmin(np.abs(param_arrays[name] - result[name]))
+                for name in param_names
+            )
+            chi2_grid[indices] = result['chi2']
+            result_grid[indices] = result
+
+        self.results_history = [{
+            'chi2_grid': chi2_grid,
+            'result_grid': result_grid,
+            'metadata': {
+                'param_names': param_names,
+                'param_arrays': param_arrays,
+                'grid_shape': grid_shape
+            }
+        }]
+
+
+def _make_result(i, j, chi2, success=True):
+    """Create a single mock result dict.
+
+    Parameters
+    ----------
+    i : int
+        Grid index for param1 (param1 = i * 0.1)
+    j : int
+        Grid index for param2 (param2 = j * 0.1)
+    chi2 : float
+    success : bool
+
+    Returns
+    -------
+    dict
+    """
+    param1 = i * 0.1
+    param2 = j * 0.1
+    return {
+        'param1': param1,
+        'param2': param2,
+        'chi2': chi2,
+        'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0} if success else None,
+        'success': success
     }
 
+
+def _make_full_grid(chi2_func, success_func=None):
+    """Create 11x11 grid of mock results.
+
+    Parameters
+    ----------
+    chi2_func : callable
+        (i, j) -> float
+    success_func : callable or None
+        (i, j) -> bool. If None, all points succeed.
+
+    Returns
+    -------
+    list of dict
+    """
+    results = []
     for i in range(11):
         for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
+            chi2 = chi2_func(i, j)
+            success = success_func(i, j) if success_func is not None else True
+            results.append(_make_result(i, j, chi2, success))
+    return results
 
-            if (i, j) in minima_dict:
-                chi2 = minima_dict[(i, j)]
-            else:
-                chi2 = 190.0  # Background
 
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
+# ----------------------------------------------------------------
+# Tests
+# ----------------------------------------------------------------
 
-    grid.set_mock_results(results)
+def test_4_clear_minima(plot_grids):
+    """Four distinct point minima, well-separated, at different chi2 levels."""
+    minima_locs = {(2, 2): 115.0, (2, 8): 125.0, (8, 2): 135.0, (8, 8): 145.0}
 
-    # Find local minima
+    grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(
+        chi2_func=lambda i, j: minima_locs.get((i, j), 190.0)
+    ))
+
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 4, f"Expected 4 minima, found {len(local_minima)}"
 
-    # Select separated minima
-    separated = grid.select_separated_minima(local_minima, min_separation=1.0)
-    assert len(separated) == 4, f"Expected 4 separated minima, found {len(separated)}"
+    assert len(local_minima) == 4, f"Expected 4 minima, got {len(local_minima)}"
+
+    chi2_values = [chi2 for chi2, _, _ in local_minima]
+    assert chi2_values == sorted(chi2_values), "Should be sorted by chi2"
+    assert chi2_values[0] == 115.0
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test A: Clear 4 Minima")
+        plot_grid_with_minima(grid, local_minima, "Test A: Clear 4 Minima")
 
 
 def test_ring_constant_chi2(plot_grids):
-    """Test case B1: Ring with constant chi2 (no true local minima)."""
-    grid = MockGridSearch()
-
-    results = []
+    """Ring of equal chi2 values forms one connected plateau -> one minimum."""
     center_i, center_j = 5, 5
     radius = 3
 
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
+    def chi2_func(i, j):
+        dist = np.sqrt((i - center_i) ** 2 + (j - center_j) ** 2)
+        return 115.0 if abs(dist - radius) < 0.5 else 190.0
 
-            # Create ring of constant chi2
-            dist = np.sqrt((i - center_i) ** 2 + (j - center_j) ** 2)
-            if abs(dist - radius) < 0.5:
-                chi2 = 115.0  # Ring - all equal
-            else:
-                chi2 = 190.0  # Background
+    grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(chi2_func))
 
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima (should find none or very few due to equal neighbors)
     local_minima = grid.find_local_minima()
-    # With constant chi2, no true local minima exist
-    assert len(local_minima) == 1, f"Expected 1 minima for constant ring, found {len(local_minima)}"
-
     if plot_grids:
-        separated = grid.select_separated_minima(local_minima, min_separation=1.0) if local_minima else []
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test B1: Ring - Constant Chi2")
+        plot_grid_with_minima(grid, local_minima, "Test B1: Ring - Constant Chi2")
+
+    assert len(local_minima) == 1, \
+        f"Constant ring should give 1 minimum, got {len(local_minima)}"
 
 
 def test_ring_with_local_minima(plot_grids):
-    """Test case B2: Ring with 4 local minima at different depths."""
-    grid = MockGridSearch()
-
-    results = []
+    """Ring with 4 distinct local minima at different depths."""
     center_i, center_j = 5, 5
     radius = 3
+    minima_locs = {(8, 5): 115.0, (5, 8): 125.0, (2, 5): 135.0, (5, 2): 145.0}
 
-    # Exact grid points at 90° intervals on the ring
-    minima_locs = [(8, 5), (5, 8), (2, 5), (5, 2)]  # E, N, W, S
-    minima_chi2 = [115.0, 125.0, 135.0, 145.0]
-    minima_dict = dict(zip(minima_locs, minima_chi2))
+    def chi2_func(i, j):
+        dist = np.sqrt((i - center_i) ** 2 + (j - center_j) ** 2)
+        if abs(dist - radius) < 0.5:
+            return minima_locs.get((i, j), 155.0)
+        return 190.0
 
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
+    grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(chi2_func))
 
-            dist_from_center = np.sqrt((i - center_i) ** 2 + (j - center_j) ** 2)
-
-            if abs(dist_from_center - radius) < 0.5:
-                # On the ring - default to 155, but set minima explicitly
-                if (i, j) in minima_dict:
-                    chi2 = minima_dict[(i, j)]
-                else:
-                    chi2 = 155.0
-            else:
-                chi2 = 190.0  # Background
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 4, f"Expected 4 minima, found {len(local_minima)}"
 
-    # Select separated minima
-    separated = grid.select_separated_minima(local_minima, min_separation=1.0)
-    assert len(separated) == 4, f"Expected 4 separated minima"
+    assert len(local_minima) == 4, f"Expected 4 minima, got {len(local_minima)}"
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test B2: Ring - With Local Minima")
+        plot_grid_with_minima(grid, local_minima, "Test B2: Ring - With Local Minima")
 
 
 def test_arc_constant_chi2(plot_grids):
-    """Test case C1: Arc with constant chi2 (no true local minima)."""
+    """Diagonal arc of equal chi2 values forms one connected plateau -> one minimum."""
+    def chi2_func(i, j):
+        return 115.0 if abs(i - j) <= 1 else 190.0
+
     grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(chi2_func))
 
-    results = []
-
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
-
-            # Create diagonal arc with constant chi2
-            if abs(i - j) <= 1:
-                chi2 = 115.0  # Arc - all equal
-            else:
-                chi2 = 190.0  # Background
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima (should find none or very few)
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 1, f"Expected 1 minima for constant arc, found {len(local_minima)}"
+
+    assert len(local_minima) == 1, \
+        f"Constant arc should give 1 minimum, got {len(local_minima)}"
 
     if plot_grids:
-        separated = grid.select_separated_minima(local_minima, min_separation=1.0) if local_minima else []
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test C1: Arc - Constant Chi2")
+        plot_grid_with_minima(grid, local_minima, "Test C1: Arc - Constant Chi2")
 
 
 def test_arc_with_local_minima(plot_grids):
-    """Test case C2: Arc with 2 local minima near endpoints."""
+    """Arc with 2 distinct local minima at endpoints."""
+    arc_points = {(i, i) for i in range(2, 9)}
+    minima_locs = {(2, 2): 115.0, (8, 8): 125.0}
+
+    def chi2_func(i, j):
+        if (i, j) in arc_points:
+            return minima_locs.get((i, j), 155.0)
+        return 190.0
+
     grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(chi2_func))
 
-    results = []
-
-    # Define arc points along diagonal from (2,2) to (8,8)
-    arc_points = [(i, i) for i in range(2, 9)]
-
-    # Minima at the endpoints with different chi2
-    minima_dict = {
-        (2, 2): 115.0,  # Bottom-left endpoint
-        (8, 8): 125.0  # Top-right endpoint
-    }
-
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
-
-            if (i, j) in arc_points:
-                # On arc - check if it's a minimum
-                if (i, j) in minima_dict:
-                    chi2 = minima_dict[(i, j)]
-                else:
-                    chi2 = 155.0  # Default arc value
-            else:
-                chi2 = 190.0  # Off arc
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 2, f"Expected 2 minima, found {len(local_minima)}"
-
-    # Select separated minima
-    separated = grid.select_separated_minima(local_minima, min_separation=1.0)
-    assert len(separated) == 2, f"Expected 2 separated minima"
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test C2: Arc - With Local Minima")
+        plot_grid_with_minima(grid, local_minima, "Test C2: Arc - With Local Minima")
+
+    assert len(local_minima) == 2, f"Expected 2 minima, got {len(local_minima)}"
+
+    chi2_values = [chi2 for chi2, _, _ in local_minima]
+    assert chi2_values[0] == 115.0
+    assert chi2_values[1] == 125.0
 
 
 def test_single_minimum(plot_grids):
-    """Test case D: Only one clear minimum in grid."""
+    """Single point minimum at grid center."""
     grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(
+        chi2_func=lambda i, j: 115.0 if (i, j) == (5, 5) else 190.0
+    ))
 
-    results = []
-
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
-
-            # Single minimum at center
-            if (i, j) == (5, 5):
-                chi2 = 115.0
-            else:
-                chi2 = 190.0
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 1, f"Expected 1 minimum, found {len(local_minima)}"
-
-    # Select separated minima
-    separated = grid.select_separated_minima(local_minima, min_separation=1.0)
-    assert len(separated) == 1
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test D: Single Minimum")
+        plot_grid_with_minima(grid, local_minima, "Test D: Single Minimum")
+
+    assert len(local_minima) == 1, f"Expected 1 minimum, got {len(local_minima)}"
+    assert local_minima[0][0] == 115.0
 
 
 def test_failed_fits_excluded(plot_grids):
-    """Test case E: Failed fits scattered throughout grid."""
+    """Failed fits (NaN chi2) should not prevent finding true minima."""
+    def chi2_func(i, j):
+        return 115.0 if (i, j) in [(2, 2), (8, 8)] else 190.0
+
+    def success_func(i, j):
+        return (i, j) in [(2, 2), (8, 8)] or (i + j) % 3 != 0
+
     grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(chi2_func, success_func))
 
-    results = []
-
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
-
-            # Two minima, but some fits failed
-            if (i, j) in [(2, 2), (8, 8)]:
-                chi2 = 115.0
-                success = True
-            elif (i + j) % 3 == 0:  # ~1/3 of points failed
-                chi2 = np.nan
-                success = False
-            else:
-                chi2 = 190.0
-                success = True
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0} if success else None,
-                'success': success
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima (should ignore failed fits)
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 2, f"Expected 2 minima, found {len(local_minima)}"
-    assert all(np.isfinite(chi2) for chi2, _ in local_minima), "All minima should have finite chi2"
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, local_minima,
-                              "Test E: Failed Fits Excluded")
+        plot_grid_with_minima(grid, local_minima, "Test E: Failed Fits Excluded")
+
+    assert len(local_minima) == 2, f"Expected 2 minima, got {len(local_minima)}"
+    assert all(np.isfinite(chi2) for chi2, _, _ in local_minima)
 
 
 def test_asymmetric_minima(plot_grids):
-    """Test case F: Different numbers of minima (2 close, 1 far)."""
+    """Two adjacent points (one lower) plus one distant minimum -> 2 minima total."""
+    chi2_map = {(2, 5): 114.0, (3, 5): 115.0, (8, 5): 125.0}
+
     grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(
+        chi2_func=lambda i, j: chi2_map.get((i, j), 190.0)
+    ))
 
-    results = []
-
-    for i in range(11):
-        for j in range(11):
-            param1 = round(i * 0.1, 10)
-            param2 = round(j * 0.1, 10)
-
-            # 3 minima: 2 close together on left (one slightly lower), 1 on right
-            if (i, j) == (2, 5):  # Best minimum
-                chi2 = 114.0
-            elif (i, j) == (3, 5):  # Nearby, but higher
-                chi2 = 115.0
-            elif (i, j) == (8, 5):  # Far away
-                chi2 = 125.0
-            else:
-                chi2 = 190.0
-
-            results.append({
-                'param1': param1,
-                'param2': param2,
-                'chi2': chi2,
-                'params': {'param1': param1, 'param2': param2, 't_0': 2459000.0},
-                'success': True
-            })
-
-    grid.set_mock_results(results)
-
-    # Find local minima
     local_minima = grid.find_local_minima()
-    assert len(local_minima) == 2, f"Expected 2 minima, found {len(local_minima)}"
-
-    # Select separated minima - should get both (they are 6 steps apart)
-    separated = grid.select_separated_minima(local_minima, min_separation=1.0)
-    assert len(separated) == 2, f"Expected 2 separated minima, found {len(separated)}"
 
     if plot_grids:
-        plot_grid_with_minima(grid, local_minima, separated,
-                              "Test F: Asymmetric Minima")
+        plot_grid_with_minima(grid, local_minima, "Test F: Asymmetric Minima")
+
+    assert len(local_minima) == 2, f"Expected 2 minima, got {len(local_minima)}"
+    assert local_minima[0][0] == 114.0, "Best minimum should be at (2,5)"
+    assert local_minima[1][0] == 125.0, "Second minimum should be at (8,5)"
+
+
+def test_minimum_at_edge(plot_grids):
+    """Minimum at grid edge should be detected."""
+    # Minima at each edge: left, right, top, bottom
+    edge_minima = {
+        (0, 5): 115.0,  # left edge
+        (10, 5): 125.0,  # right edge
+        (5, 0): 135.0,  # bottom edge
+        (5, 10): 145.0  # top edge
+    }
+
+    grid = MockGridSearch()
+    grid.set_mock_results(_make_full_grid(
+        chi2_func=lambda i, j: edge_minima.get((i, j), 190.0)
+    ))
+
+    local_minima = grid.find_local_minima()
+    if plot_grids:
+        plot_grid_with_minima(grid, local_minima, "Test G: Edge Minima")
+
+    assert len(local_minima) == 4, \
+        f"Expected 4 edge minima, got {len(local_minima)}"
+
+    chi2_values = [chi2 for chi2, _, _ in local_minima]
+    assert chi2_values == sorted(chi2_values)
+    assert chi2_values[0] == 115.0

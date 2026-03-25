@@ -3,15 +3,16 @@ from abc import ABC, abstractmethod
 import datetime
 import matplotlib.pyplot as plt
 from itertools import product
+from scipy.ndimage import minimum_filter, label
 
 import MulensModel
 import sfit_minimizer
 import exozippy.mmexofast as mmexo
 
+
 # ---------------------------------------------------------------------
 # EventFinder & AnomalyFinder Grid searches:
 # ---------------------------------------------------------------------
-
 class EventFinderGridSearch():
     """
     Based on Kim et al. 2018, AJ, 155, 76
@@ -581,526 +582,1819 @@ class AnomalyFinderGridSearch(EventFinderGridSearch):
 # General, Rectangular Grid Searches
 # ---------------------------------------------------------------------
 
+
 class BaseRectGridSearch(ABC):
+    """Abstract base class for rectangular grid searches.
+
+    Parameters
+    ----------
+    grid_params : dict or None
+        Grid specification: {'param': [min, max, step]}.
+        Prefix 'log_' on param name for log10-spaced parameters,
+        where min, max, and step are all in log10 space.
+    datasets : list or None
+        Data to fit. Required by child classes.
+    evaluation_order : str
+        'standard' or 'outward'. Default 'standard'.
+    start_point : dict or None
+        Starting point for 'outward' evaluation. Dict of param values.
+    use_nearest_neighbor_init : bool
+        Initialize each fit from nearest successful fit. Default True.
+    max_refinements : int
+        Maximum refinement iterations per minimum. Default 5.
+    max_expansions : int
+        Maximum edge expansion iterations. Default 5.
+    verbose : bool
+        Print progress. Default False.
     """
-    Abstract base class for rectangular grid searches over independent parameters.
 
-    A rectangular grid search tests all combinations of parameter values where
-    each parameter is varied independently (unlike EventFinderGridSearch where
-    t_0 spacing depends on t_eff).
-
-    Child classes must implement:
-        - _setup_grid(): Define the parameter grid
-        - _fit_grid_point(): Run fit for one grid point
-        - Set self.grid_params: Dict with keys like 'param_min', 'param_max', 'param_step'
-    """
-
-    def __init__(self, datasets, grid_params=None, skip_optimization=False, verbose=False):
-        """
-        Parameters:
-            datasets: MulensData object(s) to fit
-            verbose: *bool*
-                If True, print progress information
-            skip_optimization : bool, optional
-                If True, calculate chi2 without optimization (much faster).
-                If False, optimize parameters at each grid point. Default is False.
-        """
-        if datasets is None:
-            raise ValueError('You must define the datasets!')
-        elif isinstance(datasets, MulensModel.MulensData):
-            self.datasets = [datasets]
-        elif not isinstance(datasets, list):
-            raise TypeError(
-                'datasets must be *list* or *MulensData*! Not',
-                type(datasets))
-
-        self.datasets = datasets
-        self.verbose = verbose
-        self.skip_optimization = skip_optimization
-
-        self.results = None
-        self._best = None
-        self._grid = None
+    def __init__(self, grid_params=None, datasets=None,
+                 evaluation_order='standard', start_point=None,
+                 use_nearest_neighbor_init=True,
+                 max_refinements=5, max_expansions=5,
+                 verbose=False):
         self.grid_params = grid_params
+        self.datasets = datasets
+        self.evaluation_order = evaluation_order
+        self.start_point = start_point
+        self.use_nearest_neighbor_init = use_nearest_neighbor_init
+        self.max_refinements = max_refinements
+        self.max_expansions = max_expansions
+        self.verbose = verbose
 
-    @abstractmethod
-    def _setup_grid(self):
-        """
-        Define the parameter grid. Must set self._grid to a list of dicts,
-        where each dict contains the parameters for one grid point.
-
-        Example:
-            self._grid = [
-                {'pi_E_E': 0.1, 'pi_E_N': 0.2},
-                {'pi_E_E': 0.1, 'pi_E_N': 0.3},
-                ...
-            ]
-        """
-        pass
+        self.results_history = None
+        self.minima = None
+        self._point_cache = {}
 
     @abstractmethod
     def _fit_grid_point(self, grid_params):
-        """
-        Run fit for one grid point.
+        """Fit model at one grid point.
 
-        Parameters:
-            grid_params: *dict*
-                Parameter values for this grid point
+        Parameters
+        ----------
+        grid_params : dict
+            Parameter values for this grid point.
 
-        Returns:
-            result: *dict*
-                Must contain at least 'chi2'. Can include additional keys
-                like 'params', 'success', etc.
+        Returns
+        -------
+        dict
+            Must contain:
+            - 'chi2' : float
+            - 'success' : bool
+            - 'params' : dict of fitted parameter values
+            May contain additional keys.
         """
         pass
 
-    def run(self):
-        """
-        Execute the grid search by iterating over all grid points.
-        """
-        if self._grid is None:
-            self._setup_grid()
+    # ----------------------------------------------------------------
+    # Grid construction
+    # ----------------------------------------------------------------
 
-        results = []
-        n_total = len(self._grid)
+    def _is_log_param(self, name):
+        """Check if parameter is log-spaced.
 
-        for i, grid_params in enumerate(self._grid):
+        Parameters
+        ----------
+        name : str
+
+        Returns
+        -------
+        bool
+        """
+        return name.startswith('log_')
+
+    def _build_param_array(self, name, spec):
+        """Build 1D array of parameter values for one parameter.
+
+        For log params, spec values are in log10 space;
+        returned array contains actual (linear) values.
+
+        Parameters
+        ----------
+        name : str
+        spec : list of float
+            [min, max, step]
+
+        Returns
+        -------
+        np.ndarray
+        """
+        min_val, max_val, step = spec
+        n = int(np.round((max_val - min_val) / step)) + 1
+        values = np.linspace(min_val, max_val, n)
+        if self._is_log_param(name):
+            return 10.0 ** values
+        return values
+
+    def _build_all_param_arrays(self):
+        """Build 1D arrays for all parameters.
+
+        Returns
+        -------
+        dict
+            {param_name: np.ndarray of actual parameter values}
+        """
+        return {name: self._build_param_array(name, spec)
+                for name, spec in self.grid_params.items()}
+
+    def _build_grid_metadata(self):
+        """Build grid metadata dict.
+
+        Returns
+        -------
+        dict
+            Keys: 'param_names', 'param_arrays', 'grid_shape'
+        """
+        param_names = list(self.grid_params.keys())
+        param_arrays = self._build_all_param_arrays()
+        grid_shape = tuple(len(param_arrays[name]) for name in param_names)
+        return {
+            'param_names': param_names,
+            'param_arrays': param_arrays,
+            'grid_shape': grid_shape,
+            'steps': {name: spec[2] for name, spec in self.grid_params.items()}
+        }
+
+    def _build_empty_arrays(self, grid_shape):
+        """Build empty chi2 and result arrays.
+
+        Parameters
+        ----------
+        grid_shape : tuple of int
+
+        Returns
+        -------
+        chi2_grid : np.ndarray
+            Filled with NaN, shape grid_shape.
+        result_grid : np.ndarray
+            Filled with None, shape grid_shape, dtype object.
+        """
+        chi2_grid = np.full(grid_shape, np.nan)
+        result_grid = np.empty(grid_shape, dtype=object)
+        return chi2_grid, result_grid
+
+    # ----------------------------------------------------------------
+    # Grid indexing
+    # ----------------------------------------------------------------
+
+    def _value_to_index(self, value, param_array):
+        """Find nearest grid index for a parameter value.
+
+        Parameters
+        ----------
+        value : float
+            Actual parameter value.
+        param_array : np.ndarray
+            1D array of actual parameter values.
+
+        Returns
+        -------
+        int
+        """
+        return int(np.argmin(np.abs(param_array - value)))
+
+    def _point_to_indices(self, point, metadata):
+        """Convert parameter dict to grid index tuple.
+
+        Parameters
+        ----------
+        point : dict
+            Parameter name -> actual value.
+        metadata : dict
+            Grid metadata from _build_grid_metadata().
+
+        Returns
+        -------
+        tuple of int
+        """
+        return tuple(
+            self._value_to_index(point[name], metadata['param_arrays'][name])
+            for name in metadata['param_names']
+        )
+
+    def _indices_to_point(self, indices, metadata):
+        """Convert grid index tuple to parameter dict.
+
+        Parameters
+        ----------
+        indices : tuple of int
+        metadata : dict
+
+        Returns
+        -------
+        dict
+            Parameter name -> actual value.
+        """
+        return {
+            name: metadata['param_arrays'][name][idx]
+            for name, idx in zip(metadata['param_names'], indices)
+        }
+
+    def _shift_indices(self, indices, offsets):
+        """Shift grid indices by offsets after array expansion.
+
+        Parameters
+        ----------
+        indices : tuple of int
+        offsets : tuple of int
+
+        Returns
+        -------
+        tuple of int
+        """
+        return tuple(indices[i] + offsets[i] for i in range(len(indices)))
+
+    # ----------------------------------------------------------------
+    # Evaluation order
+    # ----------------------------------------------------------------
+
+    def _standard_order(self, grid_shape):
+        """Generate grid indices in row-major order.
+
+        Parameters
+        ----------
+        grid_shape : tuple of int
+
+        Returns
+        -------
+        list of tuple of int
+        """
+        return list(np.ndindex(*grid_shape))
+
+    def _outward_order(self, grid_shape, start_indices):
+        """Generate grid indices via BFS expansion from start point.
+
+        Parameters
+        ----------
+        grid_shape : tuple of int
+        start_indices : tuple of int
+
+        Returns
+        -------
+        list of tuple of int
+        """
+        from collections import deque
+        from itertools import product
+
+        visited = {start_indices}
+        order = []
+        queue = deque([start_indices])
+
+        while queue:
+            idx = queue.popleft()
+            order.append(idx)
+
+            for delta in product([-1, 0, 1], repeat=len(grid_shape)):
+                if all(d == 0 for d in delta):
+                    continue
+                neighbor = tuple(idx[i] + delta[i] for i in range(len(grid_shape)))
+                if (neighbor not in visited and
+                        all(0 <= neighbor[i] < grid_shape[i]
+                            for i in range(len(grid_shape)))):
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        return order
+
+    def _get_evaluation_order(self, metadata, evaluation_order, start_point):
+        """Get ordered list of grid indices to evaluate.
+
+        Parameters
+        ----------
+        metadata : dict
+        evaluation_order : str
+            'standard' or 'outward'
+        start_point : dict or None
+
+        Returns
+        -------
+        list of tuple of int
+        """
+        grid_shape = metadata['grid_shape']
+
+        if evaluation_order == 'standard':
+            return self._standard_order(grid_shape)
+
+        if start_point is not None:
+            start_indices = self._point_to_indices(start_point, metadata)
+        else:
+            start_indices = tuple(s // 2 for s in grid_shape)
+
+        return self._outward_order(grid_shape, start_indices)
+
+    # ----------------------------------------------------------------
+    # Nearest neighbor initialization
+    # ----------------------------------------------------------------
+
+    def _is_adjacent(self, indices1, indices2):
+        """Check if two grid points are adjacent (Chebyshev distance <= 1).
+
+        Parameters
+        ----------
+        indices1 : tuple of int
+        indices2 : tuple of int
+
+        Returns
+        -------
+        bool
+        """
+        return all(abs(indices1[i] - indices2[i]) <= 1
+                   for i in range(len(indices1)))
+
+    def _build_grid_metadata(self):
+        """Build grid metadata dict.
+
+        Returns
+        -------
+        dict
+            Keys: 'param_names', 'param_arrays', 'grid_shape', 'steps'
+        """
+        param_names = list(self.grid_params.keys())
+        param_arrays = self._build_all_param_arrays()
+        grid_shape = tuple(len(param_arrays[name]) for name in param_names)
+        return {
+            'param_names': param_names,
+            'param_arrays': param_arrays,
+            'grid_shape': grid_shape,
+            'steps': {name: self.grid_params[name][2] for name in param_names}
+        }
+
+    def _find_nearest_successful(self, params, param_names):
+        """Find nearest successfully evaluated point in cache.
+
+        Parameters
+        ----------
+        params : dict
+            Parameter values of the query point.
+        param_names : list of str
+
+        Returns
+        -------
+        dict or None
+            Result dict of nearest successful point, or None if not found.
+        """
+        best_dist = np.inf
+        best_result = None
+
+        for cached_key, result in self._point_cache.items():
+            if not result.get('success', False):
+                continue
+            dist = sum(
+                (params[name] - cached_key[i]) ** 2
+                for i, name in enumerate(param_names)
+            ) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_result = result
+
+        return best_result
+
+    def _get_init_params(self, point, indices, last_indices,
+                         last_result, metadata):
+        """Get initialization parameters for a grid point.
+
+        Uses last point if adjacent and successful, otherwise
+        searches cache for nearest successful point.
+
+        Parameters
+        ----------
+        point : dict
+            Parameter values for this grid point.
+        indices : tuple of int
+        last_indices : tuple of int or None
+        last_result : dict or None
+        metadata : dict
+
+        Returns
+        -------
+        dict or None
+            Fitted params to initialize from, or None.
+        """
+        if (last_indices is not None and
+                last_result is not None and
+                last_result.get('success', False) and
+                self._is_adjacent(indices, last_indices)):
+            return last_result.get('params')
+
+        nearest = self._find_nearest_successful(
+            point, metadata['param_names'])
+        if nearest is not None:
+            return nearest.get('params')
+
+        return None
+
+    # ----------------------------------------------------------------
+    # Core evaluation loop
+    # ----------------------------------------------------------------
+
+    def _run_grid(self, metadata, chi2_grid, result_grid,
+                  evaluation_order, start_point, use_nn_init):
+        """Evaluate all grid points and populate chi2 and result arrays.
+
+        Skips already-evaluated points. Caches results by parameter
+        values so sub-grids can reuse coarse grid evaluations.
+
+        Parameters
+        ----------
+        metadata : dict
+        chi2_grid : np.ndarray
+            Modified in place.
+        result_grid : np.ndarray
+            Modified in place.
+        evaluation_order : str
+        start_point : dict or None
+        use_nn_init : bool
+        """
+        ordered_indices = self._get_evaluation_order(
+            metadata, evaluation_order, start_point)
+        n_total = len(ordered_indices)
+
+        last_indices = None
+        last_result = None
+
+        for i, indices in enumerate(ordered_indices):
+            if result_grid[indices] is not None:
+                continue
+
+            point = self._indices_to_point(indices, metadata)
+
+            if use_nn_init:
+                init_params = self._get_init_params(
+                    point, indices, last_indices, last_result, metadata)
+                if init_params is not None:
+                    point['_init_params'] = init_params
+
             if self.verbose:
-                print(f"Grid point {i + 1}/{n_total}: {grid_params}")
+                print(f"Grid point {i + 1}/{n_total}: {point}")
 
-            result = self._fit_grid_point(grid_params)
+            result = self._fit_grid_point(point)
 
-            # Merge grid parameters with fit results
-            full_result = {**grid_params, **result}
-            results.append(full_result)
+            chi2_grid[indices] = result.get('chi2', np.nan)
+            result_grid[indices] = result
+
+            key = self._make_cache_key(point, metadata['param_names'])
+            self._point_cache[key] = result
+
+            last_indices = indices
+            last_result = result
 
             if self.verbose:
                 print(f"  chi2 = {result.get('chi2', 'N/A')}")
 
-        self.results = results
+    # ----------------------------------------------------------------
+    # Run
+    # ----------------------------------------------------------------
 
-    def find_local_minima(self):
-        """
-        Find all local minima in the grid search results.
-
-        For variable-density grids (from refinement), compares each point only to
-        neighbors at the appropriate step distance for that point's refinement level.
-
-        Uses clustering to handle both distinct minima and flat minimum regions.
-        Edge points (missing neighbors) are included if they're minima of existing neighbors.
-
-        Returns
-        -------
-        list of tuple
-            List of (chi2, params) tuples sorted by chi2 (best first).
-            params is the result['params'] dict containing fitted parameters.
-        """
-        # ----------------------------------------------------------------
-        # Validation
-        # ----------------------------------------------------------------
-        if self.results is None:
-            raise ValueError("No results available. Run grid search first.")
-
-        if self.grid_params is None:
-            raise ValueError("grid_params not set. Child class must initialize grid_params.")
-
-        # Filter successful results
-        valid_results = [r for r in self.results if r.get('success', False)]
-        if len(valid_results) == 0:
-            return []
-
-        # ----------------------------------------------------------------
-        # Setup
-        # ----------------------------------------------------------------
-        # Get parameter names and original step sizes
-        param_names = []
-        original_steps = {}
-        for key in self.grid_params:
-            if key.endswith('_step'):
-                param_name = key[:-5]
-                param_names.append(param_name)
-                original_steps[param_name] = self.grid_params[key]
-
-        # Set tolerance for neighbor matching
-        tolerance = getattr(self, 'min_step_size', min(original_steps.values())) / 10
-
-        # Build spatial index: map positions to results
-        position_to_results = {}
-        for result in valid_results:
-            point = tuple(round(result[param], 10) for param in param_names)
-            if point not in position_to_results:
-                position_to_results[point] = []
-            position_to_results[point].append(result)
-
-        # ----------------------------------------------------------------
-        # Helper Functions
-        # ----------------------------------------------------------------
-        def find_neighbor(center_point, center_result, deltas):
-            """
-            Find neighbor at specified delta from center point.
-
-            Parameters
-            ----------
-            center_point : tuple
-                Center point coordinates
-            center_result : dict
-                Result dict for center point
-            deltas : tuple
-                Delta in each dimension (-1, 0, or 1)
-
-            Returns
-            -------
-            dict or None
-                Neighbor result if exists, None otherwise
-            """
-            # Get step size for this point's refinement level
-            refinement_level = center_result.get('refinement_level', 0)
-            step_sizes = {param: original_steps[param] / (2 ** refinement_level)
-                          for param in param_names}
-
-            # Calculate expected neighbor position
-            expected_neighbor = tuple(
-                center_point[i] + deltas[i] * step_sizes[param_names[i]]
-                for i in range(len(param_names))
-            )
-
-            # Look for any point within tolerance
-            for candidate_point, candidate_results in position_to_results.items():
-                distance = sum((candidate_point[i] - expected_neighbor[i]) ** 2
-                               for i in range(len(param_names))) ** 0.5
-
-                if distance < tolerance:
-                    # Found neighbor - return first result at this position
-                    return candidate_results[0]
-
-            return None
-
-        def get_cluster(start_point, result_map):
-            """
-            BFS to find all connected points within 1 sigma of each other.
-
-            Parameters
-            ----------
-            start_point : tuple
-                Starting point coordinates
-            result_map : dict
-                Map from point tuples to results
-
-            Returns
-            -------
-            list
-                Cluster of connected points
-            """
-            cluster = []
-            queue = [start_point]
-            cluster_visited = {start_point}
-
-            while queue:
-                point = queue.pop(0)
-                cluster.append(point)
-
-                point_result = result_map[point]
-                center_chi2 = point_result['chi2']
-
-                # Check all neighbors using refinement-aware logic
-                for deltas in product([-1, 0, 1], repeat=len(param_names)):
-                    if all(d == 0 for d in deltas):
-                        continue
-
-                    neighbor_result = find_neighbor(point, point_result, deltas)
-
-                    if neighbor_result is not None:
-                        neighbor_point = tuple(round(neighbor_result[param], 10)
-                                               for param in param_names)
-
-                        # Skip if already visited
-                        if neighbor_point in cluster_visited:
-                            continue
-
-                        # Skip if not in result_map (not a minimum point)
-                        if neighbor_point not in result_map:
-                            continue
-
-                        neighbor_chi2 = neighbor_result['chi2']
-
-                        # Include if within 1 sigma of center point
-                        if np.sqrt(abs(neighbor_chi2 - center_chi2)) < 1.0:
-                            cluster_visited.add(neighbor_point)
-                            queue.append(neighbor_point)
-
-            return cluster
-
-        # ----------------------------------------------------------------
-        # Find Local Minimum Points
-        # ----------------------------------------------------------------
-        def find_minimum_points():
-            """
-            Find all points that are local minima (chi2 <= all existing neighbors).
-
-            Includes edge points (missing neighbors) if they're minima of neighbors that exist.
-
-            Returns
-            -------
-            list
-                List of results that are local minima
-            """
-            minimum_results = []
-
-            for result in valid_results:
-                point = tuple(round(result[param], 10) for param in param_names)
-                chi2 = result['chi2']
-
-                # Check all potential neighbors
-                is_minimum = True
-
-                for deltas in product([-1, 0, 1], repeat=len(param_names)):
-                    if all(d == 0 for d in deltas):
-                        continue
-
-                    neighbor = find_neighbor(point, result, deltas)
-
-                    # If neighbor exists and has lower chi2, this isn't a minimum
-                    if neighbor is not None and neighbor['chi2'] < chi2:
-                        is_minimum = False
-                        break
-
-                if is_minimum:
-                    minimum_results.append(result)
-
-            return minimum_results
-
-        def cluster_and_select_representatives():
-            """
-            Cluster minimum points and return one representative per cluster.
-
-            Returns
-            -------
-            list of tuple
-                List of (chi2, params) tuples, one per cluster, sorted by chi2
-            """
-            minimum_results = find_minimum_points()
-
-            if len(minimum_results) == 0:
-                return []
-
-            #for r in minimum_results:
-            #    print(r)
-
-            # Build result map
-            result_map = {tuple(round(r[param], 10) for param in param_names): r
-                          for r in minimum_results}
-
-            min_points = list(result_map.keys())
-
-            # Find global min for reference
-            min_chi2 = min(r['chi2'] for r in minimum_results)
-
-            # Cluster connected points
-            visited = set()
-            clusters = []
-
-            for point in min_points:
-                if point not in visited:
-                    cluster = get_cluster(point, result_map)
-                    visited.update(cluster)
-                    clusters.append(cluster)
-
-            # Return one representative per cluster
-            local_minima = []
-            for cluster in clusters:
-                # Pick point with lowest chi2 in cluster
-                best_in_cluster = min(cluster, key=lambda p: result_map[p]['chi2'])
-                result = result_map[best_in_cluster]
-                local_minima.append((result['chi2'], result['params']))
-                #print('cluster\n', cluster)
-                #print('best_in_cluster\n', best_in_cluster)
-
-            local_minima.sort(key=lambda x: x[0])
-            #print('final minima')
-            #for m in local_minima:
-            #    print(m)
-
-            return local_minima
-
-        # ----------------------------------------------------------------
-        # Execute
-        # ----------------------------------------------------------------
-        return cluster_and_select_representatives()
-
-    def select_separated_minima(self, local_minima, min_separation=1.0, n=None):
-        """
-        Select well-separated minima from a list of local minima.
-
-        Selects minima greedily by chi2, keeping only those that are sufficiently
-        separated from already-selected minima. Separation is normalized by grid
-        step sizes to handle parameters on different scales.
+    def _resolve_run_params(self, evaluation_order, start_point,
+                            use_nearest_neighbor_init,
+                            max_refinements, max_expansions):
+        """Resolve run() parameters against instance defaults.
 
         Parameters
         ----------
-        local_minima : list of tuple
-            List of (chi2, params) tuples from find_local_minima()
-        min_separation : float, optional
-            Minimum normalized separation between minima. Default is 1.0,
-            meaning minima must differ by at least 1 grid step in at least
-            one parameter.
-        n : int or None, optional
-            Maximum number of minima to return. If None, returns all that
-            meet the separation criteria.
+        evaluation_order : str or None
+        start_point : dict or None
+        use_nearest_neighbor_init : bool or None
+        max_refinements : int or None
+        max_expansions : int or None
+
+        Returns
+        -------
+        tuple
+            Resolved (order, start, nn_init, max_ref, max_exp)
+        """
+        order = evaluation_order or self.evaluation_order
+        start = start_point or self.start_point
+        nn_init = (use_nearest_neighbor_init
+                   if use_nearest_neighbor_init is not None
+                   else self.use_nearest_neighbor_init)
+        max_ref = max_refinements or self.max_refinements
+        max_exp = max_expansions or self.max_expansions
+        return order, start, nn_init, max_ref, max_exp
+
+    def _run_coarse_grid(self, order, start, nn_init):
+        """Build and evaluate coarse grid, store in results_history[0].
+
+        Parameters
+        ----------
+        order : str
+        start : dict or None
+        nn_init : bool
+        """
+        metadata = self._build_grid_metadata()
+        chi2_grid, result_grid = self._build_empty_arrays(
+            metadata['grid_shape'])
+        self._run_grid(metadata, chi2_grid, result_grid,
+                       order, start, nn_init)
+        self.results_history = [{
+            'chi2_grid': chi2_grid,
+            'result_grid': result_grid,
+            'metadata': metadata
+        }]
+
+    def run(self, refine=False, point_density_in_minimum=None,
+            evaluation_order=None, start_point=None,
+            use_nearest_neighbor_init=None,
+            max_refinements=None, max_expansions=None):
+        """Execute grid search.
+
+        Parameters
+        ----------
+        refine : bool
+            If True, refine around local minima after coarse grid.
+        point_density_in_minimum : int or None
+            Number of points within dchi2=1 of each minimum.
+            Required if refine=True.
+        evaluation_order : str or None
+            'standard' or 'outward'. Overrides instance default.
+        start_point : dict or None
+            Starting point for 'outward' order. Overrides instance default.
+        use_nearest_neighbor_init : bool or None
+            Overrides instance default.
+        max_refinements : int or None
+            Overrides instance default.
+        max_expansions : int or None
+            Overrides instance default.
+        """
+        if self.grid_params is None:
+            raise ValueError("grid_params must be set before running.")
+
+        if refine and point_density_in_minimum is None:
+            raise ValueError(
+                "point_density_in_minimum required when refine=True.")
+
+        order, start, nn_init, max_ref, max_exp = self._resolve_run_params(
+            evaluation_order, start_point, use_nearest_neighbor_init,
+            max_refinements, max_expansions)
+
+        self._point_cache = {}
+        self._run_coarse_grid(order, start, nn_init)
+
+        if refine:
+            self._run_refinement(point_density_in_minimum, max_ref, max_exp,
+                                 order, nn_init)
+
+    # ----------------------------------------------------------------
+    # Minima finding
+    # ----------------------------------------------------------------
+
+    def _make_inverted_grid(self, chi2_grid):
+        """Invert chi2 grid for peak_local_max, replacing NaN with -inf.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+
+        Returns
+        -------
+        np.ndarray
+        """
+        safe = np.where(np.isnan(chi2_grid), np.inf, chi2_grid)
+        return -safe
+
+    def _make_footprint(self, n_dims):
+        """Build n-dimensional 8-connectivity footprint.
+
+        Parameters
+        ----------
+        n_dims : int
+
+        Returns
+        -------
+        np.ndarray
+        """
+        return np.ones(tuple([3] * n_dims))
+
+    def _peak_indices(self, chi2_grid):
+        """Find local minima indices.
+
+        Uses minimum_filter for local minima detection with proper edge
+        handling, then removes dominated minima via flood-fill.
+
+        A candidate minimum is dominated if an already-accepted minimum
+        is reachable via a monotonically non-increasing path.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+
+        Returns
+        -------
+        np.ndarray
+            Shape (n_minima, n_dims) with grid indices.
+        """
+        chi2_safe = np.where(np.isnan(chi2_grid), np.inf, chi2_grid)
+        structure = self._make_footprint(chi2_grid.ndim)
+
+        local_min = minimum_filter(chi2_safe, size=3,
+                                   mode='constant', cval=np.inf)
+        is_local_min = (chi2_grid == local_min) & np.isfinite(chi2_grid)
+
+        candidates = np.argwhere(is_local_min)
+        if len(candidates) == 0:
+            return candidates
+
+        candidates = sorted(candidates,
+                            key=lambda idx: chi2_grid[tuple(idx)])
+
+        accepted = []
+        for candidate in candidates:
+            candidate_tuple = tuple(candidate)
+            threshold = chi2_grid[candidate_tuple]
+            mask = chi2_safe <= threshold
+            labeled, _ = label(mask, structure=structure)
+            candidate_label = labeled[candidate_tuple]
+
+            dominated = any(labeled[tuple(acc)] == candidate_label
+                            for acc in accepted)
+            if not dominated:
+                accepted.append(candidate)
+
+        return (np.array(accepted) if accepted
+                else np.empty((0, chi2_grid.ndim), dtype=int))
+
+    def _build_minimum_entry(self, indices, chi2_grid, result_grid, level):
+        """Build minimum dict for one grid point.
+
+        Parameters
+        ----------
+        indices : tuple of int
+        chi2_grid : np.ndarray
+        result_grid : np.ndarray
+        level : int
+
+        Returns
+        -------
+        dict or None
+            None if point has no valid result.
+        """
+        chi2 = chi2_grid[indices]
+        result = result_grid[indices]
+        if result is None or not np.isfinite(chi2):
+            return None
+        return {
+            'indices': indices,
+            'chi2': chi2,
+            'params': result.get('params', {}),
+            'level': level,
+            'parent': None,
+            'children': [],
+            'refinement_history': []
+        }
+
+    def _find_minima_in_grid(self, chi2_grid, result_grid, level=0):
+        """Find all local minima in a chi2 grid.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        result_grid : np.ndarray
+        level : int
+
+        Returns
+        -------
+        list of dict
+        """
+        peak_idx_array = self._peak_indices(chi2_grid)
+        minima = []
+        for idx in peak_idx_array:
+            entry = self._build_minimum_entry(
+                tuple(idx), chi2_grid, result_grid, level)
+            if entry is not None:
+                minima.append(entry)
+        return minima
+
+    def _is_edge_minimum(self, indices, grid_shape):
+        """Check if a minimum lies on the grid edge.
+
+        Parameters
+        ----------
+        indices : tuple of int
+        grid_shape : tuple of int
+
+        Returns
+        -------
+        bool
+        """
+        return any(indices[i] == 0 or indices[i] == grid_shape[i] - 1
+                   for i in range(len(indices)))
+
+    # ----------------------------------------------------------------
+    # Public minima access
+    # ----------------------------------------------------------------
+
+    def _format_minima_output(self, minima):
+        """Format minima as sorted list of (chi2, params, level) tuples.
+
+        Parameters
+        ----------
+        minima : list of dict
 
         Returns
         -------
         list of tuple
-            List of (chi2, params) for selected minima, sorted by chi2
+            (chi2, params, level) sorted by chi2 ascending.
         """
-        if len(local_minima) == 0:
-            return []
+        result = [(m['chi2'], m['params'], m['level']) for m in minima]
+        result.sort(key=lambda x: x[0])
+        return result
 
-        if self.grid_params is None:
-            raise ValueError("grid_params not set. Child class must initialize grid_params.")
+    def find_local_minima(self):
+        """Find all local minima in the grid search results.
 
-        # Get parameter names and step sizes from grid_params
-        param_names = []
-        step_sizes = {}
-        for key in self.grid_params:
-            if key.endswith('_step'):
-                param_name = key[:-5]
-                param_names.append(param_name)
-                step_sizes[param_name] = self.grid_params[key]
+        If refinement was run, returns stored minima across all levels.
+        Otherwise computes minima from the coarse grid.
 
-        # Select separated minima
-        selected = [local_minima[0]]  # Always take the best
+        Returns
+        -------
+        list of tuple
+            (chi2, params, level) sorted by chi2 ascending.
+        """
+        if self.results_history is None:
+            raise ValueError(
+                "No results available. Run grid search first.")
 
-        for chi2, params in local_minima[1:]:
-            # Check if this minimum is separated from all already-selected ones
-            is_separated = True
+        if self.minima is not None:
+            return self._format_minima_output(self.minima)
 
-            for selected_chi2, selected_params in selected:
-                # Calculate normalized separation
-                separations = []
-                for param in param_names:
-                    diff = abs(params[param] - selected_params[param])
-                    normalized_sep = diff / step_sizes[param]
-                    separations.append(normalized_sep)
+        level = self.results_history[0]
+        raw_minima = self._find_minima_in_grid(
+            level['chi2_grid'],
+            level['result_grid'],
+            level=0)
 
-                max_separation = max(separations)
+        return self._format_minima_output(raw_minima)
 
-                if max_separation < min_separation:
-                    is_separated = False
-                    break
+    # ----------------------------------------------------------------
+    # Edge expansion helpers
+    # ----------------------------------------------------------------
 
-            if is_separated:
-                selected.append((chi2, params))
+    def _get_edge_dims(self, indices, grid_shape):
+        """Find dimensions where a point lies on the grid edge.
 
-                # Stop if we've reached the requested number
-                if n is not None and len(selected) >= n:
-                    break
+        Parameters
+        ----------
+        indices : tuple of int
+        grid_shape : tuple of int
 
-        return selected
+        Returns
+        -------
+        list of tuple
+            (dim, direction) where direction is -1 (start) or +1 (end).
+        """
+        edge_dims = []
+        for i in range(len(indices)):
+            if indices[i] == 0:
+                edge_dims.append((i, -1))
+            elif indices[i] == grid_shape[i] - 1:
+                edge_dims.append((i, +1))
+        return edge_dims
 
-    @property
-    def grid(self):
-        """The parameter grid as a list of dicts"""
-        if self._grid is None:
-            self._setup_grid()
-        return self._grid
+    def _extend_param_array(self, name, param_array, direction,
+                            n_expand, step=None):
+        """Extend a 1D parameter array by n_expand steps in one direction.
+
+        For log params, extension is in log10 space.
+
+        Parameters
+        ----------
+        name : str
+        param_array : np.ndarray
+            Actual (linear) parameter values.
+        direction : int
+            -1 to prepend, +1 to append.
+        n_expand : int
+        step : float or None
+            Step size in spec space. If None, uses self.grid_params.
+
+        Returns
+        -------
+        np.ndarray
+        """
+        if step is None:
+            step = self.grid_params[name][2]
+
+        if self._is_log_param(name):
+            if direction == -1:
+                new_log = (np.log10(param_array[0])
+                           - np.arange(n_expand, 0, -1) * step)
+                return np.concatenate([10.0 ** new_log, param_array])
+            new_log = (np.log10(param_array[-1])
+                       + np.arange(1, n_expand + 1) * step)
+            return np.concatenate([param_array, 10.0 ** new_log])
+
+        if direction == -1:
+            new_vals = param_array[0] - np.arange(n_expand, 0, -1) * step
+            return np.concatenate([new_vals, param_array])
+        new_vals = param_array[-1] + np.arange(1, n_expand + 1) * step
+        return np.concatenate([param_array, new_vals])
+
+    def _expand_array_along_dim(self, arr, dim, direction, n_expand):
+        """Expand a numpy array along one dimension with NaN/None fill.
+
+        Parameters
+        ----------
+        arr : np.ndarray
+        dim : int
+        direction : int
+            -1 to prepend, +1 to append.
+        n_expand : int
+
+        Returns
+        -------
+        np.ndarray
+        """
+        shape = list(arr.shape)
+        shape[dim] = n_expand
+        if arr.dtype == object:
+            new_slice = np.full(shape, None, dtype=object)
+        else:
+            new_slice = np.full(shape, np.nan)
+        if direction == -1:
+            return np.concatenate([new_slice, arr], axis=dim)
+        return np.concatenate([arr, new_slice], axis=dim)
+
+    def _apply_expansion(self, chi2_grid, result_grid, metadata,
+                          edge_dims, n_expand):
+        """Expand arrays simultaneously in all edge dimensions.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        result_grid : np.ndarray
+        metadata : dict
+        edge_dims : list of tuple
+        n_expand : int
+
+        Returns
+        -------
+        chi2_grid : np.ndarray
+        result_grid : np.ndarray
+        metadata : dict
+        offsets : tuple of int
+        """
+        new_chi2 = chi2_grid
+        new_result = result_grid
+        new_param_arrays = dict(metadata['param_arrays'])
+        offsets = [0] * len(metadata['param_names'])
+
+        for dim, direction in edge_dims:
+            name = metadata['param_names'][dim]
+            new_chi2 = self._expand_array_along_dim(
+                new_chi2, dim, direction, n_expand)
+            new_result = self._expand_array_along_dim(
+                new_result, dim, direction, n_expand)
+            new_param_arrays[name] = self._extend_param_array(
+                name, new_param_arrays[name], direction, n_expand,
+                step=metadata['steps'][name])
+            if direction == -1:
+                offsets[dim] = n_expand
+
+        new_metadata = {
+            'param_names': metadata['param_names'],
+            'param_arrays': new_param_arrays,
+            'grid_shape': new_chi2.shape,
+            'steps': metadata['steps']
+        }
+        return new_chi2, new_result, new_metadata, tuple(offsets)
+
+    def _get_strip_ranges(self, minimum_indices, old_shape, new_shape,
+                          edge_dims, strip_width):
+        """Compute index ranges for the strip to evaluate after expansion.
+
+        In edge dimensions: all new indices.
+        In non-edge dimensions: within strip_width of minimum.
+
+        Parameters
+        ----------
+        minimum_indices : tuple of int
+            Minimum indices in the expanded grid.
+        old_shape : tuple of int
+        new_shape : tuple of int
+        edge_dims : list of tuple
+        strip_width : int
+
+        Returns
+        -------
+        list of range
+        """
+        edge_dim_map = {dim: (direction, old_shape[dim])
+                        for dim, direction in edge_dims}
+        ranges = []
+        for d in range(len(minimum_indices)):
+            if d in edge_dim_map:
+                direction, old_size = edge_dim_map[d]
+                if direction == -1:
+                    ranges.append(range(new_shape[d] - old_size))
+                else:
+                    ranges.append(range(old_size, new_shape[d]))
+            else:
+                lo = max(0, minimum_indices[d] - strip_width)
+                hi = min(new_shape[d] - 1, minimum_indices[d] + strip_width)
+                ranges.append(range(lo, hi + 1))
+        return ranges
+
+    def _evaluate_strip_points(self, chi2_grid, result_grid, metadata,
+                               strip_ranges, nn_init):
+        """Evaluate all unevaluated points in the strip.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+            Modified in place.
+        result_grid : np.ndarray
+            Modified in place.
+        metadata : dict
+        strip_ranges : list of range
+        nn_init : bool
+        """
+        from itertools import product as iproduct
+        for indices in iproduct(*strip_ranges):
+            if result_grid[indices] is not None:
+                continue
+            point = self._indices_to_point(indices, metadata)
+            if nn_init:
+                init_params = self._get_init_params(
+                    point, indices, None, None, metadata)
+                if init_params is not None:
+                    point['_init_params'] = init_params
+            result = self._fit_grid_point(point)
+            chi2_grid[indices] = result.get('chi2', np.nan)
+            result_grid[indices] = result
+            key = self._make_cache_key(point, metadata['param_names'])
+            self._point_cache[key] = result
+
+    def _find_minimum_in_strip(self, chi2_grid, strip_ranges):
+        """Find index of minimum chi2 point within strip ranges.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        strip_ranges : list of range
+
+        Returns
+        -------
+        tuple of int or None
+        """
+        from itertools import product as iproduct
+        best_chi2 = np.inf
+        best_indices = None
+        for indices in iproduct(*strip_ranges):
+            chi2 = chi2_grid[indices]
+            if np.isfinite(chi2) and chi2 < best_chi2:
+                best_chi2 = chi2
+                best_indices = indices
+        return best_indices
+
+    def _expand_once(self, indices, chi2_grid, result_grid, metadata,
+                     n_expand, strip_width, nn_init):
+        """Perform one expansion step around an edge minimum.
+
+        Parameters
+        ----------
+        indices : tuple of int
+        chi2_grid : np.ndarray
+        result_grid : np.ndarray
+        metadata : dict
+        n_expand : int
+        strip_width : int
+        nn_init : bool
+
+        Returns
+        -------
+        indices, chi2_grid, result_grid, metadata
+        """
+        edge_dims = self._get_edge_dims(indices, chi2_grid.shape)
+        old_shape = chi2_grid.shape
+        chi2_grid, result_grid, metadata, offsets = self._apply_expansion(
+            chi2_grid, result_grid, metadata, edge_dims, n_expand)
+        indices = self._shift_indices(indices, offsets)
+        strip_ranges = self._get_strip_ranges(
+            indices, old_shape, chi2_grid.shape, edge_dims, strip_width)
+        self._evaluate_strip_points(
+            chi2_grid, result_grid, metadata, strip_ranges, nn_init)
+        strip_min = self._find_minimum_in_strip(chi2_grid, strip_ranges)
+        if strip_min is not None and chi2_grid[strip_min] < chi2_grid[indices]:
+            indices = strip_min
+        return indices, chi2_grid, result_grid, metadata
+
+    # ----------------------------------------------------------------
+    # Edge expansion entry point
+    # ----------------------------------------------------------------
+
+    def _expand_edge_minimum(self, minimum, level_data, n_expand,
+                              strip_width, nn_init, max_expansions):
+        """Expand grid around an edge minimum until interior or limit reached.
+
+        Parameters
+        ----------
+        minimum : dict
+        level_data : dict
+        n_expand : int
+        strip_width : int
+        nn_init : bool
+        max_expansions : int
+
+        Returns
+        -------
+        minimum : dict
+            Updated indices and chi2.
+        level_data : dict
+            Updated arrays and metadata.
+        """
+        indices = minimum['indices']
+        chi2_grid = level_data['chi2_grid']
+        result_grid = level_data['result_grid']
+        metadata = level_data['metadata']
+
+        for _ in range(max_expansions):
+            if not self._is_edge_minimum(indices, chi2_grid.shape):
+                break
+            indices, chi2_grid, result_grid, metadata = self._expand_once(
+                indices, chi2_grid, result_grid, metadata,
+                n_expand, strip_width, nn_init)
+
+        minimum['indices'] = indices
+        minimum['chi2'] = chi2_grid[indices]
+        level_data = {
+            'chi2_grid': chi2_grid,
+            'result_grid': result_grid,
+            'metadata': metadata
+        }
+        return minimum, level_data
+
+# ----------------------------------------------------------------
+    # Refinement: grid spec computation
+    # ----------------------------------------------------------------
+
+    def _get_spec_space_value(self, name, actual_value):
+        """Convert actual parameter value to spec space.
+
+        Parameters
+        ----------
+        name : str
+        actual_value : float
+
+        Returns
+        -------
+        float
+            log10(actual_value) for log params, actual_value otherwise.
+        """
+        if self._is_log_param(name):
+            return np.log10(actual_value)
+        return actual_value
+
+    def _compute_refined_spec_1d(self, name, center_val, current_step, n):
+        """Compute refined grid spec for one parameter around a minimum.
+
+        Parameters
+        ----------
+        name : str
+        center_val : float
+            Actual parameter value at minimum.
+        current_step : float
+            Step size in spec space.
+        n : int
+            point_density_in_minimum
+
+        Returns
+        -------
+        list
+            [min_spec, max_spec, new_step] in spec space.
+        """
+        half_n = n // 2
+        new_step = current_step / (half_n + 2)
+        n_steps = half_n + 1
+        extent = n_steps * new_step
+        center_spec = self._get_spec_space_value(name, center_val)
+        return [center_spec - extent, center_spec + extent, new_step]
+
+    def _compute_refined_spec(self, minimum, metadata, n):
+        """Compute refined grid_params spec around a minimum.
+
+        Parameters
+        ----------
+        minimum : dict
+        metadata : dict
+            Must contain 'steps' key.
+        n : int
+
+        Returns
+        -------
+        dict
+            Refined grid_params in same format as self.grid_params.
+        """
+        return {
+            name: self._compute_refined_spec_1d(
+                name, minimum['params'][name], metadata['steps'][name], n)
+            for name in metadata['param_names']
+        }
+
+    # ----------------------------------------------------------------
+    # Cache management
+    # ----------------------------------------------------------------
+
+    def _make_cache_key(self, params, param_names):
+        """Build cache key from parameter values.
+
+        Parameters
+        ----------
+        params : dict
+        param_names : list of str
+
+        Returns
+        -------
+        tuple of float
+        """
+        return tuple(round(params[name], 10) for name in param_names)
+
+    def _fill_from_cache(self, chi2_grid, result_grid, metadata):
+        """Fill sub-grid from point cache where available.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+            Modified in place.
+        result_grid : np.ndarray
+            Modified in place.
+        metadata : dict
+        """
+        for indices in np.ndindex(*metadata['grid_shape']):
+            point = self._indices_to_point(indices, metadata)
+            key = self._make_cache_key(point, metadata['param_names'])
+            if key in self._point_cache:
+                result = self._point_cache[key]
+                chi2_grid[indices] = result.get('chi2', np.nan)
+                result_grid[indices] = result
+
+    # ----------------------------------------------------------------
+    # Refinement: sub-grid evaluation
+    # ----------------------------------------------------------------
+
+    def _build_subgrid_metadata(self, refined_spec):
+        """Build metadata for a refined sub-grid.
+
+        Parameters
+        ----------
+        refined_spec : dict
+
+        Returns
+        -------
+        dict
+            Keys: 'param_names', 'param_arrays', 'grid_shape', 'steps'
+        """
+        param_names = list(refined_spec.keys())
+        param_arrays = {
+            name: self._build_param_array(name, spec)
+            for name, spec in refined_spec.items()
+        }
+        grid_shape = tuple(len(param_arrays[name]) for name in param_names)
+        return {
+            'param_names': param_names,
+            'param_arrays': param_arrays,
+            'grid_shape': grid_shape,
+            'steps': {name: refined_spec[name][2] for name in param_names}
+        }
+
+    def _build_subgrid_data(self, refined_spec, nn_init):
+        """Build and evaluate a refined sub-grid.
+
+        Parameters
+        ----------
+        refined_spec : dict
+        nn_init : bool
+
+        Returns
+        -------
+        dict
+            Keys: 'chi2_grid', 'result_grid', 'metadata'
+        """
+        metadata = self._build_subgrid_metadata(refined_spec)
+        chi2_grid, result_grid = self._build_empty_arrays(metadata['grid_shape'])
+        self._fill_from_cache(chi2_grid, result_grid, metadata)
+        self._run_grid(metadata, chi2_grid, result_grid,
+                       'standard', None, nn_init)
+        return {
+            'chi2_grid': chi2_grid,
+            'result_grid': result_grid,
+            'metadata': metadata
+        }
+
+    # ----------------------------------------------------------------
+    # Refinement: convergence
+    # ----------------------------------------------------------------
+
+    def _count_below_threshold_1d(self, chi2_slice, center_pos,
+                                   threshold, direction):
+        """Count consecutive points at or below threshold in one direction.
+
+        Parameters
+        ----------
+        chi2_slice : np.ndarray
+        center_pos : int
+        threshold : float
+        direction : int
+            +1 or -1
+
+        Returns
+        -------
+        int
+        """
+        count = 0
+        pos = center_pos + direction
+        while 0 <= pos < len(chi2_slice):
+            if np.isfinite(chi2_slice[pos]) and chi2_slice[pos] <= threshold:
+                count += 1
+                pos += direction
+            else:
+                break
+        return count
+
+    def _is_converged_along_dim(self, chi2_grid, min_idx, dim, n, threshold):
+        """Check convergence along one parameter axis.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        min_idx : tuple of int
+        dim : int
+        n : int
+        threshold : float
+
+        Returns
+        -------
+        bool
+        """
+        slice_idx = list(min_idx)
+        slice_idx[dim] = slice(None)
+        chi2_slice = chi2_grid[tuple(slice_idx)]
+        half_n = n // 2
+        count_pos = self._count_below_threshold_1d(
+            chi2_slice, min_idx[dim], threshold, +1)
+        count_neg = self._count_below_threshold_1d(
+            chi2_slice, min_idx[dim], threshold, -1)
+        return count_pos >= half_n and count_neg >= half_n
+
+    def _is_converged(self, min_idx, chi2_grid, n):
+        """Check if minimum has enough points within dchi2=1 in all directions.
+
+        Parameters
+        ----------
+        min_idx : tuple of int
+        chi2_grid : np.ndarray
+        n : int
+
+        Returns
+        -------
+        bool
+        """
+        threshold = chi2_grid[min_idx] + 1.0
+        return all(
+            self._is_converged_along_dim(chi2_grid, min_idx, dim, n, threshold)
+            for dim in range(len(min_idx))
+        )
+
+    # ----------------------------------------------------------------
+    # Refinement: minimum management
+    # ----------------------------------------------------------------
+
+    def _create_child_minimum(self, sub_min, parent, level):
+        """Create a child minimum from a sub-grid result.
+
+        Parameters
+        ----------
+        sub_min : dict
+        parent : dict
+        level : int
+
+        Returns
+        -------
+        dict
+        """
+        return {
+            'indices': sub_min['indices'],
+            'chi2': sub_min['chi2'],
+            'params': sub_min['params'],
+            'level': level,
+            'parent': parent,
+            'children': [],
+            'refinement_history': []
+        }
+
+    def _update_minimum_from_subgrid(self, minimum, sub_min, level):
+        """Update minimum location from sub-grid result.
+
+        Parameters
+        ----------
+        minimum : dict
+            Modified in place.
+        sub_min : dict
+        level : int
+        """
+        minimum['indices'] = sub_min['indices']
+        minimum['chi2'] = sub_min['chi2']
+        minimum['params'] = sub_min['params']
+        minimum['level'] = level
+
+    # ----------------------------------------------------------------
+    # Refinement: core
+    # ----------------------------------------------------------------
+
+    def _refine_once(self, minimum, n, level, nn_init, max_exp):
+        """Perform one refinement iteration around a minimum.
+
+        Parameters
+        ----------
+        minimum : dict
+        n : int
+        level : int
+        nn_init : bool
+        max_exp : int
+
+        Returns
+        -------
+        sub_minima : list of dict
+        subgrid_data : dict
+        converged : bool
+        """
+        current_metadata = (minimum['refinement_history'][-1]['metadata']
+                            if minimum['refinement_history']
+                            else self.results_history[0]['metadata'])
+
+        refined_spec = self._compute_refined_spec(minimum, current_metadata, n)
+        subgrid_data = self._build_subgrid_data(refined_spec, nn_init)
+        minimum['refinement_history'].append(subgrid_data)
+
+        sub_minima = self._find_minima_in_grid(
+            subgrid_data['chi2_grid'],
+            subgrid_data['result_grid'],
+            level=level)
+
+        if len(sub_minima) == 0:
+            return [], subgrid_data, True
+
+        strip_width = max(3, n)
+        for i, sub_min in enumerate(sub_minima):
+            if self._is_edge_minimum(sub_min['indices'],
+                                     subgrid_data['chi2_grid'].shape):
+                sub_min, subgrid_data = self._expand_edge_minimum(
+                    sub_min, subgrid_data, strip_width, strip_width,
+                    nn_init, max_exp)
+                sub_minima[i] = sub_min
+                minimum['refinement_history'][-1] = subgrid_data
+
+        if len(sub_minima) == 1:
+            converged = self._is_converged(
+                sub_minima[0]['indices'],
+                subgrid_data['chi2_grid'], n)
+            return sub_minima, subgrid_data, converged
+
+        return sub_minima, subgrid_data, False
+
+    def _refine_minimum(self, minimum, n, max_ref, nn_init, max_exp):
+        """Refine around one minimum until convergence or limit reached.
+
+        Parameters
+        ----------
+        minimum : dict
+        n : int
+        max_ref : int
+        nn_init : bool
+        max_exp : int
+
+        Returns
+        -------
+        list of dict
+            Final minima (may include children from splits).
+        """
+        for level in range(1, max_ref + 1):
+            sub_minima, subgrid_data, converged = self._refine_once(
+                minimum, n, level, nn_init, max_exp)
+
+            if len(sub_minima) == 0:
+                if self.verbose:
+                    print(f"  Minimum disappeared at refinement level {level}")
+                return [minimum]
+
+            if len(sub_minima) > 1:
+                if self.verbose:
+                    print(f"  Split into {len(sub_minima)} at level {level}")
+                children = []
+                for sub_min in sub_minima:
+                    child = self._create_child_minimum(sub_min, minimum, level)
+                    minimum['children'].append(child)
+                    children.append(child)
+                remaining = max_ref - level
+                result = []
+                for child in children:
+                    result.extend(
+                        self._refine_minimum(child, n, remaining, nn_init, max_exp))
+                return result
+
+            self._update_minimum_from_subgrid(minimum, sub_minima[0], level)
+
+            if converged:
+                if self.verbose:
+                    print(f"  Converged at refinement level {level}")
+                return [minimum]
+
+        if self.verbose:
+            print("  Max refinements reached")
+        return [minimum]
+
+    # ----------------------------------------------------------------
+    # Refinement: entry point
+    # ----------------------------------------------------------------
+
+    def _run_refinement(self, n, max_ref, max_exp, order, nn_init):
+        """Find coarse minima, expand edges, refine each minimum.
+
+        Parameters
+        ----------
+        n : int
+            point_density_in_minimum
+        max_ref : int
+        max_exp : int
+        order : str
+        nn_init : bool
+        """
+        level_data = self.results_history[0]
+        coarse_minima = self._find_minima_in_grid(
+            level_data['chi2_grid'],
+            level_data['result_grid'],
+            level=0)
+
+        if len(coarse_minima) == 0:
+            self.minima = []
+            return
+
+        strip_width = max(3, n)
+        for i, minimum in enumerate(coarse_minima):
+            if self._is_edge_minimum(minimum['indices'],
+                                     level_data['chi2_grid'].shape):
+                minimum, level_data = self._expand_edge_minimum(
+                    minimum, level_data, strip_width, strip_width,
+                    nn_init, max_exp)
+                coarse_minima[i] = minimum
+
+        self.results_history[0] = level_data
+
+        self.minima = []
+        for minimum in coarse_minima:
+            refined = self._refine_minimum(minimum, n, max_ref, nn_init, max_exp)
+            self.minima.extend(refined)
+
+# ----------------------------------------------------------------
+    # Uncertainties
+    # ----------------------------------------------------------------
+
+    def _get_minimum_grid(self, minimum):
+        """Get best available chi2 grid for a minimum.
+
+        Uses last refinement level if available, else coarse grid.
+
+        Parameters
+        ----------
+        minimum : dict
+
+        Returns
+        -------
+        dict
+            Keys: 'chi2_grid', 'result_grid', 'metadata'
+        """
+        if minimum['refinement_history']:
+            return minimum['refinement_history'][-1]
+        return self.results_history[0]
+
+    def _chi2_slice_1d(self, chi2_grid, min_idx, dim):
+        """Extract 1D chi2 slice along one dimension through minimum.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        min_idx : tuple of int
+        dim : int
+
+        Returns
+        -------
+        np.ndarray
+        """
+        idx = list(min_idx)
+        idx[dim] = slice(None)
+        return chi2_grid[tuple(idx)]
+
+    def _find_bounds_1d(self, chi2_slice, center_pos, threshold):
+        """Find range of indices where chi2 <= threshold.
+
+        Parameters
+        ----------
+        chi2_slice : np.ndarray
+        center_pos : int
+        threshold : float
+
+        Returns
+        -------
+        tuple of int
+            (lo, hi) inclusive indices
+        """
+        lo = center_pos
+        while (lo > 0 and np.isfinite(chi2_slice[lo - 1])
+               and chi2_slice[lo - 1] <= threshold):
+            lo -= 1
+        hi = center_pos
+        while (hi < len(chi2_slice) - 1 and np.isfinite(chi2_slice[hi + 1])
+               and chi2_slice[hi + 1] <= threshold):
+            hi += 1
+        return lo, hi
+
+    def _indices_to_param_range(self, lo, hi, param_array):
+        """Convert index bounds to parameter value range.
+
+        Parameters
+        ----------
+        lo : int
+        hi : int
+        param_array : np.ndarray
+
+        Returns
+        -------
+        tuple of float
+            (lo_val, hi_val)
+        """
+        return param_array[lo], param_array[hi]
+
+    def _get_uncertainty_1d(self, minimum, grid_data, dim):
+        """Get uncertainty for one parameter dimension.
+
+        Parameters
+        ----------
+        minimum : dict
+        grid_data : dict
+        dim : int
+
+        Returns
+        -------
+        tuple of float
+            (lo_val, hi_val) actual parameter values
+        """
+        chi2_grid = grid_data['chi2_grid']
+        metadata = grid_data['metadata']
+        name = metadata['param_names'][dim]
+        param_array = metadata['param_arrays'][name]
+        chi2_slice = self._chi2_slice_1d(chi2_grid, minimum['indices'], dim)
+        threshold = minimum['chi2'] + 1.0
+        lo, hi = self._find_bounds_1d(
+            chi2_slice, minimum['indices'][dim], threshold)
+        return self._indices_to_param_range(lo, hi, param_array)
+
+    def get_uncertainties(self, minimum):
+        """Get 1-sigma parameter uncertainties for a minimum.
+
+        Uncertainties are the range of parameter values where
+        chi2 <= chi2_min + 1.0 along each axis independently.
+
+        Parameters
+        ----------
+        minimum : dict
+            Minimum object from self.minima.
+
+        Returns
+        -------
+        dict
+            {param_name: (lo_val, hi_val)} for each parameter.
+        """
+        grid_data = self._get_minimum_grid(minimum)
+        metadata = grid_data['metadata']
+        return {
+            name: self._get_uncertainty_1d(minimum, grid_data, dim)
+            for dim, name in enumerate(metadata['param_names'])
+        }
+
+    # ----------------------------------------------------------------
+    # Plotting helpers
+    # ----------------------------------------------------------------
+
+    def _marginalize_2d(self, chi2_grid, dim1, dim2):
+        """Marginalize chi2 grid to 2D by taking minimum along other axes.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        dim1 : int
+        dim2 : int
+
+        Returns
+        -------
+        np.ndarray, shape (n_dim1, n_dim2)
+        """
+        dims_to_reduce = tuple(d for d in range(chi2_grid.ndim)
+                               if d != dim1 and d != dim2)
+        result = (np.nanmin(chi2_grid, axis=dims_to_reduce)
+                  if dims_to_reduce else chi2_grid.copy())
+        if dim1 > dim2:
+            result = result.T
+        return result
+
+    def _marginalize_1d(self, chi2_grid, dim):
+        """Marginalize chi2 grid to 1D by taking minimum along other axes.
+
+        Parameters
+        ----------
+        chi2_grid : np.ndarray
+        dim : int
+
+        Returns
+        -------
+        np.ndarray
+        """
+        dims_to_reduce = tuple(d for d in range(chi2_grid.ndim) if d != dim)
+        return (np.nanmin(chi2_grid, axis=dims_to_reduce)
+                if dims_to_reduce else chi2_grid.copy().ravel())
+
+    def _plot_heatmap_2d(self, ax, chi2_2d, param_arrays, names):
+        """Plot 2D chi2 heatmap.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+        chi2_2d : np.ndarray
+        param_arrays : tuple of np.ndarray
+        names : tuple of str
+
+        Returns
+        -------
+        matplotlib.image.AxesImage
+        """
+        arr1, arr2 = param_arrays
+        finite = chi2_2d[np.isfinite(chi2_2d)]
+        vmin = finite.min() if len(finite) else 0
+        vmax = np.percentile(finite, 95) if len(finite) else 1
+        im = ax.imshow(chi2_2d.T, origin='lower', aspect='auto',
+                       extent=[arr1[0], arr1[-1], arr2[0], arr2[-1]],
+                       vmin=vmin, vmax=vmax, cmap='viridis')
+        ax.set_xlabel(names[0])
+        ax.set_ylabel(names[1])
+        return im
+
+    def _mark_minima_2d(self, ax, minima_list, name1, name2):
+        """Mark local minima on a 2D plot.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+        minima_list : list of tuple
+        name1 : str
+        name2 : str
+        """
+        for chi2, params, level in minima_list:
+            ax.plot(params[name1], params[name2], 'kx',
+                    markersize=10, markeredgewidth=2)
+
+    def _plot_1d_projection(self, ax, chi2_1d, param_array, name, minima_list):
+        """Plot 1D marginalized chi2 projection.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+        chi2_1d : np.ndarray
+        param_array : np.ndarray
+        name : str
+        minima_list : list of tuple
+        """
+        ax.plot(param_array, chi2_1d)
+        chi2_min = np.nanmin(chi2_1d)
+        ax.axhline(chi2_min + 1.0, color='r', linestyle='--',
+                   label=r'$\Delta\chi^2=1$')
+        for chi2, params, level in minima_list:
+            ax.axvline(params[name], color='k', linestyle=':')
+        ax.set_xlabel(name)
+        ax.set_ylabel(r'$\chi^2$')
+        ax.legend(fontsize=8)
+
+    def _plot_2d_projections(self, axes, chi2_grid, metadata, minima_list):
+        """Plot all 2D chi2 projections.
+
+        Parameters
+        ----------
+        axes : list of matplotlib.axes.Axes
+        chi2_grid : np.ndarray
+        metadata : dict
+        minima_list : list of tuple
+        """
+        import matplotlib.pyplot as plt
+        from itertools import combinations
+        param_names = metadata['param_names']
+        param_arrays = metadata['param_arrays']
+        for ax, (dim1, dim2) in zip(
+                axes, combinations(range(len(param_names)), 2)):
+            chi2_2d = self._marginalize_2d(chi2_grid, dim1, dim2)
+            arrays = (param_arrays[param_names[dim1]],
+                      param_arrays[param_names[dim2]])
+            im = self._plot_heatmap_2d(
+                ax, chi2_2d, arrays,
+                (param_names[dim1], param_names[dim2]))
+            self._mark_minima_2d(
+                ax, minima_list, param_names[dim1], param_names[dim2])
+            plt.colorbar(im, ax=ax)
+
+    def _plot_1d_projections(self, axes, chi2_grid, metadata, minima_list):
+        """Plot all 1D chi2 projections.
+
+        Parameters
+        ----------
+        axes : list of matplotlib.axes.Axes
+        chi2_grid : np.ndarray
+        metadata : dict
+        minima_list : list of tuple
+        """
+        param_names = metadata['param_names']
+        param_arrays = metadata['param_arrays']
+        for ax, (dim, name) in zip(axes, enumerate(param_names)):
+            chi2_1d = self._marginalize_1d(chi2_grid, dim)
+            self._plot_1d_projection(
+                ax, chi2_1d, param_arrays[name], name, minima_list)
+
+    def _create_figure(self, n_2d, n_1d):
+        """Create figure and axes layout.
+
+        Parameters
+        ----------
+        n_2d : int
+        n_1d : int
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        axes_2d : list of matplotlib.axes.Axes
+        axes_1d : list of matplotlib.axes.Axes
+        """
+        import matplotlib.pyplot as plt
+        n_cols = max(n_2d, n_1d, 1)
+        n_rows = 1 if n_2d == 0 else 2
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                  figsize=(4 * n_cols, 4 * n_rows),
+                                  squeeze=False)
+        for ax in axes.ravel():
+            ax.set_visible(False)
+        axes_2d = list(axes[0, :n_2d]) if n_2d > 0 else []
+        axes_1d = list(axes[-1, :n_1d])
+        for ax in axes_2d + axes_1d:
+            ax.set_visible(True)
+        return fig, axes_2d, axes_1d
+
+    # ----------------------------------------------------------------
+    # Plotting entry point
+    # ----------------------------------------------------------------
+
+    def plot(self):
+        """Plot chi2 grid search results.
+
+        Shows 2D chi2 projections for all parameter pairs,
+        marginalized over remaining parameters. Shows 1D marginalized
+        projections along each axis. Marks all local minima.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        import matplotlib.pyplot as plt
+        if self.results_history is None:
+            raise ValueError("No results. Run grid search first.")
+        level_data = self.results_history[0]
+        chi2_grid = level_data['chi2_grid']
+        metadata = level_data['metadata']
+        n = len(metadata['param_names'])
+        minima_list = self.find_local_minima()
+        n_2d = n * (n - 1) // 2
+        fig, axes_2d, axes_1d = self._create_figure(n_2d, n)
+        if n_2d > 0:
+            self._plot_2d_projections(
+                axes_2d, chi2_grid, metadata, minima_list)
+        self._plot_1d_projections(
+            axes_1d, chi2_grid, metadata, minima_list)
+        plt.tight_layout()
+        return fig
+
+    # ----------------------------------------------------------------
+    # Convenience properties
+    # ----------------------------------------------------------------
 
     @property
     def best(self):
+        """Best minimum dict from self.minima, or best coarse grid point.
+
+        Returns
+        -------
+        dict or None
         """
-        Find the grid point with minimum chi2.
-
-        Returns:
-            best: *dict*
-                The result dict for the best-fitting grid point
-        """
-        if self._best is None and self.results is not None:
-            # Filter out any results without valid chi2
-            valid_results = [r for r in self.results if
-                             'chi2' in r and np.isfinite(r['chi2'])]
-
-            if len(valid_results) == 0:
-                raise ValueError("No valid results found (all chi2 are NaN or missing)")
-
-            # Find minimum chi2
-            self._best = min(valid_results, key=lambda x: x['chi2'])
-
-        return self._best
-
-    # Utility methods for grid generation
-
-    def _linear_grid_1d(self, param_min, param_max, step):
-        """
-        Generate 1D linear grid.
-
-        Parameters:
-            param_min: *float*
-                Minimum parameter value
-            param_max: *float*
-                Maximum parameter value
-            step: *float*
-                Step size
-
-        Returns:
-            grid: *np.ndarray*
-                1D array of parameter values
-        """
-        n_steps = int(np.round((param_max - param_min) / step)) + 1
-
-        # Use linspace for exact spacing without accumulation errors
-        grid = np.linspace(param_min, param_max, n_steps)
-        # Round to eliminate floating-point errors
-        # Determine decimal places based on step size
-        decimal_places = max(0, -int(np.floor(np.log10(abs(step)))) + 1)
-        grid = np.round(grid, decimals=decimal_places)
-        return grid
-
-
-    def _log_grid_1d(self, param_min, param_max, n_steps):
-        """
-        Generate 1D logarithmic grid.
-
-        Parameters:
-            param_min: *float*
-                Minimum parameter value (must be > 0)
-            param_max: *float*
-                Maximum parameter value
-            n_steps: *int*
-                Number of grid points
-
-        Returns:
-            grid: *np.ndarray*
-                1D array of parameter values
-        """
-        if param_min <= 0 or param_max <= 0:
-            raise ValueError("Log grid requires positive values")
-        return np.logspace(np.log10(param_min), np.log10(param_max), n_steps)
-
-    def _make_rect_grid(self, param_arrays, param_names):
-        """
-        Create rectangular grid from 1D parameter arrays.
-
-        Parameters:
-            param_arrays: *list of np.ndarray*
-                1D arrays for each parameter
-            param_names: *list of str*
-                Names for each parameter
-
-        Returns:
-            grid: *list of dict*
-                All combinations of parameters
-        """
-        # Use meshgrid to get all combinations
-        meshes = np.meshgrid(*param_arrays, indexing='ij')
-
-        # Flatten and create list of dicts
-        grid = []
-        for i in range(meshes[0].size):
-            point = {}
-            for name, mesh in zip(param_names, meshes):
-                point[name] = mesh.flat[i]
-            grid.append(point)
-
-        return grid
+        if self.minima:
+            return min(self.minima, key=lambda m: m['chi2'])
+        if self.results_history is None:
+            return None
+        chi2_grid = self.results_history[0]['chi2_grid']
+        result_grid = self.results_history[0]['result_grid']
+        idx = np.unravel_index(np.nanargmin(chi2_grid), chi2_grid.shape)
+        return result_grid[idx]
 
 
 class ParallaxGridSearch(BaseRectGridSearch):
