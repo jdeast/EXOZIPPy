@@ -1,9 +1,10 @@
 import numpy as np
 from abc import ABC, abstractmethod
 import datetime
-import matplotlib.pyplot as plt
-from itertools import product
 from scipy.ndimage import minimum_filter, label
+import matplotlib.pyplot as plt
+from itertools import combinations
+from scipy import stats
 
 import MulensModel
 import sfit_minimizer
@@ -2212,7 +2213,11 @@ class BaseRectGridSearch(ABC):
                 if dims_to_reduce else chi2_grid.copy().ravel())
 
     def _plot_heatmap_2d(self, ax, chi2_2d, param_arrays, names):
-        """Plot 2D chi2 heatmap.
+        """Plot 2D n-sigma heatmap (converted from chi2, 2 DOF).
+
+        Converts delta-chi2 to a Gaussian-equivalent number of sigmas via:
+            p = chi2.sf(delta_chi2, df=2)
+            n_sigma = norm.isf(p / 2)
 
         Parameters
         ----------
@@ -2225,13 +2230,25 @@ class BaseRectGridSearch(ABC):
         -------
         matplotlib.image.AxesImage
         """
+
         arr1, arr2 = param_arrays
-        finite = chi2_2d[np.isfinite(chi2_2d)]
-        vmin = finite.min() if len(finite) else 0
-        vmax = np.percentile(finite, 95) if len(finite) else 1
-        im = ax.imshow(chi2_2d.T, origin='lower', aspect='auto',
+
+        # Shift to delta-chi2 relative to the 2D minimum
+        finite_mask = np.isfinite(chi2_2d)
+        chi2_min = chi2_2d[finite_mask].min() if finite_mask.any() else 0.0
+        delta_chi2 = chi2_2d - chi2_min
+
+        # Convert to n-sigma (2 DOF): delta-chi2 = 2.30 -> 1σ, 6.18 -> 2σ, 11.83 -> 3σ
+        with np.errstate(invalid='ignore'):
+            p_values = stats.chi2.sf(delta_chi2, df=2)
+            sigma_grid = stats.norm.isf(p_values / 2)
+
+        finite_sigma = sigma_grid[np.isfinite(sigma_grid)]
+        vmax = np.percentile(finite_sigma, 95) if len(finite_sigma) else 5.0
+
+        im = ax.imshow(sigma_grid.T, origin='lower', aspect='auto',
                        extent=[arr1[0], arr1[-1], arr2[0], arr2[-1]],
-                       vmin=vmin, vmax=vmax, cmap='viridis')
+                       vmin=0, vmax=vmax, cmap='viridis')
         ax.set_xlabel(names[0])
         ax.set_ylabel(names[1])
         return im
@@ -2272,7 +2289,7 @@ class BaseRectGridSearch(ABC):
         ax.legend(fontsize=8)
 
     def _plot_2d_projections(self, axes, chi2_grid, metadata, minima_list):
-        """Plot all 2D chi2 projections.
+        """Plot all 2D chi2 projections as n-sigma maps.
 
         Parameters
         ----------
@@ -2281,8 +2298,7 @@ class BaseRectGridSearch(ABC):
         metadata : dict
         minima_list : list of tuple
         """
-        import matplotlib.pyplot as plt
-        from itertools import combinations
+
         param_names = metadata['param_names']
         param_arrays = metadata['param_arrays']
         for ax, (dim1, dim2) in zip(
@@ -2295,7 +2311,8 @@ class BaseRectGridSearch(ABC):
                 (param_names[dim1], param_names[dim2]))
             self._mark_minima_2d(
                 ax, minima_list, param_names[dim1], param_names[dim2])
-            plt.colorbar(im, ax=ax)
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label(r'$n_\sigma$')
 
     def _plot_1d_projections(self, axes, chi2_grid, metadata, minima_list):
         """Plot all 1D chi2 projections.
@@ -2396,6 +2413,382 @@ class BaseRectGridSearch(ABC):
         idx = np.unravel_index(np.nanargmin(chi2_grid), chi2_grid.shape)
         return result_grid[idx]
 
+    # ----------------------------------------------------------------
+    # Serialization helpers
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _make_json_serializable(obj):
+        """Recursively convert obj to a JSON-serializable structure.
+
+        - np.ndarray -> nested list
+        - np.integer -> int
+        - float / np.floating NaN or inf -> None
+        - np.bool_ -> bool
+        - tuple -> list
+        - dict and list: recurse
+
+        Parameters
+        ----------
+        obj : any
+
+        Returns
+        -------
+        JSON-serializable object
+        """
+        import math
+        if obj is None:
+            return None
+        if isinstance(obj, (bool, np.bool_)):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, int):
+            return obj
+        if isinstance(obj, (float, np.floating)):
+            v = float(obj)
+            return None if (math.isnan(v) or math.isinf(v)) else v
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, np.ndarray):
+            return BaseRectGridSearch._make_json_serializable(obj.tolist())
+        if isinstance(obj, dict):
+            return {k: BaseRectGridSearch._make_json_serializable(v)
+                    for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [BaseRectGridSearch._make_json_serializable(x)
+                    for x in obj]
+        return obj
+
+    @staticmethod
+    def _flatten_nested_list(nested):
+        """Flatten a nested list to a flat list.
+
+        Recurses into lists only, not dicts or other types.
+        Grid-structure lists are flattened; dict leaf elements
+        are appended whole.
+
+        Parameters
+        ----------
+        nested : list
+
+        Returns
+        -------
+        list
+        """
+        result = []
+
+        def _rec(obj):
+            if isinstance(obj, list):
+                for item in obj:
+                    _rec(item)
+            else:
+                result.append(obj)
+
+        _rec(nested)
+        return result
+
+    @staticmethod
+    def _serialize_level_data(level_data):
+        """Serialize one level_data dict to JSON-serializable form.
+
+        Parameters
+        ----------
+        level_data : dict
+            Keys: 'chi2_grid', 'result_grid', 'metadata'
+
+        Returns
+        -------
+        dict
+        """
+        mjs = BaseRectGridSearch._make_json_serializable
+        metadata = level_data['metadata']
+        return {
+            'chi2_grid': mjs(level_data['chi2_grid']),
+            'result_grid': mjs(level_data['result_grid']),
+            'metadata': {
+                'param_names': metadata['param_names'],
+                'param_arrays': {k: mjs(v)
+                                 for k, v in
+                                 metadata['param_arrays'].items()},
+                'grid_shape': list(metadata['grid_shape']),
+                'steps': dict(metadata['steps'])
+            }
+        }
+
+    @staticmethod
+    def _deserialize_level_data(data):
+        """Restore one level_data dict from JSON-deserialized form.
+
+        null in chi2_grid -> NaN.
+        null elements in result_grid -> None.
+        null chi2 inside result dicts -> NaN.
+
+        Parameters
+        ----------
+        data : dict
+
+        Returns
+        -------
+        dict
+            Keys: 'chi2_grid', 'result_grid', 'metadata'
+        """
+        metadata = data['metadata']
+        grid_shape = tuple(metadata['grid_shape'])
+        flat = BaseRectGridSearch._flatten_nested_list
+
+        # chi2_grid: null -> NaN
+        flat_chi2 = flat(data['chi2_grid'])
+        chi2_grid = np.array(
+            [np.nan if x is None else float(x) for x in flat_chi2]
+        ).reshape(grid_shape)
+
+        # result_grid: null elements -> None, null chi2 inside dicts -> NaN
+        flat_results = flat(data['result_grid'])
+        result_grid = np.empty(len(flat_results), dtype=object)
+        for i, item in enumerate(flat_results):
+            if item is None:
+                result_grid[i] = None
+            else:
+                d = dict(item)
+                if d.get('chi2') is None:
+                    d['chi2'] = np.nan
+                result_grid[i] = d
+        result_grid = result_grid.reshape(grid_shape)
+
+        param_arrays = {k: np.array(v)
+                        for k, v in metadata['param_arrays'].items()}
+
+        return {
+            'chi2_grid': chi2_grid,
+            'result_grid': result_grid,
+            'metadata': {
+                'param_names': metadata['param_names'],
+                'param_arrays': param_arrays,
+                'grid_shape': grid_shape,
+                'steps': metadata['steps']
+            }
+        }
+
+    @staticmethod
+    def _serialize_minimum(minimum):
+        """Serialize one minimum dict. Drops parent and children.
+
+        Parameters
+        ----------
+        minimum : dict
+
+        Returns
+        -------
+        dict
+        """
+        mjs = BaseRectGridSearch._make_json_serializable
+        return {
+            'indices': list(minimum['indices']),
+            'chi2': mjs(minimum['chi2']),
+            'params': mjs(minimum['params']),
+            'level': int(minimum['level']),
+            'refinement_history': [
+                BaseRectGridSearch._serialize_level_data(ld)
+                for ld in minimum['refinement_history']
+            ]
+        }
+
+    @staticmethod
+    def _deserialize_minimum(data):
+        """Restore one minimum dict. parent=None, children=[].
+
+        Parameters
+        ----------
+        data : dict
+
+        Returns
+        -------
+        dict
+        """
+        return {
+            'indices': tuple(data['indices']),
+            'chi2': (np.nan if data['chi2'] is None
+                     else float(data['chi2'])),
+            'params': data['params'],
+            'level': data['level'],
+            'parent': None,
+            'children': [],
+            'refinement_history': [
+                BaseRectGridSearch._deserialize_level_data(ld)
+                for ld in data['refinement_history']
+            ]
+        }
+
+    # ----------------------------------------------------------------
+    # Save / load
+    # ----------------------------------------------------------------
+
+    def _get_base_save_state(self):
+        """Gather base class state for saving.
+
+        Returns
+        -------
+        dict
+        """
+        mjs = self._make_json_serializable
+        return {
+            'grid_params': mjs(self.grid_params),
+            'evaluation_order': self.evaluation_order,
+            'start_point': mjs(self.start_point),
+            'use_nearest_neighbor_init': bool(self.use_nearest_neighbor_init),
+            'max_refinements': int(self.max_refinements),
+            'max_expansions': int(self.max_expansions),
+            'verbose': bool(self.verbose),
+            'results_history': (
+                [self._serialize_level_data(ld)
+                 for ld in self.results_history]
+                if self.results_history is not None else None
+            ),
+            'minima': (
+                [self._serialize_minimum(m) for m in self.minima]
+                if self.minima is not None else None
+            )
+        }
+
+    def _get_extra_save_state(self):
+        """Gather child-class state for saving.
+
+        Override in child classes to add class-specific attributes.
+
+        Returns
+        -------
+        dict
+        """
+        return {}
+
+    def save_results(self, filepath):
+        """Save grid search results to a JSON file.
+
+        All refinement levels and minima are saved. datasets is not
+        saved and must be supplied again on load_results() if needed.
+        parent and children links in minima are dropped; level
+        implicitly encodes the hierarchy.
+
+        Parameters
+        ----------
+        filepath : str or Path
+
+        Raises
+        ------
+        ValueError
+            If no results exist.
+        """
+        import json
+        if self.results_history is None:
+            raise ValueError("No results to save. Run grid search first.")
+
+        state = {
+            'class': type(self).__name__,
+            'version': 1,
+            'base': self._get_base_save_state(),
+            'extra': self._get_extra_save_state()
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(state, f, indent=2)
+
+    @classmethod
+    def _restore_base_state(cls, instance, base_data):
+        """Restore base class attributes from deserialized JSON.
+
+        Parameters
+        ----------
+        instance : BaseRectGridSearch
+        base_data : dict
+        """
+        instance.grid_params = base_data['grid_params']
+        instance.evaluation_order = base_data['evaluation_order']
+        instance.start_point = base_data['start_point']
+        instance.use_nearest_neighbor_init = (
+            base_data['use_nearest_neighbor_init'])
+        instance.max_refinements = base_data['max_refinements']
+        instance.max_expansions = base_data['max_expansions']
+        instance.verbose = base_data['verbose']
+
+        rh = base_data.get('results_history')
+        instance.results_history = (
+            [cls._deserialize_level_data(ld) for ld in rh]
+            if rh is not None else None
+        )
+
+        minima_data = base_data.get('minima')
+        instance.minima = (
+            [cls._deserialize_minimum(m) for m in minima_data]
+            if minima_data is not None else None
+        )
+
+    @classmethod
+    def _restore_extra_state(cls, instance, extra_data):
+        """Restore child-class attributes from deserialized JSON.
+
+        Override in child classes to restore class-specific attributes.
+
+        Parameters
+        ----------
+        instance : BaseRectGridSearch
+        extra_data : dict
+        """
+        pass
+
+    @classmethod
+    def load_results(cls, filepath, datasets=None):
+        """Load grid search results from a JSON file.
+
+        Restores results_history, minima, grid_params, and all run
+        parameters. datasets is not restored and must be supplied here
+        if the object will be used for further fitting.
+
+        Parameters
+        ----------
+        filepath : str or Path
+        datasets : list or None, optional
+            Data to fit. Required before running or re-fitting.
+
+        Returns
+        -------
+        instance of cls
+
+        Warns
+        -----
+        UserWarning
+            If the saved class name does not match cls.__name__.
+        UserWarning
+            If the file version is not 1.
+        """
+        import json
+        import warnings
+
+        with open(filepath, 'r') as f:
+            state = json.load(f)
+
+        saved_class = state.get('class', 'unknown')
+        if saved_class != cls.__name__:
+            warnings.warn(
+                f"File was saved by '{saved_class}' but is being "
+                f"loaded into '{cls.__name__}'."
+            )
+
+        if state.get('version', 1) != 1:
+            warnings.warn(
+                f"File version {state.get('version')} may not be "
+                f"compatible with the current code (version 1)."
+            )
+
+        instance = object.__new__(cls)
+        instance._point_cache = {}
+        instance.datasets = datasets
+
+        cls._restore_base_state(instance, state['base'])
+        cls._restore_extra_state(instance, state.get('extra', {}))
+
+        return instance
+
 
 class ParallaxGridSearch(BaseRectGridSearch):
     """
@@ -2405,226 +2798,97 @@ class ParallaxGridSearch(BaseRectGridSearch):
     parameters and returns chi2 + fit results.
     """
 
-    def __init__(self, datasets, static_params, grid_params=None,
-                 pi_E_E_min=-0.7, pi_E_E_max=0.7, pi_E_E_step=0.05,
-                 pi_E_N_min=-1.0, pi_E_N_max=1.0, pi_E_N_step=0.1,
-                 fitter_kwargs=None, skip_optimization=False, verbose=False):
+    def __init__(self, static_params, datasets=None, grid_params=None,
+                 evaluation_order='outward', start_point=None,
+                 fitter_kwargs=None, skip_optimization=False,
+                 verbose=False, **kwargs):
         """
-        Parameters:
-            datasets: MulensData object(s) to fit
-            static_params: *dict*
-                Dictionary of fixed model parameters (e.g., 'XSPL static' params)
-                Should NOT include pi_E_E or pi_E_N
-            grid_params: *dict* or None
-                If provided, specifies all grid parameters and takes precedence
-                over individual parameters. Expected keys:
-                    'pi_E_E_min', 'pi_E_E_max', 'pi_E_E_step',
-                    'pi_E_N_min', 'pi_E_N_max', 'pi_E_N_step'
-            pi_E_E_min, pi_E_E_max, pi_E_E_step: *float*
-                Grid definition for pi_E_E (East component).
-                Ignored if grid_params is provided.
-            pi_E_N_min, pi_E_N_max, pi_E_N_step: *float*
-                Grid definition for pi_E_N (North component).
-                Ignored if grid_params is provided.
-            fitter_kwargs: *dict* or None
-                Additional keyword arguments to pass to SFitFitter
-            skip_optimization : bool, optional
-                If True, calculate chi2 without optimization (much faster).
-                If False, optimize parameters at each grid point. Default is False.
-            verbose: *bool*
-                If True, print progress information
+        Parameters
+        ----------
+        static_params : dict
+            Fixed model parameters for the fit. Keys are parameter names,
+            values are parameter values. Should NOT include pi_E_E or pi_E_N.
+            Also defines which parameters are free to fit when
+            skip_optimization=False.
+        datasets : list or None, optional
+            MulensData object(s) to fit. Required before running.
+        grid_params : dict or None, optional
+            Grid specification: {'pi_E_E': [min, max, step],
+            'pi_E_N': [min, max, step]}.
+        evaluation_order : str, optional
+            'standard' or 'outward'. Default 'outward'.
+        start_point : dict or None, optional
+            Starting point for 'outward' evaluation. Default
+            {'pi_E_E': 0.0, 'pi_E_N': 0.0}.
+        fitter_kwargs : dict or None, optional
+            Additional keyword arguments to pass to SFitFitter.
+        skip_optimization : bool, optional
+            If True, calculate chi2 without optimization. Default False.
+        verbose : bool, optional
+            If True, print progress information. Default False.
+        **kwargs
+            Additional keyword arguments passed to BaseRectGridSearch
+            (e.g. use_nearest_neighbor_init, max_refinements, max_expansions).
         """
-        super().__init__(datasets=datasets, skip_optimization=skip_optimization, verbose=verbose)
+        if start_point is None:
+            start_point = {'pi_E_E': 0.0, 'pi_E_N': 0.0}
 
+        super().__init__(
+            grid_params=grid_params,
+            datasets=datasets,
+            evaluation_order=evaluation_order,
+            start_point=start_point,
+            verbose=verbose,
+            **kwargs
+        )
         self.static_params = static_params.copy()
-        self.current_params = static_params.copy()  # Working copy
-
-        # If grid_params dict is provided, use it; otherwise build from individual params
-        if grid_params is not None:
-            self.grid_params = grid_params.copy()
-            # Validate required keys
-            required_keys = ['pi_E_E_min', 'pi_E_E_max', 'pi_E_E_step',
-                             'pi_E_N_min', 'pi_E_N_max', 'pi_E_N_step']
-            missing_keys = [k for k in required_keys if k not in self.grid_params]
-            if missing_keys:
-                raise ValueError(f"grid_params missing required keys: {missing_keys}")
-        else:
-            self.grid_params = {
-                'pi_E_E_min': pi_E_E_min,
-                'pi_E_E_max': pi_E_E_max,
-                'pi_E_E_step': pi_E_E_step,
-                'pi_E_N_min': pi_E_N_min,
-                'pi_E_N_max': pi_E_N_max,
-                'pi_E_N_step': pi_E_N_step,
-            }
-
+        self.parameters_to_fit = [] if skip_optimization else list(static_params.keys())
         self.fitter_kwargs = fitter_kwargs if fitter_kwargs is not None else {}
-
-    def _setup_grid(self):
-        """Set up rectangular grid over pi_E_E and pi_E_N"""
-        pi_E_E_array = self._linear_grid_1d(
-            self.grid_params['pi_E_E_min'],
-            self.grid_params['pi_E_E_max'],
-            self.grid_params['pi_E_E_step']
-        )
-
-        pi_E_N_array = self._linear_grid_1d(
-            self.grid_params['pi_E_N_min'],
-            self.grid_params['pi_E_N_max'],
-            self.grid_params['pi_E_N_step']
-        )
-
-        self._grid = self._make_rect_grid(
-            [pi_E_E_array, pi_E_N_array],
-            ['pi_E_E', 'pi_E_N']
-        )
-
-    def run(self):
-        """
-        Execute the grid search by iterating over all grid points in spiral order.
-
-        Starts from the grid point closest to (0, 0) and spirals outward,
-        using the best-fit parameters from the previous point as the starting
-        point for each new fit.
-        """
-        if self._grid is None:
-            self._setup_grid()
-
-        # Reorder grid in spiral pattern starting from (0, 0)
-        spiral_grid = self._spiral_order_grid()
-
-        results = []
-        n_total = len(spiral_grid)
-
-        for i, grid_params in enumerate(spiral_grid):
-            if self.verbose:
-                print(f"Grid point {i + 1}/{n_total}: {grid_params}")
-
-            result = self._fit_grid_point(grid_params)
-
-            # Merge grid parameters with fit results
-            full_result = {**grid_params, **result}
-            results.append(full_result)
-
-            if self.verbose:
-                print(f"  chi2 = {result.get('chi2', 'N/A')}")
-
-        self.results = results
-
-    def _spiral_order_grid(self):
-        """
-        Reorder grid points in counter-clockwise rectangular spiral from (0, 0).
-
-        Returns
-        -------
-        list of dict
-            Grid points ordered in counter-clockwise spiral starting from
-            the point closest to (0, 0)
-        """
-        # Organize grid into 2D array
-        pi_E_E_vals = sorted(set(p['pi_E_E'] for p in self._grid))
-        pi_E_N_vals = sorted(set(p['pi_E_N'] for p in self._grid))
-
-        # Create mapping from (i, j) to grid point
-        grid_2d = {}
-        for point in self._grid:
-            i = pi_E_E_vals.index(point['pi_E_E'])
-            j = pi_E_N_vals.index(point['pi_E_N'])
-            grid_2d[(i, j)] = point
-
-        # Find starting point closest to (0, 0)
-        min_dist = float('inf')
-        start_i, start_j = 0, 0
-        for (i, j), point in grid_2d.items():
-            dist = np.sqrt(point['pi_E_E'] ** 2 + point['pi_E_N'] ** 2)
-            if dist < min_dist:
-                min_dist = dist
-                start_i, start_j = i, j
-
-        ni = len(pi_E_E_vals)
-        nj = len(pi_E_N_vals)
-
-        spiral_order = [(start_i, start_j)]
-        visited = {(start_i, start_j)}
-
-        # Spiral outward layer by layer (counter-clockwise)
-        layer = 1
-        while len(visited) < len(grid_2d):
-            # Define bounds for this layer
-            i_min = max(0, start_i - layer)
-            i_max = min(ni - 1, start_i + layer)
-            j_min = max(0, start_j - layer)
-            j_max = min(nj - 1, start_j + layer)
-
-            # Bottom-left corner, then up left edge
-            for j in range(j_min, j_max + 1):
-                i, j_idx = i_min, j
-                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
-                    spiral_order.append((i, j_idx))
-                    visited.add((i, j_idx))
-
-            # Top edge (left to right), skip first point (already added)
-            for i in range(i_min + 1, i_max + 1):
-                j_idx = j_max
-                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
-                    spiral_order.append((i, j_idx))
-                    visited.add((i, j_idx))
-
-            # Right edge (top to bottom), skip first point
-            for j in range(j_max - 1, j_min - 1, -1):
-                i = i_max
-                if (i, j) not in visited and (i, j) in grid_2d:
-                    spiral_order.append((i, j))
-                    visited.add((i, j))
-
-            # Bottom edge (right to left), skip corners
-            for i in range(i_max - 1, i_min, -1):
-                j_idx = j_min
-                if (i, j_idx) not in visited and (i, j_idx) in grid_2d:
-                    spiral_order.append((i, j_idx))
-                    visited.add((i, j_idx))
-
-            layer += 1
-
-        return [grid_2d[idx] for idx in spiral_order]
+        self.skip_optimization = skip_optimization
 
     def _fit_grid_point(self, grid_params):
-        """
-        Evaluate or optimize one grid point.
-
-        If skip_optimization=True, calculates chi2 directly with fixed parameters.
-        Otherwise, uses self.current_params as the starting point and optimizes.
+        """Fit model at one grid point.
 
         Parameters
         ----------
         grid_params : dict
-            Contains 'pi_E_E' and 'pi_E_N' for this grid point
+            Must contain 'pi_E_E' and 'pi_E_N'. May contain '_init_params'
+            for nearest-neighbor initialization.
 
         Returns
         -------
         dict
-            Contains 'chi2', 'params' (best-fit or input parameters),
-            'success', and any other output
+            Contains 'chi2', 'params', and 'success'.
         """
-        # Combine current params with this grid point's parallax values
-        model_params = self.current_params.copy()
+        if self.datasets is None:
+            raise ValueError("datasets must be set before running.")
+
+        # Extract initialization params if provided by base class
+        init_params = grid_params.get('_init_params', None)
+
+        # Build model params: use init_params if available,
+        # otherwise start from static_params. Then fix grid point values.
+        if init_params is not None:
+            model_params = init_params.copy()
+        else:
+            model_params = self.static_params.copy()
+
         model_params['pi_E_E'] = grid_params['pi_E_E']
         model_params['pi_E_N'] = grid_params['pi_E_N']
 
+        # TODO: investigate whether skip_optimization and non-skip branches
+        # can be unified (differ in fitter.run() call and chi2 retrieval method)
         if self.skip_optimization:
-            # Just calculate chi2 without optimization
             try:
-                # Create fitter but don't run optimization
                 fitter = mmexo.fitters.SFitFitter(
                     initial_model_params=model_params,
                     datasets=self.datasets,
-                    parameters_to_fit=[],  # Empty list - no optimization
+                    parameters_to_fit=self.parameters_to_fit,
                     **self.fitter_kwargs
                 )
                 event = fitter.get_event()
                 chi2 = event.get_chi2()
-
-                result = {
+                return {
                     'chi2': chi2,
                     'params': model_params,
                     'success': True,
@@ -2632,512 +2896,69 @@ class ParallaxGridSearch(BaseRectGridSearch):
             except Exception as e:
                 if self.verbose:
                     print(f"  Chi2 calculation failed: {e}")
-
-                result = {
+                return {
                     'chi2': np.nan,
                     'params': None,
                     'success': False,
                     'error': str(e)
                 }
         else:
-            # Optimize parameters
-            parameters_to_fit = list(self.static_params.keys())
-
             try:
                 fitter = mmexo.fitters.SFitFitter(
                     initial_model_params=model_params,
                     datasets=self.datasets,
-                    parameters_to_fit=parameters_to_fit,
+                    parameters_to_fit=self.parameters_to_fit,
                     **self.fitter_kwargs
                 )
                 fitter.run()
-
                 params = {key: value for key, value in fitter.best.items()}
-                params.pop("chi2", None)
-                result = {
+                params.pop('chi2', None)
+                # Ensure grid parameters are always present in params
+                params['pi_E_E'] = grid_params['pi_E_E']
+                params['pi_E_N'] = grid_params['pi_E_N']
+                return {
                     'chi2': fitter.best['chi2'],
                     'params': params,
                     'success': fitter.results.success,
                 }
-
-                # Update current_params with best fit for next iteration
-                if result['success'] and result['params'] is not None:
-                    self.current_params.update(result['params'])
-
             except Exception as e:
                 if self.verbose:
                     print(f"  Fit failed: {e}")
-
-                result = {
+                return {
                     'chi2': np.nan,
                     'params': None,
                     'success': False,
                     'error': str(e)
                 }
 
-        return result
-
-    def run_with_refinement(self, chi2_threshold=200, min_step_size=0.005, radius_steps=2):
-        """
-        Execute grid search with iterative refinement around minima.
-
-        Prioritizes global minimum - refines it completely before processing other minima.
-
-        Workflow:
-        1. Run initial grid
-        2. Find global minimum
-        3. If has incomplete neighbors: extend edges at current level
-        4. Else if can refine further: refine to next level
-        5. Else: global min complete, process other minima within chi2_threshold
-        6. Repeat until all minima complete or step size < min_step_size
-
-        Parameters
-        ----------
-        chi2_threshold : float, optional
-            After global min complete, refine other minima within this chi2. Default is 200.
-        min_step_size : float, optional
-            Stop refining when step size reaches this value. Default is 0.005.
-        radius_steps : int, optional
-            Number of steps (at current resolution) to extend around each minimum.
-            Default is 2.
-        """
-        # Run initial grid
-        self.run()
-
-        # Store min_step_size for use in find_local_minima()
-        self.min_step_size = min_step_size
-
-        # Add refinement_level to initial results
-        for result in self.results:
-            result['refinement_level'] = 0
-
-        # Get parameter names and initial step sizes
-        param_names = []
-        original_steps = {}
-        for key in self.grid_params:
-            if key.endswith('_step'):
-                param_name = key[:-5]
-                param_names.append(param_name)
-                original_steps[param_name] = self.grid_params[key]
-
-        # Track evaluated points to avoid duplicates
-        evaluated_points = set()
-        for result in self.results:
-            point = tuple(round(result[param], 10) for param in param_names)
-            evaluated_points.add(point)
-
-        # Tolerance for neighbor matching
-        tolerance = min_step_size / 10
-
-        # Iterative refinement
-        iteration = 0
-        global_min_complete = False
-
-        while True:
-            iteration += 1
-
-            if self.verbose:
-                print(f"\nRefinement iteration {iteration}")
-
-            # Filter successful results
-            valid_results = [r for r in self.results if r.get('success', False)]
-
-            # Find local minima
-            local_minima = self.find_local_minima()
-
-            if len(local_minima) == 0:
-                if self.verbose:
-                    print("No local minima found, stopping refinement")
-                break
-
-            min_chi2 = local_minima[0][0]
-
-            # Determine which minima to process
-            if not global_min_complete:
-                # Focus on global minimum only
-                minima_to_process = [local_minima[0]]
-                if self.verbose:
-                    print(f"Processing global minimum: chi2={min_chi2:.2f}")
-            else:
-                # Global min done, process others within threshold
-                other_minima = [(chi2, params) for chi2, params in local_minima[1:]
-                                if np.sqrt(chi2 - min_chi2) < np.sqrt(chi2_threshold)]
-
-                if len(other_minima) == 0:
-                    if self.verbose:
-                        print("No other minima within threshold, refinement complete")
-                    break
-
-                minima_to_process = other_minima
-                if self.verbose:
-                    print(f"Processing {len(other_minima)} other minima within threshold")
-
-            # Check which minima need edge extension vs refinement
-            needs_edge_extension = []
-            can_refine = []
-            already_at_finest = []
-
-            for chi2, params in minima_to_process:
-                # Get this point's refinement level and step size
-                refinement_level = None
-                for r in valid_results:
-                    if all(abs(r[param] - params[param]) < tolerance for param in param_names):
-                        refinement_level = r.get('refinement_level', 0)
-                        break
-
-                if refinement_level is None:
-                    continue  # Shouldn't happen
-
-                current_point_steps = {param: original_steps[param] / (2 ** refinement_level)
-                                       for param in param_names}
-
-                # Check if has incomplete neighbors at current level
-                if self._has_incomplete_neighbors(params, current_point_steps,
-                                                  evaluated_points, tolerance):
-                    needs_edge_extension.append((chi2, params, refinement_level))
-                elif min(current_point_steps.values()) / 2 > min_step_size:
-                    # Can refine to next level
-                    can_refine.append((chi2, params, refinement_level))
-                else:
-                    # Already at finest resolution
-                    already_at_finest.append((chi2, params))
-
-            if self.verbose:
-                print(f"  {len(needs_edge_extension)} need edge extension")
-                print(f"  {len(can_refine)} can be refined")
-                print(f"  {len(already_at_finest)} at finest resolution")
-
-            # Extend edges first (at current level)
-            if needs_edge_extension:
-                if self.verbose:
-                    print(f"Extending edges at current level")
-
-                new_grid_points = []
-                for chi2, params, ref_level in needs_edge_extension:
-                    step_sizes_at_level = {param: original_steps[param] / (2 ** ref_level)
-                                           for param in param_names}
-
-                    # Find missing neighbors
-                    for deltas in product([-1, 0, 1], repeat=len(param_names)):
-                        if all(d == 0 for d in deltas):
-                            continue
-
-                        expected_neighbor = tuple(
-                            round(params[param_names[i]] + deltas[i] * step_sizes_at_level[param_names[i]], 10)
-                            for i in range(len(param_names))
-                        )
-
-                        # Check if this neighbor exists (within tolerance)
-                        neighbor_exists = False
-                        for eval_point in evaluated_points:
-                            distance = sum((eval_point[i] - expected_neighbor[i]) ** 2
-                                           for i in range(len(param_names))) ** 0.5
-                            if distance < tolerance:
-                                neighbor_exists = True
-                                break
-
-                        if not neighbor_exists:
-                            # Add this missing neighbor
-                            point_dict = {param_names[i]: expected_neighbor[i]
-                                          for i in range(len(param_names))}
-                            new_grid_points.append((point_dict, ref_level))
-                            evaluated_points.add(expected_neighbor)
-
-                if len(new_grid_points) == 0:
-                    if self.verbose:
-                        print("No new edge points to add")
-                    continue
-
-                if self.verbose:
-                    print(f"Evaluating {len(new_grid_points)} edge points")
-
-                # Evaluate new edge points
-                for i, (grid_params, ref_level) in enumerate(new_grid_points):
-                    if self.verbose and (i + 1) % 10 == 0:
-                        print(f"  Edge point {i + 1}/{len(new_grid_points)}")
-
-                    result = self._fit_grid_point(grid_params)
-                    full_result = {**grid_params, **result}
-                    full_result['refinement_level'] = ref_level
-
-                    self.results.append(full_result)
-                    self._grid.append(grid_params)
-
-                # Reset cached best and continue
-                self._best = None
-                continue
-
-            # No edges to extend - refine to next level
-            if len(can_refine) == 0:
-                if not global_min_complete:
-                    # Global minimum is now complete
-                    if self.verbose:
-                        print("Global minimum refinement complete")
-                    global_min_complete = True
-                    continue  # Process other minima
-                else:
-                    # All minima complete
-                    if self.verbose:
-                        print("All minima complete, stopping refinement")
-                    break
-
-            if self.verbose:
-                print(f"Refining {len(can_refine)} minima to next level")
-
-            # Generate refined grid points around each minimum
-            new_grid_points = []
-            for chi2, params, ref_level in can_refine:
-                step_sizes_at_level = {param: original_steps[param] / (2 ** ref_level)
-                                       for param in param_names}
-
-                # Create sub-grid around this minimum
-                param_ranges = []
-                for param in param_names:
-                    center = params[param]
-                    step = step_sizes_at_level[param] / 2  # Half the step for next level
-                    radius = radius_steps * step
-
-                    # Generate points in this dimension
-                    param_min_local = center - radius
-                    param_max_local = center + radius
-                    n_points = 2 * radius_steps + 1
-                    param_grid = np.linspace(param_min_local, param_max_local, n_points)
-                    param_grid = np.round(param_grid, decimals=10)
-                    param_ranges.append(param_grid)
-
-                # Create rectangular sub-grid
-                sub_grid = self._make_rect_grid(param_ranges, param_names)
-
-                # Filter out already-evaluated points
-                for point_dict in sub_grid:
-                    point = tuple(round(point_dict[param], 10) for param in param_names)
-
-                    # Check with tolerance
-                    point_exists = False
-                    for eval_point in evaluated_points:
-                        distance = sum((eval_point[i] - point[i]) ** 2
-                                       for i in range(len(param_names))) ** 0.5
-                        if distance < tolerance:
-                            point_exists = True
-                            break
-
-                    if not point_exists:
-                        new_grid_points.append((point_dict, ref_level + 1))
-                        evaluated_points.add(point)
-
-            if len(new_grid_points) == 0:
-                if self.verbose:
-                    print("No new points to evaluate")
-                if not global_min_complete:
-                    global_min_complete = True
-                    continue
-                else:
-                    break
-
-            if self.verbose:
-                print(f"Evaluating {len(new_grid_points)} refined points")
-
-            # Evaluate new points
-            for i, (grid_params, ref_level) in enumerate(new_grid_points):
-                if self.verbose and (i + 1) % 10 == 0:
-                    print(f"  Refined point {i + 1}/{len(new_grid_points)}")
-
-                result = self._fit_grid_point(grid_params)
-                full_result = {**grid_params, **result}
-                full_result['refinement_level'] = ref_level
-
-                # Add to results and grid
-                self.results.append(full_result)
-                self._grid.append(grid_params)
-
-            # Reset cached best
-            self._best = None
-
-        if self.verbose:
-            print(f"\nRefinement complete after {iteration} iterations")
-            print(f"Total grid points evaluated: {len(self.results)}")
-
-    def _has_incomplete_neighbors(self, params, step_sizes_at_level, evaluated_points, tolerance):
-        """
-        Check if a point is missing any neighbors at a specific refinement level.
-
-        Parameters
-        ----------
-        params : dict
-            Parameter values for the point to check
-        step_sizes_at_level : dict
-            Step size for each parameter at this refinement level
-        evaluated_points : set
-            Set of already-evaluated points as tuples
-        tolerance : float
-            Distance tolerance for considering a point as a neighbor
+    def _get_extra_save_state(self):
+        """Gather ParallaxGridSearch-specific state for saving.
 
         Returns
         -------
-        bool
-            True if any neighbors are missing (point is at edge), False if all neighbors exist
+        dict
         """
+        mjs = self._make_json_serializable
+        return {
+            'static_params': mjs(self.static_params),
+            'parameters_to_fit': list(self.parameters_to_fit),
+            'fitter_kwargs': mjs(self.fitter_kwargs),
+            'skip_optimization': bool(self.skip_optimization)
+        }
 
-        param_names = list(step_sizes_at_level.keys())
-
-        # Check all neighbors
-        for deltas in product([-1, 0, 1], repeat=len(param_names)):
-            if all(d == 0 for d in deltas):
-                continue  # Skip center point
-
-            # Calculate expected neighbor position
-            expected_neighbor = tuple(
-                round(params[param_names[i]] + deltas[i] * step_sizes_at_level[param_names[i]], 10)
-                for i in range(len(param_names))
-            )
-
-            # Check if neighbor exists within tolerance
-            neighbor_exists = False
-            for eval_point in evaluated_points:
-                distance = sum((eval_point[i] - expected_neighbor[i]) ** 2
-                               for i in range(len(param_names))) ** 0.5
-                if distance < tolerance:
-                    neighbor_exists = True
-                    break
-
-            if not neighbor_exists:
-                return True  # Missing at least one neighbor
-
-        return False  # All neighbors exist
-
-    def save_results(self, filepath, parallax_branch=None):
-        """
-        Save grid search results to ASCII file.
+    @classmethod
+    def _restore_extra_state(cls, instance, extra_data):
+        """Restore ParallaxGridSearch-specific state.
 
         Parameters
         ----------
-        filepath : str or Path
-            Full path where results should be saved
-        parallax_branch : str or None, optional
-            Optional parallax branch identifier for metadata
-
-        Raises
-        ------
-        ValueError
-            If no results exist (grid search hasn't been run yet)
+        instance : ParallaxGridSearch
+        extra_data : dict
         """
-        if self.results is None:
-            raise ValueError("No results to save. Run grid search first.")
-
-        # Create a temporary fitter to get diagnostic string for metadata
-        temp_fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=self.static_params,
-            datasets=self.datasets,
-            **self.fitter_kwargs
-        )
-
-        with open(filepath, 'w') as f:
-            # Write metadata header
-            f.write("# ParallaxGridSearch Results\n")
-            f.write(f"# Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            if parallax_branch is not None:
-                f.write(f"# Parallax Branch: {parallax_branch}\n")
-            f.write(f"# Grid: pi_E_E=[{self.grid_params['pi_E_E_min']}, "
-                    f"{self.grid_params['pi_E_E_max']}] step={self.grid_params['pi_E_E_step']}, "
-                    f"pi_E_N=[{self.grid_params['pi_E_N_min']}, "
-                    f"{self.grid_params['pi_E_N_max']}] step={self.grid_params['pi_E_N_step']}\n")
-            f.write("#\n")
-            f.write("# Reference Model:\n")
-
-            # Write diagnostic string with # prefix on each line
-            diagnostic_str = temp_fitter.get_diagnostic_str()
-            for line in diagnostic_str.split('\n'):
-                f.write(f"# {line}\n")
-
-            f.write("#\n")
-
-            # Determine column names from first result
-            if len(self.results) > 0:
-                # Start with grid params, then chi2, success, then fit params
-                first_result = self.results[0]
-
-                # Grid parameters
-                grid_param_names = ['pi_E_E', 'pi_E_N']
-
-                # Standard columns
-                standard_cols = ['chi2', 'success']
-
-                # Best-fit parameter names (if they exist)
-                fit_param_names = []
-                if first_result.get('params') is not None:
-                    fit_param_names = list(first_result['params'].keys())
-
-                all_column_names = grid_param_names + standard_cols + fit_param_names
-
-                # Write column header
-                f.write('  '.join(all_column_names) + '\n')
-
-                # Write data rows
-                for result in self.results:
-                    row = []
-
-                    # Grid params
-                    for name in grid_param_names:
-                        row.append(str(result[name]))
-
-                    # Standard columns
-                    row.append(str(result['chi2']))
-                    row.append(str(result['success']))
-
-                    # Fit params
-                    if result.get('params') is not None:
-                        for name in fit_param_names:
-                            row.append(str(result['params'][name]))
-                    else:
-                        # Fill with NaN if fit failed
-                        row.extend(['nan'] * len(fit_param_names))
-
-                    f.write('  '.join(row) + '\n')
-
-    def plot_grid_points(self, ax=None, cmap='Set1', min_chi2=None):
-        """
-        Plot grid search results as colored points.
-
-        Parameters
-        ----------
-        ax : matplotlib.axes.Axes or None, optional
-            Axes to plot on. If None, uses current axes.
-        cmap : str, optional
-            Colormap name for chi2 values. Default is 'viridis_r'.
-        min_chi2 : float or None, optional
-            Minimum chi2 value for calculating sigma. If None, uses the
-            minimum chi2 from this grid's results.
-
-        Returns
-        -------
-        matplotlib.collections.PathCollection
-            The scatter plot object (can be used for colorbar)
-
-        Raises
-        ------
-        ValueError
-            If no results exist (grid search hasn't been run yet)
-        """
-        if self.results is None:
-            raise ValueError("No results to plot. Run grid search first.")
-
-        if ax is None:
-            ax = plt.gca()
-
-        # Extract data for plotting
-        pi_E_E = [r['pi_E_E'] for r in self.results]
-        pi_E_N = [r['pi_E_N'] for r in self.results]
-        chi2 = [r['chi2'] for r in self.results]
-
-        # Calculate sigma (delta chi2 from minimum)
-        if min_chi2 is None:
-            min_chi2 = min(chi2)
-        sigma = [np.sqrt(c - min_chi2) for c in chi2]
-
-        # Create scatter plot
-        scatter = ax.scatter(pi_E_E, pi_E_N, c=sigma, cmap=cmap, vmin=0, vmax=9, s=50)
-
-        return scatter
+        instance.static_params = extra_data.get('static_params', {})
+        instance.parameters_to_fit = extra_data.get('parameters_to_fit', [])
+        instance.fitter_kwargs = extra_data.get('fitter_kwargs', {})
+        instance.skip_optimization = extra_data.get('skip_optimization', False)
 
 
 class BinaryGridSearch(BaseRectGridSearch):
