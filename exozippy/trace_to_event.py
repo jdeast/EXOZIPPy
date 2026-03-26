@@ -1,5 +1,4 @@
-from .parameter import Parameter
-import copy
+from exozippy.parameter import Parameter
 
 ''' recursively populate the posteriors of each parameter in the event dictionary from the trace object'''
 def trace_to_event(trace,event):

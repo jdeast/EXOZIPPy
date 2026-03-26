@@ -1,0 +1,81 @@
+#orbit.orbit_b.period:
+#  initval: 2.9895933 # this is the initial value, which impacts the accessible parameter space, but not the likelihood explicitly. Note: this is assumed gaussian prior unless mu is also specified
+#  init_scale: 1e-6 # this is the initial scale. the ideal value is the 1-sigma uncertainty. This impacts the number of tuning steps required for convergence, but not the likelihood explicitly
+#  gaussian_width: 0.001 # this is a gaussian prior, which impacts the likelihood and biases the fit
+#  upper_bound: 3.0 # this is an upper bound, which impacts the likelihood and biases the fit
+#  lower_bound: 2.98 # this is an upper bound, which impacts the likelihood and biases the fit
+star.0.radius:
+  initval: 1.610
+  gaussian_width: 0.05
+  lower: 1.6
+  upper: 1.62
+star.0.mass:
+  initval: 1.204
+  gaussian_width: 0.05
+  lower: 1.2
+  upper: 1.22
+star.0.teff:
+  initval: 6207
+  gaussian_width: 100
+  lower: 6150
+  upper: 6250
+star.0.feh:
+  initval: -0.116
+  gaussian_width: 0.08
+  lower: -0.15
+  upper: -0.05
+orbit.0.logP:
+  initval: 0.47561211154 # this is the initial value, which impacts the accessible parameter space, but not the likelihood explicitly. Note: this is assumed gaussian prior unless mu is also specified
+  init_scale: 1e-6 # this is the initial scale. the ideal value is the 1-sigma uncertainty. This impacts the number of tuning steps required for convergence, but not the likelihood explicitly
+  gaussian_width: 0.001 # this is a gaussian prior, which impacts the likelihood and biases the fit
+  #upper: 0.57 # this is an upper bound, which impacts the likelihood and biases the fit
+  #lower: 0.37 # this is an upper bound, which impacts the likelihood and biases the fit
+  upper: 0.4757
+  lower: 0.4755
+orbit.0.tc_base:
+  initval: -3809.697987 #2456190.302013-2460000
+  gaussian_width: 0.01
+  upper: -3809.68
+  lower: -3809.70
+orbit.0.cosi:
+  initval: 0.11996
+  gaussian_width: 0.05
+  lower: 0.10
+  upper: 0.13
+orbit.0.secosw:
+  initval: 0.01
+  lower: -0.1
+  upper: 0.1
+orbit.0.sesinw_raw:
+  initval: 0.01
+  lower: -0.1
+  upper: 0.1
+planet.0.radius:
+  initval: 1.706
+  gaussian_width: 0.1
+  lower: 1.65
+  upper: 1.75
+planet.0.mass:
+  initval: 0.878
+  #lower: 0.5
+  #upper: 2
+  upper: 0.9
+  lower: 0.85
+  unit: "jupiterMass"
+inst.0.gamma:
+  #lower: 0
+  #upper: 20
+  lower: -5
+  upper: 5
+inst.0.jitter_variance:
+  #lower: 0
+  #upper: 100
+#  lower: -25
+  upper: 25
+
+#planet.b.K:
+#  #gaussian_width: 1000
+#  initval: 100
+#  lower: 0
+#  upper: 200
+

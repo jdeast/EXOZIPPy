@@ -11,18 +11,16 @@ import astropy.constants as const
 # pymc imports
 import pymc as pm
 import pytensor.tensor as pt
-import arviz as az
 
 # exoplanet imports
 # import exoplanet as xo
 
 # exozippy imports
-from summarize_model import summarize_model
 from build_latex_table import build_latex_table
 from trace_to_event import trace_to_event
-from massradius_mann import massradius_mann
-from parameter import Parameter
-from readtran import readtran
+from src.exozippy.evolutionary_model.massradius_mann import massradius_mann
+from exozippy.parameter import Parameter
+from src.exozippy.io.readtran import readtran
 from read_parfile import read_parfile
 from exozippy_getmcmcscale import exozippy_getmcmcscale
 

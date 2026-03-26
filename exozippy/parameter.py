@@ -1,8 +1,39 @@
 import numpy as np
-from astropy import units as u
 import pymc as pm
+import pytensor.tensor as pt
 import math
+from astropy import units as u
+import yaml
 import ipdb
+
+class StellarSystem:
+    def __init__(self, model, config_path):
+        self.model = model
+        self.config_path = config_path
+        self.config = self.load_config()
+
+    def load_config(self):
+        with open(self.config_path, 'r') as f:
+            return yaml.safe_load(f)
+
+    def get_init_scales(self):
+        """
+        Extracts scales from the config or falls back to hard-coded defaults.
+        Matches PyMC's order.
+        """
+        ordered_variances = []
+        for var in self.model.free_RVs:
+            # Check if 'init_scale' exists for this specific parameter in the yaml
+            # e.g., config['planets']['b']['P']['init_scale']
+            # For now, we'll assume a flattened lookup or a nested search logic
+            user_scale = self._find_in_config(var.name, "init_scale")
+
+            if user_scale is not None:
+                ordered_variances.append(user_scale ** 2)
+            else:
+                ordered_variances.append(self.estimate_default_scale(var.name) ** 2)
+
+        return np.array(ordered_variances)
 
 class Parameter:
 
@@ -14,12 +45,10 @@ class Parameter:
                  latex=None, latex_unit=None, description=None, latex_prefix="ez",
                  user_params=None):
 
-
-
         # if the user supplied a parameter file, 
         # check to see if it matches the declared parameter
         l = None
-        add_potential=False
+        add_potential = False
 
         if user_params is not None:
             if label in user_params.keys():
@@ -45,70 +74,72 @@ class Parameter:
 
             if "sigma" in user_params[l]:
                 if user_params[l]["sigma"] == 0:
-                    self.value = mu#pm.Deterministic(label, mu)
+                    self.value = pm.Deterministic(label, mu)
                 elif user_params[l]["sigma"] is not None and user_params[l]["sigma"] > 0:
                     if sigma is None:
                         # the user wants to impose a Gaussian penalty
-                        sigma=user_params[l]["sigma"]
+                        sigma = user_params[l]["sigma"]
                     else:
                         # but there's already a gaussian penalty -- must add it as a potential
-                        add_potential=True
- 
-            # the user can't expand the default (physical) bounds
-            # only further limit them
-            if "upper" in user_params[l] and user_params[l]["upper"] is not None:
-                upper = min(user_params[l]["upper"],upper)
-            if "lower" in user_params[l] and user_params[l]["lower"] is not None:
-                lower = max(user_params[l]["lower"],lower)
-                
-        if expression is not None:
-            print("deterministic: "+label+' (mu='+str(mu) +', lower='+str(lower) + ', upper='+str(upper)+', initval='+str(initval) + ',sigma='+str(sigma)+')')
+                        add_potential = True
 
-            self.value = expression#pm.Deterministic(label, expression)
+            # the user can't expand the default (physical) bounds, only further limit them
+            if "upper" in user_params[l] and user_params[l]["upper"] is not None:
+                upper = user_params[l]["upper"] if upper is None else min(user_params[l]["upper"], upper)
+            if "lower" in user_params[l] and user_params[l]["lower"] is not None:
+                lower = user_params[l]["lower"] if lower is None else max(user_params[l]["lower"], lower)
+
+        if expression is not None:
+            print("deterministic: " + label + ' (mu=' + str(mu) + ', lower=' + str(lower) + ', upper=' + str(
+                upper) + ', initval=' + str(initval) + ',sigma=' + str(sigma) + ')')
+
+            self.value = pm.Deterministic(label, expression)
 
             # if it's deterministic, apply constraints as potentials
             if lower is not None:
-                pm.Potential("user_upperbound_" + str(ndx), pt.switch(self.value > upper, -np.inf))
+                pm.Potential("user_lowerbound_" + str(ndx), pt.switch(self.value >= lower, 0.0, -np.inf))
             if upper is not None:
-                pm.Potential("user_lowerbound_" + str(ndx), pt.switch(self.value < lower, -np.inf))
+                pm.Potential("user_upperbound_" + str(ndx), pt.switch(self.value <= upper, 0.0, -np.inf))
             if mu is not None and sigma is not None:
-                pass
-                #pm.Potential("user_prior_" + str(ndx), -0.5 * ((param.value - mu) / sigma) ** 2)
+                pm.Potential("user_prior_" + str(ndx), -0.5 * ((self.value - mu) / sigma) ** 2)
         else:
             if (mu is not None) and (sigma is not None) and ((upper is not None) or (lower is not None)):
                 # bounded normal
-                print("bounded normal: " + str(lower) + " < " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " < " + str(upper) + " (initval="+str(initval)+")")
-                self.value = mu#pm.Truncated(label, pm.Normal.dist(mu=mu,sigma=sigma),lower=lower,upper=upper, initval=initval)
+                print("bounded normal: " + str(lower) + " < " + label + " = " + str(mu) + ' +/- ' + str(
+                    sigma) + " < " + str(upper) + " (initval=" + str(initval) + ")")
+                self.value = pm.Truncated(label, dist=pm.Normal.dist(mu=mu, sigma=sigma), lower=lower, upper=upper,
+                                          initval=initval)
             elif (mu is not None) and (sigma is not None):
                 # normal
-                print("normal: " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " (lower=" + str(lower)+', upper='+str(upper)+', initval='+str(initval)+')')
-                self.value = mu#pm.Normal(label, mu=mu, sigma=sigma, initval=initval)
-            elif (mu is not None):
-                print("uniform: " + label + " = " + str(mu) + " (lower=n/a, upper=n/a, initval="+str(initval)+')')
-                self.value = mu#pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+                print("normal: " + label + " = " + str(mu) + ' +/- ' + str(sigma) + " (lower=" + str(
+                    lower) + ', upper=' + str(upper) + ', initval=' + str(initval) + ')')
+                self.value = pm.Normal(label, mu=mu, sigma=sigma, initval=initval)
+            elif mu is not None:
+                print("uniform: " + label + " = " + str(mu) + " (lower=n/a, upper=n/a, initval=" + str(initval) + ')')
+                self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
             else:
                 # uniform
-                print("uniform: " + str(lower) + " < " + label + " < " + str(upper) + " (initval="+str(initval)+', mu='+str(mu)+', sigma='+str(sigma)+")")
-                self.value = initval#pm.Uniform(label, lower=lower, upper=upper, initval=initval)
+                print("uniform: " + str(lower) + " < " + label + " < " + str(upper) + " (initval=" + str(
+                    initval) + ', mu=' + str(mu) + ', sigma=' + str(sigma) + ")")
+                self.value = pm.Uniform(label, lower=lower, upper=upper, initval=initval)
 
         if add_potential:
-            pass
-            #user_prior = pm.Potential("user_prior_" + str(ndx), -0.5 * 
-            #                          ((self.value - user_params[l].mu) / user_params[l].sigma) ** 2)
-      
-        #ipdb.set_trace()
+            user_prior = pm.Potential("user_prior_" + str(ndx), -0.5 *
+                                      ((self.value - user_params[l]["mu"]) / user_params[l]["sigma"]) ** 2)
 
-        self.unit = unit # astropy units
-        self.label = label # its unique name for specifying in the parameter file.
+        # ipdb.set_trace()
+
+        self.unit = unit  # astropy units
+        self.label = label  # its unique name for specifying in the parameter file.
 
         # for latex table
         self.latex = latex  # latex label for the latex table
         self.latex_unit = latex_unit  # latex label for the latex table
-        self.latex_value = None # $value^{+err}_{-err}$
+        self.latex_value = None  # $value^{+err}_{-err}$
         self.description = description  # a verbose description for the latex table
         self.latex_prefix = latex_prefix
         self.get_latex_var()
-        self.table_note = None # A note to appear in the latex table
+        self.table_note = None  # A note to appear in the latex table
 
         self.posterior = None  # NSTEPS x NCHAINS array of all values
         self.prior = None  # its prior value
@@ -135,15 +166,17 @@ class Parameter:
     Because numbers are not allowed in latex variable names, we replace them with their english spelling
     Because latex variable names are global in scope, we add preface all variable names with "ez@"
     '''
+
     def get_latex_var(self):
         # make the label a legal latex variable name
         old_value = ["_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-        new_value = ["","zero","one","two","three","four","five","six","seven","eight","nine"]
+        new_value = ["", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
         varname = self.label
-        for i in range(len(old_value)): varname = varname.replace(old_value[i],new_value[i])
+        for i in range(len(old_value)):
+            varname = varname.replace(old_value[i], new_value[i])
         self.latex_varname = self.latex_prefix + varname
 
-    ''' returns a string that defines a latex variable equal to the numerical value with errors
+    r''' returns a string that defines a latex variable equal to the numerical value with errors
     \providecommand{\varname}{\ensuremath{value^{+err}_{-err}}}'
     
     These definitions will be output into a separate values.tex file. We encourage exozippy users to use these variable 
@@ -153,49 +186,51 @@ class Parameter:
     
     Templates can be reused for consistent style between different systems.     
     '''
+
     def to_latex_var(self):
-        if self.latex_value == None:
+        if self.latex_value is None:
             self.get_latex_value()
-        return "\providecommand{\\" + self.latex_varname + "}{\ensuremath{" + self.latex_value + "}}\n"
+        return r"\providecommand{\\" + self.latex_varname + r"}{\ensuremath{" + self.latex_value + r"}}\n"
 
     # for median and confidence interval for latex
     def get_latex_value(self):
-        if self.upper == None or self.lower==None or self.median == None:
+        if self.upper is None or self.lower is None or self.median is None:
             self.compute_confidence_interval()
 
         if self.upper == self.lower:
-            self.latex_value = '$' + self.median + '\pm' + self.upper + '$'
+            self.latex_value = '$' + self.median + r'\pm' + self.upper + '$'
         else:
             self.latex_value = '$' + self.median + '^{+' + self.upper + '}_{-' + self.lower + '}$'
 
     # format a line in a latex table
     # $symbol$ ... description (units) ... $value^{+upper}_{-lower}$\\
     def to_table_line(self, use_variable=True):
-        if self.latex_unit == None:
+        if self.latex_unit is None:
             unit_txt = ''
         else:
             unit_text = " (" + self.latex_unit + ")"
         if use_variable:
             var_txt = "\\" + self.latex_varname
         else:
-            var_txt = "\ensuremath{" + self.latex_value + "}"
+            var_txt = r"\ensuremath{" + self.latex_value + "}"
 
-        return "$" + self.latex + "$ \dotfill & " + self.description + unit_text + "\dotfill & " + var_txt + ' \\\\\n'
+        return "$" + self.latex + r"$ \dotfill & " + self.description + unit_text + r"\dotfill & " + var_txt + ' \\\\\n'
 
     # compute the median value, upper bound, and lower bound
     def compute_confidence_interval(self, nsigma=1.0, width=None):
         if self.posterior is not None:
             arr = np.sort(np.ndarray.flatten(self.posterior.values))
             nsamples = len(arr)
-            if width==None: width = math.erf(nsigma/math.sqrt(2.0))
+            if width is None:
+                width = math.erf(nsigma / math.sqrt(2.0))
 
-            lower_limit_ndx = round(width*nsamples)
-            upper_limit_ndx = round(nsamples - width*nsamples)
-            lowerndx = round((0.5 - width/2.0)*nsamples)
-            upperndx = round((0.5 + width/2.0)*nsamples)
+            lower_limit_ndx = round(width * nsamples)
+            upper_limit_ndx = round(nsamples - width * nsamples)
+            lowerndx = round((0.5 - width / 2.0) * nsamples)
+            upperndx = round((0.5 + width / 2.0) * nsamples)
 
-            medndx =  round((0.5)*nsamples)
-            
+            medndx = round(0.5 * nsamples)
+
             self.median_value = arr[medndx]
             self.lower_error = self.median_value - arr[lowerndx]
             self.upper_error = arr[upperndx] - self.median_value
@@ -207,14 +242,16 @@ class Parameter:
             raise Exception("Cannot compute confidence interval without posteriors")
 
     # rounds error to two sig figs, value to match
-    def round_for_display(self,sigfigs=2):
-        
-        nlower = -int(math.floor(math.log10(abs(self.lower_error)))) + (sigfigs-1)
-        nupper = -int(math.floor(math.log10(abs(self.upper_error)))) + (sigfigs-1)
+    def round_for_display(self, sigfigs=2):
 
-        if nlower < 0: n = min([nlower,nupper])
-        else: n = max([nlower,nupper])
+        nlower = -int(math.floor(math.log10(abs(self.lower_error)))) + (sigfigs - 1)
+        nupper = -int(math.floor(math.log10(abs(self.upper_error)))) + (sigfigs - 1)
 
-        self.median = str(round(self.median_value,n))
-        self.lower = str(round(self.lower_error,nlower))
-        self.upper = str(round(self.upper_error,nupper))
+        if nlower < 0:
+            n = min([nlower, nupper])
+        else:
+            n = max([nlower, nupper])
+
+        self.median = str(round(self.median_value, n))
+        self.lower = str(round(self.lower_error, nlower))
+        self.upper = str(round(self.upper_error, nupper))

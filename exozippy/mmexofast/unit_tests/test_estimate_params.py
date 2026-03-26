@@ -45,7 +45,7 @@ class TestGetWideParams_alpha(unittest.TestCase):
             #print(planet_model)
             #plt.figure(figsize=(8, 4))
             #plt.suptitle(
-            #    'u_0={0}, alpha={1:8.2f}'.format(params.ulens['u_0'], params.ulens['alpha']))
+            #    'u_0={0}, alpha={1:8.2f}'.format(params_obsolete.ulens['u_0'], params_obsolete.ulens['alpha']))
             #plt.subplot(1, 2, 1)
             ##plt.title('alpha = {0}'.format(planet_model.parameters.alpha))
             #planet_model.plot_trajectory(caustics=True)
@@ -59,7 +59,7 @@ class TestGetWideParams_alpha(unittest.TestCase):
                 parameters={'t_0': self.params['t_0'], 'u_0': self.params['u_0'], 't_E': self.params['t_E']})
             pspl_model_mag = pspl_model.get_magnification(t_pl)
 
-            #print(params.ulens)
+            #print(params_obsolete.ulens)
             assert np.abs((planet_model_mag - pspl_model_mag) / pspl_model_mag) > 0.05
 
     def test_1(self):
@@ -170,7 +170,7 @@ class TestParameterEstimatorKB160625(unittest.TestCase, KB160625):
     def setUp(self):
         KB160625.__init__(self)
         self.estimator = estimate_params.ParameterEstimator(self.params, limit='point')
-        #self.ulens_params = estimate_params.get_wide_params(self.params, limit='point')
+        #self.ulens_params = estimate_params.get_wide_params(self.params_obsolete, limit='point')
 
     def test_get_rho_dwarf(self):
         estimator = estimate_params.ParameterEstimator(self.params, limit='dwarf')

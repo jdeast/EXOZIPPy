@@ -1,0 +1,52 @@
+run:
+  name: "kelt4"
+
+prefix: "fitresults/KELT-4A"
+
+rv:
+  path: "*.rv"
+  instruments:
+#  - name: "EXPERT"
+#    file: "KELT-4b.EXPERT.rv"
+#  - name: "FIES"
+#    file: "KELT-4b.FIES.rv"
+    - name: "HIRES"
+      file: "KELT-4b.HIRES.rv"
+#  - name: "TRES"
+#    file: "KELT-4b.TRES.rv"
+
+transits:
+  - name: "TESS S48"
+    file: "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat"
+    filter: "TESS"
+    exptime: 2.0 # exposure time in minutes
+    ninterp: 1.0 # number of model points to compute for each data point to account for long cadence smearing. Defaults to 1 point/3 minutes
+    fitspline: False
+    splinespace: 0.75
+
+stars:
+  - name: "A"
+    mist: False
+#  - name: "B"
+
+planets:
+  - name: "b"
+
+orbits:
+  - name: "orbit_b"
+    bodies : "b" # must match "name" of planets/stars. can be list for heirarchical orbits
+
+parameter_file: "kelt4.params.yaml"
+
+sampler:
+  backend: "pymc" # TODO: "affine_invariant", "differential_evolution", "parallel_tempering", "multinest"
+  pymc:
+    tune: 10
+    draws: 10
+    chains: 4
+    cores: 4
+    init: "adapt_diag"
+    target_accept: 0.95
+    nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"
+    recompute_trace: False # if True and an existing prefix.nc file exists, it will load that rather than re-sample
+    profile: False

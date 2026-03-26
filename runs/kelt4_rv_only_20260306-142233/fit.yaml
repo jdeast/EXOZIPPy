@@ -1,0 +1,31 @@
+run:
+  name: "kelt4_rv_only"
+
+data:
+  rv:
+    instruments:
+      - name: EXPERT
+        file: "KELT-4b.EXPERT.rv"
+      - name: FIES
+        file: "KELT-4b.FIES.rv"
+      - name: HIRES
+        file: "KELT-4b.HIRES.rv"
+      - name: TRES
+        file: "KELT-4b.TRES.rv"
+
+model:
+  planets:
+    - name: b
+
+parameters:
+  file: "kelt4.params_obsolete.yaml"
+
+sampler:
+  backend: "pymc" # TODO: "affine_invariant", "differential_evolution", "parallel_tempering", "multinest"
+  pymc:
+    draws: 1000
+    #tune: 2
+    #chains: 1
+    init: "adapt_diag"
+    target_accept: 0.9
+    nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"

@@ -15,3 +15,17 @@ EXOZIPPY_PATH environment variable?
 
 If you'd like to help, please contact me at jason.eastman@cfa.harvard.edu
 
+# Conda installation
+conda create -n exozippy python=3.11
+conda activate exozippy
+conda install -c conda-forge pymc pytensor arviz numpy scipy pandas matplotlib astropy corner
+pip install -e .
+
+# pip/venv
+python -m venv venv
+source venv/bin/activate  # (or Activate.ps1)
+pip install -U pip
+pip install -e .
+
+# Windows (powershell) -- skips compiler (slow!) Installation via Conda recommended!
+setx PYTENSOR_FLAGS "blas__ldflags=,cxx="

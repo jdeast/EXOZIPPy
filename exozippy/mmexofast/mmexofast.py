@@ -66,7 +66,7 @@ class MMEXOFASTFitter():
         self._residuals = None
         self._masked_datasets = None
 
-        # initialize params
+        # initialize params_obsolete
         self._best_ef_grid_point = None
         self._initial_pspl_params = None
         self._initial_pspl_results = None
@@ -145,9 +145,9 @@ class MMEXOFASTFitter():
     #
     #    self.pspl_params = self.do_sfit(self.datasets)
     #    if self.verbose:
-    #        print('SFIT params:', self.pspl_params)
+    #        print('SFIT params_obsolete:', self.pspl_params)
     #    if self.log_file is not None:
-    #        log.write('SFIT params {0}\n'.format(self.pspl_params))
+    #        log.write('SFIT params_obsolete {0}\n'.format(self.pspl_params))
     #        log.close()
     #
     ##    if self.fit_type == 'point lens':
@@ -172,10 +172,10 @@ class MMEXOFASTFitter():
     #    self.binary_params = self.get_initial_2L1S_params()
     #    if self.verbose:
     #        print(
-    #            'Initial 2L1S params', self.binary_params.ulens)
+    #            'Initial 2L1S params_obsolete', self.binary_params.ulens)
     #        print('mag_methods', self.binary_params.mag_methods)
     #    if self.log_file is not None:
-    #        log.write('Initial 2L1S params {0}\n'.format(self.binary_params.ulens))
+    #        log.write('Initial 2L1S params_obsolete {0}\n'.format(self.binary_params.ulens))
     #        log.write('mag_methods {0}\n'.format(self.binary_params.mag_methods))
     #        log.flush()
     #
@@ -183,7 +183,7 @@ class MMEXOFASTFitter():
     #    #self.results = self.do_mmexofast_fit()
     #    self.results = None
     #    if self.verbose:
-    #        print('Final params', self.results)
+    #        print('Final params_obsolete', self.results)
     #
     #    return self.results
     #
@@ -214,9 +214,9 @@ class MMEXOFASTFitter():
     #        chi2s = []
     #        for u_0 in u_0s:
     #            t_E = self.best_ef_grid_point['t_eff']
-    #            params = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
+    #            params_obsolete = {'t_0': t_0, 't_E': t_E, 'u_0': u_0}
     #            event = MulensModel.Event(
-    #                datasets=self.datasets, model=MulensModel.Model(params))
+    #                datasets=self.datasets, model=MulensModel.Model(params_obsolete))
     #            chi2s.append(event.get_chi2())
     #
     #        index = np.nanargmin(chi2s)
@@ -237,11 +237,11 @@ class MMEXOFASTFitter():
     #def do_sfit(self, datasets, verbose=False):
     #    param_sets = [['t_0', 't_E'], ['t_0', 'u_0', 't_E']]
     #
-    #    params = self.pspl_params
+    #    params_obsolete = self.pspl_params
     #    for i in range(len(param_sets)):
     #        parameters_to_fit = param_sets[i]
     #        event = MulensModel.Event(
-    #            datasets=datasets, model=MulensModel.Model(params))
+    #            datasets=datasets, model=MulensModel.Model(params_obsolete))
     #        event.fit_fluxes()
     #
     #        my_func = sfit.mm_funcs.PointLensSFitFunction(
@@ -249,10 +249,10 @@ class MMEXOFASTFitter():
     #
     #        initial_guess = []
     #        for key in parameters_to_fit:
-    #            if isinstance(params[key], (astropy.units.Quantity)):
-    #                initial_guess.append(params[key].value)
+    #            if isinstance(params_obsolete[key], (astropy.units.Quantity)):
+    #                initial_guess.append(params_obsolete[key].value)
     #            else:
-    #                initial_guess.append(params[key])
+    #                initial_guess.append(params_obsolete[key])
     #
     #        for i in range(len(datasets)):
     #            initial_guess.append(event.fits[i].source_flux)
@@ -265,9 +265,9 @@ class MMEXOFASTFitter():
     #        if verbose:
     #            print(result)
     #
-    #        params = my_func.event.model.parameters.parameters
+    #        params_obsolete = my_func.event.model.parameters.parameters
     #
-    #    return params
+    #    return params_obsolete
     #
     #def _setup_model(self, model_type):
     #    if model_type == 'pspl':
@@ -559,11 +559,11 @@ class MMEXOFASTFitter():
     #            'Invalid type for t_E:', self.pspl_params['t_E'],
     #            type(self.pspl_params['t_E']))
     #
-    #    params = {
+    #    params_obsolete = {
     #        't_0': self.pspl_params['t_0'], 'u_0': self.pspl_params['u_0'],
     #        't_E': t_E, 't_pl': self.best_af_grid_point['t_0'],
     #        'dt': 2. * self.best_af_grid_point['t_eff'], 'dmag': dmag}
-    #    binary_params = mmexo.estimate_params.get_wide_params(params)
+    #    binary_params = mmexo.estimate_params.get_wide_params(params_obsolete)
     #    return binary_params
 
     @property

@@ -99,11 +99,11 @@ setup(
         # that you indicate you support Python 3. These classifiers are *not*
         # checked by 'pip install'. See instead 'python_requires' below.
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         'Programming Language :: Python :: 3 :: Only',
     ],
 
@@ -116,8 +116,7 @@ setup(
     keywords='exofast, exofastv2, exoplanet, transit, radial velocity, sed, mist',  # Optional
 
     # When your lightsource code is in a subdirectory under the project root, e.g.
-    # `pyncraft/`, it is necessary to specify the `package_dir` argument.
-    #package_dir={'': 'exozippy'},  # Optional
+    package_dir={'': 'src'},  # Optional
 
     # You can just specify package directories manually here if your project is
     # simple. Or you can use find_packages().
@@ -128,7 +127,7 @@ setup(
     #
     #   py_modules=["my_module"],
     #
-    packages=find_packages(),  # Required
+    packages=find_packages('src'),  # Required
     # Specify which Python versions you support. In contrast to the
     # 'Programming Language' classifiers above, 'pip install' will check this
     # and refuse to install the project if the version does not match. See
@@ -142,18 +141,25 @@ setup(
     # For an analysis of "install_requires" vs pip's requirements files see:
     # https://packaging.python.org/discussions/install-requires-vs-requirements/
     install_requires=[
-        'numpy',
+        'numpy<2',
+        'pymc>=5',
+        'pytensor',
+        'arviz',
+        'pyyaml',
+        'pandas',
         'matplotlib',
         'astropy',
         'celerite',
-        'pymc',
         'corner',
         'MulensModel',
-        'ipdb',
         'lightkurve',
-        #'exoplanet', # built on pymc3, seems to have dependencies incompatible with pymc... doesn't bode well for our future...
+        'exoplanet-core[pymc] >= 0.3.1',
+        'click'
+        #'mkl', # BLAS library for fast linear algebra, on windows, you must create a %USER%\.pytensorrc file to use this
+        #'mkl-include' # BLAS library for fast linear algebra
+        #'exoplanet',# built on pymc3, seems to have dependencies incompatible with pymc... doesn't bode well for our future...
         #'batman', # do we need this?
-    ]
+    ],
 
     # List additional groups of dependencies here (e.g. development
     # dependencies). Users will be able to install these using the "extras"
@@ -163,10 +169,17 @@ setup(
     #
     # Similar to `install_requires` above, these must be valid existing
     # projects.
-    #extras_require={  # Optional
-    #    'dev': ['check-manifest'],
-    #    'test': ['coverage'],
-    #},
+    extras_require={
+        "jax": [
+            "jax",
+            "jaxlib",
+            "numpyro"
+        ],
+        "dev": [
+            "ipdb",
+            "pytest",
+        ]
+    },
 
     # If there are data files included in your packages that need to be
     # installed, specify them here.
@@ -203,14 +216,11 @@ setup(
     # "scripts" keyword. Entry points provide cross-platform support and allow
     # `pip` to create the appropriate form of executable for the target
     # platform.
-    #
-    # For example, the following would provide a command called `sample` which
-    # executes the function `main` from this package when invoked:
-    #entry_points={  # Optional
-    #    'console_scripts': [
-    #        'sample=sample:main',
-    #    ],
-    #},
+    entry_points={
+        "console_scripts": [
+            "exozippy=exozippy.cli:main",
+        ],
+    },
 
     # List additional URLs that are relevant to your project as a dict.
     #

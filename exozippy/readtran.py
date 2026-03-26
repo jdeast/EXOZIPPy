@@ -2,9 +2,8 @@ import numpy as np
 import glob
 import ipdb
 import os
-from .parameter import Parameter
-import pymc as pm
-import pytensor.tensor as pt
+from exozippy.parameter import Parameter
+
 
 # this is a chatGPT translation of the IDL code and has not been tested/checked at all.
 

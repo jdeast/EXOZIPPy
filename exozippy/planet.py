@@ -1,7 +1,5 @@
 # general imports
 import math
-import glob
-import ipdb
 
 # astro/science imports
 import numpy as np
@@ -11,9 +9,8 @@ import astropy.constants as const
 # pymc imports
 import pymc as pm
 import pytensor.tensor as pt
-import arviz as az
 
-from parameter import Parameter
+from exozippy.parameter import Parameter
 
 class Planet(name, star, i180=False, fitlogmp=False, circular=False,
              fitrv=False, fittran=False,
@@ -67,27 +64,6 @@ class Planet(name, star, i180=False, fitlogmp=False, circular=False,
                               expression=10 ** planet.logp.value, unit=u.day,
                               latex='P', description='Period', latex_unit='days', user_params=user_params)
 
-    planet.p = Parameter("p_" + name,
-                         expression=planet.radius.value * rjup / star.radius.value,
-                         latex="R_P/R_*", description="Radius of planet in stellar radii",
-                         latex_unit="", user_params=user_params)
-
-    # use Kepler's law to derive semi-major axis
-    planet.arsun = Parameter("arsun_" + name,
-                             expression=pt.power((G * (star.mass.value + planet.mp.value * mjup) *
-                                                  planet.period.value ** 2 / (4.0 * math.pi ** 2)), 1.0 / 3.0),
-                             latex="a/R_{\sun}", description="Semi-major axis in \rsun", latex_unit='\\rsun',
-                             user_params=user_params)
-
-    planet.ar = Parameter("ar_" + name,
-                          expression=planet.arsun.value / star.radius.value,
-                          latex='a/R_*', description='Semi-major axis in $R_*$', latex_unit='',
-                          user_params=user_params)
-
-    planet.a = Parameter("a_" + name,
-                         expression=planet.arsun.value / AU, unit=u.au,
-                         latex='a', description='Semi-major axis', latex_unit='au',
-                         user_params=user_params)
 
     ######### choose eccentricity parameterization ###########
     if circular:

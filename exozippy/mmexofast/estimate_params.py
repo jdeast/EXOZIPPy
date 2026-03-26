@@ -59,7 +59,7 @@ class BinaryLensParams():
         Sets the magnification calculation method based on input parameters.
 
         Arguments :
-            params: *dictionary*
+            params_obsolete: *dictionary*
                 Initilal parameters.
             
                 - 't_0' (*float*): Time of maximum magnification.
@@ -72,10 +72,10 @@ class BinaryLensParams():
         Returns :
            None
         """
-        #t1 = params['t_pl'] - (5 * params['dt'])
-        #t2 = params['t_pl'] + (5 * params['dt'])
+        #t1 = params_obsolete['t_pl'] - (5 * params_obsolete['dt'])
+        #t2 = params_obsolete['t_pl'] + (5 * params_obsolete['dt'])
         #self.mag_method = [t1, 'VBBL', t2]
-        #print(params)
+        #print(params_obsolete)
 
         t_E = params['t_E']
         t_0 = params['t_0']
@@ -100,7 +100,7 @@ def get_wide_params(params, limit='GG97'):
     Transform initial parameters into wide model parameters.
 
     Arguments :
-        params: *dictionary*
+        params_obsolete: *dictionary*
             Initial parameters.
             
             - 't_0' (*float*): Time of maximum magnification.
@@ -120,27 +120,27 @@ def get_wide_params(params, limit='GG97'):
     # JCY: Should these calculations be broken out into individual parameters?
     # e.g., so they can be tested individually?
     # This would mean function --> class.
-    #u = np.sqrt(params['u_0']**2 + tau**2)
-    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
+    #u = np.sqrt(params_obsolete['u_0']**2 + tau**2)
+    #tau = (params_obsolete['t_pl'] - params_obsolete['t_0']) / params_obsolete['t_E']
     #s = 0.5 * (np.sqrt(u**2 + 4) + u)
-    ##alpha = np.arctan2(-params['u_0'], tau)
-    #alpha = np.pi - np.arctan2(params['u_0'], tau)
+    ##alpha = np.arctan2(-params_obsolete['u_0'], tau)
+    #alpha = np.pi - np.arctan2(params_obsolete['u_0'], tau)
     #
     #print('JCY: I do not like this method for estimating rho and q.')
-    #rho = params['dt'] / params['t_E'] / 2.
-    #q = 0.5 * np.abs(params['dmag']) * (rho**2)
+    #rho = params_obsolete['dt'] / params_obsolete['t_E'] / 2.
+    #q = 0.5 * np.abs(params_obsolete['dmag']) * (rho**2)
     #
     #alpha_deg = correct_alpha(np.rad2deg(alpha))
-    #new_params = {'t_0': params['t_0'],
-    #           'u_0': params['u_0'],
-    #           't_E': params['t_E'],
+    #new_params = {'t_0': params_obsolete['t_0'],
+    #           'u_0': params_obsolete['u_0'],
+    #           't_E': params_obsolete['t_E'],
     #           's': s,
     #           'q': q,
     #           'rho': rho,
     #           'alpha': alpha_deg}
     #
     #out = BinaryLensParams(new_params)
-    #out.set_mag_method(params)
+    #out.set_mag_method(params_obsolete)
 
     estimator = WidePlanetParameterEstimator(params, limit=limit)
     
@@ -333,14 +333,14 @@ def get_close_params(params, q=None, rho=None):
     #if q is None:
     #    q = 0.0040
     #
-    #tau = (params['t_pl'] - params['t_0']) / params['t_E']
-    #u = np.sqrt(params['u_0']**2 + tau**2)
+    #tau = (params_obsolete['t_pl'] - params_obsolete['t_0']) / params_obsolete['t_E']
+    #u = np.sqrt(params_obsolete['u_0']**2 + tau**2)
     #
     #s = 0.5 * (np.sqrt(u**2 + 4) - u)
     #
     #eta_not = (q**0.5 / s) * (1 / (np.sqrt(1 + s**2)) + np.sqrt(1 - s**2))
     #mu = np.arctan2(eta_not, (s - 1 / s) / (1 + q)) # correction for primary --> COM
-    #phi = np.arctan2(tau, params['u_0'])
+    #phi = np.arctan2(tau, params_obsolete['u_0'])
     #
     #alpha1 = np.pi / 2 - mu - phi
     #alpha2 = alpha1 + 2 * mu
@@ -348,22 +348,22 @@ def get_close_params(params, q=None, rho=None):
     #alpha1_deg = correct_alpha(-np.rad2deg(alpha1) + 180.)
     #alpha2_deg = correct_alpha(-np.rad2deg(alpha2) + 180.)
     #
-    #if 'dt' in params.keys():
-    #    rho = params['dt'] / params['t_E'] / 2.
-    #elif 'rho' not in params.keys():
+    #if 'dt' in params_obsolete.keys():
+    #    rho = params_obsolete['dt'] / params_obsolete['t_E'] / 2.
+    #elif 'rho' not in params_obsolete.keys():
     #    rho = 0.001
     #
-    #new_params1 = {'t_0': params['t_0'],
-    #            'u_0': params['u_0'],
-    #            't_E': params['t_E'],
+    #new_params1 = {'t_0': params_obsolete['t_0'],
+    #            'u_0': params_obsolete['u_0'],
+    #            't_E': params_obsolete['t_E'],
     #            's': s,
     #            'q': q,
     #            'rho': rho,
     #            'alpha': alpha1_deg}
     #
-    #new_params2 = {'t_0': params['t_0'],
-    #            'u_0': params['u_0'],
-    #            't_E': params['t_E'],
+    #new_params2 = {'t_0': params_obsolete['t_0'],
+    #            'u_0': params_obsolete['u_0'],
+    #            't_E': params_obsolete['t_E'],
     #            's': s,
     #            'q': q,
     #            'rho': rho,
@@ -371,8 +371,8 @@ def get_close_params(params, q=None, rho=None):
     #
     #out1 = BinaryLensParams(new_params1)
     #out2 = BinaryLensParams(new_params2)
-    #out1.set_mag_method(params)
-    #out2.set_mag_method(params)
+    #out1.set_mag_method(params_obsolete)
+    #out2.set_mag_method(params_obsolete)
     #
     #return out1, out2
 
@@ -479,7 +479,7 @@ def model_pspl_mag_at_pl(params):
     Gets the magnification at second lense time assuming point lense model.
 
     Arguments :
-        params: *dictionary*
+        params_obsolete: *dictionary*
             Initilal parameters.
             
             - 't_0' (*float*): The time of maximum magnification.
@@ -512,7 +512,7 @@ class BinarySourceParams():
         source_flux_ratio: *object*
             Object representing the source flux ratio.  
             
-        set_source_flux_ratio(params):
+        set_source_flux_ratio(params_obsolete):
             Sets the source flux ratio based on input parameters.
   
     """
@@ -525,7 +525,7 @@ class BinarySourceParams():
          Sets the source flux ratio based on input parameters.
 
         Arguments :
-            params: *dictionary*
+            params_obsolete: *dictionary*
                 Initilal parameters.
             
                 - 't_0' (*float*): Time of maximum magnification.

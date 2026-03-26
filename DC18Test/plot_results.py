@@ -71,7 +71,7 @@ class PlanetFitInfo():
     def sfit_params(self):
         if self._sfit_params is None:
             for line in self.lines:
-                if 'SFIT params' in line:
+                if 'SFIT params_obsolete' in line:
                     self._sfit_params = self.extract_params(line, label_len=2)
 
         return self._sfit_params

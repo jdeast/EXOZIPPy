@@ -1,7 +1,6 @@
 # general imports
 import math
 import glob
-import ipdb
 
 # astro/science imports
 import numpy as np
@@ -11,20 +10,15 @@ import astropy.constants as const
 # pymc imports
 import pymc as pm
 import pytensor.tensor as pt
-import arviz as az
 
 # exoplanet imports
 # import exoplanet as xo
 
 # exozippy imports
-from .summarize_model import summarize_model
-from .build_latex_table import build_latex_table
-from .trace_to_event import trace_to_event
-from .massradius_mann import massradius_mann
-from .parameter import Parameter
-from .readtran import readtran
+from src.exozippy.evolutionary_model.massradius_mann import massradius_mann
+from exozippy.parameter import Parameter
+from src.exozippy.io.readtran import readtran
 from .read_parfile import read_parfile
-from .exozippy_getmcmcscale import exozippy_getmcmcscale
 
 '''This function is analagous to exofastv2's mkss.pro, but also defines
 some of the fundamental relationships between parameters done in
@@ -328,7 +322,7 @@ def build_model(nstars=1, nplanets=1,
                 planet["cosi"] = Parameter("cosi_" + str(i), lower=cosilower, upper=1.0,
                                            latex='\cos{i}',description='cos of inclination',
                                            latex_unit='',user_params=user_params)
-            elif (not fitrv[i]) and fittran[i] and (not novcve[i]):
+            elif (not fitrv[i]) and fittran[i] and fitvcve[i]:
                 # transit only parameterization
                 # vcve, sin(omega), cos(omega), sign, chord
                 planet["vcve"] = Parameter("vcve_" + str(i), lower=0.0, initval=1.0,  # upper limit implicit from e
@@ -371,7 +365,7 @@ def build_model(nstars=1, nplanets=1,
                                             latex_unit='',user_params=user_params)
 
                 jacobian = 1.0
-                if not nochord[i]:
+                if chord[i]:
                     planet["chord"] = Parameter("chord_" + str(i), lower=0.0,
                                                 latex='chord',description='transit chord',
                                                 latex_unit='',user_params=user_params)                                                
