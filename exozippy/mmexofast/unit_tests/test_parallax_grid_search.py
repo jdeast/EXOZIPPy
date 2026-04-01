@@ -112,6 +112,60 @@ SKIP_OPT_GRID_PARAMS = {
 
 
 # ---------------------------------------------------------------------------
+# Module-scoped shared fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def refinement_result(tmp_path_factory):
+    """
+    Run a ParallaxGridSearch with refine=True on REFINEMENT_GRID_PARAMS once
+    per module. Save results to a temporary file and cache both.
+
+    SHARED BY: TestRefinement, TestBest, TestSaveLoad.
+    PLACEMENT: Module level — pytest cannot share class-scoped fixtures
+    across class boundaries.
+
+    READ-ONLY CONTRACT: All consuming tests MUST NOT call run() or mutate
+    the returned instance. Mutation corrupts every subsequent test in this
+    module that uses this fixture.
+
+    Grid design rationale:
+      - REFINEMENT_GRID_PARAMS: 3x3, step=5
+      - True minimum: pi_E_N≈3.8925, pi_E_E≈-2.7208 (between grid points)
+      - Nearest grid point: (pi_E_N=5, pi_E_E=-5)
+      - Step 5 > 1σ uncertainties (σ_N≈3.7, σ_E≈3.1); coarse grid cannot
+        satisfy convergence (n//2=1 point per side within Δχ²=1). At least
+        one refinement sub-grid is computed.
+      - After one refinement (step≈5/3≈1.67 < 1σ), convergence is met at
+        level 1.
+
+    Returns:
+        dict with keys:
+            'instance': ParallaxGridSearch after run(refine=True, ...)
+            'filepath': pathlib.Path to saved JSON results file
+    """
+    tmp_dir = tmp_path_factory.mktemp("parallax_refinement")
+    filepath = tmp_dir / "refinement_results.json"
+
+    searcher = ParallaxGridSearch(
+        static_params=STATIC_PARAMS,
+        datasets=DATASETS,
+        grid_params=REFINEMENT_GRID_PARAMS,
+    )
+
+    searcher.run(
+        refine=True,
+        point_density_in_minimum=3,   # n; convergence needs n//2=1 point per side
+        max_refinements=2,
+        max_expansions=4,
+    )
+
+    searcher.save_results(filepath)
+
+    return {"instance": searcher, "filepath": filepath}
+
+
+# ---------------------------------------------------------------------------
 # Module-level tests
 # ---------------------------------------------------------------------------
 
@@ -137,3 +191,19 @@ def test_data_file_exists():
         f"MULENS_DATA_PATH resolves to: {MULENS_DATA_PATH}\n"
         "Check the data directory structure and MULENS_DATA_PATH definition."
     )
+
+
+def test_refinement_fixture_runs(refinement_result):
+    """
+    Verify the module-scoped refinement fixture executes without error and
+    produces a populated ParallaxGridSearch instance with a saved file.
+
+    This test runs at module level so fixture failures surface before
+    TestRefinement or TestBest are reached, giving clearer error attribution.
+    """
+    instance = refinement_result["instance"]
+    assert instance is not None
+    assert instance.results_history is not None
+    assert len(instance.results_history) > 0
+    filepath = refinement_result["filepath"]
+    assert filepath.exists(), f"Expected saved file at {filepath}"
