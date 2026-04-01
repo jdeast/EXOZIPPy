@@ -28,7 +28,7 @@ import exozippy.mmexofast as mmexo
 
 
 # ---------------------------------------------------------------------------
-# Block 1 — Data File and Dataset
+# Block 1 — Data File, Coordinates, and Dataset
 # ---------------------------------------------------------------------------
 
 DATA_FILE = os.path.join(
@@ -36,6 +36,16 @@ DATA_FILE = os.path.join(
     'OB140939',
     'n20100310.I.OGLE.OB140939.txt',
 )
+
+# Sky coordinates for OB140939, required by ParallaxGridSearch.
+# Loaded from the coords.txt file that lives alongside the photometry data.
+COORDS_FILE = os.path.join(
+    MULENS_DATA_PATH,
+    'OB140939',
+    'coords.txt',
+)
+with open(COORDS_FILE) as _f:
+    COORDS = _f.read().strip()
 
 # Loaded once at module import time; shared by all tests in this suite.
 _MULENS_KWARGS = mmexo.observatories.get_kwargs(DATA_FILE)
@@ -151,11 +161,12 @@ def refinement_result(tmp_path_factory):
         static_params=STATIC_PARAMS,
         datasets=DATASETS,
         grid_params=REFINEMENT_GRID_PARAMS,
+        coords=COORDS,
     )
 
     searcher.run(
         refine=True,
-        point_density_in_minimum=3,   # n; convergence needs n//2=1 point per side
+        point_density_in_minimum=3,
         max_refinements=2,
         max_expansions=4,
     )
@@ -207,3 +218,84 @@ def test_refinement_fixture_runs(refinement_result):
     assert len(instance.results_history) > 0
     filepath = refinement_result["filepath"]
     assert filepath.exists(), f"Expected saved file at {filepath}"
+
+
+# ---------------------------------------------------------------------------
+# TestCoarseGrid
+# ---------------------------------------------------------------------------
+
+class TestCoarseGrid:
+    """
+    Tests for run(refine=False) on COARSE_GRID_PARAMS.
+
+    Grid: 5x5, step=0.5, range [-1.0, 1.0] in both pi_E_E and pi_E_N axes.
+    The true minimum (pi_E_N≈3.8925, pi_E_E≈-2.7208) lies far outside this
+    range. With refine=False the grid is evaluated exactly as specified and
+    no expansion or refinement is performed. Because the chi2 surface slopes
+    toward the true minimum, the lowest chi2 within the grid will appear on
+    the boundary rather than in the interior.
+    """
+
+    @pytest.fixture(scope="class")
+    def coarse_searcher(self):
+        """
+        Instantiate and run ParallaxGridSearch with refine=False on
+        COARSE_GRID_PARAMS. Returned once per class and cached.
+
+        READ-ONLY CONTRACT: test_runs_without_error and test_minimum_is_on_edge
+        must not call run() or mutate the returned instance. Mutation will
+        corrupt the shared state for the other test in this class.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            coords=COORDS,
+        )
+        searcher.run(refine=False)
+        return searcher
+
+    def test_runs_without_error(self, coarse_searcher):
+        """
+        run(refine=False) completes and populates results_history with a
+        fully evaluated 5x5 chi2 grid.
+
+        Grid dimensions:
+          pi_E_E axis: 5 points [-1.0, -0.5, 0.0, 0.5, 1.0]
+          pi_E_N axis: 5 points [-1.0, -0.5, 0.0, 0.5, 1.0]
+
+        Every cell must be evaluated (no None entries in result_grid).
+        """
+        assert coarse_searcher.results_history is not None
+
+        chi2_grid = coarse_searcher.results_history[0]['chi2_grid']
+        assert chi2_grid.shape == (5, 5), (
+            f"Expected chi2_grid shape (5, 5); got {chi2_grid.shape}"
+        )
+
+        result_grid = coarse_searcher.results_history[0]['result_grid']
+        assert all(cell is not None for cell in result_grid.ravel()), (
+            "Every grid cell must be evaluated; found None entries"
+        )
+
+    def test_minimum_is_on_edge(self, coarse_searcher):
+        """
+        The best coarse-grid minimum lies on the grid boundary (±1.0).
+
+        The true minimum is far outside [-1, 1]; the chi2 surface slopes
+        toward it, so within the grid the lowest chi2 is at a boundary point.
+
+        Note: find_local_minima() returns a list of (chi2, params_dict, level)
+        tuples sorted best-first. self.minima stays None because refine=False.
+        """
+        minima = coarse_searcher.find_local_minima()
+        assert len(minima) >= 1, "Expected at least one minimum"
+
+        _, best_params, _ = minima[0]
+        pi_e_e = best_params['pi_E_E']
+        pi_e_n = best_params['pi_E_N']
+
+        assert (pi_e_e in (-1.0, 1.0) or pi_e_n in (-1.0, 1.0)), (
+            f"Expected best grid point on boundary (±1.0); "
+            f"got pi_E_N={pi_e_n}, pi_E_E={pi_e_e}"
+        )

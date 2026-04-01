@@ -2798,7 +2798,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
     parameters and returns chi2 + fit results.
     """
 
-    def __init__(self, static_params, datasets=None, grid_params=None,
+    def __init__(self, static_params, coords, datasets=None, grid_params=None,
                  evaluation_order='outward', start_point=None,
                  fitter_kwargs=None, skip_optimization=False,
                  verbose=False, **kwargs):
@@ -2810,6 +2810,8 @@ class ParallaxGridSearch(BaseRectGridSearch):
             values are parameter values. Should NOT include pi_E_E or pi_E_N.
             Also defines which parameters are free to fit when
             skip_optimization=False.
+        coords : str
+            Coordinates of the event. it is assumed that the units are hour angle and degrees for RA and Dec, respectively.
         datasets : list or None, optional
             MulensData object(s) to fit. Required before running.
         grid_params : dict or None, optional
