@@ -13,4 +13,4 @@ else:
 
 MULENS_DATA_PATH = path.join(DATA_PATH, 'mulens')
 
-from exozippy.mmexofast import gridsearches, mmexofast, ulens, estimate_params, fitters, com_trans
+from exozippy.mmexofast import gridsearches, ulens, estimate_params, fitters, com_trans
