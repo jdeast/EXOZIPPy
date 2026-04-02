@@ -2798,7 +2798,7 @@ class ParallaxGridSearch(BaseRectGridSearch):
     parameters and returns chi2 + fit results.
     """
 
-    def __init__(self, static_params, coords, datasets=None, grid_params=None,
+    def __init__(self, static_params, datasets=None, grid_params=None,
                  evaluation_order='outward', start_point=None,
                  fitter_kwargs=None, skip_optimization=False,
                  verbose=False, **kwargs):
@@ -2810,8 +2810,6 @@ class ParallaxGridSearch(BaseRectGridSearch):
             values are parameter values. Should NOT include pi_E_E or pi_E_N.
             Also defines which parameters are free to fit when
             skip_optimization=False.
-        coords : str
-            Coordinates of the event. it is assumed that the units are hour angle and degrees for RA and Dec, respectively.
         datasets : list or None, optional
             MulensData object(s) to fit. Required before running.
         grid_params : dict or None, optional
@@ -2823,7 +2821,31 @@ class ParallaxGridSearch(BaseRectGridSearch):
             Starting point for 'outward' evaluation. Default
             {'pi_E_E': 0.0, 'pi_E_N': 0.0}.
         fitter_kwargs : dict or None, optional
-            Additional keyword arguments to pass to SFitFitter.
+            Additional keyword arguments passed directly to SFitFitter at every
+            grid point evaluation. Recognized keys and their roles:
+
+                coords : str or astropy.coordinates.SkyCoord
+                    Sky coordinates of the event (e.g. "17:54:19.2 -29:54:04").
+                    Required for parallax calculations; SFitFitter cannot compute
+                    the parallax trajectory without an observatory location context.
+                mag_methods : list or None
+                    Specification of magnification calculation methods passed to
+                    MulensModel. None uses the default method for all epochs.
+                limb_darkening_coeffs_u : dict or None
+                    Linear limb-darkening coefficients keyed by band name.
+                    None disables limb darkening.
+                limb_darkening_coeffs_gamma : dict or None
+                    Gamma-law limb-darkening coefficients keyed by band name.
+                    None disables limb darkening.
+                fix_source_flux : dict or None
+                    Per-dataset source flux values to hold fixed during fitting.
+                    None allows source flux to float freely.
+                fix_blend_flux : dict or None
+                    Per-dataset blend flux values to hold fixed during fitting.
+                    None allows blend flux to float freely.
+
+            For the standard test suite, only ``coords`` is set; all other keys
+            default to None.
         skip_optimization : bool, optional
             If True, calculate chi2 without optimization. Default False.
         verbose : bool, optional

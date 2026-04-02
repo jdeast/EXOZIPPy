@@ -37,8 +37,9 @@ DATA_FILE = os.path.join(
     'n20100310.I.OGLE.OB140939.txt',
 )
 
-# Sky coordinates for OB140939, required by ParallaxGridSearch.
-# Loaded from the coords.txt file that lives alongside the photometry data.
+# Sky coordinates for OB140939, required by ParallaxGridSearch via
+# fitter_kwargs. Loaded from the coords.txt file that lives alongside
+# the photometry data.
 COORDS_FILE = os.path.join(
     MULENS_DATA_PATH,
     'OB140939',
@@ -46,6 +47,12 @@ COORDS_FILE = os.path.join(
 )
 with open(COORDS_FILE) as _f:
     COORDS = _f.read().strip()
+
+# fitter_kwargs passed to every ParallaxGridSearch instantiation in this
+# suite. Only coords is required; all other SFitFitter keyword arguments
+# (mag_methods, limb_darkening_coeffs_u, limb_darkening_coeffs_gamma,
+# fix_source_flux, fix_blend_flux) are left as None (their defaults).
+FITTER_KWARGS = {'coords': COORDS}
 
 # Loaded once at module import time; shared by all tests in this suite.
 _MULENS_KWARGS = mmexo.observatories.get_kwargs(DATA_FILE)
@@ -161,7 +168,7 @@ def refinement_result(tmp_path_factory):
         static_params=STATIC_PARAMS,
         datasets=DATASETS,
         grid_params=REFINEMENT_GRID_PARAMS,
-        coords=COORDS,
+        fitter_kwargs=FITTER_KWARGS,
     )
 
     searcher.run(
@@ -250,7 +257,7 @@ class TestCoarseGrid:
             static_params=STATIC_PARAMS,
             datasets=DATASETS,
             grid_params=COARSE_GRID_PARAMS,
-            coords=COORDS,
+            fitter_kwargs=FITTER_KWARGS,
         )
         searcher.run(refine=False)
         return searcher
