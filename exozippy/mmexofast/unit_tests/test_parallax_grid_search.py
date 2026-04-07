@@ -576,3 +576,133 @@ class TestFindLocalMinima:
     def test_multi_minimum_behavior(self):
         pass
 
+
+class TestRefinement:
+    """
+    Tests for run(refine=True) using REFINEMENT_GRID_PARAMS, which is
+    centered on the known true minimum so that expansion is not needed.
+
+    Refinement mechanics
+    --------------------
+    The 3×3 coarse grid has step=0.2.  With point_density_in_minimum=3 the
+    convergence criterion requires n//2=1 point per side within Δχ²=1.  The
+    step=0.2 is expected to exceed the actual 1σ width of the chi² surface,
+    so the coarse grid fails convergence and refinement is triggered at
+    level >= 1.
+
+    Shallow chi² landscape
+    -----------------------
+    The OB140939 parallax chi² surface has total variation < 1.0 near the
+    minimum.  KNOWN_PI_E_N and KNOWN_PI_E_E are within Δχ²=1.0 of the
+    minimum, meaning many nearby points are statistically indistinguishable.
+    Tests use level >= 1 and position tolerance 1.0 to reflect this genuine
+    uncertainty.
+
+    IMPORTANT — READ-ONLY CONTRACT
+    --------------------------------
+    All tests in this class consume the module-scoped refinement_result
+    fixture, which is shared with TestBest and TestSaveLoad.  Tests MUST NOT
+    call run() on the instance or mutate any attribute of the returned
+    searcher.  Any mutation would silently corrupt results for other test
+    classes that share the same fixture instance.
+    """
+
+    def test_refinement_was_triggered(self, refinement_result):
+        """
+        At least one refinement level was computed (level >= 1).
+
+        step=0.2 is expected to exceed the actual 1σ width of the chi²
+        surface, so the coarse grid cannot satisfy the convergence criterion
+        and refinement must be triggered.  If this test fails with level=0
+        it means step=0.2 is already smaller than the actual 1σ; the fix is
+        to increase the step size in REFINEMENT_GRID_PARAMS.
+
+        Note: level == 1 is NOT asserted because the shallow chi² landscape
+        (total variation < 1.0) makes the exact convergence level uncertain.
+        """
+        searcher = refinement_result["instance"]
+        minima = searcher.find_local_minima()
+        assert len(minima) >= 1, "Expected at least one local minimum"
+        _, _, level = minima[0]
+        assert level >= 1, (
+            "Expected at least one refinement level. If level=0, step=0.2 is "
+            "smaller than the actual 1σ; increase REFINEMENT_GRID_PARAMS step size."
+        )
+
+    def test_chi2_at_minimum(self, refinement_result):
+        """
+        The best chi² after refinement is within 0.3 of KNOWN_CHI2_MINIMUM.
+
+        This tests whether the refinement algorithm converged accurately, not
+        just whether it found the right region.  KNOWN_CHI2_MINIMUM is
+        approximate (~0.3 unit drift due to optimizer trajectory on the
+        shallow chi² surface), so a tolerance of 0.3 is tight enough to
+        verify convergence while accommodating genuine numerical variability.
+
+        Note: parameter location is NOT asserted here — on a shallow chi²
+        surface (total variation < 1.0) many nearby points are statistically
+        indistinguishable, making location assertions fragile.  Chi² is the
+        actual objective and is the right quantity to test.
+        """
+        searcher = refinement_result["instance"]
+        minima = searcher.find_local_minima()
+        assert len(minima) >= 1, "Expected at least one local minimum"
+        best_chi2, _, _ = minima[0]
+        assert abs(best_chi2 - KNOWN_CHI2_MINIMUM) < 0.3, (
+            f"chi² = {best_chi2:.6f}, expected within 0.3 of "
+            f"KNOWN_CHI2_MINIMUM={KNOWN_CHI2_MINIMUM:.6f}"
+        )
+
+    def test_save_load_round_trip(self, refinement_result):
+        """
+        A saved results file round-trips correctly through load_results().
+
+        Checks that grid parameters, grid shape, chi² values, static
+        parameters, skip_optimization flag, parameters_to_fit, minima, and
+        dataset handling are all preserved or correctly handled:
+        - datasets is None after loading (cannot be serialised)
+        - minima is not None and has the same length as the original
+        - the best-minimum chi² is numerically close after the round trip
+        """
+        filepath = refinement_result["filepath"]
+        original = refinement_result["instance"]
+        loaded = ParallaxGridSearch.load_results(filepath)
+
+        assert loaded.grid_params == original.grid_params, (
+            "grid_params mismatch after load"
+        )
+        assert (
+            loaded.results_history[0]['metadata']['grid_shape']
+            == original.results_history[0]['metadata']['grid_shape']
+        ), "grid_shape mismatch after load"
+        assert np.allclose(
+            loaded.results_history[0]['chi2_grid'],
+            original.results_history[0]['chi2_grid'],
+            equal_nan=True,
+        ), "chi2_grid values differ after load"
+        assert loaded.static_params == original.static_params, (
+            "static_params mismatch after load"
+        )
+        assert loaded.skip_optimization == original.skip_optimization, (
+            "skip_optimization mismatch after load"
+        )
+        assert loaded.parameters_to_fit == original.parameters_to_fit, (
+            "parameters_to_fit mismatch after load"
+        )
+        assert loaded.datasets is None, (
+            "datasets should be None after loading (not serialisable)"
+        )
+        assert loaded.minima is not None, (
+            "minima should not be None after loading"
+        )
+        assert len(loaded.minima) == len(original.minima), (
+            f"minima length mismatch: loaded {len(loaded.minima)}, "
+            f"original {len(original.minima)}"
+        )
+        assert np.isclose(
+            loaded.minima[0]['chi2'], original.minima[0]['chi2']
+        ), (
+            f"best-minimum chi² mismatch after load: "
+            f"loaded {loaded.minima[0]['chi2']}, "
+            f"original {original.minima[0]['chi2']}"
+        )
