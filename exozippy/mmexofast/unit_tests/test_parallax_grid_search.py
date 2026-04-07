@@ -447,3 +447,84 @@ class TestExpansion:
             f"level = {level}; coarse grid minimum was on an edge and should "
             f"not satisfy convergence without refinement"
         )
+
+
+class TestSkipOptimization:
+    """
+    Tests for the skip_optimization=True flag.
+
+    When skip_optimization=True, chi² is computed at exactly the grid-point
+    parameter values without running a numerical optimizer.  This means the
+    returned chi² values are always >= the optimized values at every grid
+    point, because the optimizer can only lower chi².
+
+    Grid indexing for SKIP_OPT_GRID_PARAMS
+    ----------------------------------------
+    chi2_grid[i, j] where i indexes pi_E_E and j indexes pi_E_N.
+    pi_E_E axis values: [0.0, 0.5, 1.0] → index 0 is pi_E_E=0.0
+    pi_E_N axis values: [-1.0, -0.5, 0.0] → index 2 is pi_E_N=0.0
+    Therefore chi2_grid[0, 2] is the cell for (pi_E_E=0.0, pi_E_N=0.0).
+
+    Note: STATIC_PARAMS (not STATIC_PARAMS_PAR) is used for all
+    instantiations in this class because SKIP_OPT_GRID_PARAMS is defined
+    in the origin region, which corresponds to the STATIC_PARAMS solution.
+    """
+
+    def test_chi2_at_origin(self):
+        """
+        With skip_optimization=True the chi² at (pi_E_E=0.0, pi_E_N=0.0)
+        matches the known value KNOWN_CHI2_ORIGIN_SKIPOPT to within 0.01.
+
+        Because no optimizer is run the result is fully determined by the
+        static parameters and the grid-point values, making it reproducible
+        and comparable to the pre-computed reference.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS,
+            datasets=DATASETS,
+            grid_params=SKIP_OPT_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+            skip_optimization=True,
+        )
+        searcher.run(refine=False)
+        chi2_grid = searcher.results_history[0]['chi2_grid']
+        assert abs(chi2_grid[0, 2] - KNOWN_CHI2_ORIGIN_SKIPOPT) < 0.01, (
+            f"chi² at origin = {chi2_grid[0, 2]:.6f}, "
+            f"expected {KNOWN_CHI2_ORIGIN_SKIPOPT:.6f} (tolerance 0.01)"
+        )
+
+    def test_chi2_larger_than_optimized(self):
+        """
+        At every finite grid point the skip-optimization chi² is >= the
+        optimized chi².
+
+        The numerical optimizer can only lower chi² relative to the starting
+        grid-point values, so chi2_skip >= chi2_opt must hold element-wise
+        across all grid points where both values are finite.
+        """
+        searcher_skip = ParallaxGridSearch(
+            static_params=STATIC_PARAMS,
+            datasets=DATASETS,
+            grid_params=SKIP_OPT_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+            skip_optimization=True,
+        )
+        searcher_skip.run(refine=False)
+
+        searcher_opt = ParallaxGridSearch(
+            static_params=STATIC_PARAMS,
+            datasets=DATASETS,
+            grid_params=SKIP_OPT_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+            skip_optimization=False,
+        )
+        searcher_opt.run(refine=False)
+
+        chi2_skip = searcher_skip.results_history[0]['chi2_grid']
+        chi2_opt = searcher_opt.results_history[0]['chi2_grid']
+
+        finite_mask = np.isfinite(chi2_skip) & np.isfinite(chi2_opt)
+        assert np.all(chi2_skip[finite_mask] >= chi2_opt[finite_mask]), (
+            "skip_optimization chi² should be >= optimized chi² at every "
+            "finite grid point; optimizer can only lower chi²"
+        )
