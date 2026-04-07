@@ -1035,10 +1035,9 @@ class MMEXOFASTFitter:
             primary_datasets = self.location_groups[primary_loc]
 
             # Fit static models only (no renormalization yet)
+            self._ensure_static_point_lens(primary_datasets)
             if self.finite_source:
                 self._ensure_static_finite_point_lens(primary_datasets)
-            else:
-                self._ensure_static_point_lens(primary_datasets)
 
             self._save_restart_state()
 
