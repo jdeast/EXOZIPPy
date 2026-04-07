@@ -337,3 +337,113 @@ class TestCoarseGrid:
             f"Expected best grid point on boundary; "
             f"got pi_E_N={pi_e_n}, pi_E_E={pi_e_e}"
         )
+
+
+class TestExpansion:
+    """
+    Tests for run(refine=True) edge-driven expansion and refinement.
+
+    Sequence
+    --------
+    1. The coarse grid (pi_E_N: 3.0–3.6, pi_E_E: -2.6–-2.0, step=0.2) places
+       the true minimum (pi_E_N≈3.89, pi_E_E≈-2.72) outside its boundary —
+       beyond the upper edge in pi_E_N and below the lower edge in pi_E_E.
+    2. run(refine=True) detects that the best grid point lies on a corner and
+       triggers edge-driven expansion.
+    3. With point_density_in_minimum=3 and step=0.2 each expansion adds
+       3×0.2=0.6 to the range.  One expansion in pi_E_N raises the upper edge
+       3.6 → 4.2 (covers 3.89 ✓); one expansion in pi_E_E lowers the bottom
+       -2.6 → -3.2 (covers -2.72 ✓).  max_expansions=4 provides ample margin.
+    4. Once the minimum is interior the refinement loop runs; the convergence
+       level satisfies level >= 1.
+
+    Note on shallow chi² landscape
+    --------------------------------
+    The OB140939 parallax chi² surface has total variation < 1.0 near the
+    minimum.  The exact level at which convergence is satisfied depends on
+    where the 1σ boundary falls relative to the 0.2 step, so tests assert
+    level >= 1 rather than level == 1.
+    """
+
+    @pytest.fixture(scope="class")
+    def expansion_searcher(self):
+        """
+        Class-scoped fixture: instantiate and run ParallaxGridSearch with
+        refine=True so that edge-driven expansion and subsequent refinement
+        are exercised.
+
+        READ-ONLY CONTRACT: tests must not mutate the returned searcher.
+        The fixture is evaluated once per class; any mutation would silently
+        corrupt results for later tests in the same class.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS_PAR,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        searcher.run(
+            refine=True,
+            point_density_in_minimum=3,
+            max_refinements=2,
+            max_expansions=4,
+        )
+        return searcher
+
+    def test_grid_shape_changed(self, expansion_searcher):
+        """
+        After edge-driven expansion the recorded grid shape is larger than
+        the original (4, 4) coarse grid.
+
+        The coarse grid has 4 points in each dimension (pi_E_N: 3.0, 3.2, 3.4,
+        3.6; pi_E_E: -2.6, -2.4, -2.2, -2.0), giving shape (4, 4).  At least
+        one expansion must be reflected in results_history[0].
+        """
+        grid_shape = expansion_searcher.results_history[0]['metadata']['grid_shape']
+        assert grid_shape != (4, 4), (
+            f"Expected expanded grid shape larger than (4, 4), got {grid_shape}"
+        )
+
+    def test_minimum_off_edge(self, expansion_searcher):
+        """
+        After expansion, the best minimum lies beyond the original grid boundary,
+        confirming that expansion worked.
+
+        Original boundary: pi_E_N upper edge=3.6, pi_E_E lower edge=-2.6.
+        The coarse grid corner (3.6, -2.6) was the best coarse point, which
+        triggered expansion.  After expansion, new points beyond those edges
+        are evaluated; even on a shallow chi² surface the gradient points away
+        from the original corner, so at least one new point should beat it.
+
+        The test only asserts the weak inequalities pi_E_N > 3.6 and
+        pi_E_E < -2.6 — i.e. that the minimum moved beyond the original edges.
+        """
+        minima = expansion_searcher.find_local_minima()
+        assert len(minima) >= 1, "Expected at least one local minimum to be found"
+        _, best_params, _ = minima[0]
+        assert best_params['pi_E_N'] > 3.6, (
+            f"pi_E_N = {best_params['pi_E_N']:.4f} should be > 3.6 "
+            f"(true value ≈3.89)"
+        )
+        assert best_params['pi_E_E'] < -2.6, (
+            f"pi_E_E = {best_params['pi_E_E']:.4f} should be < -2.6 "
+            f"(true value ≈-2.72)"
+        )
+
+    def test_refinement_was_triggered(self, expansion_searcher):
+        """
+        The best minimum required at least one refinement level (level >= 1).
+
+        The coarse grid minimum was on an edge and cannot satisfy the
+        convergence criterion (requires n//2=1 point per side within Δχ²=1);
+        refinement must be triggered after expansion moves the minimum to an
+        interior point.  The exact level is not asserted because the shallow
+        chi² landscape (total variation < 1.0) makes the convergence level
+        uncertain.
+        """
+        minima = expansion_searcher.find_local_minima()
+        _, _, level = minima[0]
+        assert level >= 1, (
+            f"level = {level}; coarse grid minimum was on an edge and should "
+            f"not satisfy convergence without refinement"
+        )
