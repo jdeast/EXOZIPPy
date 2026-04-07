@@ -528,3 +528,51 @@ class TestSkipOptimization:
             "skip_optimization chi² should be >= optimized chi² at every "
             "finite grid point; optimizer can only lower chi²"
         )
+
+
+class TestFindLocalMinima:
+    """
+    Tests for the find_local_minima() method.
+
+    Covered here
+    ------------
+    - Precondition error: calling find_local_minima() before run() raises
+      ValueError.
+
+    NOT covered here
+    ----------------
+    - Multi-minimum behavior: verifying that find_local_minima() correctly
+      identifies and returns multiple isolated minima.  See the placeholder
+      test_multi_minimum_behavior below for the rationale and the conditions
+      needed before this can be implemented.
+    """
+
+    def test_raises_before_run(self):
+        """
+        find_local_minima() raises ValueError if called before run().
+
+        The method requires an internal results structure that is only
+        populated by run(); calling it on a fresh instance should raise
+        ValueError to signal the violated precondition.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS_PAR,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        with pytest.raises(ValueError):
+            searcher.find_local_minima()
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO: requires a dataset / grid configuration with a known "
+            "multi-minimum chi2 landscape. OB140939 with the current grid "
+            "settings does not reliably produce multiple isolated minima. "
+            "Consider a different microlensing event or a synthetic dataset "
+            "before implementing this test."
+        )
+    )
+    def test_multi_minimum_behavior(self):
+        pass
+
