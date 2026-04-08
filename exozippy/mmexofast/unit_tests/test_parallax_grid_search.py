@@ -239,6 +239,7 @@ def test_data_file_exists():
     )
 
 
+@pytest.mark.slow
 def test_refinement_fixture_runs(refinement_result):
     """
     Verify the module-scoped refinement fixture executes without error and
@@ -258,7 +259,7 @@ def test_refinement_fixture_runs(refinement_result):
 # ---------------------------------------------------------------------------
 # TestCoarseGrid
 # ---------------------------------------------------------------------------
-
+@pytest.mark.slow
 class TestCoarseGrid:
     """
     Tests for run(refine=False) on COARSE_GRID_PARAMS.
@@ -339,6 +340,7 @@ class TestCoarseGrid:
         )
 
 
+@pytest.mark.slow
 class TestExpansion:
     """
     Tests for run(refine=True) edge-driven expansion and refinement.
@@ -493,6 +495,7 @@ class TestSkipOptimization:
             f"expected {KNOWN_CHI2_ORIGIN_SKIPOPT:.6f} (tolerance 0.01)"
         )
 
+    @pytest.mark.slow
     def test_chi2_larger_than_optimized(self):
         """
         At every finite grid point the skip-optimization chi² is >= the
@@ -577,6 +580,7 @@ class TestFindLocalMinima:
         pass
 
 
+@pytest.mark.slow
 class TestRefinement:
     """
     Tests for run(refine=True) using REFINEMENT_GRID_PARAMS, which is
@@ -783,6 +787,7 @@ class TestBest:
         )
         assert searcher.best is None
 
+    @pytest.mark.slow
     def test_fallback_to_coarse_grid(self, best_fallback_searcher):
         """
         After run(refine=False), best returns a non-None result with a chi²
@@ -802,6 +807,7 @@ class TestBest:
             f"(= {KNOWN_CHI2_ORIGIN_SKIPOPT:.6f} - {CHI2_IMPROVEMENT_MIN:.1f})"
         )
 
+    @pytest.mark.slow
     def test_minima_none_after_refine_false(self, best_fallback_searcher):
         """
         After run(refine=False), self.minima is None.
@@ -813,6 +819,7 @@ class TestBest:
             "minima should be None after run(refine=False)"
         )
 
+    @pytest.mark.slow
     def test_minima_not_none_after_refine_true(self, refinement_result):
         """
         After run(refine=True), self.minima is populated (Mode 3 precondition).
@@ -827,6 +834,7 @@ class TestBest:
             "minima should contain at least one entry after run(refine=True)"
         )
 
+    @pytest.mark.slow
     def test_chi2_close_to_known_minimum(self, refinement_result):
         """
         After run(refine=True), best['chi2'] is below KNOWN_CHI2_MINIMUM + 2.0
