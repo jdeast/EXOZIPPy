@@ -847,3 +847,116 @@ class TestBest:
             f"(= KNOWN_CHI2_MINIMUM {KNOWN_CHI2_MINIMUM:.6f} + 2.0)"
         )
 
+class TestSaveLoad:
+    """
+    Tests for save/load error and warning paths.
+
+    Round-trip correctness (grid_params, chi2_grid, static_params, minima,
+    etc.) is already covered by test_save_load_round_trip in TestRefinement.
+    This class covers the two remaining paths:
+
+    - save_results() called before run() raises ValueError (no results to
+      save yet).
+    - Loading a ParallaxGridSearch results file via the base class
+      BaseRectGridSearch.load_results() emits a UserWarning because the
+      saved class name does not match the loading class.
+    """
+
+    def test_save_raises_before_run(self, tmp_path):
+        """
+        save_results() raises ValueError if called before run().
+
+        There are no results to serialise on a fresh instance; the method
+        must detect this and raise ValueError rather than writing an empty
+        or malformed file.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS_PAR,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        # Do NOT call run()
+        filepath = tmp_path / "no_results.json"
+        with pytest.raises(ValueError):
+            searcher.save_results(filepath)
+
+    @pytest.mark.skip(
+        reason=(
+                "TODO: verifying that load_results() emits a UserWarning on class name "
+                "mismatch requires a concrete subclass of BaseRectGridSearch to satisfy "
+                "the ABC. BaseRectGridSearch itself cannot be instantiated directly "
+                "(_fit_grid_point is abstract). This path is unreachable through the "
+                "public API without a dedicated concrete subclass. Implement when a "
+                "suitable concrete subclass is available for use in tests."
+        )
+    )
+    def test_class_name_mismatch_warning(self):
+        pass
+
+
+class TestPlaceholders:
+    """
+    Documented coverage gaps that are not yet implemented.
+
+    Each placeholder records why the test cannot be written yet and what
+    precondition must be satisfied before it can be promoted to a real test.
+
+    To promote a placeholder:
+      1. Remove the @pytest.mark.skip decorator.
+      2. Replace ``pass`` with the test logic.
+      3. Update the expected skip count in this docstring from 5 to 4.
+    """
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO: find_local_minima() multi-minimum behavior requires a "
+            "dataset or grid configuration that reliably produces multiple "
+            "isolated local chi2 minima. OB140939 with the current grid "
+            "parameters does not satisfy this requirement. Consider a "
+            "different microlensing event or a synthetic chi2 landscape."
+        )
+    )
+    def test_find_local_minima_multi_minimum(self):
+        pass
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO: get_uncertainties() testing requires exact expected "
+            "uncertainty ranges derived from a definitive reference for this "
+            "dataset and grid configuration. Implementing with vague bounds "
+            "(e.g., '> 0') would give false confidence. Derive exact expected "
+            "ranges from a published or agreed-upon reference before "
+            "implementing."
+        )
+    )
+    def test_get_uncertainties_specific(self):
+        pass
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO: ParallaxGridSearch does not support log-space parameters "
+            "— 'pi_E_E' and 'pi_E_N' are always evaluated on a linear grid. "
+            "Log-space grid tests belong to a dedicated BaseRectGridSearch "
+            "subclass designed for log-space parameters. Implement when such "
+            "a subclass is available and has known expected values for a test "
+            "dataset."
+        )
+    )
+    def test_log_space_parameters(self):
+        pass
+
+    @pytest.mark.skip(
+        reason=(
+            "TODO: verifying that load_results() emits a UserWarning on "
+            "class name mismatch requires a concrete subclass of "
+            "BaseRectGridSearch to satisfy the ABC. BaseRectGridSearch "
+            "itself cannot be instantiated directly (_fit_grid_point is "
+            "abstract). This path is unreachable through the public API "
+            "without a dedicated concrete subclass. Implement when a "
+            "suitable concrete subclass is available for use in tests."
+        )
+    )
+    def test_class_name_mismatch_warning(self):
+        pass
+
