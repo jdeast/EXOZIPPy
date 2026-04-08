@@ -960,3 +960,95 @@ class TestPlaceholders:
     def test_class_name_mismatch_warning(self):
         pass
 
+
+class TestFitterKwargs:
+    """
+    Tests for fitter_kwargs validation in ParallaxGridSearch.__init__.
+
+    ParallaxGridSearch requires fitter_kwargs to be a dict containing a
+    non-None 'coords' value.  coords is the sky coordinates of the event,
+    required by SFitFitter for parallax trajectory calculations.  Without
+    it, every grid point evaluation silently produces NaN chi2, making the
+    grid search appear to succeed while producing no usable results.
+
+    These tests verify that __init__ detects and rejects invalid
+    configurations before any computation begins.
+
+    Tests
+    -----
+    test_fitter_kwargs_stored_correctly  — valid kwargs stored as self.fitter_kwargs
+    test_raises_if_fitter_kwargs_omitted — fitter_kwargs=None → ValueError at __init__
+    test_raises_if_coords_key_missing    — 'coords' key absent → ValueError at __init__
+    test_raises_if_coords_is_none        — coords=None → ValueError at __init__
+
+    No shared class fixture. None of the tests call run().
+    """
+
+    def test_fitter_kwargs_stored_correctly(self):
+        """
+        Valid fitter_kwargs is stored on the instance as self.fitter_kwargs
+        with the 'coords' key present and non-None.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS_PAR,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        assert searcher.fitter_kwargs is not None, (
+            "fitter_kwargs should not be None after construction"
+        )
+        assert 'coords' in searcher.fitter_kwargs, (
+            "fitter_kwargs should contain the 'coords' key"
+        )
+        assert searcher.fitter_kwargs['coords'] is not None, (
+            "fitter_kwargs['coords'] should not be None"
+        )
+
+    def test_raises_if_fitter_kwargs_omitted(self):
+        """
+        Omitting fitter_kwargs (leaving it as its default None) raises
+        ValueError at construction time.
+
+        Without fitter_kwargs, SFitFitter has no coords and every grid
+        point evaluation silently returns NaN chi2.
+        """
+        with pytest.raises(ValueError):
+            ParallaxGridSearch(
+                static_params=STATIC_PARAMS_PAR,
+                datasets=DATASETS,
+                grid_params=COARSE_GRID_PARAMS,
+                # fitter_kwargs intentionally omitted
+            )
+
+    def test_raises_if_coords_key_missing(self):
+        """
+        Providing fitter_kwargs without the 'coords' key raises ValueError
+        at construction time.
+
+        Other SFitFitter keyword arguments are optional; coords is the only
+        required key.
+        """
+        with pytest.raises(ValueError):
+            ParallaxGridSearch(
+                static_params=STATIC_PARAMS_PAR,
+                datasets=DATASETS,
+                grid_params=COARSE_GRID_PARAMS,
+                fitter_kwargs={'mag_methods': None},  # 'coords' key intentionally absent
+            )
+
+    def test_raises_if_coords_is_none(self):
+        """
+        Providing fitter_kwargs with coords=None raises ValueError at
+        construction time.
+
+        A None coords is equivalent to omitting it — SFitFitter cannot
+        compute parallax trajectories without a valid sky coordinate.
+        """
+        with pytest.raises(ValueError):
+            ParallaxGridSearch(
+                static_params=STATIC_PARAMS_PAR,
+                datasets=DATASETS,
+                grid_params=COARSE_GRID_PARAMS,
+                fitter_kwargs={'coords': None},
+            )

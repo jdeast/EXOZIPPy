@@ -2867,8 +2867,37 @@ class ParallaxGridSearch(BaseRectGridSearch):
         )
         self.static_params = static_params.copy()
         self.parameters_to_fit = [] if skip_optimization else list(static_params.keys())
-        self.fitter_kwargs = fitter_kwargs if fitter_kwargs is not None else {}
+        self.fitter_kwargs = self._set_fitter_kwargs(fitter_kwargs)
         self.skip_optimization = skip_optimization
+
+    def _set_fitter_kwargs(self, fitter_kwargs):
+        """
+        Validate and return fitter_kwargs.
+
+        Raises ValueError if fitter_kwargs is None, missing the 'coords' key,
+        or has coords=None.  coords is required by SFitFitter for parallax
+        trajectory calculations; without it every grid point silently returns
+        NaN chi2.
+        """
+        if fitter_kwargs is None:
+            raise ValueError(
+                "fitter_kwargs is required and must not be None. "
+                "At minimum, provide fitter_kwargs={'coords': <sky coordinates>}."
+            )
+        if 'coords' not in fitter_kwargs:
+            raise ValueError(
+                "fitter_kwargs must contain the 'coords' key with the sky "
+                "coordinates of the event. Without it, SFitFitter cannot compute "
+                "parallax trajectories and every grid point will silently return "
+                "NaN chi2."
+            )
+        if fitter_kwargs['coords'] is None:
+            raise ValueError(
+                "fitter_kwargs['coords'] must not be None. Provide the sky "
+                "coordinates of the event as a string or MulensModel coordinate "
+                "object."
+            )
+        return fitter_kwargs
 
     def _fit_grid_point(self, grid_params):
         """Fit model at one grid point.
