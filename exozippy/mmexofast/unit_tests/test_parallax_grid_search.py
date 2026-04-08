@@ -706,3 +706,144 @@ class TestRefinement:
             f"loaded {loaded.minima[0]['chi2']}, "
             f"original {original.minima[0]['chi2']}"
         )
+
+
+class TestBest:
+    """
+    Tests for the ``best`` property across all four behavioral modes.
+
+    Behavioral modes
+    ----------------
+    +--------+----------------------------------+----------------------------------+
+    | Mode   | Condition                        | Returns                          |
+    +--------+----------------------------------+----------------------------------+
+    | 1      | before run()                     | None                             |
+    | 2      | after run(refine=False)          | best coarse grid point (dict)    |
+    | 3      | after run(refine=True)           | best refined minimum (from       |
+    |        |                                  | self.minima)                     |
+    | 4      | chi² quality                     | meaningful improvement over      |
+    |        |                                  | no-parallax solution             |
+    +--------+----------------------------------+----------------------------------+
+
+    Shallow chi² landscape
+    -----------------------
+    The OB140939 parallax chi² surface has ~0.3 unit optimizer drift near
+    the minimum.  KNOWN_CHI2_MINIMUM is therefore approximate.  Tests use
+    CHI2_IMPROVEMENT_MIN (minimum expected Δχ² over the no-parallax solution)
+    rather than tight bounds against KNOWN_CHI2_MINIMUM, because
+    KNOWN_CHI2_ORIGIN_SKIPOPT is stable (computed without an optimizer) and
+    provides a reliable anchor.
+
+    IMPORTANT — READ-ONLY CONTRACT
+    --------------------------------
+    Tests 4 and 5 consume the module-scoped ``refinement_result`` fixture,
+    which is shared with TestRefinement and TestSaveLoad.  These tests MUST
+    NOT call run() on the instance or mutate any attribute.  Any mutation
+    would silently corrupt results for other test classes that share the
+    same fixture instance.
+    """
+
+    @pytest.fixture(scope="class")
+    def best_fallback_searcher(self):
+        """
+        Class-scoped fixture: run ParallaxGridSearch with refine=False on
+        BEST_FALLBACK_GRID_PARAMS (3×3, centered on the true minimum).
+
+        The center grid point (pi_E_N=3.9, pi_E_E=-2.7) is the nearest grid
+        point to the true minimum (3.8925, -2.7208), so it should be returned
+        as the best coarse grid point.
+
+        READ-ONLY CONTRACT: tests must not mutate the returned searcher.
+        The fixture is evaluated once per class; any mutation would silently
+        corrupt results for later tests in the same class.
+        """
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS_PAR,
+            datasets=DATASETS,
+            grid_params=BEST_FALLBACK_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        searcher.run(refine=False)
+        return searcher
+
+    def test_returns_none_before_run(self):
+        """
+        Before run() is called, best returns None (Mode 1).
+
+        A fresh instance has no results; best must not attempt to access
+        uninitialised state.  STATIC_PARAMS is used here because static
+        params do not affect the pre-run state being tested.
+        """
+        # fresh instance isolates pre-run state
+        searcher = ParallaxGridSearch(
+            static_params=STATIC_PARAMS,
+            datasets=DATASETS,
+            grid_params=COARSE_GRID_PARAMS,
+            fitter_kwargs=FITTER_KWARGS,
+        )
+        assert searcher.best is None
+
+    def test_fallback_to_coarse_grid(self, best_fallback_searcher):
+        """
+        After run(refine=False), best returns a non-None result with a chi²
+        showing meaningful improvement over the no-parallax solution (Mode 2).
+
+        Parameter location is NOT asserted: with skip_optimization=False the
+        optimizer can drift pi_E_N and pi_E_E away from exact grid point
+        values.  Chi² is the right quantity to test here — KNOWN_CHI2_ORIGIN_SKIPOPT
+        is stable (computed without an optimizer) and CHI2_IMPROVEMENT_MIN
+        gives margin for optimizer drift in the shallow landscape.
+        """
+        best = best_fallback_searcher.best
+        assert best is not None, "best should not be None after run(refine=False)"
+        threshold = KNOWN_CHI2_ORIGIN_SKIPOPT - CHI2_IMPROVEMENT_MIN
+        assert best['chi2'] < threshold, (
+            f"chi² = {best['chi2']:.6f} should be < {threshold:.6f} "
+            f"(= {KNOWN_CHI2_ORIGIN_SKIPOPT:.6f} - {CHI2_IMPROVEMENT_MIN:.1f})"
+        )
+
+    def test_minima_none_after_refine_false(self, best_fallback_searcher):
+        """
+        After run(refine=False), self.minima is None.
+
+        Refinement was not requested, so the minima attribute should never
+        be populated; best falls back to the coarse grid result (Mode 2).
+        """
+        assert best_fallback_searcher.minima is None, (
+            "minima should be None after run(refine=False)"
+        )
+
+    def test_minima_not_none_after_refine_true(self, refinement_result):
+        """
+        After run(refine=True), self.minima is populated (Mode 3 precondition).
+
+        READ-ONLY: this test must not call run() or mutate the instance.
+        """
+        searcher = refinement_result["instance"]
+        assert searcher.minima is not None, (
+            "minima should not be None after run(refine=True)"
+        )
+        assert len(searcher.minima) > 0, (
+            "minima should contain at least one entry after run(refine=True)"
+        )
+
+    def test_chi2_close_to_known_minimum(self, refinement_result):
+        """
+        After run(refine=True), best['chi2'] is below KNOWN_CHI2_MINIMUM + 2.0
+        (Mode 3 quality check).
+
+        KNOWN_CHI2_MINIMUM is approximate (~0.3 unit drift due to optimizer
+        trajectory on the shallow chi² surface); a tolerance of +2.0 provides
+        comfortable margin while verifying that the minimum region was found.
+
+        READ-ONLY: this test must not call run() or mutate the instance.
+        """
+        searcher = refinement_result["instance"]
+        best = searcher.best
+        assert best is not None, "best should not be None after run(refine=True)"
+        threshold = KNOWN_CHI2_MINIMUM + 2.0
+        assert best['chi2'] < threshold, (
+            f"chi² = {best['chi2']:.6f} should be < {threshold:.6f} "
+            f"(= KNOWN_CHI2_MINIMUM {KNOWN_CHI2_MINIMUM:.6f} + 2.0)"
+        )
+
