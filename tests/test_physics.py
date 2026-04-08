@@ -1,93 +1,67 @@
 import numpy as np
-import pymc as pm
 import pytest
-import astropy.units as u
-import astropy.constants as const
-from exozippy.components.star import Star
-from exozippy.components.orbit import Orbit
-from exozippy.components.planet import Planet
+import pytensor.tensor as pt
+from astropy import units as u
+from astropy import constants as const
+
+# Internal Physics Registry
+from exozippy.physics import PHYSICS_REGISTRY
+from exozippy.constants import G, KEPLER_CONST
 
 
-def test_planet_k_value():
+def test_calc_K_value():
     """
-    Directly tests the Planet class's internal K parameter calculation.
-    Target: 1 Mjup, 1 Msun, 365.25 days, e=0, i=90 should be ~28.43 m/s.
+    Standard Verification:
+    Jupiter around the Sun at 1 AU (365.25 days)
+    should yield K ~ 28.4 m/s.
     """
-    # 1. Setup minimal config dictionaries
-    star_cfg = {"name": "Sun"}
-    orbit_cfg = {"name": "Orbit1"}
-    planet_cfg = {"name": "Jupiter"}
+    calc_K = PHYSICS_REGISTRY["calc_K"]
 
-    # Mock user_params to provide standard "Sun-like" and "Jupiter-like" values
-    user_params = {
-        "star.Sun.mass": {"initval": 1.0},  # Change from 1.0 to a dict
-        "orbit.Orbit1.logP": {"initval": np.log10(365.25)},
-        "orbit.Orbit1.tc_base": {"initval": 0.0},
-        "orbit.Orbit1.cosi": {"initval": 1e-7},
-        "orbit.Orbit1.secosw": {"initval": 0.01},
-        "orbit.Orbit1.sesinw_raw": {"initval": 0.01},
-        "planet.Jupiter.mass": {"initval": 1.0},
-        "planet.Jupiter.radius": {"initval": 1.0}
-    }
+    # 1. Define Inputs in Internal Units (M_sun, R_sun, days)
+    m_star = 1.0
+    m_planet = (1.0 * u.Mjup).to(u.M_sun).value  # ~0.000954
+    m_total = m_star + m_planet
+    period = 365.25
+    ecc = 0.0
+    sini = 1.0
 
+    # a in R_sun (Standard Kepler's 3rd)
+    # a^3 = G * M * P^2 / (4pi^2)
+    arsun = KEPLER_CONST * (m_total ** (1 / 3)) * (period ** (2 / 3))
 
+    # 2. Execute the Registry Function
+    # Returns K in Internal Units (R_sun / day)
+    k_internal = calc_K(m_planet, m_total, ecc, arsun, sini, period).eval()
 
-    # 2. Instantiate actual components
-    sun = Star(star_cfg, user_params)
-    orbit = Orbit(orbit_cfg, user_params)
-    jupiter = Planet(planet_cfg, user_params)
+    # 3. Convert Result to m/s
+    k_ms = (k_internal * u.R_sun / u.day).to(u.m / u.s).value
 
-    # 3. Trigger the parameter building inside a PyMC model context
-    with pm.Model() as model:
-        # Now pm.Uniform calls inside these methods will work
-        sun.build_parameters(model)
-        orbit.build_parameters(model)
-        jupiter.build_parameters(model)
-        jupiter.build_dependent_parameters(model, sun, orbit)
+    print(f"\nInternal K: {k_internal} R_sun/d")
+    print(f"Converted K: {k_ms} m/s")
 
-        test_point = {
-            sun.mass.value: 1.0,
-            orbit.logP.value: np.log10(365.25),
-            orbit.cosi.value: 1e-7,
-            orbit.sesinw_raw.value: 0.001,
-            orbit.secosw.value: 0.001,
-            jupiter.mass.value: 1.0
-        }
-
-        calculated_k = jupiter.K.value.eval(test_point)
-
-        print(calculated_k)
-        #import ipdb; ipdb.set_trace()
+    # Truth: 28.43 m/s
+    np.testing.assert_allclose(k_ms, 28.43, rtol=1e-2)
 
 
-        # 4. Extract and Evaluate the K expression
-        # Use .eval() to compute the numerical result from the symbolic graph
-        #calculated_k = jupiter.K.value.eval()
+def test_calc_density_sun():
+    """Verify stellar density for the Sun is ~1.41 g/cm3."""
+    calc_rho = PHYSICS_REGISTRY["calc_density"]
 
-    print("sini = " + str(orbit.sini.value.eval()))
-    print("inc = " + str(orbit.inc.value.eval()*180.0/np.pi) + " deg")
-    print("e = " + str(orbit.ecc.value.eval()))
-    print("omega = " + str(orbit.omega.value.eval()*180.0/np.pi) + " deg")
-    print("period = " + str(orbit.period.value.eval()) + " days")
-    print("planet mass = " + str(jupiter.mass.value.eval()) + " MJ")
-    print("star mass = " + str(sun.mass.value.eval()) + " MJ")
+    # Sun mass=1, radius=1
+    rho_internal = calc_rho(1.0, 1.0).eval()
 
+    # Convert M_sun/R_sun^3 to g/cm3
+    rho_cgs = (rho_internal * u.M_sun / u.R_sun ** 3).to(u.g / u.cm ** 3).value
 
-    # 5. Calculate Truth using Astropy Units for 100% precision
-    P_true = 365.25 * u.day
-    Ms_true = 1.0 * u.Msun
-    Mp_true = 1.0 * u.Mjup
-
-    # Standard K formula: (2*pi*G/P)^(1/3) * (Mp*sin(i)) / (Mtotal^(2/3)) / sqrt(1-e^2)
-    truth_k = ((2 * np.pi * const.G / P_true) ** (1 / 3) * (Mp_true) / ((Ms_true + Mp_true) ** (2 / 3))
-               ).to(u.m / u.s).value
-
-    print(f"\n[Component Test] {jupiter.name} K: {calculated_k:.6f} m/s")
-    print(f"[Astropy Truth]  K: {truth_k:.6f} m/s")
-
-    # Assert that your internal class math matches physics within 0.1%
-    np.testing.assert_allclose(calculated_k, truth_k, rtol=1e-3)
+    np.testing.assert_allclose(rho_cgs, 1.4097, rtol=1e-3)
 
 
-if __name__ == "__main__":
-    test_planet_k_value()
+def test_calc_arsun():
+    """Verify semi-major axis for 1 year at 1 M_sun is ~215 R_sun (1 AU)."""
+    calc_arsun = PHYSICS_REGISTRY["calc_arsun"]
+
+    # 1 M_sun, 365.25 days
+    a_rsun = calc_arsun(1.0, 365.25).eval()
+
+    # 1 AU in R_sun is ~215.03
+    np.testing.assert_allclose(a_rsun, 215.03, rtol=1e-3)

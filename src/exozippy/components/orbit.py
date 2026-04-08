@@ -7,7 +7,9 @@ import pymc as pm
 from exoplanet_core.pymc import ops as ops
 
 # local imports
-from exozippy.constants import G, AU, mjup, rjup, pc, rsun, msun, sigmasb, Gmsun, meter
+from exozippy.constants import TWOPI
+from ..physics import calc_tp
+
 from .parameter import Parameter
 from .component import Component
 
@@ -15,188 +17,84 @@ from .component import Component
 import ipdb
 
 class Orbit(Component):
-    def __init__(self, config, user_params):
+    def __init__(self, config, config_manager):
+        # 1. Initialize the base Component
+        # sets self.config and self.config_manager
+        super().__init__(config, config_manager)
+
         self.label = "Orbital Parameters"
-        self.config = config
-        self.user_params = user_params
-        self.norbits = len(config)
-
-        self.tref = self.config[0].get("tref",2460000.0)
-
-        self.names = [c.get("name") for c in self.config]
 
         self.primary = [c.get("primary","star.0") for c in self.config] # star zero is the host by default
         self.companion = [c.get("companion", f"planet.{i}") for i, c in enumerate(self.config)] # the orbits are aligned, one per planet
         self.i180 = [c.get("i180",False) for c in self.config]
         self.fitvcve = [c.get("fitvcve",False) for c in self.config]
 
-    def build_parameters(self, model):
+    def build_parameters(self):
+        prefix = "orbit"
+        shape = (self.n_elements,)
 
-        prefix = f"orbit"
+        # 1. PEER INTO THE CONFIG (Pre-flight)
+        # We grab the resolved dictionaries to peek at the initial values
+        logP_cfg = self.config_manager.resolve(prefix, "logP", shape=shape)
+        tc_cfg = self.config_manager.resolve(prefix, "tc", shape=shape)
 
-        # physical range is -1 <= cosi <=1
-        # but unless we have astrometry or mutual transits, bound should be 0 <= cosi <=1
-        if self.i180:
-            cosilower = -1.0
+        # 2. CALCULATE WINDOWS (Domain Intelligence)
+        # Convert logP (dex days) to period (days) to find the half-period
+        # Note: resolve() ensures these are numpy arrays or scalars based on shape
+        logP_init = np.atleast_1d(logP_cfg["initval"])
+        tc_init = np.atleast_1d(tc_cfg["initval"])
+
+        half_period = (10 ** logP_init) / 2.0
+
+        # Set the windowed bounds
+        parameters = {
+            "logP": None,
+            "period": {"force_node": True, "expr_key": "default"},
+            "n": "default",
+            "tc": {
+                "force_node": True,
+                "lower": tc_init - half_period,
+                "upper": tc_init + half_period
+            }
+        }
+
+        fitvcve_mask = np.atleast_1d(getattr(self, 'fitvcve', False)).astype(bool)
+        hk_mask = ~fitvcve_mask
+
+        # --- Eccentricity / Omega Geometry Swap ---
+        if any(self.fitvcve):
+            # Fit using VC/VE (or VCVE as a single vector depending on your math)
+            raise NotImplementedError()
+            parameters["vcve"] = None
+            parameters["cosw"] = None
+            parameters["sinw"] = None
+            parameters["chord"] = None
+            parameters["ecc"] = "from_vcve"
+            parameters["omega"] = "from_vcve"
+            parameters["cosi"] = "from_chord"
+            #parameters["b"] = "default"
         else:
-            cosilower = 0.0
+            parameters.update({
+                "secosw": {"mask": hk_mask},
+                "sesinw": {"mask": hk_mask},
+                "cosi": {"mask": hk_mask},
+                "ecc": "default",
+                "omega": "default",
+                "inc": "default",
+                "sini": "default",
+                "sinw": "default",
+                "cosw": "default",
+                "esinw": "default",
+                "ecosw": "default",
+                "tp": "default",
+            })
 
-        self.logP = Parameter(f"{prefix}.logP",
-                              lower=-2, upper=13.7,
-                              initval=1.0, init_scale=-1e-5,
-                              unit=u.dex(u.d), internal_unit=u.dex(u.d),
-                              latex=r"\log{P}", description='log(Period/day)', print_to_table=False,
-                              user_params=self.user_params, shape=(self.norbits,))
-        self.logP.build_pymc()
+        # Create a 'lower' array: 0.0 where NOT i180, -1.0 where i180
+        i180_arr = np.atleast_1d(getattr(self, 'i180', False))
+        derived_lowers = np.where(i180_arr, -1.0, 0.0)
+        parameters["cosi"] = {"lower": derived_lowers}
 
-        # force the node. it's required for the model anyway, and it makes plotting easier
-        self.period = Parameter(f"{prefix}.period",
-                                force_node=True,
-                                expression=lambda: 10**self.logP.value,
-                                unit=u.d, internal_unit=u.d,
-                                latex="P", description='Period',
-                                user_params=self.user_params)
-        self.period.build_pymc()
-
-        pi2 = 2.0 * np.pi
-        self.n = Parameter(f"{prefix}.n",
-                           expression=lambda: pi2 / self.period.value,
-                           unit=u.day**(-1.0), internal_unit=u.day**(-1.0),
-                           latex="n", description='', print_to_table=False,
-                           user_params=self.user_params)
-        self.n.build_pymc()
-
-        # this scale should be dataset dependent
-        self.tc_base = Parameter(f"{prefix}.tc_base",
-                                 lower=-1e6, upper=1e6,
-                                 initval=0.0, init_scale=0.001,
-                                 unit=u.d, internal_unit=u.d,unit_latex=r"\bjdtdb",
-                                 latex='T_C', description='Time of conjunction (base)', print_to_table=True,
-                                 user_params=self.user_params, shape=(self.norbits,))
-        self.tc_base.build_pymc()
-
-        # force the node. it's required for the model anyway, and it makes plotting easier
-        self.tc = Parameter(f"{prefix}.tc",
-                            force_node=True,
-                            expression=lambda: self.tc_base.value + self.tref,
-                            unit=u.d, internal_unit=u.d, unit_latex=r"\bjdtdb",
-                            latex='T_C', description='Time of conjunction',
-                            user_params=self.user_params)
-        self.tc.build_pymc()
-
-        # if we're fitting vcve, we need the planet first, then the ecc initialization goes in build_dependent_parameters
-        # this gets complicated if there's a mix of fitvcve and not... punt for now
-        if self.fitvcve[0]: return
-
-        self.cosi = Parameter(f"{prefix}.cosi",
-                              lower=cosilower, upper=1.0,
-                              initval=1e-7, init_scale=0.01,
-                              unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                              latex=r"\cos{i}", description='cos of inc',
-                              user_params=self.user_params, shape=(self.norbits,))
-        self.cosi.build_pymc()
-
-        # 2. an adaption of Dan Foreman-Mackey's unit_disk
-        # Ensures e < 1 and handles the omega periodicity
-        self.secosw = Parameter(f"{prefix}.secosw",
-                                lower=-1.0, upper=1.0,
-                                initval=0.01, init_scale=0.2,
-                                unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                                latex=r"e^{1/2}\cos{\omega_*}", description='secosw', print_to_table=False,
-                                user_params=self.user_params, shape=(self.norbits,))
-        self.secosw.build_pymc()
-
-        # if this were the actual sqrt(e)sin(omega), it would draw e>=1
-        self.sesinw_raw = Parameter(f"{prefix}.sesinw_raw",
-                                    lower=-1.0, upper=1.0,
-                                    initval=0.01, init_scale=0.2,
-                                    unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                                    latex=r"e^{1/2}\cos{\omega_*}_{raw}", description='sesinw_raw', print_to_table=False,
-                                    user_params=self.user_params, shape=(self.norbits,))
-        self.sesinw_raw.build_pymc()
-
-        # correct the prior so it is uniform in e/omega
-        norm = pt.sqrt(1.0 - self.secosw.value ** 2)
-        pm.Potential(f"{prefix}.unit_disk_jacobian", pt.log(norm))
-
-        # this version of sesinw enforces e < 1
-        self.sesinw = Parameter(f"{prefix}.sesinw",
-                                expression=lambda: self.sesinw_raw.value * norm,
-                                unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                                latex=r"e^{1/2}\sin{\omega_*}", description='sesinw', print_to_table=False,
-                                user_params=self.user_params)
-        self.sesinw.build_pymc()
-
-        self.ecc = Parameter(f"{prefix}.ecc",
-                             expression=lambda: self.secosw.value ** 2 + self.sesinw.value ** 2,
-                             unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                             latex='e', description='eccentricity',
-                             user_params=self.user_params)
-        self.ecc.build_pymc()
-
-        self.omega = Parameter(f"{prefix}.omega",
-                                 expression=lambda: pt.arctan2(self.sesinw.value, self.secosw.value),
-                                 unit=u.deg, internal_unit=u.rad,
-                                 latex=r"\omega_*", description='Arg of periastron',
-                                 user_params=self.user_params)
-        self.omega.build_pymc()
-
-        self.sinw = Parameter(f"{prefix}.sinw",
-                                 expression=lambda: pt.sin(self.omega.value),
-                                 unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                                 latex=r"\sin{\omega_*}", description='sin of arg of periastron', print_to_table=False,
-                                 user_params=self.user_params)
-        self.sinw.build_pymc()
-
-        self.cosw = Parameter(f"{prefix}.cosw",
-                                 expression=lambda: pt.cos(self.omega.value),
-                                 unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                                 latex=r"\cos{\omega_*}", description='cos of arg of periastron', print_to_table=False,
-                                 user_params=self.user_params)
-        self.cosw.build_pymc()
-
-        self.esinw = Parameter(f"{prefix}.esinw",
-                               expression=self.ecc.value * self.sinw.value,
-                               unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                               latex=r"e\sin{\omega_*}", description='e times sin of arg of periastron',
-                               user_params=self.user_params)
-        self.esinw.build_pymc()
-
-        self.ecosw = Parameter(f"{prefix}.ecosw",
-                               expression=lambda: self.ecc.value * self.cosw.value,
-                               unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                               latex=r"e\cos{\omega_*}", description='e times cos of arg of periastron',
-                               user_params=self.user_params)
-        self.ecosw.build_pymc()
-
-        self.inc = Parameter(f"{prefix}.inc",
-                             expression=lambda: pt.arccos(self.cosi.value),
-                             unit=u.deg, internal_unit=u.rad,
-                             latex='i', description='inclination',
-                             user_params=self.user_params)
-        self.inc.build_pymc()
-
-        self.sini = Parameter(f"{prefix}.sini",
-                              expression=lambda: pt.sin(self.inc.value),
-                              unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                              latex=r"\sin{i}", description='sin(inc)', print_to_table=False,
-                              user_params=self.user_params)
-        self.sini.build_pymc()
-
-        # Stable Tc -> Tp logic
-        self.E0 = Parameter(f"{prefix}.E0",
-                            expression=lambda: 2.0 * pt.arctan2(pt.sqrt(1.0 - self.ecc.value) * self.cosw.value, pt.sqrt(1.0 + self.ecc.value) * (1.0 + self.sinw.value)),
-                            unit=u.deg, internal_unit=u.rad,
-                            latex='E0', description='Eccentric Anomaly', print_to_table=False,
-                            user_params=self.user_params)
-        self.E0.build_pymc()
-
-        self.tp = Parameter(f"{prefix}.tp",
-                            expression=lambda: self.tc.value - (self.E0.value - self.ecc.value * pt.sin(self.E0.value)) / self.n.value,
-                            unit=u.d, internal_unit=u.d, unit_latex= r"\bjdtdb",
-                            latex='T_P', description='Time of Periastron',
-                            user_params=self.user_params)
-        self.tp.build_pymc()
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
 
     def build_dependent_parameters(self, model, star, planet, user_params=None):
         # TODO: handle the vcve parameterization
@@ -308,7 +206,3 @@ class Orbit(Component):
         rv_matrix = K_grid * (cosw*cosf - sinw*sinf + ecc*cosw)
 
         return rv_matrix
-
-        # 5. Sum across planets (axis 1) to get the total signal at each time
-        # Result Shape: (N_obs,)
-        return pt.sum(rv_matrix, axis=1)

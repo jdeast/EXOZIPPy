@@ -6,76 +6,64 @@
 #  lower_bound: 2.98 # this is an upper bound, which impacts the likelihood and biases the fit
 star.0.radius:
   initval: 1.610
-  gaussian_width: 0.05
-  lower: 1.6
-  upper: 1.62
+  sigma: 0.05
 star.0.mass:
   initval: 1.204
-  gaussian_width: 0.05
-  lower: 1.2
-  upper: 1.22
+  sigma: 0.05
 star.0.teff:
   initval: 6207
-  gaussian_width: 100
-  lower: 6150
-  upper: 6250
+  sigma: 100
 star.0.feh:
   initval: -0.116
-  gaussian_width: 0.08
-  lower: -0.15
-  upper: -0.05
+  sigma: 0.08
 orbit.0.logP:
   initval: 0.47561211154 # this is the initial value, which impacts the accessible parameter space, but not the likelihood explicitly. Note: this is assumed gaussian prior unless mu is also specified
-  init_scale: 1e-6 # this is the initial scale. the ideal value is the 1-sigma uncertainty. This impacts the number of tuning steps required for convergence, but not the likelihood explicitly
-  gaussian_width: 0.001 # this is a gaussian prior, which impacts the likelihood and biases the fit
+  init_scale: 0.00001639564 # this is the initial scale for this parameter, and should be equal to the 1-sigma uncertainty (or its conditional width in the presence of large covariances). This impacts the number of tuning steps required for convergence, but not the likelihood explicitly
+  #gaussian_width: 0.001 # this is a gaussian prior, which impacts the likelihood and biases the fit
   #upper: 0.57 # this is an upper bound, which impacts the likelihood and biases the fit
   #lower: 0.37 # this is an upper bound, which impacts the likelihood and biases the fit
-  upper: 0.4757
-  lower: 0.4755
-orbit.0.tc_base:
-  initval: -3809.697987 #2456190.302013-2460000
-  gaussian_width: 0.01
-  upper: -3809.68
-  lower: -3809.70
+  #upper: 0.4757
+  #lower: 0.4755
+orbit.0.tc:
+  initval: 2456190.302013
+  init_scale: 0.0055082686
 orbit.0.cosi:
   initval: 0.11996
-  gaussian_width: 0.05
-  lower: 0.10
-  upper: 0.13
+  sigma: 0
 orbit.0.secosw:
   initval: 0.01
-  lower: -0.1
-  upper: 0.1
-orbit.0.sesinw_raw:
+  init_scale: 0.04552514536
+orbit.0.sesinw:
   initval: 0.01
-  lower: -0.1
-  upper: 0.1
+  init_scale: 0.06349532713
+#orbit.0.ecc:
+#  upper: 0.25
 planet.0.radius:
   initval: 1.706
-  gaussian_width: 0.1
-  lower: 1.65
-  upper: 1.75
+  sigma: 0.0
 planet.0.mass:
   initval: 0.878
-  #lower: 0.5
-  #upper: 2
-  upper: 0.9
-  lower: 0.85
-  unit: "jupiterMass"
-inst.0.gamma:
-  #lower: 0
-  #upper: 20
-  lower: -5
-  upper: 5
-inst.0.jitter_variance:
-  #lower: 0
-  #upper: 100
-#  lower: -25
-  upper: 25
-
-#planet.b.K:
-#  #gaussian_width: 1000
-#  initval: 100
-#  lower: 0
-#  upper: 200
-
+  init_scale: 0.00953462589
+  #unit: "jupiterMass"
+inst.EXPERT.gamma:
+  init_scale: 11.1130411925
+inst.FIES.gamma:
+  init_scale: 8.55538045957
+inst.HIRES.gamma:
+  init_scale: 0.84847723031
+inst.TRES.gamma:
+  init_scale: 5.3882459687
+inst.EXPERT.jitter_variance:
+  init_scale: 10
+  lower: -100
+  upper: 100
+inst.FIES.jitter_variance:
+  init_scale: 10
+  lower: -100
+  upper: 100
+inst.HIRES.jitter_variance:
+  init_scale: 0.49937616943
+#inst.TRES.jitter_variance:
+#  init_scale: 10
+#  lower: -100
+#  upper: 100

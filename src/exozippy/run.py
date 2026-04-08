@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 import pytensor
+import pytensor.gradient as ptg
 #pytensor.config.optimizer_excluding = "local_elemwise_fusion"
 #pytensor.config.allow_gc = True
 #pytensor.config.linker = "py"
@@ -18,10 +19,8 @@ from pymc.initial_point import make_initial_point_fn
 
 # local imports
 from .outputs.latex import build_latex_output
-from .outputs.plot_step import plot_step
+from .diagnostics import ModelAuditor
 from .components.stellarsystem import StellarSystem
-from .components.parameter import Parameter
-from .components.component import Component
 
 # debugging imports
 import ipdb
@@ -39,13 +38,14 @@ def run_fit(config):
     # 2. Load the sampler settings
     sampler_cfg = config.get("sampler", {})
     pymc_cfg = sampler_cfg.get("pymc", {})
-    init = pymc_cfg.get("adapt_diag"),
+    init = pymc_cfg.get("adapt_diag")
     tune = int(pymc_cfg.get("tune", 2000))
     draws = int(pymc_cfg.get("draws", 2000))
     chains = int(pymc_cfg.get("chains", 4))
     cores = int(pymc_cfg.get("cores", None))
     target_accept = pymc_cfg.get("target_accept", 0.9)
     recompute_trace = pymc_cfg.get("recompute_trace", False)
+    check_curvatures = pymc_cfg.get("check_curvatures", True)
     profile = pymc_cfg.get("profile", False)
     if profile: pytensor.config.profile = True
 
@@ -53,111 +53,31 @@ def run_fit(config):
     stellar_system = StellarSystem(config)
     model = stellar_system.build_model()
 
-    # debugging?
-    """
-    logp_fn = model.compile_logp()
-
-    # 2. Create the Chi-Square Shim
-    def chi2func(point):
-        #Translates PyMC Log-Probability to Chi-Square.
-        #PyMC handles the transformations (log, etc.) automatically.
-        try:
-            # Chi^2 = -2 * ln(Likelihood * Prior)
-            # We use the Log-Posterior so priors constrain the line-search
-            lp = logp_fn(point)
-            if np.isnan(lp) or np.isinf(lp):
-                return 1e20  # "Soft" infinity for the line-search
-            return -2.0 * lp
-        except Exception:
-            return 1e20
-
-    # 3. Initialize from the 'Heuristic' point
-    # model.initial_point() returns a dict of the 'Transformed' values
-    bestpars = model.initial_point()
-    """
-
-    user_init = {p.label: p.initval for p in stellar_system.get_all_parameters()
-                 if p.expression is None and p.initval is not None}
-
     # 4. Sample
     # We use adapt_diag to start exactly at our heuristic means
     with model:
 
         # 1. Get your starting dictionaries
-        ordered_scales, ordered_inits, transformed_inits = stellar_system.get_mcmc_init(model)
+        nuts_scales, phys_scales, phys_inits, transformed_inits = stellar_system.get_mcmc_init(model)
+        inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_scales, check_curvatures)
 
-        # 2. Map the scales and parameters back to their names
-        param_lookup = stellar_system.get_parameter_lookup()
+        # create a version of the plots at the starting point of the model
+        #raw_start = pm.Point(transformed_inits, model=model)
 
-        # 3. map scales to random variable names
-        scale_dict = {rv.name: scale for rv, scale in zip(model.free_RVs, ordered_scales)}
+        # this makes random draws within our 1000 sigma range
+        raw_start = model.initial_point()
 
-        print("\n--- These are the starting points, scales, and corresponding penalties of the model ---")
-        print("--- If the log-Prob is big, you may need to revisit its initialization in the parameter.yaml file ---\n")
+        # nuke them and start at our actual starting points
+        for key in raw_start:
+            raw_start[key] = np.zeros_like(raw_start[key])
 
-        logps = model.point_logps(transformed_inits)
-
-        header = f"{'Parameter':>25} | {'Value':>15} | {'Scale':>12} | {'Units':>12} | {'Log-Prob':>10} "
-        print(header)
-        print("-" * len(header))
-
-        bad_nodes = {}
-
-        for name, logp_val in logps.items():
-            if np.isinf(logp_val) or np.isnan(logp_val):
-                bad_nodes[name] = logp_val
-
-            phys_vals = ordered_inits.get(name)
-            scale_vals = scale_dict.get(name)
-            param_obj = param_lookup.get(name)
-
-            phys_vals = np.atleast_1d(phys_vals) if phys_vals is not None else None
-            scale_vals = np.atleast_1d(scale_vals) if scale_vals is not None else None
-
-            if phys_vals is not None and param_obj is not None:
-                # If it's a true vector (e.g., N planets), loop through them
-                if len(phys_vals) > 1:
-                    for i in range(len(phys_vals)):
-                        v_raw = phys_vals[i]
-                        s_raw = scale_vals[i]
-
-                        user_val = float(param_obj.from_internal(v_raw))
-                        user_scale = float(param_obj.from_internal(s_raw))
-
-                        u = param_obj.unit[i] if i < len(param_obj.unit) else param_obj.unit[0]
-                        unit_str = u.to_string() if u.to_string() != 'dimensionless' else ""
-
-                        row_name = f"{name}[{i}]"
-                        print(
-                            f"{row_name:>25} | {user_val:15.5f} | {user_scale:12.5f} | {unit_str:>12} | {logp_val:10.2f}")
-
-                # If it's a scalar (or length 1), just print it
-                else:
-                    v_raw = phys_vals[0]
-                    s_raw = scale_vals[0]
-
-                    user_val = float(param_obj.from_internal(v_raw))
-                    user_scale = float(param_obj.from_internal(s_raw))
-
-                    u = param_obj.unit[0] if isinstance(param_obj.unit, list) else param_obj.unit
-                    unit_str = u.to_string() if u.to_string() != 'dimensionless' else ""
-
-                    print(f"{name:>25} | {user_val:15.5f} | {user_scale:12.5f} | {unit_str:>12} | {logp_val:10.2f}")
-
-            else:
-                # Derived/Obs/Potentials
-                print(f"{name:>25} | {'Derived/Obs':>15} | {'N/A':>12} | {'---':>12} | {logp_val:10.2f}")
-        print("-" * len(header))
-
-        # if the starting model is bad, warn the user and stop
-        if bad_nodes:
-            raise ValueError(f"FATAL ERROR: The starting model is bad. "
-                             f"Revise the parameter.yaml file.\nBad Nodes: {bad_nodes}")
-
-        raw_start = pm.Point(transformed_inits, model=model)
+        # convert raw starting point to the physical starting point
         start_point = stellar_system.get_physical_point(model, raw_start)
-        #start_point.update(ordered_inits)
         stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, [start_point], filename_prefix=str(prefix) + "_start")
+
+        internal_start = stellar_system.get_internal_point(model, raw_start)
+        stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, [internal_start],
+                                              filename_prefix=str(prefix) + "_start")
 
         #### profiling ####
         if profile:
@@ -173,8 +93,8 @@ def run_fit(config):
             idata = az.from_netcdf(trace_path)
         else:
             # do the sampling and save the results
-            ordered_scales = np.array(ordered_scales).flatten()
-            step = pm.NUTS(scaling=ordered_scales, target_accept=target_accept)
+            nuts_scales = np.array(nuts_scales).flatten()
+            step = pm.NUTS(target_accept=target_accept)
             idata = pm.sample(
                 draws=draws,
                 tune=tune,
@@ -182,7 +102,7 @@ def run_fit(config):
                 init=init,
                 step=step,
                 cores=cores,
-                initvals=ordered_inits,
+                #initvals=ordered_inits,
                 return_inferencedata=True,
                 idata_kwargs={"log_likelihood": False}
             )
@@ -196,37 +116,31 @@ def run_fit(config):
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
 
-    # Generate the corner plot
-    import corner
-    var_names = [v.name for v in model.free_RVs]
-    data = az.extract(idata, var_names=var_names)
+    # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
+    make_corner(model, idata, str(prefix) + "_corner.pdf")
 
-    minrank = 0.5-math.erf(1.0/math.sqrt(2))/2.0
-    maxrank = 0.5+math.erf(1.0/math.sqrt(2))/2.0
-    samples = np.array([data[v].values.flatten() for v in data.data_vars]).T
-    n_samples = samples.shape[0]
-    plot_contours = n_samples > 100
+    # Save a 1D trace plot (similar to EXOFASTv2 chain file)
+    # Create a list of physical parameter labels that actually have traces
+    all_params = stellar_system.get_all_parameters()
+    plot_vars = [p.label for p in all_params if p.label in idata.posterior]
+    save_multipage_trace(idata, plot_vars, str(prefix) + "_trace_detailed.pdf")
 
-    try:
-        fig = corner.corner(
-            data,
-            labels=var_names,
-            quantiles=[minrank, 0.5, maxrank],
-            show_titles=True,
-            plot_contours=plot_contours,
-            plot_density=plot_contours,
-            title_kwargs={"fontsize": 12}
-        )
-        fig.savefig(str(prefix) + "_corner.pdf")
-    except Exception as e:
-        print(f"Warning: Corner plot failed (Sample size {n_samples}). Error: {e}")
+    # Pick the suspected troublemakers
+    # List every tracked parameter in the posterior
+    #available_vars = list(idata.posterior.data_vars)
+    #print("All available variables:\n", available_vars)
 
-    # Save a 1D trace plot (similar to EXOFASTv2 chain file
-    save_multipage_trace(idata, var_names, str(prefix) + "_trace_detailed.pdf")
-
-    #az.plot_trace(idata, var_names=var_names)
-    #plt.savefig(str(prefix) + "_trace.pdf")
-    #plt.close()
+    # Automatically filter for the ones we care about
+    #vars_to_check = [v for v in available_vars if any(sub in v for sub in ['secosw', 'sesinw', 'ecc', 'omega', 'mass'])]
+    #print("\nFiltered variables to plot:\n", vars_to_check)
+    #az.plot_pair(
+    #    idata,
+    #    var_names=vars_to_check,
+    #    kind='scatter',
+    #    divergences=True,
+    #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
+    #)
+    #plt.show()
 
     # Generate latex table
     build_latex_output(stellar_system,
@@ -238,24 +152,201 @@ def run_fit(config):
     draws = get_draws(idata)
     stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, draws, filename_prefix=str(prefix) + "_mcmc")
 
+
+def inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_scales, calc_curvature=True):
+    auditor = ModelAuditor(model, stellar_system, transformed_inits)
+    param_logps, other_nodes = auditor.get_aggregated_logps()
+    curvature_map = auditor.get_curvatures() if calc_curvature else {}
+    unused_yaml = auditor.check_unused_yaml()
+
+    # Dynamic Width Logic
+    display_labels = [p.get_display_label(i) for p in auditor.all_params
+                      for i in range(np.prod(p.shape).astype(int) if p.shape != () else 1)]
+    max_label_len = max([len(l) for l in display_labels] + [len(k) for k in other_nodes.keys()] + [24])
+
+    print("\n--- Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space) ---")
+    print(
+        "--- Ideal curvature is -1.0 and it scales quadratically with scale. Change by setting init_scale in your parameter.yaml file. ---")
+    print("--- Log-Prob for parameters includes summed penalties from bounds and priors. ---\n")
+
+    print("\n" + "-" * 145)
+    header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user)"
+    print(header)
+    print("-" * 145)
+
+    flat_warnings = []
+
+    # --- PART 1: CORE PARAMETERS ---
+    for p in auditor.all_params:
+        raw_v = phys_inits.get(p.label)
+        raw_s = phys_scales.get(p.label)
+
+        if raw_v is None or raw_s is None:
+            continue
+
+        v_phys = np.atleast_1d(raw_v)
+        s_phys = np.atleast_1d(raw_s)
+        c_phys = np.atleast_1d(curvature_map.get(p.label, [np.nan] * len(v_phys)))
+
+        user_flag = "*" if p.user_modified else ""
+
+        for i in range(len(v_phys)):
+            row_label = p.get_display_label(i)
+
+            def safe_float(x):
+                if hasattr(x, 'eval'): return float(x.eval())
+                return float(x)
+
+            val_out = float(p.from_internal(safe_float(v_phys[i])))
+            scale_out = float(p.from_internal(safe_float(s_phys[i])))
+
+            is_fixed = (p.sigma is not None and np.atleast_1d(p.sigma)[i] == 0) or p.expression is not None
+            c_val = c_phys[i] if not is_fixed and not np.isnan(c_phys[i]) else np.nan
+            # Curvature Warning Logic
+            if not np.isnan(c_val) and abs(c_val) < 1e-4:
+                flat_warnings.append(row_label)
+
+            c_str = "N/A" if np.isnan(c_val) else f"{c_val:.5f}"
+
+            prior_str = p.get_prior_str(i, latex=False)
+
+            print(
+                f"{row_label:>{max_label_len}} | {val_out:15.6f} | {scale_out:10.5f} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {c_str:>10} | {prior_str}{user_flag}")
+
+    # --- 2. Potentials & Likelihoods ---
+    for node, lp in other_nodes.items():
+        clean_node = node.replace("up_bound.", "").replace("low_bound.", "").replace("prior.", "").replace(
+            "user_prior.", "")
+        parent = auditor.param_lookup.get(clean_node)
+
+        # Flag if the user touched this parameter in the YAML
+        is_user = (parent and parent.user_modified) or (clean_node in auditor.user_params)
+
+        # SHOW CONDITION: User requested it OR it's actively penalizing the model
+        if abs(lp) > 1e-6 or is_user:
+            p_info = "Likelihood/Det."
+
+            if is_user:
+                if "up_bound" in node and parent:
+                    # Safely grab the parsed upper bound array
+                    val = parent.upper[0] if parent.upper is not None else 'N/A'
+                    p_info = f"< {val}"
+                elif "low_bound" in node and parent:
+                    val = parent.lower[0] if parent.lower is not None else 'N/A'
+                    p_info = f"> {val}"
+                elif parent:
+                    p_info = parent.get_prior_str(latex=False)
+
+            print(
+                f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {'N/A':>10} | {p_info}{' *' if is_user else ''}")
+    print("-" * 145)
+
+    # --- 3. THE FATAL CHECK ---
+    bad_params = {k: v for k, v in param_logps.items() if not np.isfinite(v)}
+    bad_nodes = {k: v for k, v in other_nodes.items() if not np.isfinite(v)}
+
+    # if we start at a bad spot, PyMC will draw randomly from the prior, which will never work
+    # raise an error here
+    if bad_params or bad_nodes:
+        print("\n\033[91m" + "!" * 40)
+        print("Fatal error: the starting model returned an infinite/NaN penalty!")
+        print("The following nodes have Infinite or NaN Log-Probability:")
+        for k, v in {**bad_params, **bad_nodes}.items():
+            print(f"  -> {k}: {v}")
+        print("Check your initial values against your bounds/priors!")
+        print("!" * 40 + "\033[0m\n")
+        raise ValueError("Initialization failed due to non-finite Log-Probability.")
+
+    if flat_warnings:
+        print("\n\033[93m" + "?" * 60)
+        print(f"WARNING: No curvature detected for: {flat_warnings}. Check your bounds/initialization.")
+        print("Even a single unconstrained parameter will destroy HMC efficiency.")
+        print("?" * 60 + "\033[0m\n")
+
+    if unused_yaml:
+        print(f"\n!!!! Warning: the following parameters in the parameter.yaml file did not match a parameter in the model and its entries were not applied: {unused_yaml}")
+        print(f"\n!!!!          This warning can be safely ignored if that was intentional, but check for typos.")
+
+def make_corner(model, idata, filename):
+    import corner
+    physical_vars = [v for v in idata.posterior.data_vars if "_raw" not in v and "_interval" not in v]
+
+    samples_list = []
+    labels = []
+
+    for v in physical_vars:
+        # Stack chains and draws into a single 'sample' dimension at the end
+        arr = idata.posterior[v].stack(sample=("chain", "draw")).values
+        n_samples = arr.shape[-1]
+
+        # If it's a scalar parameter (1D array of samples)
+        if arr.ndim == 1:
+            samples_list.append(arr)
+            labels.append(v)
+        # If it's a vector parameter (e.g., 2 instruments -> 2D array)
+        else:
+            arr_flat = arr.reshape(-1, n_samples)
+            for i in range(arr_flat.shape[0]):
+                samples_list.append(arr_flat[i])
+                labels.append(f"{v}[{i}]")
+
+    samples = np.array(samples_list).T
+
+    minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
+    maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
+    n_samples_total = samples.shape[0]
+    plot_contours = n_samples_total > 100
+
+    try:
+        fig = corner.corner(
+            samples,
+            labels=labels,
+            quantiles=[minrank, 0.5, maxrank],
+            show_titles=True,
+            plot_contours=plot_contours,
+            plot_density=plot_contours,
+            title_kwargs={"fontsize": 12}
+        )
+        fig.savefig(filename)
+    except Exception as e:
+        print(f"Warning: Corner plot failed (Sample size {n_samples_total}). Error: {e}")
+
 def save_multipage_trace(idata, var_names, filename, params_per_page=4):
     with PdfPages(filename) as pdf:
-        # 1. Break the variable list into chunks of 4
-        for i in range(0, len(var_names), params_per_page):
+        # --- PAGE 1 (Special: LP + first 3 params) ---
+        num_on_first = params_per_page - 1
+        first_page_vars = var_names[:num_on_first]
+
+        # Create a figure with enough rows for 4 parameters (8 subplots)
+        fig, axes = plt.subplots(params_per_page, 2, figsize=(12, 3 * params_per_page))
+
+        # 1. Plot LP into the first row
+        az.plot_trace(idata.sample_stats, var_names=["lp"], axes=axes[0:1, :])
+
+        # 2. Plot the parameters into the remaining rows
+        if first_page_vars:
+            az.plot_trace(idata, var_names=first_page_vars, axes=axes[1:params_per_page, :])
+
+        fig.suptitle("Trace Plots: Page 1 (Likelihood & Parameters)", fontsize=14)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # --- PAGES 2+ (Standard Loop) ---
+        for i in range(num_on_first, len(var_names), params_per_page):
             chunk = var_names[i: i + params_per_page]
+            n_rows = len(chunk)
 
-            # 2. Plot just this chunk
-            # 'compact=False' gives each chain its own line (better for spotting drifts)
-            axes = az.plot_trace(idata, var_names=chunk, compact=False)
+            fig, axes = plt.subplots(n_rows, 2, figsize=(12, 3 * n_rows))
+            # Ensure axes is 2D even if there's only 1 row
+            if n_rows == 1: axes = axes[np.newaxis, :]
 
-            # 3. Clean up the formatting for readability
-            fig = plt.gcf()
-            fig.suptitle(f"Trace Plots: Page {i // params_per_page + 1}", fontsize=14)
+            az.plot_trace(idata, var_names=chunk, axes=axes)
 
-            # Adjust layout so titles don't overlap axes
+            page_num = (i - num_on_first) // params_per_page + 2
+            fig.suptitle(f"Trace Plots: Page {page_num}", fontsize=14)
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-            # 4. Save this specific figure as a new page in the PDF
             pdf.savefig(fig)
             plt.close(fig)
 
@@ -281,3 +372,27 @@ def get_draws(idata, n_draws=50):
         draw_list.append(point)
 
     return draw_list
+
+
+def get_diagonal_curvature(model, point):
+    import pytensor.gradient as ptg
+    logp_node = model.logp()
+    vars_to_check = model.value_vars
+    curvatures = []
+
+    for var in vars_to_check:
+        grad = ptg.grad(logp_node, var)
+        curv = ptg.grad(grad.sum(), var)
+
+        # Compile the function
+        fn = model.compile_fn(curv, on_unused_input='ignore')
+
+        # fn.f.maker.inputs contains the expected variable objects
+        expected_names = [v.name for v in fn.f.maker.inputs]
+        filtered_point = {k: v for k, v in point.items() if k in expected_names}
+
+        # Pass the filtered dictionary as a single positional argument
+        val = np.atleast_1d(fn(filtered_point))
+        curvatures.append(val)
+
+    return np.concatenate(curvatures)

@@ -1,117 +1,89 @@
-from typing import Dict, Any
 from .parameter import Parameter
 
+from ..physics import PHYSICS_REGISTRY
 
 class Component:
-    """Parent class for all physical model components (Star, Planet, Orbit, etc.)"""
-
-    def get_parameter_lines(self):
-        """Recursively gather (variables_tex, table_line_tex) from all child Parameters."""
-        var_lines = []
-        table_lines = []
-
-        # 1. Look for Parameters directly on this component
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Parameter):
-                var_lines.append(attr.to_latex_var())
-                table_lines.append(attr.to_table_line())
-
-        # 2. Recurse into child Components (like Planet -> Orbit)
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Component):
-                v, t = attr.get_parameter_lines()
-                var_lines.extend(v)
-                table_lines.extend(t)
-
-        return var_lines, table_lines
-
-    def get_latex_data(self):
-        defs = []
-        lines = []
-
-        # Use __dict__ to preserve the order you wrote in the class
-        for attr_name, attr in self.__dict__.items():
-            if isinstance(attr, Parameter):
-                if attr.print_to_table:
-                    defs.append(attr.to_latex_def())
-                    lines.append(attr.to_table_line())
-
-            # Also preserve order for sub-components (like Orbit)
-            elif isinstance(attr, Component):
-                child_defs, child_lines = attr.get_latex_data()
-                defs.extend(child_defs)
-                lines.extend(child_lines)
-
-        return defs, lines
-
-    def get_latex_data_old(self):
-        """Recursively gather (variable_defs, table_lines) from all Parameters."""
-        defs = []
-        lines = []
-
-        # 1. Gather from immediate Parameter attributes
-        # Sort by attr_name or a 'priority' field to keep table order consistent
-        for attr_name in sorted(dir(self)):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Parameter):
-                if attr.print_to_table:
-                    defs.append(attr.to_latex_def())  # e.g., \newcommand{\ezRstar}{1.0 \pm 0.1}
-                    lines.append(attr.to_table_line())  # e.g., R_* & [Radius] & \ezRstar \\
-
-        # 2. Recurse into children (Orbit, etc.)
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Component):
-                child_defs, child_lines = attr.get_latex_data()
-                defs.extend(child_defs)
-                lines.extend(child_lines)
-
-        return defs, lines
-
-    def get_inits(self) -> Dict[str, float]:
-        inits = {}
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Parameter) and attr.expression is None:
-                # Use the nudged initval we calculated in build_pymc
-                inits[attr.label] = attr.initval
-
-            if isinstance(attr, Component):
-                inits.update(attr.get_inits())
-        return inits
-
-    def get_scales(self) -> Dict[str, float]:
+    def __init__(self, component_config, config_manager):
         """
-        Automatically crawls the component's attributes to find all sampling
-        parameters and returns their initial scales.
+        Standardized constructor for ALL components.
         """
-        scales = {}
-        for attr_name in dir(self):
-            # We skip 'internal' dunder methods for speed
-            if attr_name.startswith('__'):
-                continue
+        self.config = component_config  # The list from kelt4.yaml (e.g. [{'name': 'Kelt-4A'}])
+        self.config_manager = config_manager  # The resolver for exozippy_params.yaml
 
-            attr = getattr(self, attr_name)
+        # Determine how many of this thing we are building
+        self.n_elements = len(self.config)
 
-            # Check if it's a Parameter object
-            if isinstance(attr, Parameter):
-                # We only want to scale 'Free Variables' (no expression)
-                if attr.expression is None:
-                    if attr.init_scale is not None:
-                        scales[attr.label] = attr.init_scale
-                    else:
-                        # Warning with context so you know which component is 'lazy'
-                        print(f"WARNING: No init_scale for {attr.label} "
-                              f"in {self.__class__.__name__} '{self.name}'. Defaulting to 1.0.")
-                        scales[attr.label] = 1.0
+        # Grab names for labeling PyMC nodes
+        self.names = [c.get("name", f"{i}") for i, c in enumerate(self.config)]
 
-        # Now, handle nested components (like Planet owning an Orbit)
-        # This recursively gathers scales down the tree
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, Component):
-                scales.update(attr.get_scales())
+    def add_parameter(self, p_name, config_manager, shape=(), prefix=None, expr_key=None, context_nodes=None,
+                      **kwargs):
+        context_nodes = context_nodes or {}
+        cfg = config_manager.resolve(prefix, p_name, shape=shape)
 
-        return scales
+        if expr_key is None:
+            expr_key = kwargs.pop("expr_key", None)
+
+        expressions_dict = cfg.pop("expressions", {})
+        expression = None
+
+        if expr_key:
+            expr_cfg = expressions_dict.get(expr_key)
+            func = PHYSICS_REGISTRY[expr_cfg["func_name"]]
+            dep_names = expr_cfg.get("deps", [])
+
+            dep_nodes = []
+            numeric_deps = []
+
+            for d in dep_names:
+                if d in context_nodes:
+                    node = context_nodes[d]
+                    dep_nodes.append(node)
+                    # context_nodes are usually raw tensors, try to eval them
+                    try:
+                        numeric_deps.append(node.eval())
+                    except:
+                        numeric_deps.append(0.0)
+                else:
+                    param = getattr(self, d)
+                    dep_nodes.append(param.value)
+                    # THIS IS THE KEY: grab the numeric initval from the parent Parameter
+                    numeric_deps.append(param.initval)
+
+            # Pre-calculate the numeric init for the Auditor/Build process
+            try:
+                # Only overwrite if not explicitly provided in kwargs
+                if 'initval' not in kwargs:
+                    kwargs['initval'] = func(*numeric_deps)
+            except Exception as e:
+                # Fallback to a zero-array of correct shape if math fails
+                n_elements = np.prod(shape).astype(int) if shape != () else 1
+                kwargs['initval'] = np.zeros(n_elements)
+
+            expression = lambda: func(*dep_nodes)
+
+        full_params = {**cfg, **kwargs}
+
+        param_obj = Parameter(
+            label=f"{prefix}.{p_name}",
+            names=getattr(self, 'names', None),
+            expression=expression,
+            user_params=self.config_manager.user_params,
+            **full_params
+        )
+
+        setattr(self, p_name, param_obj)
+        return param_obj.build_pymc()
+
+    # Make sure build_pars_from_dict can pass it along!
+    def build_pars_from_dict(self, par_dict, shape, prefix=None, context_nodes=None):
+        for p_name, options in par_dict.items():
+            if not options:
+                self.add_parameter(p_name, self.config_manager, shape=shape, prefix=prefix,
+                                   context_nodes=context_nodes)
+            elif isinstance(options, str):
+                self.add_parameter(p_name, self.config_manager, shape=shape, expr_key=options, prefix=prefix,
+                                   context_nodes=context_nodes)
+            elif isinstance(options, dict):
+                self.add_parameter(p_name, self.config_manager, shape=shape, prefix=prefix,
+                                   context_nodes=context_nodes, **options)

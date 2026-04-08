@@ -1,16 +1,7 @@
 """
-exozippy.params_obsolete.parameter
-
-Refactor notes (high-level):
-- Separate *spec/metadata* (label, units, latex, description, bounds, priors) from the *PyMC variable*.
-- Avoid side effects in __init__ (no pm.* calls, no prints).
 - Provide a single entrypoint to "materialize" the parameter inside a pm.Model() context: Parameter.build_pymc().
 - Make user overrides explicit and predictable: users can only tighten bounds; sigma==0 means fixed/deterministic at mu/initval.
 - Clean up posterior summarization using quantiles (median, +/- 1σ by default).
-
-This module is PyMC-facing; if you later want a backend-agnostic parameter spec, split this into:
-  - spec.py (pure metadata)
-  - pymc.py (adapter that creates pm RVs)
 """
 
 from __future__ import annotations
@@ -28,6 +19,9 @@ from astropy import units as u
 
 import pymc as pm
 import pytensor.tensor as pt
+
+# local imports
+from exozippy.constants import SIGMA_1_LOW, SIGMA_1_HIGH
 
 import ipdb
 
@@ -52,11 +46,6 @@ def _tighten_bounds(
         upper = user_upper if upper is None else min(upper, user_upper)
     return lower, upper
 
-
-def _erf_sigma_to_interval_mass(nsigma: float) -> float:
-    """Mass inside +/- nsigma for a normal distribution."""
-    return math.erf(nsigma / math.sqrt(2.0))
-
 def _latex_varname(label: str, prefix: str = "ez") -> str:
     """
     Create a LaTeX-safe macro name from a label:
@@ -71,6 +60,11 @@ def _latex_varname(label: str, prefix: str = "ez") -> str:
         var = var.replace(o, n)
     return prefix + var
 
+def _idx_to_words(n):
+    words = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three',
+             '4': 'four', '5': 'five', '6': 'six', '7': 'seven',
+             '8': 'eight', '9': 'nine'}
+    return "".join(words[char] for char in str(n))
 
 def _as_flat_array(x: Any) -> np.ndarray:
     """Flatten posterior-like input to a 1D numpy array."""
@@ -155,6 +149,9 @@ class PosteriorSummary:
         - errors rounded to `sigfigs` significant figures
         - median rounded to match the more precise error
         """
+        if math.isnan(self.median) or math.isnan(self.err_minus) or math.isnan(self.err_plus):
+            return ("NaN", "NaN", "NaN")
+
         em = abs(self.err_minus)
         ep = abs(self.err_plus)
         if em == 0 and ep == 0:
@@ -241,10 +238,13 @@ class Parameter:
     initval: Optional[Number] = None
     init_scale: Optional[Number] = 1.0
     force_node: bool = False
+    names: Optional[Sequence[str]] = None
+    mask: Any = None
 
     # If expression is provided, parameter becomes deterministic (pm.Deterministic).
     # You can pass expression at build time too.
     expression: Any = None
+    shape: tuple = ()
 
     # "Physical" bounds (can be tightened by user_params, not expanded).
     lower: Optional[Number] = None
@@ -255,6 +255,7 @@ class Parameter:
     sigma: Optional[Number] = None
 
     print_to_table: bool = True
+    user_modified: bool = False
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
 
@@ -269,69 +270,80 @@ class Parameter:
     posterior: Any = None  # user stores idata posterior samples here if desired
     summary: Optional[PosteriorSummary] = field(default=None, init=False)
     table_note: Optional[str] = None
-    shape: Tuple[int, ...] = ()  # Default to scalar
 
     def __post_init__(self) -> None:
         """
         Minimalist Identity Setup.
-        No math, no scaling, no indexing.
+        Parses string units to Astropy objects strictly and enforces list structure.
+        Applies universal unit conversion to move everything to internal math space.
         """
-        # 1. Ensure unit is a list for consistency
-        if not isinstance(self.unit, (list, np.ndarray)):
-            self.unit = [self.unit]
 
-        # 2. Get the 'Pretty Name' for plots/tables
-        # (Just use the first unit as the label for now)
+        def parse_u(val):
+            if not isinstance(val, str):
+                return val
+            if val == "":
+                return u.dimensionless_unscaled
+            # Strict mode: Let Astropy raise an error if the string is invalid
+            return u.Unit(val)
+
+        # 1. INTERNAL UNIT: Always a single scalar
+        if isinstance(self.internal_unit, str):
+            self.internal_unit = parse_u(self.internal_unit)
+        elif self.internal_unit is None:
+            self.internal_unit = u.dimensionless_unscaled
+
+        # 2. USER UNIT: Parse strings AND enforce list structure
+        if isinstance(self.unit, str):
+            self.unit = [parse_u(self.unit)]
+        elif isinstance(self.unit, (list, np.ndarray)):
+            self.unit = [parse_u(x) for x in self.unit]
+        else:
+            self.unit = [u.dimensionless_unscaled if self.unit is None else self.unit]
+
+        # 3. GET LATEX DISPLAY NAME (Use the first unit in the list)
         try:
             self.unit_latex = UnitTranslator.get_latex(self.unit[0])
         except:
             self.unit_latex = ""
 
-        # 3. Structural Naming
+        # 4. STRUCTURAL NAMING
         self.latex_varname = _latex_varname(self.label, prefix=self.latex_prefix)
 
-    def __post_init__old(self) -> None:
+        # --- 5. THE GATEKEEPER CONVERSION ---
+        # Convert ALL numeric fields from User Units to Internal Units ONCE upon creation.
+        # This catches YAML defaults AND dynamic data-driven kwargs.
+        factors = self._get_conversion_factors()
 
-        # 1. Unit Handling & Conversion Factors
-        # Default internal units to Solar/Days/CGS
-        for unit in self.unit:
-            try:
-                # Calculate factor to get from User -> Internal
-                # Example: u.jupiterMass.to(u.solMass) -> 0.000954
-                trial = unit.to(unit.internal_unit)
-            except u.UnitConversionError:
-                raise TypeError(f"Cannot convert {unit.unit} to {unit.internal_unit} for {self.label}, only units supported by astropy.Unit (https://docs.astropy.org/en/stable/units/standard_units.html) are allowed")
+        def convert(val):
+            if val is None:
+                return None
 
-        # 2. Set the 'unit_latex' property strictly
-        self.unit_latex = None
+            # 1. If it's a symbolic PyTensor node, execute it to get the raw numbers
+            if hasattr(val, 'eval'):
+                try:
+                    val = val.eval()
+                except Exception:
+                    # If it cannot be evaluated (e.g., missing inputs), safely fallback
+                    return np.full(np.atleast_1d(factors).shape, np.nan)
 
-        # Check user_params for an explicit override
-        if self.user_params and self.label in self.user_params:
-            self.unit_latex = self.user_params[self.label].get("unit_latex")
+            arr = np.atleast_1d(val)
 
-        # If no override, try the translator
-        if self.unit_latex is None:
-            if self.unit:
-                # This will raise the ValueError if not understood
-                self.unit_latex = UnitTranslator.get_latex(self.unit)
-            else:
-                self.unit_latex = ""
+            # 2. In case it's an array containing individual PyTensor objects
+            if arr.size > 0 and hasattr(arr[0], 'eval'):
+                try:
+                    arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
+                except Exception:
+                    return np.full(np.atleast_1d(factors).shape, np.nan)
 
-        if self.user_params and self.label in self.user_params:
-            overrides = self.user_params[self.label]
+            # 3. Safe to cast and convert (User -> Internal)
+            return arr.astype(float) / factors
 
-            # 1. Update values
-            if "mu" in overrides: self.mu = overrides["mu"]
-            if "sigma" in overrides: self.sigma = overrides["sigma"]
-
-            # 2. Tighten bounds (never expand)
-            if "lower" in overrides:
-                self.lower = max(self.lower, overrides["lower"]) if self.lower is not None else overrides["lower"]
-
-            if "upper" in overrides:
-                self.upper = min(self.upper, overrides["upper"]) if self.upper is not None else overrides["upper"]
-
-        self.latex_varname = _latex_varname(self.label, prefix=self.latex_prefix)
+        self.initval = convert(self.initval)
+        self.init_scale = convert(self.init_scale)
+        self.lower = convert(self.lower)
+        self.upper = convert(self.upper)
+        self.mu = convert(self.mu)
+        self.sigma = convert(self.sigma)
 
     def get_value(self, point):
         """
@@ -356,223 +368,159 @@ class Parameter:
 
         raise KeyError(f"Parameter {self.label} not found in point and has no expression.")
 
+    def get_display_label(self, index=0):
+        parts = self.label.split('.')
+        # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
+        # If it's already 'inst.gamma' -> 'inst.EXPERT.gamma'
+        prefix = parts[0]
+        attr = parts[-1]
+
+        if self.names and index < len(self.names):
+            return f"{prefix}.{self.names[index]}.{attr}"
+
+        # If no names, use the index: star.0.radius
+        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
+        if n_elements > 1:
+            return f"{prefix}.{index}.{attr}"
+
+        return self.label
+
     def build_pymc(self, ndx=0, expression=None):
         """
-        Materializes the Parameter in the PyMC graph.
-        - Handles User -> Internal unit scaling.
-        - Supports vectorization (shape > 1).
-        - Supports indexed YAML overrides (planet.0.mass).
-        - Uses the 'Potential Hammer' for mixed priors in a single vector.
+        Materializes the Parameter in the PyMC graph using Non-Centered Scaling.
+        Assumes self.initval, lower, upper, mu, sigma, and init_scale
+        are already in INTERNAL UNITS (broadcasted to self.shape).
         """
+        import pytensor.tensor as pt
+        import pymc as pm
+
         expr_raw = self.expression if expression is None else expression
 
         # 1. SETUP SHAPES
         actual_shape = self.shape if isinstance(self.shape, tuple) else (self.shape,)
-        n_elements = np.prod(actual_shape).astype(int) if actual_shape != () else 1
+        n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
 
-        # 2. PREP WORK VECTORS (User Units)
-        def prep_vec(val, fill=np.nan):
+        # 2. PREP WORK VECTORS
+        # We ensure everything is a float64 array of length n_elements
+        def to_vec(val, fill=np.nan):
             if val is None:
                 return np.full(n_elements, fill, dtype=float)
 
-            v = np.atleast_1d(val)
-            if v.size == 1:
-                return np.full(n_elements, v[0], dtype=float)
-            if v.size == n_elements:
-                return v.astype(float).copy()
-            return np.full(n_elements, fill, dtype=float)
-
-        inits = prep_vec(self.initval)
-        mus = prep_vec(self.mu)
-        sigmas = prep_vec(self.sigma)
-        lowers = prep_vec(self.lower, fill=-np.inf)
-        uppers = prep_vec(self.upper, fill=np.inf)
-        scales = prep_vec(self.init_scale, fill=1.0)
-
-        # Track extra Gaussian priors (gaussian_width in YAML)
-        add_extra_gaussian = np.zeros(n_elements, dtype=bool)
-        user_mus = np.zeros(n_elements)
-        user_sigmas = np.zeros(n_elements)
-
-        # --- 3. THE SIEVE: Initialize Units and Apply YAML Overrides ---
-
-        # Initialize units list FIRST so it can be indexed in the sieve
-        # Ensure we store the Unit part, not a Quantity
-        base_u = self.unit.unit if hasattr(self.unit, 'unit') else self.unit
-        units = [base_u] * n_elements
-
-        if self.user_params is not None:
-            # A. Global Overrides (e.g., "planet.mass")
-            if self.label in self.user_params:
-                up = self.user_params[self.label]
-                if "unit" in up:
-                    u_ov = up["unit"]
-
-                    new_u = u_ov.unit if hasattr(u_ov, 'unit') else u_ov
-                    units = [new_u] * n_elements
-                if "initval" in up: inits[:] = float(up["initval"])
-                if "mu" in up: mus[:] = float(up["mu"])
-                if "sigma" in up: sigmas[:] = float(up["sigma"])
-                if "lower" in up: lowers[:] = float(up["lower"])
-                if "upper" in up: uppers[:] = float(up["upper"])
-                if "init_scale" in up: scales[:] = float(up["init_scale"])
-                if "gaussian_width" in up:
-                    add_extra_gaussian[:] = True
-                    user_sigmas[:] = float(up["gaussian_width"])
-                    user_mus[:] = mus.copy()
-
-            # B. Indexed Overrides (e.g., "planet.0.mass")
-            label_parts = self.label.split('.')
-            if len(label_parts) >= 2:
-                prefix, attr = label_parts[0], label_parts[-1]
-                for i in range(n_elements):
-                    idx_key = f"{prefix}.{i}.{attr}"
-                    if idx_key in self.user_params:
-                        ov = self.user_params[idx_key]
-
-                        # Update Unit for this specific index
-                        if "unit" in ov:
-                            new_unit = ov["unit"]
-
-                            # If it's a string from YAML, cast it to an Astropy Unit
-                            if isinstance(new_unit, str):
-                                try:
-                                    units[i] = u.Unit(new_unit)
-                                except ValueError:
-                                    raise ValueError(
-                                        f"Unit {new_unit} for {indexed_key} not understood. Must be supported by astropy.units.")
-                            else:
-                                # Handle cases where it's already an Astropy object
-                                units[i] = new_unit.unit if hasattr(new_unit, 'unit') else new_unit
-
-                        if "initval" in ov: inits[i] = float(ov["initval"])
-                        if "mu" in ov: mus[i] = float(ov["mu"])
-                        if "sigma" in ov: sigmas[i] = float(ov["sigma"])
-                        if "lower" in ov: lowers[i] = float(ov["lower"])
-                        if "upper" in ov: uppers[i] = float(ov["upper"])
-                        if "init_scale" in ov: scales[i] = float(ov["init_scale"])
-
-            # --- 4. VECTORIZED UNIT CONVERSION ---
-            factors = np.zeros(n_elements)
-
-            # Ensure units is definitely a list we can index
-            if not isinstance(units, list):
-                units = [units] * n_elements
-
-            for i in range(n_elements):
-                # Grab the specific unit object for this index
-                u_item = units[i]
-
-                # If u_item is somehow a list (the cause of your error),
-                # we grab the first element to save the run.
-                if isinstance(u_item, list):
-                    u_item = u_item[0]
-
+            # Handle cases where a Tensor might have slipped in
+            if hasattr(val, 'eval'):
                 try:
-                    # We use float() because u.to() returns a Quantity or a float
-                    # This is faster and avoids the .value AttributeError
-                    factors[i] = float(u_item.to(self.internal_unit))
-                except (AttributeError, TypeError):
-                    # Fallback for complex astropy objects
-                    factors[i] = u_item.to(self.internal_unit).value
+                    val = val.eval()
+                except:
+                    return np.full(n_elements, fill, dtype=float)
 
-        # Apply scaling to all vectors
-        inits *= factors
-        mus *= factors
-        sigmas *= factors
-        lowers *= factors
-        uppers *= factors
-        scales *= factors
-        user_mus *= factors
-        user_sigmas  *= factors
+            arr = np.atleast_1d(val)
 
-        # --- 5. INITIALIZATION & CLIPPING LOGIC ---
-        for i in range(n_elements):
-            if scales[i] < 0:
-                scales[i] = abs(inits[i] * scales[i])
-            if np.isnan(inits[i]) and not np.isnan(mus[i]):
-                inits[i] = mus[i]
-            if not np.isinf(lowers[i]) and not np.isinf(uppers[i]):
-                eps = scales[i] * 1e-6
-                inits[i] = np.clip(inits[i], lowers[i] + eps, uppers[i] - eps)
+            # Safety check for contents
+            if arr.size > 0 and hasattr(arr[0], 'eval'):
+                try:
+                    val_eval = [float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr]
+                    arr = np.array(val_eval)
+                except:
+                    return np.full(n_elements, fill, dtype=float)
 
-        # Sync class attributes for external use (tables/plots)
-        self.initval = inits[0] if n_elements == 1 else inits
-        self.init_scale = scales[0] if n_elements == 1 else scales
+            if arr.size == 1:
+                return np.full(n_elements, float(arr[0]), dtype=float)
 
-        # --- NEW: EXACT SHAPE ENFORCEMENT ---
-        # This safely collapses the 1D arrays back to 0D floats if actual_shape is (),
-        # or properly shapes them to (N,) if actual_shape is a vector.
-        def enforce_shape(arr):
-            if actual_shape == ():
-                return float(arr[0])
-            return arr.reshape(actual_shape)
+            # Truncate or pad to match n_elements
+            res = np.full(n_elements, fill, dtype=float)
+            n_to_copy = min(n_elements, arr.size)
+            res[:n_to_copy] = arr.astype(float)[:n_to_copy]
+            return res
 
-        self.initval = enforce_shape(inits)
-        self.init_scale = enforce_shape(scales)
-        self.mu = enforce_shape(mus)
-        self.sigma = enforce_shape(sigmas)
-        self.lower = enforce_shape(lowers)
-        self.upper = enforce_shape(uppers)
-        user_mus = enforce_shape(user_mus)
-        user_sigmas = enforce_shape(user_sigmas)
+        inits = to_vec(self.initval, fill=0.0)
+        scales = to_vec(self.init_scale, fill=1.0)
+        mus = to_vec(self.mu, fill=np.nan)
+        sigmas = to_vec(self.sigma, fill=np.nan)
+        lowers = to_vec(self.lower, fill=-np.inf)
+        uppers = to_vec(self.upper, fill=np.inf)
 
-        # --- 6. THE LEAN GATEKEEPER ---
-        has_constraining_logic = any([
-            not np.all(np.isnan(self.mu)),
-            not np.all(np.isnan(self.sigma)),
-            not np.all(np.isinf(self.lower)),
-            not np.all(np.isinf(self.upper)),
-            self.force_node,
-            np.any(add_extra_gaussian)
-        ])
+        # 3. IDENTIFY ROLES
+        is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
+        # Fixed if sigma is 0 OR if init_scale is effectively 0
+        is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
+        is_sampling = ~(is_fixed | is_derived)
 
-        if expr_raw is not None and not has_constraining_logic:
-            self.value = expr_raw() if callable(expr_raw) else expr_raw
-            return None
+        raw_elements = [None] * n_elements
 
-        # --- 7. DETERMINISTIC PATH ---
+        # A. FIXED OR DERIVED: Constant 0.0 in the "raw" unit-normal space
+        if np.any(is_fixed | is_derived):
+            for i in np.where(is_fixed | is_derived)[0]:
+                raw_elements[i] = pt.constant(0.0)
+
+        # B. SAMPLING: N(0, 1) or N(0, 1000) for unconstrained
+        if np.any(is_sampling):
+            idx = np.where(is_sampling)[0]
+            # Standardize: If a physical prior sigma exists, raw space is N(0,1)
+            # If no prior exists (Uniform), raw space is N(0, 1000) for high mobility
+            raw_sigmas = np.where(~np.isnan(sigmas[idx]) & (sigmas[idx] > 0), 1.0, 1000.0)
+
+            par_raw = pm.Normal(f"{self.label}_raw",
+                                mu=0,
+                                sigma=raw_sigmas,
+                                shape=len(idx),
+                                initval=np.zeros(len(idx)))
+
+            for j, actual_idx in enumerate(idx):
+                raw_elements[actual_idx] = par_raw[j]
+
+        # 4. RECONSTRUCT PHYSICAL VALUE
+        raw_vector = pt.stack(raw_elements)
+
         if expr_raw is not None:
-
-            actual_expr = expr_raw() if callable(expr_raw) else expr_raw
-            self.value = pm.Deterministic(self.label, actual_expr)
-
-            char_scale = self.init_scale
-            if char_scale is None:
-                # If bound is 100, scale is 1.0. If bound is 0, scale is 0.1
-                char_scale = np.maximum(np.abs(u_val) * 0.01 if u_val is not None else 1.0, 0.1)
-            steepness = 10.0 / char_scale
-
-            if not np.all(np.isinf(lowers)):
-                # this is a differentiable "wall" boundary at the lower bound
-                pm.Potential(f"{self.label}_lower_bound",-pt.softplus(steepness * (self.lower - self.value)))
-                #switches are really hard to sample and poorly behaved (cause divergences)
-                # pm.Potential(f"{self.label}_lower_bound", pt.switch(pt.all(self.value >= lowers), 0.0, -np.inf))
-            if not np.all(np.isinf(uppers)):
-                #pm.Potential(f"{self.label}_upper_bound", pt.switch(pt.all(self.value <= uppers), 0.0, -np.inf))
-                pm.Potential(f"{self.label}_upper_bound",-pt.softplus(steepness * (self.value-self.upper)))
-            return self.value
-
-        # --- 8. STOCHASTIC / FIXED PATH ---
-        if not np.any(np.isnan(mus)) and np.all(sigmas == 0):
-            self.value = pm.Deterministic(self.label, pt.as_tensor_variable(self.mu))
+            # Derived Parameter logic
+            phys_val = expr_raw() if callable(expr_raw) else expr_raw
         else:
-            if np.any(np.isinf(self.lower)) or np.any(np.isinf(self.upper)):
-                raise ValueError(f"{self.label}: Vectorized parameters require finite bounds.")
+            # Sampled/Fixed Parameter logic: phys = (raw * scale) + init
+            phys_val = (raw_vector * pt.as_tensor_variable(scales)) + pt.as_tensor_variable(inits)
 
-            self.value = pm.Uniform(
-                self.label, lower=self.lower, upper=self.upper, initval=self.initval, shape=actual_shape
-            )
+        # 5. ASSIGN TO SELF.VALUE (Optionally wrap in Deterministic)
+        track_node = bool(np.any(is_sampling)) or self.force_node
 
-        # --- 9. THE POTENTIAL HAMMER ---
-        for i in range(n_elements):
-            if not np.isnan(self.mu[i]) and not np.isnan(self.sigma[i]) and self.sigma[i] > 0:
-                logp = -0.5 * ((self.value[i] - self.mu[i]) / self.sigma[i]) ** 2
-                pm.Potential(f"prior.{self.label}.{i}", logp)
+        # Reshape back to parameter's intended shape
+        if actual_shape == ():
+            val_to_save = phys_val if expr_raw is not None else phys_val[0]
+        else:
+            val_to_save = phys_val.reshape(actual_shape)
 
-            if add_extra_gaussian[i]:
-                extra_logp = -0.5 * ((self.value[i] - user_mus[i]) / user_sigmas[i]) ** 2
-                pm.Potential(f"user_prior.{self.label}.{i}", extra_logp)
+        if track_node:
+            self.value = pm.Deterministic(self.label, val_to_save)
+        else:
+            self.value = val_to_save
+
+        # 6. APPLY SCIENTIFIC PRIORS & SOFT BOUNDARIES
+        # We use a Sigmoid 'Hammer' for soft boundaries (steepness based on scale)
+        softness = 0.01
+        steepness_val = 4.4 / (np.maximum(scales, 1e-12) * softness)
+        steepness = pt.as_tensor_variable(steepness_val)
+
+        # Prepare target nodes for vectorized potentials
+        val_flat = pt.flatten(self.value)
+
+        # A. Gaussian Priors (Masked for NaNs)
+        valid_priors = ~np.isnan(mus) & (sigmas > 0)
+        if np.any(valid_priors):
+            mask = pt.as_tensor_variable(valid_priors)
+            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(mus)) / pt.as_tensor_variable(sigmas)) ** 2
+            pm.Potential(f"prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+
+        # B. Soft Lower Bounds
+        has_lower = ~np.isinf(lowers)
+        if np.any(has_lower):
+            mask = pt.as_tensor_variable(has_lower)
+            penalty = pm.math.log(pt.sigmoid((val_flat - pt.as_tensor_variable(lowers)) * steepness))
+            pm.Potential(f"low_bound.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+
+        # C. Soft Upper Bounds
+        has_upper = ~np.isinf(uppers)
+        if np.any(has_upper):
+            mask = pt.as_tensor_variable(has_upper)
+            penalty = pm.math.log(pt.sigmoid((pt.as_tensor_variable(uppers) - val_flat) * steepness))
+            pm.Potential(f"up_bound.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
 
         return self.value
 
@@ -589,6 +537,10 @@ class Parameter:
             n for n in all_nodes
             if hasattr(n, 'name') and n.name in posterior_bundle
         ]
+
+        # fixed parameter, just return the scalar
+        if not inputs_in_posterior:
+            return float(expr.eval())
 
         # 1. Compile the function for a single evaluation
         calc_func = pytensor.function(
@@ -629,61 +581,6 @@ class Parameter:
 
         # Return the proper shape with 'sample' at the end again to match ArviZ's format
         return np.moveaxis(result, 0, -1)
-
-    def generate_posterior_scalar(self, posterior_bundle):
-        """
-        Calculates the posterior for this parameter.
-
-        1. If it was a named node (Deterministic/RV), extract from posterior_bundle.
-        2. If it was a 'Floating' parameter (value is None), build a mini-graph
-           from the expression/recipe and calculate it now via NumPy.
-        """
-        # Case 1: The sampler already calculated it (it was a named node)
-        if self.label in posterior_bundle:
-            return posterior_bundle[self.label]
-
-        # Case 2: We have no way to calculate this (no expression and not in idata)
-        if self.expression is None:
-            return None
-
-        # Case 3: Late-Binding calculation for 'Floating' parameters
-        # If expression is a lambda/recipe, call it now to build the symbolic nodes
-        expr = self.expression() if callable(self.expression) else self.expression
-
-        # A. Find the 'Roots' (the sampled variables) this math depends on.
-        # This scans the symbolic graph to find every parent node.
-        all_nodes = pytensor.graph.basic.ancestors([expr])
-
-        # B. Filter for parent nodes that actually exist in our MCMC results.
-        # We look for nodes that have a 'name' attribute matching a key in the bundle.
-        inputs_in_posterior = [
-            n for n in all_nodes
-            if hasattr(n, 'name') and n.name in posterior_bundle
-        ]
-
-        # C. Compile a high-speed NumPy function from the Symbolic Expression.
-        # This turns the PyTensor math into a vectorized execution block.
-        calc_func = pytensor.function(
-            inputs_in_posterior,
-            expr,
-            on_unused_input='ignore'
-        )
-
-        # D. Feed the MCMC chains into the function.
-        # We need to flatten the (chain, draw) dimensions into a single vector
-        # so PyTensor can process it as a 'batch'.
-        input_data = []
-        for n in inputs_in_posterior:
-            data = posterior_bundle[n.name]
-            # If it's xarray/dataset, flatten to 1D
-            if hasattr(data, "values"):
-                input_data.append(data.values.flatten())
-            else:
-                input_data.append(np.asarray(data).flatten())
-
-        # E. Return the result reshaped to match the original posterior structure
-        # or just keep it flat for the compute_summary logic.
-        return calc_func(*input_data)
 
     def get_scale(self):
         return {self.name: self.init_scale}
@@ -739,15 +636,12 @@ class Parameter:
     def to_unit(self, target_unit: Any) -> Any:
         return self.value * self.internal_unit.to(target_unit).value
 
+
     # ---------
     # LaTeX helpers
     # ---------
+
     def to_latex_def(self, sigfigs: int = 2) -> str:
-        def _idx_to_words(n):
-            words = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three',
-                     '4': 'four', '5': 'five', '6': 'six', '7': 'seven',
-                     '8': 'eight', '9': 'nine'}
-            return "".join(words[char] for char in str(n))
 
         # FIXED PARAMETER PATH (Restored)
         if self.posterior is None:
@@ -779,87 +673,72 @@ class Parameter:
         val = self.summary.latex_value(sigfigs=sigfigs)
         return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}" + "\n"
 
-    def to_latex_def_scalar(self, sigfigs: int = 2) -> str:
-        """
-        Returns:
-          \\providecommand{\\<varname>}{\\ensuremath{<value^{+..}_{-..}>}}
-        """
+    def get_unit_str(self, index=0):
+        u_list = np.atleast_1d(self.unit)
+        u_obj = u_list[index] if index < len(u_list) else u_list[0]
+        return u_obj.to_string() if u_obj and u_obj.to_string() != 'dimensionless' else ""
 
-        # fixed parameters:
-        if self.posterior is None:
-            if self.initval is not None:
-                # Use \equiv for fixed values
-                val = f"\\equiv {self.initval}"
-                return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}" + "\n"
-            return ""  # Skip if it has no value and no posterior
-
-        if self.summary is None:
-            self.compute_summary()
-
-        assert self.summary is not None
-        val = self.summary.latex_value(sigfigs=sigfigs)
-        return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}" + "\n"
-
-    def get_prior_str(self) -> str:
-        r"""Returns a LaTeX string representing the prior (e.g., $\mathcal{N}(0,1)$)."""
-
-        # 1. Fixed Parameter
-        if self.posterior is None and self.initval is not None:
-            return r"Fixed"
-
-        # Helper to extract scalar from 1D arrays AND convert to user units
+    def get_prior_str(self, index=0, latex=True):
         def _scalar(val):
             if val is None: return None
-            # Extract the raw float
-            raw_val = float(np.atleast_1d(val)[0])
-            # Convert back to user units for the table
-            return float(self.from_internal(raw_val))
+            arr = np.atleast_1d(val)
+            raw = arr[index] if index < len(arr) else arr[0]
 
-        # Helper for clean numerical formatting
-        def _fmt(val):
-            if val is None:
-                return ""
+            # FORCE evaluation of symbolic tensors to prevent 'nan' leak
+            if hasattr(raw, 'eval'):
+                try:
+                    raw = raw.eval()
+                except:
+                    return None
+
+            f_val = float(raw)
+            if np.isnan(f_val): return None
+
+            if self.unit is None or self.internal_unit is None: return f_val
+            f = np.atleast_1d(self._get_conversion_factors())
+            return f_val * float(f[index] if index < len(f) else f[0])
+
+        def _fmt(val, is_latex=True):
+            if val is None or np.isnan(val): return "nan"
             if np.isinf(val):
-                return r"\infty" if val > 0 else r"-\infty"
-
-            # Use standard formatting for zero and numbers between 0.001 and 10000
-            if val == 0 or (0.001 <= abs(val) < 10000):
-                # Format to 4 decimal places, then safely strip trailing zeros and the decimal point
+                return (r"\infty" if val > 0 else r"-\infty") if is_latex else ("inf" if val > 0 else "-inf")
+            if 0.001 <= abs(val) < 10000:
                 return f"{val:.4f}".rstrip("0").rstrip(".")
+            return f"{val:.2e}"
 
-            # Fallback to scientific notation for very large or very small numbers
-            return f"{val:.3g}"
+        if self.expression is not None: return "Derived"
 
-        # 2. Gaussian/Normal Prior
-        mu, sig = _scalar(self.mu), _scalar(self.sigma)
-        if mu is not None and sig is not None and sig > 0:
+        sig = _scalar(self.sigma)
+        if sig == 0: return "Fixed"
+
+        # MEAN: Check Mu first, then Fallback to Initval
+        mu = _scalar(self.mu)
+        if mu is None:
+            mu = _scalar(self.initval)
+
+        if not latex:
+            # Gaussian Path
+            if sig is not None and sig > 0:
+                return f"N({_fmt(mu, False)}, {_fmt(sig, False)})"
+
+            # Uniform Path
+            lo, hi = _scalar(self.lower), _scalar(self.upper)
+            if lo is not None or hi is not None:
+                l_s, h_s = _fmt(lo, False) if not np.isinf(lo) else "", _fmt(hi, False) if not np.isinf(hi) else ""
+                if l_s and h_s: return f"U({l_s}, {h_s})"
+                if l_s: return f"> {l_s}"
+                if h_s: return f"< {h_s}"
+            return ""
+
+        if sig is not None and sig > 0:
             return rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$"
 
-        # 3. Uniform Prior
         lo, hi = _scalar(self.lower), _scalar(self.upper)
-        if lo is not None and hi is not None:
-            # Ignore bounds if they are effectively (-inf, inf)
-            if np.isinf(lo) and np.isinf(hi):
-                return ""
-            return rf"$\mathcal{{U}}({_fmt(lo)}, {_fmt(hi)})$"
-
-        return ""
-
-    def get_prior_str_scalar(self) -> str:
-        r"""Returns a LaTeX string representing the prior (e.g., $\mathcal{N}(0,1)$)."""
-
-        # 1. Fixed Parameter
-        if self.posterior is None and self.initval is not None:
-            return r"Fixed"
-
-        # 2. Gaussian/Normal Prior
-        if self.mu is not None and self.sigma is not None and self.sigma > 0:
-            return rf"$\mathcal{{N}}({self.mu}, {self.sigma})$"
-
-        # 3. Uniform Prior
-        if self.lower is not None and self.upper is not None:
-            return rf"$\mathcal{{U}}({self.lower}, {self.upper})$"
-
+        if lo is not None or hi is not None:
+            l_s, h_s = _fmt(lo), _fmt(hi)
+            if not np.isinf(lo) and not np.isinf(hi): return rf"$\mathcal{{U}}({l_s}, {h_s})$"
+            if not np.isinf(lo): return rf"$> {l_s}$"
+            if not np.isinf(hi): return rf"$< {h_s}$"
         return ""
 
     def to_table_line(self, sigfigs: int = 2) -> str:
@@ -868,57 +747,47 @@ class Parameter:
         if self.description is None:
             raise ValueError(f"{self.label}: description not set.")
 
-        # Strip any existing $ symbols and wrap in \ensuremath for safety
         safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
 
-        if self.print_to_table:
-            val_txt = "\\" + self.latex_varname
-        else:
-            if self.summary is None:
-                self.compute_summary()
-            assert self.summary is not None
-            val_txt = r"\ensuremath{" + self.summary.latex_value(sigfigs=sigfigs) + "}"
+        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
 
-        prior_text = self.get_prior_str()
+        lines = []
+        for i in range(n_elements):
+            idx_str = _idx_to_words(i) if n_elements > 1 else ""
 
-        return (
-                rf"~~~~${self.latex}$\dotfill & "
+            # --- THE NEW SUBSCRIPT LOGIC ---
+            if n_elements > 1:
+                if self.names and i < len(self.names):
+                    # Wrap in \rm so it looks clean, and escape underscores if they exist
+                    clean_name = str(self.names[i]).replace("_", r"\_")
+                    # Use raw string concatenation to avoid f-string backslash errors
+                    symbol = self.latex + r"_{\rm " + clean_name + r"}"
+                else:
+                    symbol = f"{self.latex}_{{{i}}}"
+            else:
+                symbol = self.latex
+            # -------------------------------
+
+            if self.print_to_table:
+                val_txt = "\\" + self.latex_varname + idx_str
+            else:
+                if self.summary is None:
+                    self.compute_summary()
+
+                summ = self.summary[i] if isinstance(self.summary, list) else self.summary
+                val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}"
+
+            prior_text = self.get_prior_str(index=i)
+
+            lines.append(
+                rf"~~~~${symbol}$\dotfill & "
                 rf"{self.description}{unit_text}\dotfill & "
                 rf"{val_txt}\dotfill & "
                 rf"{prior_text} \\" + "\n"
-        )
+            )
 
-    def to_table_line_scalar(self, sigfigs: int = 2) -> str:
-        """
-        Format a line for a LaTeX table:
-          $symbol$ ... description (units) ... \\varname \\\\
-        """
-        if self.latex is None:
-            raise ValueError(f"{self.label}: latex symbol not set.")
-        if self.description is None:
-            raise ValueError(f"{self.label}: description not set.")
-
-        unit_text = "" if not self.unit_latex else f" ({self.unit_latex})"
-
-        if self.print_to_table:
-            val_txt = "\\" + self.latex_varname
-        else:
-            if self.summary is None:
-                self.compute_summary()
-            assert self.summary is not None
-            val_txt = r"\ensuremath{" + self.summary.latex_value(sigfigs=sigfigs) + "}"
-
-        prior_text = self.get_prior_str()
-
-        #return f"~~~~${self.latex}$ \\dotfill & {self.description}{unit_text} \\dotfill & {val_txt} \\\\\n"
-
-        return (
-                rf"~~~~${self.latex}$\dotfill & "
-                rf"{self.description}{unit_text}\dotfill & "
-                rf"{val_txt}\dotfill & "
-                rf"{prior_text} \\" + "\n"
-        )
+        return "".join(lines)
 
     # ---------
     # Posterior summary
@@ -928,13 +797,10 @@ class Parameter:
         arr = getattr(self.posterior, "values", self.posterior)
         arr = self.from_internal(arr)
 
-        mass = _erf_sigma_to_interval_mass(nsigma)
-        lo_q, hi_q = 0.5 - mass / 2.0, 0.5 + mass / 2.0
-
         def get_stat(data):
-            med = float(np.quantile(data, 0.5))
-            lo = float(np.quantile(data, lo_q))
-            hi = float(np.quantile(data, hi_q))
+            med = float(np.nanquantile(data, 0.5))
+            lo = float(np.nanquantile(data, SIGMA_1_LOW))
+            hi = float(np.nanquantile(data, SIGMA_1_HIGH))
             return PosteriorSummary(median=med, err_minus=med - lo, err_plus=hi - med)
 
         if arr.ndim > 1:
@@ -949,22 +815,4 @@ class Parameter:
         else:
             self.summary = get_stat(arr)
 
-        return self.summary
-
-    def compute_summary_scalar(self, nsigma: float = 1.0) -> PosteriorSummary:
-        """
-        Compute median and +/- interval corresponding to a normal-equivalent nsigma mass.
-        For nsigma=1: uses the central 68.27% interval (16th/84th percentiles).
-        """
-        arr = _as_flat_array(self.posterior)
-
-        mass = _erf_sigma_to_interval_mass(nsigma)
-        lo_q = 0.5 - mass / 2.0
-        hi_q = 0.5 + mass / 2.0
-
-        med = float(np.quantile(arr, 0.5))
-        lo = float(np.quantile(arr, lo_q))
-        hi = float(np.quantile(arr, hi_q))
-
-        self.summary = PosteriorSummary(median=med, err_minus=med - lo, err_plus=hi - med)
         return self.summary

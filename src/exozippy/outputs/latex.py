@@ -1,12 +1,11 @@
 # recursively traverse the event dictionary, find Parameters, and execute their corresponding latex commands
 #from exozippy.parameter import Parameter
 import pathlib
-from ..components import Star
-from ..components import Planet
-from ..components.component import Component
+from ..components import Parameter
 
 def build_latex_output(stellar_system, var_filename="variables.tex", template_filename="table_template.tex",
                        caption=None):
+
     # 1. Collect all data from the OO hierarchy
     all_defs = []
     all_table_lines = []
@@ -27,19 +26,19 @@ def build_latex_output(stellar_system, var_filename="variables.tex", template_fi
     all_defs.append(r"\providecommand{\fave}{\langle F \rangle}" + "\n")
     all_defs.append(r"\providecommand{\fluxcgs}{10$^9$ erg s$^{-1}$ cm$^{-2}$}" + "\n")
 
-    # Iterate through high-level components
-    for attr_name, comp in stellar_system.__dict__.items():
-        if not isinstance(comp, Component):
-            continue
+    # 2. Iterate through components to build the table
+    for comp in stellar_system.get_all_components():
+        # Look inside the component's __dict__ to preserve Parameter order
+        comp_params = [v for v in comp.__dict__.values() if isinstance(v, Parameter)]
 
-        header_text = getattr(comp, "label", f"{comp.__class__.__name__} Parameters")
+        if comp_params:
+            header_text = getattr(comp, "label", comp.__class__.__name__)
+            all_table_lines.append(rf"\sidehead{{{header_text}}}" + "\n")
 
-        # Optional: Add a LaTeX comment or sidehead for organization
-        all_table_lines.append(rf"\sidehead{{{header_text}}}" + "\n")
-
-        d, l = comp.get_latex_data()
-        all_defs.extend(d)
-        all_table_lines.extend(l)
+            for p in comp_params:
+                if p.print_to_table:
+                    all_defs.append(p.to_latex_def())
+                    all_table_lines.append(p.to_table_line())
 
     # 2. Write the "Database" file (Just the \newcommand definitions)
     with open(var_filename, 'w') as f:

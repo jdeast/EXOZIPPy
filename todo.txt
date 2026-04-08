@@ -1,0 +1,29 @@
+1) Refactor parameter instantiation by extracting hard-coded defaults into an exozippy_params.yaml file and building a centralized resolver that meshes base limits, user overrides, and dynamic component constraints (like stellar grids) into clean **kwargs for the Parameter class.
+
+2) Isolate Pure Physics from PyMC Bindings for easier unit testing
+
+3) switching planet.mass to earthMass is converted back to jupiter in the diagnostic table. fix that.
+
+4) write unit tests for high coverage
+
+5) decouple data loaders from component objects
+
+6) make celestial body super class of star/planet
+
+7) refactor system topology. not sure how to do that.
+
+8) more features/components: transits, gps, sed, evolutionary models, microlensing, astrometry, ttvs, nbody, long cadence, doppler tomography
+
+9) vcve parameterization:
+a) refactored to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute the likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
+b) cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
+
+
+
+10) analytic treatment of linear parameters (detrending, f0, gamma)
+
+
+blind spots:
+checkpoints
+pytensor cache bloat
+large n compilation choke? (is that AI trash?)

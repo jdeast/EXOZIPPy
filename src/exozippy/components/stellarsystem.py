@@ -10,6 +10,7 @@ import arviz as az
 from exozippy.components import Star, Orbit, Planet, RVInstrument
 from .component import Component
 from .parameter import Parameter
+from ..config import ConfigManager
 
 #from ..data.resolver import resolve_datasets
 #from transit import Transit
@@ -27,111 +28,80 @@ class StellarSystem(Component):
         with open(str(user_params_file), 'r') as f:
             self.user_params = yaml.safe_load(f)
 
+        self.config_manager = ConfigManager(self.user_params)
+
         # these are the objects we're modeling
-        self.stars = Star(self.config.get("stars"), self.user_params)
-        self.orbits = Orbit(self.config.get("orbits"),self.user_params)
-        self.planets = Planet(self.config.get("planets"),self.user_params)
+        self.stars = Star(self.config.get("stars"), self.config_manager)
+        self.orbits = Orbit(self.config.get("orbits"), self.config_manager)
+        self.planets = Planet(self.config.get("planets"), self.config_manager)
+        self.instruments = RVInstrument(self.config.get("rv").get("instruments"), self.config_manager)
+
+        self.instruments.load_data()
+
+        #self.stars = Star(self.config.get("stars"), self.user_params)
+        #self.orbits = Orbit(self.config.get("orbits"),self.user_params)
+        #self.planets = Planet(self.config.get("planets"),self.user_params)
 
         # data sets that constrain the above
-        self.instruments = RVInstrument(self.config.get("rv").get("instruments"),self.user_params)
+        #self.instruments = RVInstrument(self.config.get("rv").get("instruments"),self.user_params)
         #self.transits = Transit(self.config.get("transits"),self.user_params)
         #self.astrometry = Astrometry(self.config.get("astrometry"),self.user_params)
         #self.mulensing = mulensing(self.config.get("mulensing"),self.user_params)
 
     def get_all_parameters(self):
         """
-        Recursively gathers every Parameter object from all components.
+        Extracts a flat list of all Parameter objects, respecting
+        both Component and Parameter insertion order.
         """
-        all_params = []
-
-        # Helper to crawl any component
-        def crawl(component):
-            for attr_name in dir(component):
-                attr = getattr(component, attr_name)
+        params = []
+        for comp in self.get_all_components():
+            # Use __dict__.values() to preserve the definition order from __init__/build_parameters
+            for attr in comp.__dict__.values():
                 if isinstance(attr, Parameter):
-                    all_params.append(attr)
-                elif isinstance(attr, Component):
-                    crawl(attr)
+                    params.append(attr)
+        return params
 
-        # Start crawling from the high-level lists
-        for comp in [self.stars, self.planets, self.orbits, self.instruments]:
-            crawl(comp)
+    def get_internal_point(self, model, raw_point):
+        """Evaluates graph deterministics for plotting/physics without user-unit conversion."""
+        output_vars = model.free_RVs + model.deterministics
 
-        return all_params
+        eval_fn = pytensor.function(
+            inputs=model.free_RVs,
+            outputs=output_vars,
+            on_unused_input='ignore'
+        )
 
-    import pytensor
-    import numpy as np
+        # Pull the values in the exact order the function expects them
+        input_values = [raw_point[v.name] for v in model.free_RVs]
 
-    # FILE: components/stellarsystem.py
+        physical_values = eval_fn(*input_values)
+
+        return {var.name: val for var, val in zip(output_vars, physical_values)}
 
     def get_physical_point(self, model, raw_point):
-        # 1. We want every node that has a name (Free RVs AND Deterministics)
         output_vars = model.free_RVs + model.deterministics
 
-        # 2. Compile the evaluator
         eval_fn = pytensor.function(
-            inputs=model.value_vars,
+            inputs=model.free_RVs,
             outputs=output_vars,
             on_unused_input='ignore'
         )
 
-        # 3. Pass the interval-space values from the raw point
-        input_values = [raw_point[v.name] for v in model.value_vars]
+        # Pull the values in the exact order the function expects them
+        input_values = [raw_point[v.name] for v in model.free_RVs]
+
         physical_values = eval_fn(*input_values)
-
-        # 4. Build the dictionary mapping labels to physical numbers
-        results = {}
-        for var, val in zip(output_vars, physical_values):
-            # var.name will be 'orbit.period', 'star.mass', etc.
-            results[var.name] = val
-
-        return results
-
-    def get_physical_point_old(self, model, raw_point):
-        """
-        General map: (Sampler Space Dict) -> (Physical Space Dict)
-        Returns every Free RV and Deterministic in the model.
-        """
-        # 1. Gather all variables we want to see (Physical RVs + Derived math)
-        # This includes 'star.A.radius', 'orbit.b.ecc', 'planet.b.K', etc.
-        output_vars = model.free_RVs + model.deterministics
-
-        # 2. Compile a single evaluator
-        # inputs=model.value_vars are the '..._interval__' variables in raw_point
-        eval_fn = pytensor.function(
-            inputs=model.value_vars,
-            outputs=output_vars,
-            on_unused_input='ignore'
-        )
-
-        # 3. Map the raw_point dictionary to a positional list for the function
-        # This is the 'Magic Step' that avoids KeyErrors
-        input_values = [raw_point[v.name] for v in model.value_vars]
-
-        # 4. Execute and rebuild the dictionary with clean names
-        physical_values = eval_fn(*input_values)
-
-        # Create a lookup of all Parameter objects by their label
-        # (Assuming you have a helper like get_all_parameters() in StellarSystem)
-        param_lookup = {p.label: p for p in self.get_all_parameters()}
+        param_lookup = self.get_parameter_lookup()
 
         results = {}
         for var, val in zip(output_vars, physical_values):
-            name = var.name
-
-            # 4. Check if this is a Parameter we know about
-            if name in param_lookup:
-                p_obj = param_lookup[name]
-                # Use the existing logic to convert back to User Units
-                # Handles scalars or vectors (e.g., [i] for multiple planets)
-                results[name] = p_obj.from_internal(val)
+            if var.name in param_lookup:
+                # Standardize: Always use from_internal to ensure we return User Units
+                results[var.name] = param_lookup[var.name].from_internal(val)
             else:
-                # Fallback for purely internal PyMC deterministics
-                results[name] = float(np.atleast_1d(val)[0]) if np.isscalar(val) or val.size == 1 else val
+                results[var.name] = val
 
         return results
-
-        #return {var.name: float(val) for var, val in zip(output_vars, physical_values)}
 
     def build_model(self):
 
@@ -141,16 +111,22 @@ class StellarSystem(Component):
         with pm.Model() as model:
 
             # 1. first pass, build the foundational parameters
-            self.stars.build_parameters(model)
-            self.orbits.build_parameters(model)
-            self.planets.build_parameters(model)
-            self.instruments.build_parameters(model)
+            self.stars.build_parameters()
+            self.orbits.build_parameters()
+            self.planets.build_parameters()
+            self.instruments.build_parameters()
 
-            self.orbit_map = np.array([p_cfg.get("orbit_ndx", 0) for p_cfg in self.planets.config])
-            self.star_map = np.array([p_cfg.get("star_ndx", 0) for p_cfg in self.planets.config])
+            self.orbit_map = pt.as_tensor_variable(
+                np.array([p_cfg.get("orbit_ndx", 0) for p_cfg in self.planets.config])
+            ).astype("int32")
+            self.star_map = pt.as_tensor_variable(
+                np.array([p_cfg.get("star_ndx", 0) for p_cfg in self.planets.config])
+            ).astype("int32")
+            self.instruments.inst_map_tensor = pt.as_tensor_variable(
+                self.instruments.inst_map
+            ).astype("int32")
 
-            self.planets.build_dependent_parameters(model,
-                                                    stars=self.stars, orbits=self.orbits,
+            self.planets.build_dependent_parameters(stars=self.stars, orbits=self.orbits,
                                                     star_map=self.star_map, orbit_map=self.orbit_map)
 
             """ for vcve parameterization, this will be more complicated... punt for now
@@ -224,23 +200,6 @@ class StellarSystem(Component):
             elif isinstance(attr, Component) and attr is not component:
                 self._set_comp_posterior(attr, posterior)
 
-    def _set_comp_posterior_old(self, component, posterior):
-        # 1. Assign to Parameters on this component
-        for attr_name in dir(component):
-            attr = getattr(component, attr_name)
-            if isinstance(attr, Parameter):
-                if attr.label in posterior:
-                    attr.posterior = posterior[attr.label]
-                # Handle derived parameters (Deterministics) too!
-                elif attr.label in posterior:
-                    attr.posterior = posterior[attr.label]
-
-        # 2. Recurse to children
-        for attr_name in dir(component):
-            attr = getattr(component, attr_name)
-            if isinstance(attr, Component):
-                self._set_comp_posterior(attr, posterior)
-
     """Global system-wide physical constraints."""
     def build_dependent_parameters(self):
 
@@ -269,9 +228,6 @@ class StellarSystem(Component):
                 pt.switch(outer_periastron > inner_apastron, 0.0, -np.inf)
             )
 
-    import pytensor.tensor as pt
-    import numpy as np
-
     def get_parameter_lookup(self):
         """
         Recursively finds all Parameter objects in the system and
@@ -299,87 +255,75 @@ class StellarSystem(Component):
         walk(self)
         return lookup
 
+    def get_all_components(self):
+        """
+        Yields each component in the system exactly once.
+        This maintains the Star -> Orbit -> Planet -> Instrument order.
+        """
+        seen_components = set()
+
+        def crawl(obj):
+            # We only want to crawl the top-level attributes of the System
+            # or the internal structure of a Component.
+
+            # Use __dict__ to respect insertion order instead of dir() (alphabetical)
+            for attr_name, attr in obj.__dict__.items():
+                if attr_name.startswith('_'):
+                    continue
+
+                # 1. If it's a Component, yield it and its children
+                if isinstance(attr, Component):
+                    if id(attr) not in seen_components:
+                        seen_components.add(id(attr))
+                        yield attr
+                        yield from crawl(attr)
+
+                # 2. If it's a list of components (future-proofing)
+                elif isinstance(attr, (list, tuple)):
+                    for item in attr:
+                        if isinstance(item, Component) and id(item) not in seen_components:
+                            seen_components.add(id(item))
+                            yield item
+                            yield from crawl(item)
+
+        yield from crawl(self)
 
     def get_mcmc_init(self, model):
         """
-        Returns an array of initial scales mapped to model.free_RVs,
-        a dictionary of physical initial values, and a dictionary of
-        interval-transformed initial values for PyMC logp evaluation.
+        Generalized initialization for the whitened parameters.
+        Uses the agnostic parameter list to build metadata dictionaries.
         """
-        # Create lookup dictionaries of all parameters we've built
-        all_scales = {}
-        all_inits = {}
-
-        for component in [self.stars, self.planets, self.orbits, self.instruments]:
-            all_scales.update(component.get_scales())
-            all_inits.update(component.get_inits())
-
-        ordered_scales = []
-        ordered_initvals = {}
         transformed_inits = {}
 
-        for random_var in model.free_RVs:
-            name = random_var.name
+        # 1. Map Unity Space (the sampler's world) to PyMC transformed values
+        for rv, value_var in model.rvs_to_values.items():
+            # Our 'Unity Start' is 0.0 in the raw space (N(0,1))
+            unity_start = np.zeros(rv.shape.eval(), dtype=float)
+            transform = model.rvs_to_transforms.get(rv)
 
-            # 1. Match the Scale
-            scale = all_scales.get(name, 1.0)
-            ordered_scales.append(scale)
-
-            # 2. Match the Initval and Build the Transform
-            if name in all_inits:
-                physical_val = all_inits[name]
-                ordered_initvals[name] = physical_val
-
-                # 3. Check PyMC 5's internal transform dictionary
-                transform = model.rvs_to_transforms.get(random_var)
-
-                if transform is not None:
-                    # Get the actual internal value variable (this has the _interval__ name)
-                    value_var = model.rvs_to_values[random_var]
-                    transformed_name = value_var.name
-
-                    # Push the physical value through PyMC's exact interval math
-                    t_node = transform.forward(
-                        pt.as_tensor_variable(physical_val),
-                        *random_var.owner.inputs
-                    )
-                    transformed_inits[transformed_name] = t_node.eval()
-                else:
-                    # If no bounds/transform exist, physical space == internal space
-                    transformed_inits[name] = physical_val
+            if transform is not None:
+                # Forward the 0.0 through the interval/log math
+                t_node = transform.forward(pt.as_tensor_variable(unity_start), *rv.owner.inputs)
+                transformed_inits[value_var.name] = t_node.eval()
             else:
-                print(f"WARNING: No initval found for {name}. Using PyMC default.")
+                # No transform, raw == value
+                transformed_inits[value_var.name] = unity_start
 
-        return np.array(ordered_scales), ordered_initvals, transformed_inits
+        # 2. Extract Physical Metadata using the Master Parameter List
+        # This now uses the simplified get_all_parameters() which relies on the generator
+        all_params = self.get_all_parameters()
 
-    def get_mcmc_init_old(self, model):
-        """
-        Returns an array of initial scales mapped to model.free_RVs.
-        """
-        # Create a lookup dictionary of all parameters we've built
-        # { 'planet.b.radius': 0.5, 'orbit.b.logp': 0.01, ... }
-        all_scales = {}
-        all_inits = {}
+        # Filter for only the 'Free' parameters (those being sampled, no expression)
+        sampling_params = [p for p in all_params if p.expression is None]
 
-        for component in [self.stars,self.planets,self.orbits,self.instruments]:
-            all_scales.update(component.get_scales())
-            all_inits.update(component.get_inits())
+        ordered_inits = {p.label: p.initval for p in sampling_params}
+        ordered_scales = {p.label: p.init_scale for p in sampling_params}
 
-        ordered_scales = []
-        ordered_initvals = {}
-        for random_var in model.free_RVs:
-            name = random_var.name
+        # Calculate total dimensions for the NUTS step scaling
+        total_dims = sum(np.size(val) for val in transformed_inits.values())
 
-            scale = all_scales.get(name, 1.0)
-            ordered_scales.append(scale)
-
-            # Match the Initval
-            if name in all_inits:
-                ordered_initvals[name] = all_inits[name]
-            else:
-                print(f"WARNING: No initval found for {name}. Using PyMC default.")
-
-        return np.array(ordered_scales), ordered_initvals
+        # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
+        return np.ones(total_dims), ordered_scales, ordered_inits, transformed_inits
 
     # FILE: components/stellarsystem.py
     def compile_plotter_functions(self, model):

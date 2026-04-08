@@ -144,7 +144,7 @@ setup(
         'numpy<2',
         'pymc>=5',
         'pytensor',
-        'arviz',
+        'arviz,
         'pyyaml',
         'pandas',
         'matplotlib',

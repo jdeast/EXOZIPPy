@@ -1,19 +1,19 @@
 run:
   name: "kelt4"
 
-prefix: "fitresults/KELT-4A"
+prefix: "fitresults/KELT-4A_4"
 
 rv:
   path: "*.rv"
   instruments:
-#  - name: "EXPERT"
-#    file: "KELT-4b.EXPERT.rv"
-#  - name: "FIES"
-#    file: "KELT-4b.FIES.rv"
+    #- name: "EXPERT"
+    #  file: "KELT-4b.EXPERT.rv"
+    #- name: "FIES"
+    #  file: "KELT-4b.FIES.rv"
     - name: "HIRES"
       file: "KELT-4b.HIRES.rv"
-#  - name: "TRES"
-#    file: "KELT-4b.TRES.rv"
+    - name: "TRES"
+      file: "KELT-4b.TRES.rv"
 
 transits:
   - name: "TESS S48"
@@ -33,7 +33,7 @@ planets:
   - name: "b"
 
 orbits:
-  - name: "orbit_b"
+  - name: "b"
     bodies : "b" # must match "name" of planets/stars. can be list for heirarchical orbits
 
 parameter_file: "kelt4.params.yaml"
@@ -41,12 +41,14 @@ parameter_file: "kelt4.params.yaml"
 sampler:
   backend: "pymc" # TODO: "affine_invariant", "differential_evolution", "parallel_tempering", "multinest"
   pymc:
-    tune: 10
-    draws: 10
+    tune: 2000
+    draws: 4000
     chains: 4
     cores: 4
     init: "adapt_diag"
     target_accept: 0.95
-    nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"
-    recompute_trace: False # if True and an existing prefix.nc file exists, it will load that rather than re-sample
+    #nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"
+    nuts_sampler: "numpyro"
+    check_curvatures: True
+    recompute_trace: True # if True and an existing prefix.nc file exists, it will load that rather than re-sample
     profile: False

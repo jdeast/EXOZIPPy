@@ -16,4 +16,5 @@ EXOZIPPy.egg-info
 __pycache__/
 *.pyc
 *settings.json
-/src/exozippy/repo_dump.txt
+/scripts/repo_dump.txt
+/repo_dump.txt

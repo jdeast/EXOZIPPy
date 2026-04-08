@@ -1,104 +1,73 @@
 import numpy as np
 import pytensor.tensor as pt
 import pymc as pm
-import astropy.units as u
 
 from .component import Component
-from exozippy.constants import G, AU, mjup, rjup, pc, rsun, msun, sigmasb, Gmsun, Gmjup, meter
 from .parameter import Parameter
+from ..physics import calc_density, calc_logg, calc_b, calc_arsun, calc_arstar
 
 import ipdb
 
 class Planet(Component):
-    def __init__(self, config, user_params):
+    def __init__(self, config, config_manager):
+        # 1. Initialize the base Component
+        # sets self.config and self.config_manager
+        super().__init__(config, config_manager)
         self.label = "Planet Parameters"
-        self.config = config
-        self.nplanets = len(config)
-        self.names = [c.get("name") for c in self.config]
-        self.user_params = user_params
 
-    def build_parameters(self, model):
+    def build_parameters(self):
         # This encapsulates the logic in mkss.pro for each planet
         prefix = f"planet"
 
-        # fundamental parameters
-        self.radius = Parameter(f"{prefix}.radius",
-                                lower=1e-6, upper=100,
-                                initval=1.0, init_scale=0.05,
-                                unit=u.jupiterRad, internal_unit=u.solRad,
-                                latex='R_J', description='Radius',
-                                user_params=self.user_params, shape=(self.nplanets,))
-        self.radius.build_pymc()
+        # 1. Fundamental & Internal parameters
+        parameters = {
+            "radius": None,
+            "mass": None,
+            "density": "default",
+            "logg": "default"
+        }
 
-        # allow negative mass to reduce bias of marginal detections (-1 msun to 250 msun -- allow stellar "planets")
-        self.mass = Parameter(f"{prefix}.mass",
-                              lower=-1e3, upper=2.6e5,
-                              initval=1.0, init_scale=0.1,
-                              unit=u.jupiterMass, internal_unit=u.solMass,
-                              latex='M_P', description='Mass',
-                              user_params=self.user_params, shape=(self.nplanets,))
-        self.mass.build_pymc()
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
 
-        density_const = 3.0/(4.0*np.pi)
-        self.density = Parameter(f"{prefix}.density",
-                                 expression=lambda: density_const*self.mass.value/(self.radius.value*pt.sqr(self.radius.value)),
-                                 unit=u.gram/u.cm**3, internal_unit=u.gram/u.cm**3,
-                                 latex=r"\rho_P", description='Density',
-                                 user_params=self.user_params)
-        self.density.build_pymc()
+    def build_dependent_parameters(self, stars, orbits, star_map, orbit_map):
+        prefix = "planet"
 
-        logg_const = np.log10(Gmsun/rsun**2)
-        self.logg = Parameter(f"{prefix}.logg",
-                              expression=lambda: logg_const + pt.log10(self.mass.value) - 2.0 * pt.log10(self.radius.value),
-                              unit=u.dex(u.cm/u.s**2), internal_unit=u.dex(u.cm/u.s**2),
-                              latex=r"\log{g_P}", description='Surface gravity',
-                              user_params=self.user_params)
-        self.logg.build_pymc()
+        # 1. Prepare the cross-component PyTensor nodes with maps applied
+        m_total_node = pt.maximum(stars.mass.value[star_map] + self.mass.value, 1e-9)
 
-    # some parameters/constraints require objects from another class. build them here
-    def build_dependent_parameters(self, model, stars, orbits, star_map, orbit_map):
-        prefix = f"planet"
+        context_nodes = {
+            "m_total": m_total_node,
+            "star_radius": stars.radius.value[star_map],
+            "orbit_period": orbits.period.value[orbit_map],
+            "orbit_ecc": orbits.ecc.value[orbit_map],
+            "orbit_cosi": orbits.cosi.value[orbit_map],
+            "orbit_esinw": orbits.esinw.value[orbit_map],
+            "orbit_sini": orbits.sini.value[orbit_map],
+        }
 
-        #self.orbit = orbits[orbit_map]
+        # 2. Back to the elegant YAML manifest!
+        parameters = {
+            "p": "default",
+            "arsun": "default",
+            "ar": "default",
+            "b": "default",
+            "K": "default"
+        }
 
-        self.p = Parameter(f"{prefix}.p",
-                           expression=lambda: self.radius.value / stars.radius.value[star_map],
-                           unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                           latex="R_P/R_*", description="",
-                           user_params=self.user_params)
-        self.p.build_pymc()
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix, context_nodes=context_nodes)
 
-        const = (G/ (4.0 * np.pi ** 2))**(1.0/3.0)
-        m_total = pt.maximum(stars.mass.value[star_map] + self.mass.value,1e-9) # numerical shield (values at 1e-9 will be rejected below, but we can't compute a NaN)
-        m13 = pt.power(m_total, 1.0 / 3.0)
-        p2 = pt.sqr(orbits.period.value[orbit_map])
-        p23 = pt.power(p2,1.0/3.0)
-        arsun = const * m13 * p23
-        #self.arsun = Parameter(f"{prefix}.arsun",
-        #                       expression = const * m13 * p23,
-        #                       latex=r"a/R_{\sun}", print_to_table=False, description=r"Semi-major axis in \rsun", latex_unit=r"\rsun",
-        #                       user_params=self.user_params)
-        #self.arsun.build_pymc()
+        # (Keep the soft boundary Potentials here, as they are system-level likelihoods, not parameters)
+        steepness = 500.0
+        pm.Potential(f"{prefix}.m_pos_constraint", pm.math.log(pt.sigmoid(m_total_node * steepness)))
 
-        self.ar = Parameter(f"{prefix}.ar",
-                            expression=lambda: arsun / stars.radius.value[star_map],
-                            unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                            latex="a/R_*", description="",
-                            user_params=self.user_params)
-        self.ar.build_pymc()
+        maxe = 1.0 - 1.0 / self.ar.value - (self.radius.value / context_nodes["star_radius"]) / self.ar.value
+        diff = maxe - orbits.ecc.value[orbit_map]
+        pm.Potential(f"{prefix}.e_collision_bound", pm.math.log(pt.sigmoid(diff * steepness)))
 
-        # Winn, 2010, eq 7
-        self.b = Parameter(f"{prefix}.b",
-                           expression=self.ar.value * orbits.cosi.value[orbit_map] * (
-                                   1.0 - pt.sqr(orbits.ecc.value[orbit_map])) / (1.0 - orbits.esinw.value[orbit_map]),
-                           unit=u.dimensionless_unscaled, internal_unit=u.dimensionless_unscaled,
-                           latex='b', description='impact parameter',
-                           user_params=self.user_params)
-        self.b.build_pymc()
 
         """
         self.a = Parameter(f"{prefix}.a",
-                           expression=self.arsun.value / AU, unit=u.au,
+                           expression=lambda: self.arsun.value / AU, unit=u.au,
                            latex='a', description='Semi-major axis', latex_unit='au',
                            user_params=self.user_params)
         self.a.build_pymc()
@@ -151,59 +120,6 @@ class Planet(Component):
                            latex_unit='days', user_params=self.user_params)
         self.tfwhm.build_pymc()
         """
-
-        # we can leverage the computation of a/rstar to simplify this:
-        const = 2.0 * np.pi
-        mass_ratio = self.mass.value/m_total
-        ecc_factor = 1.0 / pt.sqrt(1.0 - pt.sqr(orbits.ecc.value[orbit_map]))
-        self.K = Parameter(f"{prefix}.K",
-                           expression=lambda: const*(arsun * orbits.sini.value[orbit_map] * mass_ratio * ecc_factor) / orbits.period.value[orbit_map],
-                           unit=u.meter / u.second, internal_unit=u.solRad/u.d,
-                           latex='K', description='RV semi-amplitude',
-                           user_params=self.user_params)
-        #self.K = Parameter(f"{prefix}.K",
-        #                   expression=(2.0 * np.pi * G / (orbit.period.value * (
-        #                           star.mass.value + self.mass.value * mjup) ** 2.0)) ** (1.0 / 3.0) *
-        #                              self.mass.value * mjup * orbit.sini.value /
-        #                              pt.sqrt(1.0 - orbit.ecc.value ** 2.0) * rsun / meter / 86400.0,
-        #                   unit=u.meter / u.second, latex_unit='m~s$^{-1}$',
-        #                   latex='K', description='RV semi-amplitude',
-        #                   user_params=self.user_params)
-        self.K.build_pymc()
-
-        # check parameters
-        #self.sini = f"{prefix}.K",
-        #                   expression=(2.0 * np.pi * G / (orbit.period.value * (
-        ##                           star.mass.value + self.mass.value * mjup) ** 2.0)) ** (1.0 / 3.0) *
-        #                             self.mass.value * mjup * pt.sin(orbit.inc.value) /
-        #                              pt.sqrt(1.0 - orbit.ecc.value ** 2.0) * rsun / meter / 86400.0,
-        #                   unit=u.meter / u.second, latex_unit='m~s$^{-1}$',
-        #                   latex='K', description='RV semi-amplitude',
-        #                   user_params=self.user_params)
-
-        # still need things like secondary transit duration,
-
-
-        ###### system constraints ######
-
-        # we allow negative planet mass to avoid a Lucy-Sweeny bias on the planet mass
-        # but we break our equations with a negative system mass. reject that here
-        pm.Potential(f"{prefix}.m_pos_penalty", pt.log(m_total))
-
-        # hard wall
-        # massbound = pm.Potential(f"{prefix}.mp_bound", pt.switch(m_total > 0.0, 0.0, -np.inf))
-
-
-
-        # planet cannot collide with star
-        steepness = 500.0
-        maxe = 1.0 - 1.0 / self.ar.value - self.p.value / self.ar.value  # 1 - (Rp+Rstar)/a
-        diff = maxe - orbits.ecc.value
-        # soft wall
-        ebound = pm.Potential(f"{prefix}.soft_e_bound",-steepness * pt.sigmoid(-diff * steepness))
-
-        # hard wall
-        #ebound = pm.Potential(f"{prefix}.e_bound", pt.switch(orbit.ecc.value < maxe, 0.0, -np.inf))
 
     def get_rv_signal(self, t):
         """This is what the RVInstrument calls."""

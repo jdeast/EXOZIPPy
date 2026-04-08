@@ -1,17 +1,24 @@
 import astropy.constants as const
+import astropy.units as u
 import numpy as np
+import math
 
-# constants easier to digest variable names
-G = const.GM_sun.value / const.R_sun.value ** 3 * 86400.0 ** 2
-AU = const.au.value / const.R_sun.value
-mjup = const.GM_jup.value / const.GM_sun.value
-rjup = const.R_jup.cgs.value / const.R_sun.cgs.value  # rsun/rjup
-pc = const.pc.cgs.value  # cm/pc
-rsun = const.R_sun.cgs.value  # cm/r_sun
-msun = const.M_sun.cgs.value  # g/m_sun
-sigmasb = const.sigma_sb.cgs.value
-Gmsun = const.GM_sun.cgs.value
-Gmjup = const.GM_jup.cgs.value
-Gmearth = const.GM_earth.cgs.value
-meter = 100.0  # cm/m
-lsun = 4.0*np.pi*rsun**2*sigmasb*5778**4
+# --- 1. PHYSICAL CONSTANTS (Internal Float System: R_sun, M_sun, Day) ---
+G = const.G.to(u.R_sun**3 / (u.M_sun * u.day**2)).value
+
+KEPLER_CONST = (G/ (4.0 * np.pi ** 2))**(1.0/3.0)
+LOGG_CONST = np.log10(const.GM_sun.cgs.value/const.R_sun.cgs.value**2) # cgs
+LUM_CONST = 1.0/((const.L_sun/const.sigma_sb/const.R_sun**2).cgs.value/(4.0*np.pi)) # K^-4
+FBOL_CONST = 1.0/(4.0 * np.pi * (const.pc/const.R_sun)** 2.0)
+DENSITY_CONST = 3.0 / (4.0 * np.pi)
+
+# --- 2. MATHEMATICAL CONSTANTS ---
+PI = np.pi
+TWOPI = 2.0 * np.pi
+
+
+# --- 3. STATISTICAL CONSTANTS (For the Back-End) ---
+# Used for 68% confidence intervals in tables and corner plots
+SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
+SIGMA_1_LOW = 0.5 - SIGMA_1 / 2.0
+SIGMA_1_HIGH = 0.5 + SIGMA_1 / 2.0
