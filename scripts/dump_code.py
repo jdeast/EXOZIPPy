@@ -11,7 +11,7 @@ def dump_code(output_file="repo_dump.txt"):
     project_root = script_path.parent.parent
 
     # 2. Folders we want to include
-    include_dirs = ['src', 'tests', 'scripts', 'examples_new']
+    include_dirs = ['src', 'tests', 'scripts', 'examples_new', 'examples']
 
     # 3. Folders or files to strictly ignore
     exclude_dirs = {'.git', '.venv', '__pycache__', '.ipynb_checkpoints', 'build', 'dist'}

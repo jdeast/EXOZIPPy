@@ -209,6 +209,24 @@ planet:
       default:
         func_name: "calc_K"
         deps: ["mass", "m_total", "orbit_ecc", "arsun", "orbit_sini", "orbit_period"]
+  m_total:
+    internal_unit: "solMass"
+    unit: "solMass"
+    latex: "M_{\rm tot}"
+    description: "Total System Mass"
+    expressions:
+      default:
+        func_name: "calc_m_total"
+        deps: ["mass", "star_mass"]
+  max_ecc:
+    unit: ""
+    internal_unit: ""
+    latex: "e_{\rm max}"
+    description: "Collision Eccentricity Limit"
+    expressions:
+      default:
+        func_name: "calc_max_ecc"
+        deps: ["ar", "p"]
 orbit:
   # --- Always Sampled ---
   logP:
@@ -418,3 +436,19 @@ inst:
     internal_unit: ""
     latex: "c"
     description: "Detrending Coefficients"
+lens:
+  t_0:
+    unit: "d"
+    description: "Time of peak magnification"
+  u_0:
+    unit: ""
+    description: "Impact parameter (units of Einstein radii)"
+  t_E:
+    unit: "d"
+    description: "Einstein crossing time"
+  pi_E_N:
+    initval: 0.0
+    description: "Parallax vector (North)"
+  pi_E_E:
+    initval: 0.0
+    description: "Parallax vector (East)"

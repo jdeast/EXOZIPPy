@@ -1,6 +1,7 @@
 from .parameter import Parameter
 
 from ..physics import PHYSICS_REGISTRY
+from abc import ABC, abstractmethod
 
 class Component:
     def __init__(self, component_config, config_manager):
@@ -16,6 +17,60 @@ class Component:
         # Grab names for labeling PyMC nodes
         self.names = [c.get("name", f"{i}") for i, c in enumerate(self.config)]
 
+    """ building the model takes 4 distinct steps, all of which are required but some may be trivially empty:
+    1) build_parameters - this defines the base parameters, both sampled and derived
+    2) load_data - this loads data into the component (e.g., RV data)
+    3) build_dependent_parameters - this defines additional parameters that depend on other components or have data-driven initializations, constraints, or definitions.
+    4) build_likelihood - this builds the likelihood of the component
+    """
+    @abstractmethod
+    def build_parameters(self, model):
+        """
+        Step 1: Define the base parameters, both sampled and derived
+        """
+        pass
+
+    @abstractmethod
+    def load_data(self):
+        """
+        Step 2: load any data required for this class (pass if none)
+        """
+        pass
+
+    @abstractmethod
+    def build_dependent_parameters(self, model, system):
+        """
+        Step 3: Define additional parameters that depend on other components or have data-driven initializations
+        e.g. gamma=mean(RV), constraints (user errors => jitter lower bound), or definitions (planet.K needs star.mass)
+        """
+        pass
+
+    @abstractmethod
+    def build_likelihood(self, model, system):
+        """
+        Step 4: Build the likelihood of the component
+        """
+        pass
+
+    @abstractmethod
+    def compile_plotters(self, model, system):
+        """
+        Step 5 (Optional): Compile fast PyTensor functions for plotting.
+        Compile the pytensor code that builds the model as a numpy function to use in plotting
+        That reduces effort and ensures consistency between the likelihood calculation and the figure
+        """
+        pass
+
+    @abstractmethod
+    def plot(self, system, points, filename_prefix="debug"):
+        """
+        Plot the model and data. This will be called
+          - at the beginning to verify the initialization
+          - at the end to make publication quality plots
+        """
+        pass
+
+    # this method adds a Parameter to the model
     def add_parameter(self, p_name, config_manager, shape=(), prefix=None, expr_key=None, context_nodes=None,
                       **kwargs):
         context_nodes = context_nodes or {}
@@ -87,3 +142,24 @@ class Component:
             elif isinstance(options, dict):
                 self.add_parameter(p_name, self.config_manager, shape=shape, prefix=prefix,
                                    context_nodes=context_nodes, **options)
+
+    def _is_sampling_param(self, attr):
+        """Helper to identify parameters that need to be passed to the compiled function."""
+        from .parameter import Parameter
+        return isinstance(attr, Parameter) and attr.expression is None
+
+    def get_parameters(self, sampling_only=False):
+        """
+        Returns all Parameter objects belonging to this component.
+        If sampling_only=True, filters for parameters without expressions.
+        """
+        params = []
+        # We look through __dict__ to preserve the order they were built in
+        for attr in self.__dict__.values():
+            if isinstance(attr, Parameter):
+                if sampling_only:
+                    if attr.expression is None:
+                        params.append(attr)
+                else:
+                    params.append(attr)
+        return params

@@ -3,8 +3,6 @@ import pytensor.tensor as pt
 import pymc as pm
 
 from .component import Component
-from .parameter import Parameter
-from ..physics import calc_density, calc_logg, calc_b, calc_arsun, calc_arstar
 
 import ipdb
 
@@ -14,10 +12,10 @@ class Planet(Component):
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
+        self.prefix = f"planet"
 
-    def build_parameters(self):
+    def build_parameters(self, model):
         # This encapsulates the logic in mkss.pro for each planet
-        prefix = f"planet"
 
         # 1. Fundamental & Internal parameters
         parameters = {
@@ -27,43 +25,39 @@ class Planet(Component):
             "logg": "default"
         }
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=self.prefix)
 
-    def build_dependent_parameters(self, stars, orbits, star_map, orbit_map):
-        prefix = "planet"
+    def load_data(self):
+        # no data for planet component
+        pass
+
+    def build_dependent_parameters(self, model, system): #stars, orbits, star_map, orbit_map):
 
         # 1. Prepare the cross-component PyTensor nodes with maps applied
-        m_total_node = pt.maximum(stars.mass.value[star_map] + self.mass.value, 1e-9)
-
+        stars = system.star
+        orbits = system.orbit
         context_nodes = {
-            "m_total": m_total_node,
-            "star_radius": stars.radius.value[star_map],
-            "orbit_period": orbits.period.value[orbit_map],
-            "orbit_ecc": orbits.ecc.value[orbit_map],
-            "orbit_cosi": orbits.cosi.value[orbit_map],
-            "orbit_esinw": orbits.esinw.value[orbit_map],
-            "orbit_sini": orbits.sini.value[orbit_map],
+            "star_mass": stars.mass.value[self.star_map],
+            "star_radius": stars.radius.value[self.star_map],
+            "orbit_period": orbits.period.value[self.orbit_map],
+            "orbit_ecc": orbits.ecc.value[self.orbit_map],
+            "orbit_cosi": orbits.cosi.value[self.orbit_map],
+            "orbit_esinw": orbits.esinw.value[self.orbit_map],
+            "orbit_sini": orbits.sini.value[self.orbit_map],
         }
 
         # 2. Back to the elegant YAML manifest!
         parameters = {
+            "m_total": "default",
             "p": "default",
             "arsun": "default",
             "ar": "default",
             "b": "default",
-            "K": "default"
+            "K": "default",
+            "max_ecc":"default",
         }
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix, context_nodes=context_nodes)
-
-        # (Keep the soft boundary Potentials here, as they are system-level likelihoods, not parameters)
-        steepness = 500.0
-        pm.Potential(f"{prefix}.m_pos_constraint", pm.math.log(pt.sigmoid(m_total_node * steepness)))
-
-        maxe = 1.0 - 1.0 / self.ar.value - (self.radius.value / context_nodes["star_radius"]) / self.ar.value
-        diff = maxe - orbits.ecc.value[orbit_map]
-        pm.Potential(f"{prefix}.e_collision_bound", pm.math.log(pt.sigmoid(diff * steepness)))
-
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=self.prefix, context_nodes=context_nodes)
 
         """
         self.a = Parameter(f"{prefix}.a",
@@ -120,8 +114,14 @@ class Planet(Component):
                            latex_unit='days', user_params=self.user_params)
         self.tfwhm.build_pymc()
         """
+    def build_likelihood(self, model, system):
+        # (Keep the soft boundary Potentials here, as they are system-level likelihoods, not parameters)
+        steepness = 500.0
+        pm.Potential(f"{self.prefix}.m_pos_constraint", pm.math.log(pt.sigmoid(self.m_total.value * steepness)))
 
-    def get_rv_signal(self, t):
-        """This is what the RVInstrument calls."""
-        # This passes the derived K down to the Orbit's exoplanet-core solver
-        return self.orbit.get_radial_velocity(t, self.K.value)
+        orbits = system.orbit
+        diff = self.max_ecc.value - orbits.ecc.value[self.orbit_map]
+        pm.Potential(f"{self.prefix}.e_collision_bound", pm.math.log(pt.sigmoid(diff * steepness)))
+
+    def plot(self, system, points, filename_prefix="debug"):
+        pass

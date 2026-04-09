@@ -71,13 +71,11 @@ def run_fit(config):
         for key in raw_start:
             raw_start[key] = np.zeros_like(raw_start[key])
 
-        # convert raw starting point to the physical starting point
-        start_point = stellar_system.get_physical_point(model, raw_start)
-        stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, [start_point], filename_prefix=str(prefix) + "_start")
-
+        # convert raw starting point to the internal starting point
         internal_start = stellar_system.get_internal_point(model, raw_start)
-        stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, [internal_start],
-                                              filename_prefix=str(prefix) + "_start")
+        # make all the component plots
+        for comp in stellar_system.active_components.values():
+            comp.plot(stellar_system, [internal_start], filename_prefix=str(prefix) + "_start")
 
         #### profiling ####
         if profile:
@@ -150,8 +148,8 @@ def run_fit(config):
 
     # Generate final plots
     draws = get_draws(idata)
-    stellar_system.instruments.plot_model(stellar_system, stellar_system.planets, draws, filename_prefix=str(prefix) + "_mcmc")
-
+    for comp in stellar_system.active_components.values():
+        comp.plot(stellar_system, draws, filename_prefix=str(prefix) + "_mcmc")
 
 def inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_scales, calc_curvature=True):
     auditor = ModelAuditor(model, stellar_system, transformed_inits)
@@ -373,6 +371,36 @@ def get_draws(idata, n_draws=50):
 
     return draw_list
 
+def _initialize_internal_maps(self):
+    """
+    The Bridge Phase: Converts YAML indices into PyTensor variables
+    so Step 3 can use them for vectorized math.
+    """
+    # 1. Planet Mappings (Planet -> Star and Planet -> Orbit)
+    if "planets" in self.active_components:
+        planet_comp = self.active_components["planets"]
+
+        # Read 'star_ndx' from each planet entry in the YAML
+        star_map_indices = np.array([
+            p_cfg.get("star_ndx", 0) for p_cfg in planet_comp.config
+        ])
+        self.star_map = pt.as_tensor_variable(star_map_indices).astype("int32")
+        # Also attach it to the component so it can use 'self.star_map'
+        planet_comp.star_map = self.star_map
+
+        # Read 'orbit_ndx' from each planet entry in the YAML
+        orbit_map_indices = np.array([
+            p_cfg.get("orbit_ndx", 0) for p_cfg in planet_comp.config
+        ])
+        self.orbit_map = pt.as_tensor_variable(orbit_map_indices).astype("int32")
+        planet_comp.orbit_map = self.orbit_map
+
+    # 2. RV Instrument Mapping (Observation -> Instrument Offset)
+    # We find any component that looks like an RVInstrument
+    for comp in self.active_components.values():
+        if hasattr(comp, 'inst_map') and not isinstance(comp, (Star, Planet, Orbit)):
+            # This handles the gamma/jitter slicing for RVs and Transits
+            comp.inst_map_tensor = pt.as_tensor_variable(comp.inst_map).astype("int32")
 
 def get_diagonal_curvature(model, point):
     import pytensor.gradient as ptg

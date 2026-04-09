@@ -1,34 +1,153 @@
 import ipdb
 import yaml
 import numpy as np
+import os
 
 import pytensor
 import pytensor.tensor as pt
 import pymc as pm
 import arviz as az
 
+# local imports
 from exozippy.components import Star, Orbit, Planet, RVInstrument
 from .component import Component
 from .parameter import Parameter
 from ..config import ConfigManager
-
-#from ..data.resolver import resolve_datasets
-#from transit import Transit
-#from astrometry import Astrometry
-#from mulensing import mulensing
-
+from .star import Star
+from .orbit import Orbit
+from .planet import Planet
+from .rv_instrument import RVInstrument
+from ..mulensing.lens import Lens
+from ..mulensing.instrument import MulensInstrument
+from .factory import discover_components
 
 class StellarSystem(Component):
     def __init__(self, config):
 
         self.config = config
-        self.name = self.config.get("name","planet")
+        self.name = self.config.get("name","system")
 
+        # load the user parameter file
         user_params_file = self.config.get("parameter_file",None)
+        if not os.path.exists(user_params_file):
+            raise ValueError("The user must specify a valid parameter_file")
         with open(str(user_params_file), 'r') as f:
             self.user_params = yaml.safe_load(f)
-
         self.config_manager = ConfigManager(self.user_params)
+
+        self.registry = discover_components()
+        self.active_components = {}
+
+        # 2. AGNOSTIC INSTANTIATION
+        # We look at the YAML keys. If a key matches a registered Component, we build it.
+        # We sort by priority (if defined) so Stars/Lenses exist before Planets/Instruments
+        sorted_keys = sorted(
+            self.config.keys(),
+            key=lambda k: getattr(self.registry.get(k), 'priority', 99)
+        )
+
+        for key in sorted_keys:
+            if key in self.registry:
+                CompClass = self.registry[key]
+                # Instantiate (e.g., Star(config['stars'], config_manager))
+                inst = CompClass(self.config[key], self.config_manager)
+                self.active_components[key] = inst
+                # Allow dot access for convenience: system.stars
+                setattr(self, key, inst)
+
+    def build_model(self):
+        with pm.Model() as model:
+            # 1. CORE PARAMETERS (The Foundations)
+            for comp in self.active_components.values():
+                comp.build_parameters(model)
+
+            # 2. LOAD DATA (The Heuristics & Context)
+            for comp in self.active_components.values():
+                comp.load_data()
+
+            # --- BRIDGE: INITIALIZE MAPS ---
+            # (Connect indices for planets/stars/instruments now that data is in)
+            self._initialize_internal_maps()
+
+            # 3. DEPENDENT PARAMETERS (The Physics Graph)
+            for comp in self.active_components.values():
+                comp.build_dependent_parameters(model, system=self)
+
+            # 4. LIKELIHOOD (The Comparison)
+            for comp in self.active_components.values():
+                comp.build_likelihood(model, system=self)
+
+            # now apply globally dependent parameters/constraints
+            # self.build_dependent_parameters()
+
+        self.compile_plotter_functions(model)
+
+        return model
+
+
+        # 1. first pass, build the foundational parameters
+        self.stars.build_parameters()
+        self.orbits.build_parameters()
+        self.planets.build_parameters()
+        self.instruments.build_parameters()
+
+        self.orbit_map = pt.as_tensor_variable(
+            np.array([p_cfg.get("orbit_ndx", 0) for p_cfg in self.planets.config])
+        ).astype("int32")
+        self.star_map = pt.as_tensor_variable(
+            np.array([p_cfg.get("star_ndx", 0) for p_cfg in self.planets.config])
+        ).astype("int32")
+        self.instruments.inst_map_tensor = pt.as_tensor_variable(
+            self.instruments.inst_map
+        ).astype("int32")
+
+        self.planets.build_dependent_parameters(stars=self.stars, orbits=self.orbits,
+                                                star_map=self.star_map, orbit_map=self.orbit_map)
+
+        """ for vcve parameterization, this will be more complicated... punt for now
+
+        # for transit-only fits (vcve parameterization), we must build the planet first and pass it to orbit
+        # for other fits, we must build the orbit first and pass it to planet
+        # 2. Build Planets/Orbits (Physics & Derived relations; requires Star and Orbit)
+        for p in self.planets:
+            host_star = self.stars[p.config.get(star_ndx,0)]
+
+            if not p.fitvcve:
+                # 2. Build Orbits first (Timing/Geometry; no dependencies)
+                for o in self.orbits:
+                    o.build_parameters(model)
+                planet_orbit = self.orbits[p.config.get('orbit_ndx', 0)]
+                p.build_parameters(model, host_star, planet_orbit)
+            else:
+                pass
+                # planet_orbit = self.orbits[p.config.get('orbit_ndx', 0)]
+                # p.build_parameters(model, host_star, planet_orbit)
+        """
+
+        # third pass, build likelihoods
+        self.instruments.build_likelihood(model, stars=self.stars, orbits=self.orbits, planets=self.planets,
+                                          star_map=self.star_map, orbit_map=self.orbit_map)
+
+        """
+        # 5. Build RV Instruments
+        for t in self.transits:
+            t.build_likelihood(model, self.planets, user_params)
+
+        # 6. Build Astrometry Instruments
+        for a in self.astrometry:
+            a.build_likelihood(model)
+
+        # 7. Build mulensing Instruments
+        for m in self.mulensing:
+            m.build_likelihood(model)
+        """
+
+        # now apply globally dependent parameters/constraints
+        # self.build_dependent_parameters()
+
+        self.compile_plotter_functions(model)
+
+        return model
 
         # these are the objects we're modeling
         self.stars = Star(self.config.get("stars"), self.config_manager)
@@ -102,77 +221,6 @@ class StellarSystem(Component):
                 results[var.name] = val
 
         return results
-
-    def build_model(self):
-
-        """
-        Build the PyMC Graph.
-        """
-        with pm.Model() as model:
-
-            # 1. first pass, build the foundational parameters
-            self.stars.build_parameters()
-            self.orbits.build_parameters()
-            self.planets.build_parameters()
-            self.instruments.build_parameters()
-
-            self.orbit_map = pt.as_tensor_variable(
-                np.array([p_cfg.get("orbit_ndx", 0) for p_cfg in self.planets.config])
-            ).astype("int32")
-            self.star_map = pt.as_tensor_variable(
-                np.array([p_cfg.get("star_ndx", 0) for p_cfg in self.planets.config])
-            ).astype("int32")
-            self.instruments.inst_map_tensor = pt.as_tensor_variable(
-                self.instruments.inst_map
-            ).astype("int32")
-
-            self.planets.build_dependent_parameters(stars=self.stars, orbits=self.orbits,
-                                                    star_map=self.star_map, orbit_map=self.orbit_map)
-
-            """ for vcve parameterization, this will be more complicated... punt for now
-             
-            # for transit-only fits (vcve parameterization), we must build the planet first and pass it to orbit
-            # for other fits, we must build the orbit first and pass it to planet
-            # 2. Build Planets/Orbits (Physics & Derived relations; requires Star and Orbit)
-            for p in self.planets:
-                host_star = self.stars[p.config.get(star_ndx,0)]
-
-                if not p.fitvcve:
-                    # 2. Build Orbits first (Timing/Geometry; no dependencies)
-                    for o in self.orbits:
-                        o.build_parameters(model)
-                    planet_orbit = self.orbits[p.config.get('orbit_ndx', 0)]
-                    p.build_parameters(model, host_star, planet_orbit)
-                else:
-                    pass
-                    # planet_orbit = self.orbits[p.config.get('orbit_ndx', 0)]
-                    # p.build_parameters(model, host_star, planet_orbit)
-            """
-
-            # third pass, build likelihoods
-            self.instruments.build_likelihood(model, stars=self.stars, orbits=self.orbits, planets=self.planets,
-                                                    star_map=self.star_map, orbit_map=self.orbit_map)
-
-            """
-            # 5. Build RV Instruments
-            for t in self.transits:
-                t.build_likelihood(model, self.planets, user_params)
-
-            # 6. Build Astrometry Instruments
-            for a in self.astrometry:
-                a.build_likelihood(model)
-
-            # 7. Build mulensing Instruments
-            for m in self.mulensing:
-                m.build_likelihood(model)
-            """
-
-            # now apply globally dependent parameters/constraints
-            #self.build_dependent_parameters()
-
-            self.compile_plotter_functions(model)
-
-        return model
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
@@ -325,8 +373,21 @@ class StellarSystem(Component):
         # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
         return np.ones(total_dims), ordered_scales, ordered_inits, transformed_inits
 
-    # FILE: components/stellarsystem.py
     def compile_plotter_functions(self, model):
+        """
+        Gathers the global sampling parameters so components know
+        the exact input signature required for their compiled functions,
+        then tells each component to compile its own plotters.
+        """
+        all_params = self.get_all_parameters()
+        self.plot_params = [p for p in all_params if p.expression is None]
+
+        # Delegate the actual compilation to the components
+        for comp in self.active_components.values():
+            comp.compile_plotters(model, system=self)
+
+    # FILE: components/stellarsystem.py
+    def compile_plotter_functions_old(self, model):
         t_input = pt.vector("t_input")
         all_params = self.get_all_parameters()
         self.plot_params = [p for p in all_params if p.expression is None]
@@ -352,3 +413,33 @@ class StellarSystem(Component):
             outputs=rv_matrix_node,
             on_unused_input='ignore'
         )
+
+    def _initialize_internal_maps(self):
+        """
+        The Bridge Phase: Uses Component Types instead of YAML keys
+        to ensure maps are always attached correctly.
+        """
+        # 1. Find the components by class type
+        planet_comp = next((c for c in self.active_components.values() if isinstance(c, Planet)), None)
+        # If you have an RV instrument, find it too
+        rv_comp = next((c for c in self.active_components.values() if isinstance(c, RVInstrument)), None)
+
+        # 2. Map Planets to Stars and Orbits
+        if planet_comp:
+            # We use planet_comp.config to get the original YAML list
+            star_map_indices = np.array([
+                p_cfg.get("star_ndx", 0) for p_cfg in planet_comp.config
+            ])
+            # Attach to both the System (for Instruments) and the Planet (for Physics)
+            self.star_map = pt.as_tensor_variable(star_map_indices).astype("int32")
+            planet_comp.star_map = self.star_map
+
+            orbit_map_indices = np.array([
+                p_cfg.get("orbit_ndx", 0) for p_cfg in planet_comp.config
+            ])
+            self.orbit_map = pt.as_tensor_variable(orbit_map_indices).astype("int32")
+            planet_comp.orbit_map = self.orbit_map
+
+        # 3. Map Observations to Instrument Gamma/Jitter
+        if rv_comp and hasattr(rv_comp, 'inst_map'):
+            rv_comp.inst_map_tensor = pt.as_tensor_variable(rv_comp.inst_map).astype("int32")

@@ -1,29 +1,40 @@
-1) Refactor parameter instantiation by extracting hard-coded defaults into an exozippy_params.yaml file and building a centralized resolver that meshes base limits, user overrides, and dynamic component constraints (like stellar grids) into clean **kwargs for the Parameter class.
+* switching planet.mass to earthMass is converted back to jupiter in the diagnostic table. fix that.
 
-2) Isolate Pure Physics from PyMC Bindings for easier unit testing
+* write unit tests for high coverage
 
-3) switching planet.mass to earthMass is converted back to jupiter in the diagnostic table. fix that.
+* make CelestialBody super class of Star/Planet
 
-4) write unit tests for high coverage
+* refactor system topology so planet owns it own host star and orbit rather than passing maps around. not sure how to do that.
 
-5) decouple data loaders from component objects
+* more features/components:
+  - microlensing
+  - transits
+    - ttvs
+    - long cadence
+    - light travel time
+  - GPs
+    - both RVs and Transits, periodic or red
+  - SED
+    - home grown
+    - MIST BC table
+  - evolutionary models
+  - astrometry
+  - nbody
+  - doppler tomography
 
-6) make celestial body super class of star/planet
+* vcve parameterization:
+ - refactored to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
+ - cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
 
-7) refactor system topology. not sure how to do that.
+* analytic treatment of linear parameters (detrending, f0, gamma, probably mulensing baseline)
 
-8) more features/components: transits, gps, sed, evolutionary models, microlensing, astrometry, ttvs, nbody, long cadence, doppler tomography
+* custom circular model logic, possibly including analytic planet.K -> planet.mass solver
 
-9) vcve parameterization:
-a) refactored to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute the likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
-b) cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
+* add user input -> model parameter transformation layer (analogous to step2pars.pro)
 
-
-
-10) analytic treatment of linear parameters (detrending, f0, gamma)
-
+* user linkable parameters (with symbolic math?)
 
 blind spots:
-checkpoints
-pytensor cache bloat
-large n compilation choke? (is that AI trash?)
+  * checkpoints
+  * pytensor cache bloat
+  * large n compilation choke (?? is that AI trash?)

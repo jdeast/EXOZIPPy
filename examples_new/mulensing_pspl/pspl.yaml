@@ -1,0 +1,25 @@
+# examples_new/microlensing_pspl/pspl.yaml
+run:
+  name: "OB08092"
+
+prefix: "fitresults/OB08092_pspl"
+
+microlensing:
+  lenses:
+    - name: "Lens1"
+  instruments:
+    - name: "OGLE4"
+      file: "n20100309.I.OGLE4.ob08092.dat"
+      coords: "17:47:29.42 -34:43:35.6"  # Taken from example_01_FSPL.py
+      t0_par: 2455379.571                # Reference epoch for parallax
+
+parameter_file: "pspl.params.yaml"
+
+sampler:
+  pymc:
+    tune: 1000
+    draws: 2000
+    chains: 4
+    cores: 4
+    init: "adapt_diag"
+    target_accept: 0.9

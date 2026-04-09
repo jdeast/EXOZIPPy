@@ -48,6 +48,12 @@ def calc_K(mass, m_total, ecc, arsun, sini, period):
     ecc_factor = 1.0 / pt.sqrt(1.0 - pt.sqr(ecc))
     return const * (arsun*sini*mass_ratio*ecc_factor/period)
 
+def calc_m_total(planet_mass, star_mass):
+    return pt.maximum(star_mass + planet_mass, 1e-9)
+
+def calc_max_ecc(ar, p):
+    return 1.0 - 1.0/ar - p/ar
+
 def calc_period(logP):
     return 10**logP
 
@@ -125,6 +131,8 @@ PHYSICS_REGISTRY = {
     "calc_p": calc_p,
     "calc_K": calc_K,
     "calc_tp": calc_tp,
+    "calc_m_total": calc_m_total,
+    "calc_max_ecc": calc_max_ecc,
 
     # rv instrument calculations
     "calc_jitter": calc_jitter

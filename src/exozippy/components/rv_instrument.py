@@ -43,59 +43,12 @@ class RVInstrument(Component):
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
-        # rv_instrument.py
+    def build_parameters(self, model):
+        # all our parameters will be initialized from the data
+        pass
+
 
     def load_data(self):
-        """
-        Reads files and populates the internal data arrays.
-        Separating this allows for easier testing/mocking of data.
-        """
-        all_times, all_rvs, all_errs, inst_indices = [], [], [], []
-        all_detrend = []
-
-        self.n_detrend_per_inst = []
-        for i, file in enumerate(self.files):
-            # Your existing pandas logic...
-            df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
-            n_obs = len(df)
-
-            # internally, we use rsun/day to reduce unit conversion overheads
-            factor = self.units[i].to(u.solRad / u.d)
-            all_times.append(df.iloc[:, 0].values)
-            all_rvs.append(df.iloc[:, 1].values*factor)
-            all_errs.append(df.iloc[:, 2].values*factor)
-            inst_indices.append(np.full(n_obs, i))
-
-            factor = self.units[i].to(u.m / u.s) # make sure it's m/s
-            self.gamma_init[i] = np.mean(df.iloc[:, 1].values)*factor
-            self.jittervar_lower[i] = -0.95*(np.min(df.iloc[:, 2].values*factor)**2)
-
-            # Make sure you are appending the count here:
-            n_obs = len(df)
-            n_detrend_cols = df.shape[1] - 3 if df.shape[1] > 3 else 0
-            self.n_detrend_per_inst.append(n_detrend_cols)
-
-            # Capture extra columns (detrending vectors)
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                # Still need an empty array with the right number of rows
-                all_detrend.append(np.empty((n_obs, 0)))
-
-        # Finalize the flat arrays
-        self.time = np.concatenate(all_times).astype(float)
-        self.rv = np.concatenate(all_rvs).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-
-        # Store the heuristics needed for build_parameters
-        factor = (u.solRad / u.d).to(u.m / u.s)
-        self.k_init = factor * np.sqrt(2.0) * np.std(self.rv)
-
-        self.total_detrend_cols = sum(self.n_detrend_per_inst)
-
-
-    def load_all_data(self):
         """
         Vectorized loader that handles concatenated data and
         padded block-diagonal detrending matrices.
@@ -156,7 +109,7 @@ class RVInstrument(Component):
             current_row += n_r
             current_col += n_c
 
-    def build_parameters(self):
+    def build_dependent_parameters(self, model, system):
         prefix = "inst"
 
         # We pass the calculated data-driven values as overrides to the YAML defaults
@@ -178,16 +131,20 @@ class RVInstrument(Component):
 
         self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
 
-    def build_likelihood(self, model, stars, orbits, planets, star_map, orbit_map):
+
+    def build_likelihood(self, model, system):
         time = pm.ConstantData("rv_time",self.time)
         rv = pm.ConstantData("rv_data",self.rv)
         err = pm.ConstantData("rv_err",self.err)
+
+        orbits = system.orbit
+        planets = system.planet
 
         # 1. Construct the RV Model: start with the gamma constant offset
         rv_model = self.gamma.value[self.inst_map_tensor]
 
         # sum the contribution from all planets
-        rv_model += pt.sum(orbits.get_radial_velocity(time, planets.K.value[orbit_map], orbit_map),axis=1)
+        rv_model += pt.sum(orbits.get_radial_velocity(time, planets.K.value[system.orbit_map], system.orbit_map),axis=1)
 
         # detrending
         if self.total_detrend_cols > 0:
@@ -218,20 +175,47 @@ class RVInstrument(Component):
         gp_rv.marginal("obs_rv", observed=rv)
         """
 
-    def _is_sampling_param(self, attr):
-        """Helper to identify parameters that need to be passed to the compiled function."""
-        from .parameter import Parameter
-        return isinstance(attr, Parameter) and attr.expression is None
+    def compile_plotters(self, model, system):
+        """Compiles the fast PyTensor functions used by plot_unphased and plot_phased."""
+        # 1. We need a time grid input
+        t_input = pt.vector("t_input")
 
-    def plot_model(self, stellar_system, planets, points, filename_prefix="debug", label="model"):
-        self.plot_unphased(stellar_system, points, filename_prefix=filename_prefix)
-        self.plot_phased(stellar_system, planets, points, filename_prefix=filename_prefix)
+        # 2. Get the global symbols to match the MCMC trace signature
+        param_symbols = [p.value for p in system.plot_params]
 
-    def plot_unphased(self, system, points, filename_prefix="mwe"):
+        # 3. Pull the physics from the system
+        planets = getattr(system, 'planet', None)
+        orbits = getattr(system, 'orbit', None)
+
+        if planets is not None and orbits is not None:
+            K_mapped = planets.K.value[system.orbit_map]
+
+            # The matrix of shape (N_times, N_planets)
+            rv_matrix_node = orbits.get_radial_velocity(t_input, K_mapped, system.orbit_map)
+
+            # Save them to SELF, not the system!
+            self._compiled_full_rv = pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=pt.sum(rv_matrix_node, axis=1),
+                on_unused_input='ignore'
+            )
+
+            self._compiled_rv_matrix = pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=rv_matrix_node,
+                on_unused_input='ignore'
+            )
+
+    def plot(self, system, points, filename_prefix="debug"):
+        self.plot_unphased(system, points, filename_prefix=filename_prefix)
+        self.plot_phased(system, points, filename_prefix=filename_prefix)
+
+    def plot_unphased(self, system, points, filename_prefix="debug"):
         """
         Generates a non-phased RV plot (spaghetti or single model).
         Saves to {filename_prefix}_RV_unphased.pdf
         """
+
         if isinstance(points, dict):
             points = [points]
         if len(points) == 0:
@@ -261,7 +245,7 @@ class RVInstrument(Component):
 
             try:
                 # Evaluate the compiled graph (Summed RV across all planets)
-                y_model = system._compiled_full_rv(t_pretty, *param_values)
+                y_model = self._compiled_full_rv(t_pretty, *param_values)
 
                 # Squeeze to ensure it's (2000,) for matplotlib
                 if y_model.ndim > 1:
@@ -299,15 +283,17 @@ class RVInstrument(Component):
         plt.savefig(pdf_path)
         plt.close()
 
-    def plot_phased(self, system, planets, points, filename_prefix="mwe"):
+    def plot_phased(self, system, points, filename_prefix="debug"):
         """
         Generates a phased RV plot for each planet in the system.
         Accesses planet parameters via vectorized indices.
         """
+        planets = system.planet
+
         if isinstance(points, dict): points = [points]
 
         # _compiled_rv_matrix returns (N_times, N_planets)
-        compiled_matrix = system._compiled_rv_matrix
+        compiled_matrix = self._compiled_rv_matrix
 
         # Iterate through the number of planets defined in the component
         for p_idx in range(planets.n_elements):
@@ -318,8 +304,8 @@ class RVInstrument(Component):
 
             # Accessing the vectorized period and tc for this specific planet index
             # These are stored in the Orbit object owned by the system
-            P_vals = np.atleast_1d(ref_point.get(system.orbits.period.label))
-            tc_vals = np.atleast_1d(ref_point.get(system.orbits.tc.label))
+            P_vals = np.atleast_1d(ref_point.get(system.orbit.period.label))
+            tc_vals = np.atleast_1d(ref_point.get(system.orbit.tc.label))
 
             P_ref = float(P_vals[p_idx])
             tc_ref = float(tc_vals[p_idx])

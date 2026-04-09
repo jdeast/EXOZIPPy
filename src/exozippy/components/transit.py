@@ -39,7 +39,7 @@ class Transit(Component):
         self.jittervar_lower = [None] * self.ninstruments
         self.load_all_data()
 
-    def load_all_data(self):
+    def load_data(self):
         """
         Vectorized loader for photometry that handles concatenated data and
         padded block-diagonal detrending matrices, mirroring RVInstrument.

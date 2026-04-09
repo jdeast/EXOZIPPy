@@ -29,7 +29,7 @@ class Orbit(Component):
         self.i180 = [c.get("i180",False) for c in self.config]
         self.fitvcve = [c.get("fitvcve",False) for c in self.config]
 
-    def build_parameters(self):
+    def build_parameters(self, model):
         prefix = "orbit"
         shape = (self.n_elements,)
 
@@ -96,7 +96,10 @@ class Orbit(Component):
 
         self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
 
-    def build_dependent_parameters(self, model, star, planet, user_params=None):
+    def load_data(self):
+        pass
+
+    def build_dependent_parameters(self, model, system):
         # TODO: handle the vcve parameterization
         return
         # transit only parameterization (Eastman, 2024)
@@ -164,6 +167,12 @@ class Orbit(Component):
                 pt.sqrt(1.0 - self.ecc.value ** 2) * (1.0 + self.esinw.value) ** 2)  # d(vcve)/d(e)
 
         self.jacobian = pm.Potential(f"{prefix}.jacobian", pt.abs(jacobian))
+
+    def build_likelihood(self, model, system):
+        pass
+
+    def plot(self, system, points, filename_prefix="debug"):
+        pass
 
     def get_true_anomaly(self, t):
         """Returns the true anomaly f for all planets at all times."""

@@ -1,13 +1,7 @@
-import numpy as np
-
-import pytensor.tensor as pt
+from pathlib import Path
 
 # local imports
-import astropy.units as u
-from pathlib import Path
-from .parameter import Parameter
 from .component import Component
-from ..physics import calc_density, calc_logg, calc_luminosity, calc_fbol
 
 # debugging imports
 import ipdb
@@ -34,7 +28,7 @@ class Star(Component):
         else:
             self.sedfile = self.config.get("sedfile")
 
-    def build_parameters(self):
+    def build_parameters(self, model):
         prefix = "star"
 
         parameters = {
@@ -101,3 +95,18 @@ class Star(Component):
                 mannrad_prior = pm.Potential(f"{prefix}.mannrad_prior", -0.5 *
                                              ((star.radius.value - mann_rstar) / mann_sigma_rstar) ** 2)
         '''
+    def load_data(self):
+        # no data to load
+        pass
+
+    def build_dependent_parameters(self, model, system):
+        # no dependent parameters necessary
+        # build SED parameters here?
+        pass
+
+    def build_likelihood(self, model, system):
+        # no likelihood (yet?)
+        pass
+
+    def plot(self, system, points, filename_prefix="debug"):
+        pass
