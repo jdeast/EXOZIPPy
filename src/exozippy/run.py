@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 import pytensor
-import pytensor.gradient as ptg
 #pytensor.config.optimizer_excluding = "local_elemwise_fusion"
 #pytensor.config.allow_gc = True
 #pytensor.config.linker = "py"
@@ -20,7 +19,7 @@ from pymc.initial_point import make_initial_point_fn
 # local imports
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
-from .components.stellarsystem import StellarSystem
+from exozippy.system import System
 
 # debugging imports
 import ipdb
@@ -50,19 +49,16 @@ def run_fit(config):
     if profile: pytensor.config.profile = True
 
     # 3. Build the stellar system into a PyMC Graph
-    stellar_system = StellarSystem(config)
-    model = stellar_system.build_model()
+    system = System(config)
+    model = system.build_model()
 
     # 4. Sample
     # We use adapt_diag to start exactly at our heuristic means
     with model:
 
         # 1. Get your starting dictionaries
-        nuts_scales, phys_scales, phys_inits, transformed_inits = stellar_system.get_mcmc_init(model)
-        inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_scales, check_curvatures)
-
-        # create a version of the plots at the starting point of the model
-        #raw_start = pm.Point(transformed_inits, model=model)
+        nuts_scales, phys_scales, phys_inits, transformed_inits = system.get_mcmc_init(model)
+        inspect_start(model, system, transformed_inits, phys_inits, phys_scales, check_curvatures)
 
         # this makes random draws within our 1000 sigma range
         raw_start = model.initial_point()
@@ -72,10 +68,10 @@ def run_fit(config):
             raw_start[key] = np.zeros_like(raw_start[key])
 
         # convert raw starting point to the internal starting point
-        internal_start = stellar_system.get_internal_point(model, raw_start)
+        internal_start = system.get_internal_point(model, raw_start)
         # make all the component plots
-        for comp in stellar_system.active_components.values():
-            comp.plot(stellar_system, [internal_start], filename_prefix=str(prefix) + "_start")
+        for comp in system.active_components.values():
+            comp.plot(system, [internal_start], filename_prefix=str(prefix) + "_start")
 
         #### profiling ####
         if profile:
@@ -110,7 +106,7 @@ def run_fit(config):
         #loglike = pm.compute_log_likelihood(idata)
 
     # populate the parameters with the posteriors
-    stellar_system.distribute_posterior(idata)
+    system.distribute_posterior(idata)
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
 
@@ -119,7 +115,7 @@ def run_fit(config):
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
     # Create a list of physical parameter labels that actually have traces
-    all_params = stellar_system.get_all_parameters()
+    all_params = system.get_all_parameters()
     plot_vars = [p.label for p in all_params if p.label in idata.posterior]
     save_multipage_trace(idata, plot_vars, str(prefix) + "_trace_detailed.pdf")
 
@@ -141,18 +137,18 @@ def run_fit(config):
     #plt.show()
 
     # Generate latex table
-    build_latex_output(stellar_system,
+    build_latex_output(system,
                        var_filename=str(prefix) + '_definitions.tex',
                        template_filename=str(prefix) + '_template.tex',
                        caption=r"Median and 68\% Confidence intervals for " + prefix.stem)
 
     # Generate final plots
     draws = get_draws(idata)
-    for comp in stellar_system.active_components.values():
-        comp.plot(stellar_system, draws, filename_prefix=str(prefix) + "_mcmc")
+    for comp in system.active_components.values():
+        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
-def inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_scales, calc_curvature=True):
-    auditor = ModelAuditor(model, stellar_system, transformed_inits)
+def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, calc_curvature=True):
+    auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
     curvature_map = auditor.get_curvatures() if calc_curvature else {}
     unused_yaml = auditor.check_unused_yaml()
@@ -186,7 +182,7 @@ def inspect_start(model, stellar_system, transformed_inits, phys_inits, phys_sca
         s_phys = np.atleast_1d(raw_s)
         c_phys = np.atleast_1d(curvature_map.get(p.label, [np.nan] * len(v_phys)))
 
-        user_flag = "*" if p.user_modified else ""
+        user_flag = "*" if getattr(p, 'user_prior_modified', False) else ""
 
         for i in range(len(v_phys)):
             row_label = p.get_display_label(i)

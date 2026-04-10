@@ -1,0 +1,107 @@
+star:
+  # --- Sampled Parameters ---
+  mass:
+    lower: 0.1
+    upper: 250.0
+    init_scale: 0.02
+    latex: "M_*"
+    description: "Stellar Mass"
+  radius:
+    lower: 0.1
+    upper: 2000.0
+    init_scale: 0.02
+    latex: "R_*"
+    description: "Stellar Radius"
+  radiussed:
+    lower: 0.1
+    upper: 2000.0
+    initval: 1.0
+    init_scale: 0.02
+    unit: "solRad"
+    internal_unit: "solRad"
+    latex: "R_*"
+    description: "Stellar Radius"
+    table_note: "This value ignores the systematic error and is for reference only"
+  teff:
+    lower: 1.0
+    upper: 500000.0
+    initval: 5778.0
+    init_scale: 80.0
+    unit: "K"
+    internal_unit: "K"
+    latex: "T_{\\rm eff}"
+    description: "Effective Temperature"
+  teffsed:
+    lower: 1.0
+    upper: 500000.0
+    initval: 5778.0
+    init_scale: 80.0
+    unit: "K"
+    internal_unit: "K"
+    latex: "T_{\\rm eff}"
+    description: "Effective Temperature"
+    table_note: "This value ignores the systematic error and is for reference only"
+  feh:
+    lower: -5.0
+    upper: 5.0
+    initval: 0.0
+    init_scale: 0.08
+    unit: "dex"
+    internal_unit: "dex"
+    latex: "[{\\rm Fe/H}]"
+    description: "Metallicity"
+  age:
+    lower: 0.0
+    upper: 13.77
+    initval: 4.603
+    init_scale: 3.0
+    unit: "Gyr"
+    internal_unit: "Gyr"
+    latex: "{\\rm Age}"
+    description: "Stellar Age"
+
+  # --- Derived Parameters ---
+  # We inherit the math from CelestialBody, but override the LaTeX here
+  density:
+    latex: "\\rho_*"
+    description: "Stellar Density"
+  logg:
+    latex: "\\log{g_*}"
+
+  # --- Specific Physics ---
+  fbol:
+    unit: "erg/s/cm2"
+    internal_unit: "erg/s/cm2"
+    latex: "F_{Bol}"
+    description: "Bolometric Flux"
+    expressions:
+      default:
+        func_name: "calc_fbol"
+        deps: ["luminosity", "distance"]
+  luminosity:
+    unit: "solLum"
+    internal_unit: "solLum"
+    latex: "L_*"
+    description: "Stellar Luminosity"
+    expressions:
+      default:
+        func_name: "calc_luminosity"
+        deps: ["radius", "teff"]
+  luminositysed:
+    unit: "solLum"
+    internal_unit: "solLum"
+    latex: "L_*"
+    description: "Stellar Luminosity"
+    expressions:
+      default:
+        func_name: "calc_luminosity"
+        deps: ["radiussed", "teffsed"]
+  fbolsed:
+    unit: "erg/s/cm2"
+    internal_unit: "erg/s/cm2"
+    latex: "F_{Bol}"
+    description: "Bolometric Flux"
+    expressions:
+      default:
+        func_name: "calc_fbol"
+        deps: ["luminositysed", "distance"]

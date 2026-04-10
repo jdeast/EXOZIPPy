@@ -1,0 +1,172 @@
+orbit:
+  # --- Always Sampled ---
+  logP:
+    lower: -2.0
+    upper: 13.7
+    initval: 1.0
+    init_scale: 0.00001
+    unit: "dex(d)"
+    internal_unit: "dex(d)"
+    latex: "\\log{P}"
+    description: "log10(Period/day)"
+  period:
+    unit: "d"
+    internal_unit: "d"
+    latex: "P"
+    description: "Orbital Period"
+    expressions:
+      default:
+        func_name: "calc_period"
+        deps: [ "logP" ]
+  n:
+    unit: "1/d"
+    internal_unit: "1/d"
+    latex: "n"
+    description: "Mean Motion"
+    expressions:
+      default:
+        func_name: "calc_n"
+        deps: [ "period" ]
+  tc:
+    lower: 2000000.0
+    upper: 3000000.0
+    initval: 2460000.0
+    init_scale: 0.001
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_C"
+    description: "Time of Conjunction"
+
+  # --- Conditionally Sampled or Derived (Geometry Swap) ---
+  secosw:
+    lower: -1.0
+    upper: 1.0
+    initval: 0.01
+    init_scale: 0.15
+    unit: ""
+    internal_unit: ""
+    latex: "e^{1/2}\\cos{\\omega_*}"
+  sesinw:
+    lower: -1.0
+    upper: 1.0
+    initval: 0.01
+    init_scale: 0.15
+    unit: ""
+    internal_unit: ""
+    latex: "e^{1/2}\\sin{\\omega_*}"
+  vcve:
+    lower: -10.0  # Adjust based on expected Vc/Ve scaling
+    upper: 10.0
+    initval: 0.0
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "V_C/V_E"
+
+  # --- Derived/Switchboard Targets ---
+  ecc:
+    unit: ""
+    internal_unit: ""
+    latex: "e"
+    description: "Eccentricity"
+    expressions:
+      default:
+        func_name: "calc_ecc"
+        deps: ["secosw", "sesinw"]
+      from_vcve:
+        func_name: "calc_ecc_from_vcve"
+        deps: ["vcve", "omega"]
+  omega:
+    unit: "rad"
+    internal_unit: "rad"
+    latex: "\\omega_*"
+    description: "Argument of Periastron"
+    expressions:
+      default:
+        func_name: "calc_omega"
+        deps: ["secosw", "sesinw"]
+      from_vcve:
+        func_name: "calc_omega_from_vcve"
+        deps: ["cosw", "sinw"]
+  cosi:
+    lower: -1.0
+    upper: 1.0
+    initval: 0.0000001
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "\\cos{i}"
+    description: "Cosine of Inclination"
+    expressions:
+      from_b:
+        func_name: "calc_cosi_from_b"
+        deps: ["b", "ar", "ecc", "omega"]
+  b:
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "b"
+    description: "Impact Parameter"
+    expressions:
+      default:
+        func_name: "calc_b"
+        deps: ["cosi", "ar", "ecc", "esinw"]
+  inc:
+    unit: "deg"
+    internal_unit: "rad"
+    latex: "i"
+    description: "Inclination"
+    expressions:
+      default:
+        func_name: "calc_inc"
+        deps: [ "cosi" ]
+  sini:
+    unit: ""
+    internal_unit: ""
+    latex: "\\sin{i}"
+    expressions:
+      default:
+        func_name: "calc_sini"
+        deps: [ "inc" ]
+  sinw:
+    unit: ""
+    internal_unit: ""
+    latex: "\\sin{\\omega_*}"
+    expressions:
+      default:
+        func_name: "calc_sinw"
+        deps: [ "omega" ]
+  cosw:
+    unit: ""
+    internal_unit: ""
+    latex: "\\cos{\\omega_*}"
+    expressions:
+      default:
+        func_name: "calc_cosw"
+        deps: [ "omega" ]
+  esinw:
+    unit: ""
+    internal_unit: ""
+    latex: "e\\sin{\\omega_*}"
+    expressions:
+      default:
+        func_name: "calc_esinw"
+        deps: [ "ecc", "sesinw" ]
+  ecosw:
+    unit: ""
+    internal_unit: ""
+    latex: "e\\cos{\\omega_*}"
+    expressions:
+      default:
+        func_name: "calc_ecosw"
+        deps: [ "ecc", "secosw" ]
+  tp:
+    unit: "d"
+    internal_unit: "d"
+    latex: "T_P"
+    description: "Time of Periastron"
+    expressions:
+      default:
+        func_name: "calc_tp"
+        deps: [ "ecc", "sesinw", "secosw", "tc", "n" ]

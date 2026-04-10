@@ -16,17 +16,17 @@ import pytensor
 from exoplanet_core.pymc import ops as ops
 
 # local imports
-from .parameter import Parameter
-from .component import Component
+from exozippy.components.parameter import Parameter
+from exozippy.components.component import Component
+# this import is required even though it's not used explicitly
+# it registers all the mathematical relations
+from . import physics
 
 # debugging imports
 import ipdb
 
 class RVInstrument(Component):
     def __init__(self, config, config_manager):
-        super().__init__(config, config_manager)
-        self.label = "Instrument Parameters"
-
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
 
@@ -46,7 +46,6 @@ class RVInstrument(Component):
     def build_parameters(self, model):
         # all our parameters will be initialized from the data
         pass
-
 
     def load_data(self):
         """
@@ -109,6 +108,11 @@ class RVInstrument(Component):
             current_row += n_r
             current_col += n_c
 
+    def build_map(self, system):
+        # Map the observation rows to the instrument parameters (gamma/jitter)
+        self.inst_map_tensor = pt.as_tensor_variable(self.inst_map).astype("int32")
+
+
     def build_dependent_parameters(self, model, system):
         prefix = "inst"
 
@@ -144,7 +148,7 @@ class RVInstrument(Component):
         rv_model = self.gamma.value[self.inst_map_tensor]
 
         # sum the contribution from all planets
-        rv_model += pt.sum(orbits.get_radial_velocity(time, planets.K.value[system.orbit_map], system.orbit_map),axis=1)
+        rv_model += pt.sum(orbits.get_radial_velocity(time, planets.K.value[planets.orbit_map], planets.orbit_map),axis=1)
 
         # detrending
         if self.total_detrend_cols > 0:
@@ -188,10 +192,10 @@ class RVInstrument(Component):
         orbits = getattr(system, 'orbit', None)
 
         if planets is not None and orbits is not None:
-            K_mapped = planets.K.value[system.orbit_map]
+            K_mapped = planets.K.value[planets.orbit_map]
 
             # The matrix of shape (N_times, N_planets)
-            rv_matrix_node = orbits.get_radial_velocity(t_input, K_mapped, system.orbit_map)
+            rv_matrix_node = orbits.get_radial_velocity(t_input, K_mapped, planets.orbit_map)
 
             # Save them to SELF, not the system!
             self._compiled_full_rv = pytensor.function(

@@ -1,6 +1,6 @@
 from .parameter import Parameter
 
-from ..physics import PHYSICS_REGISTRY
+from ..physics_registry import PHYSICS_REGISTRY
 from abc import ABC, abstractmethod
 
 class Component:
@@ -8,8 +8,8 @@ class Component:
         """
         Standardized constructor for ALL components.
         """
-        self.config = component_config  # The list from kelt4.yaml (e.g. [{'name': 'Kelt-4A'}])
-        self.config_manager = config_manager  # The resolver for exozippy_params.yaml
+        self.config = component_config
+        self.config_manager = config_manager
 
         # Determine how many of this thing we are building
         self.n_elements = len(self.config)
@@ -38,9 +38,17 @@ class Component:
         pass
 
     @abstractmethod
+    def build_map(self, system):
+        """
+        Step 3: Define the indexing relationship between components.
+        Converts YAML configuration indices into PyTensor tensor variables.
+        """
+        pass
+
+    @abstractmethod
     def build_dependent_parameters(self, model, system):
         """
-        Step 3: Define additional parameters that depend on other components or have data-driven initializations
+        Step 4: Define additional parameters that depend on other components or have data-driven initializations
         e.g. gamma=mean(RV), constraints (user errors => jitter lower bound), or definitions (planet.K needs star.mass)
         """
         pass
@@ -48,14 +56,14 @@ class Component:
     @abstractmethod
     def build_likelihood(self, model, system):
         """
-        Step 4: Build the likelihood of the component
+        Step 5: Build the likelihood of the component
         """
         pass
 
     @abstractmethod
     def compile_plotters(self, model, system):
         """
-        Step 5 (Optional): Compile fast PyTensor functions for plotting.
+        Step 6 (Optional): Compile fast PyTensor functions for plotting.
         Compile the pytensor code that builds the model as a numpy function to use in plotting
         That reduces effort and ensures consistency between the likelihood calculation and the figure
         """

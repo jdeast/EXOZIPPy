@@ -253,9 +253,11 @@ class Parameter:
     # Optional Gaussian prior
     mu: Optional[Number] = None
     sigma: Optional[Number] = None
+    gaussian_width: Optional[Number] = None
 
     print_to_table: bool = True
     user_modified: bool = False
+    user_prior_modified: bool = False
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
 
@@ -344,6 +346,7 @@ class Parameter:
         self.upper = convert(self.upper)
         self.mu = convert(self.mu)
         self.sigma = convert(self.sigma)
+        self.gaussian_width = convert(self.gaussian_width)
 
     def get_value(self, point):
         """
@@ -401,32 +404,20 @@ class Parameter:
         n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
 
         # 2. PREP WORK VECTORS
-        # We ensure everything is a float64 array of length n_elements
         def to_vec(val, fill=np.nan):
-            if val is None:
-                return np.full(n_elements, fill, dtype=float)
-
-            # Handle cases where a Tensor might have slipped in
+            if val is None: return np.full(n_elements, fill, dtype=float)
             if hasattr(val, 'eval'):
                 try:
                     val = val.eval()
                 except:
                     return np.full(n_elements, fill, dtype=float)
-
             arr = np.atleast_1d(val)
-
-            # Safety check for contents
             if arr.size > 0 and hasattr(arr[0], 'eval'):
                 try:
-                    val_eval = [float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr]
-                    arr = np.array(val_eval)
+                    arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
                 except:
                     return np.full(n_elements, fill, dtype=float)
-
-            if arr.size == 1:
-                return np.full(n_elements, float(arr[0]), dtype=float)
-
-            # Truncate or pad to match n_elements
+            if arr.size == 1: return np.full(n_elements, float(arr[0]), dtype=float)
             res = np.full(n_elements, fill, dtype=float)
             n_to_copy = min(n_elements, arr.size)
             res[:n_to_copy] = arr.astype(float)[:n_to_copy]
@@ -436,14 +427,48 @@ class Parameter:
         scales = to_vec(self.init_scale, fill=1.0)
         mus = to_vec(self.mu, fill=np.nan)
         sigmas = to_vec(self.sigma, fill=np.nan)
+        g_widths = to_vec(self.gaussian_width, fill=np.nan)
         lowers = to_vec(self.lower, fill=-np.inf)
         uppers = to_vec(self.upper, fill=np.inf)
 
-        # 3. IDENTIFY ROLES
+        # 3. IDENTIFY ROLES & PARAMETERIZATION SCENARIOS
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
-        # Fixed if sigma is 0 OR if init_scale is effectively 0
         is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
         is_sampling = ~(is_fixed | is_derived)
+
+        # --- DYNAMIC PARAMETERIZATION LOGIC ---
+        transform_mus = np.copy(inits)
+        transform_scales = np.copy(scales)
+        raw_sigmas = np.full(n_elements, 1000.0)
+        apply_gwidth_potential = np.zeros(n_elements, dtype=bool)
+
+        for i in range(n_elements):
+            if not is_sampling[i]:
+                continue
+
+            has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
+            has_gwidth = not np.isnan(g_widths[i]) and g_widths[i] > 0
+            has_mu = not np.isnan(mus[i])
+            actual_mu = mus[i] if has_mu else inits[i]
+
+            if has_sigma and has_gwidth:
+                # Case 4: pm.Normal with mu +/- sigma, add extra potential for gaussian_width
+                transform_mus[i] = actual_mu
+                transform_scales[i] = sigmas[i]
+                raw_sigmas[i] = 1.0
+                apply_gwidth_potential[i] = True
+
+            elif has_sigma or has_gwidth:
+                # Case 3: pm.Normal with mu +/- sigma (or g_width), no extra potential needed
+                transform_mus[i] = actual_mu
+                transform_scales[i] = sigmas[i] if has_sigma else g_widths[i]
+                raw_sigmas[i] = 1.0
+
+            else:
+                # Case 1 & 2: Nothing or init_scale -> pm.Normal with 1000*init_scale
+                transform_mus[i] = inits[i]
+                transform_scales[i] = scales[i]
+                raw_sigmas[i] = 1000.0
 
         raw_elements = [None] * n_elements
 
@@ -452,16 +477,13 @@ class Parameter:
             for i in np.where(is_fixed | is_derived)[0]:
                 raw_elements[i] = pt.constant(0.0)
 
-        # B. SAMPLING: N(0, 1) or N(0, 1000) for unconstrained
+        # B. SAMPLING
         if np.any(is_sampling):
             idx = np.where(is_sampling)[0]
-            # Standardize: If a physical prior sigma exists, raw space is N(0,1)
-            # If no prior exists (Uniform), raw space is N(0, 1000) for high mobility
-            raw_sigmas = np.where(~np.isnan(sigmas[idx]) & (sigmas[idx] > 0), 1.0, 1000.0)
-
+            # PyMC seamlessly supports vectorized mixed scales!
             par_raw = pm.Normal(f"{self.label}_raw",
                                 mu=0,
-                                sigma=raw_sigmas,
+                                sigma=raw_sigmas[idx],
                                 shape=len(idx),
                                 initval=np.zeros(len(idx)))
 
@@ -472,16 +494,13 @@ class Parameter:
         raw_vector = pt.stack(raw_elements)
 
         if expr_raw is not None:
-            # Derived Parameter logic
             phys_val = expr_raw() if callable(expr_raw) else expr_raw
         else:
-            # Sampled/Fixed Parameter logic: phys = (raw * scale) + init
-            phys_val = (raw_vector * pt.as_tensor_variable(scales)) + pt.as_tensor_variable(inits)
+            phys_val = (raw_vector * pt.as_tensor_variable(transform_scales)) + pt.as_tensor_variable(transform_mus)
 
-        # 5. ASSIGN TO SELF.VALUE (Optionally wrap in Deterministic)
+        # 5. ASSIGN TO SELF.VALUE
         track_node = bool(np.any(is_sampling)) or self.force_node
 
-        # Reshape back to parameter's intended shape
         if actual_shape == ():
             val_to_save = phys_val if expr_raw is not None else phys_val[0]
         else:
@@ -493,20 +512,18 @@ class Parameter:
             self.value = val_to_save
 
         # 6. APPLY SCIENTIFIC PRIORS & SOFT BOUNDARIES
-        # We use a Sigmoid 'Hammer' for soft boundaries (steepness based on scale)
         softness = 0.01
-        steepness_val = 4.4 / (np.maximum(scales, 1e-12) * softness)
+        # Use transform_scales so bounds adapt cleanly to tight sigmas
+        steepness_val = 4.4 / (np.maximum(transform_scales, 1e-12) * softness)
         steepness = pt.as_tensor_variable(steepness_val)
 
-        # Prepare target nodes for vectorized potentials
         val_flat = pt.flatten(self.value)
 
-        # A. Gaussian Priors (Masked for NaNs)
-        valid_priors = ~np.isnan(mus) & (sigmas > 0)
-        if np.any(valid_priors):
-            mask = pt.as_tensor_variable(valid_priors)
-            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(mus)) / pt.as_tensor_variable(sigmas)) ** 2
-            pm.Potential(f"prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+        # A. Additional Gaussian Width Potentials (Only triggers for Case 4)
+        if np.any(apply_gwidth_potential):
+            mask = pt.as_tensor_variable(apply_gwidth_potential)
+            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(transform_mus)) / pt.as_tensor_variable(g_widths)) ** 2
+            pm.Potential(f"gwidth_prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
 
         # B. Soft Lower Bounds
         has_lower = ~np.isinf(lowers)
@@ -683,27 +700,22 @@ class Parameter:
             if val is None: return None
             arr = np.atleast_1d(val)
             raw = arr[index] if index < len(arr) else arr[0]
-
-            # FORCE evaluation of symbolic tensors to prevent 'nan' leak
             if hasattr(raw, 'eval'):
                 try:
                     raw = raw.eval()
                 except:
                     return None
-
             f_val = float(raw)
             if np.isnan(f_val): return None
-
             if self.unit is None or self.internal_unit is None: return f_val
             f = np.atleast_1d(self._get_conversion_factors())
             return f_val * float(f[index] if index < len(f) else f[0])
 
         def _fmt(val, is_latex=True):
             if val is None or np.isnan(val): return "nan"
-            if np.isinf(val):
-                return (r"\infty" if val > 0 else r"-\infty") if is_latex else ("inf" if val > 0 else "-inf")
-            if 0.001 <= abs(val) < 10000:
-                return f"{val:.4f}".rstrip("0").rstrip(".")
+            if np.isinf(val): return (r"\infty" if val > 0 else r"-\infty") if is_latex else (
+                "inf" if val > 0 else "-inf")
+            if 0.001 <= abs(val) < 10000: return f"{val:.4f}".rstrip("0").rstrip(".")
             return f"{val:.2e}"
 
         if self.expression is not None: return "Derived"
@@ -711,17 +723,20 @@ class Parameter:
         sig = _scalar(self.sigma)
         if sig == 0: return "Fixed"
 
-        # MEAN: Check Mu first, then Fallback to Initval
         mu = _scalar(self.mu)
         if mu is None:
             mu = _scalar(self.initval)
 
-        if not latex:
-            # Gaussian Path
-            if sig is not None and sig > 0:
-                return f"N({_fmt(mu, False)}, {_fmt(sig, False)})"
+        g_w = _scalar(self.gaussian_width)
 
-            # Uniform Path
+        if not latex:
+            strs = []
+            if sig is not None and sig > 0:
+                strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
+            if g_w is not None and g_w > 0:
+                strs.append(f"N({_fmt(mu, False)}, {_fmt(g_w, False)})")
+            if strs: return " * ".join(strs)
+
             lo, hi = _scalar(self.lower), _scalar(self.upper)
             if lo is not None or hi is not None:
                 l_s, h_s = _fmt(lo, False) if not np.isinf(lo) else "", _fmt(hi, False) if not np.isinf(hi) else ""
@@ -730,8 +745,13 @@ class Parameter:
                 if h_s: return f"< {h_s}"
             return ""
 
+        strs = []
         if sig is not None and sig > 0:
-            return rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$"
+            strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
+        if g_w is not None and g_w > 0:
+            strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(g_w)})$")
+
+        if strs: return r" $\times$ ".join(strs)
 
         lo, hi = _scalar(self.lower), _scalar(self.upper)
         if lo is not None or hi is not None:

@@ -1,0 +1,71 @@
+transit:
+  baseline:
+    lower: -1000000.0
+    upper: 1000000.0
+    init_scale: 0.01
+    unit: ""
+    internal_unit: ""
+    latex: "F_0"
+    description: "Relative flux baseline"
+  jitter_variance:
+    lower: -1000.0
+    upper: 100000.0
+    init_scale: 0.000001
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_J^2"
+    description: "Photometric Jitter variance"
+  jitter:
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_J"
+    description: "Photometric Jitter"
+    expressions:
+      default:
+        func_name: "calc_transit_jitter"
+        deps: [ "jitter_variance" ]
+  q1:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "q_1"
+    description: "Limb darkening q1"
+  q2:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "q_2"
+    description: "Limb darkening q2"
+  u1:
+    unit: ""
+    internal_unit: ""
+    latex: "u_1"
+    description: "Linear limb darkening"
+    expressions:
+      default:
+        func_name: "calc_u1"
+        deps: ["q1", "q2"]
+  u2:
+    unit: ""
+    internal_unit: ""
+    latex: "u_2"
+    description: "Quadratic limb darkening"
+    expressions:
+      default:
+        func_name: "calc_u2"
+        deps: ["q1", "q2"]
+  detrend_coeffs:
+    initval: 0.0
+    init_scale: 1.0
+    lower: -1.0e6
+    upper: 1.0e6
+    unit: ""
+    internal_unit: ""
+    latex: "c"
+    description: "Detrending Coefficients"

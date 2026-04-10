@@ -8,9 +8,9 @@ import pymc as pm
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-from ..components.component import Component
-from ..components.parameter import Parameter
-from ..physics import PHYSICS_REGISTRY
+from exozippy.components.component import Component
+from exozippy.components.parameter import Parameter
+from exozippy.physics import PHYSICS_REGISTRY
 from .utils import get_deltas
 
 class MulensInstrument(Component):
@@ -28,7 +28,6 @@ class MulensInstrument(Component):
         Loads photometry and pre-calculates parallax shifts (delta_N, delta_E).
         This keeps Astropy/ERFA calls outside the PyMC sampling loop.
         """
-        from ..evolutionary_model.microlensing_utils import get_deltas  # Helper for Radek's code
 
         all_times, all_mags, all_errs, inst_indices = [], [], [], []
         all_dn, all_de = [], []

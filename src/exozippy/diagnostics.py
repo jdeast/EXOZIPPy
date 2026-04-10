@@ -4,16 +4,16 @@ from typing import Dict, Any, List
 
 
 class ModelAuditor:
-    def __init__(self, model, stellar_system, transformed_inits):
+    def __init__(self, model, system, transformed_inits):
         self.model = model
-        self.stellar_system = stellar_system
+        self.system = system
         self.transformed_inits = transformed_inits
-        self.param_lookup = stellar_system.get_parameter_lookup()
-        self.user_params = stellar_system.user_params
-        self.all_params = stellar_system.get_all_parameters()
+        self.param_lookup = system.get_parameter_lookup()
+        self.user_params = system.user_params
+        self.all_params = system.get_all_parameters()
 
         # Internal Filter Suffixes
-        self.hidden_suffixes = ["_raw", "_raw_n", "_raw_u", "_interval__", "_log__"]
+        self.hidden_suffixes = ["_raw", "_raw_n", "_raw_u", "_interval__", "_log__", "__"]
 
     def get_aggregated_logps(self) -> tuple[Dict[str, float], Dict[str, float]]:
         model_input_names = [v.name for v in self.model.value_vars]

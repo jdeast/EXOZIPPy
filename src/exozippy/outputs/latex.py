@@ -3,7 +3,7 @@
 import pathlib
 from ..components import Parameter
 
-def build_latex_output(stellar_system, var_filename="variables.tex", template_filename="table_template.tex",
+def build_latex_output(system, var_filename="variables.tex", template_filename="table_template.tex",
                        caption=None):
 
     # 1. Collect all data from the OO hierarchy
@@ -27,7 +27,7 @@ def build_latex_output(stellar_system, var_filename="variables.tex", template_fi
     all_defs.append(r"\providecommand{\fluxcgs}{10$^9$ erg s$^{-1}$ cm$^{-2}$}" + "\n")
 
     # 2. Iterate through components to build the table
-    for comp in stellar_system.get_all_components():
+    for comp in system.get_all_components():
         # Look inside the component's __dict__ to preserve Parameter order
         comp_params = [v for v in comp.__dict__.values() if isinstance(v, Parameter)]
 
@@ -42,7 +42,7 @@ def build_latex_output(stellar_system, var_filename="variables.tex", template_fi
 
     # 2. Write the "Database" file (Just the \newcommand definitions)
     with open(var_filename, 'w') as f:
-        f.write(f"% ExoZIPPy Generated Variables - {stellar_system.name}\n")
+        f.write(f"% ExoZIPPy Generated Variables - {system.name}\n")
         f.writelines(all_defs)
 
     # 3. Write the "Template" file (The structural table)
@@ -53,7 +53,7 @@ def build_latex_output(stellar_system, var_filename="variables.tex", template_fi
         f.write(r"\begin{document}"+"\n")
         f.write(r"\startlongtable"+"\n")
         f.write(r"\begin{deluxetable*}{lccc}"+"\n")
-        if caption != None: f.write(rf"\tablecaption{{{caption} \label{{tab:{stellar_system.name}}}}}" + "\n")
+        if caption != None: f.write(rf"\tablecaption{{{caption} \label{{tab:{system.name}}}}}" + "\n")
         f.write(r"\tablehead{\colhead{~~~Parameter} & \colhead{Description} & \colhead{Value} & \colhead{Prior}}" + "\n")
         f.write(r"\startdata"+"\n")
 

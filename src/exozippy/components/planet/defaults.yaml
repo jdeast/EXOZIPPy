@@ -1,0 +1,81 @@
+planet:
+  # Planet-specific overrides and additions from celestial_body
+  mass:
+    unit: "jupiterMass"
+    lower: -1000.0
+    upper: 260000.0
+    latex: "M_P"
+    initval: 1.0
+    init_scale: 0.1
+  radius:
+    unit: "jupiterRad"
+    lower: 0.000001
+    upper: 100.0
+    latex: "R_P"
+  density:
+    latex: "\\rho_P"
+  logg:
+    latex: "\\log{g_P}"
+
+  p:
+    unit: ""
+    internal_unit: ""
+    latex: "R_P/R_*"
+    description: "Radius Ratio"
+    expressions:
+      default:
+        func_name: "calc_p"
+        deps: ["radius", "star_radius"]
+
+  K:
+    unit: "m/s"
+    internal_unit: "solRad/d"
+    latex: "K"
+    description: "Velocity Semi-amplitude"
+    expressions:
+      default:
+        func_name: "calc_K"
+        deps: ["mass", "m_total", "orbit_ecc", "arsun", "orbit_sini", "orbit_period"]
+
+  arsun:
+    unit: "solRad"
+    internal_unit: "solRad"
+    latex: "a"
+    expressions:
+      default:
+        func_name: "calc_arsun"
+        deps: ["m_total", "orbit_period"]
+  ar:
+    unit: ""
+    internal_unit: ""
+    latex: "a/R_*"
+    expressions:
+      default:
+        func_name: "calc_arstar"
+        deps: ["arsun", "star_radius"]
+  b:
+    unit: ""
+    internal_unit: ""
+    latex: "b"
+    expressions:
+      default:
+        func_name: "calc_b"
+        deps: ["ar", "orbit_cosi", "orbit_ecc", "orbit_esinw"]
+  m_total:
+    internal_unit: "solMass"
+    unit: "solMass"
+    latex: "M_{\\rm tot}"
+    description: "Total System Mass"
+    expressions:
+      default:
+        func_name: "calc_m_total"
+        deps: ["mass", "star_mass"]
+  max_ecc:
+    unit: ""
+    internal_unit: ""
+    latex: "e_{\\rm max}"
+    description: "Collision Eccentricity Limit"
+    expressions:
+      default:
+        func_name: "calc_max_ecc"
+        deps: ["ar", "p"]

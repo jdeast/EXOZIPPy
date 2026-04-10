@@ -1,0 +1,16 @@
+lens:
+  t_0:
+    unit: "d"
+    description: "Time of peak magnification"
+  u_0:
+    unit: ""
+    description: "Impact parameter (units of Einstein radii)"
+  t_E:
+    unit: "d"
+    description: "Einstein crossing time"
+  pi_E_N:
+    initval: 0.0
+    description: "Parallax vector (North)"
+  pi_E_E:
+    initval: 0.0
+    description: "Parallax vector (East)"

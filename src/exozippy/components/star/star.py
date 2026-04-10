@@ -1,13 +1,22 @@
 from pathlib import Path
 
 # local imports
-from .component import Component
+from exozippy.components.component import Component
+
+# this import is required even though it's not used explicitly
+# it registers all the mathematical relations
+from . import physics
 
 # debugging imports
 import ipdb
 
-class Star(Component):
+from exozippy.components.celestial_body.celestial_body import CelestialBody
+
+
+class Star(CelestialBody):
     def __init__(self, config, config_manager):
+        self.prefix = "star"
+
         # 1. Initialize the base Component
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
@@ -29,15 +38,14 @@ class Star(Component):
             self.sedfile = self.config.get("sedfile")
 
     def build_parameters(self, model):
-        prefix = "star"
 
+        # 1. Build the shared DNA (mass, radius, density, logg)
+        self.build_core_parameters(model, self.prefix)
+
+        # 2. Build Star-specific parameters
         parameters = {
-            "mass" : None,
-            "radius": None,
             "teff": None,
             "feh": None,
-            "density": "default",
-            "logg":"default",
             "luminosity": "default",
         }
 
@@ -57,7 +65,7 @@ class Star(Component):
             parameters["luminositysed"] = "default"
             parameters["fbolsed"] = "default"
 
-        self.build_pars_from_dict(parameters,shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(parameters,shape=(self.n_elements,), prefix=self.prefix)
 
         '''
         self.parallax = Parameter(f"{prefix}.parallax",

@@ -7,11 +7,11 @@ import pymc as pm
 from exoplanet_core.pymc import ops as ops
 
 # local imports
-from exozippy.constants import TWOPI
-from ..physics import calc_tp
-
-from .parameter import Parameter
-from .component import Component
+#from exozippy.components.parameter import Parameter
+from exozippy.components.component import Component
+# this import is required even though it's not used explicitly
+# it registers all the mathematical relations
+from . import physics
 
 # debugging imports
 import ipdb
@@ -97,6 +97,9 @@ class Orbit(Component):
         self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
 
     def load_data(self):
+        pass
+
+    def build_map(self, system):
         pass
 
     def build_dependent_parameters(self, model, system):

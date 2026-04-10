@@ -1,6 +1,8 @@
 import pytensor.tensor as pt
-from ..components.component import Component
-
+from exozippy.components.component import Component
+# this import is required even though it's not used explicitly
+# it registers all the mathematical relations
+from . import physics
 
 class Lens(Component):
     def __init__(self, config, config_manager):

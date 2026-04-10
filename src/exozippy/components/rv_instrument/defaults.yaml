@@ -1,0 +1,37 @@
+inst:
+  gamma:
+    lower: -300000000.0
+    upper: 300000000.0
+    initval: 0.0
+    init_scale: 3.0
+    unit: "m/s"
+    internal_unit: "solRad/d"
+    latex: "\\gamma"
+    description: "Relative RV Offset"
+  jitter_variance:
+    lower: -1000.0
+    upper: 100000.0
+    initval: 0.0
+    init_scale: 1.0
+    unit: "m2/s2"
+    internal_unit: "solRad2/d2"
+    latex: "\\sigma_J^2"
+    description: "Jitter Variance"
+  jitter:
+    unit: "m/s"
+    internal_unit: "solRad/d"
+    latex: "\\sigma_J"
+    description: "Jitter"
+    expressions:
+      default:
+        func_name: "calc_jitter"
+        deps: [ "jitter_variance" ]
+  detrend_coeffs:
+    initval: 0.0
+    init_scale: 0.1
+    lower: -1.0e6
+    upper: 1.0e6
+    unit: ""
+    internal_unit: ""
+    latex: "c"
+    description: "Detrending Coefficients"
