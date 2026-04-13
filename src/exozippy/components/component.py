@@ -1,7 +1,7 @@
 from .parameter import Parameter
-
 from ..physics_registry import PHYSICS_REGISTRY
 from abc import ABC, abstractmethod
+import numpy as np
 
 class Component:
     def __init__(self, component_config, config_manager):
@@ -82,10 +82,29 @@ class Component:
     def add_parameter(self, p_name, config_manager, shape=(), prefix=None, expr_key=None, context_nodes=None,
                       **kwargs):
         context_nodes = context_nodes or {}
-        cfg = config_manager.resolve(prefix, p_name, shape=shape)
+
+        # 1. INTERCEPT NUMERICAL HEURISTICS
+        # Pull physics bounds out of kwargs so they don't clobber the resolved config!
+        physics_keys = ["initval", "init_scale", "lower", "upper", "mu", "sigma", "gaussian_width"]
+        internal_overrides = {}
+        filtered_kwargs = {}
+
+        for k, v in kwargs.items():
+            if k in physics_keys:
+                internal_overrides[k] = v
+            else:
+                filtered_kwargs[k] = v
+
+        # 2. PASS TO CONFIG CAGE
+        # Hand the names and the intercepted heuristics down to the config manager
+        cfg = config_manager.resolve(
+            prefix, p_name, shape=shape,
+            internal_overrides=internal_overrides if internal_overrides else None,
+            names=getattr(self, 'names', None)
+        )
 
         if expr_key is None:
-            expr_key = kwargs.pop("expr_key", None)
+            expr_key = filtered_kwargs.pop("expr_key", None)
 
         expressions_dict = cfg.pop("expressions", {})
         expression = None
@@ -102,7 +121,6 @@ class Component:
                 if d in context_nodes:
                     node = context_nodes[d]
                     dep_nodes.append(node)
-                    # context_nodes are usually raw tensors, try to eval them
                     try:
                         numeric_deps.append(node.eval())
                     except:
@@ -110,22 +128,22 @@ class Component:
                 else:
                     param = getattr(self, d)
                     dep_nodes.append(param.value)
-                    # THIS IS THE KEY: grab the numeric initval from the parent Parameter
                     numeric_deps.append(param.initval)
 
             # Pre-calculate the numeric init for the Auditor/Build process
             try:
-                # Only overwrite if not explicitly provided in kwargs
-                if 'initval' not in kwargs:
-                    kwargs['initval'] = func(*numeric_deps)
+                # Make sure we don't overwrite a resolved initval
+                if internal_overrides.get('initval') is None and cfg.get('initval') is None:
+                    filtered_kwargs['initval'] = func(*numeric_deps)
             except Exception as e:
-                # Fallback to a zero-array of correct shape if math fails
                 n_elements = np.prod(shape).astype(int) if shape != () else 1
-                kwargs['initval'] = np.zeros(n_elements)
+                filtered_kwargs['initval'] = np.zeros(n_elements)
 
             expression = lambda: func(*dep_nodes)
 
-        full_params = {**cfg, **kwargs}
+        # 3. MERGE METADATA
+        # Now it is safe to merge filtered_kwargs (units, latex names, etc.)
+        full_params = {**cfg, **filtered_kwargs}
 
         param_obj = Parameter(
             label=f"{prefix}.{p_name}",

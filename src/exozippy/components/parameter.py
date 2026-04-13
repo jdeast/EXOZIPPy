@@ -258,6 +258,7 @@ class Parameter:
     print_to_table: bool = True
     user_modified: bool = False
     user_prior_modified: bool = False
+    is_derived: bool = False
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
 
@@ -452,16 +453,21 @@ class Parameter:
             actual_mu = mus[i] if has_mu else inits[i]
 
             if has_sigma and has_gwidth:
-                # Case 4: pm.Normal with mu +/- sigma, add extra potential for gaussian_width
                 transform_mus[i] = actual_mu
-                transform_scales[i] = sigmas[i]
+                # Use init_scale if provided, otherwise default to the sigma
+                transform_scales[i] = scales[i] if self.user_modified else sigmas[i]
                 raw_sigmas[i] = 1.0
                 apply_gwidth_potential[i] = True
 
             elif has_sigma or has_gwidth:
-                # Case 3: pm.Normal with mu +/- sigma (or g_width), no extra potential needed
                 transform_mus[i] = actual_mu
-                transform_scales[i] = sigmas[i] if has_sigma else g_widths[i]
+                # If the user explicitly set a scale in YAML, use it!
+                # Otherwise, fall back to the prior's width.
+                if self.user_modified and scales[i] != 1.0:  # 1.0 is our 'no-info' default
+                    transform_scales[i] = scales[i]
+                else:
+                    transform_scales[i] = sigmas[i] if has_sigma else g_widths[i]
+
                 raw_sigmas[i] = 1.0
 
             else:

@@ -1,6 +1,8 @@
 import pytensor.tensor as pt
 from ...constants import TWOPI
 from ...physics_registry import register_physics
+import numpy as np
+
 
 @register_physics
 def calc_period(logP):
@@ -17,7 +19,9 @@ def calc_ecc(secosw, sesinw):
 
 @register_physics
 def calc_omega(secosw, sesinw):
-    return pt.arctan2(sesinw, secosw)
+    e_raw = pt.sqr(sesinw) + pt.sqr(secosw)
+    # If exactly 0, enforce the limit so the RV phase stays perfectly aligned
+    return pt.switch(pt.eq(e_raw, 0.0), np.pi / 2.0, pt.arctan2(sesinw, secosw))
 
 @register_physics
 def calc_sinw(omega):

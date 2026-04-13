@@ -19,6 +19,7 @@ class Planet(CelestialBody):
         self.label = "Planet Parameters"
         self.prefix = f"planet"
 
+
     def build_parameters(self, model):
         pass
 

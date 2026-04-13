@@ -1,0 +1,50 @@
+# --- Star Parameters ---
+star.0.radius:
+  initval: 0.98
+  sigma: 0.05
+star.0.mass:
+  initval: 0.98
+  sigma: 0.05
+  init_scale: 0.00060108434 # this is much smaller than sigma because of covariance with K, and we want the conditional width here
+star.0.teff:
+  initval: 5560
+  sigma: 100
+star.0.feh:
+  initval: 0.43
+  sigma: 0.08
+# --- Orbital Geometry ---
+orbit.0.logP:
+  # 111.436 days
+  initval: 2.047024
+orbit.0.tc:
+  # Approximate time of transit
+  initval: 2455210.64
+
+orbit.0.cosi:
+  # It transits, i ~ 89.28 deg
+  initval: 0.012
+  sigma: 0
+
+orbit.0.secosw:
+  # sqrt(e) * cos(w)
+  initval: 0.494
+  init_scale: 0.00000723333 # computed from an initial run by dividing default_scale/sqrt(curvature) = 0.15/sqrt(430036970.67424)
+orbit.0.sesinw:
+  # sqrt(e) * sin(w)
+  initval: -0.830
+  init_scale: 0.00000546079 # computed from an initial run by dividing default_scale/sqrt(curvature) = 0.15/sqrt(754519055.52799)
+# --- Planet Parameters ---
+planet.0.radius:
+  initval: 0.92
+  sigma: 0.0
+
+planet.0.mass:
+  # ~3.94 M_Jup (You can comment this out to test your new K-based heuristic!)
+  #initval: 3.94
+  init_scale: 0.00284567625
+# --- Instrument Parameters ---
+inst.HIRES.gamma:
+  initval: 0.0
+  init_scale: 0.0948604743
+inst.HIRES.jitter_variance:
+  init_scale: 0.05784693311

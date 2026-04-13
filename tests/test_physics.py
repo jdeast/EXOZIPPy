@@ -1,8 +1,14 @@
 import numpy as np
 import pytest
 from astropy import units as u
-from exozippy.physics import PHYSICS_REGISTRY
+
+# FIX: Updated import path
+from exozippy.physics_registry import PHYSICS_REGISTRY
 from exozippy.constants import KEPLER_CONST
+
+# FIX: Import the component physics files to trigger the @register_physics decorators
+import exozippy.components.planet.physics
+import exozippy.components.celestial_body.physics
 
 
 def test_keplerian_k_velocity():

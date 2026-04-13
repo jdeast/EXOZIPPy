@@ -44,8 +44,10 @@ def test_orbit_rv_descending_node_comprehensive():
             t_D = Tp_val + (E_D - ecc * np.sin(E_D)) / n
 
             k_param = Parameter(label="K", unit="m/s", internal_unit="solRad/d", initval=K_user)
-            rv_internal = rv_fn(*p_vals, [t_D[0]], [k_param.initval])
+
+            rv_internal = rv_fn(*p_vals, np.array([t_D[0]], dtype="float64"), k_param.initval.astype("float64"))
             rv_ms = k_param.from_internal(rv_internal).flatten()[0]
+
 
         expected_rv = K_user * (1.0 + ecc * np.cos(omega))
         np.testing.assert_allclose(rv_ms, expected_rv, rtol=1e-5)
@@ -149,22 +151,25 @@ def test_orbit_rv_vectorization():
         orbit.build_parameters(model)
 
         t = np.array([0.0, 2.5, 5.0, 7.5])
-        t_pt = pt.as_tensor_variable(t)
-
-        # 1. Convert 10 m/s to Internal Units (R_sun/day)
-        k_ms = 10.0
-        # Multiplier to go from m/s -> R_sun/day
-        m_to_int = (u.m / u.s).to(u.R_sun / u.d)
-        K = pt.as_tensor_variable([k_ms * m_to_int])
-
-        ndx = pt.as_tensor_variable([0], dtype="int32")
+        t_pt = pt.vector("t")
+        K_pt = pt.vector("K")
+        ndx_pt = pt.ivector("ndx")
 
         # 2. Call the physics
-        rv_node = orbit.get_radial_velocity(t_pt, K, ndx)
+        rv_node = orbit.get_radial_velocity(t_pt, K_pt, ndx_pt)
+        rv_fn = pytensor.function(model.free_RVs + [t_pt, K_pt, ndx_pt], rv_node, on_unused_input='ignore')
+
+        init_point = model.initial_point()
+        p_vals = [np.zeros_like(init_point[v.name]).astype("float64") for v in model.free_RVs]
 
         # 3. Convert the result BACK to m/s for easy comparison
+        k_ms = 10.0
+        m_to_int = (u.m / u.s).to(u.R_sun / u.d)
         int_to_m = (u.R_sun / u.d).to(u.m / u.s)
-        rv_val = rv_node.eval() * int_to_m
 
-    expected = np.array([10.0, 0.0, -10.0, 0.0])
+        # Pass the actual numpy arrays into the compiled function
+        rv_val = rv_fn(*p_vals, t, np.array([k_ms * m_to_int]), np.array([0], dtype="int32")) * int_to_m
+        # Expect the -K * sin(f) phase
+
+    expected = np.array([0.0, -10.0, 0.0, 10.0])
     np.testing.assert_allclose(rv_val.flatten(), expected, atol=1e-7)

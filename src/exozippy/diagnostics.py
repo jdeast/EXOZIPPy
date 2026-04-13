@@ -60,7 +60,7 @@ class ModelAuditor:
             idx += var_size
         return curvature_map
 
-    def check_unused_yaml(self) -> List[str]:
+    def check_unused_yaml(self):
         """Returns keys in YAML that didn't match any built Parameter."""
         used_keys = set()
         for p in self.all_params:
@@ -72,4 +72,21 @@ class ModelAuditor:
                 parts = p.label.split('.')
                 used_keys.add(f"{parts[0]}.{i}.{parts[-1]}")
 
-        return [k for k in self.user_params.keys() if k not in used_keys and k != 'run']
+        unused_items = []
+
+        # 1. Top-Level Unused Keys (e.g., misspelled component names: "inst.HIRES.gama")
+        for k in self.user_params.keys():
+            if k not in used_keys and k != 'run':
+                unused_items.append(k)
+
+        # 2. Ignored Sub-Keys (e.g., spelled 'intival' instead of 'initval')
+        # These are the exact and ONLY keys ConfigManager.resolve absorbs.
+        valid_subkeys = {"initval", "init_scale", "lower", "upper", "mu", "sigma", "gaussian_width"}
+
+        for k, ov in self.user_params.items():
+            if k in used_keys and isinstance(ov, dict):
+                for sub_k in ov.keys():
+                    if sub_k not in valid_subkeys:
+                        unused_items.append(f"{k} -> '{sub_k}'")
+
+        return unused_items

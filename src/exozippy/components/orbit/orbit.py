@@ -22,6 +22,7 @@ class Orbit(Component):
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
 
+        self.prefix = "orbit"
         self.label = "Orbital Parameters"
 
         self.primary = [c.get("primary","star.0") for c in self.config] # star zero is the host by default
@@ -30,13 +31,11 @@ class Orbit(Component):
         self.fitvcve = [c.get("fitvcve",False) for c in self.config]
 
     def build_parameters(self, model):
-        prefix = "orbit"
         shape = (self.n_elements,)
 
         # 1. PEER INTO THE CONFIG (Pre-flight)
-        # We grab the resolved dictionaries to peek at the initial values
-        logP_cfg = self.config_manager.resolve(prefix, "logP", shape=shape)
-        tc_cfg = self.config_manager.resolve(prefix, "tc", shape=shape)
+        logP_cfg = self.config_manager.resolve(self.prefix, "logP", shape=shape, names=self.names)
+        tc_cfg = self.config_manager.resolve(self.prefix, "tc", shape=shape, names=self.names)
 
         # 2. CALCULATE WINDOWS (Domain Intelligence)
         # Convert logP (dex days) to period (days) to find the half-period
@@ -94,7 +93,7 @@ class Orbit(Component):
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         parameters["cosi"] = {"lower": derived_lowers}
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=self.prefix)
 
     def load_data(self):
         pass

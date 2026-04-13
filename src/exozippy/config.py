@@ -29,7 +29,7 @@ class ConfigManager:
             else:
                 base[k] = v
 
-    def resolve(self, component_type, param_name, shape=()):
+    def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None):
         """
         Merges defaults and user overrides, then applies unit conversion.
         """
@@ -65,33 +65,63 @@ class ConfigManager:
             val = base.get(key)
             resolved[key] = np.full(n_elements, float(val), dtype=float) if val is not None else None
 
-        # 5. Apply Overrides
+        def apply_value(key, current_arr, idx, new_val):
+            if new_val is None:
+                return current_arr
+
+            # Initialize array with NaNs if it was empty
+            if current_arr is None:
+                current_arr = np.full(n_elements, np.nan, dtype=float)
+                resolved[key] = current_arr
+
+            v = float(new_val)
+
+            if np.isnan(current_arr[idx]):
+                current_arr[idx] = v
+            elif key == "lower":
+                current_arr[idx] = max(current_arr[idx], v)  # Most restrictive lower bound wins
+            elif key == "upper":
+                current_arr[idx] = min(current_arr[idx], v)  # Most restrictive upper bound wins
+            else:
+                current_arr[idx] = v  # initval, sigma, etc., just overwrite
+
+            return current_arr
+
+        # 5. Apply Internal Heuristics (e.g., K-based mass, RV mean)
+        if internal_overrides:
+            for key in all_numeric:
+                if key in internal_overrides:
+                    val = internal_overrides[key]
+                    for i in range(n_elements):
+                        v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                        apply_value(key, resolved[key], i, v)
+
+        # 6. Apply User Overrides
         for i in range(n_elements):
-            # Check both global (star.mass) and indexed (star.0.mass)
             keys_to_check = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+
+            # Teach the config manager to look for named components!
+            if names and i < len(names):
+                keys_to_check.append(f"{component_type}.{names[i]}.{param_name}")
+
             for k in keys_to_check:
                 if k in self.user_params:
                     ov = self.user_params[k]
-
-                    # 1. If the YAML key is blank, PyYAML parses it as None. Skip it.
-                    if ov is None:
-                        continue
-
-                    # 2. If the user used shorthand (e.g. `planet.mass: 5.0`), assume it's an initval
-                    if not isinstance(ov, dict):
-                        ov = {"initval": ov}
+                    if ov is None: continue
+                    if not isinstance(ov, dict): ov = {"initval": ov}
 
                     resolved["user_modified"] = True
-
-                    # Check if any physics-altering key was touched
                     if any(pk in ov for pk in physics_keys):
                         resolved["user_prior_modified"] = True
 
                     for key in all_numeric:
-                        if key in ov and ov[key] is not None:
-                            if resolved[key] is None:
-                                resolved[key] = np.full(n_elements, np.nan, dtype=float)
-                            resolved[key][i] = float(ov[key])
+                        if key in ov:
+                            apply_value(key, resolved[key], i, ov[key])
+
+                    # Optional: Auto-sync init_scale if user changed sigma but forgot scale
+                    if "sigma" in ov and "init_scale" not in ov and resolved["sigma"] is not None:
+                        apply_value("init_scale", resolved.get("init_scale"), i, ov["sigma"])
+
         return resolved
 
     def get_conversion_factor(self, component_type, param_name):

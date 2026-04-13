@@ -24,7 +24,7 @@ setup(
     # $ pip install sampleproject
     #
     # And where it will live on PyPI: https://pypi.org/project/sampleproject/
-    #
+    #r
     # There are some restrictions on what makes a valid project name
     # specification here:
     # https://packaging.python.org/specifications/core-metadata/#name
@@ -144,7 +144,7 @@ setup(
         'numpy<2',
         'pymc>=5',
         'pytensor',
-        'arviz,
+        'arviz',
         'pyyaml',
         'pandas',
         'matplotlib',
@@ -178,6 +178,7 @@ setup(
         "dev": [
             "ipdb",
             "pytest",
+            "pre-commit" # run pre-commit install after cloning, this will force us to pass unit tests before committing.
         ]
     },
 

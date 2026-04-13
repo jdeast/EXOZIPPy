@@ -158,15 +158,17 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
                       for i in range(np.prod(p.shape).astype(int) if p.shape != () else 1)]
     max_label_len = max([len(l) for l in display_labels] + [len(k) for k in other_nodes.keys()] + [24])
 
-    print("\n--- Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space) ---")
-    print(
-        "--- Ideal curvature is -1.0 and it scales quadratically with scale. Change by setting init_scale in your parameter.yaml file. ---")
-    print("--- Log-Prob for parameters includes summed penalties from bounds and priors. ---\n")
-
-    print("\n" + "-" * 145)
-    header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user)"
+    table_width = 127
+    print("-" * table_width )
+    print("--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------")
+    print("--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------")
+    print("--------           abs(Curv) >~ 1e4 will impact efficiency and require more tuning steps                               --------")
+    print("--------           abs(Curv) ~< 1e-4 may artificially truncate your posteriors or severely impact efficiency           --------")
+    print("--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------")
+    print("-" * table_width )
+    header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user) |"
     print(header)
-    print("-" * 145)
+    print("-" * table_width )
 
     flat_warnings = []
 
@@ -233,7 +235,7 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
 
             print(
                 f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {'N/A':>10} | {p_info}{' *' if is_user else ''}")
-    print("-" * 145)
+    print("-" * table_width )
 
     # --- 3. THE FATAL CHECK ---
     bad_params = {k: v for k, v in param_logps.items() if not np.isfinite(v)}

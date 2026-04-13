@@ -1,0 +1,34 @@
+run:
+  name: "hd80606"
+
+prefix: "fitresults/HD80606"
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    bodies : "b"
+
+rvinstrument:
+  - name: "HIRES"
+    file: "HD80606.HIRES.SIMULATED.rv"
+parameter_file: "hd80606.params.yaml"
+
+sampler:
+  backend: "pymc"
+  pymc:
+    tune: 2000
+    draws: 4000
+    chains: 4
+    cores: 4
+    init: "adapt_diag"
+    target_accept: 0.95
+    nuts_sampler: "numpyro"
+    check_curvatures: True # this is an expensive diagnostic, but very worthwhile the first time you run it (or after a major change in the inputs)
+    recompute_trace: True
+    profile: False
