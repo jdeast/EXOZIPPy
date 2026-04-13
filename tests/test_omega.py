@@ -4,8 +4,6 @@ import os
 import pytensor
 import pymc as pm
 from exozippy.components.orbit import Orbit
-
-# FIX: Need ConfigManager for the new architecture
 from exozippy.config import ConfigManager
 
 
@@ -14,8 +12,13 @@ def get_data_path():
     return os.path.join(os.path.dirname(__file__), 'tc2tp.txt')
 
 
-def test_exozippy_tp_vs_idl():
-    """Checks exozippy logic against IDL grid, reading period from each row."""
+def test_time_of_periastron_matches_idl_benchmark_grid():
+    """
+    Given a grid of period, eccentricity, and omega values from a legacy IDL model,
+    When PyTensor compiles and evaluates the Time of Periastron (Tp) conversion,
+    Then the calculated Tp should match the IDL outputs modulo the orbital period.
+    """
+    # ARRANGE
     data_path = get_data_path()
     if not os.path.exists(data_path):
         pytest.fail(f"IDL validation file not found at {data_path}")
@@ -33,7 +36,6 @@ def test_exozippy_tp_vs_idl():
                 "orbit.0.logP": {"initval": np.log10(period_val)}
             }
 
-            # FIX: Pass ConfigManager instead of raw dict
             cm = ConfigManager(user_params)
             orbit_comp = Orbit(config, cm)
 
@@ -56,7 +58,7 @@ def test_exozippy_tp_vs_idl():
         secosw_in = np.array([np.sqrt(e_val) * np.cos(w_val)], dtype="float64")
         sesinw_in = np.array([np.sqrt(e_val) * np.sin(w_val)], dtype="float64")
 
-        # FIX: Unpack a single output from the compiled function
+        # ACT
         tp_python = compiled_fns[period_val](
             logP_in,
             tc_in,
@@ -66,11 +68,11 @@ def test_exozippy_tp_vs_idl():
 
         diff = tp_python - tp_idl
         remainder = diff % period_val
-
         tol = 1e-7
         success = np.isclose(remainder, 0, atol=tol) or \
                   np.isclose(remainder, period_val, atol=tol)
 
+        # ASSERT
         assert success, (
             f"Math Mismatch!\n"
             f"Inputs: e={e_val}, omega={w_val}, P={period_val}\n"

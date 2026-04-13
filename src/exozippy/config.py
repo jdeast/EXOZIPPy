@@ -30,13 +30,12 @@ class ConfigManager:
                 base[k] = v
 
     def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None):
-        """
-        Merges defaults and user overrides, then applies unit conversion.
-        """
-        # 1. Start with the global/DNA defaults (from celestial_body)
+        import astropy.units as u  # Ensure u is available for conversion
+
+        # 1. Start with the global/DNA defaults
         base = copy.deepcopy(self.base_defaults.get(param_name, {}))
 
-        # 2. Deep-merge the component-specific overrides (from star, planet, etc.)
+        # 2. Deep-merge the component-specific defaults
         comp_defaults = self.base_defaults.get(component_type, {})
         comp_override = comp_defaults.get(param_name, {})
         if comp_override:
@@ -44,15 +43,41 @@ class ConfigManager:
 
         n_elements = int(np.prod(shape)) if shape != () else 1
 
-        # 3. Initialize the resolved dictionary
+        # 3. Detect if the user is overriding the unit
+        base_unit_str = base.get("unit", "")
+        new_unit_str = None
+
+        # Check all possible YAML keys for a unit override
+        keys_to_check_global = []
+        for i in range(n_elements):
+            keys = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            if names and i < len(names):
+                keys.append(f"{component_type}.{names[i]}.{param_name}")
+            keys_to_check_global.extend(keys)
+
+        for k in keys_to_check_global:
+            if k in self.user_params and isinstance(self.user_params[k], dict):
+                if "unit" in self.user_params[k]:
+                    new_unit_str = self.user_params[k]["unit"]
+                    break
+
+        # Calculate unit scaling factor (Default Unit -> User Unit)
+        unit_scaling = 1.0
+        if new_unit_str and base_unit_str and new_unit_str != base_unit_str:
+            try:
+                unit_scaling = u.Unit(base_unit_str).to(u.Unit(new_unit_str))
+            except Exception:
+                unit_scaling = 1.0
+
+        # 4. Initialize the resolved dictionary with scaled defaults
         resolved = {
             "shape": shape,
             "user_modified": False,
             "user_prior_modified": False,
+            "unit": new_unit_str if new_unit_str else base_unit_str,
+            "internal_unit": base.get("internal_unit"),
             "latex": base.get("latex", ""),
             "description": base.get("description", ""),
-            "unit": base.get("unit"),
-            "internal_unit": base.get("internal_unit"),
             "expressions": base.get("expressions", {})
         }
 
@@ -60,10 +85,13 @@ class ConfigManager:
         physics_keys = ["lower", "upper", "mu", "sigma", "gaussian_width"]
         all_numeric = tuning_keys + physics_keys
 
-        # 4. Process Numeric Keys from Defaults
         for key in all_numeric:
             val = base.get(key)
-            resolved[key] = np.full(n_elements, float(val), dtype=float) if val is not None else None
+            if val is not None:
+                # SCALE the default value to the new unit!
+                resolved[key] = np.full(n_elements, float(val) * unit_scaling, dtype=float)
+            else:
+                resolved[key] = None
 
         def apply_value(key, current_arr, idx, new_val):
             if new_val is None:
@@ -94,7 +122,12 @@ class ConfigManager:
                     val = internal_overrides[key]
                     for i in range(n_elements):
                         v = val[i] if isinstance(val, (list, np.ndarray)) else val
-                        apply_value(key, resolved[key], i, v)
+
+                        # FIX: Scale the internal heuristic (which assumes default units)
+                        # to the user's chosen unit.
+                        v_scaled = float(v) * unit_scaling
+
+                        apply_value(key, resolved[key], i, v_scaled)
 
         # 6. Apply User Overrides
         for i in range(n_elements):
@@ -117,6 +150,16 @@ class ConfigManager:
                     for key in all_numeric:
                         if key in ov:
                             apply_value(key, resolved[key], i, ov[key])
+
+                    for str_key in ["unit", "latex", "description"]:
+                        if str_key in ov:
+                            if n_elements > 1:
+                                # Convert the base scalar string to a list if it isn't one already
+                                if not isinstance(resolved[str_key], list):
+                                    resolved[str_key] = [resolved[str_key]] * n_elements
+                                resolved[str_key][i] = ov[str_key]
+                            else:
+                                resolved[str_key] = ov[str_key]
 
                     # Optional: Auto-sync init_scale if user changed sigma but forgot scale
                     if "sigma" in ov and "init_scale" not in ov and resolved["sigma"] is not None:

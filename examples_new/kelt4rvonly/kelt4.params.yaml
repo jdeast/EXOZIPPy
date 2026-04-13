@@ -44,7 +44,7 @@ planet.0.radius:
 planet.0.mass:
   #initval: 0.878
   #init_scale: 0.00953462589
-  #unit: "jupiterMass"
+  unit: "earthMass"
 inst.EXPERT.gamma:
   #init_scale: 11.1130411925
 inst.FIES.gamma:

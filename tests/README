@@ -1,0 +1,13 @@
+Following python conventions, this test suite
+  - uses long, explicit function names to describe the test
+  - Has Given/When/Then doc strings
+  - follows the AAA (Arrange, Act, Assert) organizational scheme
+
+Developers are forced to pass all unit tests before pushing a commit via git hooks, set up using
+the pre-commit package:
+
+pip install pre-commit
+pre-commit install
+
+Anytime a developer fixes a bug, a new unit test following the above convention should be added.
+The test should demonstrate failure before the fix and success after the fix.

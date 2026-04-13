@@ -17,6 +17,11 @@ class Component:
         # Grab names for labeling PyMC nodes
         self.names = [c.get("name", f"{i}") for i, c in enumerate(self.config)]
 
+        # Enforce unique names
+        if len(set(self.names)) != len(self.names):
+            raise ValueError(
+                f"Duplicate names found in {self.__class__.__name__} configuration: {self.names}. All component names must be unique.")
+
     """ building the model takes 4 distinct steps, all of which are required but some may be trivially empty:
     1) build_parameters - this defines the base parameters, both sampled and derived
     2) load_data - this loads data into the component (e.g., RV data)

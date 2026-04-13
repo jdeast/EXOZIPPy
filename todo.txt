@@ -1,8 +1,4 @@
-* switching planet.mass to earthMass is converted back to jupiter in the diagnostic table. fix that.
-
 * write unit tests for high coverage
-
-* make CelestialBody super class of Star/Planet
 
 * refactor system topology so planet owns it own host star and orbit rather than passing maps around. not sure how to do that.
 
@@ -23,7 +19,7 @@
   - doppler tomography
 
 * vcve parameterization:
- - refactored to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
+ - refactor to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
  - cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
 
 * analytic treatment of linear parameters (detrending, f0, gamma, probably mulensing baseline)
