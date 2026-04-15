@@ -38,3 +38,27 @@ logg:
     default:
       func_name: "calc_logg"
       deps: ["mass", "radius"]
+
+distance:
+  lower: 0.001
+  upper: 100000.0
+  initval: 10.0
+  init_scale: 0.1
+  unit: "pc"
+  internal_unit: "pc"
+  latex: "D"
+  description: "Distance"
+
+pm_ra:
+  initval: 0.0
+  unit: "mas/yr"
+  internal_unit: "mas/yr"
+  latex: "\\mu_{\\alpha*}"
+  description: "Proper Motion (RA)"
+
+pm_dec:
+  initval: 0.0
+  unit: "mas/yr"
+  internal_unit: "mas/yr"
+  latex: "\\mu_\\delta"
+  description: "Proper Motion (Dec)"

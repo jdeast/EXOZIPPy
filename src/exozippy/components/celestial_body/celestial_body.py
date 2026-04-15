@@ -6,7 +6,7 @@ from . import physics
 class CelestialBody(Component):
     """Middle-tier class for anything with mass and radius."""
 
-    def build_core_parameters(self, model, prefix, overrides=None):
+    def build_core_parameters(self, model, overrides=None):
         core_params = {
             "mass": None,
             "radius": None,
@@ -24,4 +24,4 @@ class CelestialBody(Component):
                     elif isinstance(core_params[k], dict):
                         core_params[k].update(v)
 
-        self.build_pars_from_dict(core_params, shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(core_params, shape=(self.n_elements,))

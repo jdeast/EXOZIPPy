@@ -42,11 +42,10 @@ def test_instrument_name_override_resolves_correctly():
     config_manager = ConfigManager(user_params)
     inst = RVInstrument([{"name": "HIRES"}], config_manager)
     inst.name = "HIRES"
-    inst.prefix = "inst"
 
     # ACT
     with pm.Model(name="test_inst"):
-        inst.build_pars_from_dict({"gamma": {"initval": [0.0]}}, shape=(1,), prefix="inst")
+        inst.build_pars_from_dict({"gamma": {"initval": [0.0]}}, shape=(1,))
 
     # ASSERT
     expected = 123.45 / inst.gamma._get_conversion_factors()[0]
@@ -66,12 +65,10 @@ def test_gaussian_prior_scale_override_applies_correctly():
 
     star = Star([{"name": "A"}], config_manager)
     star.name = "A"
-    star.prefix = "star"
 
     # ACT
     with pm.Model(name="model_test3"):
-        star.add_parameter("radius_test3", config_manager, prefix="star")
-
+        star.add_parameter("radius_test3", config_manager)
     # ASSERT
     assert np.isclose(star.radius_test3.init_scale[0], 0.00085)
 
@@ -90,11 +87,10 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, capsys):
     user_params = {label: {"initval": 1.0, "sigm": 0.05}}  # Misspelled 'sigm'
     system = MockSystem(user_params)
     star = Star([{"name": "A"}], system.config_manager)
-    star.prefix = "star"
     system.star = star
 
     with pm.Model(name="model_test4") as model:
-        star.add_parameter("mass_test4", system.config_manager, prefix="star")
+        star.add_parameter("mass_test4", system.config_manager)
 
     # ACT
     from exozippy.run import inspect_start
@@ -122,7 +118,7 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, cap
     system.star = star
 
     with pm.Model(name="model_test5") as model:
-        star.add_parameter("mass", system.config_manager, prefix="star")
+        star.add_parameter("mass", system.config_manager)
 
     # ACT
     inspect_start(model, system, {}, {}, {}, calc_curvature=False)
@@ -153,11 +149,10 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
 
         star = Star([{"name": "A"}], config_manager)
         star.name = "A"
-        star.prefix = "star"
 
         # ACT
         with pm.Model(name=f"model_{label.replace('.', '_')}"):
-            star.add_parameter(label.split('.')[-1], config_manager, prefix="star", **{s['type']: s['internal']})
+            star.add_parameter(label.split('.')[-1], config_manager, **{s['type']: s['internal']})
             p = getattr(star, label.split('.')[-1])
             val = p.lower[0] if s['type'] == 'lower' else p.upper[0]
 
@@ -178,11 +173,10 @@ def test_defining_mu_and_sigma_creates_valid_gaussian_prior():
 
     star = Star([{"name": "A"}], config_manager)
     star.name = "A"
-    star.prefix = "star"
 
     # ACT
     with pm.Model(name="model_sampled"):
-        star.add_parameter("mass_sampled", config_manager, prefix="star")
+        star.add_parameter("mass_sampled", config_manager)
 
     # ASSERT
     p = star.mass_sampled
@@ -226,11 +220,10 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
-    star.prefix = "star"
 
     # ACT
     with pm.Model(name="model_custom_scale"):
-        star.add_parameter("radius_custom", config_manager, prefix="star")
+        star.add_parameter("radius_custom", config_manager)
 
     # ASSERT
     p = star.radius_custom
@@ -250,12 +243,11 @@ def test_vectorized_overrides_apply_to_correct_indices():
     }
     config_manager = ConfigManager(user_params)
     star = Star([{"name": "A"}, {"name": "B"}], config_manager)
-    star.prefix = "star"
 
     # ACT
     with pm.Model(name="model_vector"):
         # Base initval of [1.0, 1.0] representing standard DNA defaults
-        star.add_parameter("mass", config_manager, prefix="star", shape=(2,), initval=[1.0, 1.0])
+        star.add_parameter("mass", config_manager, shape=(2,), initval=[1.0, 1.0])
 
     # ASSERT
     p = star.mass

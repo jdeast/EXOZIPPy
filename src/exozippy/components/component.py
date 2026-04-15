@@ -22,6 +22,12 @@ class Component:
             raise ValueError(
                 f"Duplicate names found in {self.__class__.__name__} configuration: {self.names}. All component names must be unique.")
 
+    @property
+    @abstractmethod
+    def prefix(self):
+        """Naming prefix for the model (e.g., 'star', 'planet')"""
+        pass
+
     """ building the model takes 4 distinct steps, all of which are required but some may be trivially empty:
     1) build_parameters - this defines the base parameters, both sampled and derived
     2) load_data - this loads data into the component (e.g., RV data)
@@ -84,7 +90,7 @@ class Component:
         pass
 
     # this method adds a Parameter to the model
-    def add_parameter(self, p_name, config_manager, shape=(), prefix=None, expr_key=None, context_nodes=None,
+    def add_parameter(self, p_name, config_manager, shape=(), expr_key=None, context_nodes=None,
                       **kwargs):
         context_nodes = context_nodes or {}
 
@@ -103,7 +109,7 @@ class Component:
         # 2. PASS TO CONFIG CAGE
         # Hand the names and the intercepted heuristics down to the config manager
         cfg = config_manager.resolve(
-            prefix, p_name, shape=shape,
+            self.prefix, p_name, shape=shape,
             internal_overrides=internal_overrides if internal_overrides else None,
             names=getattr(self, 'names', None)
         )
@@ -115,7 +121,32 @@ class Component:
         expression = None
 
         if expr_key:
+            # 1. Check if we even HAVE an expressions dictionary
+            if not expressions_dict:
+                raise KeyError(
+                    f"[{self.prefix}.{p_name}] Requested expression key '{expr_key}', but no "
+                    f"'expressions' were defined for this parameter in defaults.yaml. "
+                    f"Did you forget to add this parameter to the component's defaults.yaml?"
+                )
+
+            # 2. Check if the specific key exists in that dictionary
             expr_cfg = expressions_dict.get(expr_key)
+            if expr_cfg is None:
+                raise ValueError(
+                    f"[{self.prefix}.{p_name}] Requested expression key '{expr_key}' "
+                    f"not found in expressions dictionary for this component."
+                )
+
+            # 3. Check for the Registry (The "Incomplete physics.py" check)
+            func_name = expr_cfg.get("func_name")
+            if func_name not in PHYSICS_REGISTRY:
+                available = ", ".join(PHYSICS_REGISTRY.keys()) if PHYSICS_REGISTRY else "EMPTY"
+                raise NotImplementedError(
+                    f"[{self.prefix}.{p_name}] Physics function '{func_name}' is not in PHYSICS_REGISTRY. "
+                    f"Verify it's decorated with @register_physics in physics.py. "
+                    f"Available: {available}"
+                )
+
             func = PHYSICS_REGISTRY[expr_cfg["func_name"]]
             dep_names = expr_cfg.get("deps", [])
 
@@ -135,12 +166,21 @@ class Component:
                     dep_nodes.append(param.value)
                     numeric_deps.append(param.initval)
 
-            # Pre-calculate the numeric init for the Auditor/Build process
+            # Calculate the numeric init so downstream parameters aren't hitting None
             try:
-                # Make sure we don't overwrite a resolved initval
+                # 1. Use user-provided initval if it exists
+                # 2. Otherwise, calculate it from the physics function
+                calculated_init = func(*numeric_deps)
+
                 if internal_overrides.get('initval') is None and cfg.get('initval') is None:
-                    filtered_kwargs['initval'] = func(*numeric_deps)
+                    filtered_kwargs['initval'] = calculated_init
+
+                # We also need to store this on the expression object or config
+                # so the Parameter class doesn't override it with None later
+                cfg['initval'] = filtered_kwargs.get('initval')
+
             except Exception as e:
+                # Fallback to a safe numeric array instead of None
                 n_elements = np.prod(shape).astype(int) if shape != () else 1
                 filtered_kwargs['initval'] = np.zeros(n_elements)
 
@@ -151,7 +191,7 @@ class Component:
         full_params = {**cfg, **filtered_kwargs}
 
         param_obj = Parameter(
-            label=f"{prefix}.{p_name}",
+            label=f"{self.prefix}.{p_name}",
             names=getattr(self, 'names', None),
             expression=expression,
             user_params=self.config_manager.user_params,
@@ -162,16 +202,16 @@ class Component:
         return param_obj.build_pymc()
 
     # Make sure build_pars_from_dict can pass it along!
-    def build_pars_from_dict(self, par_dict, shape, prefix=None, context_nodes=None):
+    def build_pars_from_dict(self, par_dict, shape, context_nodes=None):
         for p_name, options in par_dict.items():
             if not options:
-                self.add_parameter(p_name, self.config_manager, shape=shape, prefix=prefix,
+                self.add_parameter(p_name, self.config_manager, shape=shape,
                                    context_nodes=context_nodes)
             elif isinstance(options, str):
-                self.add_parameter(p_name, self.config_manager, shape=shape, expr_key=options, prefix=prefix,
+                self.add_parameter(p_name, self.config_manager, shape=shape, expr_key=options,
                                    context_nodes=context_nodes)
             elif isinstance(options, dict):
-                self.add_parameter(p_name, self.config_manager, shape=shape, prefix=prefix,
+                self.add_parameter(p_name, self.config_manager, shape=shape,
                                    context_nodes=context_nodes, **options)
 
     def _is_sampling_param(self, attr):

@@ -12,6 +12,11 @@ LUM_CONST = 1.0/((const.L_sun/const.sigma_sb/const.R_sun**2).cgs.value/(4.0*np.p
 FBOL_CONST = 1.0/(4.0 * np.pi * (const.pc/const.R_sun)** 2.0)
 DENSITY_CONST = 3.0 / (4.0 * np.pi)
 
+# --- 4. MICROLENSING CONSTANTS ---
+# Kappa: 4G / (c^2 * au) in units of mas / M_sun
+KAPPA = (4.0 * const.G * const.M_sun / (const.c**2 * const.au)).to(u.mas, equivalencies=u.dimensionless_angles()).value
+
+
 # --- 2. MATHEMATICAL CONSTANTS ---
 PI = np.pi
 TWOPI = 2.0 * np.pi

@@ -17,8 +17,10 @@ class Planet(CelestialBody):
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
-        self.prefix = f"planet"
 
+    @property
+    def prefix(self):
+        return "planet"
 
     def build_parameters(self, model):
         pass
@@ -80,7 +82,7 @@ class Planet(CelestialBody):
                 mass_inits[i] = m_p_guess
 
         # Build the core parameters using our new heuristic dict
-        self.build_core_parameters(model, self.prefix, overrides={"mass": {"initval": mass_inits}})
+        self.build_core_parameters(model, overrides={"mass": {"initval": mass_inits}})
 
         context_nodes = {
             "star_mass": stars.mass.value[self.star_map],
@@ -103,7 +105,7 @@ class Planet(CelestialBody):
             "max_ecc":"default",
         }
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=self.prefix, context_nodes=context_nodes)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,), context_nodes=context_nodes)
 
         """
         self.a = Parameter(f"{prefix}.a",

@@ -259,6 +259,7 @@ class Parameter:
     user_modified: bool = False
     user_prior_modified: bool = False
     is_derived: bool = False
+    is_sampled: bool = False
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
 
@@ -341,7 +342,9 @@ class Parameter:
             # 3. Safe to cast and convert (User -> Internal)
             return arr.astype(float) / factors
 
-        self.initval = convert(self.initval)
+        if self.expression is None:
+            self.initval = convert(self.initval)
+
         self.init_scale = convert(self.init_scale)
         self.lower = convert(self.lower)
         self.upper = convert(self.upper)
@@ -435,7 +438,8 @@ class Parameter:
         # 3. IDENTIFY ROLES & PARAMETERIZATION SCENARIOS
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
-        is_sampling = ~(is_fixed | is_derived)
+        is_sampled = ~(is_fixed | is_derived)
+        self.is_sampled = is_sampled
 
         # --- DYNAMIC PARAMETERIZATION LOGIC ---
         transform_mus = np.copy(inits)
@@ -444,7 +448,7 @@ class Parameter:
         apply_gwidth_potential = np.zeros(n_elements, dtype=bool)
 
         for i in range(n_elements):
-            if not is_sampling[i]:
+            if not is_sampled[i]:
                 continue
 
             has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
@@ -484,8 +488,8 @@ class Parameter:
                 raw_elements[i] = pt.constant(0.0)
 
         # B. SAMPLING
-        if np.any(is_sampling):
-            idx = np.where(is_sampling)[0]
+        if np.any(is_sampled):
+            idx = np.where(is_sampled)[0]
             # PyMC seamlessly supports vectorized mixed scales!
             par_raw = pm.Normal(f"{self.label}_raw",
                                 mu=0,
@@ -504,13 +508,24 @@ class Parameter:
         else:
             phys_val = (raw_vector * pt.as_tensor_variable(transform_scales)) + pt.as_tensor_variable(transform_mus)
 
+        # --- STRIP ASTROPY UNITS ---
+        # If the expression returned a Quantity, extract the raw PyTensor array
+        if hasattr(phys_val, 'value') and hasattr(phys_val, 'unit'):
+            phys_val = phys_val.value
+
+        # --- SAFELY COMPRESS LISTS OF NODES ---
+        if isinstance(phys_val, (list, tuple)):
+            phys_val = pt.stack(list(phys_val))
+        elif isinstance(phys_val, np.ndarray) and phys_val.dtype == object:
+            phys_val = pt.stack(phys_val.tolist())
+
         # 5. ASSIGN TO SELF.VALUE
-        track_node = bool(np.any(is_sampling)) or self.force_node
+        track_node = bool(np.any(is_sampled)) or self.force_node
 
         if actual_shape == ():
             val_to_save = phys_val if expr_raw is not None else phys_val[0]
         else:
-            val_to_save = phys_val.reshape(actual_shape)
+            val_to_save = pt.broadcast_to(pt.as_tensor_variable(phys_val), actual_shape)
 
         if track_node:
             self.value = pm.Deterministic(self.label, val_to_save)
@@ -554,6 +569,11 @@ class Parameter:
             return None
 
         expr = self.expression() if callable(self.expression) else self.expression
+
+        # --- Strip Astropy Units before graph walking ---
+        if hasattr(expr, 'value') and hasattr(expr, 'unit'):
+            expr = expr.value
+
         all_nodes = pytensor.graph.basic.ancestors([expr])
 
         inputs_in_posterior = [

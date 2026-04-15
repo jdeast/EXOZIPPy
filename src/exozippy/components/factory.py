@@ -3,7 +3,7 @@ import importlib
 import inspect
 from pathlib import Path
 from .component import Component
-
+import ipdb
 
 def discover_components():
     """
@@ -38,7 +38,7 @@ def discover_components():
                     registry[key] = obj
 
         except ImportError as e:
-            # You can print(e) here if you ever need to debug a broken component import
-            pass
+            # a developer might push an unused, broken component. that shouldn't break the code
+            print(f"Warning: Failed to load component module {module_path}: {e}")
 
     return registry

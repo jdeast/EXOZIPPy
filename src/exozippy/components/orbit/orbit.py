@@ -21,14 +21,16 @@ class Orbit(Component):
         # 1. Initialize the base Component
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
-
-        self.prefix = "orbit"
         self.label = "Orbital Parameters"
 
         self.primary = [c.get("primary","star.0") for c in self.config] # star zero is the host by default
         self.companion = [c.get("companion", f"planet.{i}") for i, c in enumerate(self.config)] # the orbits are aligned, one per planet
         self.i180 = [c.get("i180",False) for c in self.config]
         self.fitvcve = [c.get("fitvcve",False) for c in self.config]
+
+    @property
+    def prefix(self):
+        return "orbit"
 
     def build_parameters(self, model):
         shape = (self.n_elements,)
@@ -93,7 +95,7 @@ class Orbit(Component):
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         parameters["cosi"] = {"lower": derived_lowers}
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=self.prefix)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
     def load_data(self):
         pass

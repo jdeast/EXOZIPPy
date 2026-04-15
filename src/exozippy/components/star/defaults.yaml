@@ -70,8 +70,8 @@ star:
 
   # --- Specific Physics ---
   fbol:
-    unit: "erg/s/cm2"
-    internal_unit: "erg/s/cm2"
+    unit: "erg s-1 cm-2"
+    internal_unit: "erg s-1 cm-2"
     latex: "F_{Bol}"
     description: "Bolometric Flux"
     expressions:
@@ -97,11 +97,83 @@ star:
         func_name: "calc_luminosity"
         deps: ["radiussed", "teffsed"]
   fbolsed:
-    unit: "erg/s/cm2"
-    internal_unit: "erg/s/cm2"
+    unit: "erg s-1 cm-2"
+    internal_unit: "erg s-1 cm-2"
     latex: "F_{Bol}"
     description: "Bolometric Flux"
     expressions:
       default:
         func_name: "calc_fbol"
         deps: ["luminositysed", "distance"]
+  pm_ra:
+    initval: 0.0
+    init_scale: 0.05
+    lower: -1e5
+    upper: 1e5
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha*}"
+    description: "Proper Motion (RA)"
+  pm_dec:
+    initval: 0.0
+    init_scale: 0.05
+    lower: -1e5
+    upper: 1e5
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_\\delta"
+    description: "Proper Motion (Dec)"
+  ra:
+    initval: 180.0
+    init_scale: 20e-6
+    lower: 0.0
+    upper: 360.0
+    unit: "deg"
+    internal_unit: "deg"
+    latex: "\\alpha_{ICRS}"
+    description: "Right Ascension"
+  dec:
+    initval: 0.0
+    init_scale: 20e-6
+    lower: -90
+    upper: 90.0
+    unit: "deg"
+    internal_unit: "deg"
+    latex: "\\delta_{ICRS}"
+    description: "Declination"
+  rv:
+    initval: 0.0
+    init_scale: 100
+    lower: -3e8
+    upper: 3e8
+    unit: "m/s"
+    internal_unit: "m/s"
+    latex: "\\gamma_{\\rm abs}"
+    description: "Absolute Radial Velocity"
+  parallax:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\varpi"
+    description: "Parallax"
+    expressions:
+      default:
+        func_name: "calc_parallax"
+        deps: [ "distance" ]
+  appks:
+    initval: 10.0
+    init_scale: 0.02
+    lower: -30.0 # the Sun is -28.29
+    upper: 50.0
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "m_{K_s}"
+    description: "Apparent Ks magnitude"
+  absks:
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "M_{K_s}"
+    description: "Absolute Ks magnitude"
+    expressions:
+      default:
+        func_name: "calc_absmag"
+        deps: ["appks", "distance"]

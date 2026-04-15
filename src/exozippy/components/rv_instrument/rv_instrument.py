@@ -43,6 +43,10 @@ class RVInstrument(Component):
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+    @property
+    def prefix(self):
+        return "inst"
+
     def build_parameters(self, model):
         # all our parameters will be initialized from the data
         pass
@@ -114,7 +118,6 @@ class RVInstrument(Component):
 
 
     def build_dependent_parameters(self, model, system):
-        prefix = "inst"
 
         # We pass the calculated data-driven values as overrides to the YAML defaults
         parameters = {
@@ -133,7 +136,7 @@ class RVInstrument(Component):
                 "shape": (self.total_detrend_cols,),
             }
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
 
     def build_likelihood(self, model, system):

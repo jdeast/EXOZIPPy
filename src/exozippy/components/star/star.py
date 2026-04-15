@@ -15,8 +15,6 @@ from exozippy.components.celestial_body.celestial_body import CelestialBody
 
 class Star(CelestialBody):
     def __init__(self, config, config_manager):
-        self.prefix = "star"
-
         # 1. Initialize the base Component
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
@@ -37,10 +35,14 @@ class Star(CelestialBody):
         else:
             self.sedfile = self.config.get("sedfile")
 
+    @property
+    def prefix(self):
+        return "star"
+
     def build_parameters(self, model):
 
         # 1. Build the shared DNA (mass, radius, density, logg)
-        self.build_core_parameters(model, self.prefix)
+        self.build_core_parameters(model)
 
         # 2. Build Star-specific parameters
         parameters = {
@@ -49,51 +51,10 @@ class Star(CelestialBody):
             "luminosity": "default",
         }
 
-        # Conditional additions
-        # evolutionary model
-        if any(self.mist) or any(self.parsec):
-            parameters["age"] = {"mask": self.mist | self.parsec}
-            parameters["initfeh"] = {"mask": self.mist | self.parsec}
-
-        # SED model
-        if getattr(self, 'sedfile', None):
-            parameters["fbol"] = "default"
-            parameters["av"] = None
-            parameters["distance"] = None
-            parameters["radiussed"] = None
-            parameters["teffsed"] = None
-            parameters["luminositysed"] = "default"
-            parameters["fbolsed"] = "default"
-
-        self.build_pars_from_dict(parameters,shape=(self.n_elements,), prefix=self.prefix)
+        self.build_pars_from_dict(parameters,shape=(self.n_elements,))
 
         '''
-        self.parallax = Parameter(f"{prefix}.parallax",
-                                  expression= lambda: calc_parallax(distance),
-                                  unit=u.mas, internal_unit=u.mas,
-                                  latex=r"\varpi", description='Parallax',
-                                  user_params=self.user_params, names=self.names,
-                                  shape=(self.nstars,))
-        self.parallax.build_pymc()
-
-        if self.mannmass or self.mannrad:
-            self.appks = Parameter(f"{prefix}.appks",
-                                   lower=-30,upper=30,
-                                   unit=u.mag, internal_unit=u.mag,
-                                   latex='ks', description="Apparent ks mag",
-                                   user_params=self.user_params, names=self.names,
-                                   shape=(self.nstars,))
-            self.appks.build_pymc()
-
-            # revisit units when we uncomment this!!!
-            self.absks = Parameter(f"{prefix}.absks",
-                                   expression= lambda: calc_absmag(self.appks.value, self.distance.value),
-                                   unit=u.mag, internal_unit=u.mag,
-                                   latex='Ks', description="Absolute Ks mag",
-                                   user_params=self.user_params, names=self.names,
-                                   shape=(self.nstars,))
-            self.absks.build_pymc()
-
+        this belongs in a mann component, build_likelihood function, but keep it here until we do that
             mann_mstar, mann_rstar, mann_sigma_mstar, mann_sigma_rstar = massradius_mann(self.ks0.value, self.feh.value,
                                                                                              distance=self.distance.value)
             if self.mannmass:
@@ -108,9 +69,51 @@ class Star(CelestialBody):
         pass
 
     def build_dependent_parameters(self, model, system):
-        # no dependent parameters necessary
-        # build SED parameters here?
-        pass
+
+        parameters = {}
+
+        # for each relevant component, we'll include additional parameters (both sampled and derived)
+        # It's ok if we declare variables multiple times, they'll only be added once.
+
+        # SED model
+        if hasattr(system, 'sed'):
+            parameters["distance"] = None
+            parameters["av"] = None
+            parameters["radiussed"] = None
+            parameters["teffsed"] = None
+            parameters["luminositysed"] = "default"
+            parameters["fbolsed"] = "default"
+
+        # evolutionary model
+        if hasattr(system, "evolutionary_model"):
+            parameters["age"] = {"mask": self.mist | self.parsec}
+            parameters["initfeh"] = {"mask": self.mist | self.parsec}
+
+        # mann model
+        if hasattr(system, 'mann'):
+            parameters["distance"] = None
+            parameters["appks"] = None
+            parameters["absks"] = "default"
+
+        # microlensing model
+        if hasattr(system, 'lens'):
+            parameters["pm_ra"] = None
+            parameters["pm_dec"] = None
+            parameters["distance"] = None
+
+        # astrometric model
+        if hasattr(system, 'astrometry'):
+            parameters["ra"] = None
+            parameters["dec"] = None
+            parameters["pm_ra"] = None
+            parameters["pm_dec"] = None
+            parameters["distance"] = None
+
+        if "distance" in parameters.keys():
+            parameters["parallax"] = "default"
+            parameters["fbol"] = "default"
+
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
     def build_likelihood(self, model, system):
         # no likelihood (yet?)

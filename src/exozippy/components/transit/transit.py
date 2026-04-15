@@ -31,6 +31,10 @@ class Transit(Component):
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+    @property
+    def prefix(self):
+        return "transit"
+
     def build_parameters(self, model):
         # All parameters are built in build_dependent_parameters
         # since their initial values and bounds depend on the data.
@@ -82,7 +86,6 @@ class Transit(Component):
             current_col += n_c
 
     def build_dependent_parameters(self, model, system):
-        prefix = "transit"
 
         parameters = {
             "baseline": {"initval": self.baseline_init},
@@ -97,7 +100,7 @@ class Transit(Component):
         if self.total_detrend_cols > 0:
             parameters["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
 
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), prefix=prefix)
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
     def build_likelihood(self, model, system):
         time = pm.ConstantData("transit_time", self.time)

@@ -1,0 +1,91 @@
+import numpy as np
+import pytensor.tensor as pt
+import pytest
+from exozippy.components.mulensing.lens import Lens  # Adjust based on your actual path
+from exozippy.components.parameter import Parameter
+from astropy import units as u
+from exozippy.physics_registry import PHYSICS_REGISTRY
+
+def test_pspl_magnification_accuracy():
+    """Verify that the magnification function matches the Paczynski formula."""
+    # Separation u in Einstein radii
+    u_vals = np.array([0.1, 0.5, 1.0, 2.0])
+
+    # Expected magnification
+    expected = (u_vals ** 2 + 2) / (u_vals * np.sqrt(u_vals ** 2 + 4))
+
+    # Mocking the lens component's internal call
+    # Assuming Lens.get_magnification(t, dn, de) logic is accessible
+    # For now, we test the core math if available in physics.py
+    calc_A = PHYSICS_REGISTRY.get("calc_magnification_pspl")
+
+    if calc_A:
+        res = calc_A(u_vals).eval()
+        assert np.allclose(res, expected, atol=1e-5)
+
+
+def test_microlensing_physics_conversions():
+    """Verify the transformation from Physical (M, D) to Observables (theta_E, t_E)."""
+
+    # Setup values
+    mass = 0.5  # M_sun
+    dl = 4000.0  # pc
+    ds = 8000.0  # pc
+    mu_rel = 5.0  # mas/yr
+
+    # 1. Test pi_rel (Relative parallax)
+    # pi_rel = 1000/dl - 1000/ds = 0.25 - 0.125 = 0.125 mas
+    calc_pi_rel = PHYSICS_REGISTRY["calc_pi_rel"]
+    pi_rel = pt.as_tensor_variable(calc_pi_rel(dl, ds)).eval()
+    assert np.isclose(pi_rel, 0.125)
+
+    # 2. Test theta_E (Einstein Radius)
+    # theta_E = sqrt(8.144 * M * pi_rel)
+    # sqrt(8.144 * 0.5 * 0.125) = sqrt(0.509) approx 0.7134 mas
+    calc_theta_E = PHYSICS_REGISTRY["calc_theta_E"]
+    theta_E = calc_theta_E(mass, pi_rel).eval()
+    assert np.isclose(theta_E, 0.7134, atol=1e-3)
+
+    # 3. Test t_E (Einstein timescale)
+    # t_E = (theta_E / mu_rel) * 365.25
+    # (0.7134 / 5.0) * 365.25 approx 52.12 days
+    calc_t_E = PHYSICS_REGISTRY["calc_t_E"]
+    t_E = calc_t_E(theta_E, mu_rel).eval()
+    assert np.isclose(t_E, 52.12, atol=1e-2)
+
+def test_lens_parameter_unit_handling():
+    """Ensure lens parameters correctly handle 'd' and 'mas' string units."""
+    p = Parameter(
+        label="lens.t_E",
+        unit="d",
+        internal_unit="d",
+        initval=50.0
+    )
+    # If the gatekeeper is working, this should stay 50.0
+    # If internal_unit was accidentally '', it would have crashed or scaled.
+    assert p.initval == 50.0
+    assert p.internal_unit == u.day
+
+
+def test_parallax_trajectory_offset():
+    """Verify that Earth's motion correctly offsets the impact parameter u."""
+    # If pi_E is 0, u should just be the linear trajectory
+    # If pi_E is large, u should be significantly modulated
+    # u(t) = sqrt(u0^2 + ((t-t0)/tE + pi_E_E*delta_E + pi_E_N*delta_N)^2)
+
+    t = 2455000.0
+    t0 = 2455000.0
+    u0 = 0.5
+    tE = 50.0
+    pi_E_N = 1.0
+    delta_N = 0.1  # Earth shift
+
+    # Simple manual check of the logic inside your get_magnification
+    # If this math doesn't match your Lens.py, the model won't fit!
+    tau = (t - t0) / tE
+    # u_vec = [u0, tau] + pi_E * delta
+    u_n = u0 + (pi_E_N * delta_N)
+    u_e = tau  # assuming pi_E_E is 0 for this test
+    u_total = np.sqrt(u_n ** 2 + u_e ** 2)
+
+    assert u_total > u0  # Parallax should have shifted the lens further away

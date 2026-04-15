@@ -1,16 +1,111 @@
 lens:
   t_0:
     unit: "d"
+    internal_unit: "d"
+    latex: "t_0"
     description: "Time of peak magnification"
   u_0:
     unit: ""
+    internal_unit: ""
+    latex: "u_0"
     description: "Impact parameter (units of Einstein radii)"
   t_E:
     unit: "d"
+    internal_unit: "d"
+    latex: "t_E"
     description: "Einstein crossing time"
+    expressions:
+      default:
+        func_name: "calc_t_E"
+        deps: [ "theta_E", "mu_rel_mag" ]
   pi_E_N:
     initval: 0.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\pi_N"
     description: "Parallax vector (North)"
+    expressions:
+      default:
+        func_name: "calc_pi_E_N"
+        deps: [ "pi_rel", "theta_E", "mu_dec_rel", "mu_rel_mag" ]
   pi_E_E:
     initval: 0.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\pi_E"
     description: "Parallax vector (East)"
+    expressions:
+      default:
+        func_name: "calc_pi_E_E"
+        deps: [ "pi_rel", "theta_E", "mu_ra_rel", "mu_rel_mag" ]
+  pi_rel:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\pi_{rel}"
+    description: "Relative lens-source parallax"
+    expressions:
+      default:
+        func_name: "calc_pi_rel"
+        deps: [ "distance_lens", "distance_source" ]
+  theta_E:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\theta_E"
+    description: "Einstein angular radius"
+    expressions:
+      default:
+        func_name: "calc_theta_E"
+        deps: [ "mass_lens", "pi_rel" ]
+  mu_ra_rel:
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha,rel}"
+    description: "Relative lens-source proper motion (RA)"
+    expressions:
+      default:
+        func_name: "calc_mu_ra_rel"
+        deps: [ "pm_ra_lens", "pm_ra_source" ]
+  mu_dec_rel:
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\delta,rel}"
+    description: "Relative lens-source proper motion (Dec)"
+    expressions:
+      default:
+        func_name: "calc_mu_dec_rel"
+        deps: [ "pm_dec_lens", "pm_dec_source" ]
+  mu_rel_mag:
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{rel}"
+    description: "Magnitude of the relative lens-source proper motion"
+    expressions:
+      default:
+        func_name: "calc_mu_rel_mag"
+        deps: ["mu_ra_rel", "mu_dec_rel"]
+mulensinst:
+  f_source:
+    initval: 1.0
+    init_scale: 0.1
+    lower: 0.0
+    unit: ""
+    internal_unit: ""
+    latex: "f_s"
+    description: "Source flux"
+  f_blend:
+    initval: 0.0
+    init_scale: 0.1
+    lower: -0.1
+    unit: ""
+    internal_unit: ""
+    latex: "f_b"
+    description: "Blend flux"
+  err_scale:
+    initval: 1.0
+    init_scale: 0.1
+    lower: 1e-6
+    upper: 1e6
+    unit: ""
+    internal_unit: ""
+    latex: "k"
+    description: "Error scaling factor"

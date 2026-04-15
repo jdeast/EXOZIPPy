@@ -1,29 +1,47 @@
-# examples_new/microlensing_pspl/pspl.params.yaml
-
-# Lens Parameters (Sampled)
-lens.0.t0:
+# --- Integration Constants (Sampled) ---
+lens.Lens.t_0:
     initval: 2455379.571
     init_scale: 0.01
-lens.0.u0:
+lens.Lens.u_0:
     initval: 0.523
     init_scale: 0.05
-lens.0.tE:
-    initval: 17.94
-    init_scale: 1.0
 
-# Parallax (Initialized to zero if you want to test the "no parallax" case first)
-lens.0.pi_E_N:
-    initval: 0.0
-    init_scale: 0.05
-lens.0.pi_E_E:
-    initval: 0.0
-    init_scale: 0.05
+# --- Physical Parameters for the LENS (Sampled) ---
+star.Lens.mass:
+    initval: 0.5     # M_sun (Typical M-dwarf lens)
+    init_scale: 0.1
+star.Lens.distance:
+    initval: 4000.0  # pc (Halfway to the bulge)
+    init_scale: 500.0
+star.Lens.pm_ra:
+    initval: -5.0    # mas/yr
+    init_scale: 2.0
+star.Lens.pm_dec:
+    initval: -2.0    # mas/yr
+    init_scale: 2.0
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Source.mass:
+    sigma: 0.0
+star.Source.radius:
+    sigma: 0.0
+star.Source.teff:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0
 
-# Instrument Parameters (Sampled)
-# Flux = fs * A + fb. Magnitudes are calculated via -2.5*log10(Flux)
-mulens.0.f_source:
-    initval: 1.0
-    init_scale: 0.1
-mulens.0.f_blend:
-    initval: 0.0
-    init_scale: 0.1
+
+# --- Physical Parameters for the SOURCE (Sampled) ---
+star.Source.distance:
+    initval: 8000.0  # pc (In the bulge)
+    init_scale: 500.0
+star.Source.pm_ra:
+    initval: -2.0    # mas/yr
+    init_scale: 2.0
+star.Source.pm_dec:
+    initval: -1.0    # mas/yr
+    init_scale: 2.0
