@@ -1,11 +1,15 @@
 lens:
   t_0:
     unit: "d"
+    lower: 2400000
+    upper: 3000000
     internal_unit: "d"
     latex: "t_0"
     description: "Time of peak magnification"
   u_0:
     unit: ""
+    lower: -18 # ~20 ppm peak magnification
+    upper: 18 # ~20 ppm peak magnification
     internal_unit: ""
     latex: "u_0"
     description: "Impact parameter (units of Einstein radii)"
@@ -85,9 +89,10 @@ lens:
         deps: ["mu_ra_rel", "mu_dec_rel"]
 mulensinst:
   f_source:
-    initval: 1.0
+    initval: 1e-7
     init_scale: 0.1
     lower: 0.0
+    upper: 10.0
     unit: ""
     internal_unit: ""
     latex: "f_s"
@@ -96,6 +101,7 @@ mulensinst:
     initval: 0.0
     init_scale: 0.1
     lower: -0.1
+    upper: 10.0
     unit: ""
     internal_unit: ""
     latex: "f_b"

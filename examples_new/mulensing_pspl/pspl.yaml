@@ -14,7 +14,7 @@ lens:
     lens_ndx: 0
     source_ndx: 1
 
-mulensinst:
+mulensinstrument:
   - name: "OGLE4"
     file: "n20100309.I.OGLE4.ob08092.dat"
     coords: "17:47:29.42 -34:43:35.6"

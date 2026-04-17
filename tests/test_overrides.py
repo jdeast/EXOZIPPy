@@ -60,7 +60,7 @@ def test_gaussian_prior_scale_override_applies_correctly():
     """
     # ARRANGE
     label = "star.A.radius_test3"
-    user_params = {label: {"initval": 1.0, "sigma": 0.05, "init_scale": 0.00085}}
+    user_params = {label: {"initval": 1.0, "sigma": 0.05, "init_scale": 0.00085, "lower": 0.0, "upper": 10.0}}
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
@@ -84,7 +84,7 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, capsys):
     mock_logp.return_value = ({}, {})
 
     label = "star.A.mass_test4"
-    user_params = {label: {"initval": 1.0, "sigm": 0.05}}  # Misspelled 'sigm'
+    user_params = {label: {"initval": 1.0, "sigm": 0.05, "lower": 0.0, "upper": 10.0}}  # Misspelled 'sigm'
     system = MockSystem(user_params)
     star = Star([{"name": "A"}], system.config_manager)
     system.star = star
@@ -135,16 +135,24 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
     Then the system should accept tightening bounds but reject expanding bounds.
     """
     scenarios = [
-        # Attempting to expand a 0.0 lower bound to -10.0 should be rejected (remains 0.0)
-        {"user": -10.0, "internal": 0.0, "expected": 0.0, "type": "lower"},
-        # Attempting to tighten a 0.0 lower bound to 0.5 should be accepted (becomes 0.5)
-        {"user": 0.5, "internal": 0.0, "expected": 0.5, "type": "lower"},
+        # Lower bound: Reject expansion (-10.0 -> 0.0)
+        {"user": -10.0, "internal": 0.0, "expected": 0.0, "type": "lower", "other_type": "upper", "other_val": 10.0},
+        # Lower bound: Accept tightening (0.5 -> 0.5)
+        {"user": 0.5, "internal": 0.0, "expected": 0.5, "type": "lower", "other_type": "upper", "other_val": 10.0},
+        # Upper bound: Reject expansion (20.0 -> 10.0)
+        {"user": 20.0, "internal": 10.0, "expected": 10.0, "type": "upper", "other_type": "lower", "other_val": 0.0},
     ]
 
     for s in scenarios:
         # ARRANGE
         label = f"star.A.mass_{s['type']}"
-        user_params = {label: {s['type']: s['user']}}
+        # Provide both bounds in user_params to satisfy the guardrail
+        user_params = {
+            label: {
+                s['type']: s['user'],
+                s['other_type']: s['other_val']
+            }
+        }
         config_manager = ConfigManager(user_params)
 
         star = Star([{"name": "A"}], config_manager)
@@ -152,7 +160,13 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
 
         # ACT
         with pm.Model(name=f"model_{label.replace('.', '_')}"):
-            star.add_parameter(label.split('.')[-1], config_manager, **{s['type']: s['internal']})
+            # Pass both bounds as "internal defaults" to the component
+            internal_defaults = {
+                s['type']: s['internal'],
+                s['other_type']: s['other_val']
+            }
+            star.add_parameter(label.split('.')[-1], config_manager, **internal_defaults)
+
             p = getattr(star, label.split('.')[-1])
             val = p.lower[0] if s['type'] == 'lower' else p.upper[0]
 
@@ -168,7 +182,7 @@ def test_defining_mu_and_sigma_creates_valid_gaussian_prior():
     """
     # ARRANGE
     label = "star.A.mass_sampled"
-    user_params = {label: {"mu": 1.1, "sigma": 0.1}}
+    user_params = {label: {"mu": 1.1, "sigma": 0.1, "lower": 0.0, "upper": 10.0}}
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
@@ -216,7 +230,7 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     """
     # ARRANGE
     label = "star.A.radius_custom"
-    user_params = {label: {"mu": 1.0, "sigma": 0.05, "init_scale": 0.001}}
+    user_params = {label: {"mu": 1.0, "sigma": 0.05, "init_scale": 0.001, "lower": 0.0, "upper": 10.0}}
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)

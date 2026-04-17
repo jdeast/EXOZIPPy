@@ -50,6 +50,20 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
 
+        print("Based on your config.yaml file, we are modeling the following components:")
+        for key in self.active_components.keys(): print(f"{key} ({self.active_components[key].n_elements})")
+
+        reserved_keys = {"run", "parameter_file", "prefix", "sampler", "name"}
+        for key in self.config.keys():
+            if key in self.registry:
+                CompClass = self.registry[key]
+                inst = CompClass(self.config[key], self.config_manager)
+                self.active_components[key] = inst
+                setattr(self, key, inst)
+            elif key not in reserved_keys:
+                print(
+                    f"\033[93m" + f"!!!! WARNING: YAML key '{key}' does not match any registered component (Star, Planet, etc.) and will be ignored." + "\033[0m")
+
     def build_model(self):
         with pm.Model() as model:
             # 1. CORE PARAMETERS (The Foundations)

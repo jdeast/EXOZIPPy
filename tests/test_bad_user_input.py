@@ -64,3 +64,57 @@ def test_missing_instrument_data_file_raises_file_not_found_error(tmp_path):
     # ACT & ASSERT
     with pytest.raises(FileNotFoundError):
         inst.load_data()
+
+
+import pymc as pm
+
+
+def test_sampled_parameter_missing_bounds_raises_developer_error():
+    """
+    Given a Parameter that is actively being sampled (no expression, sigma > 0),
+    When the parameter is materialized in the PyMC graph without explicit upper/lower bounds,
+    Then it should raise a ValueError to force the developer to define the physical limits.
+    """
+    # ARRANGE
+    # A sampled parameter with an init_scale but missing physical bounds
+    p = Parameter(
+        label="bad.sampled_param",
+        initval=1.0,
+        init_scale=0.1,
+        lower=None,  # Missing!
+        upper=None,  # Missing!
+        unit="",
+        internal_unit=""
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(ValueError, match="MUST have explicit 'lower' and 'upper' bounds"):
+            p.build_pymc()
+
+
+def test_derived_parameter_missing_bounds_is_allowed():
+    """
+    Given a Parameter that is derived (has an expression),
+    When it is materialized in the PyMC graph without explicit bounds,
+    Then it should build successfully, as derived parameters inherit constraints from their parents.
+    """
+    import pytensor.tensor as pt
+
+    # ARRANGE
+    dummy_node = pt.dscalar('dummy')
+    p = Parameter(
+        label="good.derived_param",
+        expression=dummy_node * 2.0,
+        lower=None,
+        upper=None,
+        unit="",
+        internal_unit=""
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        try:
+            p.build_pymc()
+        except ValueError:
+            pytest.fail("Developer guardrail incorrectly blocked a derived parameter!")

@@ -77,6 +77,46 @@ def _as_flat_array(x: Any) -> np.ndarray:
         raise ValueError("posterior has zero size")
     return arr
 
+
+def to_vec(val, n_elements, fill=np.nan):
+    if val is None:
+        return np.full(n_elements, fill, dtype=float)
+
+    # 1. Unpack Astropy Quantities first
+    # If it's a Quantity, we want the internal value (which might be a Tensor)
+    raw_val = getattr(val, "value", val)
+
+    # 2. Check if the underlying value is a Tensor
+    if hasattr(raw_val, 'owner') or "TensorVariable" in str(type(raw_val)):
+        return raw_val
+
+    # 3. Handle evaluate-able tensors (for initvals)
+    if hasattr(raw_val, 'eval'):
+        try:
+            raw_val = raw_val.eval()
+        except:
+            return np.full(n_elements, fill, dtype=float)
+
+    arr = np.atleast_1d(raw_val)
+
+    # 4. Handle arrays of tensors (rare, but happens in stacking)
+    if arr.size > 0 and hasattr(arr[0], 'eval'):
+        try:
+            arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
+        except:
+            return np.full(n_elements, fill, dtype=float)
+
+    # 5. Scalar conversion (This is where the crash was!)
+    if arr.size == 1:
+        # Bypass float() if it's STILL a tensor (e.g. a 1-element tensor)
+        if hasattr(arr[0], 'owner'): return arr[0]
+        return np.full(n_elements, float(arr[0]), dtype=float)
+
+    res = np.full(n_elements, fill, dtype=float)
+    n_to_copy = min(n_elements, arr.size)
+    res[:n_to_copy] = arr.astype(float)[:n_to_copy]
+    return res
+
 class UnitTranslator:
     # Essential "Pretty" Mapping
     SOLAR_DENSITY_UNIT = u.def_unit('rho_sun', 3.0 * u.M_sun / (4.0 * np.pi * u.R_sun ** 3))
@@ -322,6 +362,29 @@ class Parameter:
             if val is None:
                 return None
 
+            # Unpack Astropy Quantities first
+            raw_val = getattr(val, "value", val)
+
+            # Force evaluation if it's a Tensor node
+            if hasattr(raw_val, 'eval'):
+                try:
+                    raw_val = raw_val.eval()
+                except Exception:
+                    # If it can't eval (e.g. missing inputs), we shouldn't have it as a bound
+                    return np.full(np.atleast_1d(factors).shape, np.nan)
+
+            arr = np.atleast_1d(raw_val)
+
+            # Final check: Ensure we aren't storing an object-array of Tensors
+            if arr.dtype == object:
+                arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
+
+            return arr.astype(float) / factors
+
+        def convert_old(val):
+            if val is None:
+                return None
+
             # 1. If it's a symbolic PyTensor node, execute it to get the raw numbers
             if hasattr(val, 'eval'):
                 try:
@@ -407,39 +470,27 @@ class Parameter:
         actual_shape = self.shape if isinstance(self.shape, tuple) else (self.shape,)
         n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
 
-        # 2. PREP WORK VECTORS
-        def to_vec(val, fill=np.nan):
-            if val is None: return np.full(n_elements, fill, dtype=float)
-            if hasattr(val, 'eval'):
-                try:
-                    val = val.eval()
-                except:
-                    return np.full(n_elements, fill, dtype=float)
-            arr = np.atleast_1d(val)
-            if arr.size > 0 and hasattr(arr[0], 'eval'):
-                try:
-                    arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
-                except:
-                    return np.full(n_elements, fill, dtype=float)
-            if arr.size == 1: return np.full(n_elements, float(arr[0]), dtype=float)
-            res = np.full(n_elements, fill, dtype=float)
-            n_to_copy = min(n_elements, arr.size)
-            res[:n_to_copy] = arr.astype(float)[:n_to_copy]
-            return res
-
-        inits = to_vec(self.initval, fill=0.0)
-        scales = to_vec(self.init_scale, fill=1.0)
-        mus = to_vec(self.mu, fill=np.nan)
-        sigmas = to_vec(self.sigma, fill=np.nan)
-        g_widths = to_vec(self.gaussian_width, fill=np.nan)
-        lowers = to_vec(self.lower, fill=-np.inf)
-        uppers = to_vec(self.upper, fill=np.inf)
+        inits = to_vec(self.initval, n_elements, fill=0.0)
+        scales = to_vec(self.init_scale, n_elements, fill=1.0)
+        mus = to_vec(self.mu, n_elements, fill=np.nan)
+        sigmas = to_vec(self.sigma, n_elements, fill=np.nan)
+        g_widths = to_vec(self.gaussian_width, n_elements, fill=np.nan)
+        lowers = to_vec(self.lower, n_elements, fill=-np.inf)
+        uppers = to_vec(self.upper, n_elements, fill=np.inf)
 
         # 3. IDENTIFY ROLES & PARAMETERIZATION SCENARIOS
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
         self.is_sampled = is_sampled
+
+        # --- Any sampled parameter must have upper and lower bounds in defaults.yaml ---
+        if np.any(is_sampled):
+            if self.lower is None or self.upper is None:
+                raise ValueError(
+                    f"Developer Error: Sampled parameter '{self.label}' MUST have explicit "
+                    f"'lower' and 'upper' bounds defined in its defaults.yaml."
+                )
 
         # --- DYNAMIC PARAMETERIZATION LOGIC ---
         transform_mus = np.copy(inits)
@@ -583,7 +634,10 @@ class Parameter:
 
         # fixed parameter, just return the scalar
         if not inputs_in_posterior:
-            return float(expr.eval())
+            val = expr.eval()
+            if isinstance(val, (np.ndarray, list)) and np.size(val) > 1:
+                return np.asarray(val, dtype=float)
+            return float(val)
 
         # 1. Compile the function for a single evaluation
         calc_func = pytensor.function(
@@ -765,7 +819,8 @@ class Parameter:
 
             lo, hi = _scalar(self.lower), _scalar(self.upper)
             if lo is not None or hi is not None:
-                l_s, h_s = _fmt(lo, False) if not np.isinf(lo) else "", _fmt(hi, False) if not np.isinf(hi) else ""
+                l_s = _fmt(lo, False) if (lo is not None and not np.isinf(lo)) else ""
+                h_s = _fmt(hi, False) if (hi is not None and not np.isinf(hi)) else ""
                 if l_s and h_s: return f"U({l_s}, {h_s})"
                 if l_s: return f"> {l_s}"
                 if h_s: return f"< {h_s}"
