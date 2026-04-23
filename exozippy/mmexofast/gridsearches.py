@@ -1,10 +1,15 @@
 import numpy as np
 from abc import ABC, abstractmethod
-import datetime
 from scipy.ndimage import minimum_filter, label
 import matplotlib.pyplot as plt
 from itertools import combinations
 from scipy import stats
+import math
+
+from collections import deque
+from itertools import product as iproduct
+import json
+import warnings
 
 import MulensModel
 import sfit_minimizer
@@ -838,9 +843,6 @@ class BaseRectGridSearch(ABC):
         -------
         list of tuple of int
         """
-        from collections import deque
-        from itertools import product
-
         visited = {start_indices}
         order = []
         queue = deque([start_indices])
@@ -849,7 +851,7 @@ class BaseRectGridSearch(ABC):
             idx = queue.popleft()
             order.append(idx)
 
-            for delta in product([-1, 0, 1], repeat=len(grid_shape)):
+            for delta in iproduct([-1, 0, 1], repeat=len(grid_shape)):
                 if all(d == 0 for d in delta):
                     continue
                 neighbor = tuple(idx[i] + delta[i] for i in range(len(grid_shape)))
@@ -1487,7 +1489,6 @@ class BaseRectGridSearch(ABC):
         strip_ranges : list of range
         nn_init : bool
         """
-        from itertools import product as iproduct
         for indices in iproduct(*strip_ranges):
             if result_grid[indices] is not None:
                 continue
@@ -1515,7 +1516,6 @@ class BaseRectGridSearch(ABC):
         -------
         tuple of int or None
         """
-        from itertools import product as iproduct
         best_chi2 = np.inf
         best_indices = None
         for indices in iproduct(*strip_ranges):
@@ -2323,7 +2323,6 @@ class BaseRectGridSearch(ABC):
         axes_2d : list of matplotlib.axes.Axes
         axes_1d : list of matplotlib.axes.Axes
         """
-        import matplotlib.pyplot as plt
         n_cols = max(n_2d, n_1d, 1)
         n_rows = 1 if n_2d == 0 else 2
         fig, axes = plt.subplots(n_rows, n_cols,
@@ -2352,7 +2351,6 @@ class BaseRectGridSearch(ABC):
         -------
         matplotlib.figure.Figure
         """
-        import matplotlib.pyplot as plt
         if self.results_history is None:
             raise ValueError("No results. Run grid search first.")
         level_data = self.results_history[0]
@@ -2414,7 +2412,6 @@ class BaseRectGridSearch(ABC):
         -------
         JSON-serializable object
         """
-        import math
         if obj is None:
             return None
         if isinstance(obj, (bool, np.bool_)):
@@ -2657,7 +2654,6 @@ class BaseRectGridSearch(ABC):
         ValueError
             If no results exist.
         """
-        import json
         if self.results_history is None:
             raise ValueError("No results to save. Run grid search first.")
 
@@ -2667,7 +2663,8 @@ class BaseRectGridSearch(ABC):
             'base': self._get_base_save_state(),
             'extra': self._get_extra_save_state()
         }
-
+        print(filepath)
+        print(state)
         with open(filepath, 'w') as f:
             json.dump(state, f, indent=2)
 
@@ -2739,9 +2736,6 @@ class BaseRectGridSearch(ABC):
         UserWarning
             If the file version is not 1.
         """
-        import json
-        import warnings
-
         with open(filepath, 'r') as f:
             state = json.load(f)
 
