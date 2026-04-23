@@ -601,6 +601,8 @@ class BaseRectGridSearch(ABC):
         Starting point for 'outward' evaluation. Dict of param values.
     use_nearest_neighbor_init : bool
         Initialize each fit from nearest successful fit. Default True.
+    point_density_in_minimum : int
+        Number of grid points required for a well-defined minimum. Default 5.
     max_refinements : int
         Maximum refinement iterations per minimum. Default 5.
     max_expansions : int
@@ -612,6 +614,7 @@ class BaseRectGridSearch(ABC):
     def __init__(self, grid_params=None, datasets=None,
                  evaluation_order='standard', start_point=None,
                  use_nearest_neighbor_init=True,
+                 point_density_in_minimum=5,
                  max_refinements=5, max_expansions=5,
                  verbose=False):
         self.grid_params = grid_params
@@ -619,6 +622,7 @@ class BaseRectGridSearch(ABC):
         self.evaluation_order = evaluation_order
         self.start_point = start_point
         self.use_nearest_neighbor_init = use_nearest_neighbor_init
+        self.point_density_in_minimum = point_density_in_minimum
         self.max_refinements = max_refinements
         self.max_expansions = max_expansions
         self.verbose = verbose
@@ -1046,33 +1050,6 @@ class BaseRectGridSearch(ABC):
     # Run
     # ----------------------------------------------------------------
 
-    def _resolve_run_params(self, evaluation_order, start_point,
-                            use_nearest_neighbor_init,
-                            max_refinements, max_expansions):
-        """Resolve run() parameters against instance defaults.
-
-        Parameters
-        ----------
-        evaluation_order : str or None
-        start_point : dict or None
-        use_nearest_neighbor_init : bool or None
-        max_refinements : int or None
-        max_expansions : int or None
-
-        Returns
-        -------
-        tuple
-            Resolved (order, start, nn_init, max_ref, max_exp)
-        """
-        order = evaluation_order or self.evaluation_order
-        start = start_point or self.start_point
-        nn_init = (use_nearest_neighbor_init
-                   if use_nearest_neighbor_init is not None
-                   else self.use_nearest_neighbor_init)
-        max_ref = max_refinements or self.max_refinements
-        max_exp = max_expansions or self.max_expansions
-        return order, start, nn_init, max_ref, max_exp
-
     def _run_coarse_grid(self, order, start, nn_init):
         """Build and evaluate coarse grid, store in results_history[0].
 
@@ -1120,19 +1097,20 @@ class BaseRectGridSearch(ABC):
         if self.grid_params is None:
             raise ValueError("grid_params must be set before running.")
 
-        if refine and point_density_in_minimum is None:
-            raise ValueError(
-                "point_density_in_minimum required when refine=True.")
-
-        order, start, nn_init, max_ref, max_exp = self._resolve_run_params(
-            evaluation_order, start_point, use_nearest_neighbor_init,
-            max_refinements, max_expansions)
+        order = evaluation_order or self.evaluation_order
+        start = start_point or self.start_point
+        nn_init = (use_nearest_neighbor_init
+                   if use_nearest_neighbor_init is not None
+                   else self.use_nearest_neighbor_init)
+        pt_dens = point_density_in_minimum or self.point_density_in_minimum
+        max_ref = max_refinements or self.max_refinements
+        max_exp = max_expansions or self.max_expansions
 
         self._point_cache = {}
         self._run_coarse_grid(order, start, nn_init)
 
         if refine:
-            self._run_refinement(point_density_in_minimum, max_ref, max_exp,
+            self._run_refinement(pt_dens, max_ref, max_exp,
                                  order, nn_init)
 
     # ----------------------------------------------------------------
