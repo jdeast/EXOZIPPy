@@ -61,7 +61,6 @@ def get_telescope_band_from_filename(filename):
         filename += ' '
 
     basename = os.path.basename(filename).split('.')
-    print(len(basename), basename)
     if len(basename) < 4:
         raise ValueError(
             f"Filename ({filename}) must have the format " +
@@ -74,7 +73,7 @@ def get_telescope_band_from_filename(filename):
 # ============================================================================
 # Observatory Class and Registry
 # ============================================================================
-
+F
 class Observatory:
     """
     Container for observatory-specific MulensData configuration.

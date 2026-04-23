@@ -219,16 +219,21 @@ class MMEXOFASTFitter:
         for key in self.CONFIG_KEYS:
             setattr(self, key, config[key])
 
-    def _get_fitter_kwargs(self) -> dict:
+    def _get_fitter_kwargs(self, source_type=None) -> dict:
         """
         Bundle fitter options for passing to SFitFitter.
+
+        Parameters
+        ----------
+        key : mmexo.FitKey, optional
+            Fit key for the model to be fit
 
         Returns
         -------
         dict
             Fitter configuration options
         """
-        return {
+        kwargs = {
             'coords': self.coords,
             'mag_methods': self.mag_methods,
             'limb_darkening_coeffs_u': self.limb_darkening_coeffs_u,
@@ -236,6 +241,10 @@ class MMEXOFASTFitter:
             'fix_source_flux': self.fix_source_flux_map,
             'fix_blend_flux': self.fix_blend_flux_map
         }
+        if source_type == mmexo.SourceType.POINT:
+            kwargs['mag_methods'] = None
+
+        return kwargs
 
     def _get_state(self) -> dict:
         """
@@ -1482,7 +1491,7 @@ class MMEXOFASTFitter:
             fitter = mmexo.fitters.SFitFitter(
                 initial_model_params=initial_params,
                 datasets=datasets,
-                **self._get_fitter_kwargs()
+                **self._get_fitter_kwargs(source_type=key.source_type)
             )
             fitter.run()
 
@@ -1570,7 +1579,7 @@ class MMEXOFASTFitter:
             self._log(f"Using initial PSPL params (user/previous): {pspl_est_params}")
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=pspl_est_params, datasets=datasets, **self._get_fitter_kwargs())
+            initial_model_params=pspl_est_params, datasets=datasets, **self._get_fitter_kwargs(source_type=mmexo.SourceType.POINT))
         fitter.run()
         self._log(f'Initial SFit {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
@@ -1809,7 +1818,7 @@ class MMEXOFASTFitter:
         par_est_params = self._get_parallax_initial_params(key, initial_params)
 
         fitter = mmexo.fitters.SFitFitter(
-            initial_model_params=par_est_params, datasets=datasets, **self._get_fitter_kwargs())
+            initial_model_params=par_est_params, datasets=datasets, **self._get_fitter_kwargs(source_type=key.source_type))
         fitter.run()
         self._log(f'{mmexo.fit_types.model_key_to_label(key)}: {fitter.best}')
         self._log_file_only(fitter.get_diagnostic_str())
@@ -1891,7 +1900,7 @@ class MMEXOFASTFitter:
                 static_params,
                 datasets=datasets,
                 grid_params=grid_params,
-                fitter_kwargs=self._get_fitter_kwargs(),
+                fitter_kwargs=self._get_fitter_kwargs(source_type=reference_fit.model_key.source_type),
                 skip_optimization=skip_optimization,
                 verbose=self.verbose,
             )
@@ -2255,11 +2264,17 @@ class MMEXOFASTFitter:
                         f"pi_E_E={initial_params.get('pi_E_E', 'N/A'):.3f}, "
                         f"pi_E_N={initial_params.get('pi_E_N', 'N/A'):.3f}")
 
+        # TODO: This seems cludgy
+        if ('rho' in initial_params) or ('t_star' in initial_params):
+            source_type = mmexo.SourceType.FINITE
+        else:
+            source_type = mmexo.SourceType.POINT
+
         # Run SFitFitter with all parameters free
         fitter = mmexo.fitters.SFitFitter(
             initial_model_params=initial_params,
             datasets=datasets,
-            **self._get_fitter_kwargs()
+            **self._get_fitter_kwargs(source_type=source_type)
         )
         fitter.run()
 
