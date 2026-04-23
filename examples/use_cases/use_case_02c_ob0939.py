@@ -69,18 +69,31 @@ cont_fitter.fit()
 #    containing everything needed to initialize the next step
 # ------
 
-print('=== Restart from pickle and ADD Spitzer Data ===')
-complete_fitter = exozippy.mmexofast.fit(
-    files=ground_data_files + space_data_files,
-    parallax_grid=True,
-    renormalize_errors=True,
+print('=== Run the full end-to-end Ground workflow ===')
+# Run the full ground workflow without stopping.
+full_gr_fitter = exozippy.mmexofast.mmexofast.fit(
+    files=ground_data_files,
+    coords=coords, fit_type='point lens',
+    parallax_grid=True, renormalize_errors=True,
     verbose=True,
-    restart_file='test_output/ob0939_uc02c_gr_restart.pkl',
     output_config=OutputConfig(
-        base_dir=base_dir, file_head='ob0939_uc02c_complete', save_log=True, save_plots=True,
+        base_dir=base_dir, file_head='ob0939_uc02c_full_gr', save_log=True, save_plots=True,
         save_latex_tables=True, save_restart_files=True, save_grid_results=True)
     )
-complete_fitter.fit()
+full_gr_fitter.fit()
+
+#print('=== Restart from pickle and ADD Spitzer Data ===')
+#complete_fitter = exozippy.mmexofast.fit(
+#    files=ground_data_files + space_data_files,
+#    parallax_grid=True,
+#    renormalize_errors=True,
+#    verbose=True,
+#    restart_file='test_output/ob0939_uc02c_gr_restart.pkl',
+#    output_config=OutputConfig(
+#        base_dir=base_dir, file_head='ob0939_uc02c_complete', save_log=True, save_plots=True,
+#        save_latex_tables=True, save_restart_files=True, save_grid_results=True)
+#    )
+#complete_fitter.fit()
 # ------
 # Need to implement:
 # 1. Adding datafiles with a pickle

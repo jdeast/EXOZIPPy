@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from abc import ABC, abstractmethod
 from scipy.ndimage import minimum_filter, label
 import matplotlib.pyplot as plt
@@ -15,6 +16,8 @@ import MulensModel
 import sfit_minimizer
 import exozippy.mmexofast as mmexo
 
+
+# TODO: Separate EventFinder & AnomalyFinder grid searches from Rectangular grid searches.
 
 # ---------------------------------------------------------------------
 # EventFinder & AnomalyFinder Grid searches:
@@ -635,6 +638,7 @@ class BaseRectGridSearch(ABC):
         self.results_history = None
         self.minima = None
         self._point_cache = {}
+        self._results = None
 
     @abstractmethod
     def _fit_grid_point(self, grid_params):
@@ -1071,6 +1075,7 @@ class BaseRectGridSearch(ABC):
             'result_grid': result_grid,
             'metadata': metadata
         }]
+        # TODO: There is no reason for results_history to be a list. It never gets appended to.
 
     def run(self, refine=False, point_density_in_minimum=None,
             evaluation_order=None, start_point=None,
@@ -2389,6 +2394,54 @@ class BaseRectGridSearch(ABC):
         idx = np.unravel_index(np.nanargmin(chi2_grid), chi2_grid.shape)
         return result_grid[idx]
 
+    @property
+    def results(self):
+        """Lazy-loaded pandas DataFrame of evaluated grid points.
+
+        Extracts all evaluated grid points on first access, then caches.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: chi2, grid_params, success, fitted_params
+
+        Raises
+        ------
+        ValueError
+            If no results available or no evaluated points.
+        """
+        if self._results is not None:
+            return self._results
+
+        if self.results_history is None:
+            raise ValueError("No results available. Run grid search first.")
+
+        level_data = self.results_history[0]
+        chi2_grid = level_data['chi2_grid']
+        result_grid = level_data['result_grid']
+        metadata = level_data['metadata']
+        param_names = metadata['param_names']
+        param_arrays = metadata['param_arrays']
+
+        rows = []
+        for indices in np.ndindex(*metadata['grid_shape']):
+            result = result_grid[indices]
+            if result is None:
+                continue
+
+            row = {'chi2': chi2_grid[indices]}
+            for name in param_names:
+                row[name] = param_arrays[name][indices[param_names.index(name)]]
+            row['success'] = result.get('success', False)
+            row.update(result.get('params', {}))
+            rows.append(row)
+
+        if not rows:
+            raise ValueError("No evaluated grid points to extract.")
+
+        self._results = pd.DataFrame(rows)
+        return self._results
+
     # ----------------------------------------------------------------
     # Serialization helpers
     # ----------------------------------------------------------------
@@ -2663,10 +2716,18 @@ class BaseRectGridSearch(ABC):
             'base': self._get_base_save_state(),
             'extra': self._get_extra_save_state()
         }
-        print(filepath)
-        print(state)
+
         with open(filepath, 'w') as f:
             json.dump(state, f, indent=2)
+
+    def save_grid_points(self, filepath):
+        """Save evaluated grid points to a fixed-width format text file."""
+        df = self.results
+        with open(filepath, 'w') as f:
+            f.write(df.to_string(index=False))
+
+        if self.verbose:
+            print(f"Saved {len(df)} grid points to {filepath}")
 
     @classmethod
     def _restore_base_state(cls, instance, base_data):
@@ -2985,6 +3046,52 @@ class ParallaxGridSearch(BaseRectGridSearch):
         instance.fitter_kwargs = extra_data.get('fitter_kwargs', {})
         instance.skip_optimization = extra_data.get('skip_optimization', False)
 
+    def plot_grid_points(self, ax=None, cmap='Set1', min_chi2=None):
+        """
+        Plot grid search results as colored points.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes to plot on. If None, uses current axes.
+        cmap : str, optional
+            Colormap name for chi2 values. Default is 'viridis_r'.
+        min_chi2 : float or None, optional
+            Minimum chi2 value for calculating sigma. If None, uses the
+            minimum chi2 from this grid's results.
+
+        Returns
+        -------
+        matplotlib.collections.PathCollection
+            The scatter plot object (can be used for colorbar)
+
+        Raises
+        ------
+        ValueError
+            If no results exist (grid search hasn't been run yet)
+        """
+        # TODO: consider how this all interacts with the exising plot functions.
+
+        if self.results is None:
+            raise ValueError("No results to plot. Run grid search first.")
+
+        if ax is None:
+            ax = plt.gca()
+
+        # Extract data for plotting
+        pi_E_E = self.results['pi_E_E'].values
+        pi_E_N = self.results['pi_E_N'].values
+        chi2 = self.results['chi2'].values
+
+        # Calculate sigma (delta chi2 from minimum)
+        if min_chi2 is None:
+            min_chi2 = min(chi2)
+        sigma = [np.sqrt(c - min_chi2) for c in chi2]
+
+        # Create scatter plot
+        scatter = ax.scatter(pi_E_E, pi_E_N, c=sigma, cmap=cmap, vmin=0, vmax=9, s=50)
+
+        return scatter
 
 class BinaryGridSearch(BaseRectGridSearch):
     """

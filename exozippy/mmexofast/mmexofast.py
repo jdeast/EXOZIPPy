@@ -19,6 +19,8 @@ from scipy.special import erfcinv
 from scipy.optimize import minimize_scalar
 import numpy as np
 import os.path
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
 import MulensModel
 
@@ -67,21 +69,13 @@ class MMEXOFASTFitter:
 
     # Parallax grid search parameters
     PARALLAX_GRID_PARAMS_COARSE = {
-        'pi_E_E_min': -1.0,
-        'pi_E_E_max': 1.0,
-        'pi_E_E_step': 0.15,
-        'pi_E_N_min': -1.5,
-        'pi_E_N_max': 1.5,
-        'pi_E_N_step': 0.3
+        'pi_E_E': [-1.0, 1.0, 0.15],
+        'pi_E_N': [-1.5, 1.5, 0.3],
     }
 
     PARALLAX_GRID_PARAMS_FINE = {
-        'pi_E_E_min': -0.7,
-        'pi_E_E_max': 0.7,
-        'pi_E_E_step': 0.025,
-        'pi_E_N_min': -1.0,
-        'pi_E_N_max': 1.0,
-        'pi_E_N_step': 0.05
+        'pi_E_E': [-0.7, 0.7, 0.025],
+        'pi_E_N': [-1.0, 1.0, 0.05],
     }
 
     def __init__(
@@ -1104,6 +1098,7 @@ class MMEXOFASTFitter:
                 else:
                     self._ensure_static_point_lens(all_datasets)
 
+                state['has_parallax_fits'] = True
                 self._save_restart_state()
                 return initial_grids
 
@@ -1120,6 +1115,7 @@ class MMEXOFASTFitter:
                 # Fit parallax branches
                 self._ensure_point_lens_parallax_models(all_datasets)
 
+                state['has_parallax_fits'] = True
                 self._save_restart_state()
                 return None  # No grids created
 
@@ -1166,7 +1162,7 @@ class MMEXOFASTFitter:
                     skip_optimization=False,
                     save_results=True,
                     file_suffix='_final',
-                    refinement_params={'chi2_threshold': 9, 'min_step_size': 0.01, 'radius_steps': 3}
+                    #refinement_params={'chi2_threshold': 9, 'min_step_size': 0.01, 'radius_steps': 3}
                 )
 
                 # Extract and optimize solutions (skip if single location with existing fits)
@@ -1849,15 +1845,20 @@ class MMEXOFASTFitter:
         file_suffix : str, optional
             Suffix to add after branch name in filename. Default is ''.
         refinement_params : dict or None, optional
-            Parameters for run_with_refinement(). If None, uses defaults:
-            {'chi2_threshold': 200, 'min_step_size': 0.005, 'radius_steps': 2}
-            Keys: chi2_threshold, min_step_size, radius_steps
+            Parameters for refining the grid. If None, uses defaults:
+            {
+                'point_density_in_minimum': 3,
+                'max_refinements': 3,
+                'max_expansions': 5
+            }
+
 
         Returns
         -------
         dict
             Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
         """
+        # TODO: add refinement_params as a keyword argument in __init__
         if datasets is None:
             datasets = self.datasets
 
@@ -1867,9 +1868,9 @@ class MMEXOFASTFitter:
         # Set default refinement parameters
         if refinement_params is None:
             refinement_params = {
-                'chi2_threshold': 200,
-                'min_step_size': 0.005,
-                'radius_steps': 2
+                'point_density_in_minimum': 3,
+                'max_refinements': 3,
+                'max_expansions': 5
             }
 
         # Get reference model
@@ -1887,14 +1888,14 @@ class MMEXOFASTFitter:
 
             # Create and run grid search with refinement
             grid = mmexo.ParallaxGridSearch(
+                static_params,
                 datasets=datasets,
-                static_params=static_params,
                 grid_params=grid_params,
                 fitter_kwargs=self._get_fitter_kwargs(),
                 skip_optimization=skip_optimization,
                 verbose=self.verbose,
             )
-            grid.run_with_refinement(**refinement_params)
+            grid.run(refine=True, **refinement_params)
 
             grids[branch] = grid
 
@@ -1902,7 +1903,7 @@ class MMEXOFASTFitter:
             if self.output.config.save_grid_results and save_results:
                 filename = f"{self.output.config.file_head}{file_prefix}_piE_grid_{branch.value.lower()}{file_suffix}.txt"
                 filepath = self.output.config.base_dir / filename
-                grid.save_results(filepath, parallax_branch=branch.value)
+                grid.save_grid_points(filepath)
                 self._log(f"Saved grid results to {filepath}")
 
         # Create plot if configured
@@ -1920,15 +1921,15 @@ class MMEXOFASTFitter:
         grids : dict
             Dictionary mapping ParallaxBranch to ParallaxGridSearch objects
         """
-        import matplotlib.pyplot as plt
-        import matplotlib.gridspec as gridspec
 
         # Find global minimum chi2 for consistent coloring
         all_chi2 = []
         for grid in grids.values():
-            all_chi2.extend([r['chi2'] for r in grid.results])
+            all_chi2.extend([r['chi2_grid'] for r in grid.results_history])
 
-        min_chi2 = min(all_chi2)
+        min_chi2 = np.nanmin(all_chi2)
+        # TODO: change so it also plots the best-fit parallax solution and uses that to extract min_chi2
+        # grid is a full ParallaxGridSearch object.
 
         # Create figure with gridspec layout: 2 plots + colorbar
         fig = plt.figure(figsize=(8, 6))
@@ -1944,6 +1945,7 @@ class MMEXOFASTFitter:
 
             # Plot grid points
             scatter = grid.plot_grid_points(ax=ax, min_chi2=min_chi2)
+            #grid._plot_heatmap_2d(ax)
 
             # Formatting
             ax.set_xlabel(r'$\pi_{\rm E,E}$')
