@@ -27,3 +27,21 @@ TWOPI = 2.0 * np.pi
 SIGMA_1 = math.erf(1.0 / math.sqrt(2.0))
 SIGMA_1_LOW = 0.5 - SIGMA_1 / 2.0
 SIGMA_1_HIGH = 0.5 + SIGMA_1 / 2.0
+
+# --- 5. BULGE CONSTANTS ---
+BULGE_BAR_ANGLE = np.radians(25.)  # bar axis relative to Sun direction
+BULGE_DENSITY_X_0 = 1.590   # bulge density axis X in kpc from Zhu+17
+BULGE_DENSITY_Y_0 = 0.424   # bulge density axis Y in kpc from Zhu+17
+BULGE_DENSITY_Z_0 = 0.424   # bulge density axis Z in kpc from Zhu+17
+
+# --- 6. DISK CONSTANTS ---
+DISK_SCALE_LENGTH = 3.5  # disk density scale length from Koshimoto & Bennett 2020; in kpc
+DISK_SCALE_HEIGHT = 0.325  # disk density scale height from Koshimoto & Bennett 2020; in kpc
+DISK_ROTATION_VELOCITY = 220.  # in km/s
+
+# --- 7. SUN CONSTANTS ---
+SUN_GC_DISTANCE = 8.3
+SUN_VELOCITY_X = -12.7  # in km/s
+SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s
+SUN_VELOCITY_Z = 7.25   # in km/s
+
