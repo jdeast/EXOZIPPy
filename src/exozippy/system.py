@@ -20,17 +20,21 @@ from exozippy.components.rv_instrument.rv_instrument import RVInstrument
 from exozippy.components.factory import discover_components
 
 class System(Component):
-    def __init__(self, config):
+    def __init__(self, config, user_params=None):
 
         self.config = config
         self.name = self.config.get("name","system")
 
         # load the user parameter file
-        user_params_file = self.config.get("parameter_file",None)
-        if not os.path.exists(user_params_file):
-            raise ValueError("The user must specify a valid parameter_file")
-        with open(str(user_params_file), 'r') as f:
-            self.user_params = yaml.safe_load(f)
+        if user_params is not None:
+            self.user_params = user_params
+        else:
+            user_params_file = self.config.get("parameter_file",None)
+            if not os.path.exists(user_params_file):
+                raise ValueError("The user must specify a valid parameter_file")
+            with open(str(user_params_file), 'r') as f:
+                self.user_params = yaml.safe_load(f)
+
         self.config_manager = ConfigManager(self.user_params)
 
         self.registry = discover_components()

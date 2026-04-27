@@ -8,6 +8,8 @@ import pymc as pm
 
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from astropy.coordinates import get_body_barycentric, solar_system_ephemeris
+from astropy.time import Time
 
 from exozippy.components.component import Component
 from .utils import get_deltas
@@ -27,10 +29,9 @@ class MulensInstrument(Component):
     def prefix(self):
         return "mulensinst"
 
-    def load_data(self):
+    def load_data(self, observer_location='earth'):
         """Loads photometry and pre-calculates parallax shifts."""
-        all_times, all_mags, all_errs, inst_indices = [], [], [], []
-        all_dn, all_de = [], []
+        all_times, all_mags, all_errs, inst_indices, all_obspos = [], [], [], [], []
 
         # to initialize f_source
         self.fs_init = []
@@ -41,24 +42,39 @@ class MulensInstrument(Component):
 
             # Pre-calculate Earth position shifts (so ERFA stays out of the MCMC)
             skycoord = SkyCoord(self.coords[i], unit=(u.hourangle, u.deg))
-            deltas = get_deltas(t, self.t0_par[i], skycoord)
 
             med_mag = np.median(m)
             self.fs_init.append(10.0 ** (-0.4 * med_mag))
 
+            xyz_au = self.get_observer_position(t, observer_location=observer_location)
+
             all_times.append(t)
             all_mags.append(m)
             all_errs.append(e)
-            all_dn.append(deltas['N'])
-            all_de.append(deltas['E'])
+            all_obspos.append(xyz_au)
             inst_indices.append(np.full(len(t), i))
 
         self.time = np.concatenate(all_times).astype(float)
         self.mag = np.concatenate(all_mags).astype(float)
         self.err = np.concatenate(all_errs).astype(float)
-        self.delta_n = np.concatenate(all_dn).astype(float)
-        self.delta_e = np.concatenate(all_de).astype(float)
+        self.observer_pos = np.vstack(all_obspos).astype(float)
         self.inst_map = np.concatenate(inst_indices).astype(int)
+
+    def get_observer_position(self, time, observer_location='earth'):
+        """
+        Pre-calculates Earth's SSB position for all observation times.
+        This is done ONCE before the MCMC starts.
+        """
+        # Use JPL ephemeris for micro-arcsecond reliability
+        solar_system_ephemeris.set('jpl')
+
+        # Convert BJD_TDB times to Astropy Time objects
+        # Technically, I think we want JD_UTC here, but I don't think it matters, even at Roman precision
+        t_obj = Time(time, format='jd', scale='tdb')
+
+        # Get Earth's position in the Solar System Barycenter (SSB) frame
+        # Result is an (N, 3) array in Kilometers
+        return get_body_barycentric(observer_location, t_obj).xyz.to('au').value.T
 
     def build_parameters(self, model):
         parameters = {
@@ -89,14 +105,13 @@ class MulensInstrument(Component):
     def build_likelihood(self, model, system):
         # 1. Constants
         t = pm.ConstantData("mu_time", self.time)
-        dn = pm.ConstantData("mu_delta_n", self.delta_n)
-        de = pm.ConstantData("mu_delta_e", self.delta_e)
+        obs_pos = pm.ConstantData("obs_pos", self.observer_pos)
         obs_mag = pm.ConstantData("mu_obs_mag", self.mag)
         obs_err = pm.ConstantData("mu_obs_err", self.err)
 
         # 2. Magnification from the Lens
         # (Assuming single lens at index 0 for PSPL)
-        A = system.lens.get_magnification(t, dn, de, index=0)
+        A = system.lens.get_magnification(t, obs_pos, system, index=0)
 
         # 3. Flux Model
         fs = self.f_source.value[self.inst_map_tensor]
@@ -113,7 +128,7 @@ class MulensInstrument(Component):
         sigma = obs_err * k_scale
 
         pm.Normal(
-            "microlensing_obs",
+            f"{self.prefix}.model",
             mu=model_mag,
             sigma=sigma,
             observed=obs_mag
@@ -122,13 +137,12 @@ class MulensInstrument(Component):
     def compile_plotters(self, model, system):
         """Compile fast PyTensor functions for the lightcurve."""
         t_input = pt.vector("mu_t_input")
-        dn_input = pt.vector("mu_dn_input")
-        de_input = pt.vector("mu_de_input")
+        obs_pos_input = pt.dmatrix("obs_pos")
         inst_idx = pt.iscalar("mu_inst_idx")
 
         param_symbols = [p.value for p in system.plot_params]
 
-        A = system.lens.get_magnification(t_input, dn_input, de_input, index=0)
+        A = system.lens.get_magnification(t_input, obs_pos_input, system, index=0)
 
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
@@ -138,7 +152,7 @@ class MulensInstrument(Component):
         model_mag = -2.5 * pt.log10(safe_flux)
 
         self._compiled_mag = pytensor.function(
-            inputs=[t_input, dn_input, de_input, inst_idx] + param_symbols,
+            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
             outputs=model_mag,
             on_unused_input='ignore'
         )
@@ -154,15 +168,16 @@ class MulensInstrument(Component):
             t_data = self.time[mask]
             m_data = self.mag[mask]
             e_data = self.err[mask]
-            dn_data = self.delta_n[mask]
-            de_data = self.delta_e[mask]
+            obs_pos = self.observer_pos[mask,:]
 
             # Generate a dense, smooth time grid
             t_pretty = np.linspace(t_data.min(), t_data.max(), 2000).astype(np.float64)
 
             # Smoothly interpolate the parallax shifts (avoids slow Astropy calls)
-            dn_pretty = np.interp(t_pretty, t_data, dn_data)
-            de_pretty = np.interp(t_pretty, t_data, de_data)
+            obsx_pretty = np.interp(t_pretty, t_data, obs_pos[:,0])
+            obsy_pretty = np.interp(t_pretty, t_data, obs_pos[:,1])
+            obsz_pretty = np.interp(t_pretty, t_data, obs_pos[:,2])
+            obs_pretty = np.column_stack((obsx_pretty, obsy_pretty, obsz_pretty))
 
             # 1. Plot spaghetti models
             for point in points:
@@ -171,7 +186,7 @@ class MulensInstrument(Component):
                     else np.atleast_1d(point.get(p.label, p.initval)) for p in system.plot_params]
 
                 try:
-                    y_model = self._compiled_mag(t_pretty, dn_pretty, de_pretty, i, *param_values)
+                    y_model = self._compiled_mag(t_pretty, obs_pretty, i, *param_values)
                     alpha = 0.8 if len(points) == 1 else 0.1
                     plt.plot(t_pretty, y_model, 'r-', lw=1.5, alpha=alpha, zorder=2)
                 except Exception as e:

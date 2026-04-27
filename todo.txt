@@ -27,6 +27,13 @@
 * custom circular model logic, possibly including analytic planet.K -> planet.mass solver
 
 * add user input -> model parameter transformation layer (analogous to step2pars.pro)
+  - i think this could be implemented generally/elegantly through the physics.py recipes
+      while not parameters_updated:
+        parameters_updated = False
+        for each recipe in physics.py:
+          if not_derived and have_all_dependencies:
+            derive
+            parameters_updated = True
 
 * user linkable parameters (with symbolic math?)
 

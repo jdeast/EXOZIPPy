@@ -163,7 +163,7 @@ class RVInstrument(Component):
         sigma = pt.sqrt(pt.sqr(err) + self.jitter_variance.value[self.inst_map_tensor])
 
         pm.Normal(
-            f"rv_model",
+            f"{self.prefix}.model",
             mu=rv_model,
             sigma=sigma,
             observed=rv

@@ -77,7 +77,7 @@ orbit:
         func_name: "calc_ecc_from_vcve"
         deps: ["vcve", "omega"]
   omega:
-    unit: "rad"
+    unit: "deg"
     internal_unit: "rad"
     latex: "\\omega_*"
     description: "Argument of Periastron"

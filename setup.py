@@ -152,6 +152,7 @@ setup(
         'celerite',
         'corner',
         'MulensModel',
+        'jplephem'
         'lightkurve',
         'exoplanet-core[pymc] >= 0.3.1',
         'click'

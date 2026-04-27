@@ -414,8 +414,11 @@ def get_diagonal_curvature(model, point):
         fn = model.compile_fn(curv, on_unused_input='ignore')
 
         # fn.f.maker.inputs contains the expected variable objects
-        expected_names = [v.name for v in fn.f.maker.inputs]
-        filtered_point = {k: v for k, v in point.items() if k in expected_names}
+        #expected_names = [v.name for v in fn.f.maker.inputs]
+        #filtered_point = {k: v for k, v in point.items() if k in expected_names}
+
+        free_vars = [var.name for var in model.value_vars]
+        filtered_point = {k: point[k] for k in free_vars if k in point}
 
         # Pass the filtered dictionary as a single positional argument
         val = np.atleast_1d(fn(filtered_point))

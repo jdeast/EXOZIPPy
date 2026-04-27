@@ -97,6 +97,8 @@ class Star(CelestialBody):
 
         # microlensing model
         if hasattr(system, 'lens'):
+            parameters["ra"] = None
+            parameters["dec"] = None
             parameters["pm_ra"] = None
             parameters["pm_dec"] = None
             parameters["distance"] = None

@@ -10,6 +10,12 @@ lens.Lens.u_0:
 star.Lens.mass:
     initval: 0.5     # M_sun (Typical M-dwarf lens)
     init_scale: 0.1
+star.Lens.ra:
+    initval: 266.872583333
+    sigma: 0
+star.Lens.dec:
+    initval: 34.7265555556
+    sigma: 0
 star.Lens.distance:
     initval: 4000.0  # pc (Halfway to the bulge)
     init_scale: 500.0
@@ -33,7 +39,12 @@ star.Source.teff:
     sigma: 0.0
 star.Source.feh:
     sigma: 0.0
-
+star.Source.ra:
+    initval: 266.872583333
+    sigma: 0
+star.Source.dec:
+    initval: 34.7265555556
+    sigma: 0
 
 # --- Physical Parameters for the SOURCE (Sampled) ---
 star.Source.distance:

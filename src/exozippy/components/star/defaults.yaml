@@ -129,7 +129,7 @@ star:
     lower: 0.0
     upper: 360.0
     unit: "deg"
-    internal_unit: "deg"
+    internal_unit: "rad"
     latex: "\\alpha_{ICRS}"
     description: "Right Ascension"
   dec:
@@ -138,7 +138,7 @@ star:
     lower: -90
     upper: 90.0
     unit: "deg"
-    internal_unit: "deg"
+    internal_unit: "rad"
     latex: "\\delta_{ICRS}"
     description: "Declination"
   rv:
