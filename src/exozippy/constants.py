@@ -30,14 +30,23 @@ SIGMA_1_HIGH = 0.5 + SIGMA_1 / 2.0
 
 # --- 5. BULGE CONSTANTS ---
 BULGE_BAR_ANGLE = np.radians(25.)  # bar axis relative to Sun direction
-BULGE_DENSITY_X_0 = 1.590   # bulge density axis X in kpc from Zhu+17
-BULGE_DENSITY_Y_0 = 0.424   # bulge density axis Y in kpc from Zhu+17
-BULGE_DENSITY_Z_0 = 0.424   # bulge density axis Z in kpc from Zhu+17
+BULGE_DENSITY_X_0 = 1.590  # in kpc, bulge density axis X in kpc from Zhu+17
+BULGE_DENSITY_Y_0 = 0.424  # in kpc, bulge density axis Y in kpc from Zhu+17
+BULGE_DENSITY_Z_0 = 0.424  # in kpc, bulge density axis Z in kpc from Zhu+17
+BULGE_GAMMA = -2. # see Koshimoto and Bennett 2020 Sec. 3.4
+BULGE_VELOCITY_SIGMA_1 = 120.  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
+BULGE_VELOCITY_SIGMA_2 = 100.  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
+BULGE_VELOCITY_SIGMA_3 = 80.  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
+BULGE_ROTATION_ANGULAR_VELOCITY = 50. # in km/s/kpc, basedon on Koshimoto & Bennett 2020 tab. 1
 
 # --- 6. DISK CONSTANTS ---
 DISK_SCALE_LENGTH = 3.5  # disk density scale length from Koshimoto & Bennett 2020; in kpc
 DISK_SCALE_HEIGHT = 0.325  # disk density scale height from Koshimoto & Bennett 2020; in kpc
 DISK_ROTATION_VELOCITY = 220.  # in km/s
+DISK_VELOCITY_SIGMA_U = 30.  # in km/s, rough guess
+DISK_VELOCITY_SIGMA_V = 30.  # in km/s, rough guess
+DISK_VELOCITY_SIGMA_W = 30.  # in km/s, rough guess
+IMF_SLOPE = 1.3  # Kroupa IMF for the mass range typical for lenses.
 
 # --- 7. SUN CONSTANTS ---
 SUN_GC_DISTANCE = 8.3

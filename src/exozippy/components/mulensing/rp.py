@@ -1,8 +1,13 @@
 import numpy as np
 
-from ...constants import (SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, 
-                         DISK_SCALE_LENGTH, DISK_SCALE_HEIGHT, DISK_ROTATION_VELOCITY,
-                         SUN_VELOCITY_X, SUN_VELOCITY_Y, SUN_VELOCITY_Z)
+from ...constants import (
+    KAPPA, SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA
+    DISK_SCALE_LENGTH, DISK_SCALE_HEIGHT, DISK_ROTATION_VELOCITY, IMF_SLOPE,
+    DISK_VELOCITY_SIGMA_U, DISK_VELOCITY_SIGMA_V, DISK_VELOCITY_SIGMA_W,
+    BULGE_VELOCITY_SIGMA_1, BULGE_VELOCITY_SIGMA_2, BULGE_VELOCITY_SIGMA_3, BULGE_ROTATION_ANGULAR_VELOCITY,
+    SUN_VELOCITY_X, SUN_VELOCITY_Y, SUN_VELOCITY_Z)
+
+BULGE_ROTATION_ANGULAR_VELOCITY
 
 # NOTE: For simplicity we assume Sun at z=0.
 
@@ -30,6 +35,12 @@ class MicrolensingEvent(object):
         self._bulge_z_0_4 = BULGE_DENSITY_Z_0**4
         self._disk_const_1 = -1. / DISK_SCALE_LENGTH
         self._disk_const_2 = -self._b_sign / DISK_SCALE_HEIGHT
+        self._disk_const_velocity_1 = -0.5 / DISK_VELOCITY_SIGMA_U**2
+        self._disk_const_velocity_2 = -0.5 / DISK_VELOCITY_SIGMA_V**2
+        self._disk_const_velocity_3 = -0.5 / DISK_VELOCITY_SIGMA_W**2
+        self._bulge_const_velocity_1 = -0.5 / BULGE_VELOCITY_SIGMA_1**2
+        self._bulge_const_velocity_2 = -0.5 / BULGE_VELOCITY_SIGMA_2**2
+        self._bulge_const_velocity_3 = -0.5 / BULGE_VELOCITY_SIGMA_3**2
 
     def _get_galactic_xyz(self, distance):
         """Calculate x,y,z coordinates for given distance."""
@@ -37,6 +48,10 @@ class MicrolensingEvent(object):
         y = SUN_GC_DISTANCE - distance * self._sinl_cosb
         z = distance * self._sinb
         return x, y, z
+
+    def _get_GC_distance(self, x, y):
+        """calculate distance from Galactic center"""
+        return np.sqrt(x**2 + y**2)
 
     def _get_bulge_coords(self, x, y, z):
         """rotate coordinates from standard to aligned with the bulge"""
@@ -56,19 +71,72 @@ class MicrolensingEvent(object):
         r_s_2 = np.sqrt((x_1 + y_1)**2 + z_1)  # r_s**2 in Dwek+95 notation.
         return np.exp(-0.5 * r_s_2)
 
-    def _get_relative_lens_density(self, x_l, y_l, z_l):
+    def _get_relative_lens_density(self, r_l, z_l):
         """Relative lens density"""
-        radius_l = np.sqrt(x_l**2 + y_l**2)
-        return self._get_relative_disk_density(radius_l, z_l)
+        return self._get_relative_disk_density(r_l, z_l)
 
     def _get_relative_disk_density(self, radius, z):
         """Relative disk density"""
         scaled = self._disk_const_1 * radius + self._disk_const_2 * z
         return np.exp(scaled)
 
-    def _get_unormalized_theta_E(self, d_s, d_l, m_l):
-        """caclulate theta_E ignoring kappa constant"""
-        return np.sqrt(m_l * (1./d_l - 1./d_s))
+    def _get_theta_E(self, d_s, d_l, m_l):
+        """caclulate theta_E in mas"""
+        return np.sqrt(KAPPA * m_l * (1./d_l - 1./d_s))
+
+    def _get_weight_lens_velocity(self, x_l, y_l, r_l, v_l_x, v_l_y, v_l_z):
+        """
+        Calculate weight of lens velocity.
+        We assume lens is in the disk.
+        """
+        (v_r_l, v_phi_l) = self._get_polar_velocity(x_l, y_l, r_l, v_l_x, v_l_y)
+        out = self._disk_const_velocity_1 * (v_r_l - DISK_ROTATION_VELOCITY)**2
+        out += self._disk_const_velocity_2 * v_phi_l**2
+        out += self._disk_const_velocity_3 * v_l_z**2
+        return np.exp(out)
+
+    def _get_polar_velocity(self, x, y, r, v_x, v_y):
+        """transform 2D cartersian vector to polar frame"""
+        cos_phi = x / r
+        sin_phi = y / r
+        v_r = v_y * sin_phi + v_x * cos_phi
+        v_phi = v_y * cos_phi - v_x * sin_phi
+        return (v_r, v_phi)
+
+    def _get_weight_source_velocity(self, x_s, y_s, r_s, v_s_x, v_s_y, v_s_z):
+        """
+        Calculate weight of source velocity.
+        We assume lens is in the bulge with rotation + sigma kinematics.
+        """
+        (v_r_s, v_phi_s) = self._get_polar_velocity(x_s, y_s, r_s, v_s_x, v_s_y)
+        bulge_rotation = BULGE_ROTATION_ANGULAR_VELOCITY * r_s
+        out = self._bulge_const_velocity_1 * (v_r_s - bulge_rotation)**2
+        out += self._bulge_const_velocity_2 * v_phi_s**2
+        out += self._bulge_const_velocity_3 * v_s_z**2
+        return np.exp(out)
+
+    def _get_source_distance_weight(self, d_s):
+        """
+        The further the source, the fainter it is; various scalings are used in literature.
+        See Koshimoto and Bennett 2020.
+        """
+        return d_s**BULGE_GAMMA
+
+    def _get_lens_mass_weight(self, m_l):
+        """
+        Calculate how mass function affects the number of potential lenses.
+        """
+        return m_l**IMF_SLOPE
+
+    def _get_mu_rel(self, d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
+        """
+        Calculate relative lens-source proper motion in (l,b).
+        """
+        (mu_l_l, mu_l_b) = self._get_proper_motion(d_l, v_l_x, v_l_y, v_l_z)
+        (mu_s_l, mu_s_b) = self._get_proper_motion(d_l, v_s_x, v_s_y, v_s_z)
+        mu_rel_l = mu_l_l - mu_s_l
+        mu_rel_b = mu_l_b - mu_s_b
+        return (mu_rel_l, mu_rel_b)
 
     def get_relative_weight(self, d_s, d_l, m_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
         """
@@ -86,15 +154,18 @@ class MicrolensingEvent(object):
                 Source velocity in km/s
         """
         (x_s, y_s, z_s) = self._get_galactic_xyz(d_s)
+        r_s = self._get_GC_distance(x_s, y_s)
         (x_l, y_l, z_l) = self._get_galactic_xyz(d_l)
+        r_l = self._get_GC_distance(x_l, y_l)
         source_density = self._get_relative_bulge_density(x_s, y_s, z_s)
-        lens_density = self._get_relative_lens_density(x_l, y_l, z_l)
-        rel_theta_E = self._get_unormalized_theta_E(d_s, d_l, m_l)
-        weight_v_l = self._get_weight_lens_velocity(v_l_x, v_l_y, v_l_z)
-        # weight_v_s = self._get_weight_source_velocity(v_s_x, v_s_y, v_s_z)
-        # mu_rel = self._get_mu_rel(d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z)
-        # m_l_weight = self._get_lens_mass_weight(m_l)
-        # d_s_weight = self._get_source_distance_weight(d_s)
+        lens_density = self._get_relative_lens_density(r_l, z_l)
+        theta_E = self._get_theta_E(d_s, d_l, m_l)
+        weight_v_l = self._get_weight_lens_velocity(x_l, y_l, r_l, v_l_x, v_l_y, v_l_z)
+        weight_v_s = self._get_weight_source_velocity(x_s, y_s, r_s, v_s_x, v_s_y, v_s_z)
+        (mu_rel_l, mu_rel_b) = self._get_mu_rel(d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z)
+        mu_rel = np.sqrt(mu_rel_l**2 + mu_rel_b**2)
+        m_l_weight = self._get_lens_mass_weight(m_l)
+        d_s_weight = self._get_source_distance_weight(d_s)
 
         out = mu_rel * rel_theta_E
         out *= weight_v_s * source_density * d_s_weight
