@@ -1,13 +1,12 @@
 import numpy as np
 
 from ...constants import (
-    KAPPA, SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA
+    KAPPA, FROM_V_D_TO_PM,
+    SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA
     DISK_SCALE_LENGTH, DISK_SCALE_HEIGHT, DISK_ROTATION_VELOCITY, IMF_SLOPE,
     DISK_VELOCITY_SIGMA_U, DISK_VELOCITY_SIGMA_V, DISK_VELOCITY_SIGMA_W,
     BULGE_VELOCITY_SIGMA_1, BULGE_VELOCITY_SIGMA_2, BULGE_VELOCITY_SIGMA_3, BULGE_ROTATION_ANGULAR_VELOCITY,
     SUN_VELOCITY_X, SUN_VELOCITY_Y, SUN_VELOCITY_Z)
-
-BULGE_ROTATION_ANGULAR_VELOCITY
 
 # NOTE: For simplicity we assume Sun at z=0.
 
@@ -20,12 +19,21 @@ class MicrolensingEvent(object):
         b: *float*
             Galactic latitude in degrees.
     """
-    def __init__(self, l=0., b=0.):
+    def __init__(self, l=0., b=0., Earth_velocity_xyz=[0., 0., 0.]):
         self._l_deg = l
         self._b_deg = b
-        self._cosl_cosb = np.cos(np.radians(l)) * np.cos(np.radians(b))
-        self._sinl_cosb = np.sin(np.radians(l)) * np.cos(np.radians(b))
+        self._sun_earth_velocity_x = SUN_VELOCITY_X - Earth_velocity_xyz[0]
+        self._sun_earth_velocity_y = SUN_VELOCITY_Y - Earth_velocity_xyz[1]
+        self._sun_earth_velocity_z = SUN_VELOCITY_Z - Earth_velocity_xyz[2]
+
+        self._sinl = np.sin(np.radians(l))
+        self._cosl = np.cos(np.radians(l))
         self._sinb = np.sin(np.radians(b))
+        self._cosb = np.cos(np.radians(b))
+        self._cosl_cosb = np.cos(np.radians(l)) * np.cos(np.radians(b))
+        self._cosl_sinb = np.cos(np.radians(l)) * np.sin(np.radians(b))
+        self._sinl_cosb = np.sin(np.radians(l)) * np.cos(np.radians(b))
+        self._sinl_cosb = np.sin(np.radians(l)) * np.sin(np.radians(b))
         self._b_sign = np.sign(b)  # Defined in order to caclulate |z| without if statement.
 
         self._cos_bar_angle = np.cos(BULGE_BAR_ANGLE)
@@ -128,15 +136,27 @@ class MicrolensingEvent(object):
         """
         return m_l**IMF_SLOPE
 
-    def _get_mu_rel(self, d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
+    def _get_mu_rel_geo_lb(self, d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
         """
-        Calculate relative lens-source proper motion in (l,b).
+        Calculate relative lens-source proper motion in geocentric frame and galactic (l,b) coordinates.
         """
-        (mu_l_l, mu_l_b) = self._get_proper_motion(d_l, v_l_x, v_l_y, v_l_z)
-        (mu_s_l, mu_s_b) = self._get_proper_motion(d_l, v_s_x, v_s_y, v_s_z)
+        (mu_l_l, mu_l_b) = self._get_proper_motion_geo_lb(d_l, v_l_x, v_l_y, v_l_z)
+        (mu_s_l, mu_s_b) = self._get_proper_motion_geo_lb(d_s, v_s_x, v_s_y, v_s_z)
         mu_rel_l = mu_l_l - mu_s_l
         mu_rel_b = mu_l_b - mu_s_b
         return (mu_rel_l, mu_rel_b)
+
+    def _get_proper_motion_geo_lb(self, distance, v_x, v_y, v_z):
+        """
+        Calculate geocentric proper motion in galactic l,b coordinates [mas/yr].
+        """
+        delta_v_x = v_x - self._sun_earth_velocity_x
+        delta_v_y = v_y - self._sun_earth_velocity_y
+        delta_v_z = v_z - self._sun_earth_velocity_z
+        v_l = delta_v_x * self._sinl + delta_v_y * self._cosl
+        v_b = delta_v_x * self._cosl_sinb + delta_v_y * self._sinl_sinb + delta_v_z * self._cosb
+        factor = FROM_V_D_TO_PM / distance
+        return (factor * v_l, factor * v_b)
 
     def get_relative_weight(self, d_s, d_l, m_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
         """
@@ -162,7 +182,7 @@ class MicrolensingEvent(object):
         theta_E = self._get_theta_E(d_s, d_l, m_l)
         weight_v_l = self._get_weight_lens_velocity(x_l, y_l, r_l, v_l_x, v_l_y, v_l_z)
         weight_v_s = self._get_weight_source_velocity(x_s, y_s, r_s, v_s_x, v_s_y, v_s_z)
-        (mu_rel_l, mu_rel_b) = self._get_mu_rel(d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z)
+        (mu_rel_l, mu_rel_b) = self._get_mu_rel_geo_lb(d_s, d_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z)
         mu_rel = np.sqrt(mu_rel_l**2 + mu_rel_b**2)
         m_l_weight = self._get_lens_mass_weight(m_l)
         d_s_weight = self._get_source_distance_weight(d_s)
