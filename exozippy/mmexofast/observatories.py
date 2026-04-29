@@ -73,7 +73,7 @@ def get_telescope_band_from_filename(filename):
 # ============================================================================
 # Observatory Class and Registry
 # ============================================================================
-F
+
 class Observatory:
     """
     Container for observatory-specific MulensData configuration.

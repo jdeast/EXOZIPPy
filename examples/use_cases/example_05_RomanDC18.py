@@ -9,15 +9,19 @@ import exozippy
 from DC18_classes import dir_, TestDataSet
 
 
+base_dir = os.path.join(
+            exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output')
+
 def fit_lc(lc_num, verbose=False):
     data = TestDataSet(lc_num)
 
-    fitter = exozippy.mmexofast.fit(
+    fitter = exozippy.mmexofast.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         verbose=verbose,
         # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
-        log_file=os.path.join(
-            exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output', 'WFIRST.{0:03}.log'.format(lc_num))
+        output_config=exozippy.mmexofast.OutputConfig(
+            base_dir=base_dir, file_head='new_WFIRST.{0:03}.log'.format(lc_num), save_log=True,
+            save_latex_tables=True)
     )
 
     return fitter.all_fit_results
@@ -31,7 +35,7 @@ def evaluate_results(lc_num):
     pass
 
 
-files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
+files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.00*.txt'))
 lc_nums = []
 for file_ in files:
     elements = file_.split('.')
