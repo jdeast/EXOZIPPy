@@ -11,6 +11,10 @@ LOGG_CONST = np.log10(const.GM_sun.cgs.value/const.R_sun.cgs.value**2) # cgs
 LUM_CONST = 1.0/((const.L_sun/const.sigma_sb/const.R_sun**2).cgs.value/(4.0*np.pi)) # K^-4
 FBOL_CONST = 1.0/(4.0 * np.pi * (const.pc/const.R_sun)** 2.0)
 DENSITY_CONST = 3.0 / (4.0 * np.pi)
+FROM_PM_D_TO_V = u.au.to(u.km) / u.yr.to(u.s) # = 4.74, for unit conversion:
+# multiply it by proper motion [mas/yr] and distance [kpc] to get velocity [km/s]
+FROM_V_D_TO_PM = 1. / FROM_PM_D_TO_V  # = 0.211 - opposite unit conversion:
+# multiply it by velocity [km/s] and divide by distance [kpc] to get proper motion [mas/yr]
 
 # --- 4. MICROLENSING CONSTANTS ---
 # Kappa: 4G / (c^2 * au) in units of mas / M_sun
