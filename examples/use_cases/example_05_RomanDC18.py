@@ -12,6 +12,7 @@ from DC18_classes import dir_, TestDataSet
 base_dir = os.path.join(
             exozippy.MODULE_PATH, 'EXOZIPPy', 'DC18Test', 'temp_output')
 
+
 def fit_lc(lc_num, verbose=False):
     data = TestDataSet(lc_num)
 
