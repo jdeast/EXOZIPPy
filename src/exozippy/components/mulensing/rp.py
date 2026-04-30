@@ -1,12 +1,15 @@
 import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy import units as u
 
 from ...constants import (
     KAPPA, FROM_V_D_TO_PM,
-    SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA
+    SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0, BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA,
     DISK_SCALE_LENGTH, DISK_SCALE_HEIGHT, DISK_ROTATION_VELOCITY, IMF_SLOPE,
     DISK_VELOCITY_SIGMA_U, DISK_VELOCITY_SIGMA_V, DISK_VELOCITY_SIGMA_W,
     BULGE_VELOCITY_SIGMA_1, BULGE_VELOCITY_SIGMA_2, BULGE_VELOCITY_SIGMA_3, BULGE_ROTATION_ANGULAR_VELOCITY,
     SUN_VELOCITY_X, SUN_VELOCITY_Y, SUN_VELOCITY_Z)
+from utils import _velocity_of_earth, _calculate_projected
 
 # NOTE: For simplicity we assume Sun at z=0.
 
@@ -19,22 +22,9 @@ class MicrolensingEvent(object):
         b: *float*
             Galactic latitude in degrees.
     """
-    def __init__(self, l=0., b=0., Earth_velocity_xyz=[0., 0., 0.]):
-        self._l_deg = l
-        self._b_deg = b
-        self._sun_earth_velocity_x = SUN_VELOCITY_X - Earth_velocity_xyz[0]
-        self._sun_earth_velocity_y = SUN_VELOCITY_Y - Earth_velocity_xyz[1]
-        self._sun_earth_velocity_z = SUN_VELOCITY_Z - Earth_velocity_xyz[2]
-
-        self._sinl = np.sin(np.radians(l))
-        self._cosl = np.cos(np.radians(l))
-        self._sinb = np.sin(np.radians(b))
-        self._cosb = np.cos(np.radians(b))
-        self._cosl_cosb = np.cos(np.radians(l)) * np.cos(np.radians(b))
-        self._cosl_sinb = np.cos(np.radians(l)) * np.sin(np.radians(b))
-        self._sinl_cosb = np.sin(np.radians(l)) * np.cos(np.radians(b))
-        self._sinl_cosb = np.sin(np.radians(l)) * np.sin(np.radians(b))
-        self._b_sign = np.sign(b)  # Defined in order to caclulate |z| without if statement.
+    def __init__(self, t_0_par, ra_deg, dec_deg):
+        self._set_galactic_coords(ra_deg, dec_deg)
+        self._set_velocities(t_0_par)
 
         self._cos_bar_angle = np.cos(BULGE_BAR_ANGLE)
         self._sin_bar_angle = np.sin(BULGE_BAR_ANGLE)
@@ -49,6 +39,39 @@ class MicrolensingEvent(object):
         self._bulge_const_velocity_1 = -0.5 / BULGE_VELOCITY_SIGMA_1**2
         self._bulge_const_velocity_2 = -0.5 / BULGE_VELOCITY_SIGMA_2**2
         self._bulge_const_velocity_3 = -0.5 / BULGE_VELOCITY_SIGMA_3**2
+
+    def _set_galactic_coords(self, ra_deg, dec_deg):
+        """calculate galactic coordinates and other similar"""
+        self._skycoord = SkyCoord(ra=ra_deg, dec=dec_deg, unit='deg')
+        self._l_deg = self._skycoord.galactic.l.to(u.deg).value
+        if self._l_deg > 180.:
+            self._l_deg -= 360.
+        self._b_deg = self._skycoord.galactic.b.to(u.deg).value
+
+        self._sinl = np.sin(np.radians(self._l_deg))
+        self._cosl = np.cos(np.radians(self._l_deg))
+        self._sinb = np.sin(np.radians(self._b_deg))
+        self._cosb = np.cos(np.radians(self._b_deg))
+        self._cosl_cosb = np.cos(np.radians(self._l_deg)) * np.cos(np.radians(self._b_deg))
+        self._cosl_sinb = np.cos(np.radians(self._l_deg)) * np.sin(np.radians(self._b_deg))
+        self._sinl_cosb = np.sin(np.radians(self._l_deg)) * np.cos(np.radians(self._b_deg))
+        self._sinl_sinb = np.sin(np.radians(self._l_deg)) * np.sin(np.radians(self._b_deg))
+        self._b_sign = np.sign(self._b_deg)  # Defined in order to caclulate |z| without if statement.
+
+        D_ra_G = np.radians(ra_deg - 192.85938)  # based on 1306.2945
+        dec_G = np.radians(27.12825)
+        self._C_1 = np.sin(dec_G) * np.cos(np.radians(dec_deg)) - np.cos(dec_G) * np.sin(np.radians(dec_deg)) * np.cos(D_ra_G)
+        self._C_2 = np.cos(dec_G) * np.sin(D_ra_G)
+
+    def _set_velocities(self, t_0_par):
+        "calculate velocity at t_0_par in km/s"
+        velocity = _velocity_of_earth(t_0_par)
+        velocity *= 1731.45683  # This scales AU/day to km/s.
+        (projected_N, projected_E) = _calculate_projected(self._skycoord)
+        earth_velocity_N = np.dot(velocity, projected_N)
+        earth_velocity_E = np.dot(velocity, projected_E)
+        self._earth_velocity_l = (self._C_1 * earth_velocity_N + self._C_2 * earth_velocity_E) / self._cosb
+        self._earth_velocity_b = (-self._C_2 * earth_velocity_N + self._C_1 * earth_velocity_E) / self._cosb
 
     def _get_galactic_xyz(self, distance):
         """Calculate x,y,z coordinates for given distance."""
@@ -150,13 +173,15 @@ class MicrolensingEvent(object):
         """
         Calculate geocentric proper motion in galactic l,b coordinates [mas/yr].
         """
-        delta_v_x = v_x - self._sun_earth_velocity_x
-        delta_v_y = v_y - self._sun_earth_velocity_y
-        delta_v_z = v_z - self._sun_earth_velocity_z
-        v_l = delta_v_x * self._sinl + delta_v_y * self._cosl
-        v_b = delta_v_x * self._cosl_sinb + delta_v_y * self._sinl_sinb + delta_v_z * self._cosb
+        delta_v_x = v_x - SUN_VELOCITY_X
+        delta_v_y = v_y - SUN_VELOCITY_Y
+        delta_v_z = v_z - SUN_VELOCITY_Z
+        v_l_bary = delta_v_x * self._sinl + delta_v_y * self._cosl
+        v_b_bary = delta_v_x * self._cosl_sinb + delta_v_y * self._sinl_sinb + delta_v_z * self._cosb
+        v_l_geo = v_l_bary + self._earth_velocity_l
+        v_b_geo = v_b_bary + self._earth_velocity_b
         factor = FROM_V_D_TO_PM / distance
-        return (factor * v_l, factor * v_b)
+        return (factor * v_l_geo, factor * v_b_geo)
 
     def get_relative_weight(self, d_s, d_l, m_l, v_l_x, v_l_y, v_l_z, v_s_x, v_s_y, v_s_z):
         """
@@ -187,14 +212,14 @@ class MicrolensingEvent(object):
         m_l_weight = self._get_lens_mass_weight(m_l)
         d_s_weight = self._get_source_distance_weight(d_s)
 
-        out = mu_rel * rel_theta_E
+        out = mu_rel * theta_E
         out *= weight_v_s * source_density * d_s_weight
         out *= weight_v_l * lens_density * m_l_weight
         return out
 
 
 if __name__ == '__main__':
-    event = MicrolensingEvent(l=1.02, b=-3.92)  # i.e., Baade's window
+    event = MicrolensingEvent(t_0_par=2456789.0, ra_deg=270, dec_deg=-28.)
     kwargs = dict(d_s=8, d_l=5, m_l=0.3, v_l_x=100., v_l_y=100., v_l_z=100., v_s_x=100., v_s_y=100., v_s_z=100.)
     weight = event.get_relative_weight(**kwargs)
     print(weight)
