@@ -21,7 +21,7 @@ def fit_lc(lc_num, verbose=False):
         verbose=verbose,
         # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
         output_config=exozippy.mmexofast.OutputConfig(
-            base_dir=base_dir, file_head='new_WFIRST.{0:03}'.format(lc_num), save_log=True,
+            base_dir=base_dir, file_head='WFIRST.{0:03}'.format(lc_num), save_log=True,
             save_latex_tables=True)
     )
 

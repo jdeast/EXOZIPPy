@@ -600,10 +600,6 @@ class WidePlanetFitter(AnomalyFitter):
     If ``parameters_to_fit`` is provided, ``sigmas`` must also be provided,
     otherwise an ``AttributeError`` is raised.
 
-    There is an inconsistency in ``__init__``: the check ``'ndim' not in
-    emcee_settings`` should likely be ``'n_dim'`` to match the key that is
-    subsequently set.
-
     All other parameters are inherited from ``AnomalyFitter`` and
     ``MulensFitter``.
 
@@ -628,7 +624,7 @@ class WidePlanetFitter(AnomalyFitter):
             if key not in list(emcee_settings.keys()):
                 emcee_settings[key] = AnomalyFitter.default_emcee_settings[key]
 
-        if 'ndim' not in list(emcee_settings.keys()):
+        if 'n_dim' not in list(emcee_settings.keys()):
             emcee_settings['n_dim'] = len(self.parameters_to_fit)
 
         self.emcee_settings = emcee_settings
