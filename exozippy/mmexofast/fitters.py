@@ -198,7 +198,7 @@ class SFitFitter(MulensFitter):
 
 
 class AnomalyFitter(MulensFitter):
-    default_emcee_settings = {}
+    default_emcee_settings = {'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000}
 
     def __init__(self, datasets=None, anomaly_lc_params=None, **kwargs):
         super().__init__(**kwargs)
@@ -370,9 +370,7 @@ class WidePlanetFitter(AnomalyFitter):
             sampler = emcee.EnsembleSampler(
                 self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob)
 
-        sampler.run_mcmc(
-            starting_vector, self.emcee_settings['n_steps'],
-            progress=self.emcee_settings['progress'])
+        sampler.run_mcmc(starting_vector, self.emcee_settings['n_steps'])
 
         # Remove burn-in samples and reshape:
         samples = sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape((-1, self.emcee_settings['n_dim']))

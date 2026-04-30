@@ -21,7 +21,7 @@ def fit_lc(lc_num, verbose=False):
         verbose=verbose,
         # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
         output_config=exozippy.mmexofast.OutputConfig(
-            base_dir=base_dir, file_head='new_WFIRST.{0:03}.log'.format(lc_num), save_log=True,
+            base_dir=base_dir, file_head='new_WFIRST.{0:03}'.format(lc_num), save_log=True,
             save_latex_tables=True)
     )
 
@@ -36,13 +36,17 @@ def evaluate_results(lc_num):
     pass
 
 
-files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.00*.txt'))
+files = glob.glob(os.path.join(dir_, 'n2018*.W149.*.txt'))
 lc_nums = []
 for file_ in files:
     elements = file_.split('.')
     lc_nums.append(int(elements[-2]))
 
 # lc_nums = [4]  # favorite test case 004
+# lcs for wide planets:
+wide_planets = [107, 131, 152, 194, 208, 214, 217, 226]
+
+lc_nums = wide_planets
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:

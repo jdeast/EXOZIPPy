@@ -13,7 +13,6 @@ class PlanetFitInfo():
             lines = file_.readlines()
 
         self.lines = lines
-        #self.lc_num = int(self.lines[0].split()[-1][:-3])
         self.lc_num = int(os.path.basename(filename).split('.')[1])
 
         self._data = None
@@ -25,19 +24,44 @@ class PlanetFitInfo():
         self._initial_planet_params = None
         self._mag_methods = None
 
-    def extract_params(self, line, label_len=3):
+    def extract_params(self, line):
+        """Extract key-value pairs from a dict literal embedded in a log line.
+
+        Locates the opening '{' automatically, so this works for both the old
+        plain-text format and the new timestamp-prefixed logging format.
+        """
         elements = line.split()
         params = {}
-        for i in range(label_len, len(elements), 2):
-            key = elements[i].strip("{:'")
-            if '<' in elements[i+1]:
-                value = float(elements[i + 2].strip(',}'))
-            elif '>' in elements[i+1]:
+
+        # Find the element that opens the dict literal
+        start_idx = None
+        for i, elem in enumerate(elements):
+            if elem.startswith('{'):
+                start_idx = i
+                break
+
+        if start_idx is None:
+            return params
+
+        for i in range(start_idx, len(elements), 2):
+            key = elements[i].strip("{:'\"")
+            if not key:
+                continue
+            if i + 1 >= len(elements):
+                break
+            if '<' in elements[i + 1]:
+                if i + 2 < len(elements):
+                    value = float(elements[i + 2].strip(',}'))
+                else:
+                    continue
+            elif '>' in elements[i + 1]:
                 continue
             else:
-                value = float(elements[i+1].strip(',}'))
-
-            params[key] = value
+                try:
+                    value = float(elements[i + 1].strip(',}'))
+                    params[key] = value
+                except ValueError:
+                    pass
 
         return params
 
@@ -45,14 +69,20 @@ class PlanetFitInfo():
     def mag_methods(self):
         if self._mag_methods is None:
             for line in self.lines:
-                if 'mag_methods' in line:
-                    elements = line.split()
+                # Handle both "mag methods" (new) and "mag_methods" (old)
+                if 'mag methods' in line or 'mag_methods' in line:
+                    bracket_pos = line.find('[')
+                    if bracket_pos == -1:
+                        continue
                     mag_methods = []
-                    for i, element in enumerate(elements[1:]):
-                        if i % 2 == 1:
-                            mag_methods.append('point_source')
-                        else:
-                            mag_methods.append(float(element.strip('[],')))
+                    for element in line[bracket_pos:].split():
+                        cleaned = element.strip("[],'\"")
+                        if not cleaned:
+                            continue
+                        try:
+                            mag_methods.append(float(cleaned))
+                        except ValueError:
+                            mag_methods.append(cleaned)
 
                     self._mag_methods = mag_methods
 
@@ -62,8 +92,9 @@ class PlanetFitInfo():
     def initial_pspl_guess(self):
         if self._initial_pspl_guess is None:
             for line in self.lines:
+                # Matches both "Initial PSPL" (old) and "Initial PSPL Estimate" (new)
                 if 'Initial PSPL' in line:
-                    self._initial_pspl_guess = self.extract_params(line, label_len=2)
+                    self._initial_pspl_guess = self.extract_params(line)
 
         return self._initial_pspl_guess
 
@@ -71,8 +102,11 @@ class PlanetFitInfo():
     def sfit_params(self):
         if self._sfit_params is None:
             for line in self.lines:
-                if 'SFIT params' in line:
-                    self._sfit_params = self.extract_params(line, label_len=2)
+                # "SFIT params" (old) -> "Initial SFit" (new)
+                if 'Initial SFit' in line:
+                    params = self.extract_params(line)
+                    params.pop('chi2', None)  # chi2 is now included but isn't a model param
+                    self._sfit_params = params
 
         return self._sfit_params
 
@@ -81,7 +115,7 @@ class PlanetFitInfo():
         if self._revised_sfit_params is None:
             for line in self.lines:
                 if 'Revised SFIT' in line:
-                    self._revised_sfit_params = self.extract_params(line, label_len=2)
+                    self._revised_sfit_params = self.extract_params(line)
 
         return self._revised_sfit_params
 
@@ -89,6 +123,7 @@ class PlanetFitInfo():
     def initial_planet_params(self):
         if self._initial_planet_params is None:
             for line in self.lines:
+                # Matches both "Initial 2L1S params" (old) and "Initial 2L1S Wide Model" (new)
                 if 'Initial 2L1S' in line:
                     self._initial_planet_params = self.extract_params(line)
 
@@ -99,7 +134,7 @@ class PlanetFitInfo():
         if self._best_af_grid_point is None:
             for line in self.lines:
                 if 'Best AF' in line:
-                    self._best_af_grid_point = self.extract_params(line, label_len=3)
+                    self._best_af_grid_point = self.extract_params(line)
 
         return self._best_af_grid_point
 
@@ -145,7 +180,7 @@ class PlanetFitInfo():
 
             if self.best_af_grid_point is not None:
                 self._fitter.best_af_grid_point = self.best_af_grid_point
-                self._fitter.set_datasets_with_anomaly_masked(mask_type='t_eff')
+                #self._fitter.set_datasets_with_anomaly_masked(mask_type='t_eff')
 
         return self._fitter
 
@@ -153,9 +188,11 @@ class PlanetFitInfo():
         if self.best_af_grid_point is not None:
             plt.axvline(self.best_af_grid_point['t_0'] - 2450000., color='black', linestyle=':')
             plt.axvline(
-                self.best_af_grid_point['t_0'] - self.best_af_grid_point['t_eff'] - 2450000., color='black', linestyle='--')
+                self.best_af_grid_point['t_0'] - self.best_af_grid_point['t_eff'] - 2450000.,
+                color='black', linestyle='--')
             plt.axvline(
-                self.best_af_grid_point['t_0'] + self.best_af_grid_point['t_eff'] - 2450000., color='black', linestyle='--')
+                self.best_af_grid_point['t_0'] + self.best_af_grid_point['t_eff'] - 2450000.,
+                color='black', linestyle='--')
 
     def make_plot(self, event, n_tE=5):
         plt.figure(figsize=(10, 6))
@@ -203,7 +240,7 @@ class PlanetFitInfo():
 if __name__ == '__main__':
     import os.path
 
-    logs = glob.glob(os.path.join('temp_output', 'WFIRST*.log'))
+    logs = glob.glob(os.path.join('temp_output', 'WFIRST.*.log'))
     for file in np.sort(logs):
         print(os.path.basename(file))
         planet = PlanetFitInfo(file)
