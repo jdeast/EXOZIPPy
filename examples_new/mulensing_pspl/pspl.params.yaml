@@ -1,15 +1,22 @@
 # --- Integration Constants (Sampled) ---
 lens.Lens.t_0:
     initval: 2455379.571
-    init_scale: 0.01
+    init_scale: 0.1
 lens.Lens.u_0:
     initval: 0.523
-    init_scale: 0.05
+    init_scale: 0.0004
+
+mulensinst.OGLE4.err_scale:
+    init_scale: 0.00082
+mulensinst.OGLE4.f_source:
+    init_scale: 1e-9
+mulensinst.OGLE4.f_blend:
+    init_scale: 1e-9
 
 # --- Physical Parameters for the LENS (Sampled) ---
 star.Lens.mass:
     initval: 0.5     # M_sun (Typical M-dwarf lens)
-    init_scale: 0.1
+    init_scale: 0.001
 star.Lens.ra:
     initval: 266.872583333
     sigma: 0
@@ -18,19 +25,22 @@ star.Lens.dec:
     sigma: 0
 star.Lens.distance:
     initval: 4000.0  # pc (Halfway to the bulge)
-    init_scale: 500.0
+    init_scale: 5.0
 star.Lens.pm_ra:
-    initval: -5.0    # mas/yr
-    init_scale: 2.0
+    initval: -3.0    # mas/yr
+    init_scale: 0.01
 star.Lens.pm_dec:
-    initval: -2.0    # mas/yr
-    init_scale: 2.0
+    initval: -4.0    # mas/yr
+    init_scale: 0.01
 star.Lens.radius:
     sigma: 0.0
 star.Lens.teff:
     sigma: 0.0
 star.Lens.feh:
     sigma: 0.0
+star.Lens.rv:
+    initval: 0.0
+    init_scale: 30000.0 # wide velocity sweep
 star.Source.mass:
     sigma: 0.0
 star.Source.radius:
@@ -45,14 +55,17 @@ star.Source.ra:
 star.Source.dec:
     initval: 34.7265555556
     sigma: 0
+star.Source.rv:
+    initval: -50000.0
+    init_scale: 100000.0
 
 # --- Physical Parameters for the SOURCE (Sampled) ---
 star.Source.distance:
     initval: 8000.0  # pc (In the bulge)
-    init_scale: 500.0
+    init_scale: 5
 star.Source.pm_ra:
-    initval: -2.0    # mas/yr
-    init_scale: 2.0
+    initval: -6.0    # mas/yr
+    init_scale: 0.07
 star.Source.pm_dec:
-    initval: -1.0    # mas/yr
-    init_scale: 2.0
+    initval: -6.0    # mas/yr
+    init_scale: 0.088

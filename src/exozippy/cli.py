@@ -10,3 +10,6 @@ def main(config_file):
 
     # Call the library function
     run_fit(config)
+
+if __name__ == "__main__":
+    main()

@@ -19,5 +19,6 @@ def calc_logg(mass, radius):
     mass: solar masses
     radius: solar radii
     returns: cgs (log10)
+    Note: this odd form of logg is designed to simplify the symbolic math and chain rule derivatives
     """
     return LOGG_CONST + pt.log10(mass) - 2.0 * pt.log10(radius)

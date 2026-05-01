@@ -1,4 +1,5 @@
 import pytensor.tensor as pt
+import pymc as pm
 import numpy as np
 from exozippy.components.component import Component
 from . import physics
@@ -66,7 +67,14 @@ class Lens(Component):
         self.build_pars_from_dict(parameters, shape=(self.n_elements,), context_nodes=context_nodes)
 
     def build_likelihood(self, model, system):
-        pass
+        d_l_raw = system.star.distance.value[self.lens_map]
+        d_s_raw = system.star.distance.value[self.source_map]
+        # this penalty ensures the source is behind the lens
+        pos_penalty = -1e4 * (pt.sigmoid(-d_l_raw / 10.0) + pt.sigmoid(-d_s_raw / 10.0))
+        order_diff = d_l_raw - d_s_raw
+        order_penalty = -1e4 * pt.sigmoid(order_diff / 10.0)
+        pm.Potential(f"{self.prefix}.source_behind_lens", pt.sum(pos_penalty + order_penalty))
+
     def compile_plotters(self, model, system):
         pass
     def plot(self, system, points, filename_prefix="debug"):

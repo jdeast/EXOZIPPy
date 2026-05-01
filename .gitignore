@@ -10,11 +10,11 @@ EXOZIPPy.egg-info
 .DS_Store
 /sandbox/
 /DC18Test/temp_output/
-/exozippy/mmexofast/htmlcov/
-/exozippy/mmexofast/.coverage
-/exozippy/mmexofast/.coveragerc
+/exozippy_legacy/sed
+/exozippy_legacy/mmexofast/htmlcov/
+/exozippy_legacy/mmexofast/.coverage
+/exozippy_legacy/mmexofast/.coveragerc
 __pycache__/
 *.pyc
 *settings.json
-/scripts/repo_dump.txt
 /repo_dump.txt

@@ -1,7 +1,7 @@
 run:
   name: "OB08092"
 
-prefix: "fitresults/OB08092_pspl"
+prefix: "fitresults/OB08092_pspl_op"
 
 # 1. Define the physical bodies!
 star:
@@ -11,6 +11,11 @@ star:
 lens:
   - name: "Lens"
     # Map the switchboard to the physical stars
+    lens_ndx: 0
+    source_ndx: 1
+
+galacticmodel:
+  - name: "OB08092"
     lens_ndx: 0
     source_ndx: 1
 
@@ -24,10 +29,10 @@ parameter_file: "pspl.params.yaml"
 
 sampler:
   pymc:
-    tune: 1000
+    tune: 2000 # generally need longer tuning for mulensing
     draws: 2000
     chains: 4
     cores: 4
     init: "adapt_diag"
-    target_accept: 0.9
+    target_accept: 0.99
     recompute_trace: True

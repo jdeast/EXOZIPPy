@@ -7,7 +7,12 @@ from ...constants import KAPPA
 @register_physics
 def calc_pi_rel(dist_lens, dist_source):
     # Parallax = 1000 / distance (pc) -> mas
-    return (1000.0 / dist_lens) - (1000.0 / dist_source)
+    # no matter what we do, we must not compute a NaN.
+    # we make up values so we can compute some likelihood
+    # then introduce penalties (see lens.build_likelihood) that will reject such non-physical solutions
+    d_l = pt.maximum(dist_lens, 1e-6)
+    d_s = pt.maximum(dist_source, d_l + 1e-6)
+    return (1000.0 / d_l) - (1000.0 / d_s)
 
 @register_physics
 def calc_theta_E(mass_lens, pi_rel):

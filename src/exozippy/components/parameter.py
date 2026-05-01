@@ -740,10 +740,12 @@ class Parameter:
 
     def to_latex_def(self, sigfigs: int = 2) -> str:
 
-        # FIXED PARAMETER PATH (Restored)
+        # FIXED PARAMETER PATH
         if self.posterior is None:
             if self.initval is not None:
-                inits = np.atleast_1d(self.initval)
+                physical_inits = self.from_internal(self.initval)
+                inits = np.atleast_1d(physical_inits)
+
                 if len(inits) > 1:
                     lines = []
                     for i, val in enumerate(inits):

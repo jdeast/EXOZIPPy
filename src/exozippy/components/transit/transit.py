@@ -103,9 +103,9 @@ class Transit(Component):
         self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
     def build_likelihood(self, model, system):
-        time = pm.ConstantData("transit_time", self.time)
-        flux = pm.ConstantData("transit_data", self.flux)
-        err = pm.ConstantData("transit_err", self.err)
+        time = pm.Data("transit_time", self.time)
+        flux = pm.Data("transit_data", self.flux)
+        err = pm.Data("transit_err", self.err)
 
         orbits = system.orbit
         planets = system.planet
@@ -154,7 +154,7 @@ class Transit(Component):
             lc_model += decrement
 
         if self.total_detrend_cols > 0:
-            detrend = pm.ConstantData("transit_detrend", self.detrend_matrix)
+            detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
 
         # 5. Likelihood

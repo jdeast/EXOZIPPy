@@ -105,6 +105,15 @@ star:
       default:
         func_name: "calc_fbol"
         deps: ["luminositysed", "distance"]
+  av:
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "A_V"
+    description: "V-band extinction"
+    lower: 0.
+    upper: 100.
+    init_scale: 0.1
+    initval: 0.01
   pm_ra:
     initval: 0.0
     init_scale: 0.05

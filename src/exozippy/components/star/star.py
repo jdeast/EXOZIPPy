@@ -103,6 +103,15 @@ class Star(CelestialBody):
             parameters["pm_dec"] = None
             parameters["distance"] = None
 
+        # galactic kinematics model
+        if hasattr(system, 'galacticmodel'):
+            parameters["ra"] = None
+            parameters["dec"] = None
+            parameters["pm_ra"] = None
+            parameters["pm_dec"] = None
+            parameters["distance"] = None
+            parameters["rv"] = None
+
         # astrometric model
         if hasattr(system, 'astrometry'):
             parameters["ra"] = None

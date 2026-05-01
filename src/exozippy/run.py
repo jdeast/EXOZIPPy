@@ -69,6 +69,7 @@ def run_fit(config):
 
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
+
         # make all the component plots
         for comp in system.active_components.values():
             comp.plot(system, [internal_start], filename_prefix=str(prefix) + "_start")
@@ -197,12 +198,18 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             scale_out = float(p.from_internal(safe_float(s_phys[i])))
 
             is_fixed = (p.sigma is not None and np.atleast_1d(p.sigma)[i] == 0) or p.expression is not None
-            c_val = c_phys[i] if not is_fixed and not np.isnan(c_phys[i]) else np.nan
-            # Curvature Warning Logic
-            if not np.isnan(c_val) and abs(c_val) < 1e-4:
-                flat_warnings.append(row_label)
+            raw_c = c_phys[i]
 
-            c_str = "N/A" if np.isnan(c_val) else f"{c_val:.5f}"
+            # Curvature Warning and Display Logic
+            if is_fixed:
+                c_str = "N/A"
+            elif np.isnan(raw_c) or np.isinf(raw_c) or raw_c == 0.0:
+                c_str = "NaN (WARN)"
+                flat_warnings.append(f"{row_label} (NaN/Inf)")  # Tag it in the warning list below
+            else:
+                c_str = f"{raw_c:.5f}"
+                if abs(raw_c) < 1e-4:
+                    flat_warnings.append(row_label)
 
             prior_str = p.get_prior_str(i, latex=False)
 

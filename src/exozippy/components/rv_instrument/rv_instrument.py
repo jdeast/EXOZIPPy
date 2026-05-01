@@ -140,9 +140,9 @@ class RVInstrument(Component):
 
 
     def build_likelihood(self, model, system):
-        time = pm.ConstantData("rv_time",self.time)
-        rv = pm.ConstantData("rv_data",self.rv)
-        err = pm.ConstantData("rv_err",self.err)
+        time = pm.Data("rv_time",self.time)
+        rv = pm.Data("rv_data",self.rv)
+        err = pm.Data("rv_err",self.err)
 
         orbits = system.orbit
         planets = system.planet
@@ -155,7 +155,7 @@ class RVInstrument(Component):
 
         # detrending
         if self.total_detrend_cols > 0:
-            detrend = pm.ConstantData("rv_detrend",self.detrend_matrix)
+            detrend = pm.Data("rv_detrend",self.detrend_matrix)
             rv_model += pt.dot(detrend, self.detrend_coeffs.value)
 
         # 2. Define the Likelihood (The Normal Distribution)

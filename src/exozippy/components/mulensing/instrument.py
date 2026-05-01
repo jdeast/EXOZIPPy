@@ -104,14 +104,15 @@ class MulensInstrument(Component):
 
     def build_likelihood(self, model, system):
         # 1. Constants
-        t = pm.ConstantData("mu_time", self.time)
-        obs_pos = pm.ConstantData("obs_pos", self.observer_pos)
-        obs_mag = pm.ConstantData("mu_obs_mag", self.mag)
-        obs_err = pm.ConstantData("mu_obs_err", self.err)
+        t = pm.Data("mu_time", self.time)
+        obs_pos = pm.Data("obs_pos", self.observer_pos)
+        obs_mag = pm.Data("mu_obs_mag", self.mag)
+        obs_err = pm.Data("mu_obs_err", self.err)
 
         # 2. Magnification from the Lens
         # (Assuming single lens at index 0 for PSPL)
         A = system.lens.get_magnification(t, obs_pos, system, index=0)
+        #A = system.lens.get_magnification_op(t, obs_pos, system, index=0)
 
         # 3. Flux Model
         fs = self.f_source.value[self.inst_map_tensor]

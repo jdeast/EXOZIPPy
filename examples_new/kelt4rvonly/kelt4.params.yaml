@@ -10,6 +10,7 @@ star.0.radius:
 star.0.mass:
   initval: 1.204
   sigma: 0.05
+  init_scale: 0.01252029541
 star.0.teff:
   initval: 6207
   sigma: 100
