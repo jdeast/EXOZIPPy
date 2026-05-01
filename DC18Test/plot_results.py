@@ -228,7 +228,7 @@ class PlanetFitInfo():
     def plot_initial_planet_model(self, trajectory=False):
         model = MulensModel.Model(self.initial_planet_params)
         model.set_magnification_methods(self.mag_methods)
-        event = MulensModel.Event(datasets=self.fitter.masked_datasets, model=model)
+        event = MulensModel.Event(datasets=self.data, model=model)
         self.make_plot(event)
         if trajectory:
             plt.figure()

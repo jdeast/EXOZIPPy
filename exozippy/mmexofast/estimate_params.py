@@ -6,14 +6,17 @@
 
 # Created by Luca Campiani in January 2024
 # Updated by Jennifer Yee, May 2025
+from itertools import product
+import pandas as pd
+from matplotlib.gridspec import GridSpec
 
-import MulensModel
-import MulensModel as mm
 import matplotlib.pyplot as plt
 import numpy as np
 #import warnings
 import copy
 
+import MulensModel
+import MulensModel as mm
 import exozippy.mmexofast as mmexo
 
 # In[ ]:
@@ -284,7 +287,369 @@ class WidePlanetParameterEstimator(ParameterEstimator):
 
         return self._delta_A
 
-# In[ ]:
+
+class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
+    """
+    Estimates wide planet binary lens parameters by performing a chi2 grid
+    search centered on the analytic parameter estimates from
+    WidePlanetParameterEstimator.
+
+    The grid spans alpha, s, log_q, and log_rho. The best-fit parameters
+    are identified by minimizing chi2 over the grid.
+
+    Attributes:
+        datasets: *list* of *MulensModel.MulensData*
+            Photometric datasets to evaluate chi2 against.
+
+        params: *dict*
+            Anomaly parameters. See WidePlanetParameterEstimator for details.
+
+        d_alpha: *float*, optional
+            Step size for alpha grid. Defaults to 0.1.
+
+        n_alpha: *int*, optional
+            Number of alpha grid points. Defaults to 6.
+
+        d_s: *float*, optional
+            Step size for s grid. Defaults to 0.01 * s.
+
+        n_s: *int*, optional
+            Number of s grid points. Defaults to 4.
+
+        log_q_values: *array-like*, optional
+            Grid values for log10(q). Defaults to np.arange(-6, -1).
+
+        log_rho_values: *array-like*, optional
+            Grid values for log10(rho). Defaults to np.arange(-4, -1).
+
+        refine: *bool*, optional
+            If True, runs iterative binary search refinement after the grid
+            search. Defaults to True.
+
+        n_refine: *int*, optional
+            Number of refinement iterations. Defaults to 3.
+
+    Note: In future it might be a good idea to refactor best_params (and
+    related methods) to use dynamic lists of grid parameters rather than
+    hardcoding ['alpha', 's', 'q', 'rho'].
+    """
+
+    def __init__(self, datasets, params,
+                 d_alpha=None, n_alpha=None,
+                 d_s=None, n_s=None,
+                 log_q_values=None, log_rho_values=None,
+                 refine=True, n_refine=3):
+        super().__init__(params)
+        self.datasets = datasets
+
+        self.d_alpha = d_alpha
+        self.n_alpha = n_alpha
+        self.d_s = d_s
+        self.n_s = n_s
+        self.log_q_values = log_q_values
+        self.log_rho_values = log_rho_values
+        self.refine = refine
+        self.n_refine = n_refine
+
+        self._results = None
+        self._refinement_results = None
+        self._all_results = None
+        self._is_run = False
+
+    @property
+    def _base_binary_params(self):
+        """
+        Internal access to binary_params without run check. Used by all
+        internal methods to avoid triggering the RuntimeError guard on
+        binary_params before run() has been called.
+        """
+        if self._binary_params is None:
+            self._binary_params = self.get_binary_lens_params()
+        return self._binary_params
+
+    @property
+    def binary_params(self):
+        """
+        Returns binary_params populated with best-fit parameters from the
+        grid search and refinement. Call run() first.
+        """
+        if not self._is_run:
+            raise RuntimeError(
+                "binary_params is not available until run() has been called.")
+        return self._binary_params
+
+    @property
+    def best_params(self):
+        """
+        Returns the best-fit parameter dictionary from the grid search and
+        refinement. Call run() first.
+        """
+        if not self._is_run:
+            raise RuntimeError(
+                "best_params is not available until run() has been called.")
+        return self._binary_params.ulens
+
+    def run(self):
+        """
+        Runs the full pipeline: grid search and (if refine=True) iterative
+        refinement. Populates binary_params and best_params.
+
+        Returns:
+            binary_params: *BinaryLensParams*
+                Binary lens parameters populated with best-fit values.
+        """
+        _ = self.all_results  # triggers grid search + refinement
+        self._is_run = True
+        return self._binary_params
+
+    @property
+    def alpha_values(self):
+        d_alpha = self.d_alpha if self.d_alpha is not None else 0.1
+        n_alpha = self.n_alpha if self.n_alpha is not None else 6
+        alpha_offset = np.arange(n_alpha) - (n_alpha - 1) / 2
+        return self.alpha + alpha_offset * d_alpha
+
+    @property
+    def s_values(self):
+        d_s = self.d_s if self.d_s is not None else 0.01 * self.s
+        n_s = self.n_s if self.n_s is not None else 4
+        s_offset = np.arange(n_s) - (n_s - 1) / 2
+        return self.s + s_offset * d_s
+
+    @property
+    def log_q_grid(self):
+        return self.log_q_values if self.log_q_values is not None else np.arange(-6, -1)
+
+    @property
+    def log_rho_grid(self):
+        return self.log_rho_values if self.log_rho_values is not None else np.arange(-4, -1)
+
+    def _make_event(self, grid_params):
+        model = mm.Model(grid_params)
+        model.set_magnification_methods(self._base_binary_params.mag_methods)
+        event = mm.Event(datasets=self.datasets, model=model)
+        return event
+
+    def _grid_iterator(self):
+        return product(
+            self.alpha_values, self.s_values,
+            self.log_q_grid, self.log_rho_grid)
+
+    def _run_grid_search(self):
+        results = []
+        grid_params = self._base_binary_params.ulens.copy()
+
+        for alpha, s, log_q, log_rho in self._grid_iterator():
+            grid_params['alpha'] = alpha
+            grid_params['s'] = s
+            grid_params['q'] = 10. ** log_q
+            grid_params['rho'] = 10. ** log_rho
+
+            event = self._make_event(grid_params)
+            results.append({
+                'chi2': event.get_chi2(),
+                'alpha': alpha,
+                's': s,
+                'q': grid_params['q'],
+                'rho': grid_params['rho']
+            })
+
+        df = pd.DataFrame(results)
+        best_row = df.loc[df['chi2'].idxmin()]
+        self._base_binary_params.ulens.update(best_row[['alpha', 's', 'q', 'rho']].to_dict())
+        return df
+
+    def _run_refinement(self):
+        results = []
+
+        d_alpha = (self.d_alpha if self.d_alpha is not None else 0.1) / 2.
+        d_s = (self.d_s if self.d_s is not None else 0.01 * self.s) / 2.
+        d_log_q = 0.5
+        d_log_rho = 0.5
+
+        n_alpha = self.n_alpha if self.n_alpha is not None else 6
+        n_s = self.n_s if self.n_s is not None else 4
+        n_log_q = 3
+        n_log_rho = 3
+
+        for iteration in range(1, self.n_refine + 1):
+            best = self._base_binary_params.ulens
+
+            alpha_values = best['alpha'] + (np.arange(n_alpha) - (n_alpha - 1) / 2.) * d_alpha
+            s_values = best['s'] + (np.arange(n_s) - (n_s - 1) / 2.) * d_s
+            log_q_values = np.log10(best['q']) + (np.arange(n_log_q) - (n_log_q - 1) / 2.) * d_log_q
+            log_rho_values = np.log10(best['rho']) + (np.arange(n_log_rho) - (n_log_rho - 1) / 2.) * d_log_rho
+
+            grid_params = best.copy()
+            iter_results = []
+
+            for alpha, s, log_q, log_rho in product(
+                    alpha_values, s_values, log_q_values, log_rho_values):
+                grid_params['alpha'] = alpha
+                grid_params['s'] = s
+                grid_params['q'] = 10. ** log_q
+                grid_params['rho'] = 10. ** log_rho
+
+                event = self._make_event(grid_params)
+                iter_results.append({
+                    'chi2': event.get_chi2(),
+                    'alpha': alpha,
+                    's': s,
+                    'q': grid_params['q'],
+                    'rho': grid_params['rho'],
+                    'iteration': iteration
+                })
+
+            results.extend(iter_results)
+
+            # Update best for next iteration
+            df_iter = pd.DataFrame(iter_results)
+            best_row = df_iter.loc[df_iter['chi2'].idxmin()]
+            self._base_binary_params.ulens.update(
+                best_row[['alpha', 's', 'q', 'rho']].to_dict())
+
+            # Halve step sizes for next iteration
+            d_alpha /= 2.
+            d_s /= 2.
+            d_log_q /= 2.
+            d_log_rho /= 2.
+
+        # Ensure _base_binary_params reflects the global best across grid and refinement
+        df = pd.DataFrame(results)
+        combined = pd.concat(
+            [self.results[['chi2', 'alpha', 's', 'q', 'rho']],
+             df[['chi2', 'alpha', 's', 'q', 'rho']]], ignore_index=True)
+        best_row = combined.loc[combined['chi2'].idxmin()]
+        self._base_binary_params.ulens.update(
+            best_row[['alpha', 's', 'q', 'rho']].to_dict())
+
+        return df
+
+    @property
+    def results(self):
+        if self._results is None:
+            self._results = self._run_grid_search()
+            self._results = self._add_sigma_to_results()
+        return self._results
+
+    @property
+    def refinement_results(self):
+        if self._refinement_results is None:
+            _ = self.results  # ensure grid search has run first
+            self._refinement_results = self._run_refinement()
+        return self._refinement_results
+
+    @property
+    def all_results(self):
+        if self._all_results is None:
+            df_grid = self.results.copy()
+            df_grid['source'] = 'grid'
+            df_grid['iteration'] = 0
+
+            if self.refine:
+                df_refine = self.refinement_results.copy()
+                df_refine['source'] = 'refinement'
+                df_refine['log_q'] = np.round(np.log10(df_refine['q'])).astype(int)
+                df_refine['log_rho'] = np.round(np.log10(df_refine['rho'])).astype(int)
+                combined = pd.concat([df_grid, df_refine], ignore_index=True)
+            else:
+                combined = df_grid
+
+            # Recompute sigma relative to global minimum
+            min_chi2 = combined['chi2'].min()
+            combined['sigma'] = np.sqrt(combined['chi2'] - min_chi2)
+            self._all_results = combined
+
+        return self._all_results
+
+    def _add_sigma_to_results(self):
+        df = self.results.copy()
+        df['log_q'] = np.log10(df['q']).astype(int)
+        df['log_rho'] = np.log10(df['rho']).astype(int)
+        df['sigma'] = np.sqrt(df['chi2'] - df['chi2'].min())
+        return df
+
+    def get_results_within_n_sigma(self, n_sigma=3):
+        """
+        Return all results (grid and refinement) within n_sigma of the
+        minimum chi2.
+
+        Arguments:
+            n_sigma: *float*, optional
+                Maximum sigma threshold. Defaults to 3.
+
+        Returns:
+            *pandas.DataFrame*
+                Subset of all_results with sigma <= n_sigma.
+        """
+        df = self.all_results
+        return df[df['sigma'] <= n_sigma]
+
+    @staticmethod
+    def _get_sigma_marker(sigma):
+        if sigma < 1:
+            return '*', 200
+        elif sigma < 2:
+            return 'D', 100
+        elif sigma < 3:
+            return 'o', 60
+        else:
+            return '^', 30
+
+    def plot_sigma_maps(self):
+        df_all = self.all_results
+        df_grid = df_all[df_all['source'] == 'grid']
+
+        unique_log_q = sorted(df_grid['log_q'].unique())
+        unique_log_rho = sorted(df_grid['log_rho'].unique())
+        n_rho = len(unique_log_rho)
+
+        if self.refine:
+            df_refine = df_all[df_all['source'] == 'refinement']
+
+        for log_q in unique_log_q:
+            fig = plt.figure(figsize=(10, 4 * n_rho))
+            gs = GridSpec(n_rho, 1, figure=fig, hspace=0.3)
+
+            for idx, log_rho in enumerate(unique_log_rho):
+                ax = fig.add_subplot(gs[idx, 0])
+
+                # Grid imshow
+                mask = (df_grid['log_q'] == log_q) & (df_grid['log_rho'] == log_rho)
+                subset = df_grid[mask]
+                grid = subset.pivot(index='s', columns='alpha', values='sigma')
+                im = ax.imshow(grid, cmap='Set1', vmin=0, vmax=100, aspect='auto',
+                               origin='lower',
+                               extent=[subset['alpha'].min(), subset['alpha'].max(),
+                                       subset['s'].min(), subset['s'].max()])
+
+                # Refinement scatter overlay
+                if self.refine:
+                    refine_mask = (
+                        (df_refine['log_q'] == log_q) &
+                        (df_refine['log_rho'] == log_rho))
+                    refine_subset = df_refine[refine_mask]
+
+                    for sigma_low, sigma_high in [(0, 1), (1, 2), (2, 3), (3, np.inf)]:
+                        pts = refine_subset[
+                            (refine_subset['sigma'] >= sigma_low) &
+                            (refine_subset['sigma'] < sigma_high)]
+                        if not pts.empty:
+                            marker, size = self._get_sigma_marker(sigma_low)
+                            ax.scatter(pts['alpha'], pts['s'],
+                                       marker=marker, s=size,
+                                       c=pts['sigma'], cmap='Set1', vmin=0, vmax=100,
+                                       edgecolors='black', linewidths=0.5, zorder=5)
+
+                ax.set_xlabel('alpha', fontsize=10)
+                ax.set_ylabel('s', fontsize=10)
+                ax.set_title(f'log_q={log_q}, log_rho={log_rho}', fontsize=11)
+
+                cbar = plt.colorbar(im, ax=ax)
+                cbar.set_label('sigma', fontsize=10)
+
+            fig.suptitle(f'log_q = {log_q}', fontsize=13, fontweight='bold')
+            plt.tight_layout()
 
 
 def get_close_params(params, q=None, rho=None):

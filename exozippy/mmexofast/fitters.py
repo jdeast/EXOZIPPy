@@ -638,8 +638,8 @@ class WidePlanetFitter(AnomalyFitter):
         Estimate initial wide planet model parameters from the anomaly light curve
         parameters.
 
-        Calls ``mmexo.estimate_params.get_wide_params()`` with
-        ``self.anomaly_lc_params`` to estimate the initial binary lens parameters.
+        Calls ``mmexo.estimate_params.WidePlanetGridSearchEstimator()`` with
+        ``self.datasets`` and ``self.anomaly_lc_params`` to estimate the initial binary lens parameters.
         Sets ``self.mag_methods`` from ``BinaryLensParams.mag_methods`` and
         ``self.initial_model`` from ``BinaryLensParams.ulens``.
 
@@ -656,7 +656,10 @@ class WidePlanetFitter(AnomalyFitter):
         ``mag_methods`` (plural). This may be a bug in either the code or
         the ``BinaryLensParams`` docstring.
         """
-        binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
+        #binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
+        estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(self.datasets, self.anomaly_lc_params)
+        estimator.run()
+        binary_params = estimator.binary_params
         self.mag_methods = binary_params.mag_methods
         self.initial_model = binary_params.ulens
 
