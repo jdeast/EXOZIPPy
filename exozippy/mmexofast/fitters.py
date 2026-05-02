@@ -1,5 +1,6 @@
 import MulensModel
 import numpy as np
+import pandas as pd
 import sfit_minimizer as sfit
 import emcee
 from multiprocessing import Pool, cpu_count
@@ -595,6 +596,24 @@ class WidePlanetFitter(AnomalyFitter):
         ``'n_walkers'``, ``'n_burn'``, ``'n_steps'``, and optionally
         ``'temperature'``.
 
+    perturbation_scale : float, optional
+        Scale factor for perturbing the seeded grid values in
+        _get_seeded_grid_values(). Perturbations are drawn from a Gaussian
+        with standard deviation perturbation_scale * width, where width is
+        the range of surviving results within 3 sigma of the minimum chi2.
+        Defaults to 0.05.
+
+    seed_strategy : str, optional
+        Strategy for seeding subsequent estimators from grid search results.
+        Options are:
+
+            - ``'chain'``: each estimator seeds the next
+              (1->2->3->...->15). Default.
+            - ``'first'``: all remaining estimators are seeded from
+              estimator 1, allowing parallelization.
+
+        Defaults to ``'chain'``.
+
     Notes
     -----
     If ``parameters_to_fit`` is provided, ``sigmas`` must also be provided,
@@ -607,9 +626,17 @@ class WidePlanetFitter(AnomalyFitter):
     --------
     AnomalyFitter : Parent class.
     get_alpha_from_d_xsi : Converts ``d_xsi`` to ``alpha``.
+
+    WidePlanetGridSearchEstimator : Parameter estimator used to seed the
+        emcee starting vector.
+    _get_seeded_grid_values : Computes perturbed grid values from surviving
+        results.
+    _get_grid_params_from_estimator : Extracts seeded grid parameters from
+        a completed estimator.
     """
 
-    def __init__(self, emcee_settings=None, **kwargs):
+    def __init__(self, emcee_settings=None, perturbation_scale=0.05,
+                 seed_strategy='chain', **kwargs):
         super().__init__(**kwargs)
         if not ('parameters_to_fit' in kwargs.keys()):
             self.parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'd_xsi']
@@ -628,40 +655,322 @@ class WidePlanetFitter(AnomalyFitter):
             emcee_settings['n_dim'] = len(self.parameters_to_fit)
 
         self.emcee_settings = emcee_settings
+        self.perturbation_scale = perturbation_scale
+        self.seed_strategy = seed_strategy
 
         self._best = None
         self._event = None
-        self._initial_guess = None
+        self._estimators = None
+        self._pooled_results = None
+        self._starting_vector = None
 
-    def estimate_initial_parameters(self):
+    def _get_seeded_grid_values(self, surviving, param):
         """
-        Estimate initial wide planet model parameters from the anomaly light curve
+        Get 3 new grid values for a parameter from surviving results.
+
+        Takes the min, mid, and max of the surviving results for the given
+        parameter and perturbs each by perturbation_scale * width.
+
+        If all surviving values are identical, uses the spacing to the next
+        unique value to set the width. If there is only one unique value,
+        falls back to perturbation_scale * abs(value).
+
+        Arguments:
+            surviving: *pandas.DataFrame*
+                Rows within n_sigma of the minimum chi2.
+
+            param: *str*
+                Column name in surviving to use.
+
+        Returns:
+            *list* of 3 floats
+        """
+        lo = surviving[param].min()
+        hi = surviving[param].max()
+        mid = (lo + hi) / 2.
+        width = hi - lo
+
+        if width == 0:
+            sorted_vals = sorted(surviving[param].unique())
+            if len(sorted_vals) > 1:
+                width = np.abs(sorted_vals[1] - sorted_vals[0])
+            else:
+                width = np.abs(lo * self.perturbation_scale)
+
+        return [
+            lo + np.random.randn() * self.perturbation_scale * width,
+            mid + np.random.randn() * self.perturbation_scale * width,
+            hi + np.random.randn() * self.perturbation_scale * width
+        ]
+
+    def _get_grid_params_from_estimator(self, estimator):
+        """
+        Extract seeded grid parameters from a completed estimator's results.
+
+        Uses get_results_within_n_sigma(3) to find surviving results, then
+        calls _get_seeded_grid_values() for each of log_q, log_rho, alpha, s.
+
+        log_q and log_rho are computed from the actual q and rho values in
+        surviving results rather than the rounded subplot-mapping values stored
+        in all_results.
+
+        Arguments:
+            estimator: *WidePlanetGridSearchEstimator*
+                A completed estimator to seed from.
+
+        Returns:
+            *dict* with keys 'log_q_values', 'log_rho_values', 'alpha_grid',
+            's_grid', each containing a list of 3 floats.
+        """
+        surviving = estimator.get_results_within_n_sigma(3).copy()
+        surviving['log_q_actual'] = np.log10(surviving['q'])
+        surviving['log_rho_actual'] = np.log10(surviving['rho'])
+
+        return {
+            'log_q_values': self._get_seeded_grid_values(surviving, 'log_q_actual'),
+            'log_rho_values': self._get_seeded_grid_values(surviving, 'log_rho_actual'),
+            'alpha_grid': self._get_seeded_grid_values(surviving, 'alpha'),
+            's_grid': self._get_seeded_grid_values(surviving, 's')
+        }
+
+    def _build_estimators(self):
+        """
+        Build and run 15 WidePlanetGridSearchEstimators with perturbed PSPL
         parameters.
 
-        Calls ``mmexo.estimate_params.WidePlanetGridSearchEstimator()`` with
-        ``self.datasets`` and ``self.anomaly_lc_params`` to estimate the initial binary lens parameters.
-        Sets ``self.mag_methods`` from ``BinaryLensParams.mag_methods`` and
-        ``self.initial_model`` from ``BinaryLensParams.ulens``.
+        Constructs a 5x3 grid of estimators:
+            - 5 systematic values of t_E: t_E + [-2, -1, 0, 1, 2] * sigma_tE
+            - 3 random perturbations of t_0 and u_0 per t_E value
 
-        See Also
-        --------
-        mmexo.estimate_params.get_wide_params : Returns a ``BinaryLensParams``
-            object containing the initial wide planet parameters.
-        AnomalyFitter.estimate_initial_parameters : Parent method.
+        The first estimator uses the default broad grid. Subsequent estimators
+        are seeded using _get_grid_params_from_estimator() according to
+        seed_strategy:
+            - 'chain': each estimator seeds the next (1->2->3->...->15)
+            - 'first': all remaining estimators seeded from estimator 1
+                       (parallelizable)
 
-        Notes
-        -----
-        The ``BinaryLensParams`` class documents the magnification method
-        attribute as ``mag_method`` (singular), but this method accesses
-        ``mag_methods`` (plural). This may be a bug in either the code or
-        the ``BinaryLensParams`` docstring.
+        Sigma values for t_0, u_0, t_E are taken from self.sigmas, indexed by
+        self.parameters_to_fit.
+
+        Results are stored in self._estimators.
         """
-        #binary_params = mmexo.estimate_params.get_wide_params(self.anomaly_lc_params)
-        estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(self.datasets, self.anomaly_lc_params)
-        estimator.run()
-        binary_params = estimator.binary_params
-        self.mag_methods = binary_params.mag_methods
-        self.initial_model = binary_params.ulens
+        t_0 = self.anomaly_lc_params['t_0']
+        u_0 = self.anomaly_lc_params['u_0']
+        t_E = self.anomaly_lc_params['t_E']
+
+        param_index = {p: i for i, p in enumerate(self.parameters_to_fit)}
+        sigma_t0 = self.sigmas[param_index['t_0']]
+        sigma_u0 = self.sigmas[param_index['u_0']]
+        sigma_tE = self.sigmas[param_index['t_E']]
+
+        t_E_values = t_E + np.array([-2, -1, 0, 1, 2]) * sigma_tE
+
+        estimators = []
+        seed_estimator = None
+
+        for t_E_val in t_E_values:
+            for _ in range(3):
+                params = self.anomaly_lc_params.copy()
+                params['t_0'] = t_0 + np.random.randn() * sigma_t0
+                params['u_0'] = u_0 + np.random.randn() * sigma_u0
+                params['t_E'] = t_E_val
+
+                if seed_estimator is None:
+                    # First estimator: use default broad grid
+                    estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(
+                        self.datasets, params)
+                else:
+                    grid_params = self._get_grid_params_from_estimator(seed_estimator)
+                    estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(
+                        self.datasets, params,
+                        log_q_values=grid_params['log_q_values'],
+                        log_rho_values=grid_params['log_rho_values'],
+                        alpha_grid=grid_params['alpha_grid'],
+                        s_grid=grid_params['s_grid'])
+
+                estimator.run()
+                estimators.append(estimator)
+
+                if self.seed_strategy == 'chain':
+                    seed_estimator = estimator
+                elif self.seed_strategy == 'first' and seed_estimator is None:
+                    seed_estimator = estimator
+
+        self._estimators = estimators
+
+    def _pool_results(self):
+        """
+        Pool all_results from all estimators into a single DataFrame.
+
+        Adds t_0, u_0, t_E, and estimator_index columns to each estimator's
+        all_results before concatenating. Recomputes sigma relative to the
+        global chi2 minimum across all estimators.
+
+        Sets self.initial_model and self.mag_methods from the estimator
+        containing the global best chi2.
+        """
+        if self._estimators is None:
+            self._build_estimators()
+
+        dfs = []
+        for i, estimator in enumerate(self._estimators):
+            df = estimator.all_results.copy()
+            df['t_0'] = estimator.params['t_0']
+            df['u_0'] = estimator.params['u_0']
+            df['t_E'] = estimator.params['t_E']
+            df['estimator_index'] = i
+            dfs.append(df)
+
+        pooled = pd.concat(dfs, ignore_index=True)
+
+        # Recompute sigma relative to global minimum
+        min_chi2 = pooled['chi2'].min()
+        pooled['sigma'] = np.sqrt(pooled['chi2'] - min_chi2)
+        self._pooled_results = pooled
+
+        # Set initial_model and mag_methods from global best
+        best_row = pooled.loc[pooled['chi2'].idxmin()]
+        best_estimator = self._estimators[int(best_row['estimator_index'])]
+
+        self.initial_model = {
+            't_0': best_row['t_0'],
+            'u_0': best_row['u_0'],
+            't_E': best_row['t_E'],
+            's': best_row['s'],
+            'q': best_row['q'],
+            'rho': best_row['rho'],
+            'alpha': best_row['alpha']
+        }
+        self.mag_methods = best_estimator.binary_params.mag_methods
+
+    def make_starting_vector(self):
+        """
+        Construct the starting vector for the emcee sampler from pooled
+        grid search results.
+
+        Pools all_results across all 15 estimators, sorts by chi2, and
+        takes the top n_walkers rows as starting points. Each row is
+        converted to an emcee parameter vector using
+        make_emcee_vector_from_ModelParameters().
+
+        Also sets self.initial_model and self.mag_methods as side effects
+        via _pool_results().
+
+        Returns
+        -------
+        list
+            List of n_walkers parameter vectors, each of length n_dim.
+
+        Raises
+        ------
+        ValueError
+            If the number of pooled results is less than n_walkers.
+        """
+        if self._pooled_results is None:
+            self._pool_results()
+
+        n_walkers = self.emcee_settings['n_walkers']
+        df = self._pooled_results.sort_values(by='chi2')
+
+        if len(df) < n_walkers:
+            raise ValueError(
+                f'Not enough pooled results ({len(df)}) to fill '
+                f'n_walkers ({n_walkers}). Consider increasing the grid '
+                f'resolution or number of estimators.')
+
+        top_rows = df.head(n_walkers)
+
+        starting_vector = []
+        for _, row in top_rows.iterrows():
+            params = {
+                't_0': row['t_0'],
+                'u_0': row['u_0'],
+                't_E': row['t_E'],
+                's': row['s'],
+                'q': row['q'],
+                'rho': row['rho'],
+                'alpha': row['alpha']
+            }
+            vector = self.make_emcee_vector_from_ModelParameters(
+                MulensModel.ModelParameters(params))
+            starting_vector.append(vector)
+
+        return starting_vector
+
+    def initialize_event(self):
+        """
+        Initialize the MulensModel.Event object for the wide planet model.
+
+        Requires make_starting_vector() to have been called first, which
+        sets self.initial_model and self.mag_methods as side effects.
+
+        Raises
+        ------
+        AttributeError
+            If self.initial_model or self.mag_methods is not set.
+        """
+        if self.initial_model is None:
+            raise AttributeError(
+                'initial_model is not set. Call make_starting_vector() first.')
+
+        model = MulensModel.Model(parameters=self.initial_model)
+        model.default_magnification_method = 'point_source_point_lens'
+
+        if self.mag_methods is None:
+            raise AttributeError(
+                'self.mag_methods is not set. Call make_starting_vector() first.')
+        else:
+            model.set_magnification_methods(self.mag_methods)
+
+        self._event = MulensModel.Event(datasets=self.datasets, model=model)
+
+    def run(self, verbose=False):
+        """
+        Fit the wide planet model using emcee MCMC sampling.
+
+        Builds and runs 15 grid search estimators, pools results to construct
+        the starting vector, initializes the event, and runs the emcee sampler.
+
+        Parameters
+        ----------
+        verbose : bool, optional
+            If True, prints the fitted parameters with 16th, 50th, and 84th
+            percentile uncertainties. Default is False.
+        """
+        starting_vector = self.starting_vector # sets initial_model and mag_methods
+        self.initialize_event()
+
+        if self.pool:
+            ncpu = cpu_count()
+            print("{0} CPUs".format(ncpu))
+            os.environ["OMP_NUM_THREADS"] = "1"
+            pool = Pool()
+            sampler = emcee.EnsembleSampler(
+                self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob,
+                pool=pool)
+        else:
+            sampler = emcee.EnsembleSampler(
+                self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob)
+
+        sampler.run_mcmc(starting_vector, self.emcee_settings['n_steps'])
+
+        samples = sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape(
+            (-1, self.emcee_settings['n_dim']))
+
+        results = np.percentile(samples, [16, 50, 84], axis=0)
+        if verbose:
+            print("Fitted parameters:")
+            for i in range(self.emcee_settings['n_dim']):
+                r = results[1, i]
+                print("${:.5f}^{{+{:.5f}}}_{{-{:.5f}}}$ &".format(
+                    r, results[2, i] - r, r - results[0, i]))
+
+        prob = sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
+        best_index = np.argmax(prob)
+        self.event = samples[best_index, :]
+
+        self.best = self.event.model.parameters.parameters
+        self.best['chi2'] = self.event.get_chi2()
 
     def get_alpha_from_d_xsi(self, parameters, d_xsi):
         """
@@ -710,63 +1019,6 @@ class WidePlanetFitter(AnomalyFitter):
         alpha = -np.rad2deg(np.arcsin(sin_alpha))
 
         return alpha
-
-    def initialize_event(self):
-        """
-        Initialize the MulensModel.Event object for the wide planet model.
-
-        If ``initial_model`` has not been set, calls
-        ``estimate_initial_parameters()`` first. Sets the default magnification
-        method to ``'point_source_point_lens'`` and applies ``mag_methods`` to
-        the model before creating the event.
-
-        Raises
-        ------
-        AttributeError
-            If ``mag_methods`` is not set after calling
-            ``estimate_initial_parameters()``.
-
-        Notes
-        -----
-        The initialized event is stored in ``self._event`` and is accessible
-        via the ``event`` property.
-        """
-        if self.initial_model is None:
-            self.estimate_initial_parameters()
-
-        model = MulensModel.Model(parameters=self.initial_model)
-        model.default_magnification_method = 'point_source_point_lens'
-        if self.mag_methods is None:
-            raise AttributeError(
-                'self.mag_methods is not set! Either pass it as an kwarg to __init__ or calculate it using estimate_initial_parameters(). ')
-        else:
-            model.set_magnification_methods(self.mag_methods)
-
-        self._event = MulensModel.Event(datasets=self.datasets, model=model)
-
-    def make_starting_vector(self):
-        """
-        Construct the starting vector for the emcee sampler.
-
-        Creates ``n_walkers`` parameter vectors by perturbing ``initial_guess``
-        with Gaussian noise scaled by ``sigmas``.
-
-        Returns
-        -------
-        list
-            List of ``n_walkers`` parameter vectors, each of length ``n_dim``.
-
-        See Also
-        --------
-        AnomalyFitter.make_starting_vector : Abstract-like parent method.
-        initial_guess : Property that returns the initial parameter vector.
-        """
-        starting_vector = []
-        for i in np.arange(self.emcee_settings['n_walkers']):
-            test_vector = self.initial_guess + np.random.randn(self.emcee_settings['n_dim']) * self.sigmas
-            starting_vector.append(test_vector)
-
-        return starting_vector
 
     def make_emcee_vector_from_ModelParameters(self, parameters):
         """
@@ -817,101 +1069,6 @@ class WidePlanetFitter(AnomalyFitter):
             initial_guess.append(value)
 
         return initial_guess
-
-    def run(self, verbose=False):
-        """
-        Fit the wide planet model using emcee MCMC sampling.
-
-        Initializes the event, constructs the starting vector, and runs the
-        emcee sampler. After removing burn-in samples, identifies the
-        maximum likelihood solution and stores it in ``best``.
-
-        Parameters
-        ----------
-        verbose : bool, optional
-            If True, prints the fitted parameters with 16th, 50th, and 84th
-            percentile uncertainties. Default is False.
-
-        Notes
-        -----
-        If ``self.pool`` is True, runs the sampler in parallel using all
-        available CPUs and sets ``OMP_NUM_THREADS=1`` to avoid over-threading.
-
-        ``self.results`` is not set by this method, only ``self.best``. This
-        is inconsistent with ``SFitFitter.run()``, which sets both. Consider
-        storing the emcee sampler or samples in ``self.results``.
-
-        See Also
-        --------
-        AnomalyFitter.run : Parent method.
-        initialize_event : Initializes the event before sampling.
-        make_starting_vector : Constructs the starting vector for the sampler.
-        """
-        self.initialize_event()
-        starting_vector = self.make_starting_vector()
-
-        if self.pool:
-            ncpu = cpu_count()
-            print("{0} CPUs".format(ncpu))
-            os.environ["OMP_NUM_THREADS"] = "1"
-            pool = Pool()
-            sampler = emcee.EnsembleSampler(
-                self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob,
-                pool=pool)
-        else:
-            sampler = emcee.EnsembleSampler(
-                self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'], self.ln_prob)
-
-        sampler.run_mcmc(starting_vector, self.emcee_settings['n_steps'])
-
-        # Remove burn-in samples and reshape:
-        samples = sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape((-1, self.emcee_settings['n_dim']))
-
-        # Results:
-        results = np.percentile(samples, [16, 50, 84], axis=0)
-        if verbose:
-            print("Fitted parameters:")
-            for i in range(self.emcee_settings['n_dim']):
-                r = results[1, i]
-                print("${:.5f}^{{+{:.5f}}}_{{-{:.5f}}}$ &".format(
-                    r, results[2, i] - r, r - results[0, i]))
-
-        prob = sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
-        best_index = np.argmax(prob)
-        # self.best_chi2 = prob[best_index] / -0.5
-        self.event = samples[best_index, :]
-
-        self.best = self.event.model.parameters.parameters
-        self.best['chi2'] = self.event.get_chi2()
-
-    @property
-    def initial_guess(self):
-        """
-        Initial parameter vector for the emcee sampler.
-
-        Converts ``initial_model`` to an emcee parameter vector using
-        ``make_emcee_vector_from_ModelParameters()``. The result is cached
-        after the first call.
-
-        Returns
-        -------
-        list
-            Parameter vector corresponding to ``parameters_to_fit``, with
-            logarithmic parameters in log10 space and ``alpha`` converted
-            to ``d_xsi``.
-
-        See Also
-        --------
-        make_emcee_vector_from_ModelParameters : Performs the conversion from
-            model parameters to emcee vector.
-        make_starting_vector : Uses this property to construct the full
-            starting vector for the sampler.
-        """
-        if self._initial_guess is None:
-            self._initial_guess = self.make_emcee_vector_from_ModelParameters(
-                MulensModel.ModelParameters(self.initial_model))
-
-        return self._initial_guess
 
     @property
     def event(self):
@@ -971,3 +1128,10 @@ class WidePlanetFitter(AnomalyFitter):
         if d_xsi is not None:
             self._event.model.parameters.alpha = self.get_alpha_from_d_xsi(
                 self._event.model.parameters, d_xsi)
+
+    @property
+    def starting_vector(self):
+        if self._starting_vector is None:
+            self._starting_vector = self.make_starting_vector()
+        return self._starting_vector
+

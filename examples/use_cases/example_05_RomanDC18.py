@@ -46,7 +46,7 @@ for file_ in files:
 # lcs for wide planets:
 wide_planets = [8, 53, 107, 131, 152, 194, 208, 214, 217, 226]
 
-lc_nums = wide_planets[2]
+lc_nums = wide_planets[2:3]
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:

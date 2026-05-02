@@ -2574,13 +2574,17 @@ class MMEXOFASTFitter:
         """
 
         def fit_wide_planet():
+            # TODO: Add sigmas from PSPL fitting as input
             wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
                 datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
             )
-            wide_planet_fitter.estimate_initial_parameters()
+            starting_vector = wide_planet_fitter.starting_vector
             self._log(
                 f'Initial 2L1S Wide Model {wide_planet_fitter.initial_model}' +
                 f'\nmag methods {wide_planet_fitter.mag_methods}')
+            self._log(
+                f'EMCEE starting vector:\n{wide_planet_fitter.parameters_to_fit}\n{starting_vector}'
+            )
 
             wide_planet_fitter.run()
             self._log_file_only(wide_planet_fitter.get_diagnostic_str())

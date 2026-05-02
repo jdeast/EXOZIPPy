@@ -322,6 +322,14 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         log_rho_values: *array-like*, optional
             Grid values for log10(rho). Defaults to np.arange(-4, -1).
 
+        alpha_grid: *array-like*, optional
+            Explicit grid values for alpha. If provided, overrides d_alpha
+            and n_alpha. Defaults to None.
+
+        s_grid: *array-like*, optional
+            Explicit grid values for s. If provided, overrides d_s and n_s.
+            Defaults to None.
+
         refine: *bool*, optional
             If True, runs iterative binary search refinement after the grid
             search. Defaults to True.
@@ -338,19 +346,20 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
                  d_alpha=None, n_alpha=None,
                  d_s=None, n_s=None,
                  log_q_values=None, log_rho_values=None,
+                 alpha_grid=None, s_grid=None,
                  refine=True, n_refine=3):
         super().__init__(params)
         self.datasets = datasets
-
         self.d_alpha = d_alpha
         self.n_alpha = n_alpha
         self.d_s = d_s
         self.n_s = n_s
         self.log_q_values = log_q_values
         self.log_rho_values = log_rho_values
+        self._alpha_grid = alpha_grid
+        self._s_grid = s_grid
         self.refine = refine
         self.n_refine = n_refine
-
         self._results = None
         self._refinement_results = None
         self._all_results = None
@@ -404,6 +413,8 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
 
     @property
     def alpha_values(self):
+        if self._alpha_grid is not None:
+            return self._alpha_grid
         d_alpha = self.d_alpha if self.d_alpha is not None else 0.1
         n_alpha = self.n_alpha if self.n_alpha is not None else 6
         alpha_offset = np.arange(n_alpha) - (n_alpha - 1) / 2
@@ -411,6 +422,8 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
 
     @property
     def s_values(self):
+        if self._s_grid is not None:
+            return self._s_grid
         d_s = self.d_s if self.d_s is not None else 0.01 * self.s
         n_s = self.n_s if self.n_s is not None else 4
         s_offset = np.arange(n_s) - (n_s - 1) / 2
