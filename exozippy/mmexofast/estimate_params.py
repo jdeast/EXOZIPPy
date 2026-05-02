@@ -664,6 +664,287 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
             fig.suptitle(f'log_q = {log_q}', fontsize=13, fontweight='bold')
             plt.tight_layout()
 
+class WidePlanetEnsembleInitializer():
+    """
+    Builds an ensemble of starting points for emcee by running multiple
+    WidePlanetGridSearchEstimators with perturbed PSPL parameters.
+
+    The first estimator uses a broad default grid. Its best log_q and
+    log_rho are used to seed a narrower grid for all subsequent estimators.
+
+    Attributes:
+        datasets: *list* of *MulensModel.MulensData*
+            Photometric datasets.
+
+        anomaly_params: *dict*
+            Anomaly light curve parameters.
+
+        sigmas: *dict*
+            Step sizes for PSPL parameter perturbations. Expected keys:
+            't_0', 'u_0', 't_E'.
+
+        n_estimators: *int*, optional
+            Number of estimators to run. Should equal n_walkers.
+            Defaults to 40.
+
+        pspl_chi2: *float*, optional
+            Chi2 of the no-planet PSPL model. Used only for diagnostics
+            (delta_chi2, summary counts). Defaults to None.
+    """
+
+    def __init__(self, datasets, anomaly_params, sigmas,
+                 n_estimators=40, pspl_chi2=None):
+        self.datasets = datasets
+        self.anomaly_params = anomaly_params
+        self.sigmas = sigmas
+        self.n_estimators = n_estimators
+        self.pspl_chi2 = pspl_chi2
+
+        self._results = None
+        self._mag_methods = None
+        self._initial_model = None
+        self._seed_log_q = None
+        self._seed_log_rho = None
+
+    @property
+    def sigma_t0(self):
+        return self.sigmas.get('t_0', 0.)
+
+    @property
+    def sigma_u0(self):
+        return self.sigmas.get('u_0', 0.)
+
+    @property
+    def sigma_tE(self):
+        return self.sigmas.get('t_E', 0.)
+
+    def _perturb_params(self):
+        """
+        Generate one set of perturbed PSPL parameters.
+
+        Override to implement different perturbation strategies.
+
+        Returns
+        -------
+        dict
+            Perturbed anomaly_params.
+        """
+        params = self.anomaly_params.copy()
+        params['t_0'] = self.anomaly_params['t_0'] + np.random.randn() * self.sigma_t0
+        params['u_0'] = self.anomaly_params['u_0'] + np.random.randn() * self.sigma_u0
+        params['t_E'] = self.anomaly_params['t_E'] + np.random.randn() * self.sigma_tE
+        return params
+
+    def _get_seeded_grid_values(self, best_log_val):
+        """
+        Generate a 3-point grid from the seed estimator's best log value.
+
+        Perturbs best_log_val by 5% and returns
+        [rand_best - 0.5, rand_best, rand_best + 0.5].
+
+        Arguments:
+            best_log_val: *float*
+                Best log10 value from the seed estimator.
+
+        Returns:
+            *list* of 3 floats
+        """
+        rand_best = best_log_val + np.random.randn() * 0.05 * np.abs(best_log_val)
+        return [rand_best - 0.5, rand_best, rand_best + 0.5]
+
+    def _run_single_estimator(self, params, log_q_values=None, log_rho_values=None):
+        """
+        Run a single WidePlanetGridSearchEstimator for the given params.
+
+        Override to use different estimator settings.
+
+        Arguments:
+            params: *dict*
+                Anomaly parameters for this estimator.
+
+            log_q_values: *list*, optional
+                If provided, passed as the log_q grid. If None, the
+                estimator uses its default broad grid.
+
+            log_rho_values: *list*, optional
+                If provided, passed as the log_rho grid. If None, the
+                estimator uses its default broad grid.
+
+        Returns:
+            best: *dict*
+                Best-fit binary lens parameters.
+
+            mag_methods: *list*
+                Magnification methods from this estimator.
+        """
+        estimator = WidePlanetGridSearchEstimator(
+            datasets=self.datasets, params=params, refine=True,
+            log_q_values=log_q_values, log_rho_values=log_rho_values)
+        estimator.run()
+        return estimator.binary_params.ulens.copy(), estimator.binary_params.mag_methods
+
+    def _evaluate_chi2(self, best, mag_methods):
+        """
+        Compute chi2 for a set of binary lens parameters.
+        """
+        model = mm.Model(best)
+        model.set_magnification_methods(mag_methods)
+        model.default_magnification_method = 'point_source_point_lens'
+        event = mm.Event(datasets=self.datasets, model=model)
+        return event.get_chi2()
+
+    def _run_all_estimators(self):
+        """
+        Run all n_estimators and collect results into a DataFrame.
+
+        The first estimator uses the default broad grid. Its best log_q
+        and log_rho seed all subsequent estimators via
+        _get_seeded_grid_values().
+        """
+        rows = []
+
+        for i in range(self.n_estimators):
+            params = self._perturb_params()
+
+            if self._seed_log_q is None:
+                best, mag_methods = self._run_single_estimator(params)
+                self._seed_log_q = np.log10(best['q'])
+                self._seed_log_rho = np.log10(best['rho'])
+            else:
+                log_q_values = self._get_seeded_grid_values(self._seed_log_q)
+                log_rho_values = self._get_seeded_grid_values(self._seed_log_rho)
+                best, mag_methods = self._run_single_estimator(
+                    params,
+                    log_q_values=log_q_values,
+                    log_rho_values=log_rho_values)
+
+            if self._mag_methods is None:
+                self._mag_methods = mag_methods
+
+            chi2 = self._evaluate_chi2(best, mag_methods)
+
+            row = {
+                'chi2': chi2,
+                't_0': best['t_0'],
+                'u_0': best['u_0'],
+                't_E': best['t_E'],
+                's': best['s'],
+                'q': best['q'],
+                'rho': best['rho'],
+                'alpha': best['alpha']
+            }
+            if self.pspl_chi2 is not None:
+                row['delta_chi2'] = self.pspl_chi2 - chi2
+
+            rows.append(row)
+
+            log_str = (f'Estimator {i:3d}: chi2={chi2:.2f}  '
+                       f't_E={best["t_E"]:.3f}  '
+                       f'log_q={np.log10(best["q"]):.2f}  '
+                       f'log_rho={np.log10(best["rho"]):.2f}  '
+                       f'{"[seed]" if i == 0 else "[seeded]"}')
+            if self.pspl_chi2 is not None:
+                log_str += f'  delta_chi2={self.pspl_chi2 - chi2:.2f}'
+            print(log_str)
+
+        return pd.DataFrame(rows)
+
+    @property
+    def results(self):
+        if self._results is None:
+            self._results = self._run_all_estimators()
+        return self._results
+
+    @property
+    def mag_methods(self):
+        _ = self.results  # ensure estimators have run
+        return self._mag_methods
+
+    @property
+    def initial_model(self):
+        """
+        Best-fit binary lens parameters across all estimators (lowest chi2).
+        """
+        if self._initial_model is None:
+            df = self.results
+            best_row = df.loc[df['chi2'].idxmin()]
+            self._initial_model = {
+                k: best_row[k]
+                for k in ['t_0', 'u_0', 't_E', 's', 'q', 'rho', 'alpha']}
+        return self._initial_model
+
+    def summary(self):
+        """
+        Print a summary of all estimator results sorted by chi2.
+        """
+        df = self.results
+        if 'delta_chi2' in df.columns:
+            n_better = np.sum(df['delta_chi2'] > 0)
+            print(f'\n{n_better} / {self.n_estimators} estimators better than PSPL')
+
+        cols = ['chi2', 't_E', 'u_0', 's', 'q', 'rho', 'alpha']
+        if 'delta_chi2' in df.columns:
+            cols.insert(1, 'delta_chi2')
+        print('\nSorted by chi2:')
+        print(df.sort_values('chi2')[cols].to_string())
+
+    def plot_chi2_distribution(self):
+        """
+        Plot histogram of chi2 values across all estimators.
+        """
+        df = self.results
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.hist(df['chi2'], bins=20)
+        if self.pspl_chi2 is not None:
+            ax.axvline(self.pspl_chi2, color='red', linestyle='--',
+                       label=f'PSPL chi2={self.pspl_chi2:.0f}')
+            ax.legend()
+        ax.set_xlabel('chi2')
+        ax.set_ylabel('N')
+        ax.set_title(f'{self.n_estimators} estimators: chi2 distribution')
+
+    def plot_models(self):
+        """
+        Plot all estimator models in the anomaly region and VBBL zoom,
+        colour-coded by chi2 (red=worst, green=best).
+        """
+        df = self.results
+        t_range_anomaly = [self.mag_methods[2], self.mag_methods[8]]
+        t_range_vbbl = [self.mag_methods[4], self.mag_methods[6]]
+
+        ref_model = mm.Model(self.initial_model)
+        ref_model.set_magnification_methods(self.mag_methods)
+        ref_model.default_magnification_method = 'point_source_point_lens'
+        ref_event = mm.Event(datasets=self.datasets, model=ref_model)
+        source_flux, blend_flux = ref_event.get_ref_fluxes()
+
+        sorted_idx = df['chi2'].argsort().values[::-1]  # worst first
+        cmap = plt.cm.get_cmap('RdYlGn', self.n_estimators)
+
+        for fig_title, t_range in [('Anomaly region', t_range_anomaly),
+                                    ('VBBL zoom', t_range_vbbl)]:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            plt.sca(ax)
+            ref_event.plot_data()
+
+            for rank, idx in enumerate(sorted_idx):
+                row = df.iloc[idx]
+                params = {k: row[k] for k in
+                          ['t_0', 'u_0', 't_E', 's', 'q', 'rho', 'alpha']}
+                model = mm.Model(params)
+                model.set_magnification_methods(self.mag_methods)
+                model.default_magnification_method = 'point_source_point_lens'
+                model.plot_lc(source_flux=source_flux, blend_flux=blend_flux,
+                              color=cmap(rank), alpha=0.6, t_range=t_range)
+
+            ref_event.plot_model(label='Best (grid)', color='black',
+                                 zorder=10, t_range=t_range, linewidth=2)
+            ax.set_xlim(t_range)
+            ax.set_xlabel('Time (HJD)')
+            ax.set_ylabel('Magnitude')
+            ax.set_title(f'{fig_title} — red=worst, green=best chi2')
+            ax.minorticks_on()
+
 
 def get_close_params(params, q=None, rho=None):
     """
