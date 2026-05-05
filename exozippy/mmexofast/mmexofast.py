@@ -3123,14 +3123,11 @@ class MMEXOFASTFitter:
                 flux_keys: list[str] = []
                 for i, dataset in enumerate(self.datasets):
                     if "label" in dataset.plot_properties.keys():
-                        obs = dataset.plot_properties["label"].split("-")[0]
+                        obs, band = mmexo.observatories.get_telescope_band_from_filename(
+                            dataset.plot_properties['label'])
                     else:
                         obs = i
-
-                    if dataset.bandpass is not None:
-                        band = dataset.bandpass
-                    else:
-                        band = "mag"
+                        band = None
 
                     flux_keys.append(f"{band}_S_{obs}")
                     flux_keys.append(f"{band}_B_{obs}")
