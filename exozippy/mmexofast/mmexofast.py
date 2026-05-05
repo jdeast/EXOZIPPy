@@ -96,6 +96,8 @@ class MMEXOFASTFitter:
             initial_results=None,
             output_config=None,
             restart_file=None,
+            stop_before=None, # TODO: Build these stopping points out properly
+            stop_after=None,
     ):
         # Validate mutually exclusive parameters
         if files is not None and datasets is not None:
@@ -166,6 +168,10 @@ class MMEXOFASTFitter:
         # Load initial results if provided
         if initial_results is not None:
             self._load_initial_results(initial_results)
+
+        # Stopping points for the analysis. Barely implemented.
+        self.stop_before = stop_before
+        self.stop_after = stop_after
 
     # ---------------------------------------------------------------------
     # restart helpers:
@@ -1286,13 +1292,17 @@ class MMEXOFASTFitter:
         # Derive renorm factors from current state, if any
         renorm_factors = self.renorm_factors
 
-        new_record = mmexo.FitRecord.from_full_result(
-            model_key=key,
-            full_result=full_result,
-            renorm_factors=renorm_factors,
-            fixed=False,
-        )
-        self.all_fit_results.set(new_record)
+        # New logic to accommodate stop_before/after
+        if full_result is not None:
+            new_record = mmexo.FitRecord.from_full_result(
+                model_key=key,
+                full_result=full_result,
+                renorm_factors=renorm_factors,
+                fixed=False,
+            )
+            self.all_fit_results.set(new_record)
+        else:
+            new_record = None
 
         if self.verbose:
             self._save_restart_state()
@@ -2573,7 +2583,7 @@ class MMEXOFASTFitter:
             Binary fitting only partially implemented
         """
 
-        def fit_wide_planet():
+        def fit_wide_planet(initial_params, datasets):
             sigmas = self._select_best_static_pspl().sigmas
             t_E = self.anomaly_lc_params['t_E']
             u_0 = self.anomaly_lc_params['u_0']
@@ -2585,7 +2595,7 @@ class MMEXOFASTFitter:
             sigmas['t_E'] = min(sigmas['t_E'], max_sigma_t_E)
 
             wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
-                datasets=self.datasets, anomaly_lc_params=self.anomaly_lc_params,
+                datasets=datasets, anomaly_lc_params=self.anomaly_lc_params,
                 sigmas=sigmas
             )
             self._log(
@@ -2595,12 +2605,27 @@ class MMEXOFASTFitter:
                 f'EMCEE starting vector:\n{wide_planet_fitter.parameters_to_fit}\n{wide_planet_fitter.starting_vector}'
             )
 
+            if self.stop_before == 'emcee':
+                return None
+
             wide_planet_fitter.run()
             self._log_file_only(wide_planet_fitter.get_diagnostic_str())
-            return wide_planet_fitter.best
 
-        fit_wide_planet()
-        raise NotImplementedError('fitting binary models only partially implemented')
+            #def fit_static_pspl(initial_params=None, datasets=None):
+            #    return self._fit_initial_pspl_model(initial_params=initial_params, datasets=datasets)
+            #return wide_planet_fitter.best
+            return mmexo.MMEXOFASTFitResults(wide_planet_fitter)
+
+        datasets = self.datasets
+        key = mmexo.FitKey(
+                lens_type=mmexo.LensType.BINARY,
+                source_type=mmexo.SourceType.FINITE if self.finite_source else mmexo.SourceType.POINT,
+                parallax_branch=mmexo.ParallaxBranch.NONE,
+                lens_orb_motion=mmexo.LensOrbMotion.NONE,
+                locations_used=self._get_location_for_datasets(datasets)
+            )
+        # TODO: Update logic to handle satellite parallax.
+        self.run_fit_if_needed(key, fit_wide_planet, datasets=datasets)
 
     # ---------------------------------------------------------------------
     # Data helpers:

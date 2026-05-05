@@ -664,6 +664,7 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
             fig.suptitle(f'log_q = {log_q}', fontsize=13, fontweight='bold')
             plt.tight_layout()
 
+
 class WidePlanetEnsembleInitializer():
     """
     Builds an ensemble of starting points for emcee by running multiple
@@ -690,6 +691,8 @@ class WidePlanetEnsembleInitializer():
         pspl_chi2: *float*, optional
             Chi2 of the no-planet PSPL model. Used only for diagnostics
             (delta_chi2, summary counts). Defaults to None.
+
+    # TODO: Hypothesis that this is very slow because the event/Estimator class is getting  created anew every time.
     """
 
     def __init__(self, datasets, anomaly_params, sigmas,

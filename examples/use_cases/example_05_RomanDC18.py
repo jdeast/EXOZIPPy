@@ -20,9 +20,10 @@ def fit_lc(lc_num, verbose=False):
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         verbose=verbose,
         # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
+        stop_before='emcee',
         output_config=exozippy.mmexofast.OutputConfig(
             base_dir=base_dir, file_head='WFIRST.{0:03}'.format(lc_num), save_log=True,
-            save_latex_tables=True)
+            save_latex_tables=True, save_restart_files=True)
     )
 
     return fitter.all_fit_results
@@ -46,7 +47,7 @@ for file_ in files:
 # lcs for wide planets:
 wide_planets = [8, 53, 107, 131, 152, 194, 208, 214, 217, 226]
 
-lc_nums = wide_planets[2:3]
+lc_nums = wide_planets
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:
