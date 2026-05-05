@@ -3279,7 +3279,6 @@ class MMEXOFASTFitter:
         """
         initializations = {'fits': [], 'errfacs': self.renorm_factors, 'mag_methods': self.mag_methods}
 
-        # TODO: populate errfacs and mag_methods
         if self.fit_type == 'point lens':
             fits = []
             for par_key in self._iter_parallax_point_lens_keys():
