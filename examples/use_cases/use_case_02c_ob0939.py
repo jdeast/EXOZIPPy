@@ -23,6 +23,7 @@ raw_fitter = exozippy.mmexofast.MMEXOFASTFitter(
         base_dir=base_dir, file_head='ob0939_uc02c_raw', save_log=True, save_plots=True,
         save_latex_tables=True, save_restart_files=True))
 raw_fitter.fit()
+print('initialize_exozippy:\n', raw_fitter.initialize_exozippy())
 # ------
 # Expected workflow: fit_point_lens (incl. 2 parallax fits)
 # output:
@@ -46,6 +47,7 @@ cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
         base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
         save_latex_tables=True, save_restart_files=True, save_grid_results=True))
 cont_fitter.fit()
+print('initialize_exozippy after renorm:\n', cont_fitter.initialize_exozippy())
 # ------
 # Expected workflow: Renormalize errors, refit all models, run parallax grids
 #

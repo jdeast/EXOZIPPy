@@ -3277,7 +3277,7 @@ class MMEXOFASTFitter:
                 'mag_methods': list of magnification methods following the MulensModel
                     convention. DEFAULT: None
         """
-        initializations = {'fits': [], 'errfacs': None, 'mag_methods': None}
+        initializations = {'fits': [], 'errfacs': self.renorm_factors, 'mag_methods': self.mag_methods}
 
         # TODO: populate errfacs and mag_methods
         if self.fit_type == 'point lens':

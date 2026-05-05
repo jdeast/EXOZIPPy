@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 data_file = os.path.join(
     exozippy.MULENS_DATA_PATH, 'OB140939', 'n20100310.I.OGLE.OB140939.txt')
 
-fitter = exozippy.mmexofast.fit(
+fitter = exozippy.mmexofast.mmexofast.fit(
     files=[data_file], fit_type='point lens', renormalize_errors=False, coords='17:47:12.25 -21:22:58.7',
     verbose=True, log_file='test_output/test_ob0939_raw.log', latex_file='test_output/test_ob09393_raw.tex')
 #fitter = exozippy.mmexofast.fit(

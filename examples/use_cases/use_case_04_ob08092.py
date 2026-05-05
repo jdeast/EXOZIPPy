@@ -17,7 +17,7 @@ print('=== Fit raw data ===')
 raw_fitter = exozippy.mmexofast.MMEXOFASTFitter(
     files=ground_data_files, coords=coords, fit_type='point lens', renormalize_errors=True,
     verbose=True,
-    parallax_grid=True,
+    parallax_grid=False,
     output_config=OutputConfig(
         base_dir=base_dir, file_head='ob08092', save_log=True, save_plots=True,
         save_latex_tables=True, save_restart_files=True))
