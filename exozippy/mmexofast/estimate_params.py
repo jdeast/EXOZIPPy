@@ -8,12 +8,12 @@
 # Updated by Jennifer Yee, May 2025
 from itertools import product
 import pandas as pd
-from matplotlib.gridspec import GridSpec
-
-import matplotlib.pyplot as plt
 import numpy as np
-#import warnings
-import copy
+from scipy.optimize import minimize
+from matplotlib.gridspec import GridSpec
+import matplotlib.pyplot as plt
+import warnings
+#import copy
 
 import MulensModel
 import MulensModel as mm
@@ -331,11 +331,15 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
             Defaults to None.
 
         refine: *bool*, optional
-            If True, runs iterative binary search refinement after the grid
-            search. Defaults to True.
+            If True, runs Nelder-Mead refinement after the grid search.
+            Defaults to True.
 
-        n_refine: *int*, optional
-            Number of refinement iterations. Defaults to 3.
+        nelder_mead_options: *dict*, optional
+            Options passed to scipy.optimize.minimize with method='Nelder-Mead'.
+            Supported keys: 'maxfev' (default 500), 'xatol' (default 1e-3),
+            'fatol' (default 0.1). Any key not specified falls back to the
+            default. Note: 'initial_simplex' is computed internally from the
+            grid step sizes and should not be passed here.
 
     Note: In future it might be a good idea to refactor best_params (and
     related methods) to use dynamic lists of grid parameters rather than
@@ -347,7 +351,8 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
                  d_s=None, n_s=None,
                  log_q_values=None, log_rho_values=None,
                  alpha_grid=None, s_grid=None,
-                 refine=True, n_refine=3):
+                 refine=True,
+                 nelder_mead_options=None):
         super().__init__(params)
         self.datasets = datasets
         self.d_alpha = d_alpha
@@ -359,9 +364,10 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         self._alpha_grid = alpha_grid
         self._s_grid = s_grid
         self.refine = refine
-        self.n_refine = n_refine
+        self.nelder_mead_options = nelder_mead_options
         self._results = None
         self._refinement_results = None
+        self._refinement_result = None
         self._all_results = None
         self._is_run = False
 
@@ -375,6 +381,13 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         if self._binary_params is None:
             self._binary_params = self.get_binary_lens_params()
         return self._binary_params
+
+    @property
+    def _nelder_mead_options(self):
+        defaults = {'maxfev': 500, 'xatol': 1e-3, 'fatol': 0.1}
+        if self.nelder_mead_options is not None:
+            defaults.update(self.nelder_mead_options)
+        return defaults
 
     @property
     def binary_params(self):
@@ -440,6 +453,7 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
     def _make_event(self, grid_params):
         model = mm.Model(grid_params)
         model.set_magnification_methods(self._base_binary_params.mag_methods)
+        model.default_magnification_method = 'point_source_point_lens'
         event = mm.Event(datasets=self.datasets, model=model)
         return event
 
@@ -452,19 +466,20 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         results = []
         grid_params = self._base_binary_params.ulens.copy()
 
-        for alpha, s, log_q, log_rho in self._grid_iterator():
-            grid_params['alpha'] = alpha
-            grid_params['s'] = s
-            grid_params['q'] = 10. ** log_q
-            grid_params['rho'] = 10. ** log_rho
+        event = self._make_event(grid_params)
 
-            event = self._make_event(grid_params)
+        for alpha, s, log_q, log_rho in self._grid_iterator():
+            event.model.parameters.alpha = alpha
+            event.model.parameters.s = s
+            event.model.parameters.q = 10. ** log_q
+            event.model.parameters.rho = 10. ** log_rho
+
             results.append({
                 'chi2': event.get_chi2(),
                 'alpha': alpha,
                 's': s,
-                'q': grid_params['q'],
-                'rho': grid_params['rho']
+                'q': event.model.parameters.q,
+                'rho': event.model.parameters.rho
             })
 
         df = pd.DataFrame(results)
@@ -473,80 +488,91 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         return df
 
     def _run_refinement(self):
-        results = []
+        best = self._base_binary_params.ulens.copy()
+        x0 = np.array([
+            best['alpha'],
+            best['s'],
+            np.log10(best['q']),
+            np.log10(best['rho'])
+        ])
 
-        d_alpha = (self.d_alpha if self.d_alpha is not None else 0.1) / 2.
-        d_s = (self.d_s if self.d_s is not None else 0.01 * self.s) / 2.
-        d_log_q = 0.5
-        d_log_rho = 0.5
+        # Build initial simplex scaled to the grid step sizes used in the
+        # grid search. This is important: Nelder-Mead's default simplex
+        # perturbs each coordinate by 5% of x0, which is arbitrary and can
+        # be badly scaled here (e.g. log_q near 0 gets almost no perturbation).
+        d_alpha = self.d_alpha if self.d_alpha is not None else 0.1
+        d_s = self.d_s if self.d_s is not None else 0.01 * self.s
+        simplex_deltas = np.array([d_alpha, d_s, 0.5, 0.5])
+        n = len(x0)
+        initial_simplex = np.vstack(
+            [x0] + [x0 + simplex_deltas[i] * np.eye(n)[i] for i in range(n)])
 
-        n_alpha = self.n_alpha if self.n_alpha is not None else 6
-        n_s = self.n_s if self.n_s is not None else 4
-        n_log_q = 3
-        n_log_rho = 3
+        # Single Event created once; parameters updated in-place each call
+        event = self._make_event(best)
 
-        for iteration in range(1, self.n_refine + 1):
-            best = self._base_binary_params.ulens
+        trajectory = []
 
-            alpha_values = best['alpha'] + (np.arange(n_alpha) - (n_alpha - 1) / 2.) * d_alpha
-            s_values = best['s'] + (np.arange(n_s) - (n_s - 1) / 2.) * d_s
-            log_q_values = np.log10(best['q']) + (np.arange(n_log_q) - (n_log_q - 1) / 2.) * d_log_q
-            log_rho_values = np.log10(best['rho']) + (np.arange(n_log_rho) - (n_log_rho - 1) / 2.) * d_log_rho
+        def chi2_fn(x):
+            alpha, s, log_q, log_rho = x
+            event.model.parameters.alpha = alpha
+            event.model.parameters.s = s
+            event.model.parameters.q = 10. ** log_q
+            event.model.parameters.rho = 10. ** log_rho
+            chi2 = event.get_chi2()
+            trajectory.append({
+                'chi2': chi2,
+                'alpha': alpha,
+                's': s,
+                'q': 10. ** log_q,
+                'rho': 10. ** log_rho,
+            })
+            return chi2
 
-            grid_params = best.copy()
-            iter_results = []
+        result = minimize(
+            chi2_fn, x0, method='Nelder-Mead',
+            options={**self._nelder_mead_options, 'initial_simplex': initial_simplex})
 
-            for alpha, s, log_q, log_rho in product(
-                    alpha_values, s_values, log_q_values, log_rho_values):
-                grid_params['alpha'] = alpha
-                grid_params['s'] = s
-                grid_params['q'] = 10. ** log_q
-                grid_params['rho'] = 10. ** log_rho
+        if not result.success:
+            warnings.warn(
+                f"Nelder-Mead refinement did not converge: {result.message}. "
+                f"Best chi2={result.fun:.4f} after {result.nfev} evaluations.")
 
-                event = self._make_event(grid_params)
-                iter_results.append({
-                    'chi2': event.get_chi2(),
-                    'alpha': alpha,
-                    's': s,
-                    'q': grid_params['q'],
-                    'rho': grid_params['rho'],
-                    'iteration': iteration
-                })
+        self._refinement_result = result
 
-            results.extend(iter_results)
-
-            # Update best for next iteration
-            df_iter = pd.DataFrame(iter_results)
-            best_row = df_iter.loc[df_iter['chi2'].idxmin()]
-            self._base_binary_params.ulens.update(
-                best_row[['alpha', 's', 'q', 'rho']].to_dict())
-
-            # Halve step sizes for next iteration
-            d_alpha /= 2.
-            d_s /= 2.
-            d_log_q /= 2.
-            d_log_rho /= 2.
-
-        # Ensure _base_binary_params reflects the global best across grid and refinement
-        df = pd.DataFrame(results)
-        combined = pd.concat(
-            [self.results[['chi2', 'alpha', 's', 'q', 'rho']],
-             df[['chi2', 'alpha', 's', 'q', 'rho']]], ignore_index=True)
-        best_row = combined.loc[combined['chi2'].idxmin()]
-        self._base_binary_params.ulens.update(
-            best_row[['alpha', 's', 'q', 'rho']].to_dict())
+        df = pd.DataFrame(trajectory)
+        # Guard against Nelder-Mead wandering to a worse basin than the grid:
+        # take the global best across both grid and refinement trajectory.
+        # Use result.x directly — scipy guarantees this is the best point found
+        best_grid_chi2 = self.results['chi2'].min()
+        if result.fun < best_grid_chi2:
+            alpha, s, log_q, log_rho = result.x
+            self._base_binary_params.ulens.update({
+                'alpha': alpha,
+                's': s,
+                'q': 10. ** log_q,
+                'rho': 10. ** log_rho
+            })
+        # else: grid best is already set by _run_grid_search — leave it
 
         return df
 
     @property
     def results(self):
         if self._results is None:
-            self._results = self._run_grid_search()
-            self._results = self._add_sigma_to_results()
+            df = self._run_grid_search()
+            self._results = self._postprocess_grid_results(df)
         return self._results
 
     @property
+    def refinement_result(self):
+        """Raw scipy OptimizeResult from Nelder-Mead. Check result.success and
+        result.nfev for convergence diagnostics."""
+        _ = self.refinement_results  # ensure refinement has run
+        return self._refinement_result
+
+    @property
     def refinement_results(self):
+        """DataFrame of all points evaluated during Nelder-Mead refinement."""
         if self._refinement_results is None:
             _ = self.results  # ensure grid search has run first
             self._refinement_results = self._run_refinement()
@@ -575,10 +601,10 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
 
         return self._all_results
 
-    def _add_sigma_to_results(self):
-        df = self.results.copy()
-        df['log_q'] = np.log10(df['q']).astype(int)
-        df['log_rho'] = np.log10(df['rho']).astype(int)
+    def _postprocess_grid_results(self, df):
+        df = df.copy()
+        df['log_q'] = np.round(np.log10(df['q'])).astype(int)
+        df['log_rho'] = np.round(np.log10(df['rho'])).astype(int)
         df['sigma'] = np.sqrt(df['chi2'] - df['chi2'].min())
         return df
 
