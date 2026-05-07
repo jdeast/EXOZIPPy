@@ -353,7 +353,9 @@ class AnomalyFitter(MulensFitter):
     Base class for fitting microlensing anomalies using emcee.
 
     Extends ``MulensFitter`` with emcee-based MCMC sampling and likelihood,
-    prior, and probability functions. Intended to be subclassed for specific
+    prior, and probability functions. Provides the ``event`` property,
+    ``make_emcee_vector_from_ModelParameters()``, base ``emcee_settings``
+    setup, and pickling support. Intended to be subclassed for specific
     anomaly types (e.g. ``WidePlanetFitter``).
 
     Parameters
@@ -366,43 +368,94 @@ class AnomalyFitter(MulensFitter):
     datasets : list, optional
         List of MulensModel.MulensData objects. Inherited from ``MulensFitter``
         but also accepted here directly.
+    emcee_settings : dict, optional
+        Settings for the emcee sampler. Any missing keys are filled in from
+        ``default_emcee_settings``. Valid keys are ``'n_walkers'``,
+        ``'n_burn'``, ``'n_steps'``, ``'acceptance_fraction'``, and optionally
+        ``'temperature'``.
 
     Class Attributes
     ----------------
     default_emcee_settings : dict
-        Default emcee settings: ``{'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000}``.
+        Default emcee settings: ``{'n_walkers': 40, 'n_burn': 500,
+        'n_steps': 1000, 'acceptance_fraction': 0.1}``.
 
     Notes
     -----
-    ``set_event_parameters()`` and ``make_starting_vector()`` must be
-    implemented by subclasses. ``estimate_initial_parameters()`` is also
-    intended to be overridden.
+    ``initialize_event()`` and ``make_starting_vector()`` must be implemented
+    by subclasses. ``estimate_initial_parameters()`` is also intended to be
+    overridden.
+
+    After ``event.get_chi2()`` has been evaluated, the ``MulensModel.Event``
+    object cannot be pickled. ``__getstate__`` resets ``_event`` to ``None``
+    before pickling; call ``initialize_event()`` again after unpickling if
+    needed.
 
     ``datasets`` appears in both ``MulensFitter.__init__()`` and
     ``AnomalyFitter.__init__()``, which may cause confusion. This could
     be simplified by relying solely on the parent class argument.
     """
 
-    default_emcee_settings = {'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000, 'acceptance_fraction': 0.1}
+    default_emcee_settings = {
+        'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000, 'acceptance_fraction': 0.1}
 
-    def __init__(self, datasets=None, anomaly_lc_params=None, **kwargs):
+    def __init__(self, datasets=None, anomaly_lc_params=None, emcee_settings=None, **kwargs):
         super().__init__(**kwargs)
         self.anomaly_lc_params = anomaly_lc_params
         self.datasets = datasets
+        self._event = None
+
+        # Start from a copy of the defaults, then override with any user-supplied values.
+        # Using a copy avoids the bug of mutating the class-level dict directly.
+        settings = dict(self.default_emcee_settings)
+        if emcee_settings is not None:
+            settings.update(emcee_settings)
+        self.emcee_settings = settings
+
+    def __getstate__(self):
+        """
+        Return the object state for pickling, with ``_event`` set to ``None``.
+
+        ``MulensModel.Event`` objects cannot be pickled after ``get_chi2()``
+        has been called. This method drops the event before serialisation.
+        Call ``initialize_event()`` after unpickling to restore it.
+
+        Returns
+        -------
+        dict
+            Object ``__dict__`` with ``_event`` replaced by ``None``.
+        """
+        state = self.__dict__.copy()
+        state['_event'] = None
+        return state
+
+    def __setstate__(self, state):
+        """
+        Restore the object state after unpickling.
+
+        Parameters
+        ----------
+        state : dict
+            State dictionary produced by ``__getstate__``.
+
+        Notes
+        -----
+        After unpickling, ``_event`` will be ``None``; call
+        ``initialize_event()`` to rebuild it if needed.
+        """
+        self.__dict__.update(state)
 
     def estimate_initial_parameters(self):
         """
         Estimate initial model parameters from the anomaly light curve parameters.
 
-        Intended to be overridden by subclasses. See ``WidePlanetFitter.estimate_initial_parameters()``
-        for an example implementation.
+        Intended to be overridden by subclasses.
 
         Notes
         -----
         This method is not formally declared as abstract but is intended to be
         overridden by subclasses. Consider using ``abc.abstractmethod`` to enforce
-        this, consistent with ``set_event_parameters()`` and
-        ``make_starting_vector()``.
+        this, consistent with ``initialize_event()`` and ``make_starting_vector()``.
         """
         pass
 
@@ -428,31 +481,51 @@ class AnomalyFitter(MulensFitter):
 
         return key
 
-    def set_event_parameters(self, theta, event):
+    def initialize_event(self):
         """
-        Set the event model parameters from a parameter vector.
+        Initialize the ``MulensModel.Event`` object.
 
         Must be implemented by subclasses.
-
-        Parameters
-        ----------
-        theta : array-like
-            Parameter vector corresponding to ``parameters_to_fit``.
-        event : MulensModel.Event
-            Event object whose model parameters will be updated.
-
-        Returns
-        -------
-        MulensModel.Event
-            Event object with updated model parameters.
 
         Raises
         ------
         NotImplementedError
             If called on ``AnomalyFitter`` directly rather than a subclass.
         """
-        raise NotImplementedError('You need to implement set_event_parameters() for this class.')
-        # return mm.Event()
+        raise NotImplementedError('Subclasses must implement initialize_event().')
+
+    def make_emcee_vector_from_ModelParameters(self, parameters):
+        """
+        Convert a ``MulensModel.ModelParameters`` object to an emcee parameter
+        vector.
+
+        Constructs a parameter vector corresponding to ``parameters_to_fit``,
+        converting parameters with a ``log_`` prefix to log10 space.
+
+        Parameters
+        ----------
+        parameters : MulensModel.ModelParameters
+            Model parameters to convert.
+
+        Returns
+        -------
+        list
+            Parameter vector corresponding to ``parameters_to_fit``.
+
+        See Also
+        --------
+        event.setter : Performs the inverse conversion from emcee vector to
+            model parameters.
+        """
+        vector = []
+        for parameter in self.parameters_to_fit:
+            key = self.get_parameter_name(parameter)
+            value = parameters.__getattribute__(key)
+            if key != parameter:  # log_ prefix
+                value = np.log10(value)
+            vector.append(value)
+
+        return vector
 
     def make_starting_vector(self):
         """
@@ -472,6 +545,55 @@ class AnomalyFitter(MulensFitter):
             If called on ``AnomalyFitter`` directly rather than a subclass.
         """
         raise NotImplementedError('You need to implement make_starting_vector() for this class.')
+
+    @property
+    def event(self):
+        """
+        The ``MulensModel.Event`` object for the current fit.
+
+        Returns
+        -------
+        MulensModel.Event or None
+            The current event object, or ``None`` if ``initialize_event()``
+            has not yet been called (or after unpickling).
+
+        See Also
+        --------
+        initialize_event : Creates the event object.
+        """
+        return self._event
+
+    @event.setter
+    def event(self, theta):
+        """
+        Update the event model parameters from an emcee parameter vector.
+
+        Converts logarithmic parameters from log10 space back to linear space.
+
+        Parameters
+        ----------
+        theta : array-like
+            Parameter vector corresponding to ``parameters_to_fit``.
+
+        Raises
+        ------
+        AttributeError
+            If the event has not been initialized via ``initialize_event()``.
+
+        See Also
+        --------
+        make_emcee_vector_from_ModelParameters : Performs the inverse
+            conversion.
+        """
+        if self._event is None:
+            raise AttributeError(
+                'Event has not been created. Run initialize_event() first!')
+
+        for parameter, value in zip(self.parameters_to_fit, theta):
+            key = self.get_parameter_name(parameter)
+            if key != parameter:  # log_ prefix
+                value = 10. ** value
+            self._event.model.parameters.__setattr__(key, value)
 
     def ln_like(self, theta):
         """
@@ -497,16 +619,14 @@ class AnomalyFitter(MulensFitter):
         The bare ``except`` clause silently catches all exceptions, which may
         make debugging difficult. Consider catching specific exceptions instead.
         """
-
         self.event = theta
         try:
             chi2 = self.event.get_chi2()
-            if 'temperature' in self.emcee_settings.keys(): #['temperature'] is not None:
+            if 'temperature' in self.emcee_settings.keys():
                 chi2 /= self.emcee_settings['temperature'] ** 2
         except:
             return -np.inf
 
-        #print(chi2, theta)
         return -0.5 * chi2
 
     def ln_prior(self, theta):
@@ -585,13 +705,18 @@ class WidePlanetFitter(AnomalyFitter):
     with corresponding default sigmas ``{}``.
     ``log_rho``, ``log_s``, and ``log_q`` are fitted in log10 space.
 
+    The ``event`` property, ``make_emcee_vector_from_ModelParameters()``,
+    ``__getstate__``/``__setstate__``, and base ``emcee_settings`` setup are
+    all inherited from ``AnomalyFitter``. This class is responsible only for
+    adding ``'n_dim'`` to ``emcee_settings`` once ``parameters_to_fit`` is
+    finalised.
+
     Parameters
     ----------
     emcee_settings : dict, optional
-        Settings for the emcee sampler. Any missing keys are filled in from
-        ``AnomalyFitter.default_emcee_settings``. Valid keys are
-        ``'n_walkers'``, ``'n_burn'``, ``'n_steps'``, and optionally
-        ``'temperature'``.
+        Settings for the emcee sampler passed through to ``AnomalyFitter``.
+        ``'n_dim'`` is added automatically from ``len(parameters_to_fit)``
+        if not already present. See ``AnomalyFitter`` for other valid keys.
 
     Notes
     -----
@@ -619,7 +744,8 @@ class WidePlanetFitter(AnomalyFitter):
     """
 
     def __init__(self, emcee_settings=None, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(emcee_settings=emcee_settings, **kwargs)
+
         if not ('parameters_to_fit' in kwargs.keys()):
             self.parameters_to_fit = ['t_0', 'u_0', 't_E', 'log_rho', 'log_s', 'log_q', 'alpha']
             if self.sigmas is None:
@@ -627,20 +753,10 @@ class WidePlanetFitter(AnomalyFitter):
         elif self.sigmas is None:
             raise AttributeError('If parameters_to_fit is set, sigmas must also be set.')
 
-        if emcee_settings is None:
-            emcee_settings = AnomalyFitter.default_emcee_settings
+        # n_dim must be set after parameters_to_fit is finalised above.
+        # setdefault preserves any value the user may have passed explicitly.
+        self.emcee_settings.setdefault('n_dim', len(self.parameters_to_fit))
 
-        for key in AnomalyFitter.default_emcee_settings.keys():
-            if key not in list(emcee_settings.keys()):
-                emcee_settings[key] = AnomalyFitter.default_emcee_settings[key]
-
-        if 'n_dim' not in list(emcee_settings.keys()):
-            emcee_settings['n_dim'] = len(self.parameters_to_fit)
-
-        self.emcee_settings = emcee_settings
-
-        self._best = None
-        self._event = None
         self._initializer = None
         self._starting_vector = None
         self._initial_model = None
@@ -743,39 +859,6 @@ class WidePlanetFitter(AnomalyFitter):
         model.set_magnification_methods(self.mag_methods)
         self._event = MulensModel.Event(datasets=self.datasets, model=model)
 
-    def make_emcee_vector_from_ModelParameters(self, parameters):
-        """
-        Convert a ``MulensModel.ModelParameters`` object to an emcee parameter
-        vector.
-
-        Constructs a parameter vector corresponding to ``parameters_to_fit``,
-        converting parameters with a ``log_`` prefix to log10 space.
-
-        Parameters
-        ----------
-        parameters : MulensModel.ModelParameters
-            Model parameters to convert.
-
-        Returns
-        -------
-        list
-            Parameter vector corresponding to ``parameters_to_fit``.
-
-        See Also
-        --------
-        event.setter : Performs the inverse conversion from emcee vector to
-            model parameters.
-        """
-        vector = []
-        for parameter in self.parameters_to_fit:
-            key = self.get_parameter_name(parameter)
-            value = parameters.__getattribute__(key)
-            if key != parameter:  # log_ prefix
-                value = np.log10(value)
-            vector.append(value)
-
-        return vector
-
     def run(self, verbose=False):
         """
         Fit the wide planet model using emcee MCMC sampling.
@@ -850,52 +933,3 @@ class WidePlanetFitter(AnomalyFitter):
 
         self.best = self.event.model.parameters.parameters
         self.best['chi2'] = self.event.get_chi2()
-
-    @property
-    def event(self):
-        """
-        The ``MulensModel.Event`` object for the current fit.
-
-        Returns
-        -------
-        MulensModel.Event or None
-            The current event object, or None if ``initialize_event()`` has
-            not yet been called.
-
-        See Also
-        --------
-        initialize_event : Creates the event object.
-        """
-        return self._event
-
-    @event.setter
-    def event(self, theta):
-        """
-        Update the event model parameters from an emcee parameter vector.
-
-        Converts logarithmic parameters from log10 space back to linear space.
-
-        Parameters
-        ----------
-        theta : array-like
-            Parameter vector corresponding to ``parameters_to_fit``.
-
-        Raises
-        ------
-        AttributeError
-            If the event has not been initialized via ``initialize_event()``.
-
-        See Also
-        --------
-        make_emcee_vector_from_ModelParameters : Performs the inverse
-            conversion.
-        """
-        if self._event is None:
-            raise AttributeError(
-                'Event has not been created. Run initialize_event() first!')
-
-        for parameter, value in zip(self.parameters_to_fit, theta):
-            key = self.get_parameter_name(parameter)
-            if key != parameter:  # log_ prefix
-                value = 10. ** value
-            self._event.model.parameters.__setattr__(key, value)
