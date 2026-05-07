@@ -383,7 +383,7 @@ class AnomalyFitter(MulensFitter):
     be simplified by relying solely on the parent class argument.
     """
 
-    default_emcee_settings = {'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000}
+    default_emcee_settings = {'n_walkers': 40, 'n_burn': 500, 'n_steps': 1000, 'acceptance_fraction': 0.1}
 
     def __init__(self, datasets=None, anomaly_lc_params=None, **kwargs):
         super().__init__(**kwargs)
@@ -781,13 +781,15 @@ class WidePlanetFitter(AnomalyFitter):
         Fit the wide planet model using emcee MCMC sampling.
 
         Runs ``WidePlanetEnsembleInitializer`` to build the starting ensemble,
-        initializes the event, and runs the emcee sampler.
+        initializes the event, and runs the emcee sampler. Aborts early if the
+        mean acceptance fraction drops below ``emcee_settings['acceptance_fraction']``.
 
         Parameters
         ----------
         verbose : bool, optional
             If True, prints the fitted parameters with 16th, 50th, and 84th
-            percentile uncertainties. Default is False.
+            percentile uncertainties, and logs acceptance fraction every 100
+            steps. Default is False.
         """
         starting_vector = self.starting_vector  # triggers full initialization
 
@@ -796,17 +798,42 @@ class WidePlanetFitter(AnomalyFitter):
             print("{0} CPUs".format(ncpu))
             os.environ["OMP_NUM_THREADS"] = "1"
             pool = Pool()
-            sampler = emcee.EnsembleSampler(
+            self.sampler = emcee.EnsembleSampler(
                 self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'],
                 self.ln_prob, pool=pool)
         else:
-            sampler = emcee.EnsembleSampler(
+            self.sampler = emcee.EnsembleSampler(
                 self.emcee_settings['n_walkers'], self.emcee_settings['n_dim'],
                 self.ln_prob)
 
-        sampler.run_mcmc(starting_vector, self.emcee_settings['n_steps'])
+        try:
+            for sample in self.sampler.sample(
+                    starting_vector, iterations=self.emcee_settings['n_steps']):
 
-        samples = sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape(
+                # Only check every 100 steps, and only if a threshold is set
+                if ((self.sampler.iteration % 100) or
+                        (self.emcee_settings.get('acceptance_fraction') is None)):
+                    continue
+
+                mean_af = np.mean(self.sampler.acceptance_fraction)
+
+                if verbose:
+                    print(
+                        self.sampler.iteration,
+                        '{0:.3f}'.format(mean_af),
+                        self.sampler.acceptance_fraction)
+
+                if mean_af < self.emcee_settings['acceptance_fraction']:
+                    print('Acceptance fraction too low! Minimum set to:',
+                          self.emcee_settings['acceptance_fraction'])
+                    break
+
+        finally:
+            if self.pool:
+                pool.close()
+                pool.join()
+
+        samples = self.sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape(
             (-1, self.emcee_settings['n_dim']))
 
         results = np.percentile(samples, [16, 50, 84], axis=0)
@@ -817,7 +844,7 @@ class WidePlanetFitter(AnomalyFitter):
                 print("${:.5f}^{{+{:.5f}}}_{{-{:.5f}}}$ &".format(
                     r, results[2, i] - r, r - results[0, i]))
 
-        prob = sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
+        prob = self.sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
         best_index = np.argmax(prob)
         self.event = samples[best_index, :]
 
