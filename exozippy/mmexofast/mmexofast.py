@@ -64,7 +64,7 @@ class MMEXOFASTFitter:
         'files', 'fit_type', 'finite_source', 'coords', 'mag_methods',
         'limb_darkening_coeffs_u', 'limb_darkening_coeffs_gamma',
         'renormalize_errors', 'parallax_grid', 'verbose', 'fix_blend_flux',
-        'fix_source_flux', 'primary_location', 'primary_dataset'
+        'fix_source_flux', 'primary_location', 'primary_dataset', 'emcee_settings'
     ]
 
     # Parallax grid search parameters
@@ -98,6 +98,7 @@ class MMEXOFASTFitter:
             restart_file=None,
             stop_before=None, # TODO: Build these stopping points out properly
             stop_after=None,
+            emcee_settings=None,
     ):
         # Validate mutually exclusive parameters
         if files is not None and datasets is not None:
@@ -2596,7 +2597,7 @@ class MMEXOFASTFitter:
 
             wide_planet_fitter = mmexo.fitters.WidePlanetFitter(
                 datasets=datasets, anomaly_lc_params=self.anomaly_lc_params,
-                sigmas=sigmas
+                sigmas=sigmas, emcee_settings=self.emcee_settings
             )
             self._log(
                 f'Initial 2L1S Wide Model {wide_planet_fitter.initial_model}' +

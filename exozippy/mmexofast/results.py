@@ -3,24 +3,149 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 from collections.abc import MutableMapping
+from abc import ABC, abstractmethod
 
 import MulensModel
 import exozippy.mmexofast as mmexo
 
 
 # ============================================================================
-# MMEXOFASTFitResults wrapper
+# FitResults wrappers
 # ============================================================================
-
-class MMEXOFASTFitResults:
+class BaseFitResults(ABC):
     """
-    Wrapper containing results of a single fit, with convenience methods.
-    This assumes `fitter` exposes `.best`, `.results`, `.parameters_to_fit`,
-    `.datasets`, etc.
+    Abstract base class for fit results wrappers.
+
+    Defines the interface that all fit results classes must implement so that
+    ``FitRecord`` can consume them interchangeably, regardless of the
+    underlying fitter (e.g. SFit, emcee).
+
+    Concrete subclasses must implement:
+        - ``get_params_from_results()``
+        - ``get_sigmas_from_results()``
+        - ``format_results_as_df()``
+
+    Parameters
+    ----------
+    fitter : object
+        The fitter object whose results are being wrapped. Must expose
+        ``best``, ``parameters_to_fit``, and ``datasets`` attributes.
+
+    Attributes
+    ----------
+    fitter : object
+        The wrapped fitter object.
     """
 
     def __init__(self, fitter):
         self.fitter = fitter
+
+    # -----------------------------------------------------------------------
+    # Abstract interface — must be implemented by subclasses
+    # -----------------------------------------------------------------------
+
+    @abstractmethod
+    def get_params_from_results(self) -> dict:
+        """
+        Return the best-fit model parameters as a dict.
+
+        Returns a dictionary mapping linear-space parameter names to their
+        best-fit values, suitable for use as input to
+        ``MulensModel.Model()``. Must not include ``'chi2'``.
+
+        Returns
+        -------
+        dict
+            Parameter name -> best-fit value.
+        """
+
+    @abstractmethod
+    def get_sigmas_from_results(self) -> dict:
+        """
+        Return 1-sigma uncertainties as a dict.
+
+        Returns a dictionary mapping parameter names to their 1-sigma
+        uncertainties. For asymmetric uncertainties (e.g. from emcee),
+        returns the mean of the upper and lower uncertainties.
+
+        Returns
+        -------
+        dict
+            Parameter name -> 1-sigma uncertainty.
+        """
+
+    @abstractmethod
+    def format_results_as_df(self) -> pd.DataFrame:
+        """
+        Return fit results as a pandas DataFrame.
+
+        The DataFrame must contain at minimum the columns
+        ``'parameter_names'`` and ``'values'``. Sigma columns vary by
+        subclass: ``MMEXOFASTFitResults`` produces ``'sigmas'``;
+        ``EmceeFitResults`` produces ``'sigma_minus'`` and
+        ``'sigma_plus'``.
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+
+    # -----------------------------------------------------------------------
+    # Concrete shared properties
+    # -----------------------------------------------------------------------
+
+    @property
+    def datasets(self):
+        """list : Datasets from the fitter."""
+        return self.fitter.datasets
+
+    @property
+    def best(self):
+        """dict : Best-fit parameters including chi2."""
+        return self.fitter.best
+
+    @property
+    def parameters_to_fit(self):
+        """list of str : Names of the parameters sampled by the fitter."""
+        return self.fitter.parameters_to_fit
+
+    @property
+    def all_model_parameters(self):
+        """dict_keys : All parameter names in best, including fixed ones."""
+        return self.fitter.best.keys()
+
+    @property
+    def chi2(self):
+        """float or None : Best-fit chi2, or None if not available."""
+        return self.fitter.best.get('chi2')
+
+
+class MMEXOFASTFitResults(BaseFitResults):
+    """
+    Wrapper for results from an SFit minimizer run.
+
+    Exposes the ``BaseFitResults`` interface so that ``FitRecord`` can
+    consume SFit results identically to emcee results.
+
+    Assumes ``fitter`` exposes ``.best``, ``.results``,
+    ``.parameters_to_fit``, and ``.datasets``.
+
+    Parameters
+    ----------
+    fitter : object
+        The fitter object after the fit has completed. Must expose
+        ``best``, ``results``, ``parameters_to_fit``, and ``datasets``.
+
+    Notes
+    -----
+    Unlike ``EmceeFitResults``, this class produces a single ``'sigmas'``
+    column in ``format_results_as_df()`` since SFit returns symmetric
+    uncertainties.
+    """
+
+    def __init__(self, fitter):
+        super().__init__(fitter)
+
 
     def get_params_from_results(self) -> Dict[str, float]:
         """
@@ -123,30 +248,225 @@ class MMEXOFASTFitResults:
         df = pd.concat((df_ulens, df_flux), ignore_index=True)
         return df
 
-    # Convenience properties
-    @property
-    def datasets(self):
-        return self.fitter.datasets
-
-    @property
-    def best(self):
-        return self.fitter.best
-
     @property
     def results(self):
+        """object : Full SFit results object from the fitter."""
         return self.fitter.results
 
-    @property
-    def parameters_to_fit(self):
-        return self.fitter.parameters_to_fit
+
+class EmceeFitResults(BaseFitResults):
+    """
+    Wrapper for results from a WidePlanetFitter emcee MCMC run.
+
+    Computes post-burn-in percentiles from the sampler chain and exposes
+    them via the ``BaseFitResults`` interface so that ``FitRecord`` can
+    consume emcee results identically to SFit results.
+
+    Parameters
+    ----------
+    fitter : WidePlanetFitter
+        The fitter object after ``run()`` has completed. Must expose
+        ``sampler.chain``, ``sampler.lnprobability``, ``emcee_settings``,
+        ``best``, ``best_theta``, ``parameters_to_fit``, ``datasets``,
+        ``_event``, ``initialize_event()``, and ``get_parameter_name()``.
+
+    Attributes
+    ----------
+    fitter : WidePlanetFitter
+        The wrapped fitter object.
+
+    Notes
+    -----
+    ``sigma_minus = p50 - p16`` and ``sigma_plus = p84 - p50`` are both
+    stored as positive numbers. The minus sign is a display concern only.
+    """
+
+    def __init__(self, fitter):
+        super().__init__(fitter)
+        self._percentiles = None
+
+    # -----------------------------------------------------------------------
+    # Percentiles (lazily computed and cached)
+    # -----------------------------------------------------------------------
 
     @property
-    def all_model_parameters(self):
-        return self.fitter.best.keys()
+    def percentiles(self):
+        """
+        np.ndarray, shape (3, n_params) : 16th, 50th, and 84th percentiles
+        of the post-burn-in chain, one column per parameter in
+        ``parameters_to_fit``. Computed once and cached.
+        """
+        if self._percentiles is None:
+            n_burn = self.fitter.emcee_settings['n_burn']
+            n_dim  = self.fitter.emcee_settings['n_dim']
+            samples = self.fitter.sampler.chain[:, n_burn:, :].reshape(
+                (-1, n_dim))
+            self._percentiles = np.percentile(samples, [16, 50, 84], axis=0)
+        return self._percentiles
 
-    @property
-    def chi2(self):
-        return self.fitter.best.get('chi2')
+    # -----------------------------------------------------------------------
+    # BaseFitResults interface
+    # -----------------------------------------------------------------------
+
+    def get_params_from_results(self) -> dict:
+        """
+        Return the max-likelihood parameters in linear space.
+
+        Returns ``self.best`` excluding ``'chi2'``. Keys are linear-space
+        parameter names (e.g. ``'rho'``, not ``'log_rho'``), suitable for
+        use as input to ``MulensModel.Model()``.
+
+        Returns
+        -------
+        dict
+            Linear-space parameter name -> max-likelihood value.
+        """
+        return {k: v for k, v in self.best.items() if k != 'chi2'}
+
+    def get_sigmas_from_results(self) -> dict:
+        """
+        Return mean 1-sigma uncertainties for each fitted parameter.
+
+        Computes ``(sigma_minus + sigma_plus) / 2`` per parameter, where
+        ``sigma_minus = p50 - p16`` and ``sigma_plus = p84 - p50``
+        (both positive).
+
+        Returns
+        -------
+        dict
+            Parameter name (as in ``parameters_to_fit``) -> mean 1-sigma
+            uncertainty.
+        """
+        p = self.percentiles
+        sigmas = {}
+        for i, param in enumerate(self.parameters_to_fit):
+            sigma_minus = p[1, i] - p[0, i]
+            sigma_plus  = p[2, i] - p[1, i]
+            sigmas[param] = (sigma_minus + sigma_plus) / 2
+        return sigmas
+
+    def format_results_as_df(self) -> pd.DataFrame:
+        """
+        Build a summary DataFrame with fitted, fixed, and flux parameters.
+
+        Sections (in order):
+
+        1. **Fitted parameters**: 50th percentile values with asymmetric
+           ``sigma_minus`` (p50 - p16, positive) and ``sigma_plus``
+           (p84 - p50, positive).
+        2. **Fixed parameters and chi2**: values from ``best``, NaN sigmas.
+        3. **N_data**: total number of good data points, NaN sigmas.
+        4. **Flux parameters**: source and blend magnitudes at the
+           max-likelihood parameters, NaN sigmas.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``'parameter_names'``, ``'values'``,
+            ``'sigma_minus'``, ``'sigma_plus'``.
+        """
+        df_fitted = self._get_df_fitted_parameters()
+        df_fixed  = self._get_df_fixed_parameters()
+        df_flux   = self._get_df_flux_parameters()
+        return pd.concat([df_fitted, df_fixed, df_flux], ignore_index=True)
+
+    # -----------------------------------------------------------------------
+    # Private helpers
+    # -----------------------------------------------------------------------
+
+    def _get_df_fitted_parameters(self) -> pd.DataFrame:
+        """
+        Build the fitted parameters section of the DataFrame.
+
+        Uses the 50th percentile as values. ``sigma_minus = p50 - p16``
+        and ``sigma_plus = p84 - p50``, both stored as positive numbers.
+        """
+        p = self.percentiles
+        return pd.DataFrame({
+            'parameter_names': list(self.parameters_to_fit),
+            'values':          list(p[1]),
+            'sigma_minus':     list(p[1] - p[0]),
+            'sigma_plus':      list(p[2] - p[1]),
+        })
+
+    def _get_df_fixed_parameters(self) -> pd.DataFrame:
+        """
+        Build the fixed parameters and N_data section of the DataFrame.
+
+        Fixed parameters are those present in ``best`` but absent from the
+        linear-mapped ``parameters_to_fit``. ``chi2`` is included here.
+        ``N_data`` (total good data points across all datasets) is appended
+        last. All sigma columns are NaN.
+        """
+        linear_params_to_fit = {
+            self.fitter.get_parameter_name(p)
+            for p in self.parameters_to_fit
+        }
+        fixed_parameters = [
+            p for p in self.all_model_parameters
+            if p not in linear_params_to_fit
+        ]
+        values = [self.best[p] for p in fixed_parameters]
+
+        fixed_parameters.append('N_data')
+        values.append(
+            int(np.sum([np.sum(dataset.good) for dataset in self.datasets]))
+        )
+
+        n = len(fixed_parameters)
+        return pd.DataFrame({
+            'parameter_names': fixed_parameters,
+            'values':          values,
+            'sigma_minus':     [np.nan] * n,
+            'sigma_plus':      [np.nan] * n,
+        })
+
+    def _get_df_flux_parameters(self) -> pd.DataFrame:
+        """
+        Build the flux parameters section of the DataFrame.
+
+        Sets the fitter event to ``best_theta`` before computing fluxes to
+        ensure magnitudes correspond to the max-likelihood parameters.
+        Initializes the event first if it has not been set.
+
+        Source and blend fluxes are converted to magnitudes via
+        ``MulensModel.utils.Utils.get_mag_and_err_from_flux``. Negative
+        fluxes are reported as ``'neg flux'``. All sigma columns are NaN
+        since flux uncertainties are not available from the emcee chain.
+        """
+        if self.fitter._event is None:
+            self.fitter.initialize_event()
+        self.fitter.event = self.fitter.best_theta
+
+        parameters = []
+        values     = []
+
+        source_fluxes = self.fitter._event.source_fluxes()
+        blend_fluxes  = self.fitter._event.blend_fluxes()
+
+        for i, dataset in enumerate(self.datasets):
+            obs, band = mmexo.observatories.get_telescope_band_from_filename(
+                dataset.plot_properties['label']
+            )
+            parameters.append(f'{band}_S_{obs}')
+            parameters.append(f'{band}_B_{obs}')
+
+            for flux in [source_fluxes[i], blend_fluxes[i]]:
+                if flux > 0:
+                    mag, _ = MulensModel.utils.Utils.get_mag_and_err_from_flux(
+                        flux, 0.0
+                    )
+                else:
+                    mag = 'neg flux'
+                values.append(mag)
+
+        n = len(parameters)
+        return pd.DataFrame({
+            'parameter_names': parameters,
+            'values':          values,
+            'sigma_minus':     [np.nan] * n,
+            'sigma_plus':      [np.nan] * n,
+        })
 
 
 # ============================================================================
@@ -232,15 +552,34 @@ class FitRecord:
         """
         Export fit results as a pandas DataFrame.
 
-        Returns a DataFrame with columns 'parameter_names', 'values', and 'sigmas'.
-        If full_result is available, delegates to its formatting method.
-        Otherwise returns a minimal DataFrame constructed from params and sigmas.
+        If ``full_result`` is available, delegates to its
+        ``format_results_as_df()`` method. Otherwise returns a minimal
+        DataFrame constructed from ``params`` and ``sigmas``.
+
+        The column structure depends on the type of ``full_result``:
+
+        - ``MMEXOFASTFitResults``: columns are ``'parameter_names'``,
+          ``'values'``, ``'sigmas'``. Uncertainties are symmetric.
+        - ``EmceeFitResults``: columns are ``'parameter_names'``,
+          ``'values'``, ``'sigma_minus'``, ``'sigma_plus'``. Uncertainties
+          are asymmetric. ``sigma_minus = p50 - p16`` and
+          ``sigma_plus = p84 - p50``, both stored as positive numbers.
+          Fixed parameters, ``N_data``, and flux parameters have
+          ``NaN`` for both sigma columns.
+        - Minimal fallback (no ``full_result``): columns are
+          ``'parameter_names'``, ``'values'``, ``'sigmas'``.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame with columns: 'parameter_names', 'values', 'sigmas'.
+            DataFrame with ``'parameter_names'`` and ``'values'`` columns
+            at minimum. Sigma column(s) vary by ``full_result`` type as
+            described above.
 
+        See Also
+        --------
+        MMEXOFASTFitResults.format_results_as_df
+        EmceeFitResults.format_results_as_df
         """
         if self.full_result is not None:
             return self.full_result.format_results_as_df()

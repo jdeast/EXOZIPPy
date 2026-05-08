@@ -3,9 +3,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
-# TODO: update once EmceeFitResults is implemented
-# from mmexo.fit_results import EmceeFitResults
-# from mmexo.fit_record import FitRecord
+import MulensModel
+from exozippy.mmexofast import EmceeFitResults, FitRecord
 
 
 # ===========================================================================
@@ -68,9 +67,6 @@ _FLUX_TO_MAG = {
     _BLEND_FLUXES[1]:  _MOCK_MAG_R_BLEND_MOA,
 }
 
-# NOTE: update to match where EmceeFitResults imports this function.
-# If imported as 'from MulensModel.utils import Utils', patch
-# 'mmexo.fit_results.Utils.get_mag_and_err_from_flux' instead.
 _MAG_FROM_FLUX_PATCH_PATH = 'MulensModel.utils.Utils.get_mag_and_err_from_flux'
 
 
