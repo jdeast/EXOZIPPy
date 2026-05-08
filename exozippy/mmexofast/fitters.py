@@ -9,6 +9,80 @@ import os
 import exozippy.mmexofast as mmexo
 
 
+import numpy as np
+
+
+class MinimalResults:
+    def __init__(
+        self,
+        emcee_percentiles=None,
+        x=None,
+        sigmas=None,
+        success=None,
+        msg=None,
+        parameters_to_fit=None,
+    ):
+        """
+        Parameters
+        ----------
+        emcee_percentiles : array-like of shape (n_parameters, 3), optional
+            The 16th, 50th, and 84th percentiles for each parameter in
+            parameters_to_fit. If provided, x and sigmas cannot also be given.
+        x : array-like, optional
+            Best-fit parameter values. Derived from emcee_percentiles
+            (50th percentile column) if emcee_percentiles is provided.
+        sigmas : array-like, optional
+            Parameter uncertainties. Derived from emcee_percentiles as the
+            mean of (p50 - p16) and (p84 - p50) per parameter if
+            emcee_percentiles is provided.
+        success : bool, optional
+            Whether the fit was successful.
+        msg : str, optional
+            A message describing the fit result.
+        parameters_to_fit : list, optional
+            Names of the parameters that were fitted.
+        """
+        if emcee_percentiles is not None:
+            if x is not None:
+                raise ValueError(
+                    "Cannot provide both 'emcee_percentiles' and 'x'. "
+                    "'x' is derived from 'emcee_percentiles'."
+                )
+            if sigmas is not None:
+                raise ValueError(
+                    "Cannot provide both 'emcee_percentiles' and 'sigmas'. "
+                    "'sigmas' is derived from 'emcee_percentiles'."
+                )
+
+        self.emcee_percentiles = (
+            np.array(emcee_percentiles) if emcee_percentiles is not None else None
+        )
+        self.success = success
+        self.msg = msg
+        self.parameters_to_fit = parameters_to_fit
+
+        if self.emcee_percentiles is not None:
+            p16 = self.emcee_percentiles[0, :]
+            p50 = self.emcee_percentiles[1, :]
+            p84 = self.emcee_percentiles[2, :]
+            self.x = p50
+            self.sigmas = ((p50 - p16) + (p84 - p50)) / 2
+        else:
+            self.x = x
+            self.sigmas = sigmas
+
+    def __repr__(self):
+        return (
+            f"MinimalResults(\n"
+            f"  parameters_to_fit={self.parameters_to_fit},\n"
+            f"  x={self.x},\n"
+            f"  sigmas={self.sigmas},\n"
+            f"  success={self.success},\n"
+            f"  msg={self.msg}\n"
+            f")"
+        )
+
+
 class MulensFitter():
     """
     Parent class for microlensing model fitters.
@@ -929,7 +1003,8 @@ class WidePlanetFitter(AnomalyFitter):
 
         prob = self.sampler.lnprobability[:, self.emcee_settings['n_burn']:].reshape((-1))
         best_index = np.argmax(prob)
-        self.event = samples[best_index, :]
+        self.best_theta = samples[best_index, :]
+        self.event = self.best_theta
 
         self.best = self.event.model.parameters.parameters
         self.best['chi2'] = self.event.get_chi2()

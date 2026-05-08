@@ -240,6 +240,8 @@ class TestWidePlanetFitterBestTheta(unittest.TestCase):
     ``EmceeFitResults`` relies on this contract, so these tests should pass
     before ``EmceeFitResults`` is written. They also serve as regression
     tests once ``best_theta = samples[best_index, :]`` is added to ``run()``.
+
+    These are just tests to verify the mock_fitter is internally consistent.
     """
 
     def setUp(self):
