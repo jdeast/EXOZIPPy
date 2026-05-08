@@ -99,7 +99,7 @@ class ModelAuditor:
 
         # 2. Ignored Sub-Keys (e.g., spelled 'intival' instead of 'initval')
         # These are the exact and ONLY keys ConfigManager.resolve absorbs.
-        valid_subkeys = {"initval", "init_scale", "lower", "upper", "mu", "sigma", "gaussian_width"}
+        valid_subkeys = {"initval", "init_scale", "lower", "upper", "mu", "sigma", "derived", "unit"}
 
         for k, ov in self.user_params.items():
             if k in used_keys and isinstance(ov, dict):

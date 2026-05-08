@@ -1,0 +1,25 @@
+run:
+  name: "SingleStarPriorTest"
+
+prefix: "fitresults/single_star_test"
+
+star:
+  - name: "BulgeTarget"
+    mist: False
+
+galacticmodel:
+  - name: "MW_Prior"
+    star_ndx: 0
+
+parameter_file: "gm.params.yaml"
+
+sampler:
+  pymc:
+    tune: 2000
+    draws: 3000
+    chains: 4
+    ncores: 1
+    init: "adapt_diag"
+    target_accept: 0.99
+    check_curvatures: True
+    recompute_trace: True

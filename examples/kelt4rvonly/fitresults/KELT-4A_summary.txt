@@ -1,0 +1,30 @@
+                                    mean       sd  ...  ess_tail  r_hat
+inst.gamma[0]                      0.002    0.001  ...   10182.0    1.0
+inst.gamma[1]                     -0.001    0.002  ...   10094.0    1.0
+inst.gamma_raw[0]                  4.261    2.142  ...   10182.0    1.0
+inst.gamma_raw[1]                  5.490    4.224  ...   10094.0    1.0
+inst.jitter_variance[0]            0.000    0.000  ...    6688.0    1.0
+inst.jitter_variance[1]            0.000    0.000  ...    9392.0    1.0
+inst.jitter_variance_raw[0]      644.276  265.617  ...    6688.0    1.0
+inst.jitter_variance_raw[1]     1720.525  512.954  ...    9392.0    1.0
+orbit.logP[0]                      0.476    0.000  ...   10480.0    1.0
+orbit.logP_raw[0]                 -8.984   11.404  ...   10480.0    1.0
+orbit.period[0]                    2.989    0.001  ...   10480.0    1.0
+orbit.secosw[0]                    0.151    0.184  ...    9657.0    1.0
+orbit.secosw_raw[0]                0.938    1.229  ...    9657.0    1.0
+orbit.sesinw[0]                   -0.007    0.192  ...   10965.0    1.0
+orbit.sesinw_raw[0]               -0.110    1.281  ...   10965.0    1.0
+orbit.tc[0]                  2456190.235    0.081  ...    6906.0    1.0
+orbit.tc_raw[0]                  -67.285   80.911  ...    6906.0    1.0
+planet.mass[0]                     0.001    0.000  ...    9900.0    1.0
+planet.mass_raw[0]                -1.948    0.690  ...    9900.0    1.0
+star.feh[0]                       -0.117    0.081  ...   12185.0    1.0
+star.feh_raw[0]                   -0.007    1.017  ...   12185.0    1.0
+star.logmass[0]                    0.080    0.018  ...   12086.0    1.0
+star.logmass_raw[0]               -0.146    4.023  ...   12086.0    1.0
+star.radius[0]                     1.610    0.050  ...   11897.0    1.0
+star.radius_raw[0]                -0.002    0.991  ...   11897.0    1.0
+star.teff[0]                    6207.999  100.811  ...   12456.0    1.0
+star.teff_raw[0]                   0.010    1.008  ...   12456.0    1.0
+
+[27 rows x 9 columns]

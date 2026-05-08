@@ -12,6 +12,13 @@ class Lens(Component):
         super().__init__(config, config_manager)
         self.label = "Lens Parameters"
 
+        self.finite_source = [c.get("finite_source", False) for c in self.config]
+
+        self.mag_method = []
+        for c in self.config:
+            default_mag = "auto_vbbl" if c.get("finite_source", False) else "point_source"
+            self.mag_method.append(c.get("mag_method", default_mag))
+
     @property
     def prefix(self):
         return "lens"
@@ -61,24 +68,77 @@ class Lens(Component):
             "mu_rel_mag": "default",
             "t_E": "default",
             "pi_E_N": "default",
-            "pi_E_E": "default"
+            "pi_E_E": "default",
         }
+
+        if any(self.finite_source):
+            context_nodes["radius"] = stars.radius.value[self.source_map]
+            context_nodes["distance"] =stars.distance.value[self.source_map]
+            parameters["rho"] = "default"
 
         self.build_pars_from_dict(parameters, shape=(self.n_elements,), context_nodes=context_nodes)
 
     def build_likelihood(self, model, system):
-        d_l_raw = system.star.distance.value[self.lens_map]
-        d_s_raw = system.star.distance.value[self.source_map]
+
+        mu_rel = self.mu_rel_mag.value
+        theta_E = self.theta_E.value
+
+        # account for observation bias
+        # bigger theta_E, higher mu_rel are more likely to be detected
+        pm.Potential(f"{self.prefix}.event_rate_prior", pt.sum(pt.log(mu_rel) + pt.log(theta_E)))
+
         # this penalty ensures the source is behind the lens
-        pos_penalty = -1e4 * (pt.sigmoid(-d_l_raw / 10.0) + pt.sigmoid(-d_s_raw / 10.0))
-        order_diff = d_l_raw - d_s_raw
-        order_penalty = -1e4 * pt.sigmoid(order_diff / 10.0)
-        pm.Potential(f"{self.prefix}.source_behind_lens", pt.sum(pos_penalty + order_penalty))
+        d_l = system.star.distance.value[self.lens_map]
+        d_s = system.star.distance.value[self.source_map]
+        pi_rel_penalty = -1e6 * pt.sigmoid(-(d_s - d_l - 10.0) * 1.0)
+        pm.Potential(f"{self.prefix}.source_behind_lens", pt.sum(pi_rel_penalty))
+
+        # this avoids the theta_E singularity
+        mu_penalty = -1e6 * pt.sigmoid(-(mu_rel - 1e-6) * 1e7)
+        pm.Potential(f"{self.prefix}.mu_rel_singularity", pt.sum(mu_penalty))
+
+        # this avoids the pi_E singularity
+        theta_E = self.theta_E.value
+        theta_penalty = -1e6 * pt.sigmoid(-(theta_E - 1e-6) * 1e7)
+        pm.Potential(f"{self.prefix}.theta_E_singularity", pt.sum(theta_penalty))
 
     def compile_plotters(self, model, system):
         pass
     def plot(self, system, points, filename_prefix="debug"):
         pass
+
+    def _get_safe_mm_params(self, index=0):
+        # 1. Capture the raw values
+        tE_raw = self.t_E.value[index]
+        u0_raw = self.u_0.value[index]
+        theta_E_raw = self.theta_E.value[index]
+        pi_N_raw = self.pi_E_N.value[index]
+        pi_E_raw = self.pi_E_E.value[index]
+
+        # 2. Scrub NaNs immediately
+        # Replace NaNs with 0.0 or a safe neutral value.
+        # This prevents NaN poisoning even in the 'inactive' branch of a switch.
+        tE_scrubbed = pt.nan_to_num(tE_raw, nan=100.0)
+        u0_scrubbed = pt.nan_to_num(u0_raw, nan=1.0)
+        theta_E_scrubbed = pt.nan_to_num(theta_E_raw, nan=0.0)
+        pi_N_scrubbed = pt.nan_to_num(pi_N_raw, nan=0.0)
+        pi_E_scrubbed = pt.nan_to_num(pi_E_raw, nan=0.0)
+
+        # 3. Apply Clamps to the scrubbed values
+        tE_safe = pt.maximum(tE_scrubbed, 1e-4)
+        u0_safe = pt.sign(u0_scrubbed) * pt.maximum(pt.abs(u0_scrubbed), 1e-6)
+
+        # We use a threshold check to decide if we trust the parallax
+        is_physical = pt.gt(theta_E_scrubbed, 1e-6)
+
+        # 4. Final Logic
+        return {
+            't0': self.t_0.value[index],
+            'u0': u0_safe,
+            'tE': tE_safe,
+            'pi_N': pt.switch(is_physical, pi_N_scrubbed, 0.0),
+            'pi_E': pt.switch(is_physical, pi_E_scrubbed, 0.0)
+        }
 
     def get_magnification_old(self, time, delta_n, delta_e, index=0):
         """Symbolic Paczynski magnification including parallax."""
@@ -118,11 +178,9 @@ class Lens(Component):
         delta_n = -x * pt.cos(ra) * pt.sin(dec) - y * pt.sin(ra) * pt.sin(dec) + z * pt.cos(dec)
 
         # 3. Paczynski math
-        t0, u0, tE = self.t_0.value[index], self.u_0.value[index], self.t_E.value[index]
-        pi_N, pi_E = self.pi_E_N.value[index], self.pi_E_E.value[index]
-
-        tau_p = (times - t0) / tE + delta_n * pi_N + delta_e * pi_E
-        u_p = u0 + delta_n * pi_E - delta_e * pi_N
+        s = self._get_safe_mm_params(index)
+        tau_p = (times - s['t0']) / s['tE'] + delta_n * s['pi_N'] + delta_e * s['pi_E']
+        u_p = s['u0'] + delta_n * s['pi_E'] - delta_e * s['pi_N']
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -142,19 +200,24 @@ class Lens(Component):
         coords = f"{ra_deg}d {dec_deg}d"
 
         # 1. Gather the derived parameters from the Switchboard/Parameters
-        t0 = self.t_0.value[index]
-        u0 = self.u_0.value[index]
-        tE = self.t_E.value[index]
-        pi_N = self.pi_E_N.value[index]
-        pi_E = self.pi_E_E.value[index]
+        s = self._get_safe_mm_params(index)
+        param_list = [s['t0'], s['u0'], s['tE'], s['pi_N'], s['pi_E']]
 
         # 2. Check for rho (finite source star radius)
-        # If it doesn't exist in the component, we default to 0.0 (point source)
-        rho = getattr(self, 'rho', None)
-        rho_val = rho.value[index] if rho is not None else pt.constant(0.0)
+        if self.finite_source[index]:
+            param_list.append(self.rho.value[index])
 
-        # 3. Stack into the input vector for the Op
-        param_vector = pt.stack([t0, u0, tE, pi_N, pi_E, rho_val])
+        param_vector = pt.stack(param_list)
+
+        # 1. Convert the inputs to PyTensor variables so they can be tracked in the graph
+        times_tensor = pt.as_tensor_variable(times)
+        obs_tensor = pt.as_tensor_variable(obs_pos)
+
+        # 2. Initialize the Op with ONLY the static Python dictionary
+        mag_op = MulensMagOp(coords=coords, mag_method=self.mag_method[index])
+
+        # 3. Call the Op with all three dynamic tensors!
+        return mag_op(param_vector, times_tensor, obs_tensor)
 
         # 4. Instantiate and call the Op
         # 'times' must be a numpy array of BJD_TDB times

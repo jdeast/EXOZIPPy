@@ -14,6 +14,7 @@ lens:
     latex: "u_0"
     description: "Impact parameter (units of Einstein radii)"
   t_E:
+    lower: 0.0
     unit: "d"
     internal_unit: "d"
     latex: "t_E"
@@ -52,6 +53,7 @@ lens:
         func_name: "calc_pi_rel"
         deps: [ "distance_lens", "distance_source" ]
   theta_E:
+    lower: 0.0
     unit: "mas"
     internal_unit: "mas"
     latex: "\\theta_E"
@@ -79,6 +81,7 @@ lens:
         func_name: "calc_mu_dec_rel"
         deps: [ "pm_dec_lens", "pm_dec_source" ]
   mu_rel_mag:
+    lower: 0.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{rel}"
@@ -87,25 +90,60 @@ lens:
       default:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel", "mu_dec_rel"]
+  rho:
+    unit: ""
+    internal_unit: ""
+    latex: "\\rho"
+    description: 'Source radius normalized by the Einstein ring radius'
+    expressions:
+      default:
+        func_name: "calc_rho"
+        deps: [ "radius", "distance", "theta_E" ]
 mulensinst:
+  log_f_total:
+    initval: -6
+    init_scale: 3e-4
+    lower: -100
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\log{(f_s + f_b)}"
+    description: "log of baseline flux (Source + Blend)"
+  q_frac:
+    initval: 0.95
+    init_scale: 0.002
+    lower: 0.0
+    upper: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "f_s/(f_s + f_b)"
+    description: "Fraction of total flux belonging to the source"
   f_source:
-    initval: 1e-7
-    init_scale: 0.1
+    #initval: 1e-7
+    #init_scale: 0.1
     lower: 0.0
     upper: 10.0
     unit: ""
     internal_unit: ""
     latex: "f_s"
     description: "Source flux"
+    expressions:
+      default:
+        func_name: "calc_f_source_from_frac"
+        deps: [ "log_f_total", "q_frac" ]
   f_blend:
-    initval: 0.0
-    init_scale: 0.1
-    lower: -0.1
+    #initval: 0.0
+    #init_scale: 0.1
+    lower: 0.0
     upper: 10.0
     unit: ""
     internal_unit: ""
     latex: "f_b"
     description: "Blend flux"
+    expressions:
+      default:
+        func_name: "calc_f_blend_from_frac"
+        deps: [ "log_f_total", "q_frac" ]
   err_scale:
     initval: 1.0
     init_scale: 0.1

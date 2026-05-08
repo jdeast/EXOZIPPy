@@ -293,7 +293,6 @@ class Parameter:
     # Optional Gaussian prior
     mu: Optional[Number] = None
     sigma: Optional[Number] = None
-    gaussian_width: Optional[Number] = None
 
     print_to_table: bool = True
     user_modified: bool = False
@@ -413,7 +412,6 @@ class Parameter:
         self.upper = convert(self.upper)
         self.mu = convert(self.mu)
         self.sigma = convert(self.sigma)
-        self.gaussian_width = convert(self.gaussian_width)
 
     def get_value(self, point):
         """
@@ -474,7 +472,6 @@ class Parameter:
         scales = to_vec(self.init_scale, n_elements, fill=1.0)
         mus = to_vec(self.mu, n_elements, fill=np.nan)
         sigmas = to_vec(self.sigma, n_elements, fill=np.nan)
-        g_widths = to_vec(self.gaussian_width, n_elements, fill=np.nan)
         lowers = to_vec(self.lower, n_elements, fill=-np.inf)
         uppers = to_vec(self.upper, n_elements, fill=np.inf)
 
@@ -496,35 +493,23 @@ class Parameter:
         transform_mus = np.copy(inits)
         transform_scales = np.copy(scales)
         raw_sigmas = np.full(n_elements, 1000.0)
-        apply_gwidth_potential = np.zeros(n_elements, dtype=bool)
+        apply_potential = np.zeros(n_elements, dtype=bool)
 
         for i in range(n_elements):
+
+            has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
+            if has_sigma:
+                apply_potential[i] = True
+
             if not is_sampled[i]:
                 continue
 
-            has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
-            has_gwidth = not np.isnan(g_widths[i]) and g_widths[i] > 0
             has_mu = not np.isnan(mus[i])
             actual_mu = mus[i] if has_mu else inits[i]
 
-            if has_sigma and has_gwidth:
+            if has_sigma:
                 transform_mus[i] = actual_mu
-                # Use init_scale if provided, otherwise default to the sigma
-                transform_scales[i] = scales[i] if self.user_modified else sigmas[i]
-                raw_sigmas[i] = 1.0
-                apply_gwidth_potential[i] = True
-
-            elif has_sigma or has_gwidth:
-                transform_mus[i] = actual_mu
-                # If the user explicitly set a scale in YAML, use it!
-                # Otherwise, fall back to the prior's width.
-                if self.user_modified and scales[i] != 1.0:  # 1.0 is our 'no-info' default
-                    transform_scales[i] = scales[i]
-                else:
-                    transform_scales[i] = sigmas[i] if has_sigma else g_widths[i]
-
-                raw_sigmas[i] = 1.0
-
+                transform_scales[i] = sigmas[i]
             else:
                 # Case 1 & 2: Nothing or init_scale -> pm.Normal with 1000*init_scale
                 transform_mus[i] = inits[i]
@@ -592,10 +577,10 @@ class Parameter:
         val_flat = pt.flatten(self.value)
 
         # A. Additional Gaussian Width Potentials (Only triggers for Case 4)
-        if np.any(apply_gwidth_potential):
-            mask = pt.as_tensor_variable(apply_gwidth_potential)
-            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(transform_mus)) / pt.as_tensor_variable(g_widths)) ** 2
-            pm.Potential(f"gwidth_prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+        if np.any(apply_potential):
+            mask = pt.as_tensor_variable(apply_potential)
+            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(transform_mus)) / pt.as_tensor_variable(sigmas)) ** 2
+            pm.Potential(f"gaussian_prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
 
         # B. Soft Lower Bounds
         has_lower = ~np.isinf(lowers)
@@ -809,14 +794,10 @@ class Parameter:
         if mu is None:
             mu = _scalar(self.initval)
 
-        g_w = _scalar(self.gaussian_width)
-
         if not latex:
             strs = []
             if sig is not None and sig > 0:
                 strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
-            if g_w is not None and g_w > 0:
-                strs.append(f"N({_fmt(mu, False)}, {_fmt(g_w, False)})")
             if strs: return " * ".join(strs)
 
             lo, hi = _scalar(self.lower), _scalar(self.upper)
@@ -831,8 +812,6 @@ class Parameter:
         strs = []
         if sig is not None and sig > 0:
             strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
-        if g_w is not None and g_w > 0:
-            strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(g_w)})$")
 
         if strs: return r" $\times$ ".join(strs)
 

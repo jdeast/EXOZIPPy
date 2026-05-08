@@ -8,10 +8,10 @@ from exozippy.components.component import Component
 from exozippy.constants import (SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_X_0,
                                 BULGE_DENSITY_Y_0, BULGE_DENSITY_Z_0, BULGE_GAMMA,
                                 DISK_SCALE_LENGTH, DISK_SCALE_HEIGHT, DISK_ROTATION_VELOCITY,
-                                IMF_SLOPE, DISK_VELOCITY_SIGMA_U, DISK_VELOCITY_SIGMA_V,
+                                KROUPA_IMF_SLOPE, SALPETER_IMF_SLOPE, DISK_VELOCITY_SIGMA_U, DISK_VELOCITY_SIGMA_V,
                                 DISK_VELOCITY_SIGMA_W, BULGE_VELOCITY_SIGMA_1,
                                 BULGE_VELOCITY_SIGMA_2, BULGE_VELOCITY_SIGMA_3,
-                                BULGE_ROTATION_ANGULAR_VELOCITY)
+                                BULGE_ROTATION_ANGULAR_VELOCITY, K_VEL_CONVERSION)
 
 
 class GalacticModel(Component):
@@ -22,6 +22,8 @@ class GalacticModel(Component):
         self.is_microlensing = []
         for c in self.config:
             self.is_microlensing.append("lens_ndx" in c and "source_ndx" in c)
+
+        self.imf = self.config[0].get("IMF", "Kroupa")
 
     @property
     def prefix(self):
@@ -75,16 +77,16 @@ class GalacticModel(Component):
             dec_rad = float(np.atleast_1d(stars.dec.initval)[anchor_idx])
 
             sc = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad)
-            d = 1000.0  # Arbitrary distance for velocity basis projection
-            pm_1 = 1.0 / (4.74047 * d)
+            d = 1.0 # kpc, arbitrary distance for velocity basis projection
+            pm_1 = 1.0 / (K_VEL_CONVERSION * d) # mas/yr
 
-            sc0 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d * u.pc, pm_ra_cosdec=0 * u.mas / u.yr,
+            sc0 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d*u.kpc, pm_ra_cosdec=0 * u.mas / u.yr,
                            pm_dec=0 * u.mas / u.yr, radial_velocity=0 * u.km / u.s)
-            sc1 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d * u.pc, pm_ra_cosdec=pm_1 * u.mas / u.yr,
+            sc1 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d*u.kpc, pm_ra_cosdec=pm_1 * u.mas / u.yr,
                            pm_dec=0 * u.mas / u.yr, radial_velocity=0 * u.km / u.s)
-            sc2 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d * u.pc, pm_ra_cosdec=0 * u.mas / u.yr,
+            sc2 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d*u.kpc, pm_ra_cosdec=0 * u.mas / u.yr,
                            pm_dec=pm_1 * u.mas / u.yr, radial_velocity=0 * u.km / u.s)
-            sc3 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d * u.pc, pm_ra_cosdec=0 * u.mas / u.yr,
+            sc3 = SkyCoord(ra=sc.ra, dec=sc.dec, distance=d*u.kpc, pm_ra_cosdec=0 * u.mas / u.yr,
                            pm_dec=0 * u.mas / u.yr, radial_velocity=1 * u.km / u.s)
 
             gal0 = sc0.transform_to(Galactocentric())
@@ -114,119 +116,106 @@ class GalacticModel(Component):
         sinb = pt.as_tensor_variable(np.array(sinb_list))
 
         # 2. PyTensor Math Helpers
-        def get_galactocentric_velocity(dist, pm_ra, pm_dec, rv, idx_slice):
-            v_alpha = 4.74047 * pm_ra * dist
-            v_delta = 4.74047 * pm_dec * dist
-            v_rad = rv / 1000.0  # internal is m/s, convert to km/s
-            v_icrs = pt.stack([v_alpha, v_delta, v_rad], axis=1)  # (N, 3)
-            v_gal_offset = (M_rot[idx_slice] @ v_icrs[:, :, None]).squeeze(-1)
-            return v0[idx_slice] + v_gal_offset
+        def get_galactocentric_velocity(dist_kpc, pm_ra, pm_dec, rv_ms):
+            v_alpha_kms = K_VEL_CONVERSION * pm_ra * dist_kpc
+            v_delta_kms = K_VEL_CONVERSION * pm_dec * dist_kpc
+            v_rad_kms = rv_ms/1e3
+            v_icrs = pt.stack([v_alpha_kms, v_delta_kms, v_rad_kms], axis=1)  # (N, 3)
+            v_gal_offset = (M_rot @ v_icrs[:, :, None]).squeeze(-1)
+            return v0 + v_gal_offset
 
-        def get_galactic_xyz(dist, idx_slice):
-            x = SUN_GC_DISTANCE - dist * cosl_cosb[idx_slice]
-            y = dist * sinl_cosb[idx_slice]
-            z = dist * sinb[idx_slice]
+        def get_galactic_xyz(dist):
+            x = SUN_GC_DISTANCE - dist * cosl_cosb
+            y = dist * sinl_cosb
+            z = dist * sinb
             return x, y, z
 
         def get_polar_velocity(x, y, r, v_x, v_y):
-            cos_phi = x / r
-            sin_phi = y / r
+            cos_phi = x / r # unitless
+            sin_phi = y / r # unitless
             v_r = v_y * sin_phi + v_x * cos_phi
             v_phi = v_y * cos_phi - v_x * sin_phi
             return v_r, v_phi
 
-        # 3. Apply Penalties
-        # --- A: Microlensing Kinematics (Lens & Source interacting) ---
-        if self.lens_map is not None:
-            idx_slice = np.where(self.is_microlensing)[0]
+        # match the IMF
+        if self.imf == "Kroupa":
+            imf_slope = KROUPA_IMF_SLOPE
+        else:
+            imf_slope = SALPETER_IMF_SLOPE
 
-            d_l_raw = stars.distance.value[self.lens_map]
-            d_s_raw = stars.distance.value[self.source_map]
+        # if we sample in log10 mass, there is no curvature
+        #log_m_weight = pt.sum((imf_slope + 1.0) * np.log(10.0) * stars.logmass.value)
 
-            # even though non-physical values will be rejected (in lens.py),
-            # we still need to be able to calculate a likelihood,
-            # so we round to physical values
-            d_l = pt.maximum(d_l_raw, 1e-6)/1e3 # kpc
-            d_s = pt.maximum(d_s_raw, d_l + 1e-6)/1e3 # kpc
+        # if we sample in mass, it's hard to explore the full dynamic range
+        #log_m_weight = pt.sum(imf_slope * pt.log(stars.mass.value))
+        #pm.Potential(f"{self.prefix}.imf_prior", log_m_weight)
 
-            v_s = get_galactocentric_velocity(d_s, stars.pm_ra.value[self.source_map],
-                                              stars.pm_dec.value[self.source_map], stars.rv.value[self.source_map],
-                                              idx_slice)
-            x_s, y_s, z_s = get_galactic_xyz(d_s, idx_slice)
-            r_s = pt.sqrt(x_s ** 2 + y_s ** 2)
+        ### Chabrier 2003 System IMF parameters
+        log_Mc = np.log10(0.22)
+        sigma_imf = 0.57
 
-            cos_bar = np.cos(BULGE_BAR_ANGLE)
-            sin_bar = np.sin(BULGE_BAR_ANGLE)
-            xx_s = x_s * cos_bar + y_s * sin_bar
-            yy_s = -x_s * sin_bar + y_s * cos_bar
-            x_1 = xx_s ** 2 / BULGE_DENSITY_X_0 ** 2
-            y_1 = yy_s ** 2 / BULGE_DENSITY_Y_0 ** 2
-            z_1 = z_s ** 4 / BULGE_DENSITY_Z_0 ** 4
-            r_s_2 = pt.sqrt((x_1 + y_1) ** 2 + z_1)
-            self.log_source_density = -0.5 * r_s_2
+        # This provides beautiful, constant curvature (-1 / sigma^2) for NUTS
+        chabrier_logp = -0.5 * pt.sqr((stars.logmass.value - log_Mc) / sigma_imf)
 
-            v_r_s, v_phi_s = get_polar_velocity(x_s, y_s, r_s, v_s[:, 0], v_s[:, 1])
-            bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r_s
-            w_vs = (-0.5 / BULGE_VELOCITY_SIGMA_1 ** 2) * (v_r_s - bulge_rot) ** 2 \
-                   + (-0.5 / BULGE_VELOCITY_SIGMA_2 ** 2) * v_phi_s ** 2 \
-                   + (-0.5 / BULGE_VELOCITY_SIGMA_3 ** 2) * v_s[:, 2] ** 2
-            self.log_weight_v_s = w_vs
-            self.log_d_s_weight = pt.log(d_s ** BULGE_GAMMA)
+        # For high mass ( > 1 M_sun), you smoothly match it to a Salpeter tail
+        # but the low-mass end is usually where the unconstrained NUTS particles fall into the abyss.
+        pm.Potential(f"{self.prefix}.imf_prior", pt.sum(chabrier_logp))
+        ######
 
-            m_l = stars.mass.value[self.lens_map]
-            v_l = get_galactocentric_velocity(d_l, stars.pm_ra.value[self.lens_map], stars.pm_dec.value[self.lens_map],
-                                              stars.rv.value[self.lens_map], idx_slice)
-            x_l, y_l, z_l = get_galactic_xyz(d_l, idx_slice)
-            r_l = pt.sqrt(x_l ** 2 + y_l ** 2)
+        # even though non-physical values will be rejected
+        # we still need to be able to calculate a likelihood,
+        distance = pt.maximum(stars.distance.value, 1e-3)/1e3 # kpc
+        x,y,z = get_galactic_xyz(distance)
+        z_smooth = pt.sqrt(z**2 + 1e-6)
+        r = pt.sqrt(x ** 2 + y ** 2 + 1e-6)
 
-            scaled_disk = (-1.0 / DISK_SCALE_LENGTH) * r_l + (-1.0 / DISK_SCALE_HEIGHT) * pt.abs(z_l)
-            self.log_lens_density = scaled_disk
+        vel = get_galactocentric_velocity(distance, stars.pm_ra.value, stars.pm_dec.value, stars.rv.value) # km/s
+        v_x, v_y, v_z = vel[:, 0], vel[:, 1], vel[:, 2]
+        v_r, v_phi = get_polar_velocity(x, y, r, v_x, v_y)
 
-            v_r_l, v_phi_l = get_polar_velocity(x_l, y_l, r_l, v_l[:, 0], v_l[:, 1])
-            self.log_weight_v_l = (-0.5 / DISK_VELOCITY_SIGMA_U ** 2) * (v_r_l - DISK_ROTATION_VELOCITY) ** 2 \
-                   + (-0.5 / DISK_VELOCITY_SIGMA_V ** 2) * v_phi_l ** 2 \
-                   + (-0.5 / DISK_VELOCITY_SIGMA_W ** 2) * v_l[:, 2] ** 2
-            self.log_m_l_weight = pt.log(m_l ** IMF_SLOPE)
+        # match the density distribution of the galaxy
+        cos_bar = np.cos(BULGE_BAR_ANGLE)
+        sin_bar = np.sin(BULGE_BAR_ANGLE)
+        x_bar = x * cos_bar + y * sin_bar
+        y_bar = -x * sin_bar + y * cos_bar
 
-            self.mu_rel = system.lens.mu_rel_mag.value[self.lens_map]
-            self.theta_E = system.lens.theta_E.value[self.lens_map]
+        # 1. Compute Disk Likelihood (Spatial + Kinematic)
+        log_dens_disk = (-1.0 / DISK_SCALE_LENGTH) * r + (-1.0 / DISK_SCALE_HEIGHT) * z_smooth
+        log_vel_disk = (-0.5 / DISK_VELOCITY_SIGMA_U ** 2) * (v_r - DISK_ROTATION_VELOCITY) ** 2 \
+                       + (-0.5 / DISK_VELOCITY_SIGMA_V ** 2) * v_phi ** 2 \
+                       + (-0.5 / DISK_VELOCITY_SIGMA_W ** 2) * v_z ** 2
+        L_disk = log_dens_disk + log_vel_disk
 
-            self.log_total_weight = (
-                    pt.log(self.mu_rel) +
-                    pt.log(self.theta_E) +
-                    self.log_weight_v_s +
-                    self.log_source_density +
-                    self.log_d_s_weight +
-                    self.log_weight_v_l +
-                    self.log_lens_density +
-                    self.log_m_l_weight
-            )
-            pm.Potential(f"{self.prefix}.prior", self.log_total_weight)
+        # 2. Compute Bulge Likelihood (Spatial + Kinematic)
+        r_bulge_coord = pt.sqrt(
+            (x_bar / BULGE_DENSITY_X_0) ** 2 + (y_bar / BULGE_DENSITY_Y_0) ** 2 + (z / BULGE_DENSITY_Z_0) ** 2)
+        log_dens_bulge = -0.5 * r_bulge_coord
+        bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r
+        log_vel_bulge = (-0.5 / BULGE_VELOCITY_SIGMA_1 ** 2) * (v_r - bulge_rot) ** 2 \
+                        + (-0.5 / BULGE_VELOCITY_SIGMA_2 ** 2) * v_phi ** 2 \
+                        + (-0.5 / BULGE_VELOCITY_SIGMA_3 ** 2) * v_z** 2
+        L_bulge = log_dens_bulge + log_vel_bulge
 
-        # --- B: Host Star Kinematics (Disk prior only) ---
-        if self.star_map is not None:
-            idx_slice = np.where(~np.array(self.is_microlensing))[0]
+        volume_element = 2.0 * pt.log(distance * 1000.0)
 
-            d_l = stars.distance.value[self.star_map]
-            m_l = stars.mass.value[self.star_map]
-            v_l = get_galactocentric_velocity(d_l, stars.pm_ra.value[self.star_map], stars.pm_dec.value[self.star_map],
-                                              stars.rv.value[self.star_map], idx_slice)
-            x_l, y_l, z_l = get_galactic_xyz(d_l, idx_slice)
-            r_l = pt.sqrt(x_l ** 2 + y_l ** 2)
+        # 3. Combine them using LogSumExp
+        # This effectively does: log(exp(L_disk) + exp(L_bulge))
+        kinematic_penalty = pt.sum(pm.math.logsumexp(pt.stack([L_disk, L_bulge]), axis=0)+volume_element)
+        pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
-            scaled_disk = (-1.0 / DISK_SCALE_LENGTH) * r_l + (-1.0 / DISK_SCALE_HEIGHT) * pt.abs(z_l)
-            lens_density = pt.exp(scaled_disk)
-
-            v_r_l, v_phi_l = get_polar_velocity(x_l, y_l, r_l, v_l[:, 0], v_l[:, 1])
-            w_vl = (-0.5 / DISK_VELOCITY_SIGMA_U ** 2) * (v_r_l - DISK_ROTATION_VELOCITY) ** 2 \
-                   + (-0.5 / DISK_VELOCITY_SIGMA_V ** 2) * v_phi_l ** 2 \
-                   + (-0.5 / DISK_VELOCITY_SIGMA_W ** 2) * v_l[:, 2] ** 2
-            weight_v_l = pt.exp(w_vl)
-            m_l_weight = m_l ** IMF_SLOPE
-
-            total_weight = weight_v_l * lens_density * m_l_weight
-            safe_weight = pt.maximum(total_weight, 1e-300)
-            pm.Potential(f"{self.prefix}.host_prior", pt.sum(pt.log(safe_weight)))
+        # check parameters for debugging
+        #pm.Deterministic(f"{self.prefix}.gal_x", x)
+        #pm.Deterministic(f"{self.prefix}.gal_y", y)
+        #pm.Deterministic(f"{self.prefix}.gal_z", z)
+        #pm.Deterministic(f"{self.prefix}.gal_r", r)
+        #pm.Deterministic(f"{self.prefix}.v_x", v_x)
+        #pm.Deterministic(f"{self.prefix}.v_y", v_y)
+        #pm.Deterministic(f"{self.prefix}.v_z", v_z)
+        #pm.Deterministic(f"{self.prefix}.v_r", v_r)
+        #pm.Deterministic(f"{self.prefix}.v_phi", v_phi)
+        #pm.Deterministic(f"{self.prefix}.L_disk", log_dens_disk + log_vel_disk)
+        #pm.Deterministic(f"{self.prefix}.L_bulge", log_dens_bulge + log_vel_bulge)
+        #pm.Deterministic(f"{self.prefix}.log_imf_weight", log_m_weight)
 
     def compile_plotters(self, model, system):
         pass

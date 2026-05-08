@@ -1,13 +1,13 @@
 # Shared DNA for Stars, Planets, Moons, etc.
-mass:
-  lower: 1e-9
-  upper: 500.0
-  initval: 1.0
+logmass:
+  lower: -9.0
+  upper: 2.5
+  initval: 0.0
   init_scale: 0.1
-  unit: "solMass"
-  internal_unit: "solMass"
-  latex: "M"
-  description: "Mass"
+  unit: "dex(solMass)"
+  internal_unit: "dex(solMass)"
+  latex: "\\log{M}"
+  description: "Log of Mass"
 
 radius:
   lower: 1e-9
@@ -18,6 +18,16 @@ radius:
   internal_unit: "solRad"
   latex: "R"
   description: "Radius"
+
+mass:
+  unit: "solMass"
+  internal_unit: "solMass"
+  latex: "M"
+  description: "Mass"
+  expressions:
+    default:
+      func_name: "calc_mass"
+      deps: [ "logmass" ]
 
 density:
   unit: "g/cm3"
@@ -37,7 +47,7 @@ logg:
   expressions:
     default:
       func_name: "calc_logg"
-      deps: ["mass", "radius"]
+      deps: ["logmass", "radius"]
 
 distance:
   lower: 0.001

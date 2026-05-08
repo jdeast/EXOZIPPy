@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-import pytensor
+#import pytensor
 #pytensor.config.optimizer_excluding = "local_elemwise_fusion"
 #pytensor.config.allow_gc = True
 #pytensor.config.linker = "py"
@@ -20,6 +20,12 @@ from pymc.initial_point import make_initial_point_fn
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
+
+
+import os
+import sys
+import sysconfig
+import pytensor
 
 # debugging imports
 import ipdb
@@ -41,7 +47,7 @@ def run_fit(config):
     tune = int(pymc_cfg.get("tune", 2000))
     draws = int(pymc_cfg.get("draws", 2000))
     chains = int(pymc_cfg.get("chains", 4))
-    cores = int(pymc_cfg.get("cores", None))
+    cores = int(pymc_cfg.get("cores", 1))
     target_accept = pymc_cfg.get("target_accept", 0.9)
     recompute_trace = pymc_cfg.get("recompute_trace", False)
     check_curvatures = pymc_cfg.get("check_curvatures", True)
@@ -197,11 +203,31 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             val_out = float(p.from_internal(safe_float(v_phys[i])))
             scale_out = float(p.from_internal(safe_float(s_phys[i])))
 
+            # Float/Scientific formatting logic ---
+            def smart_format(val, width):
+                if val == 0:
+                    return f"{0.0:>{width}.6f}"
+
+                abs_v = abs(val)
+                # Use scientific notation if it's outside the "clean" range
+                if abs_v < 1e-4 or abs_v > 1e6:
+                    # For the Scale column (width 10), we use 3 decimal places: '1.000e-06'
+                    # For the Value column (width 15), we use 8 decimal places: '3.00000000e-06'
+                    precision = max(0, width - 7)
+                    return f"{val:>{width}.{precision}e}"
+
+                # Otherwise, use standard fixed-point
+                precision = max(0, width - 7)
+                return f"{val:>{width}.{precision}f}"
+
+            val_str = smart_format(val_out, width=15)
+            scale_str = smart_format(scale_out, width=10)
+
             is_fixed = (p.sigma is not None and np.atleast_1d(p.sigma)[i] == 0) or p.expression is not None
             raw_c = c_phys[i]
 
             # Curvature Warning and Display Logic
-            if is_fixed:
+            if is_fixed or not calc_curvature:
                 c_str = "N/A"
             elif np.isnan(raw_c) or np.isinf(raw_c) or raw_c == 0.0:
                 c_str = "NaN (WARN)"
@@ -214,7 +240,7 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             prior_str = p.get_prior_str(i, latex=False)
 
             print(
-                f"{row_label:>{max_label_len}} | {val_out:15.6f} | {scale_out:10.5f} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {c_str:>10} | {prior_str}{user_flag}")
+                f"{row_label:>{max_label_len}} | {val_str} | {scale_str} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {c_str:>10} | {prior_str}{user_flag}")
 
     # --- 2. Potentials & Likelihoods ---
     for node, lp in other_nodes.items():

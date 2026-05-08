@@ -7,6 +7,9 @@ from ...physics_registry import register_physics
 def calc_m_total(planet_mass, star_mass):
     return pt.maximum(star_mass + planet_mass, 1e-9)
 
+def calc_logmass(planet_mass):
+    return pt.log10(planet_mass)
+
 @register_physics
 def calc_arsun(m_total, period):
     m13 = pt.power(m_total, 1.0 / 3.0)

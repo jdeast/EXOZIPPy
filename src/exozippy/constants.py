@@ -6,6 +6,7 @@ import math
 # --- 1. PHYSICAL CONSTANTS (Internal Float System: R_sun, M_sun, Day) ---
 G = const.G.to(u.R_sun**3 / (u.M_sun * u.day**2)).value
 
+RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
 KEPLER_CONST = (G/ (4.0 * np.pi ** 2))**(1.0/3.0)
 LOGG_CONST = np.log10(const.GM_sun.cgs.value/const.R_sun.cgs.value**2) # cgs
 LUM_CONST = 1.0/((const.L_sun/const.sigma_sb/const.R_sun**2).cgs.value/(4.0*np.pi)) # K^-4
@@ -20,6 +21,8 @@ FROM_V_D_TO_PM = 1. / FROM_PM_D_TO_V  # = 0.211 - opposite unit conversion:
 # Kappa: 4G / (c^2 * au) in units of mas / M_sun
 KAPPA = (4.0 * const.G * const.M_sun / (const.c**2 * const.au)).to(u.mas, equivalencies=u.dimensionless_angles()).value
 
+# The standard proper motion conversion factor (m/s per mas/yr * pc)
+K_VEL_CONVERSION = (const.au / u.yr).to(u.km / u.s).value
 
 # --- 2. MATHEMATICAL CONSTANTS ---
 PI = np.pi
@@ -50,7 +53,8 @@ DISK_ROTATION_VELOCITY = 220.  # in km/s
 DISK_VELOCITY_SIGMA_U = 30.  # in km/s, rough guess
 DISK_VELOCITY_SIGMA_V = 30.  # in km/s, rough guess
 DISK_VELOCITY_SIGMA_W = 30.  # in km/s, rough guess
-IMF_SLOPE = 1.3  # Kroupa IMF for the mass range typical for lenses.
+KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
+SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
 
 # --- 7. SUN CONSTANTS ---
 SUN_GC_DISTANCE = 8.3

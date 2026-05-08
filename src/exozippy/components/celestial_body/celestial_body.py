@@ -8,8 +8,9 @@ class CelestialBody(Component):
 
     def build_core_parameters(self, model, overrides=None):
         core_params = {
-            "mass": None,
+            "logmass": None,
             "radius": None,
+            "mass": "default",
             "density": "default",
             "logg": "default"
         }

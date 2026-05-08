@@ -1,5 +1,13 @@
 planet:
   # Planet-specific overrides and additions from celestial_body
+  logmass:
+    unit: "dex(jupiterMass)"
+    lower: -3.0
+    upper: 5.4
+    latex: "\\log{M_P}"
+    initval: 0.0
+    init_scale: 0.1
+    
   mass:
     unit: "jupiterMass"
     lower: -1000.0

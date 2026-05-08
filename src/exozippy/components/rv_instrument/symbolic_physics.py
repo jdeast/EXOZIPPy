@@ -1,0 +1,46 @@
+import sympy as sp
+
+# ---------------------------------------------------------
+# 1. Define Symbols
+# ---------------------------------------------------------
+
+# All parameters are strictly real.
+# Positivity bounds (e.g., jitter > 0) are enforced downstream by defaults.yaml
+gamma = sp.symbols('gamma', real=True)
+jitter = sp.symbols('jitter', real=True)
+
+# Log parameters
+logjitter = sp.symbols('logjitter', real=True)
+
+# ---------------------------------------------------------
+# 2. Symbol Map
+# ---------------------------------------------------------
+# Maps SymPy symbols back to the local parameter keys inside the RV Instrument component.
+
+SYMBOL_MAP = {
+    # Systemic Offset
+    "gamma": "gamma",
+
+    # Instrumental Jitter
+    "jitter": "jitter",
+    "logjitter": "logjitter"
+}
+
+# ---------------------------------------------------------
+# 3. Physics Relations
+# ---------------------------------------------------------
+# Units:
+# gamma and jitter are typically in m/s (or whatever your global RV unit is).
+
+RELATIONS = [
+    # Reparameterization Bridge (Base-10)
+    # Allows the user to provide 'jitter' but the sampler to step in 'logjitter'
+    sp.Eq(jitter, 10 ** logjitter)
+]
+
+
+def get_solver_paths():
+    """
+    Returns the equations defining the state of an RV Instrument.
+    """
+    return RELATIONS

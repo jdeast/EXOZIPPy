@@ -5,6 +5,15 @@ from exozippy.components.mulensing.lens import Lens  # Adjust based on your actu
 from exozippy.components.parameter import Parameter
 from astropy import units as u
 from exozippy.physics_registry import PHYSICS_REGISTRY
+from exozippy.config import ConfigManager
+from exozippy.components.mulensing.physics import (
+    calc_theta_E,
+    calc_pi_rel,
+    calc_t_E
+)
+
+def get_val(x):
+    return x.eval() if hasattr(x, 'eval') else x
 
 def test_pspl_magnification_accuracy():
     """Verify that the magnification function matches the Paczynski formula."""
@@ -50,7 +59,7 @@ def test_microlensing_physics_conversions():
     # t_E = (theta_E / mu_rel) * 365.25
     # (0.7134 / 5.0) * 365.25 approx 52.12 days
     calc_t_E = PHYSICS_REGISTRY["calc_t_E"]
-    t_E = calc_t_E(theta_E, mu_rel).eval()
+    t_E = get_val(calc_t_E(theta_E, mu_rel))
     assert np.isclose(t_E, 52.12, atol=1e-2)
 
 def test_lens_parameter_unit_handling():
@@ -89,3 +98,98 @@ def test_parallax_trajectory_offset():
     u_total = np.sqrt(u_n ** 2 + u_e ** 2)
 
     assert u_total > u0  # Parallax should have shifted the lens further away
+
+def test_microlensing_contradiction_warning(capsys):
+    """
+    Verifies that providing contradictory physical values triggers
+    the visual warning to the user.
+    """
+    # Provide Mass/Distances that imply t_E ~ 34 days,
+    # but explicitly provide t_E = 100 days.
+    user_params = {
+        "star.Lens.mass": 0.5,
+        "star.Lens.distance": 4000.0,
+        "star.Source.distance": 8000.0,
+        "star.Lens.pm_ra": 5.0,
+        "star.Lens.pm_dec": 0.0,
+        "star.Source.pm_ra": 0.0,
+        "star.Source.pm_dec": 0.0,
+        "lens.Lens.t_E": 100.0  # The contradiction
+    }
+
+    ConfigManager(user_params)
+
+    # Capture stdout to see if the '!' box appeared
+    captured = capsys.readouterr()
+    assert "WARNING: PHYSICAL CONTRADICTION DETECTED" in captured.out
+    assert "Relative Error:" in captured.out
+
+
+def test_microlensing_sympy_pytensor_equivalence():
+    """
+    Ensures that initialization (SymPy) and sampling (PyTensor)
+    use the exact same mathematical constants and logic.
+    """
+    # 1. Define physical inputs for the symbolic solver
+    user_params = {
+        "star.Lens.mass": {"initval": 0.5},
+        "star.Lens.distance": {"initval": 4000.0},
+        "star.Source.distance": {"initval": 8000.0},
+        "star.Lens.pm_ra": {"initval": 10.0},
+        "star.Lens.pm_dec": {"initval": 0.0},
+        "star.Source.pm_ra": {"initval": 0.0},
+        "star.Source.pm_dec": {"initval": 0.0}
+    }
+
+    # 2. Get SymPy results via ConfigManager
+    cm = ConfigManager(user_params)
+
+    # Verify the solver completed the chain
+    assert "lens.Lens.t_E" in cm.user_params
+
+    te_sympy = cm.user_params["lens.Lens.t_E"]["initval"]
+    thetaE_sympy = cm.user_params["lens.Lens.theta_E"]["initval"]
+    pirel_sympy = cm.user_params["lens.Lens.pi_rel"]["initval"]
+
+    # 3. Feed the SAME raw inputs into the PyTensor graph
+    # (Using .eval() to pull the numeric result out of the graph)
+    mass = 0.5
+    dl = 4000.0
+    ds = 8000.0
+    mu_rel = 10.0
+
+    pi_rel_pt = get_val(calc_pi_rel(dl, ds))
+    theta_E_pt = get_val(calc_theta_E(mass, pi_rel_pt))
+    t_E_pt = get_val(calc_t_E(theta_E_pt, mu_rel))
+
+    # 4. Strict Assertion: 1e-8 tolerance to catch constant mismatches
+    # If KAPPA is 8.144 in one and 8.1448 in another, this WILL fail.
+    assert np.isclose(pirel_sympy, pi_rel_pt, rtol=1e-8), "pi_rel mismatch!"
+    assert np.isclose(thetaE_sympy, theta_E_pt, rtol=1e-8), "theta_E mismatch!"
+    assert np.isclose(te_sympy, t_E_pt, rtol=1e-8), "t_E mismatch!"
+
+
+def test_microlensing_contradiction_warning(capsys):
+    """
+    Verifies that providing contradictory physical values triggers
+    the visual warning to the user.
+    """
+    # Provide Mass/Distances that imply t_E ~ 34 days,
+    # but explicitly provide t_E = 100 days.
+    user_params = {
+        "star.Lens.mass": 0.5,
+        "star.Lens.distance": 4000.0,
+        "star.Source.distance": 8000.0,
+        "star.Lens.pm_ra": 5.0,
+        "star.Lens.pm_dec": 0.0,
+        "star.Source.pm_ra": 0.0,
+        "star.Source.pm_dec": 0.0,
+        "lens.Lens.t_E": 100.0  # The contradiction
+    }
+
+    ConfigManager(user_params)
+
+    # Capture stdout to see if the '!' box appeared
+    captured = capsys.readouterr()
+    assert "WARNING: PHYSICAL CONTRADICTION DETECTED" in captured.out
+    assert "Relative Error:" in captured.out

@@ -78,7 +78,8 @@ class MulensInstrument(Component):
 
     def build_parameters(self, model):
         parameters = {
-            "err_scale": None
+            "err_scale": None,
+            "q_frac": None
         }
         self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
@@ -86,23 +87,56 @@ class MulensInstrument(Component):
         # Convert the integer map into a PyTensor variable for indexing
         self.inst_map_tensor = pt.as_tensor_variable(self.inst_map).astype("int32")
 
-    def build_dependent_parameters(self, model, system):
-        # f_source and f_blend depend on the scale of the loaded data
-        fs_inits = np.array(self.fs_init)
+    '''
+    def initialize_exozippy():
+        fitter = self.fit(
+            files=[data_file], fit_type='point lens', renormalize_errors=False, coords='17:47:12.25 -21:22:58.7',
+            verbose=True, log_file='test_output/test_ob0939_raw.log', latex_file='test_output/test_ob09393_raw.tex')
+        # fitter = exozippy.mmexofast.fit(
+        #    files=[data_file], fit_type='point lens', coords='17:47:12.25 -21:22:58.7',
+        #    verbose=True, log_file='test_output/test_ob0939.log', latex_file='test_output/test_ob09393.tex')
+    
+        
 
+        return fitter.initialize_exozippy()
+    '''
+
+
+    def build_dependent_parameters(self, model, system):
+        # 1. Bootstrap the total flux from the data baseline
+        log_f_total_obs = np.log(np.array(self.fs_init))
+
+        # 2. Declare the parameter dictionary
         parameters = {
-            "f_source": {
-                "initval": fs_inits,
-                "init_scale": fs_inits * 0.1  # Set NUTS tuning scale proportional to flux
+            "log_f_total": {
+                "initval": log_f_total_obs,
             },
-            "f_blend": {
-                "initval": np.zeros(self.n_elements),
-                "init_scale": fs_inits * 0.1
+            # These reference the expressions defined in your defaults.yaml
+            "f_source": "default",
+            "f_blend": "default"
             }
-        }
+
+        # 3. Finalize and build the PyMC nodes
         self.build_pars_from_dict(parameters, shape=(self.n_elements,))
 
     def build_likelihood(self, model, system):
+
+        if hasattr(system, 'sed'):
+            raise NotImplemented
+            expected_fs = system.sed.Source.get_band_flux("OGLE_I") # this is the part we need from the SED
+            sigma_fs = 0.05 * expected_fs
+            pm.Potential(f"{self.prefix}_sedprior",
+                         -0.5 * pt.sqr((self.f_source.value - expected_fs) / sigma_fs))
+        else:
+            if False:
+                # Linear anchor: f_source ~ 0.2 * f_bol
+                # this accounts for heavy extinction in the bulge, but is highly uncertain
+                expected_fs = pt.log(0.2 * system.star.fbol.value[system.lens.source_map])
+                sigma_fs = 1.0
+                log_f_source = pt.log(self.f_source.value)
+                pm.Potential(f"{self.prefix}.fbolprior",
+                             -0.5 * pt.sqr((log_f_source - expected_fs) / sigma_fs))
+
         # 1. Constants
         t = pm.Data("mu_time", self.time)
         obs_pos = pm.Data("obs_pos", self.observer_pos)
@@ -111,8 +145,8 @@ class MulensInstrument(Component):
 
         # 2. Magnification from the Lens
         # (Assuming single lens at index 0 for PSPL)
-        A = system.lens.get_magnification(t, obs_pos, system, index=0)
-        #A = system.lens.get_magnification_op(t, obs_pos, system, index=0)
+        A = system.lens.get_magnification(t, self.observer_pos, system, index=0)
+        #A = system.lens.get_magnification_op(t, self.observer_pos, system, index=0)
 
         # 3. Flux Model
         fs = self.f_source.value[self.inst_map_tensor]

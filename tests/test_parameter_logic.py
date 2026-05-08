@@ -1,14 +1,13 @@
 import pytest
 import numpy as np
-from astropy import units as u
-
 import pymc as pm
+import astropy.units as u
 import pytensor.tensor as pt
 
+from exozippy.diagnostics import ModelAuditor
+from exozippy.components.star.star import Star
 from exozippy.components.parameter import Parameter, to_vec
 from exozippy.config import ConfigManager
-from exozippy.components.star.star import Star
-from exozippy.diagnostics import ModelAuditor
 
 
 def test_parameter_scaling_adapts_to_initialization_scenarios():
@@ -146,12 +145,6 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     # 3. Did the frozen parameter safely receive a NaN?
     assert np.isnan(curv[1]), "The frozen element did not receive a NaN padding!"
 
-
-import pytensor.tensor as pt
-from exozippy.config import ConfigManager
-from exozippy.components.parameter import Parameter
-
-
 def test_parameter_bypasses_float_conversion_for_tensor_expressions():
     """
     Given a derived parameter that is built dynamically with a PyTensor expression (like flux),
@@ -194,7 +187,6 @@ def test_parameter_builds_from_list_of_tensors():
     When build_pymc is called,
     Then it should safely stack them into a single TensorVariable without an object dtype crash.
     """
-    import pymc as pm
     mock_config = ConfigManager({})
 
     # Create two separate scalar tensor variables
@@ -227,8 +219,6 @@ def test_parameter_strips_astropy_quantities_from_expressions():
     When build_pymc is called,
     Then it should strip the unit to prevent Astropy's .tolist() NotImplementedError.
     """
-    import pymc as pm
-    from exozippy.config import ConfigManager
 
     mock_config = ConfigManager({})
     t1 = pt.dscalar('t1_q')
@@ -296,9 +286,6 @@ def test_derived_parameter_retains_numeric_initval():
     Then it should have a valid numeric .initval (not None)
     so that downstream parameters (like Tc) can use it for heuristics.
     """
-    from exozippy.components.parameter import Parameter
-    import pytensor.tensor as pt
-    import numpy as np
 
     # 1. Simulate the 'parent' (logP)
     logP_val = 0.477  # log10(3.0)
@@ -325,7 +312,6 @@ def test_derived_parameter_retains_numeric_initval():
     assert np.isclose(period_param.initval, 2.9991625, atol=1e-5)
 
     # 5. Verify it can still build a PyMC node (the symbolic side works)
-    import pymc as pm
     with pm.Model():
         node = period_param.build_pymc()
         assert hasattr(node, 'owner'), "PyMC node should be a symbolic expression"
@@ -403,8 +389,6 @@ def test_mulensinst_flux_defaults_are_dimensionless_and_bounded():
     Then they should have explicit bounds and remain strictly dimensionless
     (relative flux, not physical erg/s/cm2).
     """
-    from exozippy.config import ConfigManager
-    import astropy.units as u
 
     # ARRANGE
     cm = ConfigManager({})
@@ -428,3 +412,32 @@ def test_mulensinst_flux_defaults_are_dimensionless_and_bounded():
     # 2. Check that the units are strictly dimensionless unscaled
     assert p_fs.unit[0] == u.dimensionless_unscaled
     assert p_fb.unit[0] == u.dimensionless_unscaled
+
+def test_explicit_initval_is_not_overwritten_by_derived_expression():
+    """
+    Given a parameter that has a derived physics expression (e.g., mass from logmass),
+    When the user explicitly provides an initval for that parameter in their config,
+    Then the Component should retain the user's initval and NOT overwrite it with None
+    or the calculated expression value.
+    """
+    # ARRANGE
+    # We explicitly set mass to 1.204.
+    # If the bug were present, the expression calc_mass(logmass) would try to run,
+    # mismanage the dictionary assignment, and overwrite this with None.
+    user_params = {
+        "star.0.mass": {"initval": 1.204}
+    }
+    config_manager = ConfigManager(user_params)
+
+    # Initialize a dummy star to trigger the parameter building logic
+    star = Star([{"name": "0"}], config_manager)
+
+    # ACT
+    with pm.Model() as model:
+        # build_parameters calls build_core_parameters, which triggers
+        # add_parameter for "mass".
+        star.build_parameters(model)
+
+    # ASSERT
+    assert star.mass.initval is not None, "Fatal: initval was wiped out by NoneType assignment bug!"
+    assert np.isclose(star.mass.initval[0], 1.204), f"Expected 1.204, but got {star.mass.initval[0]}"

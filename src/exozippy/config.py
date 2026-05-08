@@ -3,20 +3,43 @@ import numpy as np
 import yaml
 import copy
 from pathlib import Path
+import sympy as sp
+import astropy.units as u
+import importlib
 
 class ConfigManager:
     def __init__(self, user_params):
         self.user_params = user_params
         self.base_defaults = {}
+        self.all_relations = []
+        self.master_symbol_map = {}
 
-        # 1. Search the components directory dynamically
         components_dir = Path(__file__).parent / "components"
 
-        # 2. Recursively find and load ALL defaults.yaml files
+        # 1. Scan for Defaults AND Symbolic Physics
+        for py_file in components_dir.rglob("symbolic_physics.py"):
+            # A. Load the module dynamically
+            module_name = f"exozippy.components.{py_file.parent.name}.symbolic_physics"
+            spec = importlib.util.spec_from_file_location(module_name, py_file)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            # B. Grab the RELATIONS list if it exists
+            if hasattr(module, "RELATIONS"):
+                self.all_relations.extend(module.RELATIONS)
+
+            # C: Grab the map if the component provides it
+            if hasattr(module, "SYMBOL_MAP"):
+                self.master_symbol_map.update(module.SYMBOL_MAP)
+
+        # 1. Recursively find and load ALL defaults.yaml files
         for defaults_file in components_dir.rglob("defaults.yaml"):
             with open(defaults_file, "r") as f:
                 comp_defaults = yaml.safe_load(f) or {}
                 self._deep_merge(self.base_defaults, comp_defaults)
+
+        # 2. Fills in the gaps (like deriving theta_E if the user provided Mass and Distance)
+        self.finalize_user_params()
 
     def _deep_merge(self, base, overrides):
         """
@@ -30,7 +53,6 @@ class ConfigManager:
                 base[k] = v
 
     def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None):
-        import astropy.units as u  # Ensure u is available for conversion
 
         # 1. Start with the global/DNA defaults
         base = copy.deepcopy(self.base_defaults.get(param_name, {}))
@@ -82,7 +104,7 @@ class ConfigManager:
         }
 
         tuning_keys = ["initval", "init_scale"]
-        physics_keys = ["lower", "upper", "mu", "sigma", "gaussian_width"]
+        physics_keys = ["lower", "upper", "mu", "sigma"]
         all_numeric = tuning_keys + physics_keys
 
         for key in all_numeric:
@@ -172,7 +194,6 @@ class ConfigManager:
         Looks up the units in the master YAML and returns the
         numeric multiplier to go from User -> Internal.
         """
-        import astropy.units as u
 
         comp_cfg = self.base_defaults.get(component_type, {})
         param_cfg = comp_cfg.get(param_name, {})
@@ -196,3 +217,106 @@ class ConfigManager:
             return user_u.to(internal_u)
         except Exception:
             return 1.0
+
+    def finalize_user_params(self):
+        flat_params = {}
+        input_map = {path: sym for sym, path in self.master_symbol_map.items()}
+
+        for path, data in self.user_params.items():
+            # If it's a dict, safely check for 'initval'
+            if isinstance(data, dict):
+                val = data.get("initval")  # Returns None if missing instead of KeyError
+            else:
+                val = data
+
+            if val is not None:
+                sym = input_map.get(path)
+                if sym:
+                    flat_params[sym] = val
+
+        # 2. Solve the physics chain
+        resolved_flat = self.resolve_and_validate_parameters(flat_params)
+
+        # 3. Inject derived values
+        for sym_name, val in resolved_flat.items():
+            path = self.master_symbol_map.get(str(sym_name))
+            if path and path not in self.user_params:
+                self.user_params[path] = {
+                    "initval": val,
+                    "derived": True
+                }
+            elif path and isinstance(self.user_params[path], dict) and self.user_params[path].get("initval") is None:
+                # If the entry existed (like your init_scale one) but had no initval, fill it!
+                self.user_params[path]["initval"] = val
+                self.user_params[path]["derived"] = True
+
+    def resolve_and_validate_parameters(self, user_provided_params, tolerance=1e-3):
+        source_map = {k: "USER_YAML" for k in user_provided_params.keys()}
+        resolved = {k: v for k, v in user_provided_params.items()}
+
+        updated = True
+        while updated:
+            updated = False
+            for eq in self.all_relations:
+                symbols_in_eq = {str(s) for s in eq.free_symbols}
+                known_in_eq = symbols_in_eq.intersection(resolved.keys())
+                unknown_in_eq = symbols_in_eq - known_in_eq
+
+                if len(unknown_in_eq) == 1:
+                    target_str = list(unknown_in_eq)[0]
+                    target_sym = sp.Symbol(target_str)
+                    solutions = sp.solve(eq, target_sym)
+
+                    phys_solutions = []
+                    # --- AGNOSTIC PHYSICALITY CHECK ---
+                    # 1. Get the YAML path for this symbol
+                    yaml_path = self.master_symbol_map.get(target_str)
+                    lower_bound = -np.inf
+                    upper_bound = np.inf
+
+                    if yaml_path:
+                        # Split 'lens.Lens.mass' -> ('lens', 'mass')
+                        parts = yaml_path.split('.')
+                        comp_type, param_name = parts[0], parts[-1]
+
+                        # 2. Peek at the defaults for this parameter
+                        # We use resolve() with shape=() to get the scalar bounds
+                        cfg = self.resolve(comp_type, param_name, shape=())
+                        if cfg['lower'] is not None: lower_bound = cfg['lower'][0]
+                        if cfg['upper'] is not None: upper_bound = cfg['upper'][0]
+
+                    for sol in solutions:
+                        try:
+                            val = float(sol.evalf(subs=resolved))
+                            # 3. Validation: Does the math fit the config's physical bounds?
+                            if lower_bound <= val <= upper_bound:
+                                phys_solutions.append(val)
+                        except (TypeError, ValueError):
+                            continue
+
+                    if phys_solutions:
+                        resolved[target_str] = phys_solutions[0]
+                        updated = True
+
+                elif len(unknown_in_eq) == 0:
+                    lhs_val = float(eq.lhs.evalf(subs=resolved))
+                    rhs_val = float(eq.rhs.evalf(subs=resolved))
+                    diff = abs(lhs_val - rhs_val)
+                    rel_error = diff / max(abs(lhs_val), abs(rhs_val), 1e-9)
+
+                    if rel_error > tolerance:
+                        # 4. FIX: Call with self
+                        self.print_contradiction_warning(eq, rel_error)
+
+        print(f"DEBUG: Solver results: {resolved.keys()}")
+        return resolved
+
+    def print_contradiction_warning(self, eq, error):
+        print("\n" + "!" * 60)
+        print("WARNING: PHYSICAL CONTRADICTION DETECTED")
+        print(f"Relation: {eq}")
+        print(f"Relative Error: {error:.2%}")
+        print("-" * 60)
+        print("The parameters provided in your config do not satisfy this equation.")
+        print("Verify your starting values; a bad initialization will destroy NUTS efficiency.")
+        print("!" * 60 + "\n")

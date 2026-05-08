@@ -96,7 +96,7 @@ class Component:
 
         # 1. INTERCEPT NUMERICAL HEURISTICS
         # Pull physics bounds out of kwargs so they don't clobber the resolved config!
-        physics_keys = ["initval", "init_scale", "lower", "upper", "mu", "sigma", "gaussian_width"]
+        physics_keys = ["initval", "init_scale", "lower", "upper", "mu", "sigma"]
         internal_overrides = {}
         filtered_kwargs = {}
 
@@ -168,21 +168,18 @@ class Component:
 
             # Calculate the numeric init so downstream parameters aren't hitting None
             try:
-                # 1. Use user-provided initval if it exists
-                # 2. Otherwise, calculate it from the physics function
+                # Calculate it from the physics function
                 calculated_init = func(*numeric_deps)
 
-                if internal_overrides.get('initval') is None and cfg.get('initval') is None:
-                    filtered_kwargs['initval'] = calculated_init
-
-                # We also need to store this on the expression object or config
-                # so the Parameter class doesn't override it with None later
-                cfg['initval'] = filtered_kwargs.get('initval')
+                # Only inject the calculated value if the user/defaults didn't provide one
+                if cfg.get('initval') is None:
+                    cfg['initval'] = calculated_init
 
             except Exception as e:
-                # Fallback to a safe numeric array instead of None
-                n_elements = np.prod(shape).astype(int) if shape != () else 1
-                filtered_kwargs['initval'] = np.zeros(n_elements)
+                # Fallback to a safe numeric array instead of None if the math fails
+                if cfg.get('initval') is None:
+                    n_elements = np.prod(shape).astype(int) if shape != () else 1
+                    cfg['initval'] = np.zeros(n_elements)
 
             expression = lambda: func(*dep_nodes)
 

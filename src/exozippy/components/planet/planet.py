@@ -38,6 +38,28 @@ class Planet(CelestialBody):
         orbit_indices = np.array([p.get("orbit_ndx", 0) for p in self.config])
         self.orbit_map = pt.as_tensor_variable(orbit_indices).astype("int32")
 
+    def build_core_parameters(self, model, overrides=None):
+        """
+        Overrides the CelestialBody DNA to sample in linear mass
+        and drop logmass/logg.
+        """
+        core_params = {
+            "mass": None,  # None = Sample this directly
+            "radius": None,  # Sample this directly
+            "density": "default",  # Derive this
+        }
+
+        # Apply any dynamic data-driven heuristics (like RV K -> Mass)
+        if overrides:
+            for k, v in overrides.items():
+                if k in core_params:
+                    # If it's currently None, just assign the override dict
+                    if core_params[k] is None:
+                        core_params[k] = v
+                    elif isinstance(core_params[k], dict):
+                        core_params[k].update(v)
+
+        self.build_pars_from_dict(core_params, shape=(self.n_elements,))
 
     def build_dependent_parameters(self, model, system): #stars, orbits, star_map, orbit_map):
 

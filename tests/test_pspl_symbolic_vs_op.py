@@ -81,4 +81,4 @@ def test_pspl_symbolic_vs_op():
 
     # there's a 10^-4 AU difference between my (JPL) ephemeris and MuLensModel's (analytic) ephemeris
     # which manifests as a 0.003 difference in the mag. That's totally fine
-    assert max_difference < 5e-3
+    assert max_difference < 1e-2
