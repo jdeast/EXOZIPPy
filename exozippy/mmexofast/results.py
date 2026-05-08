@@ -378,14 +378,14 @@ class EmceeFitResults(BaseFitResults):
         """
         Build the fitted parameters section of the DataFrame.
 
-        Uses the 50th percentile as values. ``sigma_minus = p50 - p16``
+        Uses the 50th percentile as values. ``sigma_minus = p16 - p50``
         and ``sigma_plus = p84 - p50``, both stored as positive numbers.
         """
         p = self.percentiles
         return pd.DataFrame({
             'parameter_names': list(self.parameters_to_fit),
             'values':          list(p[1]),
-            'sigma_minus':     list(p[1] - p[0]),
+            'sigma_minus':     list(p[0] - p[1]),
             'sigma_plus':      list(p[2] - p[1]),
         })
 
@@ -441,26 +441,35 @@ class EmceeFitResults(BaseFitResults):
         parameters = []
         values     = []
 
-        source_fluxes = self.fitter._event.source_fluxes()
-        blend_fluxes  = self.fitter._event.blend_fluxes()
+        source_fluxes = self.fitter._event.source_fluxes
+        blend_fluxes  = self.fitter._event.blend_fluxes
 
         for i, dataset in enumerate(self.datasets):
             obs, band = mmexo.observatories.get_telescope_band_from_filename(
                 dataset.plot_properties['label']
             )
-            parameters.append(f'{band}_S_{obs}')
+            if len(source_fluxes[i]) == 1:
+                parameters.append(f'{band}_S_{obs}')
+            else:
+                for j in range(len(source_fluxes[i])):
+                    parameters.append(f'{band}_S{j}_{obs}')
+
             parameters.append(f'{band}_B_{obs}')
 
-            for flux in [source_fluxes[i], blend_fluxes[i]]:
+            for flux in list(source_fluxes[i]) + [blend_fluxes[i]]:
                 if flux > 0:
                     mag, _ = MulensModel.utils.Utils.get_mag_and_err_from_flux(
                         flux, 0.0
                     )
                 else:
                     mag = 'neg flux'
+
                 values.append(mag)
 
         n = len(parameters)
+        print(parameters)
+        print(values)
+        print(source_fluxes, blend_fluxes)
         return pd.DataFrame({
             'parameter_names': parameters,
             'values':          values,

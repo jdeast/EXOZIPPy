@@ -3083,9 +3083,9 @@ class MMEXOFASTFitter:
                 list
                     Ordered list of parameter names
                 """
-                basic_keys = ["t_0", "u_0", "t_E", "rho", "t_star"]
+                basic_keys = ["t_0", "u_0", "t_E", "rho", "log_rho", "t_star"]
                 additional_keys = [
-                    "pi_E_N", "pi_E_E", "t_0_par", "s", "q", "alpha",
+                    "pi_E_N", "pi_E_E", "t_0_par", "s", "log_s", "q", "log_q", "alpha",
                     "convergence_K", "shear_G", "ds_dt", "dalpha_dt", "s_z",
                     "ds_z_dt", "t_0_kep",
                     "x_caustic_in", "x_caustic_out", "t_caustic_in", "t_caustic_out",

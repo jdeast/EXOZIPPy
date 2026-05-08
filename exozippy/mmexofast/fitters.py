@@ -993,8 +993,8 @@ class WidePlanetFitter(AnomalyFitter):
         samples = self.sampler.chain[:, self.emcee_settings['n_burn']:, :].reshape(
             (-1, self.emcee_settings['n_dim']))
 
-        results = np.percentile(samples, [16, 50, 84], axis=0)
         if verbose:
+            results = np.percentile(samples, [16, 50, 84], axis=0)
             print("Fitted parameters:")
             for i in range(self.emcee_settings['n_dim']):
                 r = results[1, i]
