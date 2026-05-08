@@ -2615,7 +2615,7 @@ class MMEXOFASTFitter:
             #def fit_static_pspl(initial_params=None, datasets=None):
             #    return self._fit_initial_pspl_model(initial_params=initial_params, datasets=datasets)
             #return wide_planet_fitter.best
-            return mmexo.MMEXOFASTFitResults(wide_planet_fitter)
+            return mmexo.EmceeFitResults(wide_planet_fitter)
 
         datasets = self.datasets
         key = mmexo.FitKey(
