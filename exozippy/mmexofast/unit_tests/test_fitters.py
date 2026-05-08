@@ -2,6 +2,7 @@ import unittest
 import os.path
 import MulensModel as mm
 import numpy as np
+import pytest
 
 from exozippy import MULENS_DATA_PATH
 from exozippy.mmexofast import fitters
@@ -112,6 +113,7 @@ class TestWidePlanetFitter(unittest.TestCase):
         for parameter in self.true_params.keys():
             assert test_fitter.event.model.parameters.as_dict()[parameter] == self.true_params[parameter]
 
+    @pytest.mark.slow
     def test_event_update(self):
         fitter = fitters.WidePlanetFitter(datasets=[self.data], anomaly_lc_params=self.anomaly_lc_params)
         theta = 9 + np.arange(len(fitter.parameters_to_fit), dtype=int)

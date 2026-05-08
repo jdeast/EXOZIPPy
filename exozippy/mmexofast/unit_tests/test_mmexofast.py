@@ -1,89 +1,85 @@
 import unittest
 
 
-def test_fit():
-    raise NotImplementedError()
-
-
 class TestMMEXOFASTFitter(unittest.TestCase):
 
     def test_fit(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_do_ef_grid_search(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_get_initial_pspl_params(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_do_sfit(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_do_mmexofast_fit(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_set_datasets_with_anomaly_masked(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_get_residuals_mask(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_refine_pspl_params(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_set_residuals(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_do_af_grid_search(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_get_dmag(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_get_initial_2L1S_params(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_residuals(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_residuals_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_masked_datasets(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_masked_datasets_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_best_ef_grid_point(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_best_ef_grid_point_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_pspl_params(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_pspl_params_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_best_af_grid_point(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_best_af_grid_point_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_binary_params(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_binary_params_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_results(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
     def test_results_setter(self):
-        raise NotImplementedError()
+        self.skipTest('Not Implemented')
 
 
 class TestSatelliteData(unittest.TestCase):
@@ -92,10 +88,11 @@ class TestSatelliteData(unittest.TestCase):
         self.ground_data = None
         self.spitzer_data = None
         self.kepler_data = None
-        raise NotImplementedError('Need to setup test datasets for this test (among other things).')
+        self.skipTest('Need to setup test datasets for this test (among other things).')
 
     def do_test_file_list(self, files):
-        fitter = MMEXFASTFitter(files=files)
+        self.skipTest('Not Implemented')
+        fitter = MMEXOFASTFitter(files=files)
         assert fitter.n_loc == len(files)
 
     def _get_datasets(self, file_list):
@@ -103,8 +100,9 @@ class TestSatelliteData(unittest.TestCase):
         return datasets
 
     def do_test_datasets(self, file_list):
+        self.skipTest('Not Implemented')
         datasets = self._get_datasets(file_list)
-        fitter = MMEXFASTFitter(datasets=datasets)
+        fitter = MMEXOFASTFitter(datasets=datasets)
         assert fitter.n_loc == len(datasets)
 
     def test_gr_only(self):

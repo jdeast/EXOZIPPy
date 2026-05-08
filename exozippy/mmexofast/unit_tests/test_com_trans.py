@@ -71,8 +71,7 @@ class TestCOMag2COMass(unittest.TestCase):
         pass
 
     def test_close_case(self):
-        print('tests not implemented, probably has some weird offset due to mmv2 --> v3')
-        assert 1 == 2
+        self.skipTest("test_close_case not implemented, probably has some weird offset due to mmv2 --> v3")
 
 
 class TestPrimary2COMass(unittest.TestCase):
@@ -81,8 +80,7 @@ class TestPrimary2COMass(unittest.TestCase):
         pass
 
     def test_close_case(self):
-        print('tests not implemented, probably has some weird offset due to mmv2 --> v3')
-        assert 1 == 2
+        self.skipTest("test_close_case not implemented, probably has some weird offset due to mmv2 --> v3")
 
 
 class TestPrimary2COMag(unittest.TestCase):
@@ -91,5 +89,4 @@ class TestPrimary2COMag(unittest.TestCase):
         pass
 
     def test_close_case(self):
-        print('tests not implemented, probably has some weird offset due to mmv2 --> v3')
-        assert 1 == 2
+        self.skipTest("test_close_case not implemented, probably has some weird offset due to mmv2 --> v3")

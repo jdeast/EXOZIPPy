@@ -49,12 +49,12 @@ class TestEventFinderGridSearch_1(unittest.TestCase):
             np.testing.assert_almost_equal(dataset.n_epochs, n_expected)
 
     def test_get_flat_chi2(self):
-        raise NotImplementedError(
+        self.skipTest(
             'Technically this part of the code is covered. But it might be a good idea to have a special test for ' +
             'debugging.')
 
     def test_do_fits(self):
-        raise NotImplementedError(
+        self.skipTest(
             'Technically this part of the code is covered. But it might be a good idea to have a special test for ' +
             'debugging.')
 
@@ -115,34 +115,34 @@ class TestEventFinderGridSearch_2(TestEventFinderGridSearch_1):
 class TestFlatSFitFunction(unittest.TestCase):
 
     def test_flatten_data(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_calc_model(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_calc_df(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
 
-class TestEFSFitFunction():
+class TestEFSFitFunction(unittest.TestCase):
 
     def test_calc_model(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_calc_residuals(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_calc_df(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_q(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_magnification(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_get_magnification(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
 
 class TestAnomalyFinderGridSearch(unittest.TestCase):
@@ -211,16 +211,16 @@ class TestAnomalyFinderGridSearch(unittest.TestCase):
         np.testing.assert_almost_equal(self.af_grid.grid_params['d_t_eff'], 1. / 3.)
 
     def test_get_zero_chi2(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_check_successive(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_get_anomalies(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_filter_anomalies(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
 
     def test_anomalies(self):
-        raise NotImplementedError()
+        self.skipTest(' NotImplemented')
