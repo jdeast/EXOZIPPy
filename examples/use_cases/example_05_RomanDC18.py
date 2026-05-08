@@ -5,6 +5,7 @@ import os.path
 import glob
 import numpy as np
 import exozippy
+import traceback
 
 from DC18_classes import dir_, TestDataSet
 
@@ -19,7 +20,8 @@ def fit_lc(lc_num, verbose=False):
     fitter = exozippy.mmexofast.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
         verbose=verbose,
-        # print_results=True, emcee=False, emcee_settings = {'n_walkers': 20, 'n_burn': 50, 'n_steps': 100},
+        # print_results=True, emcee=False,
+        #emcee_settings={'n_walkers': 14, 'n_burn': 50, 'n_steps': 100},  # Override defaults for quick testing
         output_config=exozippy.mmexofast.OutputConfig(
             base_dir=base_dir, file_head='WFIRST.{0:03}'.format(lc_num), save_log=True,
             save_latex_tables=True, save_restart_files=True)
@@ -47,7 +49,7 @@ for file_ in files:
 wide_planets = [8, 53, 107, 131, 152, 194, 208, 214, 217, 226]
 big_wide_planets = [4, 62]
 
-lc_nums = [53]
+lc_nums = wide_planets[0:3]
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:
@@ -58,3 +60,4 @@ for lc_num in np.sort(lc_nums):
         pass
     except Exception as e:
         print('Run {0} ABORTED. {1}: {2}'.format(lc_num, type(e).__name__, e))
+        traceback.print_exc()

@@ -378,14 +378,14 @@ class EmceeFitResults(BaseFitResults):
         """
         Build the fitted parameters section of the DataFrame.
 
-        Uses the 50th percentile as values. ``sigma_minus = p16 - p50``
+        Uses the 50th percentile as values. ``sigma_minus = p50 - p16``
         and ``sigma_plus = p84 - p50``, both stored as positive numbers.
         """
         p = self.percentiles
         return pd.DataFrame({
             'parameter_names': list(self.parameters_to_fit),
             'values':          list(p[1]),
-            'sigma_minus':     list(p[0] - p[1]),
+            'sigma_minus':     list(p[1] - p[0]),
             'sigma_plus':      list(p[2] - p[1]),
         })
 
@@ -457,9 +457,10 @@ class EmceeFitResults(BaseFitResults):
             parameters.append(f'{band}_B_{obs}')
 
             for flux in list(source_fluxes[i]) + [blend_fluxes[i]]:
-                if flux > 0:
+                flux_scalar = float(np.squeeze(flux))
+                if flux_scalar > 0:
                     mag, _ = MulensModel.utils.Utils.get_mag_and_err_from_flux(
-                        flux, 0.0
+                        flux_scalar, 0.0
                     )
                 else:
                     mag = 'neg flux'

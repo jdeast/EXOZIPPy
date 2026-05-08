@@ -27,6 +27,159 @@ import MulensModel
 import exozippy.mmexofast as mmexo
 
 
+# ===========================================================================
+# Module-level constants for table formatting
+# ===========================================================================
+# TODO: The very existence of this block suggests that table output/formatting should be excised to a separate file.
+
+_PARAMETER_DECIMAL_PLACES = {
+    'chi2':                              2,
+    'N_data':                            0,
+    't_0':                               6,
+    'u_0':                               6,
+    't_E':                               2,
+    'rho':                               6,
+    'log_rho':                           3,
+    't_star':                            6,
+    'pi_E_N':                            4,
+    'pi_E_E':                            4,
+    't_0_par':                           6,
+    's':                                 6,
+    'log_s':                             3,
+    'q':                                 6,
+    'log_q':                             3,
+    'alpha':                             2,
+    'convergence_K':                     6,
+    'shear_G':                           6,
+    'ds_dt':                             3,
+    'dalpha_dt':                         3,
+    's_z':                               6,
+    'ds_z_dt':                           3,
+    't_0_kep':                           6,
+    'x_caustic_in':                      6,
+    'x_caustic_out':                     6,
+    't_caustic_in':                      6,
+    't_caustic_out':                     6,
+    'xi_period':                         3,
+    'xi_semimajor_axis':                 6,
+    'xi_inclination':                    2,
+    'xi_Omega_node':                     2,
+    'xi_argument_of_latitude_reference': 2,
+    'xi_eccentricity':                   4,
+    'xi_omega_periapsis':                2,
+    'q_source':                          6,
+    't_0_xi':                            6,
+}
+
+_FLUX_PARAM_DECIMAL_PLACES = 3
+
+
+def _get_decimal_places(param_name: str) -> Optional[int]:
+    """
+    Return the number of decimal places for formatting a parameter value.
+
+    Returns ``None`` if the parameter is not in the known list, meaning the
+    caller should leave the value as a raw float string.
+
+    Handles binary source parameters (e.g. ``'t_0_1'``, ``'t_0_2'``) by
+    stripping the trailing source index and looking up the base name.
+
+    Handles flux parameters (e.g. ``'I_S_OGLE'``, ``'R_B_MOA'``) by
+    detecting the ``'_S_'`` or ``'_B_'`` pattern.
+
+    Parameters
+    ----------
+    param_name : str
+        Parameter name to look up.
+
+    Returns
+    -------
+    int or None
+        Number of decimal places, or None if not in the known list.
+    """
+    if param_name in _PARAMETER_DECIMAL_PLACES:
+        return _PARAMETER_DECIMAL_PLACES[param_name]
+
+    # Binary source parameters: e.g. 't_0_1' -> 't_0'
+    parts = param_name.rsplit('_', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        base = parts[0]
+        if base in _PARAMETER_DECIMAL_PLACES:
+            return _PARAMETER_DECIMAL_PLACES[base]
+
+    # Flux parameters: e.g. 'I_S_OGLE' -> parts[1] in ('S', 'B')
+    parts = param_name.split('_')
+    if len(parts) >= 3 and parts[1] in ('S', 'B'):
+        return _FLUX_PARAM_DECIMAL_PLACES
+
+    return None
+
+
+def _format_results_column(df: pd.DataFrame, pm_symbol: str) -> pd.DataFrame:
+    """
+    Format values and sigma columns in a single-model results DataFrame.
+
+    Applies parameter-specific decimal places to ``'values'``, ``'sigmas'``,
+    ``'sigma_minus'``, and ``'sigma_plus'`` columns. NaN sigmas become empty
+    strings ``''``. Sigma values are prefixed with the appropriate symbol:
+
+    - ``sigmas``:      ``"{pm_symbol} {value}"``
+    - ``sigma_minus``: ``"- {value}"``
+    - ``sigma_plus``:  ``"+ {value}"``
+
+    String values (e.g. ``'neg flux'``) are passed through unchanged.
+    Parameters not in the known list are formatted with ``str()``.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with columns ``'parameter_names'``, ``'values'``, and
+        optionally ``'sigmas'``, ``'sigma_minus'``, ``'sigma_plus'``.
+    pm_symbol : str
+        Symbol to prefix symmetric sigma values: ``'+/-'`` for ascii,
+        ``r'$\\pm$'`` for latex.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``df`` with formatted string values.
+    """
+    df = df.copy()
+
+    def fmt(param_name, value, prefix=""):
+        if pd.isna(value):
+            return ""
+        if isinstance(value, str):
+            return f"{prefix}{value}" if prefix else value
+        decimal_places = _get_decimal_places(param_name)
+        if decimal_places is None:
+            return f"{prefix}{value}" if prefix else str(value)
+        formatted = f"{value:.{decimal_places}f}"
+        return f"{prefix}{formatted}" if prefix else formatted
+
+    df['values'] = [
+        fmt(param, val)
+        for param, val in zip(df['parameter_names'], df['values'])
+    ]
+    if 'sigmas' in df.columns:
+        df['sigmas'] = [
+            fmt(param, val, prefix=f"{pm_symbol} ")
+            for param, val in zip(df['parameter_names'], df['sigmas'])
+        ]
+    if 'sigma_minus' in df.columns:
+        df['sigma_minus'] = [
+            fmt(param, val, prefix="- ")
+            for param, val in zip(df['parameter_names'], df['sigma_minus'])
+        ]
+    if 'sigma_plus' in df.columns:
+        df['sigma_plus'] = [
+            fmt(param, val, prefix="+ ")
+            for param, val in zip(df['parameter_names'], df['sigma_plus'])
+        ]
+
+    return df
+
+
 # ============================================================================
 # MMEXOFASTFitter
 # ============================================================================
@@ -3189,13 +3342,18 @@ class MMEXOFASTFitter:
                 model_label_record_pairs.append((label, record))
 
         results_table: Optional[pd.DataFrame] = None
+        # pm_symbol must be set after table_type is normalized from None
+        pm_symbol = r"$\pm$" if table_type == "latex" else "+/-"
 
         for label, record in model_label_record_pairs:
             new_column = record.to_dataframe()
+            new_column = _format_results_column(new_column, pm_symbol)
             new_column = new_column.rename(
                 columns={
                     "values": label,
                     "sigmas": f"sig [{label}]",
+                    "sigma_minus": f"sig- [{label}]",
+                    "sigma_plus": f"sig+ [{label}]",
                 }
             )
 
@@ -3249,7 +3407,6 @@ class MMEXOFASTFitter:
                     "display.max_rows", None,
                     "display.max_columns", None,
                     "display.width", None,
-                    "display.float_format", "{:f}".format,
             ):
                 return results_table.to_string(index=False)
 

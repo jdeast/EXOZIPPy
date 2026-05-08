@@ -41,16 +41,16 @@ _N_GOOD_DATASET_1 = 100
 _N_GOOD_DATASET_2 = 80
 _N_DATA = _N_GOOD_DATASET_1 + _N_GOOD_DATASET_2  # 180
 
-# Fluxes returned by mock_event.source_fluxes() and mock_event.blend_fluxes().
+# Fluxes returned by mock_event.source_fluxes and mock_event.blend_fluxes.
 # Index 0 = OGLE (dataset 1), index 1 = MOA (dataset 2).
-_SOURCE_FLUXES = [1000.0, 500.0]
+_SOURCE_FLUXES = [np.array([1000.0]), np.array([500.0])]
 _BLEND_FLUXES = [100.0, 50.0]
 
 # Magnitudes derived from mag = 22 - 2.5 * log10(flux)
-_MOCK_MAG_I_SOURCE_OGLE = 22 - 2.5 * np.log10(_SOURCE_FLUXES[0])   # 14.5
-_MOCK_MAG_I_BLEND_OGLE  = 22 - 2.5 * np.log10(_BLEND_FLUXES[0])    # 17.0
-_MOCK_MAG_R_SOURCE_MOA  = 22 - 2.5 * np.log10(_SOURCE_FLUXES[1])   # ~15.253
-_MOCK_MAG_R_BLEND_MOA   = 22 - 2.5 * np.log10(_BLEND_FLUXES[1])    # ~17.753
+_MOCK_MAG_I_SOURCE_OGLE = 22 - 2.5 * np.log10(float(np.squeeze(_SOURCE_FLUXES[0])))   # 14.5
+_MOCK_MAG_I_BLEND_OGLE  = 22 - 2.5 * np.log10(float(np.squeeze(_BLEND_FLUXES[0])))   # 17.0
+_MOCK_MAG_R_SOURCE_MOA  = 22 - 2.5 * np.log10(float(np.squeeze(_SOURCE_FLUXES[1])))   # ~15.253
+_MOCK_MAG_R_BLEND_MOA   = 22 - 2.5 * np.log10(float(np.squeeze(_BLEND_FLUXES[1])))   # ~17.753
 
 _EXPECTED_FLUX_PARAM_NAMES = ['I_S_OGLE', 'I_B_OGLE', 'R_S_MOA', 'R_B_MOA']
 _EXPECTED_FLUX_PARAM_VALUES = {
@@ -58,13 +58,6 @@ _EXPECTED_FLUX_PARAM_VALUES = {
     'I_B_OGLE': _MOCK_MAG_I_BLEND_OGLE,
     'R_S_MOA':  _MOCK_MAG_R_SOURCE_MOA,
     'R_B_MOA':  _MOCK_MAG_R_BLEND_MOA,
-}
-
-_FLUX_TO_MAG = {
-    _SOURCE_FLUXES[0]: _MOCK_MAG_I_SOURCE_OGLE,
-    _BLEND_FLUXES[0]:  _MOCK_MAG_I_BLEND_OGLE,
-    _SOURCE_FLUXES[1]: _MOCK_MAG_R_SOURCE_MOA,
-    _BLEND_FLUXES[1]:  _MOCK_MAG_R_BLEND_MOA,
 }
 
 _MAG_FROM_FLUX_PATCH_PATH = 'MulensModel.utils.Utils.get_mag_and_err_from_flux'
@@ -208,8 +201,8 @@ def make_mock_emcee_fitter(
     mock_dataset_2.good = np.ones(_N_GOOD_DATASET_2, dtype=bool)
 
     mock_event = MagicMock()
-    mock_event.source_fluxes.return_value = list(_SOURCE_FLUXES)
-    mock_event.blend_fluxes.return_value  = list(_BLEND_FLUXES)
+    mock_event.source_fluxes = list(_SOURCE_FLUXES)
+    mock_event.blend_fluxes = list(_BLEND_FLUXES)
 
     mock_fitter = MagicMock()
     mock_fitter.parameters_to_fit  = parameters_to_fit
