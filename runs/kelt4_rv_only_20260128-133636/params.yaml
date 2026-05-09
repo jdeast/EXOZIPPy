@@ -1,8 +1,0 @@
-planets:
-  b:
-    P_days:
-      init: 2.9895933
-    tc:
-      init: 2456190.302013
-    K_mps:
-      init: 100.0

@@ -18,3 +18,5 @@ __pycache__/
 *.pyc
 *settings.json
 /repo_dump.txt
+runs/
+examples/*/fitresults/
