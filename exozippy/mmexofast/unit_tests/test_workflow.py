@@ -1,6 +1,8 @@
 # test_workflow.py
 
-import os.path
+
+import pickle
+import os
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -731,3 +733,70 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         """
         with self.assertRaises(ValueError):
             self._make_fitter(restart_from='event_search')
+
+
+def _make_fake_pickle(path, completed_steps):
+    """
+    Write a minimal fake restart pickle containing only completed_steps.
+    """
+    state = {
+        'completed_steps': [(s.name, s.stage) for s in completed_steps],
+    }
+    data = {'config': {}, 'state': state}
+    with open(path, 'wb') as f:
+        pickle.dump(data, f)
+
+
+class TestBinaryLensRestartFromPointLens(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = self.tmp_dir.name
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _make_fitter(self, restart_file, **kwargs):
+        defaults = dict(
+            files=GROUND_DATA_FILES,
+            coords=COORDS,
+            fit_type='binary lens',
+            renormalize_errors=True)
+        defaults.update(kwargs)
+        return MMEXOFASTFitter(restart_file=restart_file, **defaults)
+
+    def test_binary_steps_added_after_point_lens_restart(self):
+        """
+        Restarting from a completed point-lens run (renormalize_errors=True,
+        parallax_grid=False) with fit_type='binary lens' produces a step
+        queue that starts at search_for_anomaly.
+        """
+        # Simulate completed point-lens run through refit_all
+        pl_completed = _make_noop_steps([
+            ('run_ef_grid',           'event_search'),
+            ('est_pl_params',         'fit_static_point_lens'),
+            ('fit_pspl',              'fit_static_point_lens'),
+            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('renormalize_datasets',  'renormalize'),
+            ('refit_all',             'renormalize'),
+        ])
+
+        pkl_path = os.path.join(self.tmp_path, 'fake.pkl')
+        _make_fake_pickle(pkl_path, pl_completed)
+
+        fitter = self._make_fitter(
+            restart_file=pkl_path,
+            dry_run=True)
+        fitter.fit()
+
+        expected = [
+            ('select_best_point_lens_model', 'search_for_anomaly'),
+            ('compute_residuals',            'search_for_anomaly'),
+            ('run_af_grid',                  'search_for_anomaly'),
+            ('est_binary_params',            'search_for_anomaly'),
+            ('fit_binary_models',            'fit_binary'),
+            ('check_needs_renorm',           'check_binary_renorm'),
+        ]
+        actual = [(step.name, step.stage) for step in fitter.planned_steps]
+        self.assertEqual(actual, expected)
