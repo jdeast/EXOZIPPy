@@ -23,9 +23,6 @@ import pytensor.tensor as pt
 # local imports
 from exozippy.constants import SIGMA_1_LOW, SIGMA_1_HIGH
 
-import ipdb
-
-
 Number = Union[int, float, np.floating]
 
 

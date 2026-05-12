@@ -1,19 +1,24 @@
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+from scipy.interpolate import CubicSpline
+from astropy.coordinates import (
+    get_body_barycentric,
+    solar_system_ephemeris,
+    EarthLocation,
+    ICRS,
+    SkyCoord
+)
+from astropy.time import Time
+import astropy.units as u
 
 import pytensor.tensor as pt
 import pytensor
 import pymc as pm
 
-from astropy.coordinates import SkyCoord
-import astropy.units as u
-from astropy.coordinates import get_body_barycentric, solar_system_ephemeris
-from astropy.time import Time
-
 from exozippy.components.component import Component
-from .utils import get_deltas
-
 
 class MulensInstrument(Component):
     def __init__(self, config, config_manager):
@@ -22,14 +27,41 @@ class MulensInstrument(Component):
 
         # Metadata
         self.files = [c.get("file") for c in self.config]
-        self.coords = [c.get("coords") for c in self.config]
-        self.t0_par = [c.get("t0_par", 2450000.0) for c in self.config]
+        #self.coords = [c.get("coords") for c in self.config]
 
     @property
     def prefix(self):
         return "mulensinst"
 
     def load_data(self, observer_location='earth'):
+        """Step 2: Pure data ingestion. No coordinate-dependent math here."""
+        all_times, all_mags, all_errs, inst_indices = [], [], [], []
+
+        # to initialize f_source in the next step
+        self.fs_init = []
+
+        for i, file in enumerate(self.files):
+            df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            t, m, e = df.iloc[:, 0].values, df.iloc[:, 1].values, df.iloc[:, 2].values
+
+            med_mag = np.median(m)
+            self.fs_init.append(10.0 ** (-0.4 * med_mag))
+
+            all_times.append(t)
+            all_mags.append(m)
+            all_errs.append(e)
+            inst_indices.append(np.full(len(t), i))
+
+        # Store raw data for processing in the dependency bridge
+        self.time = np.concatenate(all_times).astype(float)
+        self.mag = np.concatenate(all_mags).astype(float)
+        self.err = np.concatenate(all_errs).astype(float)
+        self.inst_map = np.concatenate(inst_indices).astype(int)
+
+        # Keep track of individual time arrays for the projection loop
+        self._raw_time_list = all_times
+
+    def load_data_old(self, observer_location='earth'):
         """Loads photometry and pre-calculates parallax shifts."""
         all_times, all_mags, all_errs, inst_indices, all_obspos = [], [], [], [], []
 
@@ -61,6 +93,88 @@ class MulensInstrument(Component):
         self.inst_map = np.concatenate(inst_indices).astype(int)
 
     def get_observer_position(self, time, observer_location='earth'):
+        """
+        High-precision observer position dispatcher.
+        Supports:
+          - Major bodies ('earth', 'mars')
+          - Topocentric ground sites ('lat,lon,alt' or 'CTIO')
+          - Satellite Ephemeris files (Interpolated)
+        """
+        solar_system_ephemeris.set('jpl')
+        t_obj = Time(time, format='jd', scale='tdb')
+
+        # 1. Handle Terrestrial / Topocentric (Lat/Lon)
+        # Check if string looks like "lat, lon, alt" or a known site name
+        try:
+            if ',' in observer_location:
+                # Parse "lat, lon, alt"
+                loc = EarthLocation.from_geodetic(*[float(x) for x in observer_location.split(',')])
+            else:
+                # Check for site names like 'CTIO' or 'Siding Spring'
+                loc = EarthLocation.of_site(observer_location)
+
+            # Get topocentric position: Barycentric Earth + Geocentric Offset
+            # This accounts for Earth's orbit and the observer's specific spot on the globe
+            return loc.get_itrs(t_obj).transform_to(ICRS()).cartesian.xyz.to('au').value.T
+        except:
+            # Not a ground site, move to next check
+            pass
+
+        # 2. Handle Major Bodies
+        if observer_location in ['earth', 'moon']:
+            return get_body_barycentric(observer_location, t_obj).xyz.to('au').value.T
+
+        # 3. Handle Satellite Ephemeris Files with Search Paths
+        search_paths = [
+            observer_location,  # absolute/relative path
+            os.path.join(os.path.dirname(__file__), 'ephemerides', observer_location), # Package internal
+            os.path.join(os.path.dirname(__file__), 'ephemerides', observer_location + '.eph')  # Package internal
+        ]
+
+        for path in search_paths:
+            if os.path.exists(path):
+                return self._interpolate_ephemeris(time, path)
+
+        raise ValueError(f"observer location not recognized: {observer_location}; see $EXOZIPPY_PATH/src/exozippy/components/mulensing/ephemerides/get_ephemeris.py to generate an ephemeris")
+
+    def _interpolate_ephemeris(self, time, ephemeris_file):
+        """
+        Interpolates a Barycentric ephemeris file.
+
+        Parameters:
+        -----------
+        time : float or ndarray
+            The time(s) at which to calculate coordinates (BJD_TDB).
+        ephemeris_file : str
+            Path to the file generated by get_ephemeris.py
+            (Format: BJD_TDB, X, Y, Z)
+
+        Returns:
+        --------
+        xyz_au : ndarray
+            (N, 3) array of X, Y, Z coordinates in AU.
+        """
+        # Load data, skipping the header lines
+        # data[:, 0] = BJD_TDB, [:, 1:4] = X, Y, Z
+        data = np.loadtxt(ephemeris_file)
+
+        t_grid = data[:, 0]
+        xyz_grid = data[:, 1:4]
+
+        # Check if we are extrapolating (which is dangerous)
+        t_min, t_max = np.min(t_grid), np.max(t_grid)
+        if np.any(time < t_min) or np.any(time > t_max):
+            import warnings
+            warnings.warn(f"Extrapolating outside ephemeris range! "
+                          f"Grid: {t_min:.2f}-{t_max:.2f}, Requested: {np.min(time):.2f}")
+
+        # Create the spline object
+        # bc_type='not-a-knot' is standard for smooth orbital curves
+        cs = CubicSpline(t_grid, xyz_grid, axis=0, bc_type='not-a-knot')
+
+        return cs(time)
+
+    def get_observer_position_old(self, time, observer_location='earth'):
         """
         Pre-calculates Earth's SSB position for all observation times.
         This is done ONCE before the MCMC starts.
@@ -101,8 +215,48 @@ class MulensInstrument(Component):
         return fitter.initialize_exozippy()
     '''
 
-
     def build_dependent_parameters(self, model, system):
+        """
+        Step 4: The Bridge.
+        Connect to the specific anchor star to pre-calculate observer positions.
+        """
+        # 1. Identify the anchor star (the Source)
+        # We look at the GalacticModel to see which star index is the 'anchor'
+
+        # Get RA/Dec from the (first) source star
+        source_ndx = int(system.lens.source_map[0].eval())
+        ra_rad = system.star.ra.initval[source_ndx]
+        dec_rad = system.star.dec.initval[source_ndx]
+
+        target_coord = SkyCoord(ra=ra_rad, dec=dec_rad, unit=(u.rad, u.rad))
+
+        # 3. Pre-calculate Observer Positions
+        # Use the observer_location from the first instrument's config, defaulting to 'earth'
+        all_obspos = []
+        for i, t_array in enumerate(self._raw_time_list):
+            obs_loc = self.config[i].get("observer_location", "earth")
+            xyz_au = self.get_observer_position(t_array, observer_location=obs_loc)
+            all_obspos.append(xyz_au)
+
+        self.observer_pos = np.vstack(all_obspos).astype(float)
+
+        # 4. Bootstrap the total flux from the data baseline
+        log_f_total_obs = np.log(np.array(self.fs_init))
+
+        # 5. Declare the parameter dictionary
+        parameters = {
+            "log_f_total": {
+                "initval": log_f_total_obs,
+            },
+            "f_source": "default",
+            "f_blend": "default"
+        }
+
+        # 6. Finalize and build the PyMC nodes
+        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
+
+
+    def build_dependent_parameters_old(self, model, system):
         # 1. Bootstrap the total flux from the data baseline
         log_f_total_obs = np.log(np.array(self.fs_init))
 

@@ -8,7 +8,7 @@ from exozippy.components.component import Component
 from . import physics
 
 # debugging imports
-import ipdb
+#import ipdb
 
 from exozippy.components.celestial_body.celestial_body import CelestialBody
 

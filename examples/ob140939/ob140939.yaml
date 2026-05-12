@@ -1,0 +1,48 @@
+run:
+  name: "OB140939"
+
+prefix: "fitresults/OB140939"
+
+# 1. Define the physical bodies!
+star:
+  - name: "Lens"
+  - name: "Source"
+
+lens:
+  - name: "Lens"
+    finite_source: False
+    #mag_method: "auto_vbbl" # default = auto_vbbl, but accepts anything MuLensModel does: point_source, point_source_approx, vbbl, adaptive_contour, hexadecapole, quadrupole, ray_shooting
+    # Map the lens and source to the star vector
+    lens_ndx: 0
+    source_ndx: 1
+    t0_par: 2455639.89959
+
+galacticmodel:
+  - name: "OB140939"
+    anchor_idx: 1 # in mulensing, we anchor to the source by convention
+
+mulensinstrument:
+  - name: "OGLE4"
+    file: "n20100310.I.OGLE.OB140939.dat"
+    filter: "I"
+    zero_point: ""
+    observer_location: "earth" # earth, spitzer, kepler, roman, lat/lon, or filename of horizons ephemeris to interpolate
+  - name: "Spitzer"
+    file: "n20140605.L.Spitzer.OB140939.dat"
+    filter: "Spit36" # From Yee+ 2014
+    zero_point: ""
+    observer_location: "spitzer"
+
+
+parameter_file: "ob140939.params.yaml"
+
+sampler:
+  pymc:
+    tune: 1000 # generally need longer tuning for mulensing
+    draws: 1000
+    chains: 4
+    cores: 4
+    init: "adapt_diag"
+    target_accept: 0.99
+    check_curvatures: True
+    recompute_trace: True

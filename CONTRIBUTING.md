@@ -95,7 +95,7 @@ Naming Conventions:
 
     snake_case for variables, functions, and methods.
 
-    UPPER_SNAKE_CASE for module-level constants.
+    All constants should be defined in/imported from constants.py and use UPPER_SNAKE_CASE.
 
 Docstrings: Write docstrings for all public modules, classes, and functions using the Google Style. Briefly explain what the function does, its arguments (Args:), and what it returns (Returns:).
 
@@ -113,6 +113,6 @@ The test should demonstrate failure before the fix and success after the fix.
 
 # 5. AI use:
 
-AI use is encouraged, but thorough review and testing is essential. Create unit tests that verify/confirm the output for all essential code (see above). Unit testing is especially critical with AI generated code, as it is often tunnel visioned and drops important features.
+AI use is encouraged, but thorough review and testing is essential. Create unit tests that verify/confirm the output for all essential code (see above). Unit testing is especially critical with AI generated code, as it is often tunnel visioned and drops important features not relevant to the bug.
 
-scripts/dump_code.py will collate the entire repo into a copy/pasteable file for AI review. 
+scripts/dump_code.py will collate the entire repo into a copy/pasteable file for AI review. Note that, anecdotally, ~1M tokens is suffificient to keep ~5000 lines of code in context sufficient for a deep, logically review. Beyond that, it tends to lose its focus and forget aspects of the code. The current code base is a bit larger than that, so you may wish to filter the repo dump for more targeted, relevant advice. 

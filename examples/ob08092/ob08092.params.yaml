@@ -1,0 +1,75 @@
+# --- Integration Constants (Sampled) ---
+lens.Lens.t_0:
+    initval: 2455379.571
+    init_scale: 0.1
+lens.Lens.u_0:
+    initval: 0.523
+    init_scale: 0.0004
+
+mulensinst.OGLE4.err_scale:
+    init_scale: 0.00082
+mulensinst.OGLE4.log_f_total:
+    init_scale: 0.001
+mulensinst.OGLE4.q_frac:
+    init_scale: 0.002
+
+# --- Physical Parameters for the LENS (Sampled) ---
+star.Lens.logmass:
+    initval: -0.8239     # M_sun (Typical M-dwarf lens)
+    init_scale: 0.0029
+star.Lens.ra:
+    initval: 266.872583333
+    sigma: 0
+star.Lens.dec:
+    initval: -34.7265555556
+    sigma: 0
+star.Lens.distance:
+    initval: 8100.0  # Poleski+ 2014
+    init_scale: 5.0
+star.Lens.pm_ra:
+    initval: -3.0    # mas/yr
+    init_scale: 0.01
+star.Lens.pm_dec:
+    initval: -4.0    # mas/yr
+    init_scale: 0.01
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Lens.rv:
+    initval: 0.0
+    init_scale: 30000.0 # wide velocity sweep
+#star.Source.mass:
+#    sigma: 0.0
+star.Source.radius:
+    initval: 0.519 # Poleski+ 2014
+    sigma: 0.0
+star.Source.teff:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0
+star.Source.ra:
+    initval: 266.872583333
+    sigma: 0
+star.Source.dec:
+    initval: -34.7265555556
+    sigma: 0
+star.Source.rv:
+    initval: -50000.0
+    init_scale: 100000.0
+
+# --- Physical Parameters for the SOURCE (Sampled) ---
+star.Source.distance:
+    initval: 9700.0  # Poleski+ 2014
+    init_scale: 5
+star.Source.pm_ra:
+    initval: -6.0    # mas/yr
+    init_scale: 0.07
+    # sigma: 3.0 # this comes from the galactic prior
+star.Source.pm_dec:
+    initval: -6.0    # mas/yr
+    init_scale: 0.088
+    # sigma: 3.0 # this comes from teh galactic prior
+

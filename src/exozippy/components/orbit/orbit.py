@@ -14,7 +14,7 @@ from exozippy.components.component import Component
 from . import physics
 
 # debugging imports
-import ipdb
+# import ipdb
 
 class Orbit(Component):
     def __init__(self, config, config_manager):

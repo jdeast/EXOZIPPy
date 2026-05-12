@@ -28,7 +28,7 @@ import sysconfig
 import pytensor
 
 # debugging imports
-import ipdb
+# import ipdb
 
 def run_fit(config):
     """
@@ -84,7 +84,7 @@ def run_fit(config):
         if profile:
             func = model.logp_dlogp_function(profile=True)
             func.profile.summary()
-            ipdb.set_trace()
+            #ipdb.set_trace()
         ###################
         #ipdb.set_trace()
 

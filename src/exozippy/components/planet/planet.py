@@ -4,7 +4,7 @@ import pymc as pm
 
 from exozippy.components.component import Component
 
-import ipdb
+# import ipdb
 
 from exozippy.components.celestial_body.celestial_body import CelestialBody
 # this import is required even though it's not used explicitly

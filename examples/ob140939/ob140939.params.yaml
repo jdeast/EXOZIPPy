@@ -1,10 +1,16 @@
 # --- Integration Constants (Sampled) ---
 lens.Lens.t_0:
-    initval: 2455379.571
+    initval: 2456836.22
     init_scale: 0.1
 lens.Lens.u_0:
-    initval: 0.523
+    initval: 0.840
     init_scale: 0.0004
+lens.Lens.t_E:
+    initval: 24.29
+lens.Lens.pi_E_N:
+    initval: -0.214
+lens.Lens.pi_E_E:
+    initval: 0.217
 
 mulensinst.OGLE4.err_scale:
     init_scale: 0.00082
@@ -13,19 +19,20 @@ mulensinst.OGLE4.log_f_total:
 mulensinst.OGLE4.q_frac:
     init_scale: 0.002
 
+# https://iopscience.iop.org/article/10.1088/0004-637X/802/2/76/pdf
 # --- Physical Parameters for the LENS (Sampled) ---
-star.Lens.logmass:
-    initval: -0.8239     # M_sun (Typical M-dwarf lens)
-    init_scale: 0.0029
+#star.Lens.mass:
+#    initval: 0.23     # Yee+ 2014
 star.Lens.ra:
-    initval: 266.872583333
+    initval: 266.801041667
     sigma: 0
 star.Lens.dec:
-    initval: -34.7265555556
+    initval: -21.3829722222
     sigma: 0
 star.Lens.distance:
-    initval: 8100.0  # Poleski+ 2014
-    init_scale: 5.0
+#    initval: 3100.0  # Yee+ 2014
+    initval: 4000.0  # Yee+ 2014
+#    init_scale: 5.0
 star.Lens.pm_ra:
     initval: -3.0    # mas/yr
     init_scale: 0.01
@@ -43,18 +50,18 @@ star.Lens.rv:
     init_scale: 30000.0 # wide velocity sweep
 #star.Source.mass:
 #    sigma: 0.0
-star.Source.radius:
-    initval: 0.519 # Poleski+ 2014
-    sigma: 0.0
+#star.Source.radius:
+#    initval: 0.519
+#    sigma: 0.0
 star.Source.teff:
     sigma: 0.0
 star.Source.feh:
     sigma: 0.0
 star.Source.ra:
-    initval: 266.872583333
+    initval: 266.801041667
     sigma: 0
 star.Source.dec:
-    initval: -34.7265555556
+    initval: -21.3829722222
     sigma: 0
 star.Source.rv:
     initval: -50000.0
@@ -62,7 +69,7 @@ star.Source.rv:
 
 # --- Physical Parameters for the SOURCE (Sampled) ---
 star.Source.distance:
-    initval: 9700.0  # Poleski+ 2014
+    initval: 8000.0  # bulge
     init_scale: 5
 star.Source.pm_ra:
     initval: -6.0    # mas/yr

@@ -3,7 +3,7 @@ import importlib
 import inspect
 from pathlib import Path
 from .component import Component
-import ipdb
+#import ipdb
 
 def discover_components():
     """

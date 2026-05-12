@@ -18,12 +18,8 @@ class GalacticModel(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Galactic Prior"
-
-        self.is_microlensing = []
-        for c in self.config:
-            self.is_microlensing.append("lens_ndx" in c and "source_ndx" in c)
-
         self.imf = self.config[0].get("IMF", "Kroupa")
+        self.anchor_idx = self.config[0].get("anchor_idx", 0)
 
     @property
     def prefix(self):
@@ -36,21 +32,7 @@ class GalacticModel(Component):
         pass
 
     def build_map(self, system):
-        star_map, lens_map, source_map = [], [], []
-
-        for c in self.config:
-            if "star_ndx" in c:
-                star_map.append(c["star_ndx"])
-            elif "lens_ndx" in c and "source_ndx" in c:
-                lens_map.append(c["lens_ndx"])
-                source_map.append(c["source_ndx"])
-            else:
-                raise ValueError("Galactic model requires either 'star_ndx' or ('lens_ndx' and 'source_ndx').")
-
-        # If the list has items, convert to PyTensor. Otherwise, explicitly set to None.
-        self.star_map = pt.as_tensor_variable(np.array(star_map)).astype("int32") if star_map else None
-        self.lens_map = pt.as_tensor_variable(np.array(lens_map)).astype("int32") if lens_map else None
-        self.source_map = pt.as_tensor_variable(np.array(source_map)).astype("int32") if source_map else None
+        pass
 
     def build_dependent_parameters(self, model, system):
         pass
@@ -66,15 +48,10 @@ class GalacticModel(Component):
 
         # 1. Pre-compute transformation matrices using Astropy based on initial RA/Dec
         for i in range(self.n_elements):
-            # For microlensing, the convention is to anchor the sky coordinates to the source star
-            if self.is_microlensing[i]:
-                anchor_idx = int(self.source_map.eval()[i])
-            else:
-                anchor_idx = int(self.star_map.eval()[i])
 
             # Grab the internal initvals (which are in radians)
-            ra_rad = float(np.atleast_1d(stars.ra.initval)[anchor_idx])
-            dec_rad = float(np.atleast_1d(stars.dec.initval)[anchor_idx])
+            ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
+            dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
 
             sc = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad)
             d = 1.0 # kpc, arbitrary distance for velocity basis projection

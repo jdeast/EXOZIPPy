@@ -13,6 +13,7 @@ class Lens(Component):
         self.label = "Lens Parameters"
 
         self.finite_source = [c.get("finite_source", False) for c in self.config]
+        self.t0_par = [c.get("t0_par", 2450000.0) for c in self.config]
 
         self.mag_method = []
         for c in self.config:

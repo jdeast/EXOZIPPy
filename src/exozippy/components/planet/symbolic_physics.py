@@ -6,7 +6,9 @@ import sympy as sp
 
 # All parameters are strictly real.
 # Positivity bounds (mass > 0, radius > 0) are enforced downstream by defaults.yaml
+star_radius, star_mass = sp.symbols('star_radius star_mass', real=True)
 mass, radius = sp.symbols('mass radius', real=True)
+p, ar = sp.symbols('p ar', real=True)
 density, surface_gravity = sp.symbols('density surface_gravity', real=True)
 
 # Log parameters
@@ -30,7 +32,10 @@ SYMBOL_MAP = {
     # Density & Gravity
     "density": "density",
     "surface_gravity": "surface_gravity",
-    "logg": "logg"
+    "logg": "logg",
+
+    "p": "planet.Planet.p",
+    "ar": "planet.Planet.ar"
 }
 
 # ---------------------------------------------------------
@@ -56,7 +61,9 @@ RELATIONS = [
     sp.Eq(surface_gravity, G_CGS_SCALAR * mass / (radius ** 2)),
 
     # Logg Bridge
-    sp.Eq(surface_gravity, 10 ** logg)
+    sp.Eq(surface_gravity, 10 ** logg),
+
+    sp.Eq(p, radius / star_radius) # You'll need to define star_radius as a symbol!
 ]
 
 

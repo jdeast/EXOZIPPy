@@ -15,21 +15,19 @@ lens:
     # Map the lens and source to the star vector
     lens_ndx: 0
     source_ndx: 1
+    t0_par: 2455379.571
 
 galacticmodel:
   - name: "OB08092"
-    lens_ndx: 0
-    source_ndx: 1
+    anchor_idx: 1
 
 mulensinstrument:
   - name: "OGLE4"
     file: "n20100309.I.OGLE4.ob08092.dat"
     filter: "I"
     zero_point: ""
-    coords: "17:47:29.42 -34:43:35.6"
-    t0_par: 2455379.571
 
-parameter_file: "pspl.params.yaml"
+parameter_file: "ob08092.params.yaml"
 
 sampler:
   pymc:
