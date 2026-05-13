@@ -1,8 +1,9 @@
 # test_workflow.py
 
-
+e
 import pickle
 import os
+import glob
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -11,7 +12,42 @@ from unittest.mock import MagicMock, patch
 import exozippy
 import exozippy.mmexofast as mmexo
 from exozippy.mmexofast import MMEXOFASTFitter, WorkflowStep
+from exozippy.mmexofast.fitters import MulensFitter
 
+# OB05390
+OB05390_FILES = sorted(glob.glob(os.path.join(
+    exozippy.MULENS_DATA_PATH, 'OB05390', 'n200*.txt')))
+
+with open(os.path.join(
+        exozippy.MULENS_DATA_PATH, 'OB05390', 'coords.txt')) as f:
+    OB05390_COORDS = f.read().strip()
+
+BINARY_FIT_KEY = mmexo.FitKey(
+    lens_type=mmexo.LensType.BINARY,
+    source_type=mmexo.SourceType.FINITE,
+    parallax_branch=mmexo.ParallaxBranch.NONE,
+    lens_orb_motion=mmexo.LensOrbMotion.NONE,
+    locations_used=None,
+)
+
+BINARY_PARAMS = {
+    't_0':   2453582.7281740606,
+    'u_0':   0.355227507989543,
+    't_E':   11.106795114521415,
+    'rho':   0.024632765186197645,
+    'q':     7.524529162733864e-05,
+    's':     1.6044784697939465,
+    'alpha': 157.9506556145345,
+}
+
+BEST_EF_GRID_POINT = {
+    't_0':   2456836.080383359,
+    't_eff': 23.67696884508345,
+    'j':     2,
+    'chi2':  -137842.8089725696,
+}
+
+# OB140939
 GROUND_DATA_FILES = [os.path.join(
     exozippy.MULENS_DATA_PATH, 'OB140939',
     'n20100310.I.OGLE.OB140939.txt')]
@@ -800,3 +836,107 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
+        
+
+class TestExecutionLoopDynamicSteps(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = self.tmp_dir.name
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_action_returning_none_does_not_insert_steps(self):
+        """
+        est_pl_params runs for real, returns None from the step action,
+        and the execution loop continues normally without inserting steps.
+        The result is stored in intermediate_results.est_pl_params.
+        """
+        fitter = MMEXOFASTFitter(
+            files=GROUND_DATA_FILES,
+            coords=COORDS,
+            fit_type='point lens',
+            renormalize_errors=False,
+            stop_after='fit_static_point_lens:est_pl_params')
+
+        fitter.completed_steps = _make_noop_steps([
+            ('run_ef_grid', 'event_search'),
+        ])
+        fitter.intermediate_results.best_ef_grid_point = BEST_EF_GRID_POINT
+
+        fitter.fit()
+
+        # est_pl_params ran and stored its result
+        self.assertIsNotNone(fitter.intermediate_results.est_pl_params)
+
+        # execution loop continued normally — est_pl_params is in completed_steps
+        self.assertEqual(
+            fitter.completed_steps[-1].name, 'est_pl_params')
+
+        # no dynamic steps inserted — planned_steps is empty
+        self.assertEqual(fitter.planned_steps, [])
+
+    def test_action_returning_steps_inserts_at_front_of_queue(self):
+        """
+        check_needs_renorm runs for real with a binary FitRecord that causes
+        _needs_renormalization() to return True. The dynamic renorm steps are
+        inserted at the front of the queue and visible in planned_steps before
+        they execute.
+        """
+        fitter = MMEXOFASTFitter(
+            files=OB05390_FILES,
+            coords=OB05390_COORDS,
+            fit_type='binary lens',
+            renormalize_errors=True,
+            parallax_grid=True,
+            stop_after='check_binary_renorm:check_needs_renorm')
+
+        # Pre-populate completed_steps through fit_binary_models
+        fitter.completed_steps = _make_noop_steps([
+            ('run_ef_grid',                  'event_search'),
+            ('est_pl_params',                'fit_static_point_lens'),
+            ('fit_pspl',                     'fit_static_point_lens'),
+            ('fit_parallax_u0_plus',         'fit_point_lens_parallax'),
+            ('fit_parallax_u0_minus',        'fit_point_lens_parallax'),
+            ('renormalize_datasets',         'renormalize'),
+            ('refit_all',                    'renormalize'),
+            ('select_best_point_lens_model', 'search_for_anomaly'),
+            ('compute_residuals',            'search_for_anomaly'),
+            ('run_af_grid',                  'search_for_anomaly'),
+            ('est_binary_params',            'search_for_anomaly'),
+            ('fit_binary_models',            'fit_binary'),
+        ])
+
+        # Build a real MulensFitter with binary params and OB05390 datasets
+        binary_fitter = MulensFitter(
+            datasets=fitter.datasets,
+            initial_model_params=BINARY_PARAMS,
+            mag_methods=[2453591., 'VBBL', 2453594.],
+            coords=OB05390_COORDS)
+
+        binary_record = mmexo.FitRecord.from_full_result(
+            model_key=BINARY_FIT_KEY,
+            full_result=binary_fitter)
+
+        fitter.all_fit_results.set(BINARY_FIT_KEY, binary_record)
+
+        fitter.fit()
+
+        # check_needs_renorm is in completed_steps
+        completed_names = [step.name for step in fitter.completed_steps]
+        self.assertIn('check_needs_renorm', completed_names)
+
+        # dynamic steps are in planned_steps, not yet executed
+        planned_names = [(step.name, step.stage)
+                         for step in fitter.planned_steps]
+        self.assertIn(('renormalize_datasets', 'check_binary_renorm'),
+                      planned_names)
+        self.assertIn(('refit_all', 'check_binary_renorm'),
+                      planned_names)
+
+        # dynamic steps appear before run_parallax_grids in planned_steps
+        names_only = [name for name, _ in planned_names]
+        renorm_idx = names_only.index('renormalize_datasets')
+        grid_idx = names_only.index('run_parallax_grid_u0_plus')
+        self.assertLess(renorm_idx, grid_idx)
