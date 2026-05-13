@@ -3,7 +3,10 @@
 import unittest
 import pandas as pd
 from unittest.mock import Mock
+import pickle
+import os.path
 
+import exozippy
 from exozippy.mmexofast import results, fit_types
 from exozippy.mmexofast.unit_tests.test_utils import (
     create_mock_fitter,
@@ -680,5 +683,156 @@ class TestAllFitResults(TestFitRecord):
             self.assertIsInstance(record, results.FitRecord)
 
 
+class TestIntermediateResults(unittest.TestCase):
+
+    def test_all_fields_default_to_none(self):
+        """
+        All fields of IntermediateResults default to None on construction.
+        """
+        ir = results.IntermediateResults()
+        self.assertIsNone(ir.best_ef_grid_point)
+        self.assertIsNone(ir.best_af_grid_point)
+        self.assertIsNone(ir.est_pl_params)
+        self.assertIsNone(ir.est_binary_params)
+
+    def test_best_ef_grid_point_can_be_set(self):
+        """
+        best_ef_grid_point can be set and retrieved.
+        """
+        ir = results.IntermediateResults()
+        value = {
+            't_0':   2456836.080383359,
+            't_eff': 23.67696884508345,
+            'j':     2,
+            'chi2':  -137842.8089725696,
+        }
+        ir.best_ef_grid_point = value
+        self.assertEqual(ir.best_ef_grid_point, value)
+
+    def test_best_af_grid_point_can_be_set(self):
+        """
+        best_af_grid_point can be set and retrieved.
+        """
+        ir = results.IntermediateResults()
+        value = {'t_0': 2456836.0, 'chi2': -1000.0}
+        ir.best_af_grid_point = value
+        self.assertEqual(ir.best_af_grid_point, value)
+
+    def test_est_pl_params_can_be_set(self):
+        """
+        est_pl_params can be set and retrieved.
+        """
+        ir = results.IntermediateResults()
+        value = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
+        ir.est_pl_params = value
+        self.assertEqual(ir.est_pl_params, value)
+
+    def test_est_binary_params_can_be_set(self):
+        """
+        est_binary_params can be set and retrieved.
+        """
+        ir = results.IntermediateResults()
+        value = {
+            't_0':   2453582.7281740606,
+            'u_0':   0.355227507989543,
+            't_E':   11.106795114521415,
+            'rho':   0.024632765186197645,
+            'q':     7.524529162733864e-05,
+            's':     1.6044784697939465,
+            'alpha': 157.9506556145345,
+        }
+        ir.est_binary_params = value
+        self.assertEqual(ir.est_binary_params, value)
+
+    def test_fields_are_independent(self):
+        """
+        Setting one field does not affect others.
+        """
+        ir = results.IntermediateResults()
+        ir.best_ef_grid_point = {'t_0': 2456836.0}
+        self.assertIsNone(ir.best_af_grid_point)
+        self.assertIsNone(ir.est_pl_params)
+        self.assertIsNone(ir.est_binary_params)
+
+    def test_serialization_roundtrip(self):
+        """
+        IntermediateResults survives a pickle roundtrip with all fields intact.
+        """
+        ir = results.IntermediateResults()
+        ir.best_ef_grid_point = {'t_0': 2456836.0, 't_eff': 23.67}
+        ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
+
+        restored = pickle.loads(pickle.dumps(ir))
+        self.assertEqual(restored.best_ef_grid_point, ir.best_ef_grid_point)
+        self.assertEqual(restored.best_af_grid_point, ir.best_af_grid_point)
+        self.assertEqual(restored.est_pl_params, ir.est_pl_params)
+        self.assertEqual(restored.est_binary_params, ir.est_binary_params)
+
+    def test_fitter_has_intermediate_results_attribute(self):
+        """
+        MMEXOFASTFitter has an intermediate_results attribute of type
+        IntermediateResults, initialized with all fields None.
+        """
+        fitter = exozippy.mmexofast.MMEXOFASTFitter(
+            files=[os.path.join(
+                exozippy.MULENS_DATA_PATH, 'OB140939',
+                'n20100310.I.OGLE.OB140939.txt')],
+            coords='17:47:12.25 -21:22:58.7',
+            fit_type='point lens',
+            renormalize_errors=False)
+
+        self.assertIsInstance(fitter.intermediate_results, results.IntermediateResults)
+        self.assertIsNone(fitter.intermediate_results.best_ef_grid_point)
+        self.assertIsNone(fitter.intermediate_results.best_af_grid_point)
+        self.assertIsNone(fitter.intermediate_results.est_pl_params)
+        self.assertIsNone(fitter.intermediate_results.est_binary_params)
+
+    def test_intermediate_results_included_in_state(self):
+        """
+        intermediate_results is included in _get_state() output.
+        """
+        fitter = exozippy.mmexofast.MMEXOFASTFitter(
+            files=[os.path.join(
+                exozippy.MULENS_DATA_PATH, 'OB140939',
+                'n20100310.I.OGLE.OB140939.txt')],
+            coords='17:47:12.25 -21:22:58.7',
+            fit_type='point lens',
+            renormalize_errors=False)
+
+        fitter.intermediate_results.best_ef_grid_point = {'t_0': 2456836.0}
+        state = fitter._get_state()
+        self.assertIn('intermediate_results', state)
+        self.assertEqual(
+            state['intermediate_results'].best_ef_grid_point,
+            {'t_0': 2456836.0})
+
+    def test_intermediate_results_restored_from_state(self):
+        """
+        intermediate_results is correctly restored by _restore_state().
+        """
+        fitter = exozippy.mmexofast.MMEXOFASTFitter(
+            files=[os.path.join(
+                exozippy.MULENS_DATA_PATH, 'OB140939',
+                'n20100310.I.OGLE.OB140939.txt')],
+            coords='17:47:12.25 -21:22:58.7',
+            fit_type='point lens',
+            renormalize_errors=False)
+
+        ir = results.IntermediateResults()
+        ir.best_ef_grid_point = {'t_0': 2456836.0}
+        ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
+
+        fitter._restore_state({'intermediate_results': ir})
+
+        self.assertEqual(
+            fitter.intermediate_results.best_ef_grid_point,
+            {'t_0': 2456836.0})
+        self.assertEqual(
+            fitter.intermediate_results.est_pl_params,
+            {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48})
+        self.assertIsNone(fitter.intermediate_results.best_af_grid_point)
+        self.assertIsNone(fitter.intermediate_results.est_binary_params)
+        
+        
 if __name__ == '__main__':
     unittest.main()
