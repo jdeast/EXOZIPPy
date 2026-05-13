@@ -783,57 +783,40 @@ class AllFitResults(MutableMapping):
             if key.lens_type == mmexo.LensType.POINT:
                 yield key, record
 
-    #def select_best_static_pspl(self) -> Optional[FitRecord]:
-    #    """
-    #    Among all static PSPL models (point lens, point source, no parallax, no motion),
-    #    return the one with lowest chi^2. Returns None if not found or no chi^2.
-    #    """
-    #    best_record = None
-    #    best_chi2 = None
-    #
-    #    for key, record in self._records.items():
-    #        if not (
-    #                key.lens_type == mmexo.LensType.POINT
-    #                and key.source_type == mmexo.SourceType.POINT
-    #                and key.parallax_branch == mmexo.ParallaxBranch.NONE
-    #                and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
-    #        ):
-    #            continue
-    #
-    #        chi2 = record.chi2()
-    #        if chi2 is None:
-    #            continue
-    #
-    #        if best_chi2 is None or chi2 < best_chi2:
-    #            best_chi2 = chi2
-    #            best_record = record
-    #
-    #    return best_record
 
-    #def select_best_parallax_pspl(self) -> Optional[FitRecord]:
-    #    """
-    #    Among all PSPL parallax models (point lens, point source,
-    #    parallax_branch != NONE, no orbital motion), return the one with
-    #    lowest chi^2. Returns None if not found or no chi^2.
-    #    """
-    #    best_record = None
-    #    best_chi2 = None
-    #
-    #    for key, record in self._records.items():
-    #        if not (
-    #                key.lens_type == mmexo.LensType.POINT
-    #                and key.source_type == mmexo.SourceType.POINT
-    #                and key.parallax_branch != mmexo.ParallaxBranch.NONE
-    #                and key.lens_orb_motion == mmexo.LensOrbMotion.NONE
-    #        ):
-    #            continue
-    #
-    #        chi2 = record.chi2()
-    #        if chi2 is None:
-    #            continue
-    #
-    #        if best_chi2 is None or chi2 < best_chi2:
-    #            best_chi2 = chi2
-    #            best_record = record
-    #
-    #    return best_record
+@dataclass
+class IntermediateResults:
+    """
+    Stores intermediate, non-fit results produced during workflow execution.
+
+    These are results that are needed by subsequent steps but are not
+    fit results stored in AllFitResults. All fields default to None and
+    are populated by their corresponding workflow step actions.
+
+    Fields
+    ------
+    best_ef_grid_point : dict or None
+        Best grid point from the EventFinder grid search.
+        Set by: run_ef_grid
+        Format: {'t_0': float, 't_eff': float, 'j': int, 'chi2': float}
+
+    best_af_grid_point : dict or None
+        Best grid point from the AnomalyFinder grid search.
+        Set by: run_af_grid
+        Format: TBD
+
+    est_pl_params : dict or None
+        Estimated point-lens parameters from the EF grid result.
+        Set by: est_pl_params
+        Format: {'t_0': float, 'u_0': float, 't_E': float}
+
+    est_binary_params : dict or None
+        Estimated binary lens parameters from the AF grid result.
+        Set by: est_binary_params
+        Format: {'t_0': float, 'u_0': float, 't_E': float,
+                 'rho': float, 'q': float, 's': float, 'alpha': float}
+    """
+    best_ef_grid_point: Optional[dict] = None
+    best_af_grid_point: Optional[dict] = None
+    est_pl_params: Optional[dict] = None
+    est_binary_params: Optional[dict] = None

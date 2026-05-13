@@ -1,6 +1,5 @@
 # test_workflow.py
 
-e
 import pickle
 import os
 import glob
