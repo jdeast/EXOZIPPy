@@ -836,6 +836,9 @@ class MMEXOFASTFitter:
                     json.dump(self.initialize_exozippy(), f)
                 logger.info('Saved EXOZIPPy init data to %s.', path)
 
+            if self._output_config.save_plots:
+                self._plot_event()
+
         return self.all_fit_results
 
     def _build_remaining_steps(self) -> list[WorkflowStep]:
@@ -2128,6 +2131,30 @@ class MMEXOFASTFitter:
         fig.savefig(path)
         plt.close(fig)
         logger.info('Saved piE grid plot to %s.', path)
+
+    def _plot_event(self):
+        # Get the best fit
+        complete_fits = [
+            rec for key, rec in self.all_fit_results.items()
+            if rec.full_result is not None
+        ]
+        best_fit = (
+            min(complete_fits, key=lambda r: r.chi2()) if complete_fits else None
+        )
+        event = best_fit.full_result.fitter.get_event()
+
+        # plot the light curve
+        event.plot(trajectory=False)
+        path = self._output_config.plot_path('lc')
+        plt.savefig(path)
+        logger.info('Saved light curve plot to %s.', path)
+
+        # if it's a binary, also plot the trajectory with caustics
+        if event.model.n_lenses > 1:
+            event.plot_trajectory()
+            path = self._output_config.plot_path('traj')
+            plt.savefig(path)
+            logger.info('Saved trajectory plot to %s.', path)
 
     # ------------------------------------------------------------------
     # Dataset helpers
