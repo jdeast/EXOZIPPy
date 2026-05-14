@@ -103,6 +103,7 @@ SOURCE_TAGS: Dict[str, SourceType] = {
     "PSPL": SourceType.POINT,
     "FSPL": SourceType.FINITE,
     "2L1S": SourceType.POINT,   # binary lens with single source
+    "2L1S": SourceType.FINITE,
 }
 
 LENS_TAGS: Dict[str, LensType] = {

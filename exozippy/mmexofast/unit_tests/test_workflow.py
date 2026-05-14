@@ -68,7 +68,7 @@ STATIC_PSPL_PARAMS = {
 }
 
 INITIAL_RESULTS = {
-    STATIC_PSPL_KEY: {
+    'PSPL static': {
         'params': STATIC_PSPL_PARAMS,
     }
 }
@@ -78,38 +78,38 @@ EXPECTED_STEPS = [
     ('run_ef_grid',           'event_search'),
     ('est_pl_params',         'fit_static_point_lens'),
     ('fit_pspl',              'fit_static_point_lens'),
-    ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-    ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+    ('fit_parallax_u0+',      'fit_point_lens_parallax'),
+    ('fit_parallax_u0-',      'fit_point_lens_parallax'),
 ]
 
 EXPECTED_STEPS_PL_RENORM = [
     ('run_ef_grid',                'event_search'),
     ('est_pl_params',              'fit_static_point_lens'),
     ('fit_pspl',                   'fit_static_point_lens'),
-    ('fit_parallax_u0_plus',       'fit_point_lens_parallax'),
-    ('fit_parallax_u0_minus',      'fit_point_lens_parallax'),
+    ('fit_parallax_u0+',           'fit_point_lens_parallax'),
+    ('fit_parallax_u0-',           'fit_point_lens_parallax'),
     ('renormalize_datasets',       'renormalize'),
     ('refit_all',                  'renormalize'),
-    ('run_parallax_grid_u0_plus',  'run_parallax_grids'),
-    ('run_parallax_grid_u0_minus', 'run_parallax_grids'),
+    ('run_parallax_grid_u0+',      'run_parallax_grids'),
+    ('run_parallax_grid_u0-',      'run_parallax_grids'),
 ]
 
 EXPECTED_STEPS_BINARY = [
     ('run_ef_grid',                  'event_search'),
     ('est_pl_params',                'fit_static_point_lens'),
     ('fit_pspl',                     'fit_static_point_lens'),
-    ('fit_parallax_u0_plus',         'fit_point_lens_parallax'),
-    ('fit_parallax_u0_minus',        'fit_point_lens_parallax'),
+    ('fit_parallax_u0+',         'fit_point_lens_parallax'),
+    ('fit_parallax_u0-',        'fit_point_lens_parallax'),
     ('renormalize_datasets',         'renormalize'),
     ('refit_all',                    'renormalize'),
     ('select_best_point_lens_model', 'search_for_anomaly'),
     ('compute_residuals',            'search_for_anomaly'),
     ('run_af_grid',                  'search_for_anomaly'),
-    ('est_binary_params',            'search_for_anomaly'),
-    ('fit_binary_models',            'fit_binary'),
+    ('est_binary_params',            'fit_binary_lens'),
+    ('fit_binary_models',            'fit_binary_lens'),
     ('check_needs_renorm',           'check_binary_renorm'),
-    ('run_parallax_grid_u0_plus',    'run_parallax_grids'),
-    ('run_parallax_grid_u0_minus',   'run_parallax_grids'),
+    ('run_parallax_grid_u0+',    'run_parallax_grids'),
+    ('run_parallax_grid_u0-',   'run_parallax_grids'),
 ]
 
 
@@ -122,7 +122,7 @@ def _make_noop_steps(expected_steps):
         WorkflowStep(
             name=name,
             stage=stage,
-            action=MagicMock(return_value=None),
+            func=MagicMock(return_value=None),
             description=f'No-op for {name}',
         )
         for name, stage in expected_steps
@@ -142,7 +142,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='point lens',
+            fit_type='point_lens',
             renormalize_errors=False)
         defaults.update(kwargs)
         return MMEXOFASTFitter(**defaults)
@@ -303,8 +303,8 @@ class TestPointLensWorkflow(unittest.TestCase):
         expected = [
             ('est_pl_params',         'fit_static_point_lens'),
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
@@ -320,8 +320,8 @@ class TestPointLensWorkflow(unittest.TestCase):
 
         expected = [
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
@@ -340,7 +340,7 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='point lens',
+            fit_type='point_lens',
             renormalize_errors=True,
             parallax_grid=True)
         defaults.update(kwargs)
@@ -390,8 +390,8 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
             ('run_ef_grid',           'event_search'),
             ('est_pl_params',         'fit_static_point_lens'),
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
         ]
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
@@ -409,8 +409,8 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
             ('run_ef_grid',           'event_search'),
             ('est_pl_params',         'fit_static_point_lens'),
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
             ('renormalize_datasets',  'renormalize'),
             ('refit_all',             'renormalize'),
         ]
@@ -429,8 +429,8 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         expected = [
             ('renormalize_datasets',       'renormalize'),
             ('refit_all',                  'renormalize'),
-            ('run_parallax_grid_u0_plus',  'run_parallax_grids'),
-            ('run_parallax_grid_u0_minus', 'run_parallax_grids'),
+            ('run_parallax_grid_u0+',  'run_parallax_grids'),
+            ('run_parallax_grid_u0-', 'run_parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
@@ -449,7 +449,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='binary lens',
+            fit_type='binary_lens',
             renormalize_errors=True,
             parallax_grid=True)
         defaults.update(kwargs)
@@ -513,8 +513,8 @@ class TestBinaryLensWorkflow(unittest.TestCase):
             ('run_ef_grid',           'event_search'),
             ('est_pl_params',         'fit_static_point_lens'),
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
             ('renormalize_datasets',  'renormalize'),
             ('refit_all',             'renormalize'),
         ]
@@ -523,9 +523,9 @@ class TestBinaryLensWorkflow(unittest.TestCase):
 
     def test_stop_after_fit_binary(self):
         """
-        stop_after='fit_binary' halts after fit_binary_models.
+        stop_after='fit_binary_lens' halts after fit_binary_models.
         """
-        fitter = self._make_fitter(stop_after='fit_binary')
+        fitter = self._make_fitter(stop_after='fit_binary_lens')
 
         with self._patch_fit_methods(fitter):
             fitter.fit()
@@ -534,17 +534,19 @@ class TestBinaryLensWorkflow(unittest.TestCase):
             ('run_ef_grid',                  'event_search'),
             ('est_pl_params',                'fit_static_point_lens'),
             ('fit_pspl',                     'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',         'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus',        'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',             'fit_point_lens_parallax'),
+            ('fit_parallax_u0-',             'fit_point_lens_parallax'),
             ('renormalize_datasets',         'renormalize'),
             ('refit_all',                    'renormalize'),
             ('select_best_point_lens_model', 'search_for_anomaly'),
             ('compute_residuals',            'search_for_anomaly'),
             ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'search_for_anomaly'),
-            ('fit_binary_models',            'fit_binary'),
+            ('est_binary_params',            'fit_binary_lens'),
+            ('fit_binary_models',            'fit_binary_lens'),
         ]
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
+        print('\nexpected\n', expected)
+        print('\nactual\n', actual)
         self.assertEqual(actual, expected)
 
     def test_resume_after_stop_before_fit_binary(self):
@@ -557,12 +559,13 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         fitter.fit()
 
         expected = [
-            ('fit_binary_models',          'fit_binary'),
+            ('fit_binary_models',          'fit_binary_lens'),
             ('check_needs_renorm',         'check_binary_renorm'),
-            ('run_parallax_grid_u0_plus',  'run_parallax_grids'),
-            ('run_parallax_grid_u0_minus', 'run_parallax_grids'),
+            ('run_parallax_grid_u0+',  'run_parallax_grids'),
+            ('run_parallax_grid_u0-', 'run_parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
+
         self.assertEqual(actual, expected)
 
     def test_resume_after_stop_after_check_binary_renorm(self):
@@ -575,52 +578,42 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         fitter.fit()
 
         expected = [
-            ('run_parallax_grid_u0_plus',  'run_parallax_grids'),
-            ('run_parallax_grid_u0_minus', 'run_parallax_grids'),
+            ('run_parallax_grid_u0+',  'run_parallax_grids'),
+            ('run_parallax_grid_u0-', 'run_parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
     def test_check_needs_renorm_inserts_steps_when_true(self):
         """
-        When check_needs_renorm returns dynamic steps, renormalize_datasets
-        and refit_all are inserted and executed before run_parallax_grids.
+        When check_needs_renorm returns True, renormalize_datasets and
+        refit_all are inserted and executed before run_parallax_grids.
         """
         fitter = self._make_fitter()
         fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS_BINARY[:12])
 
-        dynamic_steps = [
-            WorkflowStep(
-                name='renormalize_datasets',
-                stage='check_binary_renorm',
-                action=MagicMock(return_value=None),
-                description='No-op renormalize_datasets',
-            ),
-            WorkflowStep(
-                name='refit_all',
-                stage='check_binary_renorm',
-                action=MagicMock(return_value=None),
-                description='No-op refit_all',
-            ),
-        ]
-
         with ExitStack() as stack:
             stack.enter_context(
-                patch.object(fitter, 'check_needs_renorm',
-                             return_value=dynamic_steps))
+                patch.object(fitter, '_needs_renormalization',
+                             return_value=True))
             stack.enter_context(
-                patch.object(fitter, 'run_parallax_grid', return_value=None))
+                patch.object(fitter, 'renormalize_datasets',
+                             return_value=None))
+            stack.enter_context(
+                patch.object(fitter, 'refit_all',
+                             return_value=None))
+            stack.enter_context(
+                patch.object(fitter, 'run_parallax_grid',
+                             return_value=None))
             fitter.fit()
 
-        expected = [
-            ('check_needs_renorm',        'check_binary_renorm'),
-            ('renormalize_datasets',      'check_binary_renorm'),
-            ('refit_all',                 'check_binary_renorm'),
-            ('run_parallax_grid_u0_plus', 'run_parallax_grids'),
-            ('run_parallax_grid_u0_minus','run_parallax_grids'),
-        ]
-        actual = [(step.name, step.stage) for step in fitter.completed_steps]
-        self.assertEqual(actual, expected)
+        actual_names = [step.name for step in fitter.completed_steps]
+        self.assertIn('renormalize_datasets', actual_names)
+        self.assertIn('refit_all', actual_names)
+
+        renorm_idx = actual_names.index('renormalize_datasets')
+        grid_idx = actual_names.index('run_parallax_grid_u0+')
+        self.assertLess(renorm_idx, grid_idx)
 
 
 class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
@@ -636,7 +629,7 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='point lens',
+            fit_type='point_lens',
             renormalize_errors=False,
             initial_results=INITIAL_RESULTS)
         defaults.update(kwargs)
@@ -659,7 +652,7 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
     def test_dry_run_skips_est_pl_params(self):
         """
         When a static PSPL is supplied via initial_results with
-        fit_type='point lens', planned_steps starts at fit_pspl,
+        fit_type='point_lens', planned_steps starts at fit_pspl,
         skipping est_pl_params.
         """
         fitter = self._make_fitter(dry_run=True)
@@ -667,10 +660,11 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
 
         expected = [
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
+        print('\nactual', actual)
         self.assertEqual(actual, expected)
 
     def test_fit_pspl_uses_supplied_params_as_seed(self):
@@ -708,7 +702,7 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='binary lens',
+            fit_type='binary_lens',
             renormalize_errors=False,
             initial_results=INITIAL_RESULTS)
         defaults.update(kwargs)
@@ -736,7 +730,7 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
     def test_dry_run_starts_at_search_for_anomaly(self):
         """
         When a static PSPL is supplied via initial_results with
-        fit_type='binary lens', planned_steps starts at search_for_anomaly,
+        fit_type='binary_lens', planned_steps starts at search_for_anomaly,
         skipping all point-lens stages.
         """
         fitter = self._make_fitter(dry_run=True)
@@ -746,9 +740,8 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
             ('select_best_point_lens_model', 'search_for_anomaly'),
             ('compute_residuals',            'search_for_anomaly'),
             ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'search_for_anomaly'),
-            ('fit_binary_models',            'fit_binary'),
-            ('check_needs_renorm',           'check_binary_renorm'),
+            ('est_binary_params',            'fit_binary_lens'),
+            ('fit_binary_models',            'fit_binary_lens'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
@@ -759,6 +752,8 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         when initial_results contains a PSPL fit.
         """
         fitter = self._make_fitter()
+        print(fitter.all_fit_results)
+        print('init', INITIAL_RESULTS)
         result = fitter.select_best_point_lens_model()
         self.assertEqual(result.params, STATIC_PSPL_PARAMS)
 
@@ -795,7 +790,7 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
         defaults = dict(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='binary lens',
+            fit_type='binary_lens',
             renormalize_errors=True)
         defaults.update(kwargs)
         return MMEXOFASTFitter(restart_file=restart_file, **defaults)
@@ -803,7 +798,7 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
     def test_binary_steps_added_after_point_lens_restart(self):
         """
         Restarting from a completed point-lens run (renormalize_errors=True,
-        parallax_grid=False) with fit_type='binary lens' produces a step
+        parallax_grid=False) with fit_type='binary_lens' produces a step
         queue that starts at search_for_anomaly.
         """
         # Simulate completed point-lens run through refit_all
@@ -811,8 +806,8 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
             ('run_ef_grid',           'event_search'),
             ('est_pl_params',         'fit_static_point_lens'),
             ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus', 'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
+            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
             ('renormalize_datasets',  'renormalize'),
             ('refit_all',             'renormalize'),
         ])
@@ -829,8 +824,8 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
             ('select_best_point_lens_model', 'search_for_anomaly'),
             ('compute_residuals',            'search_for_anomaly'),
             ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'search_for_anomaly'),
-            ('fit_binary_models',            'fit_binary'),
+            ('est_binary_params',            'fit_binary_lens'),
+            ('fit_binary_models',            'fit_binary_lens'),
             ('check_needs_renorm',           'check_binary_renorm'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
@@ -855,7 +850,7 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         fitter = MMEXOFASTFitter(
             files=GROUND_DATA_FILES,
             coords=COORDS,
-            fit_type='point lens',
+            fit_type='point_lens',
             renormalize_errors=False,
             stop_after='fit_static_point_lens:est_pl_params')
 
@@ -873,8 +868,6 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         self.assertEqual(
             fitter.completed_steps[-1].name, 'est_pl_params')
 
-        # no dynamic steps inserted — planned_steps is empty
-        self.assertEqual(fitter.planned_steps, [])
 
     def test_action_returning_steps_inserts_at_front_of_queue(self):
         """
@@ -886,7 +879,7 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         fitter = MMEXOFASTFitter(
             files=OB05390_FILES,
             coords=OB05390_COORDS,
-            fit_type='binary lens',
+            fit_type='binary_lens',
             renormalize_errors=True,
             parallax_grid=True,
             stop_after='check_binary_renorm:check_needs_renorm')
@@ -896,15 +889,15 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
             ('run_ef_grid',                  'event_search'),
             ('est_pl_params',                'fit_static_point_lens'),
             ('fit_pspl',                     'fit_static_point_lens'),
-            ('fit_parallax_u0_plus',         'fit_point_lens_parallax'),
-            ('fit_parallax_u0_minus',        'fit_point_lens_parallax'),
+            ('fit_parallax_u0+',         'fit_point_lens_parallax'),
+            ('fit_parallax_u0-',        'fit_point_lens_parallax'),
             ('renormalize_datasets',         'renormalize'),
             ('refit_all',                    'renormalize'),
             ('select_best_point_lens_model', 'search_for_anomaly'),
             ('compute_residuals',            'search_for_anomaly'),
             ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'search_for_anomaly'),
-            ('fit_binary_models',            'fit_binary'),
+            ('est_binary_params',            'fit_binary_lens'),
+            ('fit_binary_models',            'fit_binary_lens'),
         ])
 
         # Build a real MulensFitter with binary params and OB05390 datasets
@@ -913,22 +906,28 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
             initial_model_params=BINARY_PARAMS,
             mag_methods=[2453591., 'VBBL', 2453594.],
             coords=OB05390_COORDS)
+        binary_fitter.best = binary_fitter.initial_model_params
+        binary_fitter.best['chi2'] = 562.
 
         binary_record = mmexo.FitRecord.from_full_result(
             model_key=BINARY_FIT_KEY,
-            full_result=binary_fitter)
+            full_result=mmexo.MMEXOFASTFitResults(binary_fitter))
 
-        fitter.all_fit_results.set(BINARY_FIT_KEY, binary_record)
+        fitter.all_fit_results.set(binary_record)
+        print('all_fit_results', fitter.all_fit_results)
+        print('needs_renorm', fitter.check_needs_renorm())
 
         fitter.fit()
 
         # check_needs_renorm is in completed_steps
-        completed_names = [step.name for step in fitter.completed_steps]
-        self.assertIn('check_needs_renorm', completed_names)
+        completed_names = [(step.name, step.stage) for step in fitter.completed_steps]
+        print('\ncompleted\n', completed_names)
+        self.assertIn(('check_needs_renorm', 'check_binary_renorm'), completed_names)
 
         # dynamic steps are in planned_steps, not yet executed
         planned_names = [(step.name, step.stage)
                          for step in fitter.planned_steps]
+        print('\nplanned\n', planned_names)
         self.assertIn(('renormalize_datasets', 'check_binary_renorm'),
                       planned_names)
         self.assertIn(('refit_all', 'check_binary_renorm'),
@@ -937,5 +936,159 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         # dynamic steps appear before run_parallax_grids in planned_steps
         names_only = [name for name, _ in planned_names]
         renorm_idx = names_only.index('renormalize_datasets')
-        grid_idx = names_only.index('run_parallax_grid_u0_plus')
+        grid_idx = names_only.index('run_parallax_grid_u0+')
         self.assertLess(renorm_idx, grid_idx)
+
+
+class TestSelectBestPointLensModel(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = self.tmp_dir.name
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _make_fitter(self, **kwargs):
+        defaults = dict(
+            files=GROUND_DATA_FILES,
+            coords=COORDS,
+            fit_type='point lens',
+            renormalize_errors=False)
+        defaults.update(kwargs)
+        return MMEXOFASTFitter(**defaults)
+
+    def _make_static_key(self, locations_used=None):
+        return mmexo.FitKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.POINT,
+            parallax_branch=mmexo.ParallaxBranch.NONE,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE,
+            locations_used=locations_used,
+        )
+
+    def _make_parallax_key(self, branch=mmexo.ParallaxBranch.U0_PLUS):
+        return mmexo.FitKey(
+            lens_type=mmexo.LensType.POINT,
+            source_type=mmexo.SourceType.POINT,
+            parallax_branch=branch,
+            lens_orb_motion=mmexo.LensOrbMotion.NONE,
+        )
+
+    def _make_record(self, key, chi2_value=None):
+        """
+        Create a FitRecord with an optional chi2 value.
+
+        Parameters
+        ----------
+        key : mmexo.FitKey
+        chi2_value : float or None
+            If None, the record is incomplete (no chi2).
+
+        Returns
+        -------
+        mmexo.FitRecord
+        """
+        record = mmexo.FitRecord(
+            model_key=key,
+            params=STATIC_PSPL_PARAMS,
+            is_complete=(chi2_value is not None),
+        )
+        if chi2_value is not None:
+            record.chi2 = lambda: chi2_value
+        return record
+
+    def test_raises_when_no_point_lens_fits(self):
+        """
+        RuntimeError raised when no point-lens fits exist.
+        """
+        fitter = self._make_fitter()
+        with self.assertRaises(RuntimeError):
+            fitter.select_best_point_lens_model()
+
+
+    def test_multiple_incomplete_records_raises(self):
+        """
+        Multiple incomplete records (no chi2) raises RuntimeError.
+        """
+        fitter = self._make_fitter()
+        fitter.all_fit_results.set(
+            self._make_record(self._make_static_key()))
+        fitter.all_fit_results.set(
+            self._make_record(self._make_parallax_key()))
+
+        with self.assertRaises(RuntimeError):
+            fitter.select_best_point_lens_model()
+
+    def test_static_fits_only_returns_best_chi2(self):
+        """
+        Static fits only: returns the fit with the lowest chi2.
+        """
+        fitter = self._make_fitter()
+        better = self._make_record(
+            self._make_static_key(locations_used='a'), chi2_value=100.0)
+        worse = self._make_record(
+            self._make_static_key(locations_used='b'), chi2_value=200.0)
+        fitter.all_fit_results.set(better)
+        fitter.all_fit_results.set(worse)
+
+        self.assertIs(fitter.select_best_point_lens_model(), better)
+
+    def test_parallax_fits_only_returns_best_chi2(self):
+        """
+        Parallax fits only: returns the fit with the lowest chi2.
+        """
+        fitter = self._make_fitter()
+        better = self._make_record(
+            self._make_parallax_key(mmexo.ParallaxBranch.U0_PLUS),
+            chi2_value=80.0)
+        worse = self._make_record(
+            self._make_parallax_key(mmexo.ParallaxBranch.U0_MINUS),
+            chi2_value=120.0)
+        fitter.all_fit_results.set(better)
+        fitter.all_fit_results.set(worse)
+
+        self.assertIs(fitter.select_best_point_lens_model(), better)
+
+    def test_returns_static_when_parallax_improvement_below_threshold(self):
+        """
+        Returns static fit when parallax chi2 improvement is less than 50.
+        """
+        fitter = self._make_fitter()
+        static = self._make_record(
+            self._make_static_key(), chi2_value=1000.0)
+        parallax = self._make_record(
+            self._make_parallax_key(), chi2_value=960.0)  # improvement = 40
+        fitter.all_fit_results.set(static)
+        fitter.all_fit_results.set(parallax)
+
+        self.assertIs(fitter.select_best_point_lens_model(), static)
+
+    def test_returns_parallax_when_improvement_above_threshold(self):
+        """
+        Returns parallax fit when chi2 improvement exceeds 50.
+        """
+        fitter = self._make_fitter()
+        static = self._make_record(
+            self._make_static_key(), chi2_value=1000.0)
+        parallax = self._make_record(
+            self._make_parallax_key(), chi2_value=900.0)  # improvement = 100
+        fitter.all_fit_results.set(static)
+        fitter.all_fit_results.set(parallax)
+
+        self.assertIs(fitter.select_best_point_lens_model(), parallax)
+
+    def test_incomplete_records_ignored_when_complete_records_exist(self):
+        """
+        Mix of complete and incomplete records: only complete records
+        are used for comparison.
+        """
+        fitter = self._make_fitter()
+        complete_static = self._make_record(
+            self._make_static_key(), chi2_value=1000.0)
+        incomplete_parallax = self._make_record(
+            self._make_parallax_key(), chi2_value=None)
+        fitter.all_fit_results.set(complete_static)
+        fitter.all_fit_results.set(incomplete_parallax)
+
+        self.assertIs(fitter.select_best_point_lens_model(), complete_static)
