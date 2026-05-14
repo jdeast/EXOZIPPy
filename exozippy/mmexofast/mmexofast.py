@@ -1129,21 +1129,29 @@ class MMEXOFASTFitter:
         -------
         list of WorkflowStep
         """
-        branches = [
-            mmexo.ParallaxBranch.U0_PLUS,
-            mmexo.ParallaxBranch.U0_MINUS,
-        ]
-        steps = []
-        for branch in branches:
-            name = f'run_parallax_grid_{branch.value.lower()}'
-            steps.append(
-                WorkflowStep(
-                    name=name,
-                    func=lambda b=branch: self.run_parallax_grid(branch=b),
-                    stage='run_parallax_grids',
-                    description=f'Run parallax grid search for branch {branch.value}',
-                )
+        #branches = [
+        #    mmexo.ParallaxBranch.U0_PLUS,
+        #    mmexo.ParallaxBranch.U0_MINUS,
+        #]
+        #steps = []
+        #for branch in branches:
+        #    name = f'run_parallax_grid_{branch.value.lower()}'
+        #    steps.append(
+        #        WorkflowStep(
+        #            name=name,
+        #            func=lambda b=branch: self.run_parallax_grid(branch=b),
+        #            stage='run_parallax_grids',
+        #            description=f'Run parallax grid search for branch {branch.value}',
+        #        )
+        #    )
+        steps = [
+            WorkflowStep(
+                name=f'run_parallax_grids',
+                func=self.run_parallax_grid,
+                stage='run_parallax_grids',
+                description=f'Run both parallax grid searches',
             )
+        ]
         return steps
 
     def _step_matches_stop_value(
@@ -1781,30 +1789,6 @@ class MMEXOFASTFitter:
                 grid.save_grid_points(path)
                 logger.info('Saved grid results to %s.', path)
 
-            for _chi2_min, params in grid.find_local_minima():
-                result = self._do_parallax_fit(
-                    params, source_type=source_type
-                )
-                key = mmexo.FitKey(
-                    lens_type=mmexo.LensType.POINT,
-                    source_type=source_type,
-                    parallax_branch=par_branch,
-                    lens_orb_motion=mmexo.LensOrbMotion.NONE,
-                )
-                self.all_fit_results.set(
-                    mmexo.FitRecord.from_full_result(
-                        model_key=key,
-                        full_result=result,
-                        renorm_factors=self.renorm_factors,
-                        fixed=False,
-                    )
-                )
-                logger.info(
-                    'Grid parallax %s: chi2=%.2f',
-                    par_branch.value,
-                    result.chi2,
-                )
-
         if (self._output_config is not None
                 and self._output_config.save_plots):
             self._plot_piE_grid_search(grids)
@@ -2091,6 +2075,7 @@ class MMEXOFASTFitter:
             Mapping of ``mmexo.ParallaxBranch`` to
             ``ParallaxGridSearch`` objects.
         """
+        #logger.info('Plotting piE grids: %s.', grids.keys())
         all_chi2 = [
             r['chi2_grid']
             for grid in grids.values()
