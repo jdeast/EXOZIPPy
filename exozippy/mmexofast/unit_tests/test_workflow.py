@@ -90,7 +90,7 @@ EXPECTED_STEPS_PL_RENORM = [
     ('fit_parallax_u0-',           'fit_point_lens_parallax'),
     ('renormalize_datasets',       'renormalize'),
     ('refit_all',                  'renormalize'),
-    ('run_parallax_grids',      'run_parallax_grids'),
+    ('run_parallax_grids',      'parallax_grids'),
 ]
 
 EXPECTED_STEPS_BINARY = [
@@ -107,7 +107,7 @@ EXPECTED_STEPS_BINARY = [
     ('est_binary_params',            'fit_binary_lens'),
     ('fit_binary_models',            'fit_binary_lens'),
     ('check_needs_renorm',           'check_binary_renorm'),
-    ('run_parallax_grids',    'run_parallax_grids'),
+    ('run_parallax_grids',    'parallax_grids'),
 ]
 
 
@@ -427,7 +427,7 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         expected = [
             ('renormalize_datasets',       'renormalize'),
             ('refit_all',                  'renormalize'),
-            ('run_parallax_grids',  'run_parallax_grids'),
+            ('run_parallax_grids',  'parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
@@ -558,7 +558,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         expected = [
             ('fit_binary_models',          'fit_binary_lens'),
             ('check_needs_renorm',         'check_binary_renorm'),
-            ('run_parallax_grids',  'run_parallax_grids'),
+            ('run_parallax_grids',  'parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
 
@@ -574,7 +574,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         fitter.fit()
 
         expected = [
-            ('run_parallax_grids',  'run_parallax_grids'),
+            ('run_parallax_grids',  'parallax_grids'),
         ]
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)

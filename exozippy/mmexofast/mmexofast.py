@@ -1148,7 +1148,7 @@ class MMEXOFASTFitter:
             WorkflowStep(
                 name=f'run_parallax_grids',
                 func=self.run_parallax_grid,
-                stage='run_parallax_grids',
+                stage='parallax_grids',
                 description=f'Run both parallax grid searches',
             )
         ]
