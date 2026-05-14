@@ -12,6 +12,7 @@ from exozippy.mmexofast.unit_tests.test_utils import (
 )
 
 
+@unittest.skip('Disabled output.OutputConfig in favor of mmexofast.OutputConfig')
 class TestOutputConfig(unittest.TestCase):
     """Test OutputConfig dataclass."""
 

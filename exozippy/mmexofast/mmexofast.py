@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import json
 import os.path
 import pickle
 from dataclasses import dataclass, field
@@ -198,15 +199,29 @@ class OutputConfig:
         Whether to save figures to disk.
     save_grid_results : bool
         Whether to save raw grid search results to text files.
+    save_table : bool
+        Whether to save fit results tables to disk.
+    table_formats : str or list of str
+        Table format(s) to save.  Each entry must be ``'ascii'`` or
+        ``'latex'``.  A bare string is accepted and wrapped in a list.
+        Defaults to ``['latex']``.
+    save_exozippy_init : bool
+        Whether to save the EXOZIPPy initialization dict to a JSON file.
+
     """
     output_dir: Path = field(default_factory=Path)
     file_prefix: str = ''
     save_plots: bool = True
     save_grid_results: bool = False
+    save_table: bool = False
+    table_formats: list = field(default_factory=lambda: ['latex'])
+    save_exozippy_init: bool = False
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(self.table_formats, str):
+            self.table_formats = [self.table_formats]
 
     def plot_path(self, name: str, ext: str = 'pdf') -> Path:
         """
@@ -242,6 +257,33 @@ class OutputConfig:
         prefix = f'{self.file_prefix}_' if self.file_prefix else ''
         return self.output_dir / f'{prefix}{name}.txt'
 
+    def table_path(self, fmt: str) -> Path:
+        """
+        Return the full path for a results table file.
+
+        Parameters
+        ----------
+        fmt : str
+            Table format: ``'ascii'`` or ``'latex'``.
+
+        Returns
+        -------
+        Path
+        """
+        ext = 'tex' if fmt == 'latex' else 'txt'
+        prefix = f'{self.file_prefix}_' if self.file_prefix else ''
+        return self.output_dir / f'{prefix}results.{ext}'
+
+    def exozippy_init_path(self) -> Path:
+        """
+        Return the full path for the EXOZIPPy initialization JSON file.
+
+        Returns
+        -------
+        Path
+        """
+        prefix = f'{self.file_prefix}_' if self.file_prefix else ''
+        return self.output_dir / f'{prefix}exozippy_init.json'
 
 # ===========================================================================
 # Module-level convenience wrapper
@@ -331,7 +373,10 @@ class MMEXOFASTFitter:
     stop_after : str, optional
         Name of the step after which execution halts.
     restart_file : path-like, optional
-        Path to a previously saved restart pickle file.
+        Path to a restart pickle file.  If the file exists it is loaded
+        to restore previous state.  After every completed step the
+        current state is written back to this same path, so the file
+        always reflects the latest checkpoint.
     restart_from : str, optional
         Step name from which to re-run; all completed steps recorded
         after this point are discarded.
@@ -349,6 +394,10 @@ class MMEXOFASTFitter:
     verbose : bool
         If True, configure the module logger to emit DEBUG-level messages
         to stdout.
+    log_file : path-like, optional
+        Path to a file for DEBUG-level log output.  The file is created
+        (or appended to) at construction time.  Call ``close()`` to
+        release the file handle when the fitter is no longer needed.
 
 
     Notes
@@ -455,6 +504,7 @@ class MMEXOFASTFitter:
         initial_results=None,
         output_config=None,
         verbose: bool = False,
+        log_file=None,
     ) -> None:
         # Mutually exclusive input validation
         if files is not None and datasets is not None:
@@ -466,18 +516,28 @@ class MMEXOFASTFitter:
                 "Specify 'initial_results' or 'restart_from', not both."
             )
 
-        # verbose → configure module logger
-        if verbose:
+        # Track handlers added by this instance for cleanup via close()
+        self._log_handlers: list[logging.Handler] = []
+
+        # verbose / log_file → configure module logger
+        if verbose or log_file is not None:
             _mod_logger = logging.getLogger(__name__)
             _mod_logger.setLevel(logging.DEBUG)
-            if not _mod_logger.handlers:
-                _mod_logger.addHandler(logging.StreamHandler())
+            if verbose:
+                _handler = logging.StreamHandler()
+                _mod_logger.addHandler(_handler)
+                self._log_handlers.append(_handler)
+            if log_file is not None:
+                _handler = logging.FileHandler(log_file)
+                _mod_logger.addHandler(_handler)
+                self._log_handlers.append(_handler)
 
         # Output config
         self._output_config: Optional[OutputConfig] = output_config
 
         # Config from restart file merged with current call
         saved_config, saved_state = self._load_restart_data(restart_file)
+        self._restart_path = Path(restart_file) if restart_file is not None else None
         config = self._merge_config(saved_config, locals())
         self._set_config_attributes(config)
 
@@ -558,6 +618,11 @@ class MMEXOFASTFitter:
             Runtime state dict stored at save time.
         """
         if restart_file is None:
+            return {}, {}
+        if not Path(restart_file).exists():
+            logger.info(
+                'No restart file found at %s; starting fresh.', restart_file
+            )
             return {}, {}
 
         logger.info('Loading restart data from: %s', restart_file)
@@ -719,6 +784,9 @@ class MMEXOFASTFitter:
             )
 
         self.planned_steps = self._build_remaining_steps()
+        logger.info(
+            '\nPlanned workflow: \n%s\n', '\n'.join(
+                ['{0}: {1}'.format(step.stage, step.name) for step in self.planned_steps]))
         i = 0
         while i < len(self.planned_steps):
             step = self.planned_steps[i]
@@ -753,6 +821,20 @@ class MMEXOFASTFitter:
                 break
 
             i += 1
+
+        if self._output_config is not None:
+            if self._output_config.save_table:
+                for fmt in self._output_config.table_formats:
+                    table_str = self.make_ulens_table(table_type=fmt)
+                    path = self._output_config.table_path(fmt)
+                    path.write_text(table_str)
+                    logger.info('Saved %s results table to %s.', fmt, path)
+
+            if self._output_config.save_exozippy_init:
+                path = self._output_config.exozippy_init_path()
+                with open(path, 'w') as f:
+                    json.dump(self.initialize_exozippy(), f)
+                logger.info('Saved EXOZIPPy init data to %s.', path)
 
         return self.all_fit_results
 
@@ -1180,6 +1262,7 @@ class MMEXOFASTFitter:
         )
         fitter.run()
         logger.info('Static PSPL: %s', fitter.best)
+        logger.info('    sigmas:  %s', list(fitter.results.sigmas))
 
         key = mmexo.FitKey(
             lens_type=mmexo.LensType.POINT,
@@ -1239,6 +1322,7 @@ class MMEXOFASTFitter:
         )
         fitter.run()
         logger.info('Static FSPL: %s', fitter.best)
+        logger.info('    sigmas:  %s', list(fitter.results.sigmas))
 
         key = mmexo.FitKey(
             lens_type=mmexo.LensType.POINT,
@@ -1441,6 +1525,7 @@ class MMEXOFASTFitter:
                 mmexo.fit_types.model_key_to_label(key),
                 fitter.best,
             )
+            logger.info('    sigmas:  %s', list(fitter.results.sigmas))
 
     def select_best_point_lens_model(self) -> FitRecord:
         """
@@ -1765,6 +1850,7 @@ class MMEXOFASTFitter:
         )
         fitter.run()
         logger.info('Parallax fit: %s', fitter.best)
+        logger.info('      sigmas: %s', list(fitter.results.sigmas))
         return mmexo.MMEXOFASTFitResults(fitter)
 
     def _get_parallax_seed_params(self, key: mmexo.FitKey) -> dict:
@@ -1925,11 +2011,9 @@ class MMEXOFASTFitter:
 
         Notes
         -----
-        Only writes to disk when ``self._restart_path`` is set.
-        Activate checkpointing by assigning a path after
-        construction::
-
-            fitter._restart_path = Path('run.pkl')
+        Only writes to disk when ``self._restart_path`` is set, which
+        happens automatically when ``restart_file`` is passed to
+        ``__init__``.
         """
         if not getattr(self, '_restart_path', None):
             return
@@ -2508,3 +2592,18 @@ class MMEXOFASTFitter:
             f'planned_steps={len(self.planned_steps)}, '
             f'n_fits={len(self.all_fit_results)})'
         )
+
+    def close(self) -> None:
+        """
+        Remove and close any logging handlers added by this fitter.
+
+        Call this when the fitter is no longer needed to prevent handler
+        accumulation when multiple fitter instances are created in one
+        process.
+        """
+        _mod_logger = logging.getLogger(__name__)
+        for handler in self._log_handlers:
+            handler.close()
+            _mod_logger.removeHandler(handler)
+        self._log_handlers.clear()
+

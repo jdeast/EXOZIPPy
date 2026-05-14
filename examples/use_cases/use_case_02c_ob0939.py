@@ -3,9 +3,10 @@ Use case to show stopping and restarting a fit.
 """
 import exozippy
 import os.path
+import json
 from pathlib import Path
 
-from exozippy.mmexofast import OutputConfig
+#from exozippy.mmexofast import OutputConfig
 
 ground_data_files = [os.path.join(
         exozippy.MULENS_DATA_PATH, 'OB140939', 'n20100310.I.OGLE.OB140939.txt')]
@@ -16,15 +17,18 @@ coords='17:47:12.25 -21:22:58.7'
 base_dir = Path('test_output')
 
 print('=== Fit raw data ===')
+raw_file_prefix = 'ob0939_uc02c_raw'
 raw_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-    files=ground_data_files, coords=coords, fit_type='point lens', renormalize_errors=False,
-    verbose=True,
-    output_config=OutputConfig(
-        base_dir=base_dir, file_head='ob0939_uc02c_raw', save_log=True, save_plots=True,
-        save_latex_tables=True, save_restart_files=True))
+    files=ground_data_files, coords=coords, fit_type='point_lens', renormalize_errors=False,
+    verbose=True, restart_file=os.path.join(base_dir, 'ob0939_uc02c.pkl'),
+    log_file=os.path.join(base_dir, raw_file_prefix+'.log'),
+    output_config=exozippy.mmexofast.OutputConfig(
+        output_dir=base_dir, file_prefix=raw_file_prefix, save_plots=True, save_table=True, save_exozippy_init=True))
 raw_fitter.fit()
-print('initialize_exozippy:\n', raw_fitter.initialize_exozippy())
-# ------
+raw_fitter.close()
+
+
+#  ------
 # Expected workflow: fit_point_lens (incl. 2 parallax fits)
 # output:
 # A log file: ob0939_uc02c_raw.log [DONE]
@@ -39,14 +43,17 @@ print('initialize_exozippy:\n', raw_fitter.initialize_exozippy())
 # ------
 
 print('=== Restart from pickle and Fit w/Error Renorm ===')
+cont_file_prefix ='ob0939_uc02c_gr'
 cont_fitter = exozippy.mmexofast.MMEXOFASTFitter(
-    restart_file='test_output/ob0939_uc02c_raw_restart.pkl',
+    restart_file='test_output/ob0939_uc02c.pkl',
+    log_file=os.path.join(base_dir, cont_file_prefix+'.log'),
     renormalize_errors=True, verbose=True,
     #parallax_grid=True,
-    output_config=OutputConfig(
-        base_dir=base_dir, file_head='ob0939_uc02c_gr', save_log=True, save_plots=True,
-        save_latex_tables=True, save_restart_files=True, save_grid_results=True))
+    output_config=exozippy.mmexofast.OutputConfig(
+         output_dir=base_dir, file_prefix=cont_file_prefix,
+         save_plots=True, save_grid_results=True, save_table=True, save_exozippy_init=True))
 cont_fitter.fit()
+cont_fitter.close()
 print('initialize_exozippy after renorm:\n', cont_fitter.initialize_exozippy())
 # ------
 # Expected workflow: Renormalize errors, refit all models, run parallax grids
@@ -71,18 +78,22 @@ print('initialize_exozippy after renorm:\n', cont_fitter.initialize_exozippy())
 #    containing everything needed to initialize the next step
 # ------
 
-print('=== Run the full end-to-end Ground workflow ===')
-# Run the full ground workflow without stopping.
+#print('=== Run the full end-to-end Ground workflow ===')
+## Run the full ground workflow without stopping.
+full_file_prefix = 'ob0939_uc02c_full'
 full_gr_fitter = exozippy.mmexofast.mmexofast.fit(
     files=ground_data_files,
-    coords=coords, fit_type='point lens',
-    parallax_grid=True, renormalize_errors=True,
+    coords=coords, fit_type='point_lens',
+    #parallax_grid=True,
+    renormalize_errors=True,
     verbose=True,
-    output_config=OutputConfig(
-        base_dir=base_dir, file_head='ob0939_uc02c_full_gr', save_log=True, save_plots=True,
-        save_latex_tables=True, save_restart_files=True, save_grid_results=True)
+    log_file=os.path.join(base_dir, full_file_prefix+'.log'),
+    output_config=exozippy.mmexofast.OutputConfig(
+         output_dir=base_dir, file_prefix=full_file_prefix,
+         save_plots=True, save_grid_results=True, save_table=True, save_exozippy_init=True)
     )
 full_gr_fitter.fit()
+full_gr_fitter.close()
 
 #print('=== Restart from pickle and ADD Spitzer Data ===')
 #complete_fitter = exozippy.mmexofast.fit(
