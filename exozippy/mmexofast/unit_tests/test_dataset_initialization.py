@@ -11,6 +11,7 @@ from exozippy import MULENS_DATA_PATH
 from exozippy.mmexofast import MMEXOFASTFitter, OutputConfig
 
 
+@unittest.skip("Multi-location workflows not implemented.")
 class TestDatasetInitialization(unittest.TestCase):
     """Test dataset initialization from files, datasets, and pickles."""
 

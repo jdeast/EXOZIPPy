@@ -647,7 +647,7 @@ class MMEXOFASTFitter:
         self.intermediate_results = saved_state.get(
             'intermediate_results', IntermediateResults()
         )
-        self._renorm_factors: dict = saved_state.get('renorm_factors', {})
+        self.renorm_factors: dict = saved_state.get('renorm_factors', {})
 
     def _get_state(self) -> dict:
         """
@@ -666,7 +666,7 @@ class MMEXOFASTFitter:
                 (s.name, s.stage) for s in self.completed_steps
             ],
             'intermediate_results': self.intermediate_results,
-            'renorm_factors': self._renorm_factors,
+            'renorm_factors': self.renorm_factors,
             'datasets': self.datasets,
         }
 
@@ -1191,7 +1191,7 @@ class MMEXOFASTFitter:
             mmexo.FitRecord.from_full_result(
                 model_key=key,
                 full_result=mmexo.MMEXOFASTFitResults(fitter),
-                renorm_factors=self._renorm_factors,
+                renorm_factors=self.renorm_factors,
                 fixed=False,
             )
         )
@@ -1250,7 +1250,7 @@ class MMEXOFASTFitter:
             mmexo.FitRecord.from_full_result(
                 model_key=key,
                 full_result=mmexo.MMEXOFASTFitResults(fitter),
-                renorm_factors=self._renorm_factors,
+                renorm_factors=self.renorm_factors,
                 fixed=False,
             )
         )
@@ -1296,7 +1296,7 @@ class MMEXOFASTFitter:
                 mmexo.FitRecord.from_full_result(
                     model_key=key,
                     full_result=result,
-                    renorm_factors=self._renorm_factors,
+                    renorm_factors=self.renorm_factors,
                     fixed=False,
                 )
             )
@@ -1313,7 +1313,7 @@ class MMEXOFASTFitter:
 
         Notes
         -----
-        Datasets already present in ``self._renorm_factors`` are skipped.
+        Datasets already present in ``self.renorm_factors`` are skipped.
         Combines logic from the old ``_remove_outliers_and_calc_errfacs``
         and ``_apply_error_renormalization``.  Rebuilds
         ``fix_blend_flux_map`` and ``fix_source_flux_map`` after
@@ -1339,7 +1339,7 @@ class MMEXOFASTFitter:
         for i, dataset in enumerate(self.datasets):
             label = dataset.plot_properties['label']
 
-            if label in self._renorm_factors:
+            if label in self.renorm_factors:
                 new_datasets.append(dataset)
                 continue
 
@@ -1406,7 +1406,7 @@ class MMEXOFASTFitter:
                     **kwargs,
                 )
             )
-            self._renorm_factors[label] = errfac
+            self.renorm_factors[label] = errfac
 
         self.datasets = new_datasets
 
@@ -1432,7 +1432,7 @@ class MMEXOFASTFitter:
                 mmexo.FitRecord.from_full_result(
                     model_key=key,
                     full_result=mmexo.MMEXOFASTFitResults(fitter),
-                    renorm_factors=self._renorm_factors,
+                    renorm_factors=self.renorm_factors,
                     fixed=False,
                 )
             )
@@ -1622,7 +1622,7 @@ class MMEXOFASTFitter:
             mmexo.FitRecord.from_full_result(
                 model_key=key,
                 full_result=mmexo.EmceeFitResults(wide_planet_fitter),
-                renorm_factors=self._renorm_factors,
+                renorm_factors=self.renorm_factors,
                 fixed=False,
             )
         )
@@ -1710,7 +1710,7 @@ class MMEXOFASTFitter:
                     mmexo.FitRecord.from_full_result(
                         model_key=key,
                         full_result=result,
-                        renorm_factors=self._renorm_factors,
+                        renorm_factors=self.renorm_factors,
                         fixed=False,
                     )
                 )
@@ -2464,7 +2464,7 @@ class MMEXOFASTFitter:
                 List of ``{'parameters': dict, 'sigmas': dict}``.
             ``'errfacs'``
                 Per-dataset error renormalization factors
-                (``self._renorm_factors``).
+                (``self.renorm_factors``).
             ``'mag_methods'``
                 Magnification methods in MulensModel convention.
 
@@ -2492,7 +2492,7 @@ class MMEXOFASTFitter:
 
         return {
             'fits':        fits,
-            'errfacs':     self._renorm_factors,
+            'errfacs':     self.renorm_factors,
             'mag_methods': self.mag_methods,
         }
 
