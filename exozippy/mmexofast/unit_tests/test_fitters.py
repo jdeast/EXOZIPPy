@@ -38,12 +38,12 @@ class TestSFitFitter_1(unittest.TestCase):
         return ulens_params, fluxes
 
     def test_initial_model(self):
-        sfit = fitters.SFitFitter(datasets=self.data, initial_model=self.initial_guess)
-        for key, value in sfit.initial_model.items():
+        sfit = fitters.SFitFitter(datasets=self.data, initial_model_params=self.initial_guess)
+        for key, value in sfit.initial_model_params.items():
             assert self.initial_guess[key] == value
 
     def test_run(self):
-        sfit = fitters.SFitFitter(datasets=[self.data], initial_model=self.initial_guess)
+        sfit = fitters.SFitFitter(datasets=[self.data], initial_model_params=self.initial_guess)
         sfit.run()
         for key, value in sfit.best.items():
             if key in self.true_params.keys():
@@ -94,19 +94,19 @@ class TestWidePlanetFitter(unittest.TestCase):
     def test_mag_methods_error(self):
         with self.assertRaises(AttributeError):
             test_fitter = fitters.WidePlanetFitter(
-                datasets=[self.data], initial_model=self.true_params)
+                datasets=[self.data], initial_model_params=self.true_params)
             test_fitter.initialize_event()
 
     def test_event_creation(self):
         test_fitter = fitters.WidePlanetFitter(
-            datasets=[self.data], initial_model=self.true_params,
+            datasets=[self.data], initial_model_params=self.true_params,
             mag_methods=[
                 self.anomaly_lc_params['t_pl'] - 10. * self.anomaly_lc_params['dt'],
                 'VBBL',
                 self.anomaly_lc_params['t_pl'] + 10. * self.anomaly_lc_params['dt']])
 
         assert test_fitter._event is None
-        assert isinstance(test_fitter.initial_model, dict)
+        assert isinstance(test_fitter.initial_model_params, dict)
 
         assert len(test_fitter.parameters_to_fit) == 7
         test_fitter.initialize_event()
