@@ -4,6 +4,7 @@ from exozippy.mmexofast.fit_types import FitKey, LensType, SourceType, ParallaxB
 from exozippy.mmexofast.results import MMEXOFASTFitResults, EmceeFitResults, FitRecord, AllFitResults, GridSearchResult
 #from exozippy.mmexofast.output import OutputConfig, OutputManager
 from exozippy.mmexofast.mmexofast import MMEXOFASTFitter, WorkflowStep, OutputConfig
+from exozippy.mmexofast.classifier import AnomalyClassifier
 
 # Import modules for methods
 from exozippy.mmexofast import observatories, fitters, estimate_params, fit_types
