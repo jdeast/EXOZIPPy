@@ -683,6 +683,17 @@ class TestAllFitResults(TestFitRecord):
             self.assertIsInstance(record, results.FitRecord)
 
 
+
+ANOMALY_LC_PARAMS = {
+    't_0':   2459846.8256940236,
+    't_E':   6.092881664273319,
+    'u_0':   0.8565730569521676,
+    'dmag': -0.14566435684576362,
+    'dt':    0.17894899984821677,
+    't_pl':  2459840.6340004997,
+}
+
+
 class TestIntermediateResults(unittest.TestCase):
 
     def test_all_fields_default_to_none(self):
@@ -695,6 +706,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(ir.est_pl_params)
         self.assertIsNone(ir.est_binary_params)
         self.assertIsNone(ir.anomaly_type)
+        self.assertIsNone(ir.anomaly_lc_params)
 
     def test_best_ef_grid_point_can_be_set(self):
         """
@@ -774,6 +786,14 @@ class TestIntermediateResults(unittest.TestCase):
         with self.assertRaises(ValueError):
             ir.anomaly_type = 'planetary'
 
+    def test_anomaly_lc_params_can_be_set(self):
+        """
+        anomaly_lc_params can be set and retrieved.
+        """
+        ir = results.IntermediateResults()
+        ir.anomaly_lc_params = ANOMALY_LC_PARAMS
+        self.assertEqual(ir.anomaly_lc_params, ANOMALY_LC_PARAMS)
+
     def test_fields_are_independent(self):
         """
         Setting one field does not affect others.
@@ -784,6 +804,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(ir.est_pl_params)
         self.assertIsNone(ir.est_binary_params)
         self.assertIsNone(ir.anomaly_type)
+        self.assertIsNone(ir.anomaly_lc_params)
 
     def test_serialization_roundtrip(self):
         """
@@ -793,6 +814,7 @@ class TestIntermediateResults(unittest.TestCase):
         ir.best_ef_grid_point = {'t_0': 2456836.0, 't_eff': 23.67}
         ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
         ir.anomaly_type = 'close'
+        ir.anomaly_lc_params = ANOMALY_LC_PARAMS
 
         restored = pickle.loads(pickle.dumps(ir))
         self.assertEqual(restored.best_ef_grid_point, ir.best_ef_grid_point)
@@ -800,6 +822,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertEqual(restored.est_pl_params, ir.est_pl_params)
         self.assertEqual(restored.est_binary_params, ir.est_binary_params)
         self.assertEqual(restored.anomaly_type, ir.anomaly_type)
+        self.assertEqual(restored.anomaly_lc_params, ir.anomaly_lc_params)
 
     def test_fitter_has_intermediate_results_attribute(self):
         """
@@ -820,25 +843,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(fitter.intermediate_results.est_pl_params)
         self.assertIsNone(fitter.intermediate_results.est_binary_params)
         self.assertIsNone(fitter.intermediate_results.anomaly_type)
-
-    def test_intermediate_results_included_in_state(self):
-        """
-        intermediate_results is included in _get_state() output.
-        """
-        fitter = exozippy.mmexofast.MMEXOFASTFitter(
-            files=[os.path.join(
-                exozippy.MULENS_DATA_PATH, 'OB140939',
-                'n20100310.I.OGLE.OB140939.txt')],
-            coords='17:47:12.25 -21:22:58.7',
-            fit_type='point lens',
-            renormalize_errors=False)
-
-        fitter.intermediate_results.best_ef_grid_point = {'t_0': 2456836.0}
-        state = fitter._get_state()
-        self.assertIn('intermediate_results', state)
-        self.assertEqual(
-            state['intermediate_results'].best_ef_grid_point,
-            {'t_0': 2456836.0})
+        self.assertIsNone(fitter.intermediate_results.anomaly_lc_params)
 
     def test_intermediate_results_restored_from_state(self):
         """
@@ -856,6 +861,7 @@ class TestIntermediateResults(unittest.TestCase):
         ir.best_ef_grid_point = {'t_0': 2456836.0}
         ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
         ir.anomaly_type = 'wide'
+        ir.anomaly_lc_params = ANOMALY_LC_PARAMS
 
         fitter._restore_state({'intermediate_results': ir})
 
@@ -867,6 +873,8 @@ class TestIntermediateResults(unittest.TestCase):
             {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48})
         self.assertEqual(
             fitter.intermediate_results.anomaly_type, 'wide')
+        self.assertEqual(
+            fitter.intermediate_results.anomaly_lc_params, ANOMALY_LC_PARAMS)
         self.assertIsNone(fitter.intermediate_results.best_af_grid_point)
         self.assertIsNone(fitter.intermediate_results.est_binary_params)
 

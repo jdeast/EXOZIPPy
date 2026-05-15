@@ -74,7 +74,7 @@ INITIAL_RESULTS = {
 }
 
 # ---------------------------------------------------------------------------
-# Option 1: per-stage step blocks
+# Per-stage step blocks
 #
 # Each stage's steps are defined once. The combined workflow lists below are
 # built by concatenation, so adding or renaming a step in one place
@@ -100,6 +100,7 @@ _STEPS_SEARCH_ANOMALY = [
     ('select_best_point_lens_model', 'search_for_anomaly'),
     ('compute_residuals',            'search_for_anomaly'),
     ('run_af_grid',                  'search_for_anomaly'),
+    ('get_anomaly_lc_params',        'search_for_anomaly'),
     ('classify_anomaly',             'search_for_anomaly'),
 ]
 _STEPS_FIT_BINARY = [
@@ -138,7 +139,7 @@ EXPECTED_STEPS_BINARY = (
 )
 
 # ---------------------------------------------------------------------------
-# Option 2: name-based slice helper
+# Name-based slice helper
 #
 # Replaces magic-index slicing (e.g. EXPECTED_STEPS_BINARY[:11]) with an
 # intent-revealing name. A wrong index silently tests the wrong scenario;
@@ -168,6 +169,99 @@ def steps_through(steps, step_name):
         if name == step_name:
             return steps[:i + 1]
     raise ValueError(f'{step_name!r} not found in steps list')
+
+
+# ---------------------------------------------------------------------------
+# Step-to-method mapping and shared patching helper
+#
+# Maps each workflow step name to the MMEXOFASTFitter method it invokes.
+# fit_parallax_u0+ and fit_parallax_u0- share one underlying method so one
+# patch covers both.
+#
+# When a new step is added to any EXPECTED_STEPS_* constant, add its entry
+# here too. patch_fitter_methods will raise AssertionError immediately if a
+# step name is missing, making the omission obvious.
+# ---------------------------------------------------------------------------
+
+_STEP_TO_METHOD = {
+    'run_ef_grid':                  'run_ef_grid',
+    'est_pl_params':                'est_pl_params',
+    'fit_pspl':                     'fit_pspl',
+    'fit_parallax_u0+':             'fit_parallax',   # shared method
+    'fit_parallax_u0-':             'fit_parallax',   # shared method
+    'renormalize_datasets':         'renormalize_datasets',
+    'refit_all':                    'refit_all',
+    'select_best_point_lens_model': 'select_best_point_lens_model',
+    'compute_residuals':            'compute_residuals',
+    'run_af_grid':                  'run_af_grid',
+    'get_anomaly_lc_params':        'get_anomaly_lc_params',
+    'classify_anomaly':             'classify_anomaly',
+    'est_binary_params':            'est_binary_params',
+    'fit_binary_models':            'fit_binary_models',
+    'check_needs_renorm':           'check_needs_renorm',
+    'run_parallax_grids':           'run_parallax_grids',
+}
+
+# Methods whose no-op return value must be something other than None.
+_METHOD_RETURN_VALUES = {
+    'run_ef_grid':   {},
+    'est_pl_params': {},
+}
+
+
+def patch_fitter_methods(test_case, fitter, expected_steps):
+    """
+    Patch the fitter methods invoked by expected_steps with no-ops.
+
+    Each step name is looked up in _STEP_TO_METHOD to find the underlying
+    fitter method. Steps that share a method (fit_parallax_u0+/u0-) produce
+    one patch whose mock is accessible under both step-name keys.
+
+    Parameters
+    ----------
+    test_case : unittest.TestCase
+        Used for the coverage guard assertion.
+    fitter : MMEXOFASTFitter
+        Instance whose methods are patched.
+    expected_steps : list of (name, stage) tuples
+        Full workflow for this test class; determines which methods are
+        patched and what the guard checks against.
+
+    Returns
+    -------
+    ExitStack
+        Active context manager. Attribute .mocks is a dict keyed by step
+        name, mapping to the corresponding MagicMock.
+
+    Raises
+    ------
+    AssertionError
+        If any step name in expected_steps has no entry in _STEP_TO_METHOD.
+        Add the missing entry to _STEP_TO_METHOD to resolve.
+    """
+    # Guard first — fail clearly before patching anything.
+    # If this fires, a step was added to an EXPECTED_STEPS_* constant
+    # without a corresponding entry in _STEP_TO_METHOD.
+    unknown = {name for name, _ in expected_steps} - set(_STEP_TO_METHOD)
+    test_case.assertFalse(
+        unknown,
+        f'Steps missing from _STEP_TO_METHOD: {unknown}. '
+        f'Add an entry to _STEP_TO_METHOD when adding a new workflow step.')
+
+    stack = ExitStack()
+    method_mocks = {}   # keyed by method name; prevents double-patching
+    mocks = {}          # keyed by step name for caller inspection
+
+    for step_name, _ in expected_steps:
+        method_name = _STEP_TO_METHOD[step_name]
+        if method_name not in method_mocks:
+            rv = _METHOD_RETURN_VALUES.get(method_name, None)
+            method_mocks[method_name] = stack.enter_context(
+                patch.object(fitter, method_name, return_value=rv))
+        mocks[step_name] = method_mocks[method_name]
+
+    stack.mocks = mocks
+    return stack
 
 
 def _make_noop_steps(expected_steps):
@@ -205,23 +299,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         return MMEXOFASTFitter(**defaults)
 
     def _patch_fit_methods(self, fitter):
-        """
-        Patch all fit action methods with no-ops so the execution loop
-        runs without performing real fits. Returns an ExitStack with a
-        .mocks dict attribute for post-call inspection.
-        """
-        stack = ExitStack()
-        mocks = {}
-        mocks['run_ef_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_ef_grid', return_value={}))
-        mocks['est_pl_params'] = stack.enter_context(
-            patch.object(fitter, 'est_pl_params', return_value={}))
-        mocks['fit_pspl'] = stack.enter_context(
-            patch.object(fitter, 'fit_pspl', return_value=None))
-        mocks['fit_parallax'] = stack.enter_context(
-            patch.object(fitter, 'fit_parallax', return_value=None))
-        stack.mocks = mocks
-        return stack
+        return patch_fitter_methods(self, fitter, EXPECTED_STEPS)
 
     # --- dry run ---
 
@@ -383,24 +461,7 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         return MMEXOFASTFitter(**defaults)
 
     def _patch_fit_methods(self, fitter):
-        stack = ExitStack()
-        mocks = {}
-        mocks['run_ef_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_ef_grid', return_value={}))
-        mocks['est_pl_params'] = stack.enter_context(
-            patch.object(fitter, 'est_pl_params', return_value={}))
-        mocks['fit_pspl'] = stack.enter_context(
-            patch.object(fitter, 'fit_pspl', return_value=None))
-        mocks['fit_parallax'] = stack.enter_context(
-            patch.object(fitter, 'fit_parallax', return_value=None))
-        mocks['renormalize_datasets'] = stack.enter_context(
-            patch.object(fitter, 'renormalize_datasets', return_value=None))
-        mocks['refit_all'] = stack.enter_context(
-            patch.object(fitter, 'refit_all', return_value=None))
-        mocks['run_parallax_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_parallax_grid', return_value=None))
-        stack.mocks = mocks
-        return stack
+        return patch_fitter_methods(self, fitter, EXPECTED_STEPS_PL_RENORM)
 
     def test_dry_run_planned_steps(self):
         """
@@ -474,37 +535,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         return MMEXOFASTFitter(**defaults)
 
     def _patch_fit_methods(self, fitter):
-        stack = ExitStack()
-        mocks = {}
-        mocks['run_ef_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_ef_grid', return_value={}))
-        mocks['est_pl_params'] = stack.enter_context(
-            patch.object(fitter, 'est_pl_params', return_value={}))
-        mocks['fit_pspl'] = stack.enter_context(
-            patch.object(fitter, 'fit_pspl', return_value=None))
-        mocks['fit_parallax'] = stack.enter_context(
-            patch.object(fitter, 'fit_parallax', return_value=None))
-        mocks['renormalize_datasets'] = stack.enter_context(
-            patch.object(fitter, 'renormalize_datasets', return_value=None))
-        mocks['refit_all'] = stack.enter_context(
-            patch.object(fitter, 'refit_all', return_value=None))
-        mocks['select_best_point_lens_model'] = stack.enter_context(
-            patch.object(fitter, 'select_best_point_lens_model',
-                         return_value=None))
-        mocks['compute_residuals'] = stack.enter_context(
-            patch.object(fitter, 'compute_residuals', return_value=None))
-        mocks['run_af_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_af_grid', return_value=None))
-        mocks['est_binary_params'] = stack.enter_context(
-            patch.object(fitter, 'est_binary_params', return_value=None))
-        mocks['fit_binary_models'] = stack.enter_context(
-            patch.object(fitter, 'fit_binary_models', return_value=None))
-        mocks['check_needs_renorm'] = stack.enter_context(
-            patch.object(fitter, 'check_needs_renorm', return_value=None))
-        mocks['run_parallax_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_parallax_grid', return_value=None))
-        stack.mocks = mocks
-        return stack
+        return patch_fitter_methods(self, fitter, EXPECTED_STEPS_BINARY)
 
     def test_dry_run_planned_steps(self):
         """
@@ -542,8 +573,6 @@ class TestBinaryLensWorkflow(unittest.TestCase):
 
         expected = steps_through(EXPECTED_STEPS_BINARY, 'fit_binary_models')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
-        print('\nexpected\n', expected)
-        print('\nactual\n', actual)
         self.assertEqual(actual, expected)
 
     def test_resume_after_stop_before_fit_binary(self):
@@ -556,7 +585,11 @@ class TestBinaryLensWorkflow(unittest.TestCase):
             steps_through(EXPECTED_STEPS_BINARY, 'est_binary_params'))
         fitter.fit()
 
-        expected = _STEPS_FIT_BINARY[1:] + _STEPS_CHECK_BINARY_RENORM + _STEPS_PARALLAX_GRIDS
+        expected = (
+            _STEPS_FIT_BINARY[1:] +
+            _STEPS_CHECK_BINARY_RENORM +
+            _STEPS_PARALLAX_GRIDS
+        )
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -594,7 +627,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
                 patch.object(fitter, 'refit_all',
                              return_value=None))
             stack.enter_context(
-                patch.object(fitter, 'run_parallax_grid',
+                patch.object(fitter, 'run_parallax_grids',
                              return_value=None))
             fitter.fit()
 
@@ -627,18 +660,10 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
         return MMEXOFASTFitter(**defaults)
 
     def _patch_fit_methods(self, fitter):
-        stack = ExitStack()
-        mocks = {}
-        mocks['run_ef_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_ef_grid', return_value={}))
-        mocks['est_pl_params'] = stack.enter_context(
-            patch.object(fitter, 'est_pl_params', return_value={}))
-        mocks['fit_pspl'] = stack.enter_context(
-            patch.object(fitter, 'fit_pspl', return_value=None))
-        mocks['fit_parallax'] = stack.enter_context(
-            patch.object(fitter, 'fit_parallax', return_value=None))
-        stack.mocks = mocks
-        return stack
+        # Patch the full point-lens workflow; the initial_results causes
+        # some steps to be skipped at runtime, but patching unused methods
+        # is harmless and keeps the guard meaningful.
+        return patch_fitter_methods(self, fitter, EXPECTED_STEPS)
 
     def test_dry_run_skips_est_pl_params(self):
         """
@@ -651,7 +676,6 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
 
         expected = _STEPS_STATIC_PL[1:] + _STEPS_PL_PARALLAX
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
-        print('\nactual', actual)
         self.assertEqual(actual, expected)
 
     def test_fit_pspl_uses_supplied_params_as_seed(self):
@@ -660,8 +684,7 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
         """
         fitter = self._make_fitter()
 
-        stack = self._patch_fit_methods(fitter)
-        with stack:
+        with self._patch_fit_methods(fitter) as stack:
             fitter.fit()
 
         call_args = stack.mocks['fit_pspl'].call_args
@@ -696,23 +719,8 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         return MMEXOFASTFitter(**defaults)
 
     def _patch_fit_methods(self, fitter):
-        stack = ExitStack()
-        mocks = {}
-        mocks['select_best_point_lens_model'] = stack.enter_context(
-            patch.object(fitter, 'select_best_point_lens_model',
-                         return_value=None))
-        mocks['compute_residuals'] = stack.enter_context(
-            patch.object(fitter, 'compute_residuals', return_value=None))
-        mocks['run_af_grid'] = stack.enter_context(
-            patch.object(fitter, 'run_af_grid', return_value=None))
-        mocks['est_binary_params'] = stack.enter_context(
-            patch.object(fitter, 'est_binary_params', return_value=None))
-        mocks['fit_binary_models'] = stack.enter_context(
-            patch.object(fitter, 'fit_binary_models', return_value=None))
-        mocks['check_needs_renorm'] = stack.enter_context(
-            patch.object(fitter, 'check_needs_renorm', return_value=None))
-        stack.mocks = mocks
-        return stack
+        return patch_fitter_methods(
+            self, fitter, _STEPS_SEARCH_ANOMALY + _STEPS_FIT_BINARY)
 
     def test_dry_run_starts_at_search_for_anomaly(self):
         """
@@ -733,8 +741,6 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         when initial_results contains a PSPL fit.
         """
         fitter = self._make_fitter()
-        print(fitter.all_fit_results)
-        print('init', INITIAL_RESULTS)
         result = fitter.select_best_point_lens_model()
         self.assertEqual(result.params, STATIC_PSPL_PARAMS)
 
@@ -788,9 +794,7 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
         pkl_path = os.path.join(self.tmp_path, 'fake.pkl')
         _make_fake_pickle(pkl_path, pl_completed)
 
-        fitter = self._make_fitter(
-            restart_file=pkl_path,
-            dry_run=True)
+        fitter = self._make_fitter(restart_file=pkl_path, dry_run=True)
         fitter.fit()
 
         expected = (
@@ -829,12 +833,8 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
 
         fitter.fit()
 
-        # est_pl_params ran and stored its result
         self.assertIsNotNone(fitter.intermediate_results.est_pl_params)
-
-        # execution loop continued normally — est_pl_params is in completed_steps
-        self.assertEqual(
-            fitter.completed_steps[-1].name, 'est_pl_params')
+        self.assertEqual(fitter.completed_steps[-1].name, 'est_pl_params')
 
     def test_action_returning_steps_inserts_at_front_of_queue(self):
         """
@@ -854,7 +854,6 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         fitter.completed_steps = _make_noop_steps(
             steps_through(EXPECTED_STEPS_BINARY, 'fit_binary_models'))
 
-        # Build a real MulensFitter with binary params and OB05390 datasets
         binary_fitter = MulensFitter(
             datasets=fitter.datasets,
             initial_model_params=BINARY_PARAMS,
@@ -868,30 +867,24 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
             full_result=mmexo.MMEXOFASTFitResults(binary_fitter))
 
         fitter.all_fit_results.set(binary_record)
-        print('all_fit_results', fitter.all_fit_results)
-        print('needs_renorm', fitter.check_needs_renorm())
-
         fitter.fit()
 
-        # check_needs_renorm is in completed_steps
-        completed_names = [(step.name, step.stage) for step in fitter.completed_steps]
-        print('\ncompleted\n', completed_names)
-        self.assertIn(('check_needs_renorm', 'check_binary_renorm'), completed_names)
+        completed_names = [(step.name, step.stage)
+                           for step in fitter.completed_steps]
+        self.assertIn(('check_needs_renorm', 'check_binary_renorm'),
+                      completed_names)
 
-        # dynamic steps are in planned_steps, not yet executed
         planned_names = [(step.name, step.stage)
                          for step in fitter.planned_steps]
-        print('\nplanned\n', planned_names)
         self.assertIn(('renormalize_datasets', 'check_binary_renorm'),
                       planned_names)
         self.assertIn(('refit_all', 'check_binary_renorm'),
                       planned_names)
 
-        # dynamic steps appear before run_parallax_grids in planned_steps
         names_only = [name for name, _ in planned_names]
-        renorm_idx = names_only.index('renormalize_datasets')
-        grid_idx = names_only.index('run_parallax_grids')
-        self.assertLess(renorm_idx, grid_idx)
+        self.assertLess(
+            names_only.index('renormalize_datasets'),
+            names_only.index('run_parallax_grids'))
 
 
 class TestSelectBestPointLensModel(unittest.TestCase):
@@ -930,19 +923,6 @@ class TestSelectBestPointLensModel(unittest.TestCase):
         )
 
     def _make_record(self, key, chi2_value=None):
-        """
-        Create a FitRecord with an optional chi2 value.
-
-        Parameters
-        ----------
-        key : mmexo.FitKey
-        chi2_value : float or None
-            If None, the record is incomplete (no chi2).
-
-        Returns
-        -------
-        mmexo.FitRecord
-        """
         record = mmexo.FitRecord(
             model_key=key,
             params=STATIC_PSPL_PARAMS,
@@ -953,30 +933,18 @@ class TestSelectBestPointLensModel(unittest.TestCase):
         return record
 
     def test_raises_when_no_point_lens_fits(self):
-        """
-        RuntimeError raised when no point-lens fits exist.
-        """
         fitter = self._make_fitter()
         with self.assertRaises(RuntimeError):
             fitter.select_best_point_lens_model()
 
     def test_multiple_incomplete_records_raises(self):
-        """
-        Multiple incomplete records (no chi2) raises RuntimeError.
-        """
         fitter = self._make_fitter()
-        fitter.all_fit_results.set(
-            self._make_record(self._make_static_key()))
-        fitter.all_fit_results.set(
-            self._make_record(self._make_parallax_key()))
-
+        fitter.all_fit_results.set(self._make_record(self._make_static_key()))
+        fitter.all_fit_results.set(self._make_record(self._make_parallax_key()))
         with self.assertRaises(RuntimeError):
             fitter.select_best_point_lens_model()
 
     def test_static_fits_only_returns_best_chi2(self):
-        """
-        Static fits only: returns the fit with the lowest chi2.
-        """
         fitter = self._make_fitter()
         better = self._make_record(
             self._make_static_key(locations_used='a'), chi2_value=100.0)
@@ -984,13 +952,9 @@ class TestSelectBestPointLensModel(unittest.TestCase):
             self._make_static_key(locations_used='b'), chi2_value=200.0)
         fitter.all_fit_results.set(better)
         fitter.all_fit_results.set(worse)
-
         self.assertIs(fitter.select_best_point_lens_model(), better)
 
     def test_parallax_fits_only_returns_best_chi2(self):
-        """
-        Parallax fits only: returns the fit with the lowest chi2.
-        """
         fitter = self._make_fitter()
         better = self._make_record(
             self._make_parallax_key(mmexo.ParallaxBranch.U0_PLUS),
@@ -1000,13 +964,9 @@ class TestSelectBestPointLensModel(unittest.TestCase):
             chi2_value=120.0)
         fitter.all_fit_results.set(better)
         fitter.all_fit_results.set(worse)
-
         self.assertIs(fitter.select_best_point_lens_model(), better)
 
     def test_returns_static_when_parallax_improvement_below_threshold(self):
-        """
-        Returns static fit when parallax chi2 improvement is less than 50.
-        """
         fitter = self._make_fitter()
         static = self._make_record(
             self._make_static_key(), chi2_value=1000.0)
@@ -1014,13 +974,9 @@ class TestSelectBestPointLensModel(unittest.TestCase):
             self._make_parallax_key(), chi2_value=960.0)  # improvement = 40
         fitter.all_fit_results.set(static)
         fitter.all_fit_results.set(parallax)
-
         self.assertIs(fitter.select_best_point_lens_model(), static)
 
     def test_returns_parallax_when_improvement_above_threshold(self):
-        """
-        Returns parallax fit when chi2 improvement exceeds 50.
-        """
         fitter = self._make_fitter()
         static = self._make_record(
             self._make_static_key(), chi2_value=1000.0)
@@ -1028,14 +984,9 @@ class TestSelectBestPointLensModel(unittest.TestCase):
             self._make_parallax_key(), chi2_value=900.0)  # improvement = 100
         fitter.all_fit_results.set(static)
         fitter.all_fit_results.set(parallax)
-
         self.assertIs(fitter.select_best_point_lens_model(), parallax)
 
     def test_incomplete_records_ignored_when_complete_records_exist(self):
-        """
-        Mix of complete and incomplete records: only complete records
-        are used for comparison.
-        """
         fitter = self._make_fitter()
         complete_static = self._make_record(
             self._make_static_key(), chi2_value=1000.0)
@@ -1043,5 +994,4 @@ class TestSelectBestPointLensModel(unittest.TestCase):
             self._make_parallax_key(), chi2_value=None)
         fitter.all_fit_results.set(complete_static)
         fitter.all_fit_results.set(incomplete_parallax)
-
         self.assertIs(fitter.select_best_point_lens_model(), complete_static)

@@ -815,8 +815,36 @@ class IntermediateResults:
         Set by: est_binary_params
         Format: {'t_0': float, 'u_0': float, 't_E': float,
                  'rho': float, 'q': float, 's': float, 'alpha': float}
+
+    anomaly_lc_params : dict or None
+        PSPL properties + observed anomaly properties.
+        Set by: get_anomaly_lc_params
+        Format: {'t_0': float, 'u_0': float, 't_E': float,
+                  'dmag': float, 'dt': float, 't_pl': float}
+
+    anomaly_type : str or None
+       Type of anomaly. Allowed types are given in VALID_ANOMALY_TYPES
+
     """
+    VALID_ANOMALY_TYPES = {'close', 'wide', 'high_mag'}
+
     best_ef_grid_point: Optional[dict] = None
     best_af_grid_point: Optional[dict] = None
     est_pl_params: Optional[dict] = None
     est_binary_params: Optional[dict] = None
+    anomaly_lc_params: Optional[dict] = None
+
+    def __init__(self):
+        self._anomaly_type: Optional[str] = None
+
+    @property
+    def anomaly_type(self) -> Optional[str]:
+        return self._anomaly_type
+
+    @anomaly_type.setter
+    def anomaly_type(self, value: Optional[str]) -> None:
+        if value is not None and value not in self.VALID_ANOMALY_TYPES:
+            raise ValueError(
+                f'{value!r} is not a valid anomaly_type. '
+                f'Must be one of {self.VALID_ANOMALY_TYPES}.')
+        self._anomaly_type = value

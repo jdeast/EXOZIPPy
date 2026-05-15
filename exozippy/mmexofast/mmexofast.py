@@ -1091,6 +1091,18 @@ class MMEXOFASTFitter:
                 stage='search_for_anomaly',
                 description='Run AnomalyFinder grid search',
             ),
+            WorkflowStep(
+                name='get_anomaly_lc_params',
+                func=self.get_anomaly_lc_params,
+                stage='search_for_anomaly',
+                description='Measure observable anomaly properties',
+            ),
+            WorkflowStep(
+                name='classify_anomaly',
+                func=self.classify_anomaly,
+                stage='search_for_anomaly',
+                description='Classify the anomaly type',
+            ),
         ]
 
     def _build_binary_fit_steps(self) -> list[WorkflowStep]:
@@ -1142,7 +1154,7 @@ class MMEXOFASTFitter:
         #    steps.append(
         #        WorkflowStep(
         #            name=name,
-        #            func=lambda b=branch: self.run_parallax_grid(branch=b),
+        #            func=lambda b=branch: self.run_parallax_grids(branch=b),
         #            stage='run_parallax_grids',
         #            description=f'Run parallax grid search for branch {branch.value}',
         #        )
@@ -1150,7 +1162,7 @@ class MMEXOFASTFitter:
         steps = [
             WorkflowStep(
                 name=f'run_parallax_grids',
-                func=self.run_parallax_grid,
+                func=self.run_parallax_grids,
                 stage='parallax_grids',
                 description=f'Run both parallax grid searches',
             )
@@ -1654,17 +1666,34 @@ class MMEXOFASTFitter:
         logger.info('Best AF grid point: %s', af_grid.best)
         self.intermediate_results.best_af_grid_point = af_grid.best
 
+    def get_anomaly_lc_params(self):
+        """
+        Estimate anomaly properties from the AnomalyFinder grid
+        result.
+
+        Stores estimates in
+        ``self.intermediate_results.anomaly_lc_params``.
+        """
+        best_pspl = self.select_best_point_lens_model()
+        estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
+            datasets=self.datasets,
+            pspl_params=best_pspl.params,
+            af_results=self.intermediate_results.best_af_grid_point,
+        )
+        params = estimator.get_anomaly_lc_parameters()
+        logger.info('Estimated binary params: %s', params)
+        self.intermediate_results.anomaly_lc_params = params
+
     def classify_anomaly(self) -> None:
         """
-        Use estimated binary-lens parameters from the AnomalyFinder grid
+        Use estimated anomaly properties from the AnomalyFinder grid
         result to classify the anomaly.
 
         Stores estimates in
         ``self.intermediate_results.anomaly_type``.
         """
         classifier = mmexo.AnomalyClassifier()
-        self.intermediate_results.anomaly_type = classifier.classify(self.intermediate_results.est_binary_params)
-
+        self.intermediate_results.anomaly_type = classifier.classify(self.intermediate_results.anomaly_lc_params)
 
     def est_binary_params(self) -> None:
         """
@@ -1674,6 +1703,8 @@ class MMEXOFASTFitter:
         Stores estimates in
         ``self.intermediate_results.est_binary_params``.
         """
+        raise NotImplementedError('This is wrong.')
+
         best_pspl = self.select_best_point_lens_model()
         estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
             datasets=self.datasets,
@@ -1755,7 +1786,7 @@ class MMEXOFASTFitter:
 
         return None
 
-    def run_parallax_grid(self, branch=None) -> None:
+    def run_parallax_grids(self, branch=None) -> None:
         """
         Run a parallax grid search for the given branch.
 
@@ -1819,7 +1850,7 @@ class MMEXOFASTFitter:
     ) -> mmexo.MMEXOFASTFitResults:
         """
         Shared implementation invoked by ``fit_parallax()`` and
-        ``run_parallax_grid()``.
+        ``run_parallax_grids()``.
 
         Parameters
         ----------
