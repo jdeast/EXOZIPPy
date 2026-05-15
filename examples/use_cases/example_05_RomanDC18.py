@@ -17,14 +17,13 @@ base_dir = os.path.join(
 def fit_lc(lc_num, verbose=False):
     data = TestDataSet(lc_num)
 
+    file_prefix = 'WFIRST.{0:03}'.format(lc_num)
     fitter = exozippy.mmexofast.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
-        verbose=verbose,
-        # print_results=True, emcee=False,
-        #emcee_settings={'n_walkers': 14, 'n_burn': 50, 'n_steps': 100},  # Override defaults for quick testing
-        output_config=exozippy.mmexofast.OutputConfig(
-            base_dir=base_dir, file_head='WFIRST.{0:03}'.format(lc_num), save_log=True,
-            save_latex_tables=True, save_restart_files=True)
+        verbose=verbose, renormalize_errors=False,
+        log_file=os.path.join(base_dir, file_prefix + '.log'),
+        restart_file=os.path.join(base_dir, file_prefix + 'pkl'),
+        stop_after='fit_binary_lens:est_binary_params',
     )
 
     return fitter.all_fit_results
@@ -49,7 +48,7 @@ for file_ in files:
 wide_planets = [8, 53, 107, 131, 152, 194, 208, 214, 217, 226]
 big_wide_planets = [4, 62]
 
-lc_nums = wide_planets[0:3]
+lc_nums = wide_planets[1:2]
 for lc_num in np.sort(lc_nums):
     print('\n...Fitting light curve {0}...'.format(lc_num))
     try:
