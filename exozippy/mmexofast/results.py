@@ -810,11 +810,12 @@ class IntermediateResults:
         Set by: est_pl_params
         Format: {'t_0': float, 'u_0': float, 't_E': float}
 
-    est_binary_params : dict or None
-        Estimated binary lens parameters from the AF grid result.
+    est_binary_params : dict of dicts or None
+        Estimated binary lens parameters from the AF grid result. Some anomaly
+        types may have multiple possible solutions.
         Set by: est_binary_params
-        Format: {'t_0': float, 'u_0': float, 't_E': float,
-                 'rho': float, 'q': float, 's': float, 'alpha': float}
+        Format: {solution: {'t_0': float, 'u_0': float, 't_E': float,
+                 'rho': float, 'q': float, 's': float, 'alpha': float}, ...}
 
     anomaly_lc_params : dict or None
         PSPL properties + observed anomaly properties.

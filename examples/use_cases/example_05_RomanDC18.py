@@ -19,10 +19,10 @@ def fit_lc(lc_num, verbose=False):
 
     file_prefix = 'WFIRST.{0:03}'.format(lc_num)
     fitter = exozippy.mmexofast.mmexofast.fit(
-        files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary lens',
+        files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary_lens',
         verbose=verbose, renormalize_errors=False,
         log_file=os.path.join(base_dir, file_prefix + '.log'),
-        restart_file=os.path.join(base_dir, file_prefix + 'pkl'),
+        restart_file=os.path.join(base_dir, file_prefix + '.pkl'),
         stop_after='fit_binary_lens:est_binary_params',
     )
 

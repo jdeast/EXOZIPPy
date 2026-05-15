@@ -745,7 +745,7 @@ class TestIntermediateResults(unittest.TestCase):
         est_binary_params can be set and retrieved.
         """
         ir = results.IntermediateResults()
-        value = {
+        value ={'wide': {
             't_0':   2453582.7281740606,
             'u_0':   0.355227507989543,
             't_E':   11.106795114521415,
@@ -753,7 +753,7 @@ class TestIntermediateResults(unittest.TestCase):
             'q':     7.524529162733864e-05,
             's':     1.6044784697939465,
             'alpha': 157.9506556145345,
-        }
+        }}
         ir.est_binary_params = value
         self.assertEqual(ir.est_binary_params, value)
 

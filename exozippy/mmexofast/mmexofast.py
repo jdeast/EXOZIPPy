@@ -1694,6 +1694,8 @@ class MMEXOFASTFitter:
         """
         classifier = mmexo.AnomalyClassifier()
         self.intermediate_results.anomaly_type = classifier.classify(self.intermediate_results.anomaly_lc_params)
+        logger.info('Anomaly classified as anomaly_type = ', self.intermediate_results.anomaly_type)
+
 
     def est_binary_params(self) -> None:
         """
@@ -1703,17 +1705,25 @@ class MMEXOFASTFitter:
         Stores estimates in
         ``self.intermediate_results.est_binary_params``.
         """
-        raise NotImplementedError('This is wrong.')
 
-        best_pspl = self.select_best_point_lens_model()
-        estimator = mmexo.estimate_params.AnomalyPropertyEstimator(
-            datasets=self.datasets,
-            pspl_params=best_pspl.params,
-            af_results=self.intermediate_results.best_af_grid_point,
-        )
-        params = estimator.get_anomaly_lc_parameters()
-        logger.info('Estimated binary params: %s', params)
-        self.intermediate_results.est_binary_params = params
+        if self.intermediate_results.anomaly_type == 'wide':
+            est_params = {}
+
+            estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(
+                datasets=self.datasets,
+                params=self.intermediate_results.anomaly_lc_params,
+            )
+            estimator.run()
+            params = estimator.binary_params
+            logger.info('Estimated binary params: %s', params.ulens)
+            logger.info('mag_methods: %s', params.mag_methods)
+            est_params['wide'] = params
+
+        else:
+            est_params = None
+            logger.info('Binary params estimate not implemented for ', self.intermediate_results.anomaly_type)
+
+        self.intermediate_results.est_binary_params = est_params
 
     def fit_binary_models(self) -> Optional[list[WorkflowStep]]:
         """
