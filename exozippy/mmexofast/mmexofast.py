@@ -1654,6 +1654,18 @@ class MMEXOFASTFitter:
         logger.info('Best AF grid point: %s', af_grid.best)
         self.intermediate_results.best_af_grid_point = af_grid.best
 
+    def classify_anomaly(self) -> None:
+        """
+        Use estimated binary-lens parameters from the AnomalyFinder grid
+        result to classify the anomaly.
+
+        Stores estimates in
+        ``self.intermediate_results.anomaly_type``.
+        """
+        classifier = mmexo.AnomalyClassifier()
+        self.intermediate_results.anomaly_type = classifier.classify(self.intermediate_results.est_binary_params)
+
+
     def est_binary_params(self) -> None:
         """
         Estimate binary-lens parameters from the AnomalyFinder grid

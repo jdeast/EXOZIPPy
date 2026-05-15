@@ -694,6 +694,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(ir.best_af_grid_point)
         self.assertIsNone(ir.est_pl_params)
         self.assertIsNone(ir.est_binary_params)
+        self.assertIsNone(ir.anomaly_type)
 
     def test_best_ef_grid_point_can_be_set(self):
         """
@@ -744,6 +745,35 @@ class TestIntermediateResults(unittest.TestCase):
         ir.est_binary_params = value
         self.assertEqual(ir.est_binary_params, value)
 
+    def test_valid_anomaly_types_are_expected_values(self):
+        """
+        VALID_ANOMALY_TYPES contains exactly the expected set of values.
+        If this fails, check whether test_anomaly_type_accepts_valid_values
+        and test_anomaly_type_rejects_invalid_value need updating.
+        """
+        self.assertEqual(
+            results.IntermediateResults.VALID_ANOMALY_TYPES,
+            {'close', 'wide', 'high_mag'})
+
+    def test_anomaly_type_accepts_valid_values(self):
+        """
+        anomaly_type accepts every value listed in
+        IntermediateResults.VALID_ANOMALY_TYPES and round-trips correctly.
+        """
+        ir = results.IntermediateResults()
+        for value in results.IntermediateResults.VALID_ANOMALY_TYPES:
+            with self.subTest(value=value):
+                ir.anomaly_type = value
+                self.assertEqual(ir.anomaly_type, value)
+
+    def test_anomaly_type_rejects_invalid_value(self):
+        """
+        Assigning an unrecognised string to anomaly_type raises ValueError.
+        """
+        ir = results.IntermediateResults()
+        with self.assertRaises(ValueError):
+            ir.anomaly_type = 'planetary'
+
     def test_fields_are_independent(self):
         """
         Setting one field does not affect others.
@@ -753,6 +783,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(ir.best_af_grid_point)
         self.assertIsNone(ir.est_pl_params)
         self.assertIsNone(ir.est_binary_params)
+        self.assertIsNone(ir.anomaly_type)
 
     def test_serialization_roundtrip(self):
         """
@@ -761,12 +792,14 @@ class TestIntermediateResults(unittest.TestCase):
         ir = results.IntermediateResults()
         ir.best_ef_grid_point = {'t_0': 2456836.0, 't_eff': 23.67}
         ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
+        ir.anomaly_type = 'close'
 
         restored = pickle.loads(pickle.dumps(ir))
         self.assertEqual(restored.best_ef_grid_point, ir.best_ef_grid_point)
         self.assertEqual(restored.best_af_grid_point, ir.best_af_grid_point)
         self.assertEqual(restored.est_pl_params, ir.est_pl_params)
         self.assertEqual(restored.est_binary_params, ir.est_binary_params)
+        self.assertEqual(restored.anomaly_type, ir.anomaly_type)
 
     def test_fitter_has_intermediate_results_attribute(self):
         """
@@ -786,6 +819,7 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertIsNone(fitter.intermediate_results.best_af_grid_point)
         self.assertIsNone(fitter.intermediate_results.est_pl_params)
         self.assertIsNone(fitter.intermediate_results.est_binary_params)
+        self.assertIsNone(fitter.intermediate_results.anomaly_type)
 
     def test_intermediate_results_included_in_state(self):
         """
@@ -821,6 +855,7 @@ class TestIntermediateResults(unittest.TestCase):
         ir = results.IntermediateResults()
         ir.best_ef_grid_point = {'t_0': 2456836.0}
         ir.est_pl_params = {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48}
+        ir.anomaly_type = 'wide'
 
         fitter._restore_state({'intermediate_results': ir})
 
@@ -830,9 +865,11 @@ class TestIntermediateResults(unittest.TestCase):
         self.assertEqual(
             fitter.intermediate_results.est_pl_params,
             {'t_0': 2456836., 'u_0': 1.012, 't_E': 21.48})
+        self.assertEqual(
+            fitter.intermediate_results.anomaly_type, 'wide')
         self.assertIsNone(fitter.intermediate_results.best_af_grid_point)
         self.assertIsNone(fitter.intermediate_results.est_binary_params)
-        
-        
+
+
 if __name__ == '__main__':
     unittest.main()
