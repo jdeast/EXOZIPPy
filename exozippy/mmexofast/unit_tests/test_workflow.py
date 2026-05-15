@@ -73,42 +73,101 @@ INITIAL_RESULTS = {
     }
 }
 
-# (name, stage)
-EXPECTED_STEPS = [
-    ('run_ef_grid',           'event_search'),
-    ('est_pl_params',         'fit_static_point_lens'),
-    ('fit_pspl',              'fit_static_point_lens'),
-    ('fit_parallax_u0+',      'fit_point_lens_parallax'),
-    ('fit_parallax_u0-',      'fit_point_lens_parallax'),
-]
+# ---------------------------------------------------------------------------
+# Option 1: per-stage step blocks
+#
+# Each stage's steps are defined once. The combined workflow lists below are
+# built by concatenation, so adding or renaming a step in one place
+# propagates everywhere automatically.
+# ---------------------------------------------------------------------------
 
-EXPECTED_STEPS_PL_RENORM = [
-    ('run_ef_grid',                'event_search'),
-    ('est_pl_params',              'fit_static_point_lens'),
-    ('fit_pspl',                   'fit_static_point_lens'),
-    ('fit_parallax_u0+',           'fit_point_lens_parallax'),
-    ('fit_parallax_u0-',           'fit_point_lens_parallax'),
-    ('renormalize_datasets',       'renormalize'),
-    ('refit_all',                  'renormalize'),
-    ('run_parallax_grids',      'parallax_grids'),
+_STEPS_EVENT_SEARCH = [
+    ('run_ef_grid', 'event_search'),
 ]
-
-EXPECTED_STEPS_BINARY = [
-    ('run_ef_grid',                  'event_search'),
-    ('est_pl_params',                'fit_static_point_lens'),
-    ('fit_pspl',                     'fit_static_point_lens'),
-    ('fit_parallax_u0+',         'fit_point_lens_parallax'),
-    ('fit_parallax_u0-',        'fit_point_lens_parallax'),
-    ('renormalize_datasets',         'renormalize'),
-    ('refit_all',                    'renormalize'),
+_STEPS_STATIC_PL = [
+    ('est_pl_params', 'fit_static_point_lens'),
+    ('fit_pspl',      'fit_static_point_lens'),
+]
+_STEPS_PL_PARALLAX = [
+    ('fit_parallax_u0+', 'fit_point_lens_parallax'),
+    ('fit_parallax_u0-', 'fit_point_lens_parallax'),
+]
+_STEPS_RENORM = [
+    ('renormalize_datasets', 'renormalize'),
+    ('refit_all',            'renormalize'),
+]
+_STEPS_SEARCH_ANOMALY = [
     ('select_best_point_lens_model', 'search_for_anomaly'),
     ('compute_residuals',            'search_for_anomaly'),
     ('run_af_grid',                  'search_for_anomaly'),
-    ('est_binary_params',            'fit_binary_lens'),
-    ('fit_binary_models',            'fit_binary_lens'),
-    ('check_needs_renorm',           'check_binary_renorm'),
-    ('run_parallax_grids',    'parallax_grids'),
+    ('classify_anomaly',             'search_for_anomaly'),
 ]
+_STEPS_FIT_BINARY = [
+    ('est_binary_params', 'fit_binary_lens'),
+    ('fit_binary_models', 'fit_binary_lens'),
+]
+_STEPS_CHECK_BINARY_RENORM = [
+    ('check_needs_renorm', 'check_binary_renorm'),
+]
+_STEPS_PARALLAX_GRIDS = [
+    ('run_parallax_grids', 'parallax_grids'),
+]
+
+# Combined workflow lists, each built entirely from the blocks above.
+EXPECTED_STEPS = (
+    _STEPS_EVENT_SEARCH +
+    _STEPS_STATIC_PL +
+    _STEPS_PL_PARALLAX
+)
+EXPECTED_STEPS_PL_RENORM = (
+    _STEPS_EVENT_SEARCH +
+    _STEPS_STATIC_PL +
+    _STEPS_PL_PARALLAX +
+    _STEPS_RENORM +
+    _STEPS_PARALLAX_GRIDS
+)
+EXPECTED_STEPS_BINARY = (
+    _STEPS_EVENT_SEARCH +
+    _STEPS_STATIC_PL +
+    _STEPS_PL_PARALLAX +
+    _STEPS_RENORM +
+    _STEPS_SEARCH_ANOMALY +
+    _STEPS_FIT_BINARY +
+    _STEPS_CHECK_BINARY_RENORM +
+    _STEPS_PARALLAX_GRIDS
+)
+
+# ---------------------------------------------------------------------------
+# Option 2: name-based slice helper
+#
+# Replaces magic-index slicing (e.g. EXPECTED_STEPS_BINARY[:11]) with an
+# intent-revealing name. A wrong index silently tests the wrong scenario;
+# a wrong name raises ValueError immediately.
+# ---------------------------------------------------------------------------
+
+def steps_through(steps, step_name):
+    """
+    Return a prefix of `steps` ending at (and including) the first step
+    whose name matches `step_name`.
+
+    Parameters
+    ----------
+    steps : list of (name, stage) tuples
+    step_name : str
+
+    Returns
+    -------
+    list of (name, stage) tuples
+
+    Raises
+    ------
+    ValueError
+        If step_name is not present in steps.
+    """
+    for i, (name, _stage) in enumerate(steps):
+        if name == step_name:
+            return steps[:i + 1]
+    raise ValueError(f'{step_name!r} not found in steps list')
 
 
 def _make_noop_steps(expected_steps):
@@ -190,7 +249,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [('run_ef_grid', 'event_search')]
+        expected = _STEPS_EVENT_SEARCH
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -205,10 +264,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',   'event_search'),
-            ('est_pl_params', 'fit_static_point_lens'),
-        ]
+        expected = steps_through(EXPECTED_STEPS, 'est_pl_params')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -225,10 +281,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',   'event_search'),
-            ('est_pl_params', 'fit_static_point_lens'),
-        ]
+        expected = steps_through(EXPECTED_STEPS, 'est_pl_params')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -243,11 +296,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',   'event_search'),
-            ('est_pl_params', 'fit_static_point_lens'),
-            ('fit_pspl',      'fit_static_point_lens'),
-        ]
+        expected = steps_through(EXPECTED_STEPS, 'fit_pspl')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -263,7 +312,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [('run_ef_grid', 'event_search')]
+        expected = _STEPS_EVENT_SEARCH
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -279,11 +328,7 @@ class TestPointLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',   'event_search'),
-            ('est_pl_params', 'fit_static_point_lens'),
-            ('fit_pspl',      'fit_static_point_lens'),
-        ]
+        expected = steps_through(EXPECTED_STEPS, 'fit_pspl')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -295,15 +340,11 @@ class TestPointLensWorkflow(unittest.TestCase):
         starts at est_pl_params.
         """
         fitter = self._make_fitter(dry_run=True)
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS[:1])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS, 'run_ef_grid'))
         fitter.fit()
 
-        expected = [
-            ('est_pl_params',         'fit_static_point_lens'),
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-        ]
+        expected = _STEPS_STATIC_PL + _STEPS_PL_PARALLAX
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -313,14 +354,11 @@ class TestPointLensWorkflow(unittest.TestCase):
         planned_steps starts at fit_pspl.
         """
         fitter = self._make_fitter(dry_run=True)
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS[:2])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS, 'est_pl_params'))
         fitter.fit()
 
-        expected = [
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-        ]
+        expected = _STEPS_STATIC_PL[1:] + _STEPS_PL_PARALLAX
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -384,13 +422,7 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',           'event_search'),
-            ('est_pl_params',         'fit_static_point_lens'),
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-        ]
+        expected = steps_through(EXPECTED_STEPS_PL_RENORM, 'fit_parallax_u0-')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -403,15 +435,7 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',           'event_search'),
-            ('est_pl_params',         'fit_static_point_lens'),
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-            ('renormalize_datasets',  'renormalize'),
-            ('refit_all',             'renormalize'),
-        ]
+        expected = steps_through(EXPECTED_STEPS_PL_RENORM, 'refit_all')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -421,14 +445,11 @@ class TestPointLensRenormWorkflow(unittest.TestCase):
         planned_steps starts at renormalize_datasets.
         """
         fitter = self._make_fitter(dry_run=True)
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS_PL_RENORM[:5])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_PL_RENORM, 'fit_parallax_u0-'))
         fitter.fit()
 
-        expected = [
-            ('renormalize_datasets',       'renormalize'),
-            ('refit_all',                  'renormalize'),
-            ('run_parallax_grids',  'parallax_grids'),
-        ]
+        expected = _STEPS_RENORM + _STEPS_PARALLAX_GRIDS
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -506,15 +527,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',           'event_search'),
-            ('est_pl_params',         'fit_static_point_lens'),
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-            ('renormalize_datasets',  'renormalize'),
-            ('refit_all',             'renormalize'),
-        ]
+        expected = steps_through(EXPECTED_STEPS_BINARY, 'refit_all')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         self.assertEqual(actual, expected)
 
@@ -527,20 +540,7 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         with self._patch_fit_methods(fitter):
             fitter.fit()
 
-        expected = [
-            ('run_ef_grid',                  'event_search'),
-            ('est_pl_params',                'fit_static_point_lens'),
-            ('fit_pspl',                     'fit_static_point_lens'),
-            ('fit_parallax_u0+',             'fit_point_lens_parallax'),
-            ('fit_parallax_u0-',             'fit_point_lens_parallax'),
-            ('renormalize_datasets',         'renormalize'),
-            ('refit_all',                    'renormalize'),
-            ('select_best_point_lens_model', 'search_for_anomaly'),
-            ('compute_residuals',            'search_for_anomaly'),
-            ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'fit_binary_lens'),
-            ('fit_binary_models',            'fit_binary_lens'),
-        ]
+        expected = steps_through(EXPECTED_STEPS_BINARY, 'fit_binary_models')
         actual = [(step.name, step.stage) for step in fitter.completed_steps]
         print('\nexpected\n', expected)
         print('\nactual\n', actual)
@@ -548,20 +548,16 @@ class TestBinaryLensWorkflow(unittest.TestCase):
 
     def test_resume_after_stop_before_fit_binary(self):
         """
-        When completed_steps ends at search_for_anomaly,
+        When completed_steps ends at est_binary_params,
         planned_steps starts at fit_binary_models.
         """
         fitter = self._make_fitter(dry_run=True)
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS_BINARY[:11])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_BINARY, 'est_binary_params'))
         fitter.fit()
 
-        expected = [
-            ('fit_binary_models',          'fit_binary_lens'),
-            ('check_needs_renorm',         'check_binary_renorm'),
-            ('run_parallax_grids',  'parallax_grids'),
-        ]
+        expected = _STEPS_FIT_BINARY[1:] + _STEPS_CHECK_BINARY_RENORM + _STEPS_PARALLAX_GRIDS
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
-
         self.assertEqual(actual, expected)
 
     def test_resume_after_stop_after_check_binary_renorm(self):
@@ -570,12 +566,11 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         planned_steps contains only the parallax grid steps.
         """
         fitter = self._make_fitter(dry_run=True)
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS_BINARY[:13])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_BINARY, 'check_needs_renorm'))
         fitter.fit()
 
-        expected = [
-            ('run_parallax_grids',  'parallax_grids'),
-        ]
+        expected = _STEPS_PARALLAX_GRIDS
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -585,7 +580,8 @@ class TestBinaryLensWorkflow(unittest.TestCase):
         refit_all are inserted and executed before run_parallax_grids.
         """
         fitter = self._make_fitter()
-        fitter.completed_steps = _make_noop_steps(EXPECTED_STEPS_BINARY[:12])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_BINARY, 'fit_binary_models'))
 
         with ExitStack() as stack:
             stack.enter_context(
@@ -653,11 +649,7 @@ class TestPointLensWorkflowWithInitialResults(unittest.TestCase):
         fitter = self._make_fitter(dry_run=True)
         fitter.fit()
 
-        expected = [
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-        ]
+        expected = _STEPS_STATIC_PL[1:] + _STEPS_PL_PARALLAX
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         print('\nactual', actual)
         self.assertEqual(actual, expected)
@@ -731,13 +723,7 @@ class TestBinaryLensWorkflowWithInitialResults(unittest.TestCase):
         fitter = self._make_fitter(dry_run=True)
         fitter.fit()
 
-        expected = [
-            ('select_best_point_lens_model', 'search_for_anomaly'),
-            ('compute_residuals',            'search_for_anomaly'),
-            ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'fit_binary_lens'),
-            ('fit_binary_models',            'fit_binary_lens'),
-        ]
+        expected = _STEPS_SEARCH_ANOMALY + _STEPS_FIT_BINARY
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
 
@@ -796,16 +782,8 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
         parallax_grid=False) with fit_type='binary_lens' produces a step
         queue that starts at search_for_anomaly.
         """
-        # Simulate completed point-lens run through refit_all
-        pl_completed = _make_noop_steps([
-            ('run_ef_grid',           'event_search'),
-            ('est_pl_params',         'fit_static_point_lens'),
-            ('fit_pspl',              'fit_static_point_lens'),
-            ('fit_parallax_u0+',  'fit_point_lens_parallax'),
-            ('fit_parallax_u0-', 'fit_point_lens_parallax'),
-            ('renormalize_datasets',  'renormalize'),
-            ('refit_all',             'renormalize'),
-        ])
+        pl_completed = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_BINARY, 'refit_all'))
 
         pkl_path = os.path.join(self.tmp_path, 'fake.pkl')
         _make_fake_pickle(pkl_path, pl_completed)
@@ -815,17 +793,14 @@ class TestBinaryLensRestartFromPointLens(unittest.TestCase):
             dry_run=True)
         fitter.fit()
 
-        expected = [
-            ('select_best_point_lens_model', 'search_for_anomaly'),
-            ('compute_residuals',            'search_for_anomaly'),
-            ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'fit_binary_lens'),
-            ('fit_binary_models',            'fit_binary_lens'),
-            ('check_needs_renorm',           'check_binary_renorm'),
-        ]
+        expected = (
+            _STEPS_SEARCH_ANOMALY +
+            _STEPS_FIT_BINARY +
+            _STEPS_CHECK_BINARY_RENORM
+        )
         actual = [(step.name, step.stage) for step in fitter.planned_steps]
         self.assertEqual(actual, expected)
-        
+
 
 class TestExecutionLoopDynamicSteps(unittest.TestCase):
 
@@ -849,9 +824,7 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
             renormalize_errors=False,
             stop_after='fit_static_point_lens:est_pl_params')
 
-        fitter.completed_steps = _make_noop_steps([
-            ('run_ef_grid', 'event_search'),
-        ])
+        fitter.completed_steps = _make_noop_steps(_STEPS_EVENT_SEARCH)
         fitter.intermediate_results.best_ef_grid_point = BEST_EF_GRID_POINT
 
         fitter.fit()
@@ -862,7 +835,6 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
         # execution loop continued normally — est_pl_params is in completed_steps
         self.assertEqual(
             fitter.completed_steps[-1].name, 'est_pl_params')
-
 
     def test_action_returning_steps_inserts_at_front_of_queue(self):
         """
@@ -879,21 +851,8 @@ class TestExecutionLoopDynamicSteps(unittest.TestCase):
             parallax_grid=True,
             stop_after='check_binary_renorm:check_needs_renorm')
 
-        # Pre-populate completed_steps through fit_binary_models
-        fitter.completed_steps = _make_noop_steps([
-            ('run_ef_grid',                  'event_search'),
-            ('est_pl_params',                'fit_static_point_lens'),
-            ('fit_pspl',                     'fit_static_point_lens'),
-            ('fit_parallax_u0+',         'fit_point_lens_parallax'),
-            ('fit_parallax_u0-',        'fit_point_lens_parallax'),
-            ('renormalize_datasets',         'renormalize'),
-            ('refit_all',                    'renormalize'),
-            ('select_best_point_lens_model', 'search_for_anomaly'),
-            ('compute_residuals',            'search_for_anomaly'),
-            ('run_af_grid',                  'search_for_anomaly'),
-            ('est_binary_params',            'fit_binary_lens'),
-            ('fit_binary_models',            'fit_binary_lens'),
-        ])
+        fitter.completed_steps = _make_noop_steps(
+            steps_through(EXPECTED_STEPS_BINARY, 'fit_binary_models'))
 
         # Build a real MulensFitter with binary params and OB05390 datasets
         binary_fitter = MulensFitter(
@@ -1000,7 +959,6 @@ class TestSelectBestPointLensModel(unittest.TestCase):
         fitter = self._make_fitter()
         with self.assertRaises(RuntimeError):
             fitter.select_best_point_lens_model()
-
 
     def test_multiple_incomplete_records_raises(self):
         """
