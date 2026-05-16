@@ -401,6 +401,15 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         return self._binary_params
 
     @property
+    def alternate_params(self):
+        base_params = self.get_binary_lens_params()
+        s_new = base_params.ulens['s']**2 / self.best_params['s']
+        alt_params = BinaryLensParams(base_params.ulens)
+        alt_params.mag_methods = base_params.mag_methods
+        alt_params.ulens['s'] = s_new
+        return alt_params
+
+    @property
     def best_params(self):
         """
         Returns the best-fit parameter dictionary from the grid search and
