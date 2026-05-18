@@ -940,6 +940,7 @@ class MMEXOFASTFitter:
             steps.extend(self._build_check_binary_renorm_steps())
         if self.parallax_grid:
             steps.extend(self._build_parallax_grid_steps())
+
         return steps
 
     def _build_event_search_steps(self) -> list[WorkflowStep]:
@@ -1934,12 +1935,17 @@ class MMEXOFASTFitter:
             return dict(existing.params)
 
         # 2. Sign-transform from another parallax branch
+        # "s" = sign, "tgt" = target
         su0_tgt, spi_tgt = BRANCH_SIGNS[key.parallax_branch]
         for other_key, other_rec in self.all_fit_results.items():
             if (other_key.lens_type == key.lens_type
                     and other_key.source_type == key.source_type
                     and other_key.parallax_branch in BRANCH_SIGNS
-                    and other_key.parallax_branch != key.parallax_branch):
+                    and other_key.parallax_branch != key.parallax_branch
+                    and ((other_rec.sigmas is None) or
+                         (np.abs(other_rec.sigmas['pi_E_E'] / other_rec.params['pi_E_E']) < 0.5)
+                    )  # don't bother if there parallax isn't well constrained.
+            ):
                 su0_src, spi_src = BRANCH_SIGNS[other_key.parallax_branch]
                 base = dict(other_rec.params)
                 if 'u_0' in base:

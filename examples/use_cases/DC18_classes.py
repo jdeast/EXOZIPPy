@@ -3,6 +3,7 @@ import exozippy
 import numpy as np
 import pandas as pd
 import MulensModel as mm
+from astropy.coordinates import SkyCoord
 import matplotlib.pyplot as plt
 
 dir_ = os.path.join(exozippy.MULENS_DATA_PATH, "2018DataChallenge")
@@ -21,8 +22,8 @@ class TestDataSet():
             dir_, 'n20180816.Z087.WFIRST18.{0:03}.txt'.format(lc_num))
 
         index = np.where(event_info['num'] == lc_num)
-        self.coords = '{0} {1}'.format(
-            event_info['ra'][index][0], event_info['dec'][index][0])
+        coords = SkyCoord(event_info['ra'][index][0], event_info['dec'][index][0], unit='deg')
+        self.coords = coords.to_string(style='hmsdms')
 
 
 class DC18Answers():
