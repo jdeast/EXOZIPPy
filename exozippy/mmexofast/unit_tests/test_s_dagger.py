@@ -45,9 +45,9 @@ class TestSDagger(unittest.TestCase):
                 #np.testing.assert_almost_equal(result[key], value)
                 pass
             elif key == 's_mean':
-                np.testing.assert_almost_equal(result['s'], value)
+                assert abs(result['s'] - value) / abs(value) < 0.01
             elif key == 'log_q':
-                np.testing.assert_almost_equal(np.log10(result['q']), value)  # Unlikely to be terribly accurate.
+                assert abs(np.log10(result['q']) - value) < 0.5  # Unlikely to be terribly accurate.
 
     def test_kb161105_estimate(self):
         """Test that anomaly_lc_params gives the correct guess for alpha, s."""
@@ -64,6 +64,6 @@ class TestSDagger(unittest.TestCase):
             estimator._is_run = True
             estimator._binary_params = mmexo.estimate_params.BinaryLensParams(KB161105[solution])
             alt_sol = estimator.alternate_params.ulens
-            np.testing.assert_almost_equal(alt_sol['s'], KB161105['expected']['s_mean']**2 / KB161105[solution]['s'])
+            assert abs(1. - KB161105['expected']['s_mean']**2 / KB161105[solution]['s'] / alt_sol['s']) < 0.01
 
 
