@@ -16,16 +16,18 @@ base_dir = os.path.join(
 
 def fit_lc(lc_num, verbose=False):
     data = TestDataSet(lc_num)
+    output_dir = os.path.join(base_dir, 'W{0:03}'.format(lc_num))
+    os.makedirs(output_dir, exist_ok=True)
 
     file_prefix = 'WFIRST.{0:03}'.format(lc_num)
     fitter = exozippy.mmexofast.mmexofast.fit(
         files=[data.file_w149, data.file_z087], coords=data.coords, fit_type='binary_lens',
         verbose=verbose, renormalize_errors=False,
-        log_file=os.path.join(base_dir, file_prefix + '.log'),
-        restart_file=os.path.join(base_dir, file_prefix + '.pkl'),
+        log_file=os.path.join(output_dir, file_prefix + '.log'),
+        restart_file=os.path.join(output_dir, file_prefix + '.pkl'),
         stop_after='fit_binary_lens:est_binary_params',
         output_config=exozippy.mmexofast.OutputConfig(
-            output_dir=base_dir, file_prefix=file_prefix, save_plots=True, save_table=True,
+            output_dir=output_dir, file_prefix=file_prefix, save_plots=True, save_table=True,
             save_exozippy_init=False)
     )
 
