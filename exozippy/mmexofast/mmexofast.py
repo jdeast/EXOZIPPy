@@ -1712,6 +1712,18 @@ class MMEXOFASTFitter:
             logger.info('mag_methods: %s', params.mag_methods)
             est_params['wide'] = params
 
+        elif self.intermediate_results.anomaly_type == 'close':
+            est_params = {}
+
+            estimator = mmexo.estimate_params.ClosePlanetGridSearchEstimator(
+                datasets=self.datasets,
+                params=self.intermediate_results.anomaly_lc_params,
+            )
+            estimator.run()
+            params = estimator.binary_params
+            logger.info('Estimated binary params: %s', params.ulens)
+            logger.info('mag_methods: %s', params.mag_methods)
+            est_params['close'] = params
         else:
             est_params = None
             logger.info('Binary params estimate not implemented for ', self.intermediate_results.anomaly_type)
@@ -2201,22 +2213,22 @@ class MMEXOFASTFitter:
         model = event.model
         if model.mag_methods is not None:
             return [model.mag_methods[0], model.mag_methods[-1]]
-        elif 'best_af_grid_point' in self.intermediate_results:
+        elif self.intermediate_results.best_af_grid_point is not None:
             n_teff = 3
-            start = self.intermediate_results['best_af_grid_point']['t_0'] - n_teff * self.intermediate_results['best_af_grid_point']['t_eff']
-            stop = self.intermediate_results['best_af_grid_point']['t_0'] + n_teff * self.intermediate_results['best_af_grid_point']['t_eff']
+            start = self.intermediate_results.best_af_grid_point['t_0'] - n_teff * self.intermediate_results.best_af_grid_point['t_eff']
+            stop = self.intermediate_results.best_af_grid_point['t_0'] + n_teff * self.intermediate_results.best_af_grid_point['t_eff']
             return [start, stop]
         else:
             return self._get_event_t_range(event, n_tE=1)
 
     def _plot_planet_window(self):
-        if 'best_af_grid_point' in self.intermediate_results:
-            plt.axvline(self.intermediate_results['best_af_grid_point']['t_0'] - 2450000., color='black', linestyle=':')
+        if self.intermediate_results.best_af_grid_point is not None:
+            plt.axvline(self.intermediate_results.best_af_grid_point['t_0'] - 2450000., color='black', linestyle=':')
             plt.axvline(
-                self.intermediate_results['best_af_grid_point']['t_0'] - self.intermediate_results['best_af_grid_point']['t_eff'] - 2450000.,
+                self.intermediate_results.best_af_grid_point['t_0'] - self.intermediate_results.best_af_grid_point['t_eff'] - 2450000.,
                 color='black', linestyle='--')
             plt.axvline(
-                self.intermediate_results['best_af_grid_point']['t_0'] + self.intermediate_results['best_af_grid_point']['t_eff'] - 2450000.,
+                self.intermediate_results.best_af_grid_point['t_0'] + self.intermediate_results.best_af_grid_point['t_eff'] - 2450000.,
                 color='black', linestyle='--')
 
     def _plot_event(self, event, n_tE=5, suptitle=None):
