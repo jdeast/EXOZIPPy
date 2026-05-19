@@ -984,35 +984,6 @@ class WidePlanetEnsembleInitializer():
             ax.minorticks_on()
 
 
-def get_close_params(params, q=None, rho=None):
-    """
-    Transform initial parameters into two close model parameters for a binary lens. One for upper and one for lower caustics. 
-
-    Arguments:
-        params: *dictionary*
-            Initial parameters.
-
-            - 't_0' (*float*): Time of maximum magnification.
-            - 'u_0' (*float*): Impact parameter.
-            - 't_E' (*float*): Einstein crossing time.
-            - 't_pl' (*float*): Time at which to compute the close model parameters.
-            - 'dt' (*float*), optional: Duration of the anomaly
-            - 'q' (*float*): trial value of q for calculating the caustic,
-                default is 0.004
-            - 'rho' (*float*): value of rho for the model. If 'dt' is specified,
-                'rho' is calculated from 'dt'. If neither are specified,
-                default is 0.001.
-
-    Returns:
-        lens1, lens2 : *tuple of BinaryLensParams*
-            Two instances of BinaryLensParams representing close model parameters.
-    """
-    estimator_upper = CloseUpperPlanetParameterEstimator(params=params, q=q)
-    estimator_lower = CloseLowerPlanetParameterEstimator(params=params, q=q)
-
-    return estimator_upper.binary_params, estimator_lower.binary_params
-
-
 class CloseUpperPlanetParameterEstimator(WidePlanetParameterEstimator):
 
     def __init__(self, params, limit='GG97', q=None):
@@ -1108,6 +1079,67 @@ class CloseLowerPlanetParameterEstimator(CloseUpperPlanetParameterEstimator):
             self._alpha = self._correct_alpha(alpha)
 
         return self._alpha
+
+
+def get_close_params(params, q=None, rho=None):
+    """
+    Transform initial parameters into two close model parameters for a binary lens. One for upper and one for lower caustics.
+
+    Arguments:
+        params: *dictionary*
+            Initial parameters.
+
+            - 't_0' (*float*): Time of maximum magnification.
+            - 'u_0' (*float*): Impact parameter.
+            - 't_E' (*float*): Einstein crossing time.
+            - 't_pl' (*float*): Time at which to compute the close model parameters.
+            - 'dt' (*float*), optional: Duration of the anomaly
+            - 'q' (*float*): trial value of q for calculating the caustic,
+                default is 0.004
+            - 'rho' (*float*): value of rho for the model. If 'dt' is specified,
+                'rho' is calculated from 'dt'. If neither are specified,
+                default is 0.001.
+
+    Returns:
+        lens1, lens2 : *tuple of BinaryLensParams*
+            Two instances of BinaryLensParams representing close model parameters.
+    """
+    estimator_upper = CloseUpperPlanetParameterEstimator(params=params, q=q)
+    estimator_lower = CloseLowerPlanetParameterEstimator(params=params, q=q)
+
+    return estimator_upper.binary_params, estimator_lower.binary_params
+
+
+class ClosePlanetParameterEstimator(WidePlanetParameterEstimator):
+
+    @property
+    def s(self):
+        if self._s is None:
+            u = self.u_pl
+            self._s = np.abs(0.5 * (np.sqrt(u ** 2 + 4) - u))
+        return self._s
+
+    @property
+    def q(self):
+        if self._q is None:
+            print((self.params['dt'] / self.params['t_E'] / 4.)**2)
+            print((self.s / self.u_0))
+            print(np.abs((np.sin(np.deg2rad(self.alpha)))**3))
+            self._q = (self.params['dt'] / self.params['t_E'] / 4.)**2 * (self.s / self.u_0) * np.abs((np.sin(np.deg2rad(self.alpha)))**3)
+        return self._q
+
+    @property
+    def alpha(self):
+        if self._alpha is None:
+            alpha = np.arctan2(self.params['u_0'], self.tau_pl)
+            alpha = np.rad2deg(-alpha)
+            self._alpha = self._correct_alpha(alpha)
+
+        return self._alpha
+
+
+class ClosePlanetGridSearchEstimator(WidePlanetGridSearchEstimator, ClosePlanetParameterEstimator):
+    pass
 
 
 def model_pspl_mag_at_pl(params):
