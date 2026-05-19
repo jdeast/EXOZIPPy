@@ -791,6 +791,10 @@ class MMEXOFASTFitter:
         while i < len(self.planned_steps):
             step = self.planned_steps[i]
 
+            #debugging:
+            #logger.info(f'\nDEBUG running step: {step.stage}:{step.name}')
+            #logger.info(f'DEBUG remaining steps: %s', [f'{s.stage}:{s.name}' for s in self.planned_steps])
+
             if (self.stop_before is not None
                     and self._matches_stop_point(
                         self.stop_before, step, mode='before'
@@ -803,12 +807,15 @@ class MMEXOFASTFitter:
             else:
                 step.run()
                 self.completed_steps.append(step)
-                self._save_restart_state()
 
                 # Insert any dynamically generated follow-up steps
                 if isinstance(step.result, list) and step.result:
+                    #logger.info('DEBUG: steps to insert: %s', [f'{s.stage}:{s.name}' for s in step.result])
+
                     for j, dynamic_step in enumerate(step.result):
                         self.planned_steps.insert(i + 1 + j, dynamic_step)
+
+                self._save_restart_state()
 
             # Lookahead uses the queue *after* any dynamic insertions
             remaining = self.planned_steps[i + 1:]
@@ -837,7 +844,7 @@ class MMEXOFASTFitter:
                 logger.info('Saved EXOZIPPy init data to %s.', path)
 
             if self._output_config.save_plots:
-                self._plot_event()
+                self._plot_best_fit_event()
 
         return self.all_fit_results
 
@@ -918,6 +925,7 @@ class MMEXOFASTFitter:
         steps = self._build_common_point_lens_steps()
         if self.parallax_grid:
             steps.extend(self._build_parallax_grid_steps())
+
         return steps
 
     def _build_binary_lens_steps(self) -> list[WorkflowStep]:
@@ -1145,21 +1153,6 @@ class MMEXOFASTFitter:
         -------
         list of WorkflowStep
         """
-        #branches = [
-        #    mmexo.ParallaxBranch.U0_PLUS,
-        #    mmexo.ParallaxBranch.U0_MINUS,
-        #]
-        #steps = []
-        #for branch in branches:
-        #    name = f'run_parallax_grid_{branch.value.lower()}'
-        #    steps.append(
-        #        WorkflowStep(
-        #            name=name,
-        #            func=lambda b=branch: self.run_parallax_grids(branch=b),
-        #            stage='run_parallax_grids',
-        #            description=f'Run parallax grid search for branch {branch.value}',
-        #        )
-        #    )
         steps = [
             WorkflowStep(
                 name=f'run_parallax_grids',
@@ -1682,7 +1675,7 @@ class MMEXOFASTFitter:
             af_results=self.intermediate_results.best_af_grid_point,
         )
         params = estimator.get_anomaly_lc_parameters()
-        logger.info('Estimated binary params: %s', params)
+        logger.info('Estimated anomaly params: %s', params)
         self.intermediate_results.anomaly_lc_params = params
 
     def classify_anomaly(self) -> None:
@@ -1695,8 +1688,7 @@ class MMEXOFASTFitter:
         """
         classifier = mmexo.AnomalyClassifier()
         self.intermediate_results.anomaly_type = classifier.classify(self.intermediate_results.anomaly_lc_params)
-        logger.info('Anomaly classified as anomaly_type = ', self.intermediate_results.anomaly_type)
-
+        logger.info('Anomaly classified as anomaly_type = %s', self.intermediate_results.anomaly_type)
 
     def est_binary_params(self) -> None:
         """
@@ -1725,6 +1717,8 @@ class MMEXOFASTFitter:
             logger.info('Binary params estimate not implemented for ', self.intermediate_results.anomaly_type)
 
         self.intermediate_results.est_binary_params = est_params
+        if (self._output_config is not None) and self._output_config['save_plots']:
+            self._plot_initial_2L1S_guess()
 
     def fit_binary_models(self) -> Optional[list[WorkflowStep]]:
         """
@@ -2068,8 +2062,14 @@ class MMEXOFASTFitter:
             'config': self._get_config(),
             'state':  self._get_state(),
         }
+
+        # debugging:
+        #step = self.completed_steps[-1]
+        #logger.info(f'DEBUG save_restart_state called after: {step.stage}:{step.name}')
+
         with open(self._restart_path, 'wb') as f:
             pickle.dump(restart_data, f)
+
         logger.debug('Restart state saved to %s.', self._restart_path)
 
     def _get_config(self) -> dict:
@@ -2191,7 +2191,71 @@ class MMEXOFASTFitter:
         plt.close(fig)
         logger.info('Saved piE grid plot to %s.', path)
 
-    def _plot_event(self):
+    def _get_event_t_range(self, event, n_tE=5):
+        params = event.model.parameters.parameters
+        start = params['t_0'] - n_tE * params['t_E']
+        stop = params['t_0'] + n_tE * params['t_E']
+        return [start, stop]
+
+    def _get_planet_t_range(self, event, n_tE=5):
+        model = event.model
+        if model.mag_methods is not None:
+            return [model.mag_methods[0], model.mag_methods[-1]]
+        elif 'best_af_grid_point' in self.intermediate_results:
+            n_teff = 3
+            start = self.intermediate_results['best_af_grid_point']['t_0'] - n_teff * self.intermediate_results['best_af_grid_point']['t_eff']
+            stop = self.intermediate_results['best_af_grid_point']['t_0'] + n_teff * self.intermediate_results['best_af_grid_point']['t_eff']
+            return [start, stop]
+        else:
+            return self._get_event_t_range(event, n_tE=1)
+
+    def _plot_planet_window(self):
+        if 'best_af_grid_point' in self.intermediate_results:
+            plt.axvline(self.intermediate_results['best_af_grid_point']['t_0'] - 2450000., color='black', linestyle=':')
+            plt.axvline(
+                self.intermediate_results['best_af_grid_point']['t_0'] - self.intermediate_results['best_af_grid_point']['t_eff'] - 2450000.,
+                color='black', linestyle='--')
+            plt.axvline(
+                self.intermediate_results['best_af_grid_point']['t_0'] + self.intermediate_results['best_af_grid_point']['t_eff'] - 2450000.,
+                color='black', linestyle='--')
+
+    def _plot_event(self, event, n_tE=5, suptitle=None):
+        if suptitle is None:
+            suptitle = '{0}'.format(event.model)
+
+        plt.figure(figsize=(10, 6))
+        plt.suptitle(suptitle)
+        plt.subplot(1, 2, 1)
+        event.plot_data(show_bad=True, subtract_2450000=True)
+        t_range = self._get_event_t_range(event, n_tE=n_tE)
+        event.plot_model(
+            t_range=t_range,
+            subtract_2450000=True, color='black', zorder=10)
+        self._plot_planet_window()
+        plt.xlim(np.array(t_range) - 2450000.)
+        plt.minorticks_on()
+
+        plt.subplot(1, 2, 2)
+        event.plot_data(show_bad=True, subtract_2450000=True)
+        planet_t_range = self._get_planet_t_range()
+        event.plot_model(t_range=planet_t_range, color='black', subtract_2450000=True, zorder=10)
+        self._plot_planet_window()
+        plt.xlim(np.array(planet_t_range) - 2450000.)
+        plt.minorticks_on()
+
+        plt.tight_layout()
+
+    def _plot_initial_2L1S_guess(self):
+        for key, params in self.intermediate_results.est_binary_params:
+            model = MulensModel.Model(parameters=params.ulens)
+            model.set_magnification_methods(params.mag_methods)
+            self._plot_event(
+                MulensModel.Event(model=model, datasets=self.datasets),
+                suptitle='{key}:\n{model}')
+            path = self._output_config.plot_path(f'af_{key}')
+            plt.savefig(path)
+
+    def _plot_best_fit_event(self):
         # Get the best fit
         complete_fits = [
             rec for key, rec in self.all_fit_results.items()
@@ -2203,7 +2267,8 @@ class MMEXOFASTFitter:
         event = best_fit.full_result.fitter.get_event()
 
         # plot the light curve
-        event.plot(trajectory=False)
+        #event.plot(trajectory=False)
+        self._plot_event(event)
         path = self._output_config.plot_path('lc')
         plt.savefig(path)
         logger.info('Saved light curve plot to %s.', path)

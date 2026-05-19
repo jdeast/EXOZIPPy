@@ -24,6 +24,9 @@ def fit_lc(lc_num, verbose=False):
         log_file=os.path.join(base_dir, file_prefix + '.log'),
         restart_file=os.path.join(base_dir, file_prefix + '.pkl'),
         stop_after='fit_binary_lens:est_binary_params',
+        output_config=exozippy.mmexofast.OutputConfig(
+            output_dir=base_dir, file_prefix=file_prefix, save_plots=True, save_table=True,
+            save_exozippy_init=False)
     )
 
     return fitter.all_fit_results
