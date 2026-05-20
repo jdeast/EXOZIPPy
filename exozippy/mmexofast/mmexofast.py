@@ -1729,7 +1729,7 @@ class MMEXOFASTFitter:
             logger.info('Binary params estimate not implemented for ', self.intermediate_results.anomaly_type)
 
         self.intermediate_results.est_binary_params = est_params
-        if (self._output_config is not None) and self._output_config['save_plots']:
+        if (self._output_config is not None) and self._output_config.save_plots:
             self._plot_initial_2L1S_guess()
 
     def fit_binary_models(self) -> Optional[list[WorkflowStep]]:
@@ -2211,15 +2211,24 @@ class MMEXOFASTFitter:
 
     def _get_planet_t_range(self, event, n_tE=5):
         model = event.model
-        if model.mag_methods is not None:
-            return [model.mag_methods[0], model.mag_methods[-1]]
+        if model.methods is not None and (model.n_lenses > 1):
+            if model.methods is dict:
+                raise NotImplementedError('Plotting for Binary Source models not implemented, yet.')
+                #probably want to loop over the sources and find min/max values of hexadecapole
+            else:
+                hex_indices = [i for i in range(1, len(model.methods), 2) if model.methods[i] == "hexadecapole"]
+                first_idx = hex_indices[0] - 1 if hex_indices else 0
+                last_idx = min(hex_indices[-1] + 1, len(model.methods) - 1) if hex_indices else len(model.methods) - 1
+
+                return [model.methods[first_idx], model.methods[last_idx]]
+
         elif self.intermediate_results.best_af_grid_point is not None:
             n_teff = 3
             start = self.intermediate_results.best_af_grid_point['t_0'] - n_teff * self.intermediate_results.best_af_grid_point['t_eff']
             stop = self.intermediate_results.best_af_grid_point['t_0'] + n_teff * self.intermediate_results.best_af_grid_point['t_eff']
             return [start, stop]
         else:
-            return self._get_event_t_range(event, n_tE=1)
+            return self._get_event_t_range(event, n_tE=n_tE)
 
     def _plot_planet_window(self):
         if self.intermediate_results.best_af_grid_point is not None:
@@ -2233,7 +2242,7 @@ class MMEXOFASTFitter:
 
     def _plot_event(self, event, n_tE=5, suptitle=None):
         if suptitle is None:
-            suptitle = '{0}'.format(event.model)
+            suptitle = '{0}'.format(event.model.parameters)
 
         plt.figure(figsize=(10, 6))
         plt.suptitle(suptitle)
@@ -2243,13 +2252,19 @@ class MMEXOFASTFitter:
         event.plot_model(
             t_range=t_range,
             subtract_2450000=True, color='black', zorder=10)
-        self._plot_planet_window()
+        if event.model.n_lenses > 1:
+            self._plot_planet_window()
+
         plt.xlim(np.array(t_range) - 2450000.)
         plt.minorticks_on()
 
         plt.subplot(1, 2, 2)
         event.plot_data(show_bad=True, subtract_2450000=True)
-        planet_t_range = self._get_planet_t_range()
+        if event.model.n_lenses > 1:
+            planet_t_range = self._get_planet_t_range(event)
+        else:
+            planet_t_range = self._get_event_t_range(event, n_tE=0.5)
+
         event.plot_model(t_range=planet_t_range, color='black', subtract_2450000=True, zorder=10)
         self._plot_planet_window()
         plt.xlim(np.array(planet_t_range) - 2450000.)
@@ -2258,12 +2273,13 @@ class MMEXOFASTFitter:
         plt.tight_layout()
 
     def _plot_initial_2L1S_guess(self):
-        for key, params in self.intermediate_results.est_binary_params:
+        #print(self.intermediate_results.est_binary_params)
+        for key, params in self.intermediate_results.est_binary_params.items():
             model = MulensModel.Model(parameters=params.ulens)
             model.set_magnification_methods(params.mag_methods)
             self._plot_event(
                 MulensModel.Event(model=model, datasets=self.datasets),
-                suptitle='{key}:\n{model}')
+                suptitle=f'{key}:\n{model.parameters}')
             path = self._output_config.plot_path(f'af_{key}')
             plt.savefig(path)
 
@@ -2276,6 +2292,9 @@ class MMEXOFASTFitter:
         best_fit = (
             min(complete_fits, key=lambda r: r.chi2()) if complete_fits else None
         )
+        if best_fit.model_key.lens_type == mmexo.LensType.POINT:
+            best_fit = self.select_best_point_lens_model()
+
         event = best_fit.full_result.fitter.get_event()
 
         # plot the light curve
