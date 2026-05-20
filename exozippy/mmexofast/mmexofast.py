@@ -314,14 +314,13 @@ def fit(
     MMEXOFASTFitter
         The fitter after ``fit()`` has been called.
     """
-    fitter = MMEXOFASTFitter(
+    with MMEXOFASTFitter(
         datasets=datasets,
         files=files,
         fit_type=fit_type,
         **kwargs,
-    )
-    fitter.fit()
-    return fitter
+    ) as fitter:
+        return fitter.fit()
 
 
 # ===========================================================================
@@ -1633,6 +1632,7 @@ class MMEXOFASTFitter:
         event = MulensModel.Event(
             datasets=self.datasets,
             model=MulensModel.Model(best.params),
+            coords=self.coords
         )
         event.fit_fluxes()
 
@@ -2766,6 +2766,13 @@ class MMEXOFASTFitter:
             f'planned_steps={len(self.planned_steps)}, '
             f'n_fits={len(self.all_fit_results)})'
         )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False  # Don't suppress exceptions
 
     def close(self) -> None:
         """
