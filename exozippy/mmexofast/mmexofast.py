@@ -816,6 +816,7 @@ class MMEXOFASTFitter:
                         self.planned_steps.insert(i + 1 + j, dynamic_step)
 
                 self._save_restart_state()
+                logger.info("\n")
 
             # Lookahead uses the queue *after* any dynamic insertions
             remaining = self.planned_steps[i + 1:]
@@ -1393,19 +1394,20 @@ class MMEXOFASTFitter:
             result = self._do_parallax_fit(
                 seed, source_type=key.source_type
             )
-            self.all_fit_results.set(
-                mmexo.FitRecord.from_full_result(
-                    model_key=key,
-                    full_result=result,
-                    renorm_factors=self.renorm_factors,
-                    fixed=False,
+            if result is not None:
+                self.all_fit_results.set(
+                    mmexo.FitRecord.from_full_result(
+                        model_key=key,
+                        full_result=result,
+                        renorm_factors=self.renorm_factors,
+                        fixed=False,
+                    )
                 )
-            )
-            logger.info(
-                'Parallax %s: chi2=%.2f',
-                key.parallax_branch.value,
-                result.chi2,
-            )
+                logger.info(
+                    'Parallax %s: chi2=%.2f',
+                    key.parallax_branch.value,
+                    result.chi2,
+                )
 
     def renormalize_datasets(self) -> None:
         """
@@ -1895,7 +1897,12 @@ class MMEXOFASTFitter:
             datasets=self.datasets,
             **self._get_fitter_kwargs(source_type=source_type),
         )
-        fitter.run()
+        try:
+            fitter.run()
+        except Exception as e:
+            logger.info('Parallax fit failed:\n{0}: {1}'.format(type(e).__name__, e))
+            return None
+
         logger.info('Parallax fit: %s', fitter.best)
         logger.info('      sigmas: %s', list(fitter.results.sigmas))
         return mmexo.MMEXOFASTFitResults(fitter)

@@ -30,8 +30,8 @@ def fit_lc(lc_num, verbose=False):
             output_dir=output_dir, file_prefix=file_prefix, save_plots=True, save_table=True,
             save_exozippy_init=False)
     )
-
-    return fitter.all_fit_results
+    fitter.close()
+    #results = fitter.all_fit_results
 
 
 def evaluate_results(lc_num):
