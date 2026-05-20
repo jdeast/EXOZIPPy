@@ -1430,8 +1430,7 @@ class MMEXOFASTFitter:
 
         event = MulensModel.Event(
             datasets=self.datasets,
-            model=reference_model,
-            **self._get_fitter_kwargs(source_type=reference_fit.model_key.source_type)
+            model=reference_model
         )
         event.fit_fluxes()
 
@@ -1632,7 +1631,8 @@ class MMEXOFASTFitter:
         event = MulensModel.Event(
             datasets=self.datasets,
             model=MulensModel.Model(best.params),
-            **self._get_fitter_kwargs(source_type=best.model_key.source_type)
+            coords=self.coords
+            # TODO: Tracking inputs to Model and Event is going to be a problem when fixed fluxes are implemented.
         )
         event.fit_fluxes()
 
@@ -1675,7 +1675,7 @@ class MMEXOFASTFitter:
             datasets=self.datasets,
             pspl_params=best_pspl.params,
             af_results=self.intermediate_results.best_af_grid_point,
-            **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE)
+            coords=self.coords,
         )
         params = estimator.get_anomaly_lc_parameters()
         logger.info('Estimated anomaly params: %s', params)
@@ -1708,7 +1708,7 @@ class MMEXOFASTFitter:
             estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(
                 datasets=self.datasets,
                 params=self.intermediate_results.anomaly_lc_params,
-                **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),
+                coords=self.coords,
             )
             estimator.run()
             params = estimator.binary_params
@@ -1722,7 +1722,7 @@ class MMEXOFASTFitter:
             estimator = mmexo.estimate_params.ClosePlanetGridSearchEstimator(
                 datasets=self.datasets,
                 params=self.intermediate_results.anomaly_lc_params,
-                **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE)
+                coords=self.coords,
             )
             estimator.run()
             params = estimator.binary_params
@@ -1762,7 +1762,7 @@ class MMEXOFASTFitter:
             anomaly_lc_params=self.intermediate_results.est_binary_params,
             sigmas=sigmas,
             emcee_settings=self.emcee_settings,
-            **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),
+            **self._get_fitter_kwargs(),
         )
         logger.info(
             'Initial 2L1S Wide Model: %s',
@@ -1962,9 +1962,7 @@ class MMEXOFASTFitter:
                     and ((other_rec.sigmas is None) or
                          (np.abs(other_rec.sigmas['pi_E_E'] / other_rec.params['pi_E_E']) < 0.5)
                     )  # don't bother if the parallax isn't well constrained.
-                       # TODO: this constraint doesn't appear to work --> write a unit test!
             ):
-
                 su0_src, spi_src = BRANCH_SIGNS[other_key.parallax_branch]
                 base = dict(other_rec.params)
                 if 'u_0' in base:
@@ -2292,8 +2290,7 @@ class MMEXOFASTFitter:
             model.set_magnification_methods(params.mag_methods)
             self._plot_event(
                 MulensModel.Event(
-                    model=model, datasets=self.datasets,
-                    **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),),
+                    model=model, datasets=self.datasets, coords=self.coords),
                 suptitle=f'{key}:\n{model.parameters}')
             path = self._output_config.plot_path(f'af_{key}')
             plt.savefig(path)
@@ -2440,6 +2437,16 @@ class MMEXOFASTFitter:
             )
         return result
 
+    def _get_model_kwargs(self):
+        kwargs = {
+            'coords':                      self.coords,
+            'limb_darkening_coeffs_u':     self.limb_darkening_coeffs_u,
+            'limb_darkening_coeffs_gamma': (
+                self.limb_darkening_coeffs_gamma
+            )
+        }
+        return kwargs
+
     def _get_fitter_kwargs(self, source_type=None) -> dict:
         """
         Bundle fitter options for passing to ``SFitFitter``.
@@ -2455,16 +2462,13 @@ class MMEXOFASTFitter:
         dict
             Keyword arguments ready to unpack into a fitter constructor.
         """
-        kwargs = {
-            'coords':                      self.coords,
-            'mag_methods':                 self.mag_methods,
-            'limb_darkening_coeffs_u':     self.limb_darkening_coeffs_u,
-            'limb_darkening_coeffs_gamma': (
-                self.limb_darkening_coeffs_gamma
-            ),
+        kwargs = self._get_model_kwargs()
+        kwargs.update({
+            'mag_methods': self.mag_methods,
             'fix_source_flux':             self.fix_source_flux_map,
             'fix_blend_flux':              self.fix_blend_flux_map,
-        }
+        })
+
         if source_type == mmexo.SourceType.POINT:
             kwargs['mag_methods'] = None
         return kwargs
