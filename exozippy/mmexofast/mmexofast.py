@@ -815,7 +815,7 @@ class MMEXOFASTFitter:
                         self.planned_steps.insert(i + 1 + j, dynamic_step)
 
                 self._save_restart_state()
-                logger.info("\n")
+                logger.info("")
 
             # Lookahead uses the queue *after* any dynamic insertions
             remaining = self.planned_steps[i + 1:]
@@ -1431,7 +1431,7 @@ class MMEXOFASTFitter:
         event = MulensModel.Event(
             datasets=self.datasets,
             model=reference_model,
-            coords=self.coords,
+            **self._get_fitter_kwargs(source_type=reference_fit.model_key.source_type)
         )
         event.fit_fluxes()
 
@@ -1632,7 +1632,7 @@ class MMEXOFASTFitter:
         event = MulensModel.Event(
             datasets=self.datasets,
             model=MulensModel.Model(best.params),
-            coords=self.coords
+            **self._get_fitter_kwargs(source_type=best.model_key.source_type)
         )
         event.fit_fluxes()
 
@@ -1675,6 +1675,7 @@ class MMEXOFASTFitter:
             datasets=self.datasets,
             pspl_params=best_pspl.params,
             af_results=self.intermediate_results.best_af_grid_point,
+            **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE)
         )
         params = estimator.get_anomaly_lc_parameters()
         logger.info('Estimated anomaly params: %s', params)
@@ -1707,6 +1708,7 @@ class MMEXOFASTFitter:
             estimator = mmexo.estimate_params.WidePlanetGridSearchEstimator(
                 datasets=self.datasets,
                 params=self.intermediate_results.anomaly_lc_params,
+                **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),
             )
             estimator.run()
             params = estimator.binary_params
@@ -1720,6 +1722,7 @@ class MMEXOFASTFitter:
             estimator = mmexo.estimate_params.ClosePlanetGridSearchEstimator(
                 datasets=self.datasets,
                 params=self.intermediate_results.anomaly_lc_params,
+                **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE)
             )
             estimator.run()
             params = estimator.binary_params
@@ -1759,6 +1762,7 @@ class MMEXOFASTFitter:
             anomaly_lc_params=self.intermediate_results.est_binary_params,
             sigmas=sigmas,
             emcee_settings=self.emcee_settings,
+            **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),
         )
         logger.info(
             'Initial 2L1S Wide Model: %s',
@@ -1957,8 +1961,10 @@ class MMEXOFASTFitter:
                     and other_key.parallax_branch != key.parallax_branch
                     and ((other_rec.sigmas is None) or
                          (np.abs(other_rec.sigmas['pi_E_E'] / other_rec.params['pi_E_E']) < 0.5)
-                    )  # don't bother if there parallax isn't well constrained.
+                    )  # don't bother if the parallax isn't well constrained.
+                       # TODO: this constraint doesn't appear to work --> write a unit test!
             ):
+
                 su0_src, spi_src = BRANCH_SIGNS[other_key.parallax_branch]
                 base = dict(other_rec.params)
                 if 'u_0' in base:
@@ -2285,7 +2291,9 @@ class MMEXOFASTFitter:
             model = MulensModel.Model(parameters=params.ulens)
             model.set_magnification_methods(params.mag_methods)
             self._plot_event(
-                MulensModel.Event(model=model, datasets=self.datasets),
+                MulensModel.Event(
+                    model=model, datasets=self.datasets,
+                    **self._get_fitter_kwargs(source_type=mmexo.SourceType.FINITE),),
                 suptitle=f'{key}:\n{model.parameters}')
             path = self._output_config.plot_path(f'af_{key}')
             plt.savefig(path)

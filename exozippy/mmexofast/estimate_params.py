@@ -346,7 +346,7 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
     hardcoding ['alpha', 's', 'q', 'rho'].
     """
 
-    def __init__(self, datasets, params,
+    def __init__(self, datasets, params, fitter_kwargs=None,
                  d_alpha=None, n_alpha=None,
                  d_s=None, n_s=None,
                  log_q_values=None, log_rho_values=None,
@@ -355,6 +355,7 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
                  nelder_mead_options=None):
         super().__init__(params)
         self.datasets = datasets
+        self.fitter_kwargs = fitter_kwargs
         self.d_alpha = d_alpha
         self.n_alpha = n_alpha
         self.d_s = d_s
@@ -463,7 +464,7 @@ class WidePlanetGridSearchEstimator(WidePlanetParameterEstimator):
         model = mm.Model(grid_params)
         model.set_magnification_methods(self._base_binary_params.mag_methods)
         model.default_magnification_method = 'point_source_point_lens'
-        event = mm.Event(datasets=self.datasets, model=model)
+        event = mm.Event(datasets=self.datasets, model=model, **self.fitter_kwargs)
         return event
 
     def _grid_iterator(self):
@@ -730,11 +731,12 @@ class WidePlanetEnsembleInitializer():
     # TODO: Hypothesis that this is very slow because the event/Estimator class is getting  created anew every time.
     """
 
-    def __init__(self, datasets, anomaly_params, sigmas,
+    def __init__(self, datasets, anomaly_params, sigmas, fitter_kwargs=None,
                  n_estimators=40, pspl_chi2=None):
         self.datasets = datasets
         self.anomaly_params = anomaly_params
         self.sigmas = sigmas
+        self.fitter_kwargs = fitter_kwargs
         self.n_estimators = n_estimators
         self.pspl_chi2 = pspl_chi2
 
@@ -828,7 +830,7 @@ class WidePlanetEnsembleInitializer():
         model = mm.Model(best)
         model.set_magnification_methods(mag_methods)
         model.default_magnification_method = 'point_source_point_lens'
-        event = mm.Event(datasets=self.datasets, model=model)
+        event = mm.Event(datasets=self.datasets, model=model, **self.fitter_kwargs)
         return event.get_chi2()
 
     def _run_all_estimators(self):
@@ -953,7 +955,7 @@ class WidePlanetEnsembleInitializer():
         ref_model = mm.Model(self.initial_model)
         ref_model.set_magnification_methods(self.mag_methods)
         ref_model.default_magnification_method = 'point_source_point_lens'
-        ref_event = mm.Event(datasets=self.datasets, model=ref_model)
+        ref_event = mm.Event(datasets=self.datasets, model=ref_model, **self.fitter_kwargs)
         source_flux, blend_flux = ref_event.get_ref_fluxes()
 
         sorted_idx = df['chi2'].argsort().values[::-1]  # worst first
@@ -1240,16 +1242,17 @@ def get_binary_source_params(params):
 
 
 class AnomalyPropertyEstimator():
-    # The old version revised the PSPL parameters after masking the anomaly.
+    # TODO: The old version revised the PSPL parameters after masking the anomaly.
     # Could consider whether it would be a good idea to reimplement that.
 
-    def __init__(self, datasets=None, pspl_params=None, af_results=None, mask_type='t_eff', n_mask=3):
+    def __init__(self, datasets=None, pspl_params=None, af_results=None, fitter_kwargs=None, mask_type='t_eff', n_mask=3):
         if isinstance(datasets, MulensModel.MulensData):
             datasets = [datasets]
 
         self.datasets = datasets
         self.pspl_params = pspl_params
         self.af_results = af_results
+        self.fitter_kwargs = fitter_kwargs
         self.n_mask = n_mask
 
         self.anom_t_range_af = self.af_results['t_0'] + self.n_mask * np.array(
@@ -1275,7 +1278,8 @@ class AnomalyPropertyEstimator():
 
     def get_pspl_event(self):
         event = mm.Event(datasets=self.datasets,
-                         model=mm.Model(self.pspl_params))
+                         model=mm.Model(self.pspl_params),
+                         **self.fitter_kwargs)
         event.fit_fluxes()
         return event
 
