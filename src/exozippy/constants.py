@@ -17,6 +17,9 @@ FROM_PM_D_TO_V = u.au.to(u.km) / u.yr.to(u.s) # = 4.74, for unit conversion:
 FROM_V_D_TO_PM = 1. / FROM_PM_D_TO_V  # = 0.211 - opposite unit conversion:
 # multiply it by velocity [km/s] and divide by distance [kpc] to get proper motion [mas/yr]
 
+PC_TO_RSUN_CONST = u.pc.to(u.R_sun)
+ANG_TO_MICRON_CONST = u.Angstrom.to(u.micron)
+
 # --- 4. MICROLENSING CONSTANTS ---
 # Kappa: 4G / (c^2 * au) in units of mas / M_sun
 KAPPA = (4.0 * const.G * const.M_sun / (const.c**2 * const.au)).to(u.mas, equivalencies=u.dimensionless_angles()).value
@@ -62,3 +65,8 @@ SUN_VELOCITY_X = -12.7  # in km/s
 SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s
 SUN_VELOCITY_Z = 7.25   # in km/s
 
+# IAU 2015, Resolution B2 zero point values
+LSUN = 1 * u.Lsun
+M_BOL_SUN = LSUN.to(u.M_bol).value
+L0 = LSUN/10**(-0.4*M_BOL_SUN)
+LOG_L0_CONST = 2.5 * np.log10(L0.value)

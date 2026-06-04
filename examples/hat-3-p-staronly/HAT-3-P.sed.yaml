@@ -1,0 +1,42 @@
+model: NextGen
+# how many stars are being modeled in fit
+# nstars will be assumed to be 1 if not set
+# if nstars >= 2, but photType is not set
+# photType for filter assumed to be blended photometry
+nstars: 1
+filters:
+    - name: "GAIA2r.Gbp"
+      mag: 11.7686 
+      err: 0.02
+
+    - name: "GAIA2r.G"    
+      mag: 11.2795 
+      err: 0.02
+
+    - name: "GAIA2r.Grp"
+      mag: 10.6721 
+      err: 0.02
+
+    - name: "WISE.W1"     
+      mag: 9.377   
+      err: 0.03
+
+    - name: "WISE.W2"     
+      mag: 9.451   
+      err: 0.03
+
+    - name: "WISE.W3"    
+      mag: 9.389   
+      err: 0.035
+
+    - name: "2MASS.H"     
+      mag: 9.542   
+      err: 0.028
+
+    - name: "2MASS.Ks"    
+      mag: 9.448   
+      err: 0.025
+
+    - name: "2MASS.J"     
+      mag: 9.936   
+      err: 0.022
