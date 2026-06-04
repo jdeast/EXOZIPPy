@@ -1,0 +1,10 @@
+sed:
+  errscale:
+    lower: 1.0e-3
+    upper: 1000.0
+    initval: 1.0
+    init_scale: 0.10
+    unit: ""
+    internal_unit: ""
+    latex: "\\sigma_{\\rm SED}"
+    description: "SED photometric error scaling"
