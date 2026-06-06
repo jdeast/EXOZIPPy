@@ -7,31 +7,47 @@ Welcome to the project! This guide outlines the tools and standards we use to ke
 We use Poetry to manage dependencies, virtual environments, and packaging. It replaces pip and requirements.txt with a more robust pyproject.toml file.
 Installation & Setup
 
+First, we need to be sure we're on the same version of python (we'll test version-related bugs separately and explicitly):
+
+    pyenv install 3.12.13
+
+You might need to install pyenv first:
+
+MacOS:
+
+    brew install pyenv
+
+
 If you don't have Poetry installed, install it globally using the official installer:
 Bash
 
-curl -sSL https://install.python-poetry.org | python3 -
+    curl -sSL https://install.python-poetry.org | python3 -
 
-Once installed, navigate to the project root and install the dependencies. This will automatically create a virtual environment for you:
+Download EXOZIPPy (if you haven't already):
+
+    git clone https://github.com/jdeast/EXOZIPPy.git
+
+Navigate to the project root and install the dependencies. This will automatically create a virtual environment for you:
 Bash
 
-poetry install
+    poetry env use python3.12
 
-Common Poetry Commands (Bash):
+    poetry install
 
-Activate the virtual environment (Bash):
+When you git pull, be sure to install any new dependencies:
 
-    poetry shell
+    git pull
+    poetry update
 
-Run a command inside the environment (without activating it):
+To run a python script inside the poetry environment (without activating it):
 
     poetry run python main.py
 
-Add a new production dependency:
+If you need to add a new dependent package:
 
-    poetry add requests
+    poetry add <package>
 
-Add a new development dependency:
+To add a new development dependency:
 
     poetry add --group dev pytest
 
@@ -45,7 +61,7 @@ We use pre-commit to (enforce style guidelines?) and catch common errors before 
 
 Installation & Setup
 
-Pre-commit is included in our development dependencies. Once you have run poetry install, you just need to install the git hooks:
+Pre-commit is included in our development dependencies. Once you have run "poetry install", you just need to install the git hooks:
 
     poetry run pre-commit install
 
@@ -116,3 +132,9 @@ The test should demonstrate failure before the fix and success after the fix.
 AI use is encouraged, but thorough review and testing is essential. Create unit tests that verify/confirm the output for all essential code (see above). Unit testing is especially critical with AI generated code, as it is often tunnel visioned and drops important features not relevant to the bug.
 
 scripts/dump_code.py will collate the entire repo into a copy/pasteable file for AI review. Note that, anecdotally, ~1M tokens is suffificient to keep ~5000 lines of code in context sufficient for a deep, logically review. Beyond that, it tends to lose its focus and forget aspects of the code. The current code base is a bit larger than that, so you may wish to filter the repo dump for more targeted, relevant advice. 
+
+Useful prompts: 
+    
+    here is the code dump. identify any inconsistent use of functions, style, variable names, etc. Identify any AI comments irrelevant to the final code base. Flag obsolete code. Suggest revisions for speed, clarity, standardization, and readability. Identify arbitrary fallbacks designed to make the code run at all costs, when that cost is producing garbage [paste code dump]
+
+    here is the code dump. write unit tests to protect functionality not currently covered [paste code dump with -c all flag, which includes the unit test directory]

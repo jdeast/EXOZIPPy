@@ -99,38 +99,17 @@ def test_parallax_trajectory_offset():
 
     assert u_total > u0  # Parallax should have shifted the lens further away
 
-def test_microlensing_contradiction_warning(capsys):
-    """
-    Verifies that providing contradictory physical values triggers
-    the visual warning to the user.
-    """
-    # Provide Mass/Distances that imply t_E ~ 34 days,
-    # but explicitly provide t_E = 100 days.
-    user_params = {
-        "star.Lens.mass": 0.5,
-        "star.Lens.distance": 4000.0,
-        "star.Source.distance": 8000.0,
-        "star.Lens.pm_ra": 5.0,
-        "star.Lens.pm_dec": 0.0,
-        "star.Source.pm_ra": 0.0,
-        "star.Source.pm_dec": 0.0,
-        "lens.Lens.t_E": 100.0  # The contradiction
-    }
-
-    ConfigManager(user_params)
-
-    # Capture stdout to see if the '!' box appeared
-    captured = capsys.readouterr()
-    assert "WARNING: PHYSICAL CONTRADICTION DETECTED" in captured.out
-    assert "Relative Error:" in captured.out
-
-
 def test_microlensing_sympy_pytensor_equivalence():
     """
-    Ensures that initialization (SymPy) and sampling (PyTensor)
-    use the exact same mathematical constants and logic.
-    """
-    # 1. Define physical inputs for the symbolic solver
+            Ensures that initialization (SymPy) and sampling (PyTensor)
+            use the exact same mathematical constants and logic.
+            """
+    # 1. Define Topology
+    system_config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}]
+    }
+
     user_params = {
         "star.Lens.mass": {"initval": 0.5},
         "star.Lens.distance": {"initval": 4000.0},
@@ -141,8 +120,9 @@ def test_microlensing_sympy_pytensor_equivalence():
         "star.Source.pm_dec": {"initval": 0.0}
     }
 
-    # 2. Get SymPy results via ConfigManager
-    cm = ConfigManager(user_params)
+    # 2. Pass topology and explicitly trigger the solver
+    cm = ConfigManager(user_params, system_config=system_config)
+    cm.finalize_user_params()
 
     # Verify the solver completed the chain
     assert "lens.Lens.t_E" in cm.user_params
@@ -169,27 +149,30 @@ def test_microlensing_sympy_pytensor_equivalence():
     assert np.isclose(te_sympy, t_E_pt, rtol=1e-8), "t_E mismatch!"
 
 
-def test_microlensing_contradiction_warning(capsys):
+def test_microlensing_contradiction_warning(caplog):
     """
     Verifies that providing contradictory physical values triggers
-    the visual warning to the user.
+    a logged warning to the user.
     """
+    # 1. Define Topology
+    system_config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}]
+    }
+
     # Provide Mass/Distances that imply t_E ~ 34 days,
     # but explicitly provide t_E = 100 days.
     user_params = {
-        "star.Lens.mass": 0.5,
         "star.Lens.distance": 4000.0,
         "star.Source.distance": 8000.0,
-        "star.Lens.pm_ra": 5.0,
-        "star.Lens.pm_dec": 0.0,
-        "star.Source.pm_ra": 0.0,
-        "star.Source.pm_dec": 0.0,
-        "lens.Lens.t_E": 100.0  # The contradiction
+        "lens.Lens.pi_rel": 0.999
     }
 
-    ConfigManager(user_params)
+    # 2. Pass topology and explicitly trigger the solver
+    import logging
+    cm = ConfigManager(user_params, system_config=system_config)
+    with caplog.at_level(logging.WARNING):
+        cm.finalize_user_params()
 
-    # Capture stdout to see if the '!' box appeared
-    captured = capsys.readouterr()
-    assert "WARNING: PHYSICAL CONTRADICTION DETECTED" in captured.out
-    assert "Relative Error:" in captured.out
+    assert "contradiction detected" in caplog.text.lower()
+    assert "sacrificing" in caplog.text.lower()

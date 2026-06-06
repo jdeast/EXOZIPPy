@@ -2,6 +2,7 @@ run:
   name: "kelt4"
 
 prefix: "fitresults/KELT-4A"
+logger_level: INFO   # DEBUG, INFO, or WARNING
 
 # the order of the components here is the order they are output in the table
 
@@ -51,5 +52,5 @@ sampler:
     #nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"
     nuts_sampler: "numpyro"
     check_curvatures: True
-    recompute_trace: True # if True and an existing prefix.nc file exists, it will load that rather than re-sample
+    recompute_trace: True # if False and an existing prefix.nc file exists, it will load that rather than re-sample
     profile: False

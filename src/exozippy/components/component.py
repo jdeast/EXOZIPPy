@@ -2,12 +2,28 @@ from .parameter import Parameter
 from ..physics_registry import PHYSICS_REGISTRY
 from abc import ABC, abstractmethod
 import numpy as np
+import pytensor.tensor as pt
 
-class Component:
+
+class Component(ABC):
+    """
+    Base class for all physical and instrumental components in the system.
+
+    This framework utilizes a "Lazy DAG" (Directed Acyclic Graph) architecture to
+    safely construct complex PyMC models without deadlocks. The orchestration
+    happens in the following distinct lifecycle stages:
+
+    Stage 0: load_data()           - Ingests CSVs and calculates data-driven parameter estimates.
+    Stage 1: build_maps()          - Generates Numpy integer arrays linking children to parents.
+    Stage 2: register_parameters() - Declares the component's mathematical manifest.
+    Stage 3: [System-Level]        - The ConfigManager symbolically solves the universe.
+    Stage 4: build_tensor_maps()   - Auto-converts Numpy maps to PyTensor variables.
+    Stage 5: add_parameter()       - Materializes PyMC nodes safely, one at a time.
+    Stage 6: build_likelihood()    - Defines observational Likelihoods and Potentials.
+    """
+
     def __init__(self, component_config, config_manager):
-        """
-        Standardized constructor for ALL components.
-        """
+        """Standardized constructor for ALL components."""
         self.config = component_config
         self.config_manager = config_manager
 
@@ -20,209 +36,184 @@ class Component:
         # Enforce unique names
         if len(set(self.names)) != len(self.names):
             raise ValueError(
-                f"Duplicate names found in {self.__class__.__name__} configuration: {self.names}. All component names must be unique.")
+                f"Duplicate names found in {self.__class__.__name__} configuration: {self.names}. "
+                f"All component names must be unique."
+            )
 
     @property
     @abstractmethod
     def prefix(self):
-        """Naming prefix for the model (e.g., 'star', 'planet')"""
+        """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
 
-    """ building the model takes 4 distinct steps, all of which are required but some may be trivially empty:
-    1) build_parameters - this defines the base parameters, both sampled and derived
-    2) load_data - this loads data into the component (e.g., RV data)
-    3) build_dependent_parameters - this defines additional parameters that depend on other components or have data-driven initializations, constraints, or definitions.
-    4) build_likelihood - this builds the likelihood of the component
-    """
-    @abstractmethod
-    def build_parameters(self, model):
+    def load_data(self, system):
         """
-        Step 1: Define the base parameters, both sampled and derived
+        Stage 1a: Data Ingestion.
+        Override this to load CSV files and push data-driven parameter guesses (like RV offsets)
+        to the ConfigManager.
         """
         pass
 
-    @abstractmethod
-    def load_data(self):
+    def build_maps(self):
         """
-        Step 2: load any data required for this class (pass if none)
+        Stage 1b: Logical Mapping.
+        Override this to define Numpy integer arrays (ending in '_map') that establish
+        vectorized relationships between this component and its parents.
         """
         pass
 
     @abstractmethod
-    def build_map(self, system):
+    def register_parameters(self, system):
         """
-        Step 3: Define the indexing relationship between components.
-        Converts YAML configuration indices into PyTensor tensor variables.
-        """
-        pass
-
-    @abstractmethod
-    def build_dependent_parameters(self, model, system):
-        """
-        Step 4: Define additional parameters that depend on other components or have data-driven initializations
-        e.g. gamma=mean(RV), constraints (user errors => jitter lower bound), or definitions (planet.K needs star.mass)
+        Stage 2: The Blueprint.
+        Define `self.manifest` (a dictionary) mapping parameter names to their physics
+        dependencies, and push those symbols to the ConfigManager.
         """
         pass
 
-    @abstractmethod
-    def build_likelihood(self, model, system):
+    def build_tensor_maps(self):
         """
-        Step 5: Build the likelihood of the component
+        Stage 4: Automatic PyTensor Conversion.
+        Scans the component's attributes. Any numpy array ending in '_map'
+        is automatically converted to a PyTensor variable ending in '_map_tensor'.
         """
-        pass
+        for attr_name in list(self.__dict__.keys()):
+            if attr_name.endswith("_map"):
+                logical_array = getattr(self, attr_name)
+                # Only convert if it's actually an array/list (safeguard)
+                if isinstance(logical_array, (np.ndarray, list)):
+                    tensor_name = attr_name + "_tensor"
+                    tensor_var = pt.as_tensor_variable(logical_array).astype("int32")
+                    setattr(self, tensor_name, tensor_var)
 
-    @abstractmethod
-    def compile_plotters(self, model, system):
-        """
-        Step 6 (Optional): Compile fast PyTensor functions for plotting.
-        Compile the pytensor code that builds the model as a numpy function to use in plotting
-        That reduces effort and ensures consistency between the likelihood calculation and the figure
-        """
-        pass
-
-    @abstractmethod
-    def plot(self, system, points, filename_prefix="debug"):
-        """
-        Plot the model and data. This will be called
-          - at the beginning to verify the initialization
-          - at the end to make publication quality plots
-        """
-        pass
-
-    # this method adds a Parameter to the model
-    def add_parameter(self, p_name, config_manager, shape=(), expr_key=None, context_nodes=None,
-                      **kwargs):
+    def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
 
-        # 1. INTERCEPT NUMERICAL HEURISTICS
-        # Pull physics bounds out of kwargs so they don't clobber the resolved config!
-        physics_keys = ["initval", "init_scale", "lower", "upper", "mu", "sigma"]
-        internal_overrides = {}
-        filtered_kwargs = {}
+        # 0. Prevent double-building nodes
+        if hasattr(self, param_name) and isinstance(getattr(self, param_name), Parameter):
+            return getattr(self, param_name).value
 
-        for k, v in kwargs.items():
-            if k in physics_keys:
-                internal_overrides[k] = v
-            else:
-                filtered_kwargs[k] = v
+        if not hasattr(self, 'manifest'):
+            raise ValueError(f"[{self.prefix}] has no manifest. Did register_parameters run?")
+        if param_name not in self.manifest:
+            raise KeyError(f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest.")
 
-        # 2. PASS TO CONFIG CAGE
-        # Hand the names and the intercepted heuristics down to the config manager
-        cfg = config_manager.resolve(
-            self.prefix, p_name, shape=shape,
-            internal_overrides=internal_overrides if internal_overrides else None,
-            names=getattr(self, 'names', None)
+        options = self.manifest[param_name] or {}
+        if isinstance(options, str):
+            options = {"expr_key": options}
+
+        shape = (self.n_elements,)
+
+        # 1. Grab configuration properties agnostically
+        cfg = self.config_manager.resolve(
+            self.prefix, param_name, shape=shape, names=getattr(self, 'names', None)
         )
 
-        if expr_key is None:
-            expr_key = filtered_kwargs.pop("expr_key", None)
-
+        expr_key = options.pop("expr_key", None)
         expressions_dict = cfg.pop("expressions", {})
         expression = None
 
-        if expr_key:
-            # 1. Check if we even HAVE an expressions dictionary
-            if not expressions_dict:
-                raise KeyError(
-                    f"[{self.prefix}.{p_name}] Requested expression key '{expr_key}', but no "
-                    f"'expressions' were defined for this parameter in defaults.yaml. "
-                    f"Did you forget to add this parameter to the component's defaults.yaml?"
-                )
-
-            # 2. Check if the specific key exists in that dictionary
-            expr_cfg = expressions_dict.get(expr_key)
-            if expr_cfg is None:
-                raise ValueError(
-                    f"[{self.prefix}.{p_name}] Requested expression key '{expr_key}' "
-                    f"not found in expressions dictionary for this component."
-                )
-
-            # 3. Check for the Registry (The "Incomplete physics.py" check)
+        # --- AGNOSTIC CONDITIONAL WIRE-UP ---
+        # Only parse dependencies if an expression block actively exists for this parameter role
+        if expr_key and expr_key in expressions_dict:
+            expr_cfg = expressions_dict[expr_key]
             func_name = expr_cfg.get("func_name")
+
             if func_name not in PHYSICS_REGISTRY:
-                available = ", ".join(PHYSICS_REGISTRY.keys()) if PHYSICS_REGISTRY else "EMPTY"
                 raise NotImplementedError(
-                    f"[{self.prefix}.{p_name}] Physics function '{func_name}' is not in PHYSICS_REGISTRY. "
-                    f"Verify it's decorated with @register_physics in physics.py. "
-                    f"Available: {available}"
-                )
+                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY.")
 
-            func = PHYSICS_REGISTRY[expr_cfg["func_name"]]
+            func = PHYSICS_REGISTRY[func_name]
             dep_names = expr_cfg.get("deps", [])
-
             dep_nodes = []
-            numeric_deps = []
 
             for d in dep_names:
                 if d in context_nodes:
-                    node = context_nodes[d]
-                    dep_nodes.append(node)
-                    try:
-                        numeric_deps.append(node.eval())
-                    except:
-                        numeric_deps.append(0.0)
+                    dep_nodes.append(context_nodes[d])
+                elif "." in d:
+                    # Parse universal cross-component strings: "star.density[star_map]"
+                    custom_slice = None
+                    if "[" in d and d.endswith("]"):
+                        path_part, slice_part = d.split("[", 1)
+                        custom_slice = slice_part.rstrip("]")
+                        d_lookup = path_part
+                    else:
+                        d_lookup = d
+
+                    ext_comp_name, ext_param_name = d_lookup.split(".", 1)
+                    ext_comp = getattr(system, ext_comp_name, None)
+                    if not ext_comp:
+                        raise ValueError(f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active.")
+
+                    # Ensure the dependency node is built lazily on demand
+                    if not hasattr(ext_comp, ext_param_name):
+                        ext_comp.add_parameter(model, ext_param_name, system, context_nodes)
+
+                    ext_param = getattr(ext_comp, ext_param_name)
+
+                    # Dynamically slice via requested map name or component fallback name
+                    map_attr = f"{custom_slice}_tensor" if custom_slice else f"{ext_comp_name}_map_tensor"
+                    if hasattr(self, map_attr):
+                        map_tensor = getattr(self, map_attr)
+                        dep_nodes.append(ext_param.value[map_tensor])
+                    else:
+                        dep_nodes.append(ext_param.value)
                 else:
-                    param = getattr(self, d)
-                    dep_nodes.append(param.value)
-                    numeric_deps.append(param.initval)
-
-            # Calculate the numeric init so downstream parameters aren't hitting None
-            try:
-                # Calculate it from the physics function
-                calculated_init = func(*numeric_deps)
-
-                # Only inject the calculated value if the user/defaults didn't provide one
-                if cfg.get('initval') is None:
-                    cfg['initval'] = calculated_init
-
-            except Exception as e:
-                # Fallback to a safe numeric array instead of None if the math fails
-                if cfg.get('initval') is None:
-                    n_elements = np.prod(shape).astype(int) if shape != () else 1
-                    cfg['initval'] = np.zeros(n_elements)
+                    # Local tracking recursive lookup
+                    if not hasattr(self, d) or not isinstance(getattr(self, d), Parameter):
+                        self.add_parameter(model, d, system, context_nodes)
+                    dep_nodes.append(getattr(self, d).value)
 
             expression = lambda: func(*dep_nodes)
 
-        # 3. MERGE METADATA
-        # Now it is safe to merge filtered_kwargs (units, latex names, etc.)
-        full_params = {**cfg, **filtered_kwargs}
-
+        # 3. Create Parameter Node
+        full_params = {**cfg, **options}
         param_obj = Parameter(
-            label=f"{self.prefix}.{p_name}",
+            label=f"{self.prefix}.{param_name}",
             names=getattr(self, 'names', None),
             expression=expression,
             user_params=self.config_manager.user_params,
             **full_params
         )
 
-        setattr(self, p_name, param_obj)
+        setattr(self, param_name, param_obj)
         return param_obj.build_pymc()
 
-    # Make sure build_pars_from_dict can pass it along!
-    def build_pars_from_dict(self, par_dict, shape, context_nodes=None):
-        for p_name, options in par_dict.items():
-            if not options:
-                self.add_parameter(p_name, self.config_manager, shape=shape,
-                                   context_nodes=context_nodes)
-            elif isinstance(options, str):
-                self.add_parameter(p_name, self.config_manager, shape=shape, expr_key=options,
-                                   context_nodes=context_nodes)
-            elif isinstance(options, dict):
-                self.add_parameter(p_name, self.config_manager, shape=shape,
-                                   context_nodes=context_nodes, **options)
+    @abstractmethod
+    def build_likelihood(self, model, system):
+        """
+        Stage 6: The Objective Function.
+        Construct the PyMC Likelihoods (`pm.Normal`, etc.) or custom `pm.Potential`
+        penalties that constrain the model against data.
+        """
+        pass
+
+    def compile_plotters(self, model, system):
+        """
+        Compile fast PyTensor functions for plotting.
+        Translates PyTensor graphs into numpy functions to ensure consistency
+        between the likelihood calculation and the final figures.
+        """
+        pass
+
+    def plot(self, system, points, filename_prefix="debug"):
+        """
+        Plot the model and data. Called twice:
+          - Pre-flight: To visually verify the initialization logic.
+          - Post-flight: To generate publication-quality posterior models.
+        """
+        pass
 
     def _is_sampling_param(self, attr):
         """Helper to identify parameters that need to be passed to the compiled function."""
-        from .parameter import Parameter
         return isinstance(attr, Parameter) and attr.expression is None
 
     def get_parameters(self, sampling_only=False):
         """
         Returns all Parameter objects belonging to this component.
-        If sampling_only=True, filters for parameters without expressions.
+        If sampling_only=True, filters for Free (sampled) parameters.
         """
         params = []
-        # We look through __dict__ to preserve the order they were built in
         for attr in self.__dict__.values():
             if isinstance(attr, Parameter):
                 if sampling_only:

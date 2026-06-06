@@ -6,7 +6,7 @@ from astropy import units as u
 from exozippy.components.orbit.orbit import Orbit
 from exozippy.config import ConfigManager
 from exozippy.components.parameter import Parameter
-
+from exozippy.system import System
 
 def test_radial_velocity_handles_descending_node_and_eccentricity():
     """
@@ -28,11 +28,13 @@ def test_radial_velocity_handles_descending_node_and_eccentricity():
             "orbit.0.secosw": {"initval": np.sqrt(ecc) * np.cos(omega)},
             "orbit.0.sesinw": {"initval": np.sqrt(ecc) * np.sin(omega)}
         }
-        orbit = Orbit([{"name": "test"}], ConfigManager(user_params))
+        config = {"orbit": [{"name": "test"}]}
+        system = System(config, user_params=user_params)
+        system.prepare()
+        model = system.build_model()
+        orbit = system.orbit
 
-        with pm.Model() as model:
-            orbit.build_parameters(model)
-
+        with model:
             tp_fn = pytensor.function(model.free_RVs, orbit.tp.value, on_unused_input='ignore')
             t_var = pt.vector("t")
             K_var = pt.vector("K_int")
@@ -70,11 +72,13 @@ def test_radial_velocity_matches_kelt4_periastron_benchmark():
         "orbit.0.secosw": {"initval": 0.0},
         "orbit.0.sesinw": {"initval": 0.0}
     }
-    orbit = Orbit([{"name": "b"}], ConfigManager(user_params))
+    config = {"orbit": [{"name": "b"}]}
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    orbit = system.orbit
 
-    with pm.Model() as model:
-        orbit.build_parameters(model)
-
+    with model:
         t_var = pt.vector("t")
         K_var = pt.vector("K_int")
         rv_node = orbit.get_radial_velocity(t_var, K_var, pt.as_tensor_variable([0], dtype="int32"))
@@ -111,10 +115,14 @@ def test_radial_velocity_matches_earth_periastron_benchmark():
         "orbit.0.secosw": {"initval": 0.0},
         "orbit.0.sesinw": {"initval": 0.0}
     }
-    orbit = Orbit([{"name": "Earth"}], ConfigManager(user_params))
+    # ARRANGE
+    config = {"orbit": [{"name": "Earth"}]}
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    orbit = system.orbit
 
-    with pm.Model() as model:
-        orbit.build_parameters(model)
+    with model:
         k_ms = 0.089438027
         k_int = (k_ms * u.m / u.s).to(u.R_sun / u.d).value
 
@@ -150,10 +158,13 @@ def test_radial_velocity_computes_correctly_over_vectorized_time_array():
         "orbit.0.secosw": {"initval": 0.0},
         "orbit.0.sesinw": {"initval": 0.0}
     }
-    orbit = Orbit([{"name": "b"}], ConfigManager(user_params))
+    config = {"orbit": [{"name": "b"}]}
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    orbit = system.orbit
 
-    with pm.Model() as model:
-        orbit.build_parameters(model)
+    with model:
 
         t = np.array([0.0, 2.5, 5.0, 7.5])
         t_pt = pt.vector("t")

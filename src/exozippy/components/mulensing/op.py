@@ -6,7 +6,6 @@ import MulensModel as mm
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-
 def setup_mulens_model(p, coords, mag_method):
     # p = [t_0, u_0, t_E, pi_E_N, pi_E_E, (optional) rho]
     mm_params = {

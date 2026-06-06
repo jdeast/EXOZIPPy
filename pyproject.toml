@@ -8,10 +8,10 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "pytensor (>=2.20.0)",
+    "pytensor (<2.35.0)",
     "pandas (>=1.3.6,<3.0.0)",
     "arviz (<0.20.0)",
-    "numpy (<2)",
+    "numpy (>=2.0)",
     "pymc (>=5.10.0)",
     "pyyaml (>=6.0.3,<7.0.0)",
     "matplotlib (>=3.10.9,<4.0.0)",
@@ -23,7 +23,8 @@ dependencies = [
     "lightkurve (>=2.6.0,<3.0.0)",
     "exoplanet-core[pymc] (>=0.3.1)",
     "click (>=8.3.3,<9.0.0)",
-    "h5py (>=3.16.0,<4.0.0)"
+    "h5py (>=3.16.0,<4.0.0)",
+    "numba (>=0.65.1,<0.66.0)"
 ]
 
 
@@ -41,7 +42,9 @@ dev = [
     "ipdb (>=0.13.13,<0.14.0)",
     "pytest (>=9.0.3,<10.0.0)",
     "pre-commit (>=4.6.0,<5.0.0)",
-    "ipykernel (>=7.2.0,<8.0.0)"
+    "ipykernel (>=7.2.0,<8.0.0)",
+    "scipy-stubs (>=1.17.1.5,<2.0.0.0)",
+    "pandas-stubs (>=3.0.3.260530,<4.0.0.0)"
 ]
 
 [tool.poetry.scripts]

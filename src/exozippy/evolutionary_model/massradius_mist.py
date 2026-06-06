@@ -1,4 +1,7 @@
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Persistent track storage
 tracks = None
@@ -114,12 +117,12 @@ def massradius_mist(mstar, feh, age, teff, rstar, vvcrit=None, alpha=None, span=
 
     if not (0.1 <= mstar <= 300):
         if verbose:
-            print(f"Mstar ({mstar}) is out of range [0.1, 300]", file=logname or None)
+            logger.warning(f"Mstar ({mstar}) is out of range [0.1, 300]")
         return np.inf
 
     if not (-4.0 <= feh <= 0.5):
         if verbose:
-            print(f"initfeh ({feh}) is out of range [-4, 0.5]", file=logname or None)
+            logger.warning(f"initfeh ({feh}) is out of range [-4, 0.5]")
         return np.inf
 
     massndx = np.argmin(np.abs(allowedmass - mstar))
@@ -144,13 +147,13 @@ def massradius_mist(mstar, feh, age, teff, rstar, vvcrit=None, alpha=None, span=
         eep -= 1
     if eep < 1:
         if verbose:
-            print(f"EEP ({eep}) is out of range [1, ∞]", file=logname or None)
+            logger.warning(f"EEP ({eep}) is out of range [1, inf]")
         return np.inf
 
     neep = len(ages)
     if eep >= neep:
         if verbose:
-            print(f"EEP ({eep}) is out of bounds for track with {neep} points", file=logname or None)
+            logger.warning(f"EEP ({eep}) is out of bounds for track with {neep} points")
         return np.inf
 
     # Interpolation using two closest ages
@@ -163,7 +166,7 @@ def massradius_mist(mstar, feh, age, teff, rstar, vvcrit=None, alpha=None, span=
 
     if mistage < 0 or (not allowold and mistage > 13.82):
         if verbose:
-            print(f"Age ({mistage}) is out of range", file=logname or None)
+            logger.warning(f"Age ({mistage}) is out of range")
         return np.inf
 
     percenterror = 0.03 - 0.025 * np.log10(mstar) + 0.045 * (np.log10(mstar))**2

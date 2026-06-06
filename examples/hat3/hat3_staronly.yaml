@@ -1,0 +1,30 @@
+run:
+  name: "hat3"
+
+prefix: "fitresults/HAT-P-3b"
+
+star:
+  - name: "A"
+    mist: False
+    sed: "NextGen" # or name model: "NextGen" [MISTv1, MISTv2]
+
+parameter_file: "hat3.params.yaml"
+
+sed:
+  path: "*.sed.*"
+  file: "hat3_sed.yaml"
+
+sampler:
+  backend: "pymc"
+  pymc:
+    tune: 1000
+    draws: 2000
+    chains: 4
+    cores: 4
+    init: "adapt_diag"
+    min_draws: 1
+    target_accept: 0.95
+    nuts_sampler: "numpyro" # "numpyro", "blackjax", "nutpie"
+    check_curvatures: True   # for testing, set to False
+    recompute_trace: True
+    profile: False

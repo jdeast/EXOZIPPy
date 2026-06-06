@@ -4,7 +4,9 @@ from astropy import units as u
 from exozippy.physics_registry import PHYSICS_REGISTRY
 from exozippy.constants import KEPLER_CONST
 import exozippy.components.planet.physics
-import exozippy.components.celestial_body.physics
+#import exozippy.components.celestial_body.physics
+import exozippy.components.planet.physics
+import exozippy.components.star.physics
 
 
 def test_rv_semi_amplitude_matches_jupiter_sun_benchmark():

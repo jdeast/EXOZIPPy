@@ -1,0 +1,465 @@
+import logging
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+logger = logging.getLogger(__name__)
+
+import pymc as pm
+import pytensor.tensor as pt
+from scipy.interpolate import CubicSpline
+
+from astropy.coordinates import (
+    get_body_barycentric,
+    solar_system_ephemeris,
+    EarthLocation,
+    ICRS,
+    SkyCoord
+)
+from astropy.time import Time
+
+import astropy.units as u
+from exozippy.components.component import Component
+import pytensor.tensor as pt
+import pytensor
+import pymc as pm
+
+class MulensInstrument(Component):
+    def __init__(self, config, config_manager):
+        super().__init__(config, config_manager)
+        self.label = "Microlensing Data"
+        self.files = [c.get("file") for c in self.config]
+
+    @property
+    def prefix(self):
+        return "mulensinstrument"
+
+    def load_data(self, system):
+        """Stage 1a: Load photometry and pre-calculate observer positions."""
+        all_times, all_mags, all_errs, inst_indices = [], [], [], []
+        self.fs_init = []
+        self._raw_time_list = []
+        all_obspos = []
+
+        # Source RA/Dec (degrees from resolve → radians for projection math)
+        source_ndx = int(system.lens.source_map[0])
+        n_stars = system.star.n_elements
+        ra_deg  = self.config_manager.resolve("star", "ra",  shape=(n_stars,))['initval'][source_ndx]
+        dec_deg = self.config_manager.resolve("star", "dec", shape=(n_stars,))['initval'][source_ndx]
+        ra_rad  = float(ra_deg)  * np.pi / 180.0
+        dec_rad = float(dec_deg) * np.pi / 180.0
+
+        # Geocentric reference (Skowron+2011 convention): Earth's position and
+        # velocity at t_0_par define the inertial frame.  All observer positions
+        # are stored as deviations from this linear Earth trajectory so that
+        # t_0/u_0 remain geocentric parameters.
+        self._t0_par = float(system.lens.t0_par[0])
+        self._earth_pos_ref = self.get_observer_position(
+            np.array([self._t0_par]), 'earth')[0]                # (3,) AU
+        _dt = 0.5  # days for finite-difference velocity
+        _ep = self.get_observer_position(np.array([self._t0_par + _dt]), 'earth')[0]
+        _em = self.get_observer_position(np.array([self._t0_par - _dt]), 'earth')[0]
+        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)         # AU/day
+
+        # Median absolute position per instrument (used by Lens to detect parallax)
+        self.inst_ref_pos = []
+
+        for i, file in enumerate(self.files):
+            df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            t, m, e = df.iloc[:, 0].values, df.iloc[:, 1].values, df.iloc[:, 2].values
+
+            obs_loc = self.config[i].get("observer_location", "earth")
+            xyz_abs = self.get_observer_position(t, observer_location=obs_loc)
+            self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
+
+            xyz_delta = self._abs_to_delta(t, xyz_abs)
+            all_obspos.append(xyz_delta)
+
+            self.fs_init.append(
+                self._estimate_baseline_flux(t, m, xyz_delta, ra_rad, dec_rad)
+            )
+
+            all_times.append(t)
+            all_mags.append(m)
+            all_errs.append(e)
+            inst_indices.append(np.full(len(t), i))
+            self._raw_time_list.append(t)
+
+        self.inst_ref_pos = np.array(self.inst_ref_pos)   # (n_inst, 3) absolute AU
+        self.time     = np.concatenate(all_times).astype(float)
+        self.mag      = np.concatenate(all_mags).astype(float)
+        self.err      = np.concatenate(all_errs).astype(float)
+        self.inst_map = np.concatenate(inst_indices).astype(int)
+        self.observer_pos = np.vstack(all_obspos).astype(float)
+
+    def _estimate_baseline_flux(self, t, m, xyz_au, ra_rad, dec_rad):
+        """
+        Estimate the unmagnified (baseline) total flux for one instrument.
+
+        Strategy:
+        - Compute the Paczynski impact-parameter trajectory u(t) for this
+          observer using geocentric-deviation positions (Skowron+2011 convention)
+          and the lens parameters already available in user_params.
+        - If the data contains observations near baseline (A < 1.05),
+          return the median flux of those points.
+        - Otherwise (peak-only coverage, e.g. Spitzer), divide the
+          estimated peak flux by the peak magnification A(u_min) to
+          recover the baseline.
+
+        Falls back to the data median if t_0 or u_0 are not yet in
+        user_params (e.g. the user has not supplied them).
+        """
+        cm = self.config_manager
+
+        def _get(key, default=None):
+            data = cm.user_params.get(key)
+            if data is None:
+                return default
+            return data.get("initval", default) if isinstance(data, dict) else float(data)
+
+        t0    = _get("lens.0.t_0")
+        u0    = _get("lens.0.u_0")
+        tE    = _get("lens.0.t_E")
+        pi_E_N = _get("lens.0.pi_E_N", 0.0)
+        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+
+        if t0 is None or u0 is None:
+            return 10.0 ** (-0.4 * np.median(m))
+
+        # Project heliocentric observer positions onto the sky-plane
+        # North/East axes (same convention as get_magnification).
+        x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
+        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
+        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
+                   - y * np.sin(ra_rad) * np.sin(dec_rad)
+                   + z * np.cos(dec_rad))
+
+        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
+        tau   = (t - float(t0)) / tE_safe
+        tau_p = tau + delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
+        u_p   = float(u0) - delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
+        A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+
+        # Baseline-covered: at least 3 points with A < 1.05
+        baseline_mask = A_traj < 1.05
+        if np.sum(baseline_mask) >= 3:
+            return 10.0 ** (-0.4 * np.median(m[baseline_mask]))
+
+        # Peak-only: back-calculate from u_min over the observed window.
+        # Using the 10th magnitude percentile (brightest ~10%) as F_peak_est
+        # and assuming pure source (q_frac = 1) as the zeroth-order approximation.
+        u_min  = max(float(np.min(u_traj)), 1e-6)
+        A_peak = (u_min ** 2 + 2.0) / (u_min * np.sqrt(u_min ** 2 + 4.0))
+        F_peak_est = 10.0 ** (-0.4 * np.percentile(m, 10))
+        return F_peak_est / A_peak
+
+    def _abs_to_delta(self, t, xyz_abs):
+        """Convert absolute barycentric positions to Skowron+2011 geocentric deviations.
+
+        Converts to the Skowron+2011 geocentric inertial frame whose origin
+        moves with Earth's position and velocity at t_0_par.  Any observer's
+        position in this frame is:
+
+        delta(t) = xyz_obs(t) - [xyz_earth(t_0_par) + v_earth(t_0_par)*(t - t_0_par)]
+
+        For Earth: small deviation from straight-line motion (annual parallax).
+        For Spitzer: ≈ Spitzer − Earth vector at t_0_par (satellite parallax offset,
+        ~1–2 AU).  Yee+2014 §3: "Spitzer's offset from the centre of Earth is
+        treated just as any other observatory."
+        """
+        t_delta = (t - self._t0_par)[:, np.newaxis]  # (N, 1)
+        return xyz_abs - (self._earth_pos_ref + self._earth_vel_ref * t_delta)
+
+    def get_observer_position(self, time, observer_location='earth'):
+        """
+        High-precision observer position dispatcher.
+        Supports:
+          - Major bodies ('earth', 'mars')
+          - Topocentric ground sites ('lat,lon,alt' or 'CTIO')
+          - Satellite Ephemeris files (Interpolated)
+        """
+        solar_system_ephemeris.set('jpl')
+        t_obj = Time(time, format='jd', scale='tdb')
+
+        # 1. Handle Terrestrial / Topocentric (Lat/Lon)
+        # Check if string looks like "lat, lon, alt" or a known site name
+        try:
+            if ',' in observer_location:
+                # Parse "lat, lon, alt"
+                loc = EarthLocation.from_geodetic(*[float(x) for x in observer_location.split(',')])
+            else:
+                # Check for site names like 'CTIO' or 'Siding Spring'
+                loc = EarthLocation.of_site(observer_location)
+
+            # Get topocentric position: Barycentric Earth + Geocentric Offset
+            # This accounts for Earth's orbit and the observer's specific spot on the globe
+            return loc.get_itrs(t_obj).transform_to(ICRS()).cartesian.xyz.to('au').value.T
+        except:
+            # Not a ground site, move to next check
+            pass
+
+        # 2. Handle Major Bodies
+        if observer_location in ['earth', 'moon']:
+            return get_body_barycentric(observer_location, t_obj).xyz.to('au').value.T
+
+        # 3. Handle Satellite Ephemeris Files with Search Paths
+        search_paths = [
+            observer_location,  # absolute/relative path
+            os.path.join(os.path.dirname(__file__), 'ephemerides', observer_location), # Package internal
+            os.path.join(os.path.dirname(__file__), 'ephemerides', observer_location + '.eph')  # Package internal
+        ]
+
+        for path in search_paths:
+            if os.path.exists(path):
+                return self._interpolate_ephemeris(time, path)
+
+        raise ValueError(f"observer location not recognized: {observer_location}; see $EXOZIPPY_PATH/src/exozippy/components/mulensing/ephemerides/get_ephemeris.py to generate an ephemeris")
+
+    def _interpolate_ephemeris(self, time, ephemeris_file):
+        """
+        Interpolates a Barycentric ephemeris file.
+
+        Parameters:
+        -----------
+        time : float or ndarray
+            The time(s) at which to calculate coordinates (BJD_TDB).
+        ephemeris_file : str
+            Path to the file generated by get_ephemeris.py
+            (Format: BJD_TDB, X, Y, Z)
+
+        Returns:
+        --------
+        xyz_au : ndarray
+            (N, 3) array of X, Y, Z coordinates in AU.
+        """
+        # Load data, skipping the header lines
+        # data[:, 0] = BJD_TDB, [:, 1:4] = X, Y, Z
+        data = np.loadtxt(ephemeris_file)
+
+        t_grid = data[:, 0]
+        xyz_grid = data[:, 1:4]
+
+        # Check if we are extrapolating (which is dangerous)
+        t_min, t_max = np.min(t_grid), np.max(t_grid)
+        if np.any(time < t_min) or np.any(time > t_max):
+            import warnings
+            warnings.warn(f"Extrapolating outside ephemeris range! "
+                          f"Grid: {t_min:.2f}-{t_max:.2f}, Requested: {np.min(time):.2f}")
+
+        # Create the spline object
+        # bc_type='not-a-knot' is standard for smooth orbital curves
+        cs = CubicSpline(t_grid, xyz_grid, axis=0, bc_type='not-a-knot')
+
+        return cs(time)
+
+    def register_parameters(self, system):
+
+        # 1. Grab the default q_frac (or user override if they provided one)
+        q_cfg = self.config_manager.resolve(self.prefix, "q_frac", shape=(self.n_elements,))
+        q_frac_init = q_cfg["initval"]
+
+        # 2. Convert median magnitudes to physical fluxes
+        f_total_init = np.array(self.fs_init)
+
+        # 3. Inject the hints
+        for i in range(self.n_elements):
+            f_source_guess = f_total_init[i] * q_frac_init[i]
+            f_blend_guess = f_total_init[i] * (1.0 - q_frac_init[i])
+
+            self.config_manager.add_hint(f"{self.prefix}.{i}.f_source", f_source_guess)
+            self.config_manager.add_hint(f"{self.prefix}.{i}.f_blend", max(f_blend_guess, 1e-9))
+
+        """Stage 2: Declare the manifest with bootstrapped fluxes."""
+        self.manifest = {
+            "log_f_total": {"initval": np.log10(f_total_init)},
+            "f_source": "default",
+            "f_blend": "default",
+            "err_scale": None,
+            "q_frac": None
+        }
+
+    def build_likelihood(self, model, system):
+
+        if hasattr(system, 'sed'):
+            raise NotImplemented
+            expected_fs = system.sed.Source.get_band_flux("OGLE_I") # this is the part we need from the SED
+            sigma_fs = 0.05 * expected_fs
+            pm.Potential(f"{self.prefix}_sedprior",
+                         -0.5 * pt.sqr((self.f_source.value - expected_fs) / sigma_fs))
+        else:
+            if False:
+                # Linear anchor: f_source ~ 0.2 * f_bol
+                # this accounts for heavy extinction in the bulge, but is highly uncertain
+                expected_fs = pt.log(0.2 * system.star.fbol.value[system.lens.source_map])
+                sigma_fs = 1.0
+                log_f_source = pt.log(self.f_source.value)
+                pm.Potential(f"{self.prefix}.fbolprior",
+                             -0.5 * pt.sqr((log_f_source - expected_fs) / sigma_fs))
+
+        # 1. Constants
+        t = pm.Data("mu_time", self.time)
+        obs_pos = pm.Data("obs_pos", self.observer_pos)
+        obs_mag = pm.Data("mu_obs_mag", self.mag)
+        obs_err = pm.Data("mu_obs_err", self.err)
+
+        # 2. Magnification from the Lens
+        # (Assuming single lens at index 0 for PSPL)
+        A = system.lens.get_magnification(t, self.observer_pos, system, index=0)
+        #A = system.lens.get_magnification_op(t, self.observer_pos, system, index=0)
+
+        # 3. Flux Model
+        fs = self.f_source.value[self.inst_map_tensor]
+        fb = self.f_blend.value[self.inst_map_tensor]
+        k_scale = self.err_scale.value[self.inst_map_tensor]
+
+        model_flux = fs * A + fb
+
+        # Guard against negative flux causing log10(NaN) crash during tuning
+        safe_flux = pt.maximum(model_flux, 1e-12)
+        model_mag = -2.5 * pt.log10(safe_flux)
+
+        # 4. Error scaling & Likelihood
+        sigma = obs_err * k_scale
+
+        pm.Normal(
+            f"{self.prefix}.model",
+            mu=model_mag,
+            sigma=sigma,
+            observed=obs_mag
+        )
+
+    def compile_plotters(self, model, system):
+        """Compile fast PyTensor functions for the lightcurve."""
+        t_input = pt.vector("mu_t_input")
+        obs_pos_input = pt.dmatrix("obs_pos")
+        inst_idx = pt.iscalar("mu_inst_idx")
+
+        param_symbols = [p.value for p in system.plot_params]
+
+        A = system.lens.get_magnification(t_input, obs_pos_input, system, index=0)
+
+        fs_inst = self.f_source.value[inst_idx]
+        fb_inst = self.f_blend.value[inst_idx]
+
+        # Normalized apparent magnification: (f_s*A + f_b) / (f_s + f_b).
+        # Equals 1 at baseline regardless of blending, so all instruments
+        # are on the same scale.
+        model_flux = fs_inst * A + fb_inst
+        f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
+        model_A_eff = model_flux / f_total_inst
+
+        self._compiled_A_eff = pytensor.function(
+            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
+            outputs=model_A_eff,
+            on_unused_input='ignore'
+        )
+
+    def plot(self, system, points, filename_prefix="debug"):
+        if isinstance(points, dict): points = [points]
+        if len(points) == 0: return
+
+        # Model time grid: ±5 tE around t_0 when known, else full data span
+        cm = self.config_manager
+        def _get_param(key):
+            d = cm.user_params.get(key)
+            if d is None: return None
+            return d.get("initval") if isinstance(d, dict) else float(d)
+
+        t0 = _get_param("lens.0.t_0")
+        tE = _get_param("lens.0.t_E")
+        if t0 is not None and tE is not None:
+            t_model = np.linspace(t0 - 5.0*tE, t0 + 5.0*tE, 2000).astype(np.float64)
+        else:
+            t_model = np.linspace(self.time.min(), self.time.max(), 2000).astype(np.float64)
+
+        # Each instrument gets its own color.  Model lines are one per unique
+        # observer_location: multiple earth instruments share one model curve
+        # (parallax between terrestrial sites is negligible unless lat/lon is
+        # explicitly specified, in which case each site is a distinct string).
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        inst_color = {i: colors[i % len(colors)] for i in range(self.n_elements)}
+
+        # Map unique observer_location strings to the first instrument with that location.
+        unique_observers = []
+        obs_to_inst = {}
+        for i in range(self.n_elements):
+            obs_loc = self.config[i].get("observer_location", "earth")
+            if obs_loc not in obs_to_inst:
+                unique_observers.append(obs_loc)
+                obs_to_inst[obs_loc] = i
+
+        # Compute geocentric-convention deviations for each unique observer over the model grid.
+        obs_model_pos = {
+            obs_loc: self._abs_to_delta(
+                t_model,
+                self.get_observer_position(t_model, observer_location=obs_loc)
+            )
+            for obs_loc in unique_observers
+        }
+
+        # Data normalization: use median sampled f_total so data and model traces
+        # are on the same scale.  The model A_eff = q_frac*A + (1-q_frac) is
+        # independent of f_total, so when the sampler moves log_f_total away
+        # from fs_init the data must follow.  Falls back to fs_init if the
+        # parameter isn't in plot_params (e.g. starting-model single-point plot).
+        log_ft_param = next(
+            (p for p in system.plot_params
+             if hasattr(p, 'label') and 'log_f_total' in str(p.label)
+             and self.prefix in str(p.label)),
+            None
+        )
+        if log_ft_param is not None and points:
+            log_ft_samples = np.array([
+                np.atleast_1d(point.get(log_ft_param.label,
+                                        np.log10(self.fs_init)))
+                for point in points
+            ])  # (n_samples, n_instruments)
+            f_norm = 10.0 ** np.median(log_ft_samples, axis=0)
+        else:
+            f_norm = np.array(self.fs_init)
+
+        def draw(ax):
+            for i in range(self.n_elements):
+                mask = (self.inst_map == i)
+                F_obs = 10.0 ** (-0.4 * self.mag[mask])
+                A_eff = F_obs / f_norm[i]
+                sigma_A_eff = 0.4 * np.log(10) * self.err[mask] * A_eff
+                ax.errorbar(
+                    self.time[mask], A_eff, yerr=sigma_A_eff,
+                    fmt='.', color=inst_color[i], alpha=0.6, zorder=1, label=self.names[i]
+                )
+            for obs_loc in unique_observers:
+                i = obs_to_inst[obs_loc]
+                obs_pretty = obs_model_pos[obs_loc]
+                for point in points:
+                    param_values = [
+                        float(np.squeeze(np.asarray(point.get(p.label, p.initval))))
+                        if getattr(p.value, "ndim", 0) == 0
+                        else np.atleast_1d(point.get(p.label, p.initval))
+                        for p in system.plot_params
+                    ]
+                    try:
+                        y_model = self._compiled_A_eff(t_model, obs_pretty, i, *param_values)
+                        alpha = 0.8 if len(points) == 1 else 0.1
+                        ax.plot(t_model, y_model, '-', color=inst_color[i], lw=1.5, alpha=alpha, zorder=2)
+                    except Exception as e:
+                        logger.warning(f"Model eval failed for observer '{obs_loc}': {e}")
+            ax.set_xlabel("Time [BJD]")
+            ax.set_ylabel("Magnification")
+            ax.legend()
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        draw(ax)
+        fig.tight_layout()
+        fig.savefig(f"{filename_prefix}_mulens.pdf")
+        plt.close(fig)
+
+        if t0 is not None and tE is not None:
+            fig_z, ax_z = plt.subplots(figsize=(12, 6))
+            draw(ax_z)
+            ax_z.set_xlim(t0 - 3.0 * tE, t0 + 3.0 * tE)
+            fig_z.tight_layout()
+            fig_z.savefig(f"{filename_prefix}_mulens_zoom.pdf")
+            plt.close(fig_z)

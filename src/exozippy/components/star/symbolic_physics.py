@@ -1,4 +1,5 @@
 import sympy as sp
+from ...constants import LOGG_CONST
 
 # ---------------------------------------------------------
 # 1. Define Symbols
@@ -7,11 +8,11 @@ import sympy as sp
 # All parameters are strictly real.
 # Positivity bounds (e.g., mass > 0, teff > 0) are enforced downstream by defaults.yaml
 mass, radius, luminosity = sp.symbols('mass radius luminosity', real=True)
-teff, density = sp.symbols('teff density', real=True)
+teff, density, logg, feh = sp.symbols('teff density logg feh', real=True)
 distance, parallax = sp.symbols('distance parallax', real=True)
 
 # Log parameters
-logmass, logradius, loglum = sp.symbols('logmass logradius loglum', real=True)
+logmass = sp.symbols('logmass', real=True)
 
 # Astrometry
 pm_ra, pm_dec = sp.symbols('pm_ra pm_dec', real=True)
@@ -22,29 +23,27 @@ ra, dec = sp.symbols('ra dec', real=True)
 # ---------------------------------------------------------
 # Maps SymPy symbols back to the local parameter keys inside the Star component.
 
-SYMBOL_MAP = {
-    # Mass
-    "mass": "mass",
-    "logmass": "logmass",
+comp_key = "star"
 
-    # Radius & Density
-    "radius": "radius",
-    "logradius": "logradius",
-    "density": "density",
+def get_symbol_map(star_config_list):
+    return {
+        f"logmass": f"logmass",
+        f"mass": f"mass",
+        f"radius": f"radius",
+        f"density": f"density",
+        f"logg":"logg",
+        f"luminosity": f"luminosity",
+        f"teff": f"teff",
+        f"feh": f"feh",
 
-    # Luminosity & Temp
-    "luminosity": "luminosity",
-    "loglum": "loglum",
-    "teff": "teff",
-
-    # Astrometry
-    "distance": "distance",
-    "parallax": "parallax",
-    "pm_ra": "pm_ra",
-    "pm_dec": "pm_dec",
-    "ra": "ra",
-    "dec": "dec"
-}
+        f"distance": f"distance",
+        f"parallax": f"parallax",
+        f"rv": f"rv",
+        f"ra": f"ra",
+        f"dec": f"dec",
+        f"pm_ra": f"pm_ra",
+        f"pm_dec": f"pm_dec",
+    }
 
 # ---------------------------------------------------------
 # 3. Physics Relations
@@ -57,12 +56,13 @@ SYMBOL_MAP = {
 RELATIONS = [
     # Reparameterization Bridges (Base-10)
     sp.Eq(mass, 10 ** logmass),
-    sp.Eq(radius, 10 ** logradius),
-    sp.Eq(luminosity, 10 ** loglum),
 
     # Stellar Density (Solar units: rho_sun = 1.0)
     # rho = M / R^3
     sp.Eq(density, mass / (radius ** 3)),
+
+    # Surface Gravity in cgs (g = G * M / R^2)
+    sp.Eq(logg, LOGG_CONST + logmass - 2.0 * sp.log(radius, 10)),
 
     # Stefan-Boltzmann Law (Solar units: T_sun = 5772.0 K)
     # L = R^2 * (T / T_sun)^4

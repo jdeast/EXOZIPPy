@@ -1,15 +1,53 @@
 star:
-  # --- Sampled Parameters ---
+  logmass:
+    lower: -9.0
+    upper: 2.5
+    initval: 0.0
+    init_scale: 0.1
+    unit: "dex(solMass)"
+    internal_unit: "dex(solMass)"
+    latex: "\\log{M}"
+    description: "Log of Mass"
   mass:
+    unit: "solMass"
+    internal_unit: "solMass"
     lower: 0.1
     upper: 250.0
     init_scale: 0.02
     latex: "M_*"
     description: "Stellar Mass"
+    debug_print: true
+    expressions:
+      default:
+        func_name: "calc_mass"
+        deps: [ "logmass" ]
+  logg:
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log{g_*}"
+    description: "Surface Gravity"
+    expressions:
+      default:
+        func_name: "calc_logg"
+        deps: ["logmass", "radius"]
+
+  distance:
+    lower: 0.001
+    upper: 100000.0
+    initval: 10.0
+    init_scale: 0.1
+    unit: "pc"
+    internal_unit: "pc"
+    latex: "D"
+    description: "Distance"
+  # --- Sampled Parameters ---
   radius:
     lower: 0.1
     upper: 2000.0
+    initval: 1.0
     init_scale: 0.02
+    unit: "solRad"
+    internal_unit: "solRad"
     latex: "R_*"
     description: "Stellar Radius"
   radiussed:
@@ -61,13 +99,15 @@ star:
     description: "Stellar Age"
 
   # --- Derived Parameters ---
-  # We inherit the math from CelestialBody, but override the LaTeX here
   density:
+    unit: "g/cm3"
+    internal_unit: "solMass/solRad3"
     latex: "\\rho_*"
     description: "Stellar Density"
-  logg:
-    latex: "\\log{g_*}"
-
+    expressions:
+      default:
+        func_name: "calc_density"
+        deps: ["mass", "radius"]
   # --- Specific Physics ---
   fbol:
     unit: "erg s-1 cm-2"
@@ -115,7 +155,7 @@ star:
     init_scale: 0.1
     initval: 0.01
   pm_ra:
-    initval: 0.0
+    initval: -3.0
     init_scale: 0.05
     lower: -1e5
     upper: 1e5
@@ -124,7 +164,7 @@ star:
     latex: "\\mu_{\\alpha*}"
     description: "Proper Motion (RA)"
   pm_dec:
-    initval: 0.0
+    initval: -3.0
     init_scale: 0.05
     lower: -1e5
     upper: 1e5

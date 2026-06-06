@@ -1,8 +1,11 @@
 # src/exozippy/components/factory.py
 import importlib
 import inspect
+import logging
 from pathlib import Path
 from .component import Component
+
+logger = logging.getLogger(__name__)
 #import ipdb
 
 def discover_components():
@@ -39,6 +42,6 @@ def discover_components():
 
         except ImportError as e:
             # a developer might push an unused, broken component. that shouldn't break the code
-            print(f"Warning: Failed to load component module {module_path}: {e}")
+            logger.warning(f"Failed to load component module {module_path}: {e}")
 
     return registry

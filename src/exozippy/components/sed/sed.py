@@ -1,4 +1,6 @@
 # generic imports
+import logging
+import urllib.request
 from pathlib import Path
 import yaml
 import ast
@@ -31,16 +33,14 @@ from .bc_grid import (
     RegularGridInterpolator,
     DEFAULT_BC_ROOT,
 )
-from ..celestial_body.physics import calc_logg
-from ..star.physics import calc_luminosity
-
-# debugging imports
-import ipdb
+from ..star.physics import calc_logg, calc_luminosity
 
 # plotting imports
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerTuple
+
+logger = logging.getLogger(__name__)
 
 try:
     current_dir = Path(__file__).parent
@@ -172,10 +172,9 @@ class SED(Component):
             # defer to load_data's own error handling rather than
             # crashing here — the user's config may be wrong but
             # that's a load-time failure, not an init failure.
-            print(
-                f"Warning: sed could not peek "
-                f"grid axes for model={self.sedmodel} at "
-                f"{self.bc_root}: {e}. Skipping bound injection."
+            logger.warning(
+                f"SED could not peek grid axes for model={self.sedmodel} "
+                f"at {self.bc_root}: {e}. Skipping bound injection."
             )
 
         self.grid_axes = axes
@@ -219,17 +218,11 @@ class SED(Component):
         return "sed"
 
     # ------------------------------------------------------------------
-    # 1) build_parameters — just the SED-specific errscale.
+    # 1) register_parameters — declare the manifest for stage 2.
     # ------------------------------------------------------------------
-    def build_parameters(self, model):
-        
-        # in future could forsee doing per facility error scaling
-        parameters = {
-            "errscale": None,
-        }
-        self.build_pars_from_dict(
-            parameters, shape=(1,)#, prefix=self._prefix
-        )
+    def register_parameters(self, system):
+        # in future could foresee doing per facility error scaling
+        self.manifest = {"errscale": None}
 
     # ------------------------------------------------------------------
     # 2) load_data — parse .sed file and build one BC interpolator
@@ -276,12 +269,31 @@ class SED(Component):
             photType = [None]*self.nfilters
     
 
-    def load_data(self):
+    _MODEL_DATA_URLS = {
+        "NextGen": {
+            "NextGen.spectra.csv":    "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
+            "NextGen.wavelength.csv": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
+        }
+    }
+
+    def _ensure_model_data(self):
+        """Download large model data files from Zenodo if not present locally."""
+        urls = self._MODEL_DATA_URLS.get(self.sedmodel, {})
+        model_dir = current_dir / "models" / self.sedmodel
+        for filename, url in urls.items():
+            dest = model_dir / filename
+            if not dest.exists():
+                logger.info(f"Downloading {filename} from Zenodo...")
+                urllib.request.urlretrieve(url, dest)
+                logger.info(f"Saved {filename} to {dest}")
+
+    def load_data(self, system):
         if self.sedfile is None:
             raise ValueError(
                 f"sed is missing the required 'file' key"
             )
-        
+
+        self._ensure_model_data()
         self._process_SED_yaml()
 
         grid = build_bc_grid(
@@ -289,58 +301,17 @@ class SED(Component):
             model=self.sedmodel,
             bc_root=self.bc_root,
         )
-
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
 
-    # ------------------------------------------------------------------
-    # 3) build_map — nothing vectorized yet. We keep staridx as a
-    #    python int and look up scalar star-params in the likelihood
-    #    loop. If/when multi-star fits become a thing, convert to
-    #    tensor_variable here and vectorize build_likelihood.
-    # ------------------------------------------------------------------
-    def build_map(self, system):
-        pass
+        # Build the BC interpolator now, using config_manager.resolve() for
+        # the star parameter bounds. _inject_grid_bounds() already wrote the
+        # grid-axis limits into config_manager.user_params during __init__,
+        # so resolve() returns the correct tightened bounds here.
+        teff_cfg = self.config_manager.resolve('star', 'teffsed')
+        feh_cfg  = self.config_manager.resolve('star', 'feh')
+        av_cfg   = self.config_manager.resolve('star', 'av')
 
-    # ------------------------------------------------------------------
-    # 4) build_dependent_parameters — no-op in v1. We rely on the
-    #    star component having already built teffsed, radiussed, av,
-    #    distance, fbolsed, luminositysed because the user set
-    #    star.sedfile (which is the path we've already read).
-    # ------------------------------------------------------------------
-    def build_dependent_parameters(self, model, system):
-        # Guard rail: fail loudly if the required star params are missing.
-        star = getattr(system, "star", None)
-        if star is None:
-            raise RuntimeError(
-                "sed component requires a 'star' component in the system"
-            )
-        required = [
-            "teffsed",
-            "radiussed",
-            "feh",
-            "av",
-            "distance",
-            "fbolsed",
-            "mass",
-        ]
-        missing = [r for r in required if not hasattr(star, r)]
-        if missing:
-            raise RuntimeError(
-                f"sed component requires the following star parameters "
-                f"to exist but they are missing: {missing}. "
-                "Make sure star.sedfile is set in your system YAML so "
-                "star.build_parameters() creates them."
-            )
-        
-        # create grid based on star/user bounds
-        bc_values = self.bc_grid_data['bc_values']
-        star_teff = star.teffsed
-        star_feh = star.feh
-        star_av = star.av
-        # slice_bc expects a grid-yaml-shaped dict (see NextGen.grid.yaml),
-        # not the SED yaml. Reconstitute it from bc_grid_data, which is the
-        # actual source of truth for the loaded axes.
         grid_dict = {
             "model": self.sedmodel,
             "grid": {
@@ -350,15 +321,12 @@ class SED(Component):
                 "av":   self.bc_grid_data["av_pts"],
             },
         }
-        bc_slice, axes = slice_bc(grid_dict, bc_values,
-                                  teff=(star_teff.lower, star_teff.upper),
-                                  feh=(star_feh.lower, star_feh.upper),
-                                  av=(star_av.lower, star_av.upper))
-
-        # slice_bc only populates `axes` for constrained params (teff/feh/av
-        # here). logg is unconstrained, so its full grid survives in bc_slice
-        # but needs to be supplied to RegularGridInterpolator from
-        # bc_grid_data. Overlay the slices on top of the full axes.
+        bc_slice, axes = slice_bc(
+            grid_dict, self.bc_grid_data['bc_values'],
+            teff=(float(teff_cfg['lower'][0]), float(teff_cfg['upper'][0])),
+            feh=(float(feh_cfg['lower'][0]),   float(feh_cfg['upper'][0])),
+            av=(float(av_cfg['lower'][0]),      float(av_cfg['upper'][0])),
+        )
         axes_full = {
             "teff": self.bc_grid_data["teff_pts"],
             "logg": self.bc_grid_data["logg_pts"],
@@ -366,19 +334,21 @@ class SED(Component):
             "av":   self.bc_grid_data["av_pts"],
         }
         axes_full.update(axes)
-
         self.bc_interpolator = RegularGridInterpolator(
-            points=[
-                axes_full['teff'],
-                axes_full['logg'],
-                axes_full['feh'],
-                axes_full['av'],
-            ],
+            points=[axes_full['teff'], axes_full['logg'], axes_full['feh'], axes_full['av']],
             values=bc_slice,
         )
 
     # ------------------------------------------------------------------
-    # 5) build_likelihood — per-SED Normal likelihood over observed
+    # 3) build_maps — nothing vectorized yet. If/when multi-star fits
+    #    become a thing, convert staridx to a tensor_variable here and
+    #    vectorize build_likelihood.
+    # ------------------------------------------------------------------
+    def build_maps(self):
+        pass
+
+    # ------------------------------------------------------------------
+    # 4) build_likelihood — per-SED Normal likelihood over observed
     #    magnitudes, with a predicted mag coming from (mbol - BC).
     # ------------------------------------------------------------------
     def build_likelihood(self, model, system):
@@ -389,12 +359,12 @@ class SED(Component):
         radiussed = star.radiussed.value   # R_sun
         fbol = star.fbol.value             # erg/s/cm2
         fbolsed = star.fbolsed.value       # erg/s/cm2
-        logmass = star.logmass.value             # M_sun
+        logmass = star.logmass.value       # dex(M_sun)
         feh = star.feh.value               # dex
         av = star.av.value                 # mag
 
         # Reconstruct loggsed from logmass + radiussed (NOT radius).
-        loggsed = calc_logg(logmass, radiussed) 
+        loggsed = calc_logg(logmass, radiussed)
 
         # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
         coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
@@ -494,10 +464,7 @@ class SED(Component):
         except Exception as e:
             # Don't let plotting infra kill model build; warn
             # and leave None in place so plot() skips gracefully.
-            print(
-                f"Warning: SED plotter compile "
-                f"failed: {e}"
-            )
+            logger.warning(f"SED plotter compile failed: {e}")
             self._compiled_mag_predictors = None
             self._compiled_logg_calc = None
 
@@ -508,7 +475,7 @@ class SED(Component):
         if isinstance(points, dict):
             points = [points]
         if not points:
-            print("SED.plot: no points provided.")
+            logger.warning("SED.plot: no points provided.")
             return
         
         # retrieve model plotting class

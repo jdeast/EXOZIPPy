@@ -3,6 +3,7 @@ import yaml
 import numpy as np
 import math
 import os
+import logging
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -17,6 +18,7 @@ import arviz as az
 from pymc.initial_point import make_initial_point_fn
 
 # local imports
+from .logger import setup_logging
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
@@ -26,6 +28,8 @@ import os
 import sys
 import sysconfig
 import pytensor
+
+logger = logging.getLogger(__name__)
 
 # debugging imports
 # import ipdb
@@ -39,6 +43,8 @@ def run_fit(config):
     prefix = Path(config.get("prefix", "fitresults/planet"))
     parent_dir = prefix.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
+
+    setup_logging(prefix, config.get("logger_level", "INFO"))
 
     # 2. Load the sampler settings
     sampler_cfg = config.get("sampler", {})
@@ -56,10 +62,11 @@ def run_fit(config):
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config)
+    system.prepare() # this triggers I/O
     model = system.build_model()
 
     # 4. Sample
-    # We use adapt_diag to start exactly at our heuristic means
+    # We use adapt_diag to start exactly at our estimated means
     with model:
 
         # 1. Get your starting dictionaries
@@ -166,25 +173,55 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
     max_label_len = max([len(l) for l in display_labels] + [len(k) for k in other_nodes.keys()] + [24])
 
     table_width = 127
-    print("-" * table_width )
-    print("--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------")
-    print("--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------")
-    print("--------           abs(Curv) >~ 1e4 will impact efficiency and require more tuning steps                               --------")
-    print("--------           abs(Curv) ~< 1e-4 may artificially truncate your posteriors or severely impact efficiency           --------")
-    print("--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------")
-    print("-" * table_width )
+    logger.info("-" * table_width)
+    logger.info("--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------")
+    logger.info("--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------")
+    logger.info("--------           abs(Curv) >~ 1e4 will impact efficiency and require more tuning steps                               --------")
+    logger.info("--------           abs(Curv) ~< 1e-4 may artificially truncate your posteriors or severely impact efficiency           --------")
+    logger.info("--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------")
+    logger.info("--------           Positive log-prob is normal: continuous PDF values can exceed 1 (e.g. narrow Gaussians).            --------")
+    logger.info("-" * table_width)
     header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user) |"
-    print(header)
-    print("-" * table_width )
+    logger.info(header)
+    logger.info("-" * table_width)
 
     flat_warnings = []
 
     # --- PART 1: CORE PARAMETERS ---
     for p in auditor.all_params:
-        raw_v = phys_inits.get(p.label)
-        raw_s = phys_scales.get(p.label)
+        should_print = getattr(p, 'debug_print', None)
+        if should_print is None:
+            should_print = np.any(getattr(p, 'is_sampled', False))
+            # Handle vectorized boolean flags
+            if isinstance(should_print, np.ndarray):
+                should_print = np.any(should_print)
+        if not should_print:
+            continue
 
-        if raw_v is None or raw_s is None:
+        raw_v = p.initval
+        raw_s = p.init_scale
+
+        if raw_v is None:
+            # 1. Try to get it from the expression's dependency-solved graph
+            try:
+                if p.label in auditor.system.config_manager.user_params:
+                    user_val = auditor.system.config_manager.user_params[p.label].get("initval")
+                    if user_val is not None:
+                        # Convert to internal units so it matches expectations
+                        raw_v = p.to_internal(user_val)
+            except:
+                pass
+
+            # 2. Last resort: Eval the expression if it exists
+            if raw_v is None and p.expression is not None:
+                try:
+                    # 'deps' often need to be resolved. This is a hacky but effective way
+                    # to visualize the starting point of a deterministic.
+                    raw_v = p.expression().eval() if hasattr(p.expression(), 'eval') else p.expression()
+                except:
+                    pass
+
+        if raw_v is None:
             continue
 
         v_phys = np.atleast_1d(raw_v)
@@ -196,23 +233,52 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
         for i in range(len(v_phys)):
             row_label = p.get_display_label(i)
 
-            def safe_float(x):
-                if hasattr(x, 'eval'): return float(x.eval())
-                return float(x)
+            # Grab the solver's reconciled value if it exists ---
+            if row_label in auditor.system.config_manager.user_params:
+                resolved_data = auditor.system.config_manager.user_params[row_label]
+                if "initval" in resolved_data:
+                    # Fetch the conversion factor and apply it backwards
+                    f = p._get_conversion_factors()
+                    f_val = f[i] if np.size(f) > 1 else (f[0] if np.size(f) == 1 else f)
+                    v_phys[i] = float(resolved_data["initval"]) / float(f_val)
 
-            val_out = float(p.from_internal(safe_float(v_phys[i])))
-            scale_out = float(p.from_internal(safe_float(s_phys[i])))
+            def safe_float(x):
+                if x is None or (hasattr(x, 'size') and x.size == 0):
+                    return np.nan
+                if hasattr(x, 'eval'):
+                    x = x.eval()
+                    # Extract scalar from numpy arrays/scalars
+                val = x.item() if hasattr(x, 'item') else x
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return np.nan
+
+            raw_val = safe_float(v_phys[i])
+            # Pass through component conversion
+            internal_res = p.from_internal(raw_val)
+            # FORCE extraction to a standard Python float
+            val_out = float(internal_res.item()) if hasattr(internal_res, 'item') else float(internal_res)
+
+            # Do the same for scale
+            raw_scale = safe_float(s_phys[i])
+            internal_scale = p.from_internal(raw_scale)
+            scale_out = float(internal_scale.item()) if hasattr(internal_scale, 'item') else float(internal_scale)
+
+            #val_out = float(p.from_internal(safe_float(v_phys[i])))
+            #scale_out = float(p.from_internal(safe_float(s_phys[i])))
 
             # Float/Scientific formatting logic ---
             def smart_format(val, width):
+                # 2. Print a clean N/A instead of 'nan'
+                if np.isnan(val):
+                    return f"{'N/A':>{width}}"
                 if val == 0:
                     return f"{0.0:>{width}.6f}"
 
                 abs_v = abs(val)
                 # Use scientific notation if it's outside the "clean" range
                 if abs_v < 1e-4 or abs_v > 1e6:
-                    # For the Scale column (width 10), we use 3 decimal places: '1.000e-06'
-                    # For the Value column (width 15), we use 8 decimal places: '3.00000000e-06'
                     precision = max(0, width - 7)
                     return f"{val:>{width}.{precision}e}"
 
@@ -239,7 +305,7 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
 
             prior_str = p.get_prior_str(i, latex=False)
 
-            print(
+            logger.info(
                 f"{row_label:>{max_label_len}} | {val_str} | {scale_str} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {c_str:>10} | {prior_str}{user_flag}")
 
     # --- 2. Potentials & Likelihoods ---
@@ -247,17 +313,27 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
         clean_node = node.replace("up_bound.", "").replace("low_bound.", "").replace("prior.", "").replace(
             "user_prior.", "")
         parent = auditor.param_lookup.get(clean_node)
+        is_bound = "low_bound" in node or "up_bound" in node
 
-        # Flag if the user touched this parameter in the YAML
-        is_user = (parent and parent.user_modified) or (clean_node in auditor.user_params)
+        # Bug fix: skip inactive bounds — lp≈0 means we're well within the bound.
+        # They clutter the table without conveying useful information.
+        if is_bound and abs(lp) < 1e-6:
+            continue
 
-        # SHOW CONDITION: User requested it OR it's actively penalizing the model
+        # Bug fix: for bound nodes mark * only when the user explicitly set the
+        # prior/bounds (sigma, lower, upper), NOT merely because they set initval.
+        # user_modified is True for any user touch; user_prior_modified requires
+        # an explicit physics override (sigma, lower, upper, mu).
+        if is_bound:
+            is_user = parent and getattr(parent, 'user_prior_modified', False)
+        else:
+            is_user = (parent and parent.user_modified) or (clean_node in auditor.user_params)
+
         if abs(lp) > 1e-6 or is_user:
             p_info = "Likelihood/Det."
 
             if is_user:
                 if "up_bound" in node and parent:
-                    # Safely grab the parsed upper bound array
                     val = parent.upper[0] if parent.upper is not None else 'N/A'
                     p_info = f"< {val}"
                 elif "low_bound" in node and parent:
@@ -266,9 +342,9 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
                 elif parent:
                     p_info = parent.get_prior_str(latex=False)
 
-            print(
+            logger.info(
                 f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {'N/A':>10} | {p_info}{' *' if is_user else ''}")
-    print("-" * table_width )
+    logger.info("-" * table_width)
 
     # --- 3. THE FATAL CHECK ---
     bad_params = {k: v for k, v in param_logps.items() if not np.isfinite(v)}
@@ -277,24 +353,28 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
     # if we start at a bad spot, PyMC will draw randomly from the prior, which will never work
     # raise an error here
     if bad_params or bad_nodes:
-        print("\n\033[91m" + "!" * 40)
-        print("Fatal error: the starting model returned an infinite/NaN penalty!")
-        print("The following nodes have Infinite or NaN Log-Probability:")
-        for k, v in {**bad_params, **bad_nodes}.items():
-            print(f"  -> {k}: {v}")
-        print("Check your initial values against your bounds/priors!")
-        print("!" * 40 + "\033[0m\n")
+        bad_list = "\n".join(f"  -> {k}: {v}" for k, v in {**bad_params, **bad_nodes}.items())
+        logger.error(
+            "!" * 40 + "\n"
+            "Fatal error: the starting model returned an infinite/NaN penalty!\n"
+            "The following nodes have Infinite or NaN Log-Probability:\n"
+            f"{bad_list}\n"
+            "Check your initial values against your bounds/priors!\n"
+            + "!" * 40)
         raise ValueError("Initialization failed due to non-finite Log-Probability.")
 
     if flat_warnings:
-        print("\n\033[93m" + "?" * 60)
-        print(f"WARNING: No curvature detected for: {flat_warnings}. Check your bounds/initialization.")
-        print("Even a single unconstrained parameter will destroy HMC efficiency.")
-        print("?" * 60 + "\033[0m\n")
+        logger.warning(
+            "?" * 60 + "\n"
+            f"WARNING: No curvature detected for: {flat_warnings}. Check your bounds/initialization.\n"
+            "Even a single unconstrained parameter will destroy HMC efficiency.\n"
+            + "?" * 60)
 
     if unused_yaml:
-        print(f"\n!!!! Warning: the following parameters in the parameter.yaml file did not match a parameter in the model and its entries were not applied: {unused_yaml}")
-        print(f"\n!!!!          This warning can be safely ignored if that was intentional, but check for typos.")
+        logger.warning(
+            f"The following parameters in the parameter.yaml file did not match any model parameter "
+            f"and were not applied: {unused_yaml}\n"
+            "This can be safely ignored if intentional, but check for typos.")
 
 def make_corner(model, idata, filename):
     import corner
@@ -338,7 +418,7 @@ def make_corner(model, idata, filename):
         )
         fig.savefig(filename)
     except Exception as e:
-        print(f"Warning: Corner plot failed (Sample size {n_samples_total}). Error: {e}")
+        logger.warning(f"Corner plot failed (sample size {n_samples_total}): {e}")
 
 def save_multipage_trace(idata, var_names, filename, params_per_page=4):
     with PdfPages(filename) as pdf:

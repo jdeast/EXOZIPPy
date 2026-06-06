@@ -1,7 +1,10 @@
 #import ipdb
+import logging
 import yaml
 import numpy as np
 import os
+
+logger = logging.getLogger(__name__)
 
 import pytensor
 import pytensor.tensor as pt
@@ -9,55 +12,37 @@ import pymc as pm
 import arviz as az
 
 # local imports
-from exozippy.components import Star, Orbit, Planet, RVInstrument
 from exozippy.components.component import Component
 from exozippy.components.parameter import Parameter
 from exozippy.config import ConfigManager
-from exozippy.components.star.star import Star
-from exozippy.components.orbit.orbit import Orbit
-from exozippy.components.planet.planet import Planet
-from exozippy.components.rv_instrument.rv_instrument import RVInstrument
 from exozippy.components.factory import discover_components
+from exozippy.graph import determine_pymc_build_order
 
+"""
+The System Class builds an entire system to model from its components.
+Critically, it contains no component-specific logic, so it 
+can generally construct any model containing arbitrary components.
+"""
 class System(Component):
     def __init__(self, config, user_params=None):
-
         self.config = config
-        self.name = self.config.get("name","system")
+        self.name = self.config.get("name", "system")
 
-        # load the user parameter file
         if user_params is not None:
             self.user_params = user_params
         else:
-            user_params_file = self.config.get("parameter_file",None)
+            user_params_file = self.config.get("parameter_file", None)
             if not os.path.exists(user_params_file):
                 raise ValueError("The user must specify a valid parameter_file")
             with open(str(user_params_file), 'r') as f:
                 self.user_params = yaml.safe_load(f)
 
-        self.config_manager = ConfigManager(self.user_params)
-
+        self.config_manager = ConfigManager(self.user_params, system_config=self.config)
         self.registry = discover_components()
         self.active_components = {}
 
-        # 2. AGNOSTIC INSTANTIATION
-        # We look at the YAML keys. If a key matches a registered Component, we build it.
-        # Python >= 3.7 dicts preserve insertion order, so the user's YAML order
-        # implicitly dictates the order in the output table.
-        # note it also implicitly dictates the component processing order
-        # but the model building recipe should be robust to build order
-        # that might lead to mysterious bugs if that turns out to be false
-        for key in self.config.keys():
-            if key in self.registry:
-                CompClass = self.registry[key]
-                inst = CompClass(self.config[key], self.config_manager)
-                self.active_components[key] = inst
-                setattr(self, key, inst)
-
-        print("Based on your config.yaml file, we are modeling the following components:")
-        for key in self.active_components.keys(): print(f"{key} ({self.active_components[key].n_elements})")
-
-        reserved_keys = {"run", "parameter_file", "prefix", "sampler", "name"}
+        # 1. AGNOSTIC INSTANTIATION
+        reserved_keys = {"run", "parameter_file", "prefix", "sampler", "name", "logger_level"}
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]
@@ -65,30 +50,71 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
-                print(
-                    f"\033[93m" + f"!!!! WARNING: YAML key '{key}' does not match any registered component (Star, Planet, etc.) and will be ignored." + "\033[0m")
+                logger.warning(f"YAML key '{key}' does not match any registered component and will be ignored.")
+
+        logger.info("Modeling the following components:")
+        for key, comp in self.active_components.items():
+            logger.info(f"  {key} ({comp.n_elements})")
+
+        # ==========================================================
+        # THE WIRING PASS (Universal Topology)
+        # ==========================================================
+        entity_directory = {}
+        for comp_name, comp in self.active_components.items():
+            for idx, name in enumerate(comp.names):
+                entity_directory[name] = (comp, idx)
+
+    def prepare(self):
+        # ==========================================================
+        # PRE-FLIGHT SEQUENCE
+        # ==========================================================
+        # Stage 1: DATA & LOGICAL MAPS
+        for comp in self.active_components.values():
+            if hasattr(comp, 'load_data'): comp.load_data(self)
+            if hasattr(comp, 'build_maps'): comp.build_maps()
+
+        # Stage 2: REGISTRATION (The Blueprint)
+        for comp in self.active_components.values():
+            if hasattr(comp, 'register_parameters'): comp.register_parameters(self)
+
+        # Stage 3: RECONCILIATION (The Solver)
+        self.config_manager.finalize_user_params()
+
+        self.config_manager.audit_scales()
+
+    def build_likelihood(self, model, system):
+        pass
+
+    @property
+    def prefix(self) -> str:
+        return "system"
+
+    def register_parameters(self, system):
+        pass
 
     def build_model(self):
+        """Constructs the PyMC probabilistic model for the entire system."""
         with pm.Model() as model:
-            # 1. CORE PARAMETERS (The Foundations)
+            # Stage 4a: Automatic PyTensor Map Conversion
+            # Convert logical numpy arrays into PyTensor variables for the graph
             for comp in self.active_components.values():
-                comp.build_parameters(model)
+                comp.build_tensor_maps()
 
-            # 2. LOAD DATA (The Heuristics & Context)
-            for comp in self.active_components.values():
-                comp.load_data()
+            # Stage 4: Topological Sort for Parameter Building
+            # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
+            pymc_build_order = determine_pymc_build_order(self.active_components, self.config_manager)
 
-            # 3. Structural Mapping (PyTensor Graph Topology)
-            for comp in self.active_components.values():
-                comp.build_map(system=self)
+            # Stage 5: Linearly materialize the nodes node-by-node
+            for param_path in pymc_build_order:
+                comp_name, param_name = param_path.split('.', 1)
+                if comp_name in self.active_components:
+                    comp = self.active_components[comp_name]
+                    if param_name in getattr(comp, 'manifest', {}):
+                        comp.add_parameter(model, param_name, self)
 
-            # --- BRIDGE: INITIALIZE MAPS ---
+            # Stage 6: LIKELIHOOD
             for comp in self.active_components.values():
-                comp.build_dependent_parameters(model, system=self)
-
-            # 4. LIKELIHOOD (The Comparison)
-            for comp in self.active_components.values():
-                comp.build_likelihood(model, system=self)
+                if hasattr(comp, 'build_likelihood'): comp.build_likelihood(model, system=self)
 
         self.compile_plotter_functions(model)
         return model

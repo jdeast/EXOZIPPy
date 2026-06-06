@@ -1,0 +1,39 @@
+star.teff: 
+    initval: 5190.0
+#    sigma: 150
+
+#star.teffsed:
+#    initval: 5190.0
+#    sigma: 150
+#    init_scale: 9.8
+
+star.mass:
+    initval: 0.92
+    sigma: 0.05
+
+#star.logmass:
+#    initval: -0.0362
+#    sigma: 0.02
+
+star.radius:
+    initval: 0.85
+#    sigma: 0.05
+
+#star.radiussed:
+#    initval: 0.85
+#    sigma: 0.05
+#    init_scale: 0.003
+
+star.feh:  
+    initval: 0.27
+    sigma: 0.08
+
+star.av:  
+    #upper: 0.096687450
+    initval: 0.01
+    sigma: 0.01
+
+# NOTE: the Gaia DR3 parallax uncertainty (0.0143000) has been added in quadrature with 0.01 to account for remaining systematic residuals
+star.parallax:
+    initval: 7.45278
+    sigma: 0.01745

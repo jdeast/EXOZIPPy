@@ -4,7 +4,7 @@ import pytensor.tensor as pt
 import pytensor
 from exozippy.components.orbit import Orbit
 from exozippy.config import ConfigManager
-
+from exozippy.system import System
 
 def test_isolated_orbital_mechanics_match_pure_numpy_sinusoid():
     """
@@ -13,7 +13,7 @@ def test_isolated_orbital_mechanics_match_pure_numpy_sinusoid():
     Then the output should perfectly match a pure numpy sinusoidal truth array.
     """
     # ARRANGE
-    config = [{"name": "test_orbit"}]
+    config = {"orbit": [{"name": "test_orbit"}]}
     user_params = {
         "orbit.test_orbit.logP": {"initval": np.log10(10.0)},
         "orbit.test_orbit.tc": {"initval": 0.0},
@@ -21,11 +21,12 @@ def test_isolated_orbital_mechanics_match_pure_numpy_sinusoid():
         "orbit.test_orbit.sesinw": {"initval": 0.0}
     }
 
-    cm = ConfigManager(user_params)
-    orbit = Orbit(config, cm)
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    orbit = system.orbit
 
-    with pm.Model() as model:
-        orbit.build_parameters(model)
+    with model:
 
         times = np.linspace(0, 10, 100)
         t_tensor = pt.vector("t")

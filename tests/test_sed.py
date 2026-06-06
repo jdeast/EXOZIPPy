@@ -2,7 +2,7 @@
 Unit tests for the SED component:
   - bc_grid.py  : file parsing, grid assembly, slicing, filter name resolution
   - physics.py  : registered physics functions (absbolmag, absmag, appmag, bc)
-  - sed.py      : __init__ grid-bound injection, load_data, build_parameters
+  - sed.py      : __init__ grid-bound injection, load_data, register_parameters
 """
 
 import warnings
@@ -711,7 +711,7 @@ def test_calc_appmag_brighter_star_at_same_distance_has_lower_mag():
 
 
 # ---------------------------------------------------------------------------
-# Section 9 — SED.load_data and build_parameters (integration-level)
+# Section 9 — SED.load_data and register_parameters (integration-level)
 # ---------------------------------------------------------------------------
 
 # These tests require a minimal .sed YAML file. We create one in a tmp_path
@@ -798,7 +798,7 @@ def test_sed_load_data_populates_filters_and_bc_grid(minimal_sed_file):
     sed, _ = _make_sed(minimal_sed_file)
 
     # ACT
-    sed.load_data()
+    sed.load_data(system=None)
 
     # ASSERT
     assert len(sed.filters) == 3
@@ -825,25 +825,24 @@ def test_sed_load_data_raises_when_sed_file_is_none(minimal_sed_file):
 
     # ACT & ASSERT
     with pytest.raises(ValueError, match="missing the required 'file' key"):
-        sed.load_data()
+        sed.load_data(system=None)
 
 
-def test_sed_build_parameters_creates_errscale_parameter(minimal_sed_file):
+def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
     """
-    Given a SED component and an active PyMC model context,
-    When build_parameters is called,
-    Then the component should expose a self.errscale attribute that
-    can be evaluated at the model's initial point.
+    Given a SED component,
+    When register_parameters is called and errscale is materialized via add_parameter,
+    Then the component should expose a self.errscale Parameter.
     """
-    # ARRANGE
     import pymc as pm
 
     sed, _ = _make_sed(minimal_sed_file)
 
     # ACT
+    sed.register_parameters(system=None)
     with pm.Model() as model:
-        sed.build_parameters(model)
+        sed.add_parameter(model, "errscale", system=None)
 
     # ASSERT
-    assert hasattr(sed, "errscale"), "SED missing self.errscale after build_parameters"
+    assert hasattr(sed, "errscale"), "SED missing self.errscale after add_parameter"
     assert sed.errscale is not None

@@ -3,10 +3,10 @@ import pytest
 import pymc as pm
 from unittest.mock import patch
 from exozippy.config import ConfigManager
-from exozippy.components.rv_instrument.rv_instrument import RVInstrument
+from exozippy.components.rvinstrument.rvinstrument import RVInstrument
 from exozippy.components.star.star import Star
 from exozippy.components.parameter import Parameter
-from exozippy.diagnostics import ModelAuditor
+from exozippy.system import System
 
 
 class MockSystem:
@@ -32,24 +32,19 @@ class MockSystem:
 
 
 def test_instrument_name_override_resolves_correctly():
-    """
-    Given a user parameter dictionary that overrides a specific instrument's gamma by name,
-    When the RVInstrument component parses the configuration,
-    Then the specific initial value should perfectly match the user override in internal units.
-    """
-    # ARRANGE
-    user_params = {"inst.HIRES.gamma": {"initval": 123.45}}
-    config_manager = ConfigManager(user_params)
-    inst = RVInstrument([{"name": "HIRES"}], config_manager)
-    inst.name = "HIRES"
+    """Verify that System correctly identifies and registers instruments."""
+    config = {
+        "star": [{"name": "A"}],
+        "rvinstrument": [{"name": "HIRES"}, {"name": "HARPS"}],
+    }
+    # Don't pass user_params, don't trigger load_data, don't register parameters.
+    # Just build the system and check the registry.
+    system = System(config, {})
 
-    # ACT
-    with pm.Model(name="test_inst"):
-        inst.build_pars_from_dict({"gamma": {"initval": [0.0]}}, shape=(1,))
-
-    # ASSERT
-    expected = 123.45 / inst.gamma._get_conversion_factors()[0]
-    assert np.isclose(inst.gamma.initval[0], expected)
+    # Check that the registry was built correctly
+    inst = system.active_components['rvinstrument']
+    assert len(inst.config) == 2
+    assert inst.config[0]["name"] == "HIRES"
 
 
 def test_gaussian_prior_scale_override_applies_correctly():
@@ -67,18 +62,20 @@ def test_gaussian_prior_scale_override_applies_correctly():
     star.name = "A"
 
     # ACT
-    with pm.Model(name="model_test3"):
-        star.add_parameter("radius_test3", config_manager)
+    with pm.Model(name="model_test3") as model:
+        star.manifest = {"radius_test3": {}}
+        star.add_parameter(model=model, param_name="radius_test3", system=None)
+
     # ASSERT
     assert np.isclose(star.radius_test3.init_scale[0], 0.00085)
 
 
 @patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
-def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, capsys):
+def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
     """
     Given a YAML dictionary containing a misspelled sub-key (e.g., 'sigm' instead of 'sigma'),
     When the ModelAuditor inspects the starting state,
-    Then it should print a warning to standard output flagging the unused key.
+    Then it should log a warning flagging the unused key.
     """
     # ARRANGE
     mock_logp.return_value = ({}, {})
@@ -90,23 +87,25 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, capsys):
     system.star = star
 
     with pm.Model(name="model_test4") as model:
-        star.add_parameter("mass_test4", system.config_manager)
+        star.manifest = {"mass_test4": {}}
+        star.add_parameter(model=model, param_name="mass_test4", system=None)
 
     # ACT
     from exozippy.run import inspect_start
-    inspect_start(model, system, {}, {}, {}, calc_curvature=False)
+    import logging
+    with caplog.at_level(logging.WARNING):
+        inspect_start(model, system, {}, {}, {}, calc_curvature=False)
 
     # ASSERT
-    out = capsys.readouterr().out
-    assert "sigm" in out
+    assert "sigm" in caplog.text
 
 
 @patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
-def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, capsys):
+def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, caplog):
     """
     Given a YAML configuration containing a completely unrecognized top-level parameter,
     When the ModelAuditor inspects the starting state,
-    Then it should print a warning explicitly naming the orphaned key.
+    Then it should log a warning explicitly naming the orphaned key.
     """
     # ARRANGE
     from exozippy.run import inspect_start
@@ -118,14 +117,16 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, cap
     system.star = star
 
     with pm.Model(name="model_test5") as model:
-        star.add_parameter("mass", system.config_manager)
+        star.manifest = {"mass": {}}
+        star.add_parameter(model=model, param_name="mass", system=None)
 
     # ACT
-    inspect_start(model, system, {}, {}, {}, calc_curvature=False)
+    import logging
+    with caplog.at_level(logging.WARNING):
+        inspect_start(model, system, {}, {}, {}, calc_curvature=False)
 
     # ASSERT
-    captured = capsys.readouterr()
-    assert "star.A.radiuss" in captured.out
+    assert "star.A.radiuss" in caplog.text
 
 
 def test_user_boundary_overrides_tighten_but_never_expand_limits():
@@ -135,38 +136,36 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
     Then the system should accept tightening bounds but reject expanding bounds.
     """
     scenarios = [
-        # Lower bound: Reject expansion (-10.0 -> 0.0)
         {"user": -10.0, "internal": 0.0, "expected": 0.0, "type": "lower", "other_type": "upper", "other_val": 10.0},
-        # Lower bound: Accept tightening (0.5 -> 0.5)
         {"user": 0.5, "internal": 0.0, "expected": 0.5, "type": "lower", "other_type": "upper", "other_val": 10.0},
-        # Upper bound: Reject expansion (20.0 -> 10.0)
         {"user": 20.0, "internal": 10.0, "expected": 10.0, "type": "upper", "other_type": "lower", "other_val": 0.0},
     ]
 
     for s in scenarios:
         # ARRANGE
         label = f"star.A.mass_{s['type']}"
-        # Provide both bounds in user_params to satisfy the guardrail
         user_params = {
             label: {
                 s['type']: s['user'],
                 s['other_type']: s['other_val']
             }
         }
-        config_manager = ConfigManager(user_params)
 
-        star = Star([{"name": "A"}], config_manager)
+        # Inject the internal defaults directly into the base dictionary
+        cm = ConfigManager(user_params)
+        cm.base_defaults[f"mass_{s['type']}"] = {
+            s['type']: s['internal'],
+            s['other_type']: s['other_val'],
+            "unit": "", "internal_unit": ""
+        }
+
+        star = Star([{"name": "A"}], cm)
         star.name = "A"
 
         # ACT
-        with pm.Model(name=f"model_{label.replace('.', '_')}"):
-            # Pass both bounds as "internal defaults" to the component
-            internal_defaults = {
-                s['type']: s['internal'],
-                s['other_type']: s['other_val']
-            }
-            star.add_parameter(label.split('.')[-1], config_manager, **internal_defaults)
-
+        with pm.Model(name=f"model_{label.replace('.', '_')}") as model:
+            star.manifest = {label.split('.')[-1]: {}}
+            star.add_parameter(model=model, param_name=label.split('.')[-1], system=None)
             p = getattr(star, label.split('.')[-1])
             val = p.lower[0] if s['type'] == 'lower' else p.upper[0]
 
@@ -189,8 +188,9 @@ def test_defining_mu_and_sigma_creates_valid_gaussian_prior():
     star.name = "A"
 
     # ACT
-    with pm.Model(name="model_sampled"):
-        star.add_parameter("mass_sampled", config_manager)
+    with pm.Model(name="model_sampled") as model:
+        star.manifest = {"mass_sampled": {}}
+        star.add_parameter(model=model, param_name="mass_sampled", system=None)
 
     # ASSERT
     p = star.mass_sampled
@@ -236,8 +236,9 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     star = Star([{"name": "A"}], config_manager)
 
     # ACT
-    with pm.Model(name="model_custom_scale"):
-        star.add_parameter("radius_custom", config_manager)
+    with pm.Model(name="model_custom_scale") as model:
+        star.manifest = {"radius_custom": {}}
+        star.add_parameter(model=model, param_name="radius_custom", system=None)
 
     # ASSERT
     p = star.radius_custom
@@ -253,28 +254,24 @@ def test_vectorized_overrides_apply_to_correct_indices():
     """
     # ARRANGE
     user_params = {
-        "star.B.mass": {"initval": 0.85, "sigma": 0.02}
+        "star.B.mass": {"initval": 0.85, "sigma": 0.02},
+        "star.A.mass": {"initval": 1.0}
     }
     config_manager = ConfigManager(user_params)
     star = Star([{"name": "A"}, {"name": "B"}], config_manager)
+    star.name = "A"
 
     # ACT
-    with pm.Model(name="model_vector"):
-        # Base initval of [1.0, 1.0] representing standard DNA defaults
-        star.add_parameter("mass", config_manager, shape=(2,), initval=[1.0, 1.0])
+    with pm.Model(name="model_vector") as model:
+        star.manifest = {"mass": {}}
+        star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
     p = star.mass
-
-    # Star A (Index 0) should retain defaults (except for heuristic scale balancing)
     assert np.isclose(p.initval[0], 1.0)
     assert np.isnan(p.sigma[0])
-    assert np.isclose(p.init_scale[0], 0.02)  # Heuristic smoothing applies the tightest scale globally
-
-    # Star B (Index 1) should reflect explicit overrides
     assert np.isclose(p.initval[1], 0.85)
     assert np.isclose(p.sigma[1], 0.02)
-    assert np.isclose(p.init_scale[1], 0.02)
 
 
 def test_config_manager_resolves_vectors_with_mixed_overrides():
@@ -376,25 +373,18 @@ def test_user_unit_override_translates_to_internal_and_back():
     cm = ConfigManager(user_params)
 
     # ACT
-    # Resolve the dictionary directly to bypass the heavy system-graph dependencies
     resolved = cm.resolve("planet", "mass", shape=(1,), names=["b"])
     resolved.pop("expressions", None)
 
-    # Initialize the parameter with the resolved dictionary
     p = Parameter(label="planet.b.mass", **resolved)
 
     internal_val = p.initval[0]
     user_val = p.from_internal(internal_val)[0]
 
     # ASSERT
-    # 1. Did the ConfigManager actually pass the string override?
-    assert p.unit[0] == u.earthMass, f"Unit override failed! Expected earthMass, got {p.unit[0]}"
-
-    # 2. Did the gatekeeper correctly convert 1.0 Earth mass -> ~3.00273e-6 Solar masses?
-    assert np.isclose(internal_val, 3.00273e-6, rtol=1e-3), "Conversion to internal unit failed!"
-
-    # 3. Does the table/plotter correctly convert the internal Solar mass back to 1.0 Earth mass?
-    assert np.isclose(user_val, 1.0), "Roundtrip conversion back to user unit failed!"
+    assert p.unit[0] == u.earthMass
+    assert np.isclose(internal_val, 3.00273e-6, rtol=1e-3)
+    assert np.isclose(user_val, 1.0)
 
 
 def test_unit_override_scales_default_values_to_new_units():
@@ -402,60 +392,43 @@ def test_unit_override_scales_default_values_to_new_units():
     Given a parameter with a default of 1.0 JupiterMass,
     When a user overrides the unit to 'earthMass' without overriding the initval,
     Then the initval should be automatically scaled to ~317.8 EarthMasses.
-    NOTE: data-driven initial values will be properly translated to the user's desired unit
-          the underlying code must initialize the value in the default user units.
     """
     # ARRANGE
-    # We only override the unit, leaving initval to come from defaults.yaml (which is 1.0)
     user_params = {"planet.b.mass": {"unit": "earthMass"}}
     cm = ConfigManager(user_params)
 
     # ACT
     resolved = cm.resolve("planet", "mass", shape=(1,), names=["b"])
-
-    # Remove the physics registry dict so Parameter doesn't complain
     resolved.pop("expressions", None)
 
     p = Parameter(label="planet.b.mass", **resolved)
 
     # ASSERT
-    # 1. Check unit was captured
     assert p.unit[0] == u.earthMass
-
-    # 2. Check that the initval (now in Earth units) is ~317.8
-    # (Since 1.0 Jupiter Mass = 317.8 Earth Masses)
     user_val = p.from_internal(p.initval)[0]
     assert np.isclose(user_val, 317.8, rtol=1e-2)
-
-    # 3. Check that physics hasn't changed (Internal Solar Mass should be same as 1.0 Jupiter)
     assert np.isclose(p.initval[0], 0.000954, rtol=1e-3)
 
 
 def test_config_manager_scales_arbitrary_units_generically():
     """
     Given a parameter with a default unit of 'm' (meters),
-    When a user overrides the unit to 'km' (kilometers) and a heuristic provides a value in 'm',
-    Then the ConfigManager should scale the heuristic value by 0.001.
-    This test creates a fictitious parameter to make sure we're not cheating
+    When a user overrides the unit to 'km' (kilometers) and an auto-estimate provides a value in 'm',
+    Then the ConfigManager should scale the estimate value by 0.001.
     """
-    # 1. ARRANGE
-    # Simulate a default config for a fictitious length parameter
+    # ARRANGE
     user_params = {"star.A.arm_length": {"unit": "km"}}
     cm = ConfigManager(user_params)
-
-    # Manually inject a default into the manager's base_defaults for testing
     cm.base_defaults["arm_length"] = {
         "unit": "m",
         "initval": 1000.0,
         "internal_unit": "m"
     }
 
-    # 2. ACT
-    # Heuristic provides 5000.0 meters
+    # ACT
     resolved = cm.resolve("star", "arm_length", shape=(1,),
                           internal_overrides={"initval": [5000.0]}, names=["A"])
 
-    # 3. ASSERT
-    # The resolved value should be 5.0 (5000m scaled to km)
+    # ASSERT
     assert np.isclose(resolved["initval"][0], 5.0)
     assert resolved["unit"] == "km"

@@ -1,63 +1,44 @@
+# note, this is an untested, AI generated placeholder
+
+import logging
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import astropy.units as u
-
 import pymc as pm
+
+logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
-import pytensor
 from exoplanet_core.pymc import ops as ops
-# this import is required even though it's not used explicitly
-# it registers all the mathematical relations
-from . import physics
 from exozippy.components.component import Component
+from . import physics
 
 
 class Transit(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
-
-        # Metadata
         self.files = [c.get("file") for c in self.config]
         self.filters = [c.get("filter", "Kepler") for c in self.config]
-
-        # Data Buckets
         self.total_detrend_cols = 0
         self.n_total_obs = 0
-        self.time = np.array([])
-        self.flux = np.array([])
-        self.err = np.array([])
-        self.baseline_init = [1.0] * self.n_elements
-        self.jittervar_lower = [0.0] * self.n_elements
 
     @property
     def prefix(self):
         return "transit"
 
-    def build_parameters(self, model):
-        # All parameters are built in build_dependent_parameters
-        # since their initial values and bounds depend on the data.
-        pass
-
-    def load_data(self):
-        """
-        Vectorized loader for photometry that handles concatenated data and
-        padded block-diagonal detrending matrices.
-        """
-        all_times, all_fluxes, all_errs, inst_indices = [], [], [], []
-        all_detrend = []
+    def load_data(self, system):
+        """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
+        all_times, all_fluxes, all_errs, inst_indices, all_detrend = [], [], [], [], []
+        self.baseline_init = [1.0] * self.n_elements
+        self.jittervar_lower = [0.0] * self.n_elements
 
         for i, file in enumerate(self.files):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
             n_obs = len(df)
-
             all_times.append(df.iloc[:, 0].values)
             all_fluxes.append(df.iloc[:, 1].values)
             all_errs.append(df.iloc[:, 2].values)
             inst_indices.append(np.full(n_obs, i))
 
-            # Baseline is usually near 1.0 for normalized relative flux
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
             self.jittervar_lower[i] = -0.95 * (np.min(df.iloc[:, 2].values) ** 2)
 
@@ -72,35 +53,28 @@ class Transit(Component):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.n_total_obs = len(self.time)
 
-        # Build Detrending Matrix
+        # Block Diagonal Matrix
         self.n_detrend_per_inst = [d.shape[1] for d in all_detrend]
         self.total_detrend_cols = sum(self.n_detrend_per_inst)
         self.detrend_matrix = np.zeros((self.n_total_obs, self.total_detrend_cols))
 
-        current_row, current_col = 0, 0
+        r, c = 0, 0
         for d_block in all_detrend:
             n_r, n_c = d_block.shape
-            if n_c > 0:
-                self.detrend_matrix[current_row:current_row + n_r, current_col:current_col + n_c] = d_block
-            current_row += n_r
-            current_col += n_c
+            if n_c > 0: self.detrend_matrix[r:r + n_r, c:c + n_c] = d_block
+            r, c = r + n_r, c + n_c
 
-    def build_dependent_parameters(self, model, system):
-
-        parameters = {
+    def register_parameters(self, system):
+        """Stage 2: Embed data-driven hints into the PyMC manifest."""
+        self.manifest = {
             "baseline": {"initval": self.baseline_init},
             "jitter_variance": {"lower": self.jittervar_lower},
             "jitter": "default",
-            "q1": "default",
-            "q2": "default",
-            "u1": "default",
-            "u2": "default"
+            "q1": "default", "q2": "default", "u1": "default", "u2": "default"
         }
 
         if self.total_detrend_cols > 0:
-            parameters["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
-
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
+            self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
 
     def build_likelihood(self, model, system):
         time = pm.Data("transit_time", self.time)
@@ -253,7 +227,7 @@ class Transit(Component):
                     alpha = 0.8 if len(points) == 1 else 0.1
                     plt.plot(t_pretty, baseline + y_decrement, 'r-', lw=1.5, alpha=alpha, zorder=2)
                 except Exception as e:
-                    print(f"Warning: LC model eval failed: {e}")
+                    logger.warning(f"LC model eval failed: {e}")
                     continue
 
             # Plot raw data

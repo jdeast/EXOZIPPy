@@ -2,82 +2,100 @@ import pytensor.tensor as pt
 import pymc as pm
 import numpy as np
 from exozippy.components.component import Component
-from . import physics
 from .op import MulensMagOp
-
-
 
 class Lens(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Lens Parameters"
-
         self.finite_source = [c.get("finite_source", False) for c in self.config]
-        self.t0_par = [c.get("t0_par", 2450000.0) for c in self.config]
+        self.t0_par = [self._resolve_t0_par(i, c, config_manager) for i, c in enumerate(self.config)]
+        self.mag_method = [c.get("mag_method", "auto_vbbl" if c.get("finite_source", False) else "point_source") for c
+                           in self.config]
 
-        self.mag_method = []
-        for c in self.config:
-            default_mag = "auto_vbbl" if c.get("finite_source", False) else "point_source"
-            self.mag_method.append(c.get("mag_method", default_mag))
+    @staticmethod
+    def _resolve_t0_par(i, c, config_manager):
+        """Return t_0_par for lens i: explicit yaml value > user params t_0 > fallback."""
+        if 't0_par' in c:
+            return float(c['t0_par'])
+        entry = config_manager.user_params.get(f"lens.{i}.t_0")
+        if isinstance(entry, dict):
+            val = entry.get('initval')
+        else:
+            val = entry
+        return float(val) if val is not None else 2450000.0
 
     @property
     def prefix(self):
         return "lens"
 
-    def build_parameters(self, model):
-        # We only build the base integration constants here
-        parameters = {
-            "t_0": None,
-            "u_0": None,
-        }
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
+    def build_maps(self):
+        """Stage 1b: Map the lens and source to their respective stars."""
+        # The base Component will automatically convert these to PyTensor int32
+        # variables named `self.lens_map_tensor` and `self.source_map_tensor`
+        self.lens_map = np.array([c.get("lens_ndx", 0) for c in self.config])
+        self.source_map = np.array([c.get("source_ndx", 1) for c in self.config])
 
-    def load_data(self):
-        pass
-
-    def build_map(self, system):
-        # Map which star is the lens and which is the source
-        # Defaults: lens is star 0, source is star 1
-        lens_indices = np.array([c.get("lens_ndx", 0) for c in self.config])
-        self.lens_map = pt.as_tensor_variable(lens_indices).astype("int32")
-
-        source_indices = np.array([c.get("source_ndx", 1) for c in self.config])
-        self.source_map = pt.as_tensor_variable(source_indices).astype("int32")
-
-    def build_dependent_parameters(self, model, system):
-        stars = system.star
-
-        # 1. Provide the physical inputs from the mapped stars
-        context_nodes = {
-            "dist_lens": stars.distance.value[self.lens_map],
-            "dist_source": stars.distance.value[self.source_map],
-            "mass_lens": stars.mass.value[self.lens_map],
-            "pm_ra_lens": stars.pm_ra.value[self.lens_map],
-            "pm_dec_lens": stars.pm_dec.value[self.lens_map],
-            "pm_ra_source": stars.pm_ra.value[self.source_map],
-            "pm_dec_source": stars.pm_dec.value[self.source_map],
-            "distance_lens": system.star.distance.value[self.lens_map],
-            "distance_source": system.star.distance.value[self.source_map]
+    def register_parameters(self, system):
+        """Stage 2: Declare the microlensing manifest."""
+        self.manifest = {
+            "t_0": None, "u_0": None,
+            "pi_rel": "default", "theta_E": "default",
+            "mu_ra_rel": "default", "mu_dec_rel": "default",
+            "mu_rel_mag": "default", "t_E": "default",
+            "pi_E_N": "default", "pi_E_E": "default",
         }
 
-        # 2. Command the switchboard to build the derived microlensing observables
-        parameters = {
-            "pi_rel": "default",
-            "theta_E": "default",
-            "mu_ra_rel": "default",
-            "mu_dec_rel": "default",
-            "mu_rel_mag": "default",
-            "t_E": "default",
-            "pi_E_N": "default",
-            "pi_E_E": "default",
-        }
+        # Inject microlensing initval and init_scale defaults for all events.
+        # Initval hints (rank=30): override the generic 10 pc star default but
+        # yield to data-derived (rank 60) or user-supplied values (rank 100).
+        # Scale hints: replace the 0.1 pc stellar default which is ~5000x too
+        # small for bulge distances; these yield to user-provided init_scale.
+        for i in range(self.n_elements):
+            l_idx = self.lens_map[i]
+            s_idx = self.source_map[i]
+
+            self.config_manager.add_hint(f"star.{l_idx}.distance", 4000.0, rank=30)
+            self.config_manager.add_hint(f"star.{s_idx}.distance", 8000.0, rank=30)
+
+            # Distance scale: lens uncertain over disk range, source over bulge depth
+            self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.distance", 5.0)
+
+            # Proper motion scale: galactic velocity dispersion ~3–5 mas/yr
+            # (default 0.05 is ~100x too small for bulge stars)
+            self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra",  3.0)
+            self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra",  3.0)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
+
+            # Logmass scale: Chabrier IMF sigma ~0.5 dex; data typically constrains
+            # to 0.05–0.2 dex — 0.3 dex is a reasonable middle-ground default
+            self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", 0.001)
+            self.config_manager.add_scale_hint(f"star.{s_idx}.logmass", 0.3)
+
+        # Tighten lens logmass scale when parallax is constrained by multi-observer data.
+        if hasattr(system, 'mulensinstrument') and hasattr(system.mulensinstrument, 'inst_ref_pos'):
+            ref_pos = system.mulensinstrument.inst_ref_pos  # (n_inst, 3) absolute AU
+            max_sep = 0.0
+            for ii in range(len(ref_pos)):
+                for jj in range(ii + 1, len(ref_pos)):
+                    max_sep = max(max_sep, float(np.linalg.norm(ref_pos[ii] - ref_pos[jj])))
+            # > 0.5 AU: satellite parallax → mass constrained to ~0.05 dex
+            # > 1e-5 AU (~1500 km): terrestrial parallax in high-mag events → ~0.15 dex
+            if max_sep > 0.5:
+                lens_logmass_scale = 0.0005
+            elif max_sep > 1e-5:
+                lens_logmass_scale = 0.00075
+            else:
+                lens_logmass_scale = None
+            if lens_logmass_scale is not None:
+                for i in range(self.n_elements):
+                    self.config_manager.add_scale_hint(
+                        f"star.{self.lens_map[i]}.logmass", lens_logmass_scale)
 
         if any(self.finite_source):
-            context_nodes["radius"] = stars.radius.value[self.source_map]
-            context_nodes["distance"] =stars.distance.value[self.source_map]
-            parameters["rho"] = "default"
-
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,), context_nodes=context_nodes)
+            self.manifest["rho"] = "default"
 
     def build_likelihood(self, model, system):
 
@@ -152,8 +170,8 @@ class Lens(Component):
         pi_E = self.pi_E_E.value[index]
 
         tau = (time - t0) / tE
-        tau_p = tau + delta_n * pi_N + delta_e * pi_E
-        u_p = u0 + delta_n * pi_E - delta_e * pi_N
+        tau_p = tau + delta_n * pi_N - delta_e * pi_E
+        u_p = u0 - delta_n * pi_E - delta_e * pi_N
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         A = (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -180,8 +198,10 @@ class Lens(Component):
 
         # 3. Paczynski math
         s = self._get_safe_mm_params(index)
-        tau_p = (times - s['t0']) / s['tE'] + delta_n * s['pi_N'] + delta_e * s['pi_E']
-        u_p = s['u0'] + delta_n * s['pi_E'] - delta_e * s['pi_N']
+        # Sky convention: E is to the left (looking up), so the East term picks up
+        # a sign flip relative to the standard right-handed dot product.
+        tau_p = (times - s['t0']) / s['tE'] + delta_n * s['pi_N'] - delta_e * s['pi_E']
+        u_p = s['u0'] - delta_n * s['pi_E'] - delta_e * s['pi_N']
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -193,7 +213,7 @@ class Lens(Component):
         """
 
         # Get RA/Dec from the source star (usually the coordinate anchor)
-        source_ndx = int(self.source_map[index].eval())
+        source_ndx = int(self.source_map[index])
         ra_deg = float(system.star.ra.value[source_ndx].eval()) * (180.0 / np.pi)
         dec_deg = float(system.star.dec.value[source_ndx].eval()) * (180.0 / np.pi)
 
@@ -219,9 +239,3 @@ class Lens(Component):
 
         # 3. Call the Op with all three dynamic tensors!
         return mag_op(param_vector, times_tensor, obs_tensor)
-
-        # 4. Instantiate and call the Op
-        # 'times' must be a numpy array of BJD_TDB times
-        mag_op = MulensMagOp(times, coords, obs_pos)
-
-        return mag_op(param_vector)

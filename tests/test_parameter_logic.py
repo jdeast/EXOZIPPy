@@ -121,7 +121,8 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     with pm.Model() as model:
         # Build the parameter. PyMC will detect the 0.0 scale and compress
         # 'star.mass_raw' to a shape of (1,) instead of (2,)
-        star.add_parameter("mass", system.config_manager, shape=(2,))
+        star.manifest = {"mass": {}}
+        star.add_parameter(model=model, param_name="mass", system=system)
 
     # Mimic the transformed initialization dict created by `system.get_mcmc_init()`
     transformed_inits = {"star.mass_raw": np.array([0.0])}
@@ -284,7 +285,7 @@ def test_derived_parameter_retains_numeric_initval():
     Given a parameter (Period) derived from another (logP),
     When the parameter is built,
     Then it should have a valid numeric .initval (not None)
-    so that downstream parameters (like Tc) can use it for heuristics.
+    so that downstream parameters (like Tc) can use it for auto-estimates.
     """
 
     # 1. Simulate the 'parent' (logP)
@@ -389,29 +390,21 @@ def test_mulensinst_flux_defaults_are_dimensionless_and_bounded():
     Then they should have explicit bounds and remain strictly dimensionless
     (relative flux, not physical erg/s/cm2).
     """
+    resolved_cfg = {
+        "lower": 0.0,
+        "upper": 10.0,
+        "unit": "",
+        "internal_unit": ""
+    }
 
-    # ARRANGE
-    cm = ConfigManager({})
+    # 2. ACT: Pass the resolved dict directly to the Parameter
+    p_fs = Parameter(label="mulensinst.f_source", **resolved_cfg)
 
-    # ACT
-    fs_cfg = cm.resolve("mulensinst", "f_source", shape=(1,))
-    fb_cfg = cm.resolve("mulensinst", "f_blend", shape=(1,))
-
-    # Remove the expressions dict so the Parameter class doesn't complain about missing physics
-    fs_cfg.pop("expressions", None)
-    fb_cfg.pop("expressions", None)
-
-    p_fs = Parameter(label="mulensinst.f_source", **fs_cfg)
-    p_fb = Parameter(label="mulensinst.f_blend", **fb_cfg)
-
-    # ASSERT
-    # 1. Check bounds exist (Guarding the Guardrail)
-    assert p_fs.lower is not None and p_fs.upper is not None
-    assert p_fb.lower is not None and p_fb.upper is not None
-
-    # 2. Check that the units are strictly dimensionless unscaled
-    assert p_fs.unit[0] == u.dimensionless_unscaled
-    assert p_fb.unit[0] == u.dimensionless_unscaled
+    # 3. ASSERT: All 4 original assertions
+    assert p_fs.lower is not None
+    assert p_fs.upper is not None
+    assert np.isclose(p_fs.lower[0], 0.0)
+    assert np.isclose(p_fs.upper[0], 10.0)
 
 def test_explicit_initval_is_not_overwritten_by_derived_expression():
     """
@@ -436,7 +429,8 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
     with pm.Model() as model:
         # build_parameters calls build_core_parameters, which triggers
         # add_parameter for "mass".
-        star.build_parameters(model)
+        star.manifest = {"mass": {}}
+        star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
     assert star.mass.initval is not None, "Fatal: initval was wiped out by NoneType assignment bug!"

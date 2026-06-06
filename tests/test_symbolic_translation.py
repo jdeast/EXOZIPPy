@@ -95,7 +95,7 @@ def test_derived_parameter_bounds_translation():
 
 def test_sampled_parameter_fallback_scaling():
     """
-    Tests the distinction between `sigma` (scientific) and `init_scale` (sampling heuristic).
+    Tests the distinction between `sigma` (scientific) and `init_scale` (sampling estimate).
     If a sampled parameter has NO sigma, it should just be bounded without applying a Gaussian penalty.
     """
     with pm.Model() as model:

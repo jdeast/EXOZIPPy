@@ -6,11 +6,11 @@ lens.Lens.u_0:
     initval: 0.523
     init_scale: 0.0004
 
-mulensinst.OGLE4.err_scale:
+mulensinstrument.OGLE4.err_scale:
     init_scale: 0.00082
-mulensinst.OGLE4.log_f_total:
+mulensinstrument.OGLE4.log_f_total:
     init_scale: 0.001
-mulensinst.OGLE4.q_frac:
+mulensinstrument.OGLE4.q_frac:
     init_scale: 0.002
 
 # --- Physical Parameters for the LENS (Sampled) ---

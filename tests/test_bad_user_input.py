@@ -1,6 +1,6 @@
 import pytest
 from exozippy.config import ConfigManager
-from exozippy.components.rv_instrument.rv_instrument import RVInstrument
+from exozippy.components.rvinstrument.rvinstrument import RVInstrument
 from exozippy.components.parameter import Parameter
 
 
@@ -63,7 +63,7 @@ def test_missing_instrument_data_file_raises_file_not_found_error(tmp_path):
 
     # ACT & ASSERT
     with pytest.raises(FileNotFoundError):
-        inst.load_data()
+        inst.load_data(system=None)
 
 
 import pymc as pm

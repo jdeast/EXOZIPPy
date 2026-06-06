@@ -3,6 +3,7 @@ lens:
     unit: "d"
     lower: 2400000
     upper: 3000000
+    init_scale: 0.01
     internal_unit: "d"
     latex: "t_0"
     description: "Time of peak magnification"
@@ -10,6 +11,7 @@ lens:
     unit: ""
     lower: -18 # ~20 ppm peak magnification
     upper: 18 # ~20 ppm peak magnification
+    init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
     description: "Impact parameter (units of Einstein radii)"
@@ -44,6 +46,8 @@ lens:
         func_name: "calc_pi_E_E"
         deps: [ "pi_rel", "theta_E", "mu_ra_rel", "mu_rel_mag" ]
   pi_rel:
+    lower: 0.0
+    upper: 10000
     unit: "mas"
     internal_unit: "mas"
     latex: "\\pi_{rel}"
@@ -51,9 +55,10 @@ lens:
     expressions:
       default:
         func_name: "calc_pi_rel"
-        deps: [ "distance_lens", "distance_source" ]
+        deps: [ "star.distance[lens_map]", "star.distance[source_map]"]
   theta_E:
     lower: 0.0
+    upper: 1000.0
     unit: "mas"
     internal_unit: "mas"
     latex: "\\theta_E"
@@ -61,8 +66,10 @@ lens:
     expressions:
       default:
         func_name: "calc_theta_E"
-        deps: [ "mass_lens", "pi_rel" ]
+        deps: [ "star.mass[lens_map]", "pi_rel" ]
   mu_ra_rel:
+    lower: -10000.0
+    upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha,rel}"
@@ -70,8 +77,10 @@ lens:
     expressions:
       default:
         func_name: "calc_mu_ra_rel"
-        deps: [ "pm_ra_lens", "pm_ra_source" ]
+        deps: [ "star.pm_ra[lens_map]", "star.pm_ra[source_map]" ]
   mu_dec_rel:
+    lower: -10000.0
+    upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\delta,rel}"
@@ -79,9 +88,10 @@ lens:
     expressions:
       default:
         func_name: "calc_mu_dec_rel"
-        deps: [ "pm_dec_lens", "pm_dec_source" ]
+        deps: [ "star.pm_dec[lens_map]", "star.pm_dec[source_map]" ]
   mu_rel_mag:
     lower: 0.0
+    upper: 10000
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{rel}"
@@ -98,8 +108,8 @@ lens:
     expressions:
       default:
         func_name: "calc_rho"
-        deps: [ "radius", "distance", "theta_E" ]
-mulensinst:
+        deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
+mulensinstrument:
   log_f_total:
     initval: -6
     init_scale: 3e-4

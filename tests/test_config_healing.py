@@ -7,9 +7,20 @@ from exozippy.config import ConfigManager
 def test_config_derives_te_from_physical_input():
     """
     Given: User only provides Mass, Distance, and Proper Motion.
-    When: ConfigManager initializes.
+    When: ConfigManager is provided topology and finalized.
     Then: It should derive t_E and inject it into user_params.
     """
+    # 1. Define the system topology so it knows what "Lens" and "Source" mean
+    system_config = {
+        "star": [
+            {"name": "Lens"},
+            {"name": "Source"}
+        ],
+        "lens": [
+            {"name": "Lens", "lens_ndx": 0, "source_ndx": 1}
+        ]
+    }
+
     user_params = {
         "star.Lens.mass": {"initval": 0.5},
         "star.Lens.distance": {"initval": 4000.0},
@@ -22,7 +33,8 @@ def test_config_derives_te_from_physical_input():
         "star.Source.pm_dec": {"initval": 0.0}
     }
 
-    cm = ConfigManager(user_params)
+    cm = ConfigManager(user_params, system_config=system_config)
+    cm.finalize_user_params()
 
     # Check if t_E was derived and injected
     assert "lens.Lens.t_E" in cm.user_params

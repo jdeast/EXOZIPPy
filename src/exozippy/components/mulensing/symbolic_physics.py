@@ -13,38 +13,46 @@ lens_pm_dec, source_pm_dec = sp.symbols('lens_pm_dec source_pm_dec')
 pi_E_N, pi_E_E = sp.symbols('pi_E_N pi_E_E')
 rho, source_radius = sp.symbols('rho source_radius')
 
-# src/exozippy/components/mulensing/symbolic_physics.py
+comp_key = "lens"
+def get_symbol_map(lens_config_list):
+    """
+    Dynamically maps SymPy symbols to YAML paths based on
+    which star indices are lens/source.
+    """
+    # Grab the first lens configuration (for PSPL)
 
-SYMBOL_MAP = {
-    # Timing & Geometry
-    "t_0": "lens.Lens.t_0",
-    "u_0": "lens.Lens.u_0",
-    "t_E": "lens.Lens.t_E",
-    "rho": "lens.Lens.rho",
+    l_idx = lens_config_list.get("lens_ndx", 0)
+    s_idx = lens_config_list.get("source_ndx", 1)
 
-    # Einstein Radius & Parallax
-    "theta_E": "lens.Lens.theta_E",
-    "pi_rel": "lens.Lens.pi_rel",
-    "pi_E_N": "lens.Lens.pi_E_N",
-    "pi_E_E": "lens.Lens.pi_E_E",
+    return {
+        f"t_0": f"t_0",
+        f"u_0": f"u_0",
+        f"t_E": f"t_E",
+        f"rho": f"rho",
 
-    # Physical Properties (Mass/Distance)
-    "lens_mass": "star.Lens.mass",
-    "lens_distance": "star.Lens.distance",
-    "source_distance": "star.Source.distance",
-    "source_radius": "star.Source.radius",
+        f"theta_E": f"theta_E",
+        f"pi_rel": f"pi_rel",
+        f"pi_E_N": f"pi_E_N",
+        f"pi_E_E": f"pi_E_E",
 
-    # Proper Motions (Vector Components)
-    "lens_pm_ra": "star.Lens.pm_ra",
-    "lens_pm_dec": "star.Lens.pm_dec",
-    "source_pm_ra": "star.Source.pm_ra",
-    "source_pm_dec": "star.Source.pm_dec",
+        f"mu_rel_mag": f"mu_rel_mag",
+        f"mu_ra_rel": f"mu_ra_rel",
+        f"mu_dec_rel": f"mu_dec_rel",
 
-    # Relative Motion (Magnitude and components used by the solver)
-    "mu_rel_mag": "lens.Lens.mu_rel_mag",  # Mapping to the lens component parameter
-    "mu_ra_rel": "lens.Lens.mu_ra_rel",
-    "mu_dec_rel": "lens.Lens.mu_dec_rel"
-}
+        "lens_mass": f"star.{l_idx}.mass",
+        "lens_distance": f"star.{l_idx}.distance",
+        "lens_pm_ra": f"star.{l_idx}.pm_ra",
+        "lens_pm_dec": f"star.{l_idx}.pm_dec",
+        "lens_ra": f"star.{l_idx}.ra",
+        "lens_dec": f"star.{l_idx}.dec",
+
+        "source_mass": f"star.{s_idx}.mass",
+        "source_distance": f"star.{s_idx}.distance",
+        "source_pm_ra": f"star.{s_idx}.pm_ra",
+        "source_pm_dec": f"star.{s_idx}.pm_dec",
+        "source_ra": f"star.{s_idx}.ra",
+        "source_dec": f"star.{s_idx}.dec",
+    }
 
 RELATIONS = [
     # Einstein Radius
@@ -66,6 +74,14 @@ RELATIONS = [
     # Parallax Vector Components
     sp.Eq(pi_E_N, (pi_rel / theta_E) * (mu_dec_rel / mu_rel_mag)),
     sp.Eq(pi_E_E, (pi_rel / theta_E) * (mu_ra_rel / mu_rel_mag)),
+
+    # Derived shortcut: pi_rel = kappa * mass * |pi_E|^2
+    # (obtained by eliminating theta_E from the Einstein-radius and pi_E-magnitude
+    # equations: |pi_E|^2 = (pi_rel/theta_E)^2 and theta_E^2 = kappa*mass*pi_rel).
+    # This gives the solver a direct rank-100 path when mass and pi_E are both
+    # user-supplied, bypassing the distance hint and avoiding sign ambiguity in
+    # the quadratic for mu_ra_rel / mu_dec_rel.
+    sp.Eq(pi_rel, KAPPA * lens_mass * (pi_E_N ** 2 + pi_E_E ** 2)),
 
     # Finite Source (R_sun to AU, then to mas)
     sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E)

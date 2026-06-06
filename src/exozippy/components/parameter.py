@@ -16,6 +16,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 import numpy as np
 import math
 from astropy import units as u
+import re
 
 import pymc as pm
 import pytensor.tensor as pt
@@ -292,12 +293,14 @@ class Parameter:
     sigma: Optional[Number] = None
 
     print_to_table: bool = True
+    debug_print: Optional[bool] = None
     user_modified: bool = False
     user_prior_modified: bool = False
     is_derived: bool = False
     is_sampled: bool = False
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
+    auto_estimated: bool = False
 
     # LaTeX/table metadata
     latex: Optional[str] = ""
@@ -361,12 +364,17 @@ class Parameter:
             # Unpack Astropy Quantities first
             raw_val = getattr(val, "value", val)
 
-            # Force evaluation if it's a Tensor node
+            # Symbolic nodes (has 'owner') cannot be numerically scaled — preserve as-is.
+            # Unit conversion is a concrete operation; bounds/scales must be numeric.
+            if hasattr(raw_val, 'owner'):
+                return raw_val
+
+            # Evaluate constant tensor nodes (e.g. pt.constant(5.0))
             if hasattr(raw_val, 'eval'):
                 try:
                     raw_val = raw_val.eval()
                 except Exception:
-                    # If it can't eval (e.g. missing inputs), we shouldn't have it as a bound
+                    # Free-variable tensor that can't eval: not valid as a bound/scale
                     return np.full(np.atleast_1d(factors).shape, np.nan)
 
             arr = np.atleast_1d(raw_val)
@@ -376,34 +384,8 @@ class Parameter:
                 arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
 
             return arr.astype(float) / factors
-
-        def convert_old(val):
-            if val is None:
-                return None
-
-            # 1. If it's a symbolic PyTensor node, execute it to get the raw numbers
-            if hasattr(val, 'eval'):
-                try:
-                    val = val.eval()
-                except Exception:
-                    # If it cannot be evaluated (e.g., missing inputs), safely fallback
-                    return np.full(np.atleast_1d(factors).shape, np.nan)
-
-            arr = np.atleast_1d(val)
-
-            # 2. In case it's an array containing individual PyTensor objects
-            if arr.size > 0 and hasattr(arr[0], 'eval'):
-                try:
-                    arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
-                except Exception:
-                    return np.full(np.atleast_1d(factors).shape, np.nan)
-
-            # 3. Safe to cast and convert (User -> Internal)
-            return arr.astype(float) / factors
-
-        if self.expression is None:
-            self.initval = convert(self.initval)
-
+        # --- APPLY THE CONVERSION ---
+        self.initval = convert(self.initval)
         self.init_scale = convert(self.init_scale)
         self.lower = convert(self.lower)
         self.upper = convert(self.upper)
@@ -616,10 +598,10 @@ class Parameter:
 
         # fixed parameter, just return the scalar
         if not inputs_in_posterior:
-            val = expr.eval()
-            if isinstance(val, (np.ndarray, list)) and np.size(val) > 1:
-                return np.asarray(val, dtype=float)
-            return float(val)
+            val = np.asarray(expr.eval(), dtype=float)
+            if val.size > 1:
+                return val
+            return val.item()
 
         # 1. Compile the function for a single evaluation
         calc_func = pytensor.function(
@@ -678,6 +660,39 @@ class Parameter:
         return fn(point)
 
     def _get_conversion_factors(self):
+        """
+        Calculates the numerical conversion factor from internal -> user units.
+        Safely handles self.unit as a single Unit, a scalar Quantity, or a list/array.
+        Halts immediately on invalid linear unit conversions.
+        """
+        is_sequence = isinstance(self.unit, (list, tuple)) or \
+                      (isinstance(self.unit, np.ndarray) and getattr(self.unit, 'ndim', 0) > 0)
+
+        def _process_single(u_user):
+            target_u = getattr(u_user, 'unit', u_user)
+            i_str = str(self.internal_unit)
+            u_str = str(target_u)
+
+            # 1. Protection: Ignore Dex math completely.
+            # If both are log-space (dex), treat the multiplier as 1.0.
+            if "dex" in u_str and "dex" in i_str:
+                return 1.0
+
+            # 2. Protection: Strict Linear conversion
+            try:
+                return float(self.internal_unit.to(target_u))
+            except Exception as e:
+                # Halt immediately if units are incompatible (e.g., mass to time)
+                raise ValueError(
+                    f"[{self.label}] Conversion failure from '{u_str}' to '{i_str}'. "
+                    f"Ensure units are valid astropy strings. Original error: {e}"
+                )
+
+        if is_sequence:
+            return np.array([_process_single(u) for u in self.unit], dtype=np.float64)
+
+        return _process_single(self.unit)
+    def _get_conversion_factors_old(self):
         """
         Calculates the numerical conversion factor from internal -> user units.
         Safely handles self.unit as a single Unit, a scalar Quantity, or a list/array.
@@ -782,10 +797,19 @@ class Parameter:
             if 0.001 <= abs(val) < 10000: return f"{val:.4f}".rstrip("0").rstrip(".")
             return f"{val:.2e}"
 
-        if self.expression is not None: return "Derived"
-
         sig = _scalar(self.sigma)
         if sig == 0: return "Fixed"
+
+        lo = _scalar(self.lower)
+        hi = _scalar(self.upper)
+
+        # Determine if there are actual constraints to print
+        has_prior = (sig is not None and sig > 0)
+        has_bounds = (lo is not None or hi is not None)
+
+        # If it's derived AND has no custom bounds/priors, just return "Derived"
+        if self.expression is not None and not (has_prior or has_bounds):
+            return "Derived"
 
         mu = _scalar(self.mu)
         if mu is None:
@@ -793,32 +817,39 @@ class Parameter:
 
         if not latex:
             strs = []
-            if sig is not None and sig > 0:
+            if has_prior:
                 strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
             if strs: return " * ".join(strs)
 
-            lo, hi = _scalar(self.lower), _scalar(self.upper)
-            if lo is not None or hi is not None:
+            if has_bounds:
                 l_s = _fmt(lo, False) if (lo is not None and not np.isinf(lo)) else ""
                 h_s = _fmt(hi, False) if (hi is not None and not np.isinf(hi)) else ""
                 if l_s and h_s: return f"U({l_s}, {h_s})"
                 if l_s: return f"> {l_s}"
                 if h_s: return f"< {h_s}"
-            return ""
 
+            # Fallback for deterministics if the logic somehow slips through
+            return "Derived" if self.expression is not None else ""
+
+        # --- LaTeX Formatting Block ---
         strs = []
-        if sig is not None and sig > 0:
+        if has_prior:
             strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
 
         if strs: return r" $\times$ ".join(strs)
 
-        lo, hi = _scalar(self.lower), _scalar(self.upper)
-        if lo is not None or hi is not None:
+        if has_bounds:
             l_s, h_s = _fmt(lo), _fmt(hi)
-            if not np.isinf(lo) and not np.isinf(hi): return rf"$\mathcal{{U}}({l_s}, {h_s})$"
-            if not np.isinf(lo): return rf"$> {l_s}$"
-            if not np.isinf(hi): return rf"$< {h_s}$"
-        return ""
+
+            # Safe infinity checks to avoid TypeErrors if lo/hi are None
+            lo_is_inf = (lo is None) or np.isinf(lo)
+            hi_is_inf = (hi is None) or np.isinf(hi)
+
+            if not lo_is_inf and not hi_is_inf: return rf"$\mathcal{{U}}({l_s}, {h_s})$"
+            if not lo_is_inf: return rf"$> {l_s}$"
+            if not hi_is_inf: return rf"$< {h_s}$"
+
+        return "Derived" if self.expression is not None else ""
 
     def to_table_line(self, sigfigs: int = 2) -> str:
         if self.latex is None:

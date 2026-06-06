@@ -2,6 +2,7 @@ run:
   name: "OB140939"
 
 prefix: "fitresults/OB140939"
+logger_level: INFO   # DEBUG, INFO, or WARNING
 
 # 1. Define the physical bodies!
 star:
@@ -15,7 +16,7 @@ lens:
     # Map the lens and source to the star vector
     lens_ndx: 0
     source_ndx: 1
-    t0_par: 2455639.89959
+    t0_par: 2456836.22
 
 galacticmodel:
   - name: "OB140939"
@@ -33,13 +34,12 @@ mulensinstrument:
     zero_point: ""
     observer_location: "spitzer"
 
-
 parameter_file: "ob140939.params.yaml"
 
 sampler:
   pymc:
-    tune: 1000 # generally need longer tuning for mulensing
-    draws: 1000
+    tune: 4000 # generally need longer tuning for mulensing
+    draws: 5000
     chains: 4
     cores: 4
     init: "adapt_diag"

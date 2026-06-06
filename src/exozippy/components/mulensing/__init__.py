@@ -1,2 +1,2 @@
 from .lens import Lens
-from .instrument import MulensInstrument
+from .mulensinstrument import MulensInstrument

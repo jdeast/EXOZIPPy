@@ -1,30 +1,53 @@
 planet:
-  # Planet-specific overrides and additions from celestial_body
-  logmass:
-    unit: "dex(jupiterMass)"
-    lower: -3.0
-    upper: 5.4
-    latex: "\\log{M_P}"
-    initval: 0.0
-    init_scale: 0.1
-    
   mass:
-    unit: "jupiterMass"
-    lower: -1000.0
-    upper: 260000.0
-    latex: "M_P"
     initval: 1.0
     init_scale: 0.1
+    lower: -1000.0
+    upper: 260000.0
+    unit: "jupiterMass"
+    internal_unit: "solMass"
+    latex: "M_P"
+    description: "planet mass"
+    rank: 10 # rank < 20 makes this the first to be overwritten if we have a constraint from somewhere else (e.g., K estimate)
+  density:
+    unit: "g/cm3"
+    internal_unit: "solMass/solRad3"
+    latex: "\\rho_P"
+    description: "Density"
+    expressions:
+      default:
+        func_name: "calc_density"
+        deps: ["mass", "radius"]
+
+  logg:
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log{g_P}"
+    description: "Surface Gravity"
+    expressions:
+      default:
+        func_name: "calc_logg"
+        deps: ["mass", "radius"]
+
+  distance:
+    lower: 0.001
+    upper: 100000.0
+    initval: 10.0
+    init_scale: 0.1
+    unit: "pc"
+    internal_unit: "pc"
+    latex: "D"
+    description: "Distance"
   radius:
     unit: "jupiterRad"
     lower: 0.000001
     upper: 100.0
+    initval: 1.0
+    init_scale: 0.1
+    rank: 10
+    internal_unit: "solRad"
     latex: "R_P"
-  density:
-    latex: "\\rho_P"
-  logg:
-    latex: "\\log{g_P}"
-
+    description: "planet radius"
   p:
     unit: ""
     internal_unit: ""
@@ -33,7 +56,7 @@ planet:
     expressions:
       default:
         func_name: "calc_p"
-        deps: ["radius", "star_radius"]
+        deps: ["radius", "star.radius"]
 
   K:
     unit: "m/s"
@@ -43,8 +66,7 @@ planet:
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["mass", "m_total", "orbit_ecc", "arsun", "orbit_sini", "orbit_period"]
-
+        deps: ["mass", "m_total", "orbit.ecc", "arsun", "orbit.sini", "orbit.period"]
   arsun:
     unit: "solRad"
     internal_unit: "solRad"
@@ -52,7 +74,7 @@ planet:
     expressions:
       default:
         func_name: "calc_arsun"
-        deps: ["m_total", "orbit_period"]
+        deps: ["m_total", "orbit.period"]
   ar:
     unit: ""
     internal_unit: ""
@@ -60,7 +82,7 @@ planet:
     expressions:
       default:
         func_name: "calc_arstar"
-        deps: ["arsun", "star_radius"]
+        deps: ["arsun", "star.radius"]
   b:
     unit: ""
     internal_unit: ""
@@ -68,7 +90,7 @@ planet:
     expressions:
       default:
         func_name: "calc_b"
-        deps: ["ar", "orbit_cosi", "orbit_ecc", "orbit_esinw"]
+        deps: ["ar", "orbit.cosi", "orbit.ecc", "orbit.esinw"]
   m_total:
     internal_unit: "solMass"
     unit: "solMass"
@@ -77,7 +99,7 @@ planet:
     expressions:
       default:
         func_name: "calc_m_total"
-        deps: ["mass", "star_mass"]
+        deps: ["mass", "star.mass"]
   max_ecc:
     unit: ""
     internal_unit: ""

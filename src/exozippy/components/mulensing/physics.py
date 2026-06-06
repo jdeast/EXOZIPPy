@@ -48,12 +48,12 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
 @register_physics
 def calc_f_source_from_frac(log_f_total, q_frac):
     """Derives source flux from total flux and fraction."""
-    return pt.exp(log_f_total) * q_frac
+    return pt.power(10,log_f_total) * q_frac
 
 @register_physics
 def calc_f_blend_from_frac(log_f_total, q_frac):
     """Derives blend flux from total flux and remainder."""
-    return pt.exp(log_f_total) * (1.0 - q_frac)
+    return pt.power(10,log_f_total) * (1.0 - q_frac)
 
 @register_physics
 def calc_rho(radius, distance, theta_E):

@@ -13,9 +13,6 @@ from exozippy.components.component import Component
 # it registers all the mathematical relations
 from . import physics
 
-# debugging imports
-# import ipdb
-
 class Orbit(Component):
     def __init__(self, config, config_manager):
         # 1. Initialize the base Component
@@ -32,23 +29,19 @@ class Orbit(Component):
     def prefix(self):
         return "orbit"
 
-    def build_parameters(self, model):
+    def register_parameters(self, system):
+        """Stage 2: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
-        # 1. PEER INTO THE CONFIG (Pre-flight)
+        # 1. Peer into the config (Pre-flight windows)
         logP_cfg = self.config_manager.resolve(self.prefix, "logP", shape=shape, names=self.names)
         tc_cfg = self.config_manager.resolve(self.prefix, "tc", shape=shape, names=self.names)
 
-        # 2. CALCULATE WINDOWS (Domain Intelligence)
-        # Convert logP (dex days) to period (days) to find the half-period
-        # Note: resolve() ensures these are numpy arrays or scalars based on shape
         logP_init = np.atleast_1d(logP_cfg["initval"])
         tc_init = np.atleast_1d(tc_cfg["initval"])
-
         half_period = (10 ** logP_init) / 2.0
 
-        # Set the windowed bounds
-        parameters = {
+        self.manifest = {
             "logP": None,
             "period": {"force_node": True, "expr_key": "default"},
             "n": "default",
@@ -62,20 +55,10 @@ class Orbit(Component):
         fitvcve_mask = np.atleast_1d(getattr(self, 'fitvcve', False)).astype(bool)
         hk_mask = ~fitvcve_mask
 
-        # --- Eccentricity / Omega Geometry Swap ---
         if any(self.fitvcve):
-            # Fit using VC/VE (or VCVE as a single vector depending on your math)
-            raise NotImplementedError()
-            parameters["vcve"] = None
-            parameters["cosw"] = None
-            parameters["sinw"] = None
-            parameters["chord"] = None
-            parameters["ecc"] = "from_vcve"
-            parameters["omega"] = "from_vcve"
-            parameters["cosi"] = "from_chord"
-            #parameters["b"] = "default"
+            raise NotImplementedError("VCVE parameterization not yet migrated to manifest.")
         else:
-            parameters.update({
+            self.manifest.update({
                 "secosw": {"mask": hk_mask},
                 "sesinw": {"mask": hk_mask},
                 "cosi": {"mask": hk_mask},
@@ -90,92 +73,11 @@ class Orbit(Component):
                 "tp": "default",
             })
 
-        # Create a 'lower' array: 0.0 where NOT i180, -1.0 where i180
         i180_arr = np.atleast_1d(getattr(self, 'i180', False))
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
-        parameters["cosi"] = {"lower": derived_lowers}
-
-        self.build_pars_from_dict(parameters, shape=(self.n_elements,))
-
-    def load_data(self):
-        pass
-
-    def build_map(self, system):
-        pass
-
-    def build_dependent_parameters(self, model, system):
-        # TODO: handle the vcve parameterization
-        return
-        # transit only parameterization (Eastman, 2024)
-        # vcve, sin(omega), cos(omega), sign, chord
-        self.vcve = Parameter(f"{prefix}.vcve", lower=0.0, initval=1.0,
-                              latex='V_c/V_e', description='Scaled velocity',
-                              latex_unit='', user_params=self.user_params)
-
-        self.cosw = Parameter(f"{prefix}.cosw", lower=-1.0, upper=1.0, initval=0.0,
-                              latex=r"\cos{\omega_*}", description='Cos of arg of periastron',
-                              latex_unit='', user_params=self.user_params)
-
-        self.sinw = Parameter(f"{prefix}.sinw", lower=-1.0, upper=1.0, initval=0.0,
-                              latex=r"\sin{\omega_*}", description='Sin of arg of periastron',
-                              latex_unit='', user_params=self.user_params)
-
-        # bound omega
-        L = self.cosw.value ** 2 + self.sinw.value ** 2
-
-        # ensures uniform omega distribution
-        wbound = pm.Potential(f"{prefix}.wbound", pt.switch(L > 1.0, -np.inf, 0.0))
-
-        self.omega = Parameter(f"{prefix}.omega", unit=u.rad,
-                               expression=pt.arctan2(self.sinw, self.cosw),
-                               latex=r"\omega_*", description='Arg of periastron',
-                               latex_unit='rad', user_params=self.user_params)
-
-        self.sign = Parameter(f"{prefix}.sign", lower=-1.0, upper=1.0,  # boolean?
-                              latex='Sign', description='Sign of quadratic solution',
-                              latex_unit='', user_params=self.user_params)
-
-        # solve quadratic for e (Eastman 2024, eq 5)
-        a = self.vcve.value ** 2 * self.sinw.value ** 2 + 1.0
-        b = 2.0 * self.vcve.value ** 2 * self.sinw.value
-        c = self.vcve.value ** 2 - 1.0
-
-        self.ecc = Parameter(f"{prefix}.e",
-                             expression=-b + pt.sign(self.sign.value) * pt.sqrt(b ** 2 - 4.0 * a * c) / (2.0 * a),
-                             latex='e', description='eccentricity',
-                             latex_unit='', user_params=self.user_params)
-
-        self.esinw = Parameter(f"{prefix}.esinw",
-                               expression=self.ecc.value * self.sinw.value,
-                               latex=r"e\sin{\omega_*}", description='e times sin of arg of periastron',
-                               latex_unit='', user_params=self.user_params)
-
-        jacobian = 1.0
-
-        self.chord = Parameter(f"{prefix}.chord", lower=0.0,
-                               latex='chord', description='transit chord',
-                               latex_unit='', user_params=self.user_params)
-
-        self.cosi = Parameter(f"{prefix}.cosi",
-                              expression=planet.b.value /
-                                         (planet.ar.value * (1.0 - self.ecc.value ** 2) / (
-                                                 1.0 + self.esinw.value)),
-                              latex=r"\cos{i}", description='cos of inclination',
-                              latex_unit='', user_params=self.user_params)
-
-        jacobian *= self.b.value ** 2 / (
-                self.cosi.value * self.chord.value)  # d(chord)/d(cosi)
-
-        # correct the prior to be uniform in e/omega (Eastman 2024, eq 6)
-        jacobian *= (self.ecc.value + self.sinw.value) / (
-                pt.sqrt(1.0 - self.ecc.value ** 2) * (1.0 + self.esinw.value) ** 2)  # d(vcve)/d(e)
-
-        self.jacobian = pm.Potential(f"{prefix}.jacobian", pt.abs(jacobian))
+        self.manifest["cosi"] = {"lower": derived_lowers}
 
     def build_likelihood(self, model, system):
-        pass
-
-    def plot(self, system, points, filename_prefix="debug"):
         pass
 
     def get_true_anomaly(self, t):

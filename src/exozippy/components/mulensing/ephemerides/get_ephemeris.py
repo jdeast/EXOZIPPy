@@ -1,7 +1,10 @@
+import logging
 import numpy as np
 from astroquery.jplhorizons import Horizons
 from astropy.time import Time
 import argparse
+
+logger = logging.getLogger(__name__)
 
 
 def get_ephemeris(target_id, start_time, stop_time, step='1h', outfile=None):
@@ -22,7 +25,7 @@ def get_ephemeris(target_id, start_time, stop_time, step='1h', outfile=None):
         Filename to save the results. Defaults to target_ephemeris.txt
     """
 
-    print(f"Querying JPL Horizons for {target_id}...")
+    logger.info(f"Querying JPL Horizons for {target_id}...")
 
     # '500@0' specifies the Solar System Barycenter as the origin
     obj = Horizons(id=target_id,
@@ -49,7 +52,7 @@ def get_ephemeris(target_id, start_time, stop_time, step='1h', outfile=None):
     header = f"Target: {target_id} (Center: 500@0)\nSource: JPL Horizons\nColumns: MJD, X [AU], Y [AU], Z [AU]"
 
     np.savetxt(outfile, data, header=header, fmt=['%.8f', '%.12f', '%.12f', '%.12f'])
-    print(f"Success! Ephemeris saved to {outfile}")
+    logger.info(f"Ephemeris saved to {outfile}")
     return outfile
 
 

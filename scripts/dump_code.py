@@ -113,9 +113,11 @@ def dump_code(output_file, target_files, project_root):
 
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    # Strip empty lines to save tokens
-                    lines = [line for line in f if line.strip()]
-                    out.writelines(lines)
+                    # Enumerate tracks the TRUE line number in the source file
+                    for i, line in enumerate(f, 1):
+                        # Still strip empty lines to save LLM tokens
+                        if line.strip():
+                            out.write(f"{i:4d} | {line}")
             except Exception as e:
                 out.write(f"Error reading file: {e}\n")
             out.write("\n")
