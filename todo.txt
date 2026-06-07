@@ -1,9 +1,28 @@
 * write unit tests for high coverage
+  - add GitHub Actions workflow (.github/workflows/test.yml) to run pytest on
+    every push, so collaborator commits are also tested (pre-commit only covers
+    local commits)
 
-* refactor system topology so planet owns it own host star and orbit rather than passing maps around. not sure how to do that.
+* user-linkable parameters in params.yaml
+  - equality:   orbit.b.omega: {expr: "orbit.A.omega + pi"}
+  - inequality (dynamic lower bounds): (star.B.av: {lower: "star.A.av"})
+  - same-orbit: star.A.age: {expr: "star.B.age"}
 
 * more features/components:
   - microlensing
+    - fix whatever's wrong with the spitzer model of OB1410939
+    - incorporate mulensmodel as a custom Op
+      - build out its functionality:
+        - PSPL
+        - finite source effects
+        - pipe magnifications methods
+        - binary lens
+        - binary source
+        - triple lens (does mulensmodel even do this?)
+        - what else?
+    - confirm (and document) conventions (origin, alpha, etc)
+    - explore samplers and parameterizations
+    - explore degeneracies
   - transits
     - ttvs
     - long cadence
@@ -11,10 +30,17 @@
   - GPs
     - both RVs and Transits, periodic or red
   - SED
-    - home grown
+    - multi-star systems
     - MIST BC table
+    - _inject_grid_bounds should move from __init__ to load_data; requires a
+      new contribute_param_overrides hook on Component called before
+      register_parameters in system.prepare()
+    - sed/symbolic_physics.py uses comp_key="star" so teffsed=teff and
+      radiussed=radius relations fire for all stars even without a SED;
+      should be conditioned on SED being present in the config
   - evolutionary models
   - astrometry
+   - especially gaia data handling
   - nbody
   - doppler tomography
 
@@ -22,20 +48,32 @@
  - refactor to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
  - cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
 
-* analytic treatment of linear parameters (detrending, f0, gamma, probably mulensing baseline)
+* one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 
-* custom circular model logic, possibly including analytic planet.K -> planet.mass solver
+* symbolic_physics and physics.py/defaults.yaml support for t14, tau, t14s, taus, ts, tt?
 
-* add user input -> model parameter transformation layer (analogous to step2pars.pro)
-  - i think this could be implemented generally/elegantly through the physics.py recipes
-      while not parameters_updated:
-        parameters_updated = False
-        for each recipe in physics.py:
-          if not_derived and have_all_dependencies:
-            derive
-            parameters_updated = True
+* analytic marginalization of linear parameters (gamma, f0, baseline, mulensing
+  source flux): for parameters that enter linearly, the marginal likelihood over
+  them with a flat prior is a closed-form Gaussian integral (rank-1 covariance
+  update). Eliminates one sampled dimension per instrument; see Bishop PRML Ch.3.
+  Worth doing for large RV / mulensing datasets.
 
-* user linkable parameters (with symbolic math?)
+* custom circular orbit model logic
+
+* global solutions to seed blind
+  - mulensing: incorporate https://github.com/jenniferyee/MMEXOFAST
+  - transit: BLS
+  - RV: lomb scargle
+  - astrometry: ??
+
+* output new prior file from old run
+
+* automatic stopping upon mixing (user-settable R-hat / ESS thresholds;
+  may need to wait for PyMC support)
+
+* config.py cleanup: the unit_scaling (base->user) and get_conversion_factor
+  (user->internal) two-layer conversion in resolve() is fragile; we fixed the
+  propagated_scales/scale_hints bug but the underlying design could be simplified
 
 blind spots:
   * checkpoints
