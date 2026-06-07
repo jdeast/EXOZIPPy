@@ -13,7 +13,12 @@ from exozippy.constants import (SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_
                                 BULGE_VELOCITY_SIGMA_2, BULGE_VELOCITY_SIGMA_3,
                                 BULGE_ROTATION_ANGULAR_VELOCITY, K_VEL_CONVERSION)
 
-
+"""
+This implements a mixture model of the bulge and disk, enforcing the kinematics and density of the galaxy 
+as defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract. 
+It's a major refactor of https://github.com/nkoshimoto/genulens 
+to distill its core functionality into a component for EXOZIPPy
+"""
 class GalacticModel(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
