@@ -26,14 +26,14 @@ def massradius_mann(ks0, feh=None, distance=None):
         bi = [-0.642, -0.208, -8.43e-4, 7.87e-3, 1.42e-4, -2.13e-4]
         mstar = 10 ** (bi[0] + bi[1] * (ks - zp) + bi[2] * (ks - zp) ** 2 +
                        bi[3] * (ks - zp) ** 3 + bi[4] * (ks - zp) ** 4 + 
-                       bi[4] * (ks - zp) ** 5)
+                       bi[5] * (ks - zp) ** 5)
         sigma_mstar = mstar * 0.020
     else:
         # eq 5, table 6 (n=5)
         bi = [-0.647, -0.207, -6.53e-4, 7.13e-3, 1.84e-4, -1.6e-4, -0.0035]
         mstar = (1.0+feh*bi[6])*10**(bi[0] + bi[1]*(ks - zp) + bi[2]*(ks - zp)**2 +
                                      bi[3]*(ks - zp)**3 + bi[4]*(ks-zp)**4 +
-                                     bi[4]*(ks - zp)**5)
+                                     bi[5]*(ks - zp)**5)
         sigma_mstar = mstar * 0.021
     
     return mstar, rstar, sigma_mstar, sigma_rstar
