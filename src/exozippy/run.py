@@ -19,17 +19,24 @@ import arviz as az
 from pymc.initial_point import make_initial_point_fn
 
 
-class DEMetropolisZ(pm.DEMetropolisZ):
-    """PyMC 5.25.1 bug: self.scaling is np.atleast_1d (always 1-D array) but
-    stats_dtypes_shapes declares shape [] (scalar), causing a ValueError in
-    the NDArray backend.  Fix: flatten scalar stats before returning."""
-    def astep(self, q0):
-        result, stats = super().astep(q0)
+def _fix_de_stats(astep_fn):
+    """Decorator fixing PyMC 5.25.1 bug: self.scaling is np.atleast_1d (always
+    1-D array) but stats_dtypes_shapes declares shape [] (scalar), causing a
+    ValueError in the NDArray backend when recording stats."""
+    def wrapper(self, q0):
+        result, stats = astep_fn(self, q0)
         for s in stats:
             for key in ("scaling", "lambda"):
                 if key in s and np.ndim(s[key]) > 0:
                     s[key] = float(np.ravel(s[key])[0])
         return result, stats
+    return wrapper
+
+class DEMetropolisZ(pm.DEMetropolisZ):
+    astep = _fix_de_stats(pm.DEMetropolisZ.astep)
+
+class DEMetropolis(pm.DEMetropolis):
+    astep = _fix_de_stats(pm.DEMetropolis.astep)
 
 # local imports
 from .logger import setup_logging
@@ -71,7 +78,9 @@ def run_fit(config):
     cores = int(pymc_cfg.get("cores", 1))
     target_accept = pymc_cfg.get("target_accept", 0.9)
     step_method = pymc_cfg.get("step_method", "NUTS")
+    n_groups = int(pymc_cfg.get("n_groups", 1))
     recompute_trace = pymc_cfg.get("recompute_trace", False)
+    nthin = int(pymc_cfg.get("nthin", 1))
     check_curvatures = pymc_cfg.get("check_curvatures", True)
     profile = pymc_cfg.get("profile", False)
     if profile: pytensor.config.profile = True
@@ -117,16 +126,23 @@ def run_fit(config):
         else:
             # do the sampling and save the results
             nuts_scales = np.array(nuts_scales).flatten()
-            if step_method == "DEMetropolisZ":
-                # Gradient-free; suited for models with numerical-gradient Ops
-                # (e.g. MulensModel binary lens).  Requires >= 3 chains.
+            if step_method in ("DEMetropolisZ", "DEMetropolis"):
+                # Gradient-free DE samplers suited for models with numerical-gradient
+                # Ops (e.g. MulensModel binary lens).
                 #
-                # Chain initialization: same strategy as EXOFAST.
-                # Chain 0 starts at the best-fit (raw=0 = initvals).
-                # Chains 1..N-1 start spread by factor*scale*randn, where
-                # factor = min(sqrt(500/nparams), 3).  If a proposed start has
-                # non-finite logp (outside a hard constraint), we back off
-                # exponentially until the point is valid.
+                # DEMetropolisZ: proposals from history archive; chains run independently.
+                # DEMetropolis:  proposals from current ensemble; population sampler.
+                #   DEMetropolis rescues stuck chains faster because proposals always
+                #   come from where other chains are now, not their past history.
+                #
+                # n_groups > 1: run n_groups independent pm.sample() calls each with
+                #   chains/n_groups chains, then concatenate.  Groups are truly
+                #   independent so rhat/ESS are valid across them; population mixing
+                #   within each group handles stuck chains.
+                #
+                # Chain initialization: Chain 0 (of each group) starts at initvals.
+                # Others start spread by factor*init_scale*randn, backing off
+                # exponentially if the proposed point has non-finite logp.
                 logp_fn = model.compile_logp()
                 model_keys = set(model.initial_point().keys())
                 nparams = sum(v.size for v in raw_start.values())
@@ -134,7 +150,7 @@ def run_fit(config):
 
                 chain_starts = []
                 for j in range(chains):
-                    if j == 0:
+                    if j == 0 or (n_groups > 1 and j % (chains // n_groups) == 0):
                         chain_starts.append({k: v.copy() for k, v in raw_start.items()})
                         continue
                     niter = 0
@@ -153,18 +169,22 @@ def run_fit(config):
                         if niter % 500 == 0:
                             logger.warning(f"Chain {j}: {niter} retries finding valid start")
 
-                step = DEMetropolisZ()
-
-                idata = pm.sample(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    step=step,
-                    cores=cores,
-                    initvals=chain_starts,
-                    return_inferencedata=True,
-                    idata_kwargs={"log_likelihood": False}
-                )
+                step_cls = DEMetropolisZ if step_method == "DEMetropolisZ" else DEMetropolis
+                chains_per_group = chains // n_groups
+                group_idatas = []
+                for g in range(n_groups):
+                    sl = slice(g * chains_per_group, (g + 1) * chains_per_group)
+                    group_idatas.append(pm.sample(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains_per_group,
+                        step=step_cls(),
+                        cores=max(1, cores // n_groups),
+                        initvals=chain_starts[sl],
+                        return_inferencedata=True,
+                        idata_kwargs={"log_likelihood": False}
+                    ))
+                idata = az.concat(group_idatas, dim="chain") if n_groups > 1 else group_idatas[0]
             else:
                 step = pm.NUTS(target_accept=target_accept)
                 idata = pm.sample(
@@ -177,8 +197,11 @@ def run_fit(config):
                     return_inferencedata=True,
                     idata_kwargs={"log_likelihood": False}
                 )
-            # Metropolis doesn't record lp in sample_stats; compute and persist it now
-            # so future restores from disk have it without recomputation.
+            if nthin > 1:
+                idata = idata.sel(draw=slice(None, None, nthin))
+            # DEMetropolisZ doesn't record lp in sample_stats; compute and persist it
+            # now (after thinning) so future restores from disk have it without
+            # recomputation.
             ss_vars = (list(idata.sample_stats.data_vars)
                        if hasattr(idata, "sample_stats") else [])
             if "lp" not in ss_vars:

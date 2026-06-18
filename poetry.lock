@@ -1119,6 +1119,25 @@ numpy = {version = ">=1.26.0", markers = "python_version >= \"3.12\""}
 wrapt = ">=1.11.2"
 
 [[package]]
+name = "emcee"
+version = "3.1.6"
+description = "The Python ensemble sampling toolkit for MCMC"
+optional = false
+python-versions = "*"
+groups = ["microlensing"]
+files = [
+    {file = "emcee-3.1.6-py2.py3-none-any.whl", hash = "sha256:f2d63752023bdccf744461450e512a5b417ae7d28f18e12acd76a33de87580cb"},
+    {file = "emcee-3.1.6.tar.gz", hash = "sha256:11af4daf6ab8f9ca69681e3c29054665db7bbd87fd4eb8e437d2c3a1248c637d"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+extras = ["h5py", "scipy"]
+tests = ["coverage[toml]", "pytest", "pytest-cov"]
+
+[[package]]
 name = "etuples"
 version = "0.3.10"
 description = "Python S-expression emulation using tuple-like objects."
@@ -1463,6 +1482,22 @@ test = ["aiohttp (!=4.0.0a0,!=4.0.0a1)", "numpy", "pytest", "pytest-asyncio (!=0
 test-downstream = ["aiobotocore (>=2.5.4,<3.0.0)", "dask[dataframe,test]", "moto[server] (>4,<5)", "pytest-timeout", "xarray"]
 test-full = ["adlfs", "aiohttp (!=4.0.0a0,!=4.0.0a1)", "backports-zstd ; python_version < \"3.14\"", "cloudpickle", "dask", "distributed", "dropbox", "dropboxdrivefs", "fastparquet", "fusepy", "gcsfs", "jinja2", "kerchunk", "libarchive-c", "lz4", "notebook", "numpy", "ocifs", "pandas (<3.0.0)", "panel", "paramiko", "pyarrow", "pyarrow (>=1)", "pyftpdlib", "pygit2", "pytest", "pytest-asyncio (!=0.22.0)", "pytest-benchmark", "pytest-cov", "pytest-mock", "pytest-recording", "pytest-rerunfailures", "python-snappy", "requests", "smbprotocol", "tqdm", "urllib3", "zarr", "zstandard ; python_version < \"3.14\""]
 tqdm = ["tqdm"]
+
+[[package]]
+name = "gaiadr3-zeropoint"
+version = "0.1.0"
+description = "eDR3 zero point functions from Lindegren et al. 2020 implemented in Python."
+optional = true
+python-versions = ">=3.6"
+groups = ["main"]
+markers = "extra == \"sed\""
+files = [
+    {file = "gaiadr3_zeropoint-0.1.0-py3-none-any.whl", hash = "sha256:39b6ab4c58807a5313674767b494684bd8bea263b3c55a4ea489c8b13b1fe7fb"},
+    {file = "gaiadr3_zeropoint-0.1.0.tar.gz", hash = "sha256:95687809acb82cf6ed20034c3d59aa10b39028069f37fcd1939877af7adb3f5d"},
+]
+
+[package.dependencies]
+numpy = "*"
 
 [[package]]
 name = "h5netcdf"
@@ -2576,6 +2611,22 @@ numpy = {version = ">=1.26.0", markers = "python_version >= \"3.12\""}
 dev = ["absl-py", "pyink", "pylint (>=2.6.0)", "pytest", "pytest-xdist"]
 
 [[package]]
+name = "mmexofast"
+version = "0.0.0"
+description = ""
+optional = false
+python-versions = "*"
+groups = ["microlensing"]
+files = []
+develop = false
+
+[package.source]
+type = "git"
+url = "https://github.com/jenniferyee/MMEXOFAST.git"
+reference = "HEAD"
+resolved_reference = "e97a1907bf63602d01b277d4248da582d3e1d29e"
+
+[[package]]
 name = "more-itertools"
 version = "11.0.2"
 description = "More routines for operating on iterables, beyond itertools"
@@ -2936,7 +2987,7 @@ version = "2.4.6"
 description = "Fundamental package for array computing in Python"
 optional = false
 python-versions = ">=3.11"
-groups = ["main", "dev"]
+groups = ["main", "dev", "microlensing"]
 files = [
     {file = "numpy-2.4.6-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:0280e0356c0829a18d9de1cb7eee50ec22ca639878d7240307ca0943d73cd2c4"},
     {file = "numpy-2.4.6-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:110f8b71aacb688ec69062bb7f6938a0f8acb01b7c1c4beb453c65b6d234584d"},
@@ -4329,6 +4380,22 @@ test = ["build[virtualenv] (>=1.0.3)", "filelock (>=3.4.0)", "ini2toml[lite] (>=
 type = ["importlib_metadata (>=7.0.2) ; python_version < \"3.10\"", "jaraco.develop (>=7.21) ; sys_platform != \"cygwin\"", "mypy (==1.18.*)", "pytest-mypy"]
 
 [[package]]
+name = "sfit_minimizer"
+version = "0.0.0"
+description = ""
+optional = false
+python-versions = "*"
+groups = ["microlensing"]
+files = []
+develop = false
+
+[package.source]
+type = "git"
+url = "https://github.com/jenniferyee/sfit_minimizer.git"
+reference = "HEAD"
+resolved_reference = "614d0a2f76574d121a0a94134a7d3320c814775f"
+
+[[package]]
 name = "six"
 version = "1.17.0"
 description = "Python 2 and 3 compatibility utilities"
@@ -4937,8 +5004,9 @@ propcache = ">=0.2.1"
 
 [extras]
 jax = []
+sed = ["gaiadr3-zeropoint"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "68a36cae70a20e511dcd947c75af3faa7806934869f9cf7b23aaaf2e6e5efa79"
+content-hash = "e055f63a62b77ee5b3b0bc1d81438eb1a0c629c824a3f2fc379549cb9303701a"

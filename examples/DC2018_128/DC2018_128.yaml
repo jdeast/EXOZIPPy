@@ -40,10 +40,12 @@ parameter_file: "DC2018_128.params.yaml"
 
 sampler:
   pymc:
-    step_method: "DEMetropolisZ"   # gradient-free; DEMetropolisZ broken in PyMC 5.25.1, falls back to Metropolis
-    tune: 5000   # 90% dropped (tune_drop_fraction); scaling adapts in ~2000 steps
-    draws: 10000 # DE has high autocorrelation; ESS ~ 5-20% of nominal
-    chains: 8    # DE needs enough chains for good proposals; more = richer archive
+    step_method: "DEMetropolis"
+    n_groups: 4          # 4 independent groups → valid rhat/ESS across groups
+    chains: 16           # 4 chains per group; population mixing rescues stuck chains
+    tune: 5000
+    draws: 50000
+    nthin: 10
     cores: 4
     check_curvatures: False
     recompute_trace: True
