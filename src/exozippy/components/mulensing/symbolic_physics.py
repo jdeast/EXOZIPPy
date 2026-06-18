@@ -12,32 +12,59 @@ lens_pm_ra, source_pm_ra = sp.symbols('lens_pm_ra source_pm_ra')
 lens_pm_dec, source_pm_dec = sp.symbols('lens_pm_dec source_pm_dec')
 pi_E_N, pi_E_E = sp.symbols('pi_E_N pi_E_E')
 rho, source_radius = sp.symbols('rho source_radius')
+q_lens, companion_mass = sp.symbols('q_lens companion_mass')
+alpha, cosalpha, sinalpha = sp.symbols('alpha cosalpha sinalpha')
 
 comp_key = "lens"
+
+
 def get_symbol_map(lens_config_list):
     """
-    Dynamically maps SymPy symbols to YAML paths based on
-    which star indices are lens/source.
+    Dynamically maps SymPy symbols to YAML paths based on lens/source/companion
+    body assignments.  Supports both the legacy lens_ndx/source_ndx keys and the
+    NLNS lenses:/sources: list syntax.
+
+    companion_mass is only added to the map for binary events (len(lenses) > 1).
+    When absent, any RELATION that mentions companion_mass or q_lens will be
+    skipped by the relaxation engine (all symbols must be in master_symbol_map).
     """
-    # Grab the first lens configuration (for PSPL)
+    companion_mass_path = None
 
-    l_idx = lens_config_list.get("lens_ndx", 0)
-    s_idx = lens_config_list.get("source_ndx", 1)
+    if "lenses" in lens_config_list:
+        lenses = lens_config_list["lenses"]
+        l_comp, l_idx = lenses[0].split(".")
+        l_idx = int(l_idx)
 
-    return {
-        f"t_0": f"t_0",
-        f"u_0": f"u_0",
-        f"t_E": f"t_E",
-        f"rho": f"rho",
+        sources = lens_config_list.get("sources", ["star.1"])
+        s_comp, s_idx = sources[0].split(".")
+        s_idx = int(s_idx)
 
-        f"theta_E": f"theta_E",
-        f"pi_rel": f"pi_rel",
-        f"pi_E_N": f"pi_E_N",
-        f"pi_E_E": f"pi_E_E",
+        if len(lenses) > 1:
+            c_comp, c_idx = lenses[1].split(".")
+            companion_mass_path = f"{c_comp}.{c_idx}.mass"
+    else:
+        l_idx = int(lens_config_list.get("lens_ndx", 0))
+        s_idx = int(lens_config_list.get("source_ndx", 1))
 
-        f"mu_rel_mag": f"mu_rel_mag",
-        f"mu_ra_rel": f"mu_ra_rel",
-        f"mu_dec_rel": f"mu_dec_rel",
+    result = {
+        "t_0": "t_0",
+        "u_0": "u_0",
+        "t_E": "t_E",
+        "rho": "rho",
+        "q_lens": "q",   # → lens.{i}.q after yaml_key prefix
+
+        "theta_E": "theta_E",
+        "pi_rel": "pi_rel",
+        "pi_E_N": "pi_E_N",
+        "pi_E_E": "pi_E_E",
+
+        "mu_rel_mag": "mu_rel_mag",
+        "mu_ra_rel": "mu_ra_rel",
+        "mu_dec_rel": "mu_dec_rel",
+
+        "alpha": "alpha",
+        "cosalpha": "cosalpha",
+        "sinalpha": "sinalpha",
 
         "lens_mass": f"star.{l_idx}.mass",
         "lens_distance": f"star.{l_idx}.distance",
@@ -47,12 +74,18 @@ def get_symbol_map(lens_config_list):
         "lens_dec": f"star.{l_idx}.dec",
 
         "source_mass": f"star.{s_idx}.mass",
+        "source_radius": f"star.{s_idx}.radius",
         "source_distance": f"star.{s_idx}.distance",
         "source_pm_ra": f"star.{s_idx}.pm_ra",
         "source_pm_dec": f"star.{s_idx}.pm_dec",
         "source_ra": f"star.{s_idx}.ra",
         "source_dec": f"star.{s_idx}.dec",
     }
+
+    if companion_mass_path:
+        result["companion_mass"] = companion_mass_path
+
+    return result
 
 RELATIONS = [
     # Einstein Radius
@@ -84,7 +117,22 @@ RELATIONS = [
     sp.Eq(pi_rel, KAPPA * lens_mass * (pi_E_N ** 2 + pi_E_E ** 2)),
 
     # Finite Source (R_sun to AU, then to mas)
-    sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E)
+    sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E),
+
+    # Binary lens mass ratio: q = M_companion / M_primary
+    # companion_mass is only in the symbol map for binary events, so this relation
+    # is automatically inert for PSPL (relaxation engine skips equations with
+    # unregistered symbols).  Propagates: user-supplied q → companion mass initval,
+    # or known masses → q for diagnostics.
+    sp.Eq(q_lens * lens_mass, companion_mass),
+
+    # Source trajectory angle: alpha (radians, internal) → cosalpha, sinalpha.
+    # These relations let a user supply alpha+init_scale in params.yaml; the
+    # relaxation engine propagates initvals and scales to the sampled cosalpha/sinalpha.
+    # alpha itself is not in the symbol map for PSPL events (no cosalpha/sinalpha
+    # registered), so both relations are automatically inert for point-source fits.
+    sp.Eq(cosalpha, sp.cos(alpha)),
+    sp.Eq(sinalpha, sp.sin(alpha)),
 ]
 
 

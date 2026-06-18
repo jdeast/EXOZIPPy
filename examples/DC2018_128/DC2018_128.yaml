@@ -1,0 +1,49 @@
+run:
+  name: "DC2018_128"
+
+prefix: "fitresults/DC2018_128"
+
+# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+#
+# system architecture:
+#   star.0 = Lens      (primary lens host)
+#   star.1 = Source    (background source)
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: True
+    #mag_method: "auto_vbbl"  # default for binary+finite_source
+    t0_par: 2458554.89         # approximate t_0 from MMEXOFAST
+
+galacticmodel:
+  - name: "DC2018_128"
+    anchor_idx: 1              # source is star.1
+
+mulensinstrument:
+  - name: "Roman"
+    file: "n20180816.Z087.WFIRST18.128.txt"
+    data_format: flux          # file stores normalized flux, not magnitudes
+    observer_location: roman_simulated_2018dc  # MMEXOFAST wfirst_ephemeris_W149.txt, J2000 equatorial
+
+parameter_file: "DC2018_128.params.yaml"
+
+sampler:
+  pymc:
+    step_method: "DEMetropolisZ"   # gradient-free; DEMetropolisZ broken in PyMC 5.25.1, falls back to Metropolis
+    tune: 5000   # 90% dropped (tune_drop_fraction); scaling adapts in ~2000 steps
+    draws: 10000 # DE has high autocorrelation; ESS ~ 5-20% of nominal
+    chains: 8    # DE needs enough chains for good proposals; more = richer archive
+    cores: 4
+    check_curvatures: False
+    recompute_trace: True

@@ -1,0 +1,78 @@
+# Seeded from MMEXOFAST solution 0 (0-indexed)
+# Source: examples/DC2018_128/mmexofast.json
+# n_solutions in file: 2
+#
+# MMEXOFAST uncertainties are mapped to init_scale, NOT sigma.
+# init_scale = sampling hint only (no logp penalty).
+# sigma = Gaussian prior (would double-count the data).
+
+lens.Lens.t_0:
+    initval: 2458554.89424795
+    init_scale: 0.02002712
+
+lens.Lens.u_0:
+    initval: 0.14297468
+    init_scale: 0.00376723
+
+# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
+# Provided here as an initval hint to seed the relaxation engine.
+lens.Lens.t_E:
+    initval: 18.17037538
+    init_scale: 0.31212459
+
+lens.Lens.s:
+    initval: 0.97875222
+    init_scale: 0.00068642
+
+# alpha: relaxation engine propagates initval/init_scale to cosalpha/sinalpha.
+lens.Lens.alpha:
+    initval: -52.15111097728343
+    init_scale: 0.5472813114829904
+
+lens.Lens.rho:
+    initval: 5.38363705e-03
+    init_scale: 8.23216699e-03
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
+# this through the symbolic relation  q * M_primary = M_companion
+# to set the companion's mass initval automatically.
+lens.Lens.q:
+    initval: 1.10584968e-03
+    init_scale: 4.55919089e-05
+
+star.Lens.ra:
+    initval: 267.595
+    sigma: 0
+star.Lens.dec:
+    initval: -28.982
+    sigma: 0
+star.Source.ra:
+    initval: 267.595
+    sigma: 0
+star.Source.dec:
+    initval: -28.982
+    sigma: 0
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Source.teff:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0
+planet.Companion.radius:
+    sigma: 0
+
+# Source radius is unconstrained without SED data (same reasoning as Lens.radius).
+star.Source.radius:
+    sigma: 0.0
+
+# log_f_total init_scale was 0 in the previous run (data hint overrode the
+# default), causing Metropolis to take zero-size steps on this parameter.
+mulensinstrument.Roman.log_f_total:
+    init_scale: 2.0

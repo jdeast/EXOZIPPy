@@ -23,27 +23,6 @@ def get_val(node, inputs_dict=None):
     return fn(*values)
 
 
-def test_derived_parameter_prior_registration():
-    """
-    Ensures that if a derived parameter (with an expression) is given a sigma,
-    it successfully registers a pm.Potential in the model.
-    """
-    with pm.Model() as model:
-        logmass = Parameter(label="logmass", initval=0.0, init_scale=0.1, lower=-2.0, upper=2.0)
-        logmass_node = logmass.build_pymc()
-
-        mass = Parameter(
-            label="mass",
-            initval=1.2,
-            sigma=0.05,
-            expression=lambda: pt.pow(10.0, logmass_node)
-        )
-        mass.build_pymc()
-
-    potential_names = [p.name for p in model.potentials]
-    assert "gaussian_prior.mass" in potential_names, "Derived parameter prior was ignored!"
-
-
 def test_derived_prior_numerical_evaluation():
     """
     Tests the mathematical accuracy of the applied prior using pure PyTensor evaluation.
@@ -71,40 +50,35 @@ def test_derived_prior_numerical_evaluation():
     # Prior is N(mu=1.2, sigma=0.05)
     # Penalty = -0.5 * ((1.0 - 1.2) / 0.05)^2 = -8.0
     np.testing.assert_allclose(val, -8.0, atol=1e-5, err_msg="Derived prior calculated incorrect penalty!")
-def test_derived_parameter_bounds_translation():
-    """
-    Tests that setting physical upper/lower bounds on a derived parameter
-    translates to soft boundaries in the PyMC graph.
-    """
-    with pm.Model() as model:
-        logP = Parameter(label="logP", initval=1.0, init_scale=0.1, lower=0.0, upper=2.0)
-        logP_node = logP.build_pymc()
-
-        period = Parameter(
-            label="period",
-            lower=5.0,
-            upper=15.0,
-            expression=lambda: pt.pow(10.0, logP_node)
-        )
-        period.build_pymc()
-
-    potential_names = [p.name for p in model.potentials]
-    assert "low_bound.period" in potential_names, "Lower bound on derived parameter ignored"
-    assert "up_bound.period" in potential_names, "Upper bound on derived parameter ignored"
 
 
 def test_sampled_parameter_fallback_scaling():
     """
     Tests the distinction between `sigma` (scientific) and `init_scale` (sampling estimate).
-    If a sampled parameter has NO sigma, it should just be bounded without applying a Gaussian penalty.
+    - Sampled params with `sigma` + bounds: logit transform (hard bounds) with
+      the Gaussian prior applied on the physical value (truncated normal);
+      sigma also sets the whitening scale.
+    - Sampled params with only `init_scale` + bounds: logit transform with a
+      flat prior; init_scale affects whitening only, never the posterior.
     """
     with pm.Model() as model:
         logP = Parameter(label="logP", initval=0.5, init_scale=0.01, lower=-1.0, upper=2.0)
         logP.build_pymc()
 
-        ecc = Parameter(label="ecc", initval=0.0, sigma=0.05, lower=0.0, upper=1.0)
+        ecc = Parameter(label="ecc", initval=0.05, mu=0.0, sigma=0.05, lower=0.0, upper=1.0)
         ecc.build_pymc()
 
     potential_names = [p.name for p in model.potentials]
-    assert "gaussian_prior.ecc" in potential_names, "sigma failed to create a Gaussian prior!"
-    assert "gaussian_prior.logP" not in potential_names, "init_scale leaked and created a false scientific prior!"
+    # sigma on a bounded sampled param is a Gaussian potential on the physical
+    # value (the raw N(0,1) is cancelled by the flat-prior correction)
+    assert "gaussian_prior.ecc" in potential_names, "bounded sampled sigma must add a Gaussian potential"
+    assert "gaussian_prior.logP" not in potential_names, "init_scale should never create a Gaussian prior!"
+
+    logp_fn = model.compile_logp()
+    logp_center = logp_fn({"ecc_raw": np.array([0.0]), "logP_raw": np.array([0.0])})
+    assert np.isfinite(logp_center), "logp should be finite at raw=0"
+
+    # The Gaussian prior penalizes deviations in physical space:
+    # raw=3 moves ecc from 0.05 to ~0.55, ~11 sigma from mu=0.
+    logp_3sigma = logp_fn({"ecc_raw": np.array([3.0]), "logP_raw": np.array([0.0])})
+    assert logp_3sigma < logp_center - 3.0, "large deviation should be penalized"

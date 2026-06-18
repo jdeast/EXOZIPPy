@@ -101,8 +101,11 @@ class Component(ABC):
         options = self.manifest[param_name] or {}
         if isinstance(options, str):
             options = {"expr_key": options}
+        options = dict(options)  # don't mutate the manifest via the pops below
 
-        shape = (self.n_elements,)
+        # Manifest entries may override the shape for parameters that are not
+        # one-per-element (e.g. one (s, alpha) per lens companion).
+        shape = tuple(options.pop("shape", None) or (self.n_elements,))
 
         # 1. Grab configuration properties agnostically
         cfg = self.config_manager.resolve(

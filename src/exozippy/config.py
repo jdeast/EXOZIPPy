@@ -680,17 +680,44 @@ class ConfigManager:
                 scale_provenance[path_str] = RANK_USER
 
         # 2. The Relaxation Engine
-        logger.info("Solving for starting values/scales of sampled parameters given user/data initialization....")
+        logger.info("Solving for starting values/scales of sampled parameters given user/data/default initialization....")
         updated = True
         iteration = 0
         max_iter = 100  # Failsafe
+        _CYCLE_HIST = 6  # how many recent values to keep per variable
+        value_history = {}  # {var_name: [recent rounded values]}
+        pinned_vars = set()  # variables locked out of further updates due to cycle
 
         while updated and iteration < max_iter:
             updated = False
             iteration += 1
+            resolved_snapshot = dict(resolved)
+
             for eq in self.all_relations:
-                if self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance):
+                if self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
+                                        pinned_vars):
                     updated = True
+
+            # Cycle detection: track per-variable history; pin any that oscillate.
+            # Pinning lets other variables keep converging instead of stopping the loop.
+            for k, v in resolved.items():
+                if k in pinned_vars:
+                    continue
+                if k not in resolved_snapshot or resolved_snapshot[k] != v:
+                    hist = value_history.setdefault(k, [])
+                    hist.append(round(v, 8))
+                    if len(hist) > _CYCLE_HIST:
+                        hist.pop(0)
+
+            for k, hist in value_history.items():
+                if k in pinned_vars:
+                    continue
+                if len(hist) >= 4 and hist[-1] == hist[-3] and hist[-2] == hist[-4] and hist[-1] != hist[-2]:
+                    logger.warning(
+                        f"Cycle: '{k}' oscillates between {hist[-2]:.6g} and {hist[-1]:.6g} — "
+                        f"pinned to {hist[-1]:.6g} (conflicting equal-rank constraints)."
+                    )
+                    pinned_vars.add(k)
 
         if iteration == max_iter:
             logger.warning("Relaxation engine reached max iterations — check for unstable circular dependencies.")
@@ -741,7 +768,8 @@ class ConfigManager:
 
         return resolved
 
-    def _relax_equation(self, eq, resolved, provenance, resolved_scales, scale_provenance, tolerance):
+    def _relax_equation(self, eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
+                        pinned_vars=None):
 
         if not isinstance(eq, sp.Eq):
             return False
@@ -787,6 +815,10 @@ class ConfigManager:
         if not target or len(unknowns) > 1:
             return False
 
+        # Skip pinned variables so other variables can keep converging
+        if pinned_vars and target in pinned_vars:
+            return False
+
         # 5. Calculate New Armor
         # Use min(input_ranks) so a chain is only as strong as its weakest link.
         # Condition A floor is RANK_DEFAULT-1 so an indirectly-derived value
@@ -796,7 +828,12 @@ class ConfigManager:
         # armor weaker than an unseeded default.
         inputs = [s for s in symbols_in_eq if s != target]
         min_input_rank = min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
-        rank_floor = RANK_DEFAULT - 1 if len(unknowns) == 1 else RANK_DEFAULT
+        # Condition A floor: RANK_DEFAULT-1 so indirect derivations always yield
+        #   to expression-path derivations or defaults in Condition B.
+        # Condition B floor: 0 so low-rank inputs (e.g. pm defaults at rank 10)
+        #   produce low-rank results — preventing them from blocking higher-rank
+        #   derivations from the t_E/theta_E/pi_rel chain.
+        rank_floor = RANK_DEFAULT - 1 if len(unknowns) == 1 else 0
         new_rank = max(rank_floor, min(RANK_DERIVED_USER, min_input_rank))
 
         if is_contradiction:
@@ -806,9 +843,13 @@ class ConfigManager:
                 f"  Action: sacrificing '{target}' to enforce physical consistency.")
 
         return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
-                                   inputs)
+                                   inputs, pinned_vars=pinned_vars)
 
-    def _execute_solve(self, eq, target_str, resolved, provenance, new_rank, resolved_scales, scale_provenance, inputs):
+    def _execute_solve(self, eq, target_str, resolved, provenance, new_rank, resolved_scales, scale_provenance, inputs,
+                       pinned_vars=None):
+        if pinned_vars and target_str in pinned_vars:
+            return False
+
         # 1. ALWAYS check custom solvers FIRST
         parts = target_str.split('.')
         lookup_key = f"{parts[0]}.{parts[-1]}"
@@ -823,8 +864,13 @@ class ConfigManager:
                 logger.debug(f"Updated {target_str} = {valid_val:.4g} (custom solver)")
                 return True
             except Exception as e:
-                logger.debug(f"Custom solver failed for {target_str}: {e}")
-                return False
+                # A custom solver is a shortcut for one specific relation
+                # (e.g. K -> companion mass).  If it can't run (missing
+                # dependencies), fall through to the generic symbolic solver
+                # so OTHER equations targeting this parameter (e.g.
+                # q * M_primary = M_companion) still get their chance.
+                logger.debug(f"Custom solver failed for {target_str}: {e}; "
+                             f"falling back to symbolic solve.")
 
         # 2. Skip equations whose symbolic inversion has previously timed out
         if target_str in self.symbolic_blacklist:
@@ -938,6 +984,31 @@ class ConfigManager:
 
         # 5. Apply Value and Armor
         if valid_val is not None:
+            # 5b. Jacobian-filtered rank refinement.
+            # Replace raw min(input_ranks) with min(active_input_ranks), where
+            # "active" means the input has a non-negligible Jacobian contribution.
+            # This prevents incidentally-zero inputs (e.g. mu_ra_rel ≈ 0 in the
+            # mu_dec_rel = sqrt(mu_rel_mag² - mu_ra_rel²) equation) from dragging
+            # down the trustworthiness of the result.
+            jac_active_inputs = []
+            if not used_nsolve and hasattr(valid_sol, 'free_symbols') and inputs:
+                for parent_str in inputs:
+                    parent_sym = sp.Symbol(parent_str)
+                    if not valid_sol.has(parent_sym):
+                        continue
+                    try:
+                        d = float(sp.diff(valid_sol, parent_sym).evalf(subs=resolved))
+                        if np.isfinite(d) and abs(d) > 1e-6:
+                            jac_active_inputs.append(parent_str)
+                    except Exception:
+                        jac_active_inputs.append(parent_str)  # conservative: include on error
+
+            if jac_active_inputs:
+                min_jac_rank = min(provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs)
+                # Refine upward only: never reduce a rank that was already determined
+                # by a valid floor (e.g. Condition A floor of RANK_DEFAULT-1).
+                new_rank = max(new_rank, min(RANK_DERIVED_USER, min_jac_rank))
+
             resolved[target_str] = valid_val
             provenance[target_str] = new_rank
             logger.debug(f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})")

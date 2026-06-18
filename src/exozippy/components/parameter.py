@@ -22,7 +22,11 @@ import pymc as pm
 import pytensor.tensor as pt
 
 # local imports
+import logging
 from exozippy.constants import SIGMA_1_LOW, SIGMA_1_HIGH
+from exozippy.potentials import soft_lower_bound, soft_upper_bound
+
+logger = logging.getLogger(__name__)
 
 Number = Union[int, float, np.floating]
 
@@ -298,6 +302,9 @@ class Parameter:
     user_prior_modified: bool = False
     is_derived: bool = False
     is_sampled: bool = False
+    # Raw-space starting values for the sampled elements (set in build_pymc):
+    # 0 for logit elements, (initval - mu)/sigma for Gaussian-path elements.
+    raw_initval: Optional[np.ndarray] = None
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
@@ -434,9 +441,22 @@ class Parameter:
 
     def build_pymc(self, ndx=0, expression=None):
         """
-        Materializes the Parameter in the PyMC graph using Non-Centered Scaling.
-        Assumes self.initval, lower, upper, mu, sigma, and init_scale
-        are already in INTERNAL UNITS (broadcasted to self.shape).
+        Materializes the Parameter in the PyMC graph.
+
+        Sampling cases:
+          - Bounded (lower+upper finite): logit transform — hard bounds.
+            raw ~ N(0,1), val = lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw).
+            raw=0 maps exactly to initval; no soft barriers. The N(0,1) raw
+            density is cancelled by a correction potential, so the implied
+            prior is exactly U(lower, upper); with sigma > 0 a Gaussian
+            potential on the physical value makes it a truncated normal, and
+            sigma sets the whitening scale.
+          - Unbounded with sigma > 0: raw ~ N(0,1), val = mu + sigma * raw.
+            The raw prior IS the Gaussian; no separate potential needed.
+
+        All raw variables are N(0,1). init_scale is always in physical units;
+        for logit params it is converted to logit-space internally via the
+        Jacobian and affects only tuning/conditioning, never the posterior.
         """
         import pytensor.tensor as pt
         import pymc as pm
@@ -454,13 +474,19 @@ class Parameter:
         lowers = to_vec(self.lower, n_elements, fill=-np.inf)
         uppers = to_vec(self.upper, n_elements, fill=np.inf)
 
-        # 3. IDENTIFY ROLES & PARAMETERIZATION SCENARIOS
+        # 2. IDENTIFY ROLES
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
+
+        # Warn if user tried to fix a derived parameter — sigma=0 has no effect on derived params.
+        if np.any(is_derived & (sigmas == 0)):
+            logger.warning(
+                f"Parameter '{self.label}': sigma=0 has no effect on a derived parameter "
+                f"To hold it constant, you must fix the corresponding sampled parameter(s)."
+            )
         self.is_sampled = is_sampled
 
-        # --- Any sampled parameter must have upper and lower bounds in defaults.yaml ---
         if np.any(is_sampled):
             if self.lower is None or self.upper is None:
                 raise ValueError(
@@ -468,73 +494,144 @@ class Parameter:
                     f"'lower' and 'upper' bounds defined in its defaults.yaml."
                 )
 
-        # --- DYNAMIC PARAMETERIZATION LOGIC ---
-        transform_mus = np.copy(inits)
-        transform_scales = np.copy(scales)
-        raw_sigmas = np.full(n_elements, 1000.0)
-        apply_potential = np.zeros(n_elements, dtype=bool)
+        # 3. PER-ELEMENT PARAMETERIZATION
+        # use_logit[i]: finite bounds → logit transform (hard bounds). A sigma
+        #   prior on a bounded element is applied as a Gaussian potential on
+        #   the physical value (section A), giving truncated-normal semantics.
+        # has_sigma_prior[i]: explicit Gaussian prior (sigma > 0)
+        use_logit = np.zeros(n_elements, dtype=bool)
+        has_sigma_prior = np.zeros(n_elements, dtype=bool)
+
+        # Logit transform: logit_q_init + init_scale_logit * raw → sigmoid → physical
+        logit_q_inits = np.zeros(n_elements)
+        init_scale_logits = np.zeros(n_elements)
+
+        # Gaussian: val = gaussian_mus + gaussian_scales * raw
+        gaussian_mus = np.copy(inits)
+        gaussian_scales = np.copy(scales)
 
         for i in range(n_elements):
-
-            has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
-            if has_sigma:
-                apply_potential[i] = True
-
             if not is_sampled[i]:
                 continue
 
-            has_mu = not np.isnan(mus[i])
-            actual_mu = mus[i] if has_mu else inits[i]
+            has_sigma = not np.isnan(sigmas[i]) and sigmas[i] > 0
+            has_bounds = not np.isinf(lowers[i]) and not np.isinf(uppers[i])
+            has_sigma_prior[i] = has_sigma
 
-            if has_sigma:
-                transform_mus[i] = actual_mu
-                transform_scales[i] = sigmas[i]
+            if has_bounds:
+                use_logit[i] = True
+                span = uppers[i] - lowers[i]
+                if span <= 0:
+                    raise ValueError(
+                        f"Parameter '{self.label}'[{i}]: lower bound equals or exceeds "
+                        f"upper bound ({lowers[i]} >= {uppers[i]}). To hold a parameter "
+                        f"at a fixed value, set 'sigma: 0' instead of collapsing the bounds."
+                    )
+                q_raw = (inits[i] - lowers[i]) / span
+                # Use the tighter of sigma and init_scale as the whitening scale.
+                # Section C cancels the raw N(0,1) prior (leaving a flat prior in
+                # physical space), so the prior shape is determined solely by the
+                # Gaussian potential in section A — always N(mu, sigma) regardless
+                # of whiten.  Using min(sigma, init_scale) makes chain initialization
+                # spread by init_scale in physical space when init_scale < sigma
+                # (e.g. cosalpha/sinalpha where sigma=1 encodes a uniform-angle
+                # prior but init_scale reflects the actual alpha uncertainty).
+                whiten = (min(sigmas[i], scales[i]) if has_sigma else scales[i])
+                # Keep the start off the exact bound. The floor is in units of
+                # the whitening scale (1e-6*scale inside the bound is
+                # "essentially at the bound" in problem units); a span-based
+                # floor would be arbitrarily large for wide bounds. The 1e-12
+                # absolute floor keeps logit(q) within the ±30 sigmoid clip.
+                q_floor = min(max(1e-6 * whiten / span, 1e-12), 0.25)
+                q_init = np.clip(q_raw, q_floor, 1.0 - q_floor)
+                if q_init != q_raw:
+                    logger.warning(
+                        f"Parameter '{self.label}'[{i}]: initval {inits[i]} is at or "
+                        f"within 1e-6*init_scale of bounds [{lowers[i]}, {uppers[i]}]; "
+                        f"starting value nudged to {lowers[i] + q_init * span}."
+                    )
+                logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
+                jac = q_init * (1.0 - q_init) * span  # dval/d(logit_q) at initval
+                # Near a wall jac → 0 and whiten/jac would explode, saturating
+                # the sigmoid within one tiny raw step (parameter frozen at the
+                # wall). Flooring jac at min(whiten, span/4) caps the logit
+                # step at ~1, so a pinned start escapes multiplicatively —
+                # one e-fold in (val - bound) per unit raw step — while
+                # interior starts are unaffected.
+                init_scale_logits[i] = whiten / max(jac, min(whiten, span / 4.0))
+            elif has_sigma:
+                # Unbounded with sigma: non-centered Gaussian; the raw N(0,1)
+                # IS the prior.
+                has_mu = not np.isnan(mus[i])
+                gaussian_mus[i] = mus[i] if has_mu else inits[i]
+                gaussian_scales[i] = sigmas[i]
             else:
-                # Case 1 & 2: Nothing or init_scale -> pm.Normal with 1000*init_scale
-                transform_mus[i] = inits[i]
-                transform_scales[i] = scales[i]
-                raw_sigmas[i] = 1000.0
+                # Unbounded, no sigma: fall back to linear with N(0,1)
+                gaussian_mus[i] = inits[i]
+                gaussian_scales[i] = scales[i]
 
+        # 4. BUILD RAW VARIABLES
         raw_elements = [None] * n_elements
 
-        # A. FIXED OR DERIVED: Constant 0.0 in the "raw" unit-normal space
-        if np.any(is_fixed | is_derived):
-            for i in np.where(is_fixed | is_derived)[0]:
-                raw_elements[i] = pt.constant(0.0)
+        # Fixed / derived: constant 0 in raw space
+        for i in np.where(is_fixed | is_derived)[0]:
+            raw_elements[i] = pt.constant(0.0)
 
-        # B. SAMPLING
         if np.any(is_sampled):
             idx = np.where(is_sampled)[0]
-            # PyMC seamlessly supports vectorized mixed scales!
+            # Start each raw element so the physical value equals initval.
+            # Logit elements: raw=0 maps to initval by construction.
+            # Gaussian elements: val = mu + sigma*raw, so raw must start at
+            # (initval - mu)/sigma (0 when mu is absent, since mu falls back
+            # to initval).  The prior stays exactly N(mu, sigma); only the
+            # starting point moves.
+            raw_initvals = np.zeros(len(idx))
+            for j, i in enumerate(idx):
+                if not use_logit[i]:
+                    raw_initvals[j] = ((inits[i] - gaussian_mus[i])
+                                       / max(gaussian_scales[i], 1e-30))
+            # Saved so run.py can build the true raw starting point explicitly
+            # (model.initial_point() is not trusted to honor these).
+            self.raw_initval = raw_initvals
             par_raw = pm.Normal(f"{self.label}_raw",
                                 mu=0,
-                                sigma=raw_sigmas[idx],
+                                sigma=1.0,
                                 shape=len(idx),
-                                initval=np.zeros(len(idx)))
-
+                                initval=raw_initvals)
             for j, actual_idx in enumerate(idx):
                 raw_elements[actual_idx] = par_raw[j]
 
-        # 4. RECONSTRUCT PHYSICAL VALUE
+        # 5. RECONSTRUCT PHYSICAL VALUE
         raw_vector = pt.stack(raw_elements)
 
         if expr_raw is not None:
             phys_val = expr_raw() if callable(expr_raw) else expr_raw
         else:
-            phys_val = (raw_vector * pt.as_tensor_variable(transform_scales)) + pt.as_tensor_variable(transform_mus)
+            # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
+            lq = pt.as_tensor_variable(logit_q_inits) + pt.as_tensor_variable(init_scale_logits) * raw_vector
+            phys_logit = (pt.as_tensor_variable(lowers)
+                          + pt.as_tensor_variable(uppers - lowers) * pt.sigmoid(pt.clip(lq, -30.0, 30.0)))
 
-        # --- STRIP ASTROPY UNITS ---
-        # If the expression returned a Quantity, extract the raw PyTensor array
+            # Gaussian / linear branch: mu + sigma * raw  (or initval + scale * raw)
+            phys_linear = pt.as_tensor_variable(gaussian_mus) + pt.as_tensor_variable(gaussian_scales) * raw_vector
+
+            if np.all(use_logit):
+                phys_val = phys_logit
+            elif not np.any(use_logit):
+                phys_val = phys_linear
+            else:
+                phys_val = pt.where(pt.as_tensor_variable(use_logit), phys_logit, phys_linear)
+
+        # Strip Astropy units
         if hasattr(phys_val, 'value') and hasattr(phys_val, 'unit'):
             phys_val = phys_val.value
 
-        # --- SAFELY COMPRESS LISTS OF NODES ---
         if isinstance(phys_val, (list, tuple)):
             phys_val = pt.stack(list(phys_val))
         elif isinstance(phys_val, np.ndarray) and phys_val.dtype == object:
             phys_val = pt.stack(phys_val.tolist())
 
-        # 5. ASSIGN TO SELF.VALUE
+        # 6. ASSIGN TO SELF.VALUE
         track_node = bool(np.any(is_sampled)) or self.force_node
 
         if actual_shape == ():
@@ -547,33 +644,72 @@ class Parameter:
         else:
             self.value = val_to_save
 
-        # 6. APPLY SCIENTIFIC PRIORS & SOFT BOUNDARIES
-        softness = 0.01
-        # Use transform_scales so bounds adapt cleanly to tight sigmas
-        steepness_val = 4.4 / (np.maximum(transform_scales, 1e-12) * softness)
-        steepness = pt.as_tensor_variable(steepness_val)
-
+        # 7. PRIORS AND SOFT BOUNDS
         val_flat = pt.flatten(self.value)
 
-        # A. Additional Gaussian Width Potentials (Only triggers for Case 4)
-        if np.any(apply_potential):
-            mask = pt.as_tensor_variable(apply_potential)
-            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(transform_mus)) / pt.as_tensor_variable(sigmas)) ** 2
-            pm.Potential(f"gaussian_prior.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+        # A. Gaussian potential on the physical value for:
+        #    - derived parameters with sigma, and
+        #    - bounded (logit-transformed) sampled parameters with sigma, whose
+        #      raw N(0,1) is cancelled by section C → uniform × this Gaussian
+        #      = truncated normal.
+        #    Unbounded sampled Gaussian params encode their prior in raw ~
+        #    N(0,1); no double-count.
+        gaussian_prior_mask = ((is_derived | (is_sampled & use_logit & has_sigma_prior))
+                               & ~np.isnan(sigmas) & (sigmas > 0))
+        if np.any(gaussian_prior_mask):
+            prior_mus = np.where(~np.isnan(mus), mus, inits)
+            mask = pt.as_tensor_variable(gaussian_prior_mask)
+            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(prior_mus))
+                              / pt.as_tensor_variable(np.where(sigmas > 0, sigmas, 1.0))) ** 2
+            pm.Potential(f"gaussian_prior.{self.label}",
+                         pm.math.sum(pt.where(mask, penalty, 0.0)))
 
-        # B. Soft Lower Bounds
-        has_lower = ~np.isinf(lowers)
-        if np.any(has_lower):
-            mask = pt.as_tensor_variable(has_lower)
-            penalty = pm.math.log(pt.sigmoid((val_flat - pt.as_tensor_variable(lowers)) * steepness))
-            pm.Potential(f"low_bound.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+        # B. Soft bounds for derived params (and the rare half-bounded sampled
+        #    param, where only one bound is finite so the logit transform does
+        #    not apply). Fully-bounded sampled params: sigmoid is a hard
+        #    constraint — no barrier needed.
+        #    Fixed params: constant, so barrier adds only a harmless constant — skip.
+        needs_barrier = (is_derived | (is_sampled & ~use_logit)) & ~is_fixed
+        if np.any(needs_barrier):
+            # Use init_scale for barrier steepness (falls back to gaussian_scales
+            # for Gaussian params, where gaussian_scales = sigma).
+            barrier_scales = np.where(use_logit, scales, gaussian_scales)
 
-        # C. Soft Upper Bounds
-        has_upper = ~np.isinf(uppers)
-        if np.any(has_upper):
-            mask = pt.as_tensor_variable(has_upper)
-            penalty = pm.math.log(pt.sigmoid((pt.as_tensor_variable(uppers) - val_flat) * steepness))
-            pm.Potential(f"up_bound.{self.label}", pm.math.sum(pt.where(mask, penalty, 0.0)))
+            has_lower = ~np.isinf(lowers) & needs_barrier
+            if np.any(has_lower):
+                mask = pt.as_tensor_variable(has_lower)
+                penalty = soft_lower_bound(
+                    val_flat, pt.as_tensor_variable(lowers), barrier_scales)
+                pm.Potential(f"low_bound.{self.label}",
+                             pm.math.sum(pt.where(mask, penalty, 0.0)))
+
+            has_upper = ~np.isinf(uppers) & needs_barrier
+            if np.any(has_upper):
+                mask = pt.as_tensor_variable(has_upper)
+                penalty = soft_upper_bound(
+                    val_flat, pt.as_tensor_variable(uppers), barrier_scales)
+                pm.Potential(f"up_bound.{self.label}",
+                             pm.math.sum(pt.where(mask, penalty, 0.0)))
+
+        # C. Flat-prior correction for logit-transformed sampled parameters.
+        #    raw ~ N(0,1) through the sigmoid gives a logit-normal prior in
+        #    physical space. Adding log(q*(1-q)) + raw²/2 cancels both the
+        #    sigmoid distortion AND the N(0,1) raw density, leaving an exactly
+        #    uniform prior on [lower, upper] — the same logp PyMC's Interval
+        #    transform gives pm.Uniform, but in our initval-centered,
+        #    init_scale-whitened raw coordinate. init_scale then only affects
+        #    tuning/conditioning, not the posterior.
+        if np.any(use_logit) and expr_raw is None:
+            logit_mask = pt.as_tensor_variable(use_logit)
+            # log(q*(1-q)) from the *unclipped* logit: smooth, and decays ~ -|lq|
+            # at the walls so the sampler always feels a restoring gradient
+            # (computing it through the clipped sigmoid would plateau, leaving
+            # a flat region where a chain could drift unboundedly).
+            log_jac = -pt.softplus(lq) - pt.softplus(-lq)
+            correction = pt.where(logit_mask,
+                                  log_jac + 0.5 * pt.sqr(raw_vector),
+                                  pt.zeros_like(raw_vector))
+            pm.Potential(f"logit_uniform_prior.{self.label}", pt.sum(correction))
 
         return self.value
 
@@ -807,9 +943,9 @@ class Parameter:
         has_prior = (sig is not None and sig > 0)
         has_bounds = (lo is not None or hi is not None)
 
-        # If it's derived AND has no custom bounds/priors, just return "Derived"
+        # Derived parameters with no custom constraint have no prior to display.
         if self.expression is not None and not (has_prior or has_bounds):
-            return "Derived"
+            return ""
 
         mu = _scalar(self.mu)
         if mu is None:
@@ -828,8 +964,8 @@ class Parameter:
                 if l_s: return f"> {l_s}"
                 if h_s: return f"< {h_s}"
 
-            # Fallback for deterministics if the logic somehow slips through
-            return "Derived" if self.expression is not None else ""
+            if self.expression is not None:
+                return ""
 
         # --- LaTeX Formatting Block ---
         strs = []
@@ -849,7 +985,20 @@ class Parameter:
             if not lo_is_inf: return rf"$> {l_s}$"
             if not hi_is_inf: return rf"$< {h_s}$"
 
-        return "Derived" if self.expression is not None else ""
+        return ""
+
+    def to_latex_prior_def(self) -> str:
+        """Generate a \\providecommand for the prior column value.
+
+        The command name is ``\\<latex_varname>prior`` so the table body can
+        reference it symbolically rather than inlining the prior string.  A
+        single command is generated per parameter (not per element) because
+        all elements of a vector parameter share the same prior.
+        """
+        prior_str = self.get_prior_str(index=0, latex=True)
+        if not prior_str:
+            return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
+        return rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}" + "\n"
 
     def to_table_line(self, sigfigs: int = 2) -> str:
         if self.latex is None:
@@ -866,18 +1015,14 @@ class Parameter:
         for i in range(n_elements):
             idx_str = _idx_to_words(i) if n_elements > 1 else ""
 
-            # --- THE NEW SUBSCRIPT LOGIC ---
             if n_elements > 1:
                 if self.names and i < len(self.names):
-                    # Wrap in \rm so it looks clean, and escape underscores if they exist
                     clean_name = str(self.names[i]).replace("_", r"\_")
-                    # Use raw string concatenation to avoid f-string backslash errors
                     symbol = self.latex + r"_{\rm " + clean_name + r"}"
                 else:
                     symbol = f"{self.latex}_{{{i}}}"
             else:
                 symbol = self.latex
-            # -------------------------------
 
             if self.print_to_table:
                 val_txt = "\\" + self.latex_varname + idx_str
@@ -888,7 +1033,7 @@ class Parameter:
                 summ = self.summary[i] if isinstance(self.summary, list) else self.summary
                 val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}"
 
-            prior_text = self.get_prior_str(index=i)
+            prior_text = "\\" + self.latex_varname + "prior"
 
             lines.append(
                 rf"~~~~${symbol}$\dotfill & "
@@ -898,6 +1043,39 @@ class Parameter:
             )
 
         return "".join(lines)
+
+    def to_table_line_at(self, index: int, sigfigs: int = 2) -> str:
+        """Single table row for element ``index``, without an instance subscript.
+
+        Used when the enclosing section header already identifies the instance.
+        """
+        if self.latex is None:
+            raise ValueError(f"{self.label}: latex symbol not set.")
+        if self.description is None:
+            raise ValueError(f"{self.label}: description not set.")
+
+        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
+        idx_str = _idx_to_words(index) if n_elements > 1 else ""
+
+        safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
+        unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
+
+        if self.print_to_table:
+            val_txt = "\\" + self.latex_varname + idx_str
+        else:
+            if self.summary is None:
+                self.compute_summary()
+            summ = self.summary[index] if isinstance(self.summary, list) else self.summary
+            val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}"
+
+        prior_text = "\\" + self.latex_varname + "prior"
+
+        return (
+            rf"~~~~${self.latex}$\dotfill & "
+            rf"{self.description}{unit_text}\dotfill & "
+            rf"{val_txt}\dotfill & "
+            rf"{prior_text} \\" + "\n"
+        )
 
     # ---------
     # Posterior summary

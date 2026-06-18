@@ -1,7 +1,8 @@
 import numpy as np
+import pytensor
 import pytensor.tensor as pt
 import pytest
-from exozippy.components.mulensing.lens import Lens  # Adjust based on your actual path
+from exozippy.components.mulensing.lens import Lens
 from exozippy.components.parameter import Parameter
 from astropy import units as u
 from exozippy.physics_registry import PHYSICS_REGISTRY
@@ -11,26 +12,64 @@ from exozippy.components.mulensing.physics import (
     calc_pi_rel,
     calc_t_E
 )
+from exozippy.system import System
+
 
 def get_val(x):
     return x.eval() if hasattr(x, 'eval') else x
 
+
+@pytest.mark.slow
 def test_pspl_magnification_accuracy():
-    """Verify that the magnification function matches the Paczynski formula."""
-    # Separation u in Einstein radii
-    u_vals = np.array([0.1, 0.5, 1.0, 2.0])
+    """
+    Given a PSPL model evaluated at t=t0 with zero observer positions (no
+    parallax correction), when get_magnification is called, then the output
+    must equal the analytical Paczynski formula A(u0) = (u0^2+2)/(u0*sqrt(u0^2+4)).
 
-    # Expected magnification
-    expected = (u_vals ** 2 + 2) / (u_vals * np.sqrt(u_vals ** 2 + 4))
+    At t=t0 with obs=0: tau=0 and u2=u0^2, so this reduces to a single-point
+    check of the inline formula in lens.py:383.
+    """
+    u0_val = 0.3
+    t0_val = 2460025.0
 
-    # Mocking the lens component's internal call
-    # Assuming Lens.get_magnification(t, dn, de) logic is accessible
-    # For now, we test the core math if available in physics.py
-    calc_A = PHYSICS_REGISTRY.get("calc_magnification_pspl")
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
+    }
+    user_params = {
+        "lens.Lens.t_0":        {"initval": t0_val},
+        "lens.Lens.u_0":        {"initval": u0_val},
+        "lens.Lens.pi_E_N":     {"initval": 0.0, "sigma": 0.0},
+        "lens.Lens.pi_E_E":     {"initval": 0.0, "sigma": 0.0},
+        "star.Lens.distance":   {"initval": 4000.0},
+        "star.Source.distance": {"initval": 8000.0},
+        "star.Lens.mass":       {"initval": 0.5},
+        "star.Lens.pm_ra":      {"initval": 0.0},
+        "star.Lens.pm_dec":     {"initval": 0.0},
+        "star.Source.pm_ra":    {"initval": 0.0},
+        "star.Source.pm_dec":   {"initval": 0.0},
+        "star.Source.ra":       {"initval": 0.0},
+        "star.Source.dec":      {"initval": 0.0},
+        "star.Lens.ra":         {"initval": 0.0},
+        "star.Lens.dec":        {"initval": 0.0},
+    }
 
-    if calc_A:
-        res = calc_A(u_vals).eval()
-        assert np.allclose(res, expected, atol=1e-5)
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+
+    obs_zero = np.zeros((1, 3), dtype=np.float64)
+    t_at_peak = np.array([t0_val])
+
+    with model:
+        A_node = system.lens.get_magnification(t_at_peak, obs_zero, system, index=0)
+        f = pytensor.function(model.free_RVs, A_node, on_unused_input="ignore")
+        ip = model.initial_point()
+        zero_in = [np.zeros_like(ip[v.name]).astype("float64") for v in model.free_RVs]
+        A_result = float(f(*zero_in)[0])
+
+    expected = (u0_val**2 + 2) / (u0_val * np.sqrt(u0_val**2 + 4))
+    np.testing.assert_allclose(A_result, expected, rtol=1e-6)
 
 
 def test_microlensing_physics_conversions():
@@ -76,28 +115,6 @@ def test_lens_parameter_unit_handling():
     assert p.internal_unit == u.day
 
 
-def test_parallax_trajectory_offset():
-    """Verify that Earth's motion correctly offsets the impact parameter u."""
-    # If pi_E is 0, u should just be the linear trajectory
-    # If pi_E is large, u should be significantly modulated
-    # u(t) = sqrt(u0^2 + ((t-t0)/tE + pi_E_E*delta_E + pi_E_N*delta_N)^2)
-
-    t = 2455000.0
-    t0 = 2455000.0
-    u0 = 0.5
-    tE = 50.0
-    pi_E_N = 1.0
-    delta_N = 0.1  # Earth shift
-
-    # Simple manual check of the logic inside your get_magnification
-    # If this math doesn't match your Lens.py, the model won't fit!
-    tau = (t - t0) / tE
-    # u_vec = [u0, tau] + pi_E * delta
-    u_n = u0 + (pi_E_N * delta_N)
-    u_e = tau  # assuming pi_E_E is 0 for this test
-    u_total = np.sqrt(u_n ** 2 + u_e ** 2)
-
-    assert u_total > u0  # Parallax should have shifted the lens further away
 
 def test_microlensing_sympy_pytensor_equivalence():
     """

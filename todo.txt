@@ -11,22 +11,40 @@
 * more features/components:
   - microlensing
     - fix whatever's wrong with the spitzer model of OB1410939
-    - incorporate mulensmodel as a custom Op
-      - build out its functionality:
-        - PSPL
-        - finite source effects
-        - pipe magnifications methods
-        - binary lens
-        - binary source
-        - triple lens (does mulensmodel even do this?)
-        - what else?
-    - confirm (and document) conventions (origin, alpha, etc)
+    - MulensModel Op (lens.py / op.py): DONE for PSPL and binary lens (BinaryLensMagOp);
+      mulensinstrument.build_likelihood now calls get_magnification_op which dispatches
+      automatically; numerical gradients via _PSPLGradOp / _BinaryGradOp
+    - NLNS architecture: DONE
+        - lenses: ["star.0", "planet.0"] / sources: ["star.1"] YAML syntax
+        - PSPL (1 lens) and binary lens (2 lenses) dispatched automatically
+        - NotImplementedError guard for triple+ lens and binary source
+        - DC2018_128 example wires up 2L1S with Roman ephemeris + flux data format
+    - flux data format (data_format: flux in YAML): DONE — converts to mag on load
+    - Roman simulated ephemeris: DONE — roman_simulated_2018dc.eph in ephemerides/
+    - binary source (2L2S / 1L2S): NOT DONE
+        - source_bodies list structure and NotImplementedError guard are in place
+        - needs: t_0, u_0, rho vectorized to (N_events, N_sources)
+        - needs: f_source reshaped to (N_instruments, N_sources) in mulensinstrument
+        - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
+        - needs: q_source parameterization generalized (currently 1 scalar per instrument)
+        - needs: BinaryLensMagOp extended or new 2L2S Op
+    - band component (limb darkening for finite source): scaffold DONE (band/band.py),
+      but band_ndx stored in mulensinstrument is never wired into the magnification Op;
+      LD coefficients not yet passed to get_magnification_op
+    - triple+ lens: NotImplementedError; MulensModel does support it
+    - confirm (and document) conventions (origin, alpha, parallax sign)
     - explore samplers and parameterizations
-    - explore degeneracies
+    - explore degeneracies (close/wide, u_0 sign, alpha ± pi)
   - transits
     - ttvs
     - long cadence
     - light travel time
+    - limb darkening
+        - compute our own table using the SED infrastructure?
+           - self consistency
+           - generality
+           - faster?
+           - hard?
   - GPs
     - both RVs and Transits, periodic or red
   - SED
@@ -38,6 +56,7 @@
     - sed/symbolic_physics.py uses comp_key="star" so teffsed=teff and
       radiussed=radius relations fire for all stars even without a SED;
       should be conditioned on SED being present in the config
+    - extract filter and merge with band component?
   - evolutionary models
   - astrometry
    - especially gaia data handling
@@ -62,6 +81,15 @@
 
 * global solutions to seed blind
   - mulensing: incorporate https://github.com/jenniferyee/MMEXOFAST
+    - run MMEXOFAST directly (see ~/python/MMEXOFAST and its
+      examples/example_05_RomanDC18.py) and inject results as data-driven
+      init_scale hints (not sigma/priors) via config_manager.add_hint() during
+      load_data, unless the user has already provided those values
+    - scripts/mmexofast_to_params.py is the manual fallback; automatic injection
+      is the goal
+    - support multi-solution initialization: when MMEXOFAST returns N degenerate
+      solutions, initialize one chain per solution (or use all as restarts) so
+      the sampler can explore all modes; currently only solution 0 is used
   - transit: BLS
   - RV: lomb scargle
   - astrometry: ??
@@ -74,6 +102,18 @@
 * config.py cleanup: the unit_scaling (base->user) and get_conversion_factor
   (user->internal) two-layer conversion in resolve() is fragile; we fixed the
   propagated_scales/scale_hints bug but the underlying design could be simplified
+
+* DEMetropolisZ broken in PyMC 5.25.1 (stats_dtypes_shapes registration bug;
+  ValueError: setting an array element with a sequence on every step).
+  Currently falling back to pm.Metropolis for gradient-free sampling.
+  Revisit when PyMC fixes it; DEMetropolisZ is preferable for multimodal posteriors.
+
+* master Instrument class: mulensinstrument, rvinstrument, and
+  transitinstrument should inherit from a shared Instrument base (common
+  file loading, err_scale, plotting hooks, per-instrument config handling)
+
+* per-instrument plot color: allow the user to specify a color for any
+  instrument in the config, overriding the default plotting color cycle
 
 blind spots:
   * checkpoints

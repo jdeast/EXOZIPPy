@@ -1,4 +1,5 @@
 
+import gc
 import yaml
 import numpy as np
 import math
@@ -17,8 +18,22 @@ import pymc as pm
 import arviz as az
 from pymc.initial_point import make_initial_point_fn
 
+
+class DEMetropolisZ(pm.DEMetropolisZ):
+    """PyMC 5.25.1 bug: self.scaling is np.atleast_1d (always 1-D array) but
+    stats_dtypes_shapes declares shape [] (scalar), causing a ValueError in
+    the NDArray backend.  Fix: flatten scalar stats before returning."""
+    def astep(self, q0):
+        result, stats = super().astep(q0)
+        for s in stats:
+            for key in ("scaling", "lambda"):
+                if key in s and np.ndim(s[key]) > 0:
+                    s[key] = float(np.ravel(s[key])[0])
+        return result, stats
+
 # local imports
 from .logger import setup_logging
+from .mkparam import backup_params, mkprior
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
@@ -49,12 +64,13 @@ def run_fit(config):
     # 2. Load the sampler settings
     sampler_cfg = config.get("sampler", {})
     pymc_cfg = sampler_cfg.get("pymc", {})
-    init = pymc_cfg.get("adapt_diag")
+    init = pymc_cfg.get("init", "adapt_diag")
     tune = int(pymc_cfg.get("tune", 2000))
     draws = int(pymc_cfg.get("draws", 2000))
     chains = int(pymc_cfg.get("chains", 4))
     cores = int(pymc_cfg.get("cores", 1))
     target_accept = pymc_cfg.get("target_accept", 0.9)
+    step_method = pymc_cfg.get("step_method", "NUTS")
     recompute_trace = pymc_cfg.get("recompute_trace", False)
     check_curvatures = pymc_cfg.get("check_curvatures", True)
     profile = pymc_cfg.get("profile", False)
@@ -73,12 +89,11 @@ def run_fit(config):
         nuts_scales, phys_scales, phys_inits, transformed_inits = system.get_mcmc_init(model)
         inspect_start(model, system, transformed_inits, phys_inits, phys_scales, check_curvatures)
 
-        # this makes random draws within our 1000 sigma range
-        raw_start = model.initial_point()
-
-        # nuke them and start at our actual starting points
-        for key in raw_start:
-            raw_start[key] = np.zeros_like(raw_start[key])
+        # Build the raw starting point explicitly: 0 for logit params,
+        # (initval - mu)/sigma for Gaussian-path params, so the physical
+        # start is always initval (model.initial_point() is not trusted —
+        # it can draw randomly from our intentionally huge priors).
+        raw_start = system.get_raw_start(model)
 
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
@@ -102,18 +117,78 @@ def run_fit(config):
         else:
             # do the sampling and save the results
             nuts_scales = np.array(nuts_scales).flatten()
-            step = pm.NUTS(target_accept=target_accept)
-            idata = pm.sample(
-                draws=draws,
-                tune=tune,
-                chains=chains,
-                init=init,
-                step=step,
-                cores=cores,
-                #initvals=ordered_inits,
-                return_inferencedata=True,
-                idata_kwargs={"log_likelihood": False}
-            )
+            if step_method == "DEMetropolisZ":
+                # Gradient-free; suited for models with numerical-gradient Ops
+                # (e.g. MulensModel binary lens).  Requires >= 3 chains.
+                #
+                # Chain initialization: same strategy as EXOFAST.
+                # Chain 0 starts at the best-fit (raw=0 = initvals).
+                # Chains 1..N-1 start spread by factor*scale*randn, where
+                # factor = min(sqrt(500/nparams), 3).  If a proposed start has
+                # non-finite logp (outside a hard constraint), we back off
+                # exponentially until the point is valid.
+                logp_fn = model.compile_logp()
+                model_keys = set(model.initial_point().keys())
+                nparams = sum(v.size for v in raw_start.values())
+                factor = min(np.sqrt(500.0 / max(nparams, 1)), 3.0)
+
+                chain_starts = []
+                for j in range(chains):
+                    if j == 0:
+                        chain_starts.append({k: v.copy() for k, v in raw_start.items()})
+                        continue
+                    niter = 0
+                    while True:
+                        effective_factor = factor / np.exp(niter / 1000.0)
+                        proposal = {
+                            k: v + effective_factor * np.random.randn(*v.shape)
+                            for k, v in raw_start.items()
+                        }
+                        internal_proposal = system.get_internal_point(model, proposal)
+                        filtered = {k: v for k, v in internal_proposal.items() if k in model_keys}
+                        if np.isfinite(logp_fn(filtered)):
+                            chain_starts.append(proposal)
+                            break
+                        niter += 1
+                        if niter % 500 == 0:
+                            logger.warning(f"Chain {j}: {niter} retries finding valid start")
+
+                step = DEMetropolisZ()
+
+                idata = pm.sample(
+                    draws=draws,
+                    tune=tune,
+                    chains=chains,
+                    step=step,
+                    cores=cores,
+                    initvals=chain_starts,
+                    return_inferencedata=True,
+                    idata_kwargs={"log_likelihood": False}
+                )
+            else:
+                step = pm.NUTS(target_accept=target_accept)
+                idata = pm.sample(
+                    draws=draws,
+                    tune=tune,
+                    chains=chains,
+                    init=init,
+                    step=step,
+                    cores=cores,
+                    return_inferencedata=True,
+                    idata_kwargs={"log_likelihood": False}
+                )
+            # Metropolis doesn't record lp in sample_stats; compute and persist it now
+            # so future restores from disk have it without recomputation.
+            ss_vars = (list(idata.sample_stats.data_vars)
+                       if hasattr(idata, "sample_stats") else [])
+            if "lp" not in ss_vars:
+                import xarray as xr
+                lp_vals = _compute_lp_from_model(model, idata)
+                if lp_vals is not None:
+                    idata.sample_stats["lp"] = xr.DataArray(
+                        lp_vals, dims=["chain", "draw"],
+                        coords={"chain": idata.posterior.chain,
+                                "draw": idata.posterior.draw})
             az.to_netcdf(idata, trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
@@ -121,17 +196,18 @@ def run_fit(config):
 
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
+
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
 
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
-    make_corner(model, idata, str(prefix) + "_corner.pdf")
+    make_corner(model, idata, str(prefix) + "_corner.png")
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
-    # Create a list of physical parameter labels that actually have traces
     all_params = system.get_all_parameters()
-    plot_vars = [p.label for p in all_params if p.label in idata.posterior]
-    save_multipage_trace(idata, plot_vars, str(prefix) + "_trace_detailed.pdf")
+    plot_vars = [p.label for p in all_params if p.label in idata["posterior"]]
+    save_multipage_trace(idata, plot_vars, str(prefix) + "_trace_detailed.pdf",
+                         model=model)
 
     # Pick the suspected troublemakers
     # List every tracked parameter in the posterior
@@ -161,6 +237,13 @@ def run_fit(config):
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
+    # Preserve the current params.yaml, then write a MAP-seeded successor
+    try:
+        backup_params(config)
+        mkprior(config, trace_path=trace_path)
+    except Exception:
+        logger.exception("mkprior failed (non-fatal)")
+
 def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, calc_curvature=True):
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
@@ -179,7 +262,6 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
     logger.info("--------           abs(Curv) >~ 1e4 will impact efficiency and require more tuning steps                               --------")
     logger.info("--------           abs(Curv) ~< 1e-4 may artificially truncate your posteriors or severely impact efficiency           --------")
     logger.info("--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------")
-    logger.info("--------           Positive log-prob is normal: continuous PDF values can exceed 1 (e.g. narrow Gaussians).            --------")
     logger.info("-" * table_width)
     header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user) |"
     logger.info(header)
@@ -310,6 +392,11 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
 
     # --- 2. Potentials & Likelihoods ---
     for node, lp in other_nodes.items():
+        # logit_uniform_prior nodes are constant log-volume factors (−log range) that
+        # never change during sampling and add nothing informative to the table.
+        if node.startswith("logit_uniform_prior"):
+            continue
+
         clean_node = node.replace("up_bound.", "").replace("low_bound.", "").replace("prior.", "").replace(
             "user_prior.", "")
         parent = auditor.param_lookup.get(clean_node)
@@ -376,35 +463,42 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             f"and were not applied: {unused_yaml}\n"
             "This can be safely ignored if intentional, but check for typos.")
 
-def make_corner(model, idata, filename):
+def make_corner(model, idata, filename, max_samples=1000):
     import corner
-    physical_vars = [v for v in idata.posterior.data_vars if "_raw" not in v and "_interval" not in v]
+    all_vars = list(idata["posterior"].data_vars)
+    physical_vars = [v for v in all_vars if "_raw" not in v and "_interval" not in v]
 
     samples_list = []
     labels = []
 
     for v in physical_vars:
-        # Stack chains and draws into a single 'sample' dimension at the end
-        arr = idata.posterior[v].stack(sample=("chain", "draw")).values
+        arr = idata["posterior"][v].stack(sample=("chain", "draw")).values
         n_samples = arr.shape[-1]
 
-        # If it's a scalar parameter (1D array of samples)
         if arr.ndim == 1:
             samples_list.append(arr)
             labels.append(v)
-        # If it's a vector parameter (e.g., 2 instruments -> 2D array)
         else:
             arr_flat = arr.reshape(-1, n_samples)
-            for i in range(arr_flat.shape[0]):
+            n_elem = arr_flat.shape[0]
+            if n_elem > 100:
+                logger.warning(f"make_corner: {v} has {n_elem} elements — possible shape mismatch")
+            for i in range(n_elem):
                 samples_list.append(arr_flat[i])
                 labels.append(f"{v}[{i}]")
 
     samples = np.array(samples_list).T
 
+    # Thin to cap corner.corner() memory — 1000 samples is sufficient for visual quality.
+    if samples.shape[0] > max_samples:
+        rng = np.random.default_rng(seed=42)
+        idx = rng.choice(samples.shape[0], size=max_samples, replace=False)
+        idx.sort()
+        samples = samples[idx]
+
     minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
     maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
     n_samples_total = samples.shape[0]
-    plot_contours = n_samples_total > 100
 
     try:
         fig = corner.corner(
@@ -412,52 +506,188 @@ def make_corner(model, idata, filename):
             labels=labels,
             quantiles=[minrank, 0.5, maxrank],
             show_titles=True,
-            plot_contours=plot_contours,
-            plot_density=plot_contours,
             title_kwargs={"fontsize": 12}
         )
-        fig.savefig(filename)
+        # PDF vector backend holds every scatter marker path in memory during
+        # serialization → balloons to tens of GB for a 26×26 subplot figure.
+        # PNG (Agg) rasterizes to a fixed pixel buffer bounded by DPI × size.
+        fig.savefig(filename, dpi=150)
+        plt.close(fig)
     except Exception as e:
         logger.warning(f"Corner plot failed (sample size {n_samples_total}): {e}")
 
-def save_multipage_trace(idata, var_names, filename, params_per_page=4):
+# Module-level globals for fork-based parallel lp evaluation.
+# PyTensor compiled functions can't be pickled, so they're set here before
+# forking; child processes inherit them via copy-on-write without IPC.
+_LP_FN = None
+_LP_POINT_MAP = None
+
+
+def _lp_eval_chain(args):
+    """Evaluate logp for every draw in one chain (runs in a forked child)."""
+    chain_data, chain_idx, n_draws = args
+    lp_chain = np.full(n_draws, np.nan)
+    for d in range(n_draws):
+        point = {_LP_POINT_MAP[tname]: np.atleast_1d(chain_data[tname][d])
+                 for tname in chain_data}
+        lp_chain[d] = float(_LP_FN(point))
+    return chain_idx, lp_chain
+
+
+def _compute_lp_from_model(model, idata):
+    """Compute log posterior at each draw by evaluating the compiled model logp.
+
+    Used when the sampler (Metropolis) doesn't write lp to sample_stats.
+    Chains are processed in parallel via fork so the PyTensor compiled function
+    is inherited without pickling (numpy chain data is all that's sent over IPC).
+    Returns an (n_chains, n_draws) float64 array, or None on failure.
+    """
+    import multiprocessing as mp
+    try:
+        n_chains = idata.posterior.sizes["chain"]
+        n_draws = idata.posterior.sizes["draw"]
+
+        with model:
+            logp_fn = model.compile_logp(jacobian=False)
+
+        # In EXOZIPPy's non-centered parameterization, the free RVs ARE the raw
+        # unconstrained variables (e.g. "star.logmass_raw"). ArviZ stores them in
+        # the posterior under the same name. Do NOT append another "_raw" here.
+        point_map = {}   # trace var name → logp_fn input name
+        for rv in model.free_RVs:
+            vv = model.rvs_to_values.get(rv)
+            if vv is None:
+                continue
+            if rv.name in idata.posterior.data_vars:
+                point_map[rv.name] = vv.name
+
+        if not point_map:
+            logger.warning("_compute_lp_from_model: no unconstrained vars found in trace")
+            return None
+
+        logger.info(f"Computing lp for {n_chains}×{n_draws} draws "
+                    f"({len(point_map)} unconstrained vars)")
+
+        # Extract per-chain numpy arrays (picklable; logp_fn is NOT pickled —
+        # it's inherited by child processes via fork).
+        chain_arrays = []
+        for c in range(n_chains):
+            chain_arrays.append({tname: idata.posterior[tname].values[c]
+                                  for tname in point_map})
+
+        # Set module-level globals so forked workers inherit them without pickling.
+        global _LP_FN, _LP_POINT_MAP
+        _LP_FN = logp_fn
+        _LP_POINT_MAP = point_map
+
+        n_workers = min(n_chains, mp.cpu_count())
+        ctx = mp.get_context("fork")
+        with ctx.Pool(n_workers) as pool:
+            results = pool.map(_lp_eval_chain, [(arr, c, n_draws)
+                                                for c, arr in enumerate(chain_arrays)])
+
+        lp_vals = np.full((n_chains, n_draws), np.nan)
+        for chain_idx, chain_lp in results:
+            lp_vals[chain_idx] = chain_lp
+            logger.info(f"  chain {chain_idx}: lp range "
+                        f"[{chain_lp.min():.1f}, {chain_lp.max():.1f}]")
+
+        return lp_vals
+
+    except Exception as e:
+        logger.warning(f"Could not compute lp from model: {e}")
+        return None
+
+
+def _n_trace_rows(idata, var_names, group="posterior"):
+    """Total rows az.plot_trace needs: 1 row per element (shape product) per var."""
+    rows = 0
+    dataset = idata[group]
+    for v in var_names:
+        shape = dataset[v].shape[2:]  # drop (chain, draw) dims
+        rows += int(np.prod(shape)) if shape else 1
+    return rows
+
+
+def _chunk_by_rows(idata, var_names, rows_per_page):
+    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows."""
+    chunk, chunk_rows = [], 0
+    for v in var_names:
+        r = _n_trace_rows(idata, [v])
+        if chunk_rows + r > rows_per_page and chunk:
+            yield chunk, chunk_rows
+            chunk, chunk_rows = [v], r
+        else:
+            chunk.append(v)
+            chunk_rows += r
+    if chunk:
+        yield chunk, chunk_rows
+
+
+def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
+                         max_samples=2000, model=None):
+    n_chains, n_draws = idata.posterior.chain.size, idata.posterior.draw.size
+
+    # Thin to cap matplotlib memory and render time
+    total_samples = n_chains * n_draws
+    if total_samples > max_samples:
+        thin_factor = max(1, total_samples // max_samples)
+        sl = slice(None, None, thin_factor)
+        thin_kwargs = {"posterior": idata.posterior.isel(draw=sl)}
+        if hasattr(idata, "sample_stats"):
+            thin_kwargs["sample_stats"] = idata.sample_stats.isel(draw=sl)
+        idata = az.InferenceData(**thin_kwargs)
+
+    # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
+    # the fix that computes and persists it right after pm.sample().
+    # Fall back to computing it for old trace files.
+    ss_vars = list(idata.sample_stats.data_vars) if hasattr(idata, "sample_stats") else []
+    if "lp" in ss_vars:
+        lp_idata, lp_var = idata["sample_stats"], "lp"
+    elif model is not None:
+        logger.info("lp not in trace — computing from model (old trace file)")
+        import xarray as xr
+        lp_vals = _compute_lp_from_model(model, idata)
+        if lp_vals is not None:
+            if not hasattr(idata, "sample_stats") or idata.sample_stats is None:
+                idata.add_groups({"sample_stats": xr.Dataset()})
+            idata.sample_stats["lp"] = xr.DataArray(
+                lp_vals, dims=["chain", "draw"],
+                coords={"chain": idata.posterior.chain,
+                        "draw": idata.posterior.draw})
+            lp_idata, lp_var = idata["sample_stats"], "lp"
+        else:
+            lp_idata, lp_var = None, None
+    else:
+        lp_idata, lp_var = None, None
+
     with PdfPages(filename) as pdf:
-        # --- PAGE 1 (Special: LP + first 3 params) ---
-        num_on_first = params_per_page - 1
-        first_page_vars = var_names[:num_on_first]
+        # lp gets its own first page when available — mixing two different
+        # datasets (sample_stats + posterior) in a pre-allocated axes grid
+        # caused ArviZ 0.19 to silently ignore the passed axes and render
+        # into its own floating figure, leaving our fig blank.  Let ArviZ
+        # own the figure and retrieve it from the returned axes instead.
+        if lp_var and lp_idata is not None:
+            lp_axes = az.plot_trace(lp_idata, var_names=[lp_var],
+                                    figsize=(12, 3))
+            fig_lp = lp_axes.flat[0].figure
+            fig_lp.suptitle("Trace Plots: log-posterior (lp)", fontsize=14)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            pdf.savefig(fig_lp)
+            plt.close(fig_lp)
+            gc.collect()
 
-        # Create a figure with enough rows for 4 parameters (8 subplots)
-        fig, axes = plt.subplots(params_per_page, 2, figsize=(12, 3 * params_per_page))
-
-        # 1. Plot LP into the first row
-        az.plot_trace(idata.sample_stats, var_names=["lp"], axes=axes[0:1, :])
-
-        # 2. Plot the parameters into the remaining rows
-        if first_page_vars:
-            az.plot_trace(idata, var_names=first_page_vars, axes=axes[1:params_per_page, :])
-
-        fig.suptitle("Trace Plots: Page 1 (Likelihood & Parameters)", fontsize=14)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        pdf.savefig(fig)
-        plt.close(fig)
-
-        # --- PAGES 2+ (Standard Loop) ---
-        for i in range(num_on_first, len(var_names), params_per_page):
-            chunk = var_names[i: i + params_per_page]
-            n_rows = len(chunk)
-
-            fig, axes = plt.subplots(n_rows, 2, figsize=(12, 3 * n_rows))
-            # Ensure axes is 2D even if there's only 1 row
-            if n_rows == 1: axes = axes[np.newaxis, :]
-
-            az.plot_trace(idata, var_names=chunk, axes=axes)
-
-            page_num = (i - num_on_first) // params_per_page + 2
+        for page_num, (chunk, n_rows) in enumerate(
+            _chunk_by_rows(idata, var_names, rows_per_page), start=1
+        ):
+            axes_arr = az.plot_trace(idata, var_names=chunk,
+                                     figsize=(12, 3 * n_rows))
+            fig = axes_arr.flat[0].figure
             fig.suptitle(f"Trace Plots: Page {page_num}", fontsize=14)
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
             pdf.savefig(fig)
             plt.close(fig)
+            gc.collect()
 
 def get_draws(idata, n_draws=50):
     """

@@ -159,6 +159,7 @@ star:
     init_scale: 0.05
     lower: -1e5
     upper: 1e5
+    rank: 10
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha*}"
@@ -168,6 +169,7 @@ star:
     init_scale: 0.05
     lower: -1e5
     upper: 1e5
+    rank: 10
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_\\delta"

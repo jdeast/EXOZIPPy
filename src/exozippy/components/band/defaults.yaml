@@ -1,0 +1,29 @@
+band:
+  u1:
+    lower: -1.0
+    upper: 2.0
+    initval: 0.3
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "u_1"
+    description: "Linear limb-darkening coefficient"
+  u2:
+    lower: -1.0
+    upper: 2.0
+    initval: 0.1
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "u_2"
+    description: "Quadratic limb-darkening coefficient"
+  # Linear LD (single coefficient, used when ld_law = linear)
+  gamma:
+    lower: -1.0
+    upper: 2.0
+    initval: 0.5
+    init_scale: 0.1
+    unit: ""
+    internal_unit: ""
+    latex: "\\Gamma"
+    description: "Linear limb-darkening coefficient"

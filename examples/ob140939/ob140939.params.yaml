@@ -1,80 +1,77 @@
-# --- Integration Constants (Sampled) ---
+# From Yee+2014, Table 1
+# https://iopscience.iop.org/article/10.1088/0004-637X/802/2/76/pdf
+# eventually, we'd like to get this from MMEXOFAST
 lens.Lens.t_0:
     initval: 2456836.22
 lens.Lens.u_0:
-    initval: 0.840
+    initval: 0.922
     init_scale: 0.0004
 lens.Lens.t_E:
-    initval: 24.29
+    initval: 22.87
 lens.Lens.pi_E_N:
-    initval: -0.214
+    initval: -0.248
 lens.Lens.pi_E_E:
-    initval: 0.217
+    initval: 0.234
+
+# the solver needs this, but it shouldn't
+#star.Lens.mass:
+#    initval: 0.23
+
+# From Yee+2014 Table 3: F_S,OGLE=13.2, F_B,OGLE=-2.19 → q = F_S/(F_S+F_B) = 1.199
+# Negative blending is common for OGLE difference imaging in the crowded Galactic bulge.
+mulensinstrument.OGLE4.q_source:
+    initval: 1.199
+    init_scale: 0.05
+
+# From Yee+2014 Table 3: F_S,Spitzer=4.31, F_B,Spitzer=-0.08 → q = 4.31/4.23 = 1.019
+mulensinstrument.Spitzer.q_source:
+    initval: 1.019
+    init_scale: 0.05
 
 mulensinstrument.Spitzer.err_scale:
-    init_scale: 0.00142
+    upper: 1.1
 #mulensinstrument.OGLE4.log_f_total:
 #    init_scale: 0.001
 #mulensinstrument.OGLE4.q_frac:
 #    init_scale: 0.002
 
-# https://iopscience.iop.org/article/10.1088/0004-637X/802/2/76/pdf
-# --- Physical Parameters for the LENS (Sampled) ---
-star.Lens.mass:
-    initval: 0.23     # Yee+ 2014
+# this come from a catalog and only influences the galactic model prior (with course precision)
+# we probably want to link the ra/dec of source/lens within the model
+# or maybe all stars with syntax like this:
+#star.ra:
+#    initval: 266.801041667
+#    sigma: 0
+#star.dec:
+#    initval: -21.3829722222
+#    sigma: 0
 star.Lens.ra:
     initval: 266.801041667
     sigma: 0
 star.Lens.dec:
     initval: -21.3829722222
     sigma: 0
-#star.Lens.distance:
-#    initval: 3100.0  # Yee+ 2014
-#    initval: 4000.0  # Yee+ 2014
-#    init_scale: 5.0
-#star.Lens.pm_ra:
-#    initval: -3.0    # mas/yr
-#    init_scale: 0.01
-#star.Lens.pm_dec:
-#    initval: -4.0    # mas/yr
-#    init_scale: 0.01
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
-star.Lens.rv:
-    initval: 0.0
-    init_scale: 100000.0 # wide velocity sweep
-#star.Source.mass:
-#    sigma: 0.0
-star.Source.radius:
-    initval: 0.519
-    sigma: 0.0
-star.Source.teff:
-    sigma: 0.0
-star.Source.feh:
-    sigma: 0.0
 star.Source.ra:
     initval: 266.801041667
     sigma: 0
 star.Source.dec:
     initval: -21.3829722222
     sigma: 0
-star.Source.rv:
-    initval: -50000.0
-    init_scale: 100000.0
 
-# --- Physical Parameters for the SOURCE (Sampled) ---
-star.Source.distance:
-    initval: 8000.0  # bulge
-#    init_scale: 5
-#star.Source.pm_ra:
-#    initval: -6.0    # mas/yr
-#    init_scale: 0.07
-    # sigma: 3.0 # this comes from the galactic prior
-#star.Source.pm_dec:
-#    initval: -6.0    # mas/yr
-#    init_scale: 0.088
-    # sigma: 3.0 # this comes from teh galactic prior
+# I think Yee+2014 constrains this with Finite Source Effects?
+# We ignore that for now, so let's fix it at the Yee value
+star.Source.radius:
+    initval: 0.519
+    sigma: 0.0
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Source.teff:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0

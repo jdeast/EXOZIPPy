@@ -5,3 +5,11 @@ python get_ephemeris.py --id -163 --out "k2.eph" --start "2016-04-01" --stop "20
 
 See here for a list of IDs:
 https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/C/req/naif_ids.html
+
+roman_simulated_2018dc.eph
+  Source: MMEXOFAST 2018DataChallenge/wfirst_ephemeris_W149.txt
+  https://github.com/jenniferyee/MMEXOFAST
+  Format: BJD X_EQ Y_EQ Z_EQ X_ECL Y_ECL Z_ECL (AU, J2000 equatorial + ecliptic)
+  Coverage: BJD 2458346.505 – 2460059.241 (~4.7 yr at 15-min cadence)
+  Columns 1-3 (X_EQ, Y_EQ, Z_EQ) are the equatorial J2000 frame used by EXOZIPPy.
+  Single file covers all 2018 DC filters (spacecraft position is filter-independent).

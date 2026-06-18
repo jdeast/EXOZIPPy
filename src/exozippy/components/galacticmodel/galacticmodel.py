@@ -14,10 +14,10 @@ from exozippy.constants import (SUN_GC_DISTANCE, BULGE_BAR_ANGLE, BULGE_DENSITY_
                                 BULGE_ROTATION_ANGULAR_VELOCITY, K_VEL_CONVERSION)
 
 """
-This implements a mixture model of the bulge and disk, enforcing the kinematics and density of the galaxy 
-as defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract. 
-It's a major refactor of https://github.com/nkoshimoto/genulens 
-to distill its core functionality into a component for EXOZIPPy
+This class implements a mixture model of the bulge and disk, enforcing the kinematics and density of the galaxy 
+It's a simplified version of the model defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract. 
+and codified here https://github.com/nkoshimoto/genulens 
+This class distills genulens's core functionality into a component for EXOZIPPy
 """
 class GalacticModel(Component):
     def __init__(self, config, config_manager):

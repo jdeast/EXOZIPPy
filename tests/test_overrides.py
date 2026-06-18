@@ -7,28 +7,7 @@ from exozippy.components.rvinstrument.rvinstrument import RVInstrument
 from exozippy.components.star.star import Star
 from exozippy.components.parameter import Parameter
 from exozippy.system import System
-
-
-class MockSystem:
-    """Mock system to isolate ConfigManager and Auditor testing from the full PyMC graph."""
-
-    def __init__(self, user_params):
-        self.user_params = user_params
-        self.config_manager = ConfigManager(user_params)
-        self.star = None
-
-    def get_parameter_lookup(self):
-        lookup = {}
-        if self.star:
-            for attr in self.star.__dict__.values():
-                if isinstance(attr, Parameter):
-                    lookup[attr.label] = attr
-        return lookup
-
-    def get_all_parameters(self):
-        if self.star:
-            return [v for v in self.star.__dict__.values() if isinstance(v, Parameter)]
-        return []
+from conftest import MockSystem
 
 
 def test_instrument_name_override_resolves_correctly():

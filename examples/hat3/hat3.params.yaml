@@ -29,9 +29,9 @@ star.feh:
     sigma: 0.08
 
 star.av:  
-    #upper: 0.096687450
-    initval: 0.01
-    sigma: 0.01
+    upper: 0.096687450
+    #initval: 0.01
+    #sigma: 0.01
 
 # NOTE: the Gaia DR3 parallax uncertainty (0.0143000) has been added in quadrature with 0.01 to account for remaining systematic residuals
 star.parallax:

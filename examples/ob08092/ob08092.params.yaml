@@ -1,75 +1,99 @@
-# --- Integration Constants (Sampled) ---
+# initialized from this paper (just the secondary subevent in Table 1)
+# https://ui.adsabs.harvard.edu/abs/2014ApJ...795...42P/abstract
+
+# eventually, these will be initialized from the LC by running Jennifer Yee's MMEXOFAST
+# for now, we're taking the values from Poleski+ 2014, Table 1
 lens.Lens.t_0:
     initval: 2455379.571
     init_scale: 0.1
 lens.Lens.u_0:
     initval: 0.523
     init_scale: 0.0004
+lens.Lens.t_E:
+    initval: 17.94
 
+# these were iteratively determined from the curvatures of previous runs
+# they are not strictly necessary, but make the autotuning faster/more reliable
 mulensinstrument.OGLE4.err_scale:
     init_scale: 0.00082
 mulensinstrument.OGLE4.log_f_total:
     init_scale: 0.001
-mulensinstrument.OGLE4.q_frac:
+mulensinstrument.OGLE4.q_source:
     init_scale: 0.002
 
 # --- Physical Parameters for the LENS (Sampled) ---
-star.Lens.logmass:
-    initval: -0.8239     # M_sun (Typical M-dwarf lens)
-    init_scale: 0.0029
+# these could be initialized from the LC metadata?
 star.Lens.ra:
     initval: 266.872583333
     sigma: 0
 star.Lens.dec:
     initval: -34.7265555556
     sigma: 0
-star.Lens.distance:
-    initval: 8100.0  # Poleski+ 2014
-    init_scale: 5.0
-star.Lens.pm_ra:
-    initval: -3.0    # mas/yr
-    init_scale: 0.01
-star.Lens.pm_dec:
-    initval: -4.0    # mas/yr
-    init_scale: 0.01
-star.Lens.radius:
-    sigma: 0.0
-star.Lens.teff:
-    sigma: 0.0
-star.Lens.feh:
-    sigma: 0.0
-star.Lens.rv:
-    initval: 0.0
-    init_scale: 30000.0 # wide velocity sweep
-#star.Source.mass:
-#    sigma: 0.0
-star.Source.radius:
-    initval: 0.519 # Poleski+ 2014
-    sigma: 0.0
-star.Source.teff:
-    sigma: 0.0
-star.Source.feh:
-    sigma: 0.0
 star.Source.ra:
     initval: 266.872583333
     sigma: 0
 star.Source.dec:
     initval: -34.7265555556
     sigma: 0
-star.Source.rv:
-    initval: -50000.0
-    init_scale: 100000.0
+
+# these kinematic initializations are now the default for mulensing, constrained primarily by the galactic model and ra/dec
+# --- Physical Parameters for the Lens (Sampled) ---
+#star.Lens.distance:
+#    initval: 8100.0  # Poleski+ 2014
+#    init_scale: 5.0
+#star.Lens.pm_ra:
+#    initval: -3.0    # mas/yr
+#    init_scale: 0.01
+#star.Lens.pm_dec:
+#    initval: -4.0    # mas/yr
+#    init_scale: 0.01
+#star.Lens.rv:
+#    initval: 0.0
+#    init_scale: 100000.0 # wide velocity sweep
 
 # --- Physical Parameters for the SOURCE (Sampled) ---
-star.Source.distance:
-    initval: 9700.0  # Poleski+ 2014
-    init_scale: 5
-star.Source.pm_ra:
-    initval: -6.0    # mas/yr
-    init_scale: 0.07
-    # sigma: 3.0 # this comes from the galactic prior
-star.Source.pm_dec:
-    initval: -6.0    # mas/yr
-    init_scale: 0.088
-    # sigma: 3.0 # this comes from teh galactic prior
+#star.Source.rv:
+#    initval: -50000.0
+#    init_scale: 100000.0
+#star.Source.distance:
+#    initval: 9700.0  # Poleski+ 2014
+#    init_scale: 5
+#star.Source.pm_ra:
+#    initval: -6.0    # mas/yr
+#    init_scale: 0.07
+#    # sigma: 3.0 # this comes from the galactic prior
+#star.Source.pm_dec:
+#    initval: -6.0    # mas/yr
+#    init_scale: 0.088
+#    # sigma: 3.0 # this comes from teh galactic prior
 
+# how does he get this? source/blend flux? prior?
+star.Source.radius:
+    initval: 0.519 # Poleski+ 2014
+    sigma: 0.0
+#star.Lens.logmass:
+#    initval: -0.8239     # M_sun (Typical M-dwarf lens)
+#    init_scale: 0.0029
+
+# these don't impact the likelihood
+# so we're just going to fix these at arbitrary ~M dwarf values for now.
+# eventually, they won't even be sampled for such fits (without additional components that actually can constrain these)
+# or they'll be loosely constrained by the source/blend flux + SED
+star.Lens.radius:
+    initval: 0.3
+    sigma: 0.0
+star.Lens.teff:
+    initval: 3500
+    sigma: 0.0
+star.Lens.feh:
+    initval: 0.0
+    sigma: 0.0
+star.Source.mass:
+    initval: 0.3
+    sigma: 0.0
+star.Source.teff:
+    initval: 3500
+    sigma: 0.0
+star.Source.feh:
+    initval: 0
+    sigma: 0.0

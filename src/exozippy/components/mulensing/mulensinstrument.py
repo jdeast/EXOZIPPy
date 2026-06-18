@@ -21,6 +21,7 @@ from astropy.time import Time
 
 import astropy.units as u
 from exozippy.components.component import Component
+from exozippy.config import RANK_DERIVED_DATA
 import pytensor.tensor as pt
 import pytensor
 import pymc as pm
@@ -36,11 +37,18 @@ class MulensInstrument(Component):
         return "mulensinstrument"
 
     def load_data(self, system):
-        """Stage 1a: Load photometry and pre-calculate observer positions."""
+        """Stage 1a: Load photometry and pre-calculate observer positions.
+
+        Single-event assumption (enforced by Lens.__init__): index 0 is the
+        only event, so the event-0 source, t0_par, and magnification are used
+        throughout.
+        """
         all_times, all_mags, all_errs, inst_indices = [], [], [], []
         self.fs_init = []
+        self.q_source_init = []
         self._raw_time_list = []
         all_obspos = []
+        all_obspos_abs = []
 
         # Source RA/Dec (degrees from resolve → radians for projection math)
         source_ndx = int(system.lens.source_map[0])
@@ -69,15 +77,26 @@ class MulensInstrument(Component):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
             t, m, e = df.iloc[:, 0].values, df.iloc[:, 1].values, df.iloc[:, 2].values
 
+            if self.config[i].get("data_format", "magnitude") == "flux":
+                # Convert normalized flux to instrumental magnitudes.
+                # mag = -2.5*log10(flux);  err = (2.5/ln10) * flux_err/flux
+                safe_f = np.maximum(m, 1e-30)
+                e = (2.5 / np.log(10)) * np.maximum(e, 0.0) / safe_f
+                m = -2.5 * np.log10(safe_f)
+
             obs_loc = self.config[i].get("observer_location", "earth")
             xyz_abs = self.get_observer_position(t, observer_location=obs_loc)
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
             all_obspos.append(xyz_delta)
+            all_obspos_abs.append(xyz_abs)
 
             self.fs_init.append(
                 self._estimate_baseline_flux(t, m, xyz_delta, ra_rad, dec_rad)
+            )
+            self.q_source_init.append(
+                self._estimate_q_source(t, m, xyz_delta, ra_rad, dec_rad)
             )
 
             all_times.append(t)
@@ -91,7 +110,8 @@ class MulensInstrument(Component):
         self.mag      = np.concatenate(all_mags).astype(float)
         self.err      = np.concatenate(all_errs).astype(float)
         self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.observer_pos = np.vstack(all_obspos).astype(float)
+        self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations (for _estimate_baseline_flux)
+        self.observer_pos_abs = np.vstack(all_obspos_abs).astype(float)  # absolute barycentric (for get_magnification_op)
 
     def _estimate_baseline_flux(self, t, m, xyz_au, ra_rad, dec_rad):
         """
@@ -137,8 +157,9 @@ class MulensInstrument(Component):
 
         tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
         tau   = (t - float(t0)) / tE_safe
-        tau_p = tau + delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p   = float(u0) - delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        # MulensModel convention: minus on both N and E in tau, plus on N in u.
+        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
+        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
         u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
         A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
 
@@ -154,6 +175,72 @@ class MulensInstrument(Component):
         A_peak = (u_min ** 2 + 2.0) / (u_min * np.sqrt(u_min ** 2 + 4.0))
         F_peak_est = 10.0 ** (-0.4 * np.percentile(m, 10))
         return F_peak_est / A_peak
+
+    def _estimate_q_source(self, t, m, xyz_delta, ra_rad, dec_rad):
+        """Estimate q_source = f_source / f_total from data and initial lens params.
+
+        For baseline-covered instruments (>=3 points with A_traj < 1.05):
+          q_source = (A_eff_obs - 1) / (A_peak_model - 1)
+        where A_eff_obs is the ratio of observed peak flux to observed baseline flux
+        and A_peak_model is A(u_min) from the initial PSPL trajectory.
+
+        Returns a float (clamped to 0.05–1.95), or 0.95 if underdetermined.
+        """
+        cm = self.config_manager
+
+        def _get(key, default=None):
+            data = cm.user_params.get(key)
+            if data is None:
+                return default
+            return data.get("initval", default) if isinstance(data, dict) else float(data)
+
+        t0 = _get("lens.0.t_0")
+        u0 = _get("lens.0.u_0")
+        tE = _get("lens.0.t_E")
+        pi_E_N = _get("lens.0.pi_E_N", 0.0)
+        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+
+        if t0 is None or u0 is None:
+            return 0.95
+
+        x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
+        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
+        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
+                   - y * np.sin(ra_rad) * np.sin(dec_rad)
+                   + z * np.cos(dec_rad))
+
+        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
+        tau = (t - float(t0)) / tE_safe
+        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
+        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p**2 + u_p**2)
+        A_traj = (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
+
+        baseline_mask = A_traj < 1.05
+        if np.sum(baseline_mask) < 3:
+            return 0.95
+
+        f_baseline = 10.0 ** (-0.4 * np.median(m[baseline_mask]))
+
+        u_min = max(float(np.min(u_traj)), 1e-6)
+        A_peak_model = (u_min**2 + 2.0) / (u_min * np.sqrt(u_min**2 + 4.0))
+        if A_peak_model < 1.01:
+            return 0.95
+
+        # Observed peak: maximum flux among the top 10% PSPL-ordered points.
+        # Median would underestimate the peak for sharp caustic crossings where
+        # the true peak spans only a few data points within the top 10%.
+        n_peak = max(1, len(m) // 10)
+        peak_idx = np.argsort(u_traj)[:n_peak]
+        f_peak_obs = np.max(10.0 ** (-0.4 * m[peak_idx]))
+
+        A_eff_obs = f_peak_obs / f_baseline
+        q_est = (A_eff_obs - 1.0) / (A_peak_model - 1.0)
+        q_est = float(np.clip(q_est, 0.05, 1.95))
+        logger.debug(
+            f"q_source estimate: A_eff_obs={A_eff_obs:.4f}, A_peak_model={A_peak_model:.4f} → q={q_est:.4f}"
+        )
+        return q_est
 
     def _abs_to_delta(self, t, xyz_abs):
         """Convert absolute barycentric positions to Skowron+2011 geocentric deviations.
@@ -255,30 +342,42 @@ class MulensInstrument(Component):
         return cs(time)
 
     def register_parameters(self, system):
-
-        # 1. Grab the default q_frac (or user override if they provided one)
-        q_cfg = self.config_manager.resolve(self.prefix, "q_frac", shape=(self.n_elements,))
-        q_frac_init = q_cfg["initval"]
-
-        # 2. Convert median magnitudes to physical fluxes
-        f_total_init = np.array(self.fs_init)
-
-        # 3. Inject the hints
-        for i in range(self.n_elements):
-            f_source_guess = f_total_init[i] * q_frac_init[i]
-            f_blend_guess = f_total_init[i] * (1.0 - q_frac_init[i])
-
-            self.config_manager.add_hint(f"{self.prefix}.{i}.f_source", f_source_guess)
-            self.config_manager.add_hint(f"{self.prefix}.{i}.f_blend", max(f_blend_guess, 1e-9))
-
         """Stage 2: Declare the manifest with bootstrapped fluxes."""
+        f_total_init = np.array(self.fs_init)
+        q_source_init = np.array(self.q_source_init)
+
+        # Inject hints for derived f_source / f_blend so the relaxation engine
+        # can resolve initial values.  Also push the data-estimated q_source as a
+        # RANK_DERIVED_DATA hint so it overrides the defaults.yaml 0.95 while still
+        # yielding to any explicit user override in params.yaml (RANK_USER wins).
+        for i in range(self.n_elements):
+            q = q_source_init[i]
+            f_source_guess = f_total_init[i] * q
+            f_blend_guess = f_total_init[i] * (1.0 - q)
+            self.config_manager.add_hint(f"{self.prefix}.{i}.f_source", f_source_guess)
+            self.config_manager.add_hint(f"{self.prefix}.{i}.f_blend", f_blend_guess)
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.q_source", q, rank=RANK_DERIVED_DATA
+            )
+
         self.manifest = {
             "log_f_total": {"initval": np.log10(f_total_init)},
+            "q_source": None,
             "f_source": "default",
             "f_blend": "default",
             "err_scale": None,
-            "q_frac": None
         }
+
+        # band_ndx: optional per-instrument mapping to a Band component instance
+        self.band_ndx = np.array(
+            [c.get("band_ndx", -1) for c in self.config], dtype=int
+        )
+        if np.any(self.band_ndx >= 0):
+            logger.warning(
+                "band_ndx is set, but limb darkening is not yet wired into the "
+                "magnification Op: finite-source magnifications will ignore the "
+                "band component's LD coefficients."
+            )
 
     def build_likelihood(self, model, system):
 
@@ -300,14 +399,13 @@ class MulensInstrument(Component):
 
         # 1. Constants
         t = pm.Data("mu_time", self.time)
-        obs_pos = pm.Data("obs_pos", self.observer_pos)
         obs_mag = pm.Data("mu_obs_mag", self.mag)
         obs_err = pm.Data("mu_obs_err", self.err)
 
-        # 2. Magnification from the Lens
-        # (Assuming single lens at index 0 for PSPL)
-        A = system.lens.get_magnification(t, self.observer_pos, system, index=0)
-        #A = system.lens.get_magnification_op(t, self.observer_pos, system, index=0)
+        # 2. Magnification — both symbolic and Op paths take absolute barycentric AU.
+        #    get_magnification_op dispatches: PSPL→symbolic (NUTS-friendly),
+        #    binary/finite-source→MulensModel Op (use Metropolis).
+        A = system.lens.get_magnification_op(t, self.observer_pos_abs, system, index=0)
 
         # 3. Flux Model
         fs = self.f_source.value[self.inst_map_tensor]
@@ -338,7 +436,7 @@ class MulensInstrument(Component):
 
         param_symbols = [p.value for p in system.plot_params]
 
-        A = system.lens.get_magnification(t_input, obs_pos_input, system, index=0)
+        A = system.lens.get_magnification_op(t_input, obs_pos_input, system, index=0)
 
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
@@ -390,12 +488,11 @@ class MulensInstrument(Component):
                 unique_observers.append(obs_loc)
                 obs_to_inst[obs_loc] = i
 
-        # Compute geocentric-convention deviations for each unique observer over the model grid.
+        # Absolute barycentric positions for each unique observer over the model grid.
+        # Both the symbolic PSPL path and the MulensModel Op expect absolute barycentric AU;
+        # get_magnification converts internally to geocentric deviations as needed.
         obs_model_pos = {
-            obs_loc: self._abs_to_delta(
-                t_model,
-                self.get_observer_position(t_model, observer_location=obs_loc)
-            )
+            obs_loc: self.get_observer_position(t_model, observer_location=obs_loc)
             for obs_loc in unique_observers
         }
 

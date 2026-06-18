@@ -46,16 +46,18 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
     return pi_E_mag * (mu_ra_rel / mu_rel_mag)
 
 @register_physics
-def calc_f_source_from_frac(log_f_total, q_frac):
-    """Derives source flux from total flux and fraction."""
-    return pt.power(10,log_f_total) * q_frac
+def calc_f_source(log_f_total, q_source):
+    return pt.power(10, log_f_total) * q_source
 
 @register_physics
-def calc_f_blend_from_frac(log_f_total, q_frac):
-    """Derives blend flux from total flux and remainder."""
-    return pt.power(10,log_f_total) * (1.0 - q_frac)
+def calc_f_blend(log_f_total, q_source):
+    return pt.power(10, log_f_total) * (1.0 - q_source)
 
 @register_physics
 def calc_rho(radius, distance, theta_E):
     theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
     return theta_star_mas/theta_E
+
+@register_physics
+def calc_alpha(cosalpha, sinalpha):
+    return pt.arctan2(sinalpha, cosalpha)

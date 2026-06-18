@@ -14,13 +14,14 @@ lens:
     init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
-    description: "Impact parameter (units of Einstein radii)"
+    description: "Impact parameter (Einstein radii)"
   t_E:
     lower: 0.0
     unit: "d"
     internal_unit: "d"
     latex: "t_E"
     description: "Einstein crossing time"
+    debug_print: true
     expressions:
       default:
         func_name: "calc_t_E"
@@ -29,8 +30,9 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_N"
+    latex: "\\pi_{\rm E,N}"
     description: "Parallax vector (North)"
+    debug_print: true
     expressions:
       default:
         func_name: "calc_pi_E_N"
@@ -39,8 +41,9 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_E"
+    latex: "\\pi_{\rm E,E}"
     description: "Parallax vector (East)"
+    debug_print: true
     expressions:
       default:
         func_name: "calc_pi_E_E"
@@ -95,7 +98,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{rel}"
-    description: "Magnitude of the relative lens-source proper motion"
+    description: "Relative lens-source proper motion"
     expressions:
       default:
         func_name: "calc_mu_rel_mag"
@@ -104,11 +107,63 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "\\rho"
-    description: 'Source radius normalized by the Einstein ring radius'
+    description: 'Source radius (Einstein radii)'
     expressions:
       default:
         func_name: "calc_rho"
         deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
+  # Binary lens parameters (N_lenses - 1 per event)
+  q:
+    lower: 0.0
+    upper: 1.0
+    init_scale: 0.01
+    sigma: 0
+    unit: ""
+    internal_unit: ""
+    latex: "q"
+    description: "Binary lens mass ratio M_companion / M_primary"
+    debug_print: true
+  alpha:
+    unit: "deg"
+    internal_unit: "rad"
+    latex: "\\alpha"
+    description: "Source trajectory angle"
+    debug_print: true
+    expressions:
+      default:
+        func_name: "calc_alpha"
+        deps: [ "cosalpha", "sinalpha" ]
+  s:
+    lower: 0.001
+    upper: 1000.0
+    initval: 1.0
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "s"
+    description: "Projected binary separation (Einstein radii)"
+  cosalpha:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\cos\\alpha"
+    description: "cos of source trajectory angle"
+  sinalpha:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\sin\\alpha"
+    description: "sin of source trajectory angle"
 mulensinstrument:
   log_f_total:
     initval: -6
@@ -119,41 +174,37 @@ mulensinstrument:
     internal_unit: ""
     latex: "\\log{(f_s + f_b)}"
     description: "log of baseline flux (Source + Blend)"
-  q_frac:
+  q_source:
     initval: 0.95
-    init_scale: 0.002
+    init_scale: 0.05
     lower: 0.0
-    upper: 1.0
+    upper: 2.0
     unit: ""
     internal_unit: ""
-    latex: "f_s/(f_s + f_b)"
-    description: "Fraction of total flux belonging to the source"
+    latex: "q_s"
+    description: "Source fraction f_source / f_total"
   f_source:
-    #initval: 1e-7
-    #init_scale: 0.1
     lower: 0.0
-    upper: 10.0
+    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_s"
     description: "Source flux"
     expressions:
       default:
-        func_name: "calc_f_source_from_frac"
-        deps: [ "log_f_total", "q_frac" ]
+        func_name: "calc_f_source"
+        deps: [ "log_f_total", "q_source" ]
   f_blend:
-    #initval: 0.0
-    #init_scale: 0.1
-    lower: 0.0
-    upper: 10.0
+    lower: -1000.0
+    upper: 1000.0
     unit: ""
     internal_unit: ""
     latex: "f_b"
     description: "Blend flux"
     expressions:
       default:
-        func_name: "calc_f_blend_from_frac"
-        deps: [ "log_f_total", "q_frac" ]
+        func_name: "calc_f_blend"
+        deps: [ "log_f_total", "q_source" ]
   err_scale:
     initval: 1.0
     init_scale: 0.1

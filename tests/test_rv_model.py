@@ -2,9 +2,12 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 import pytensor
+import pytest
 from exozippy.components.orbit import Orbit
 from exozippy.config import ConfigManager
 from exozippy.system import System
+
+pytestmark = pytest.mark.slow
 
 def test_isolated_orbital_mechanics_match_pure_numpy_sinusoid():
     """

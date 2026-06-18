@@ -29,6 +29,8 @@ poetry run python scripts/dump_code.py
 
 EXOZIPPy is a component-agnostic wrapper around PyMC. A user writes two YAML files — a system config (`*.yaml`) and a parameter override file (`*.params.yaml`) — and calls `exozippy <config.yaml>`. The high-level flow in `run.py` is:
 
+All component-specific logic is handled within the components. The higher level codes (run, config, system, etc) rely solely on the generic component blueprint, not specific implementations.
+
 ```python
 system = System(config, user_params)
 system.prepare()           # I/O + registration + symbolic solving

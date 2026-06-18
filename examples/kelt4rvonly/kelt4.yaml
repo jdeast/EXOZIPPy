@@ -39,6 +39,7 @@ rvinstrument:
     file: "KELT-4b.TRES.rv"
 
 parameter_file: "kelt4.params.yaml"
+#parameter_file: "kelt4.params.2.yaml" # broken
 
 sampler:
   backend: "pymc" # TODO: "affine_invariant", "differential_evolution", "parallel_tempering", "multinest"

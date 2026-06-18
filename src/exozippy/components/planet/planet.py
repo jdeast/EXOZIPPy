@@ -24,38 +24,39 @@ class Planet(Component):
 
     def register_parameters(self, system):
         """Stage 2: Auto-estimates and Manifest declaration."""
+        has_orbit = "orbit" in system.active_components
+
         self.manifest = {
             "mass": None,
             "radius": None,
             "density": "default",
-            "logg": "default"
+            "logg": "default",
+            "m_total": "default",
         }
 
-        # 2. Add Planet-specific observables
-        self.manifest.update({
-            "m_total": "default",
-            "p": "default",
-            "arsun": "default",
-            "ar": "default",
-            "b": "default",
-            "K": "default",
-            "max_ecc": "default",
-        })
+        if has_orbit:
+            self.manifest.update({
+                "p": "default",
+                "arsun": "default",
+                "ar": "default",
+                "b": "default",
+                "K": "default",
+                "max_ecc": "default",
+            })
 
-        # 3. Data-driven estimate: Initialize 'K' directly from the RV data variance
+        # Data-driven estimate: Initialize 'K' directly from the RV data variance
         rv_comps = [c for c in system.active_components.values() if hasattr(c, 'k_init')]
-        if rv_comps:
-            # Split the total observed RV variance equally among all planets
+        if rv_comps and has_orbit:
             k_ms_guess = rv_comps[0].k_init / np.sqrt(self.n_elements)
-
             for i in range(self.n_elements):
-                # Pass K_init to the ConfigManager as a low-rank fact
                 self.config_manager.add_hint(f"planet.{i}.K", k_ms_guess)
 
     def build_likelihood(self, model, system):
-        # (Keep the soft boundary Potentials here, as they are system-level likelihoods, not parameters)
         steepness = 500.0
         pm.Potential(f"{self.prefix}.m_pos_constraint", pm.math.log(pt.sigmoid(self.m_total.value * steepness)))
+
+        if "orbit" not in system.active_components:
+            return
 
         orbits = system.orbit
         diff = self.max_ecc.value - orbits.ecc.value[self.orbit_map]

@@ -132,6 +132,31 @@ class System(Component):
                     params.append(attr)
         return params
 
+    def get_raw_start(self, model):
+        """
+        Build the raw-space starting point explicitly from each Parameter's
+        stored raw_initval (set in build_pymc): 0 for logit-transformed
+        elements (raw=0 maps to initval by construction) and
+        (initval - mu)/sigma for Gaussian-path elements, so the physical
+        starting value is always initval even when an explicit prior mean
+        mu != initval.
+
+        We do NOT trust model.initial_point() here: at this stage it can draw
+        from the (intentionally very wide) priors instead of our initvals.
+        """
+        raw_start = model.initial_point()
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        for key in raw_start:
+            name = key[:-len("_raw")] if key.endswith("_raw") else key
+            par = lookup.get(name)
+            raw_init = getattr(par, "raw_initval", None) if par is not None else None
+            if raw_init is not None and np.size(raw_init) == np.size(raw_start[key]):
+                raw_start[key] = np.asarray(raw_init, dtype=float).reshape(
+                    np.shape(raw_start[key]))
+            else:
+                raw_start[key] = np.zeros_like(raw_start[key])
+        return raw_start
+
     def get_internal_point(self, model, raw_point):
         """Evaluates graph deterministics for plotting/physics without user-unit conversion."""
         output_vars = model.free_RVs + model.deterministics
@@ -267,10 +292,19 @@ class System(Component):
         """
         transformed_inits = {}
 
-        # 1. Map Unity Space (the sampler's world) to PyMC transformed values
+        # 1. Map Unity Space (the sampler's world) to PyMC transformed values.
+        # Only iterate free_RVs — observed RVs also appear in rvs_to_values but
+        # are not sampled, and their (potentially large) shapes would corrupt
+        # total_dims and the Metropolis proposal covariance.
+        raw_start = self.get_raw_start(model)
+        free_rvs = set(model.free_RVs)
         for rv, value_var in model.rvs_to_values.items():
-            # Our 'Unity Start' is 0.0 in the raw space (N(0,1))
-            unity_start = np.zeros(rv.shape.eval(), dtype=float)
+            if rv not in free_rvs:
+                continue
+            # The unity start is 0.0 for logit params, (initval-mu)/sigma for
+            # Gaussian-path params (see get_raw_start).
+            unity_start = raw_start.get(
+                value_var.name, np.zeros(rv.shape.eval(), dtype=float))
             transform = model.rvs_to_transforms.get(rv)
 
             if transform is not None:

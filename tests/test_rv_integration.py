@@ -2,61 +2,110 @@ import numpy as np
 import pymc as pm
 import pytensor
 import pytensor.tensor as pt
+import pytest
 from astropy import units as u
 from exozippy.components.orbit.orbit import Orbit
 from exozippy.config import ConfigManager
 from exozippy.components.parameter import Parameter
 from exozippy.system import System
 
-def test_radial_velocity_handles_descending_node_and_eccentricity():
-    """
-    Given an Orbit model with randomized eccentricities and omegas,
-    When the radial velocity is evaluated at a specific descending node time,
-    Then the RV should perfectly match the expected analytical semi-amplitude.
-    """
-    # ARRANGE
-    np.random.seed(42)
-    P_days, Tc, K_user = 10.0, 2450000.0, 100.0
-    n = 2.0 * np.pi / P_days
-    omegas = np.concatenate([np.linspace(0, 2 * np.pi, 9)[:-1], np.random.uniform(0, 2 * np.pi, 5)])
+pytestmark = pytest.mark.slow
 
-    for i, omega in enumerate(omegas):
-        ecc = 0.2 if i < 8 else np.random.uniform(0.1, 0.8)
-        user_params = {
-            "orbit.0.logP": {"initval": np.log10(P_days)},
-            "orbit.0.tc": {"initval": Tc},
-            "orbit.0.secosw": {"initval": np.sqrt(ecc) * np.cos(omega)},
-            "orbit.0.sesinw": {"initval": np.sqrt(ecc) * np.sin(omega)}
-        }
-        config = {"orbit": [{"name": "test"}]}
-        system = System(config, user_params=user_params)
-        system.prepare()
-        model = system.build_model()
-        orbit = system.orbit
+# ---------------------------------------------------------------------------
+# Parametrized (omega, ecc) grid — generated once at import time
+# ---------------------------------------------------------------------------
 
-        with model:
-            tp_fn = pytensor.function(model.free_RVs, orbit.tp.value, on_unused_input='ignore')
+_P_DAYS = 10.0
+_TC = 2450000.0
+_K_USER_MS = 100.0
+_N = 2.0 * np.pi / _P_DAYS
+
+np.random.seed(42)
+_omegas = np.concatenate([np.linspace(0, 2 * np.pi, 9)[:-1],
+                          np.random.uniform(0, 2 * np.pi, 5)])
+_eccs   = [0.2 if i < 8 else float(np.random.uniform(0.1, 0.8))
+           for i in range(len(_omegas))]
+_CASES  = list(zip(_omegas, _eccs))
+
+
+def _case_id(params):
+    omega, ecc = params
+    return f"w={omega:.3f}_e={ecc:.3f}"
+
+
+@pytest.fixture(scope="module")
+def compiled_rv_functions():
+    """Compile tp/rv pytensor functions once for all (omega, ecc) cases."""
+    user_params = {
+        "orbit.0.logP":   {"initval": np.log10(_P_DAYS)},
+        "orbit.0.tc":     {"initval": _TC},
+        "orbit.0.secosw": {"initval": 0.0},
+        "orbit.0.sesinw": {"initval": 0.0},
+    }
+    with pytensor.config.change_flags(mode="FAST_COMPILE"):
+        cm = ConfigManager(user_params)
+        orbit_comp = Orbit([{"name": "test"}], cm)
+
+        with pm.Model():
+            orbit_comp.register_parameters(system=None)
+            for param_name in orbit_comp.manifest:
+                orbit_comp.add_parameter(model=pm.modelcontext(None),
+                                         param_name=param_name, system=None)
+
             t_var = pt.vector("t")
             K_var = pt.vector("K_int")
-            rv_node = orbit.get_radial_velocity(t_var, K_var, pt.as_tensor_variable([0], dtype="int32"))
-            rv_fn = pytensor.function(model.free_RVs + [t_var, K_var], rv_node, on_unused_input='ignore')
+            rv_node = orbit_comp.get_radial_velocity(
+                t_var, K_var, pt.as_tensor_variable([0], dtype="int32"))
 
-            init_point = model.initial_point()
-            p_vals = [np.zeros_like(init_point[v.name]) for v in model.free_RVs]
+            # Treat the physical parameter values as free symbolic inputs so
+            # the same compiled function works for every (omega, ecc) pair.
+            tp_fn = pytensor.function(
+                inputs=[orbit_comp.logP.value, orbit_comp.tc.value,
+                        orbit_comp.secosw.value, orbit_comp.sesinw.value],
+                outputs=[orbit_comp.tp.value],
+                on_unused_input="ignore",
+            )
+            rv_fn = pytensor.function(
+                inputs=[orbit_comp.logP.value, orbit_comp.tc.value,
+                        orbit_comp.secosw.value, orbit_comp.sesinw.value,
+                        t_var, K_var],
+                outputs=[rv_node],
+                on_unused_input="ignore",
+            )
+    return tp_fn, rv_fn
 
-            # ACT
-            Tp_val = tp_fn(*p_vals)
-            f_D = -omega
-            E_D = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * np.sin(f_D / 2), np.sqrt(1.0 + ecc) * np.cos(f_D / 2))
-            t_D = Tp_val + (E_D - ecc * np.sin(E_D)) / n
 
-            k_param = Parameter(label="K", unit="m/s", internal_unit="solRad/d", initval=K_user)
-            rv_internal = rv_fn(*p_vals, np.array([t_D[0]], dtype="float64"), k_param.initval.astype("float64"))
-            rv_ms = k_param.from_internal(rv_internal).flatten()[0]
+@pytest.mark.parametrize("omega_ecc", _CASES, ids=[_case_id(c) for c in _CASES])
+def test_radial_velocity_handles_descending_node_and_eccentricity(omega_ecc, compiled_rv_functions):
+    """
+    Given an Orbit model with specific eccentricity and argument of periastron,
+    When the radial velocity is evaluated at the descending node time,
+    Then the RV matches the analytical semi-amplitude K*(1 + e*cos(omega)).
+    """
+    omega, ecc = omega_ecc
+    tp_fn, rv_fn = compiled_rv_functions
 
-        # ASSERT
-        expected_rv = K_user * (1.0 + ecc * np.cos(omega))
-        np.testing.assert_allclose(rv_ms, expected_rv, rtol=1e-5)
+    logP_in   = np.array([np.log10(_P_DAYS)], dtype="float64")
+    tc_in     = np.array([_TC],               dtype="float64")
+    secosw_in = np.array([np.sqrt(ecc) * np.cos(omega)], dtype="float64")
+    sesinw_in = np.array([np.sqrt(ecc) * np.sin(omega)], dtype="float64")
+
+    k_param = Parameter(label="K", unit="m/s", internal_unit="solRad/d",
+                        initval=_K_USER_MS)
+
+    Tp_val = tp_fn(logP_in, tc_in, secosw_in, sesinw_in)
+    f_D = -omega
+    E_D = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * np.sin(f_D / 2),
+                            np.sqrt(1.0 + ecc) * np.cos(f_D / 2))
+    t_D = float(np.ravel(Tp_val)[0]) + (E_D - ecc * np.sin(E_D)) / _N
+
+    rv_internal = rv_fn(logP_in, tc_in, secosw_in, sesinw_in,
+                        np.array([t_D], dtype="float64"),
+                        k_param.initval.astype("float64"))
+    rv_ms = k_param.from_internal(rv_internal).flatten()[0]
+
+    expected_rv = _K_USER_MS * (1.0 + ecc * np.cos(omega))
+    np.testing.assert_allclose(rv_ms, expected_rv, rtol=1e-5)
 
 
 def test_radial_velocity_matches_kelt4_periastron_benchmark():

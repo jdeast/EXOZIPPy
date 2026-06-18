@@ -16,6 +16,9 @@ lens:
     lens_ndx: 0
     source_ndx: 1
     t0_par: 2455379.571
+    # by default, for PSPL fits, we use our pytensor implementation of the Paczynski curve, which allows use of NUTS and is significantly faster
+    # Set use_op: True to use the MuLensModel version, but you'll want to change the sampler to one that doesn't require gradients.
+    use_op: False
 
 galacticmodel:
   - name: "OB08092"
