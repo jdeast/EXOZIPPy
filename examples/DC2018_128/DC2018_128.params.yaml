@@ -75,4 +75,4 @@ star.Source.radius:
 # log_f_total init_scale was 0 in the previous run (data hint overrode the
 # default), causing Metropolis to take zero-size steps on this parameter.
 mulensinstrument.Roman.log_f_total:
-    init_scale: 2.0
+    init_scale: 1e-4

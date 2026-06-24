@@ -1,7 +1,7 @@
 * write unit tests for high coverage
   - add GitHub Actions workflow (.github/workflows/test.yml) to run pytest on
     every push, so collaborator commits are also tested (pre-commit only covers
-    local commits)
+    local commits and can be bypassed or not implemented by devs)
 
 * user-linkable parameters in params.yaml
   - equality:   orbit.b.omega: {expr: "orbit.A.omega + pi"}
@@ -10,43 +10,47 @@
 
 * more features/components:
   - microlensing
-    - fix whatever's wrong with the spitzer model of OB1410939
-    - MulensModel Op (lens.py / op.py): DONE for PSPL and binary lens (BinaryLensMagOp);
-      mulensinstrument.build_likelihood now calls get_magnification_op which dispatches
-      automatically; numerical gradients via _PSPLGradOp / _BinaryGradOp
-    - NLNS architecture: DONE
-        - lenses: ["star.0", "planet.0"] / sources: ["star.1"] YAML syntax
-        - PSPL (1 lens) and binary lens (2 lenses) dispatched automatically
-        - NotImplementedError guard for triple+ lens and binary source
-        - DC2018_128 example wires up 2L1S with Roman ephemeris + flux data format
-    - flux data format (data_format: flux in YAML): DONE — converts to mag on load
-    - Roman simulated ephemeris: DONE — roman_simulated_2018dc.eph in ephemerides/
+    - MulensModel Op
+     - PSPL: DONE
+     - 2L1S: Done
+     - Need finite source effects + limb darkening
+      - band component scaffold DONE (band/band.py)
+      - but band_ndx stored in mulensinstrument is never wired into the magnification Op
+      - LD coefficients not yet passed to get_magnification_op
     - binary source (2L2S / 1L2S): NOT DONE
-        - source_bodies list structure and NotImplementedError guard are in place
-        - needs: t_0, u_0, rho vectorized to (N_events, N_sources)
-        - needs: f_source reshaped to (N_instruments, N_sources) in mulensinstrument
-        - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
-        - needs: q_source parameterization generalized (currently 1 scalar per instrument)
-        - needs: BinaryLensMagOp extended or new 2L2S Op
-    - band component (limb darkening for finite source): scaffold DONE (band/band.py),
-      but band_ndx stored in mulensinstrument is never wired into the magnification Op;
-      LD coefficients not yet passed to get_magnification_op
-    - triple+ lens: NotImplementedError; MulensModel does support it
+      - source_bodies list structure and NotImplementedError guard are in place
+      - needs: t_0, u_0, rho vectorized to (N_events, N_sources)
+      - needs: f_source reshaped to (N_instruments, N_sources) in mulensinstrument
+      - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
+      - needs: q_source parameterization generalized (currently 1 scalar per instrument)
+      - needs: BinaryLensMagOp extended or new 2L2S Op
     - confirm (and document) conventions (origin, alpha, parallax sign)
     - explore samplers and parameterizations
+      - identify best practices
+      - make templates for ideal workflows for examples
     - explore degeneracies (close/wide, u_0 sign, alpha ± pi)
   - transits
     - ttvs
     - long cadence
     - light travel time
     - limb darkening
-        - compute our own table using the SED infrastructure?
-           - self consistency
-           - generality
-           - faster?
-           - hard?
+      - compute our own table using SED infrastructure?
+        - self consistency is great
+        - generality
+          - support all SVO bands
+        - faster?
+        - harder? or maybe easier?
+    - vcve parameterization:
+      - refactor to remove the sign parameter
+        - compute both solutions and incorporate the joint logaddexp summed likelihood
+        - needs soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e.
+        - The soft shield (sigmoid) guides the sampler and protects the physics.
+        - The hard shield (clip) is a stop to protect the math (it must be impossible to draw a NaN likelihood)
+      - omega analogous to alpha
   - GPs
     - both RVs and Transits, periodic or red
+    - mulensing? is that useful?
+    - might go in a generic instrument class
   - SED
     - multi-star systems
     - MIST BC table
@@ -58,14 +62,26 @@
       should be conditioned on SED being present in the config
     - extract filter and merge with band component?
   - evolutionary models
+   - MIST
+   - PARSEC
+   - YY
+  - Empirical relations
+   - Mann
+   - Torres
   - astrometry
    - especially gaia data handling
   - nbody
   - doppler tomography
 
-* vcve parameterization:
- - refactor to remove the sign parameter. that means computing both solutions and incorporating the joint logaddexp summed likelihood, with soft and hard shields that allow us to compute a single log likelihood when given an imaginary/non-physical e. The soft shield (sigmoid) guides the sampler and protects the physics. the hard shield (clip) is a stop to protect the math.
- - cosw/sinw must be gaussian normals mu=0, sigma=1 (no bias to omega, no weird boundaries).
+* samplers
+ - DEMC is implemented but not well exercised
+  - Required local patch of PyMC bug
+  - Implemented hybrid of DEMetropolisZ and DEMetropolis to take advantage of exploration benefits of intra-chain exchange (DEMetropolis) while maintaining independence for proper convergence stats (DEMetropolisZ uses its own history)
+   - This is better than EXOFASTv2's sampler, which is equivalent to DEMetropolis/setting n_groups=1
+ - Implement Parallel tempering and make a hybrid analogous to EXOFASTv2's sampler
+  - Better than HMC for multi-modal exploration (like we expect for mulensing)
+  - HMC doesn't play well with gradient free Op implementation of MulensModel
+  - Claude thinks SMC is not applicable to our use case
 
 * one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 
@@ -77,9 +93,9 @@
   update). Eliminates one sampled dimension per instrument; see Bishop PRML Ch.3.
   Worth doing for large RV / mulensing datasets.
 
-* custom circular orbit model logic
+* custom circular orbit model logic for efficiency gains
 
-* global solutions to seed blind
+* global solutions to seed blind fits (make params.yaml file optional?)
   - mulensing: incorporate https://github.com/jenniferyee/MMEXOFAST
     - run MMEXOFAST directly (see ~/python/MMEXOFAST and its
       examples/example_05_RomanDC18.py) and inject results as data-driven
@@ -95,6 +111,7 @@
   - astrometry: ??
 
 * output new prior file from old run
+ - implemented but not tested
 
 * automatic stopping upon mixing (user-settable R-hat / ESS thresholds;
   may need to wait for PyMC support)
@@ -103,11 +120,6 @@
   (user->internal) two-layer conversion in resolve() is fragile; we fixed the
   propagated_scales/scale_hints bug but the underlying design could be simplified
 
-* DEMetropolisZ broken in PyMC 5.25.1 (stats_dtypes_shapes registration bug;
-  ValueError: setting an array element with a sequence on every step).
-  Currently falling back to pm.Metropolis for gradient-free sampling.
-  Revisit when PyMC fixes it; DEMetropolisZ is preferable for multimodal posteriors.
-
 * master Instrument class: mulensinstrument, rvinstrument, and
   transitinstrument should inherit from a shared Instrument base (common
   file loading, err_scale, plotting hooks, per-instrument config handling)
@@ -115,7 +127,7 @@
 * per-instrument plot color: allow the user to specify a color for any
   instrument in the config, overriding the default plotting color cycle
 
-blind spots:
+* blind spots:
   * checkpoints
   * pytensor cache bloat
   * large n compilation choke (?? is that AI trash?)

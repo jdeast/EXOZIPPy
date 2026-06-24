@@ -14,15 +14,16 @@ from matplotlib.backends.backend_pdf import PdfPages
 #pytensor.config.allow_gc = True
 #pytensor.config.linker = "py"
 
+import multiprocessing as mp
 import pymc as pm
 import arviz as az
 from pymc.initial_point import make_initial_point_fn
 
 
+# PyMC 5.25.1 bug fix: stats_dtypes_shapes declares scaling/lambda as scalar []
+# but np.atleast_1d always produces a 1-D array, crashing the NDArray backend.
+# Not currently used (PTDE replaced DEMetropolis), kept for future experiments.
 def _fix_de_stats(astep_fn):
-    """Decorator fixing PyMC 5.25.1 bug: self.scaling is np.atleast_1d (always
-    1-D array) but stats_dtypes_shapes declares shape [] (scalar), causing a
-    ValueError in the NDArray backend when recording stats."""
     def wrapper(self, q0):
         result, stats = astep_fn(self, q0)
         for s in stats:
@@ -44,11 +45,9 @@ from .mkparam import backup_params, mkprior
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
+from exozippy.ptde import ptde_sample
 
 
-import os
-import sys
-import sysconfig
 import pytensor
 
 logger = logging.getLogger(__name__)
@@ -75,10 +74,18 @@ def run_fit(config):
     tune = int(pymc_cfg.get("tune", 2000))
     draws = int(pymc_cfg.get("draws", 2000))
     chains = int(pymc_cfg.get("chains", 4))
-    cores = int(pymc_cfg.get("cores", 1))
+    _cores_raw = pymc_cfg.get("cores", None)
+    if _cores_raw is not None:
+        cores = int(_cores_raw)
+    else:
+        _phys = mp.cpu_count()
+        cores = max(1, min(int(_phys * 0.75), _phys - 1))
     target_accept = pymc_cfg.get("target_accept", 0.9)
     step_method = pymc_cfg.get("step_method", "NUTS")
-    n_groups = int(pymc_cfg.get("n_groups", 1))
+    n_temps = int(pymc_cfg.get("n_temps", 8))
+    T_max = float(pymc_cfg.get("T_max", 200.0))
+    _n_chains_raw = pymc_cfg.get("n_chains", None)
+    n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
     recompute_trace = pymc_cfg.get("recompute_trace", False)
     nthin = int(pymc_cfg.get("nthin", 1))
     check_curvatures = pymc_cfg.get("check_curvatures", True)
@@ -126,65 +133,15 @@ def run_fit(config):
         else:
             # do the sampling and save the results
             nuts_scales = np.array(nuts_scales).flatten()
-            if step_method in ("DEMetropolisZ", "DEMetropolis"):
-                # Gradient-free DE samplers suited for models with numerical-gradient
-                # Ops (e.g. MulensModel binary lens).
-                #
-                # DEMetropolisZ: proposals from history archive; chains run independently.
-                # DEMetropolis:  proposals from current ensemble; population sampler.
-                #   DEMetropolis rescues stuck chains faster because proposals always
-                #   come from where other chains are now, not their past history.
-                #
-                # n_groups > 1: run n_groups independent pm.sample() calls each with
-                #   chains/n_groups chains, then concatenate.  Groups are truly
-                #   independent so rhat/ESS are valid across them; population mixing
-                #   within each group handles stuck chains.
-                #
-                # Chain initialization: Chain 0 (of each group) starts at initvals.
-                # Others start spread by factor*init_scale*randn, backing off
-                # exponentially if the proposed point has non-finite logp.
-                logp_fn = model.compile_logp()
-                model_keys = set(model.initial_point().keys())
-                nparams = sum(v.size for v in raw_start.values())
-                factor = min(np.sqrt(500.0 / max(nparams, 1)), 3.0)
-
-                chain_starts = []
-                for j in range(chains):
-                    if j == 0 or (n_groups > 1 and j % (chains // n_groups) == 0):
-                        chain_starts.append({k: v.copy() for k, v in raw_start.items()})
-                        continue
-                    niter = 0
-                    while True:
-                        effective_factor = factor / np.exp(niter / 1000.0)
-                        proposal = {
-                            k: v + effective_factor * np.random.randn(*v.shape)
-                            for k, v in raw_start.items()
-                        }
-                        internal_proposal = system.get_internal_point(model, proposal)
-                        filtered = {k: v for k, v in internal_proposal.items() if k in model_keys}
-                        if np.isfinite(logp_fn(filtered)):
-                            chain_starts.append(proposal)
-                            break
-                        niter += 1
-                        if niter % 500 == 0:
-                            logger.warning(f"Chain {j}: {niter} retries finding valid start")
-
-                step_cls = DEMetropolisZ if step_method == "DEMetropolisZ" else DEMetropolis
-                chains_per_group = chains // n_groups
-                group_idatas = []
-                for g in range(n_groups):
-                    sl = slice(g * chains_per_group, (g + 1) * chains_per_group)
-                    group_idatas.append(pm.sample(
-                        draws=draws,
-                        tune=tune,
-                        chains=chains_per_group,
-                        step=step_cls(),
-                        cores=max(1, cores // n_groups),
-                        initvals=chain_starts[sl],
-                        return_inferencedata=True,
-                        idata_kwargs={"log_likelihood": False}
-                    ))
-                idata = az.concat(group_idatas, dim="chain") if n_groups > 1 else group_idatas[0]
+            if step_method == "PTDE":
+                idata = ptde_sample(
+                    model, system, draws, tune,
+                    n_temps=n_temps,
+                    T_max=T_max,
+                    n_chains=n_chains,
+                    cores=cores,
+                    plot_prefix=str(prefix),
+                )
             else:
                 step = pm.NUTS(target_accept=target_accept)
                 idata = pm.sample(
@@ -199,9 +156,7 @@ def run_fit(config):
                 )
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
-            # DEMetropolisZ doesn't record lp in sample_stats; compute and persist it
-            # now (after thinning) so future restores from disk have it without
-            # recomputation.
+            # Ensure lp is in sample_stats; compute and persist if missing.
             ss_vars = (list(idata.sample_stats.data_vars)
                        if hasattr(idata, "sample_stats") else [])
             if "lp" not in ss_vars:
@@ -565,7 +520,6 @@ def _compute_lp_from_model(model, idata):
     is inherited without pickling (numpy chain data is all that's sent over IPC).
     Returns an (n_chains, n_draws) float64 array, or None on failure.
     """
-    import multiprocessing as mp
     try:
         n_chains = idata.posterior.sizes["chain"]
         n_draws = idata.posterior.sizes["draw"]

@@ -764,7 +764,17 @@ class Parameter:
             input_data.append(val)
 
         # 3. Evaluate the first sample to dynamically determine the output dimension
-        first_args = [arr[0] for arr in input_data]
+        # Reshape each sample slice to match the PyTensor node's expected ndim.
+        # A scalar variable lands as 0-D after arr[0], but build_pymc may have
+        # compiled calc_func with a 1-D (n=1) input; atleast_nd fixes that.
+        def _match_ndim(val, node):
+            target = node.ndim if hasattr(node, 'ndim') else 0
+            while np.ndim(val) < target:
+                val = np.atleast_1d(val)
+            return val
+
+        first_args = [_match_ndim(arr[0], n)
+                      for arr, n in zip(input_data, inputs_in_posterior)]
         first_result = np.asarray(calc_func(*first_args))
 
         # 4. Loop through the remaining samples
@@ -773,7 +783,8 @@ class Parameter:
         result[0] = first_result
 
         for i in range(1, n_samples):
-            args = [arr[i] for arr in input_data]
+            args = [_match_ndim(arr[i], n)
+                    for arr, n in zip(input_data, inputs_in_posterior)]
             result[i] = calc_func(*args)
 
         # Return the proper shape with 'sample' at the end again to match ArviZ's format

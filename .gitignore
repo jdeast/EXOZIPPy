@@ -9,15 +9,10 @@ EXOZIPPy.egg-info
 *.egg
 .DS_Store
 /sandbox/
-/DC18Test/temp_output/
-/exozippy_legacy/sed
-/exozippy_legacy/mmexofast/htmlcov/
-/exozippy_legacy/mmexofast/.coverage
-/exozippy_legacy/mmexofast/.coveragerc
+/examples/*/*.params.*.yaml
 __pycache__/
 *.pyc
 *settings.json
-/repo_dump.txt
 runs/
 examples/*/fitresults/
 .idea/
