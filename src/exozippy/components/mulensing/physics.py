@@ -46,6 +46,10 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
     return pi_E_mag * (mu_ra_rel / mu_rel_mag)
 
 @register_physics
+def calc_q(mass_companion, mass_lens):
+    return mass_companion / mass_lens
+
+@register_physics
 def calc_f_source(log_f_total, q_source):
     return pt.power(10, log_f_total) * q_source
 

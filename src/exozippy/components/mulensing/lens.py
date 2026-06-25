@@ -159,6 +159,14 @@ class Lens(Component):
         self.lens_map = np.array(l_ndxs, dtype=int)
         self.source_map = np.array(s_ndxs, dtype=int)
 
+        if self.n_companions >= 1:
+            # Scalar maps (length-1) so the bracket-slice dep yields a scalar
+            # mass rather than a full-component mass array.
+            _, p_ndx = self.lens_bodies[0][0]
+            self.primary_lens_map = np.array([p_ndx], dtype=int)
+            _, c_ndx = self.lens_bodies[0][1]
+            self.companion_mass_map = np.array([c_ndx], dtype=int)
+
     def register_parameters(self, system):
         """Stage 2: Declare the manifest."""
         self._validate_bodies(system)
@@ -181,8 +189,14 @@ class Lens(Component):
             self.manifest["sinalpha"] = {"shape": companion_shape}
             # alpha derived from cosalpha/sinalpha; internal unit = rad, display = deg
             self.manifest["alpha"] = {"expr_key": "default", "shape": companion_shape}
-            # q display: fixed (sigma=0 in defaults.yaml), initval from user params
-            self.manifest["q"] = None
+            # q = M_companion / M_primary; companion component type varies by config
+            companion_type = self.lens_bodies[0][1][0]
+            self.manifest["q"] = {
+                "expr_key": "default",
+                "shape": companion_shape,
+                "deps": [f"{companion_type}.mass[companion_mass_map]",
+                         "star.mass[primary_lens_map]"],
+            }
 
         if any(self.finite_source):
             self.manifest["rho"] = "default"

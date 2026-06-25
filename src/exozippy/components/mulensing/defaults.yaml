@@ -116,13 +116,15 @@ lens:
   q:
     lower: 0.0
     upper: 1.0
-    init_scale: 0.01
-    sigma: 0
     unit: ""
     internal_unit: ""
     latex: "q"
-    description: "Binary lens mass ratio M_companion / M_primary"
+    description: "Binary lens mass ratio (M_2 / M_1)"
     debug_print: true
+    expressions:
+      default:
+        func_name: "calc_q"
+        deps: ["planet.mass[companion_mass_map]", "star.mass[primary_lens_map]"]
   alpha:
     unit: "deg"
     internal_unit: "rad"
@@ -182,7 +184,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "q_s"
-    description: "Source fraction f_source / f_total"
+    description: "Source fraction f_s / (f_s + f_b)"
   f_source:
     lower: 0.0
     upper: 1000.0

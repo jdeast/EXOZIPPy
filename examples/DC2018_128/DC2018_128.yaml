@@ -46,7 +46,7 @@ sampler:
     # n_chains: defaults to 2 × n_params
     # cores: defaults to 75% of physical cores
     tune: 5000
-    draws: 10000
+    draws: 100000
     nthin: 10
     check_curvatures: False
     recompute_trace: True

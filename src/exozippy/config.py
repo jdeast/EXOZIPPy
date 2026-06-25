@@ -594,7 +594,7 @@ class ConfigManager:
             # Issue targeted warnings based on exactly why the scale is being ignored
             if path_str in user_scale_paths:
                 if is_derived:
-                    logger.warning(f"init_scale for '{path_str}' ignored — it is a DERIVED parameter; scale propagates from parents.")
+                    logger.debug(f"init_scale for '{path_str}' will be back-propagated to sampled parents.")
                 elif is_fixed:
                     logger.warning(f"init_scale for '{path_str}' ignored — it is FIXED; the sampler will not step here.")
                 elif not is_config_present:
@@ -760,6 +760,48 @@ class ConfigManager:
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_rank
                 except Exception as e:
+                    pass
+
+        # Backward scale pass: if the user specified init_scale on a derived parameter,
+        # back-propagate it to sampled parents via the inverse Jacobian:
+        #   σ_parent ≈ σ_derived / |∂derived/∂parent|
+        # Rank and update semantics are identical to the initval relaxation engine:
+        # a back-propagated scale gets RANK_DERIVED_USER (one tier below the user's
+        # RANK_USER source), and only wins if its rank exceeds the parent's current rank.
+        for eq in self.all_relations:
+            syms = [str(s) for s in eq.free_symbols]
+            if not all(s in resolved for s in syms):
+                continue
+            for derived_str in syms:
+                if scale_provenance.get(derived_str, 0) < RANK_USER:
+                    continue
+                sigma_derived = resolved_scales.get(derived_str)
+                if sigma_derived is None:
+                    continue
+                new_rank = min(RANK_DERIVED_USER, scale_provenance[derived_str])
+                parents = [s for s in syms if s != derived_str]
+                try:
+                    sols = sp.solve(eq, sp.Symbol(derived_str))
+                    if not sols:
+                        continue
+                    sol = sols[0]
+                    for parent_str in parents:
+                        if new_rank <= scale_provenance.get(parent_str, 0):
+                            continue
+                        parent_sym = sp.Symbol(parent_str)
+                        if not sol.has(parent_sym):
+                            continue
+                        d = float(sp.diff(sol, parent_sym).evalf(subs=resolved))
+                        if not np.isfinite(d) or abs(d) < 1e-15:
+                            continue
+                        implied = sigma_derived / abs(d)
+                        resolved_scales[parent_str] = implied
+                        scale_provenance[parent_str] = new_rank
+                        logger.debug(
+                            f"Scale for {parent_str} informed by {derived_str} "
+                            f"(σ={sigma_derived:.4g} → {implied:.4g})"
+                        )
+                except Exception:
                     pass
 
         # Expose final scales for resolve() to use as a low-priority default

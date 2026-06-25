@@ -28,7 +28,8 @@ def determine_pymc_build_order(active_components, config_manager):
             expressions_dict = cfg.get("expressions", {})
 
             if expr_key in expressions_dict:
-                dep_names = expressions_dict[expr_key].get("deps", [])
+                manifest_deps = options.get("deps") if isinstance(options, dict) else None
+                dep_names = manifest_deps if manifest_deps is not None else expressions_dict[expr_key].get("deps", [])
                 for d in dep_names:
                     if "." in d:
                         # Strip off any bracket indicators to get the raw structural key (e.g., "star.mass")

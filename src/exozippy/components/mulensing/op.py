@@ -75,7 +75,9 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
     # already embedded in the geocentric conversion (satellite - earth_actual).
     model.parallax(earth_orbital=False, satellite=True, topocentric=False)
 
-    if mag_method == "auto_vbbl":
+    if isinstance(mag_method, list):
+        model.set_magnification_methods(mag_method)
+    elif mag_method == "auto_vbbl":
         if use_rho:
             t_0, t_E = mm_params['t_0'], mm_params['t_E']
             window = 5.0 * mm_params['rho'] * t_E
@@ -105,7 +107,9 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     model = mm.Model(parameters=mm_params, coords=coords)
     model.parallax(earth_orbital=False, satellite=True, topocentric=False)
 
-    if mag_method == "auto_vbbl":
+    if isinstance(mag_method, list):
+        model.set_magnification_methods(mag_method)
+    elif mag_method == "auto_vbbl":
         # Keyed on the finite_source config flag, not the runtime rho value.
         method = 'VBM' if use_rho else 'VBBL'
         model.set_magnification_methods([0.0, method])

@@ -127,7 +127,8 @@ class Component(ABC):
                     f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY.")
 
             func = PHYSICS_REGISTRY[func_name]
-            dep_names = expr_cfg.get("deps", [])
+            manifest_deps = options.pop("deps", None)
+            dep_names = manifest_deps if manifest_deps is not None else expr_cfg.get("deps", [])
             dep_nodes = []
 
             for d in dep_names:

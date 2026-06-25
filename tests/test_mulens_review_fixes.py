@@ -266,3 +266,119 @@ def test_band_ndx_warns_that_ld_is_not_wired(caplog):
 
     # Assert
     assert any("limb darkening" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# q derived from masses (regression for ghost-parameter bug)
+# ---------------------------------------------------------------------------
+
+def test_q_absent_from_pspl_manifest():
+    """
+    Given a PSPL lens config with one lens body,
+    When register_parameters runs,
+    Then 'q' is not in the manifest (no companion, no mass ratio).
+    """
+    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    lens.build_maps()
+    lens.register_parameters(system)
+
+    assert "q" not in lens.manifest
+
+
+def test_q_is_derived_for_planet_companion():
+    """
+    Given a binary lens with a planet companion,
+    When register_parameters runs,
+    Then 'q' is in the manifest as a derived parameter (has expr_key) and
+      its deps reference 'planet.mass' for the companion.
+    """
+    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    system.planet = _DummyComponent(1)
+    lens.build_maps()
+    lens.register_parameters(system)
+
+    assert "q" in lens.manifest
+    q_entry = lens.manifest["q"]
+    assert isinstance(q_entry, dict)
+    assert q_entry.get("expr_key") == "default"
+    deps = q_entry.get("deps", [])
+    assert any("planet.mass" in d for d in deps), (
+        f"planet companion: expected 'planet.mass' dep, got {deps}"
+    )
+    assert any("star.mass" in d for d in deps), (
+        f"planet companion: expected 'star.mass' dep for primary, got {deps}"
+    )
+
+
+def test_q_deps_use_star_mass_for_stellar_binary():
+    """
+    Given a binary lens with a stellar companion (two stars),
+    When register_parameters runs,
+    Then 'q' deps reference 'star.mass' for both primary and companion
+      (not 'planet.mass').
+    """
+    lens = Lens([{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+                _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+    lens.build_maps()
+    lens.register_parameters(system)
+
+    deps = lens.manifest["q"]["deps"]
+    assert all("star.mass" in d for d in deps), (
+        f"stellar binary: all q deps should reference star.mass, got {deps}"
+    )
+    assert not any("planet" in d for d in deps), (
+        f"stellar binary: no q dep should reference planet, got {deps}"
+    )
+
+
+def test_companion_mass_map_points_to_correct_index():
+    """
+    Given a binary lens where the companion is planet.0,
+    When build_maps runs,
+    Then primary_lens_map points to star index 0 and
+      companion_mass_map points to planet index 0.
+    """
+    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+    lens.build_maps()
+
+    np.testing.assert_array_equal(lens.primary_lens_map, [0])
+    np.testing.assert_array_equal(lens.companion_mass_map, [0])
+
+
+def test_companion_mass_map_stellar_binary_points_to_second_star():
+    """
+    Given a stellar binary (star.0 primary, star.1 companion),
+    When build_maps runs,
+    Then companion_mass_map points to star index 1.
+    """
+    lens = Lens([{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+                _DummyConfigManager())
+    lens.build_maps()
+
+    np.testing.assert_array_equal(lens.primary_lens_map, [0])
+    np.testing.assert_array_equal(lens.companion_mass_map, [1])
+
+
+def test_calc_q_returns_mass_ratio():
+    """
+    Given companion mass 0.001 and lens mass 0.5 (solar masses),
+    When calc_q is called,
+    Then the result is 0.001 / 0.5 = 0.002.
+    """
+    import pytensor.tensor as pt
+    import pytensor
+    from exozippy.components.mulensing.physics import calc_q
+
+    m_companion = pt.as_tensor_variable(np.array([0.001]))
+    m_lens = pt.as_tensor_variable(np.array([0.5]))
+    result = float(pytensor.function([], calc_q(m_companion, m_lens))()[0])
+    assert result == pytest.approx(0.002, rel=1e-6)
