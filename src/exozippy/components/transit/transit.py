@@ -4,6 +4,8 @@ import logging
 import numpy as np
 import pandas as pd
 import pymc as pm
+import pytensor
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
@@ -89,12 +91,12 @@ class Transit(Component):
 
         # 2. Orbital Geometry Broadcast
         t_grid = time[:, None]  # (N_obs, 1)
-        tp = orbits.tp.value[system.orbit_map][None, :]  # (1, N_planets)
-        n = orbits.n.value[system.orbit_map][None, :]
-        ecc = orbits.ecc.value[system.orbit_map][None, :]
-        cosw = orbits.cosw.value[system.orbit_map][None, :]
-        sinw = orbits.sinw.value[system.orbit_map][None, :]
-        inc = orbits.inc.value[system.orbit_map][None, :]
+        tp = orbits.tp.value[planets.orbit_map][None, :]  # (1, N_planets)
+        n = orbits.n.value[planets.orbit_map][None, :]
+        ecc = orbits.ecc.value[planets.orbit_map][None, :]
+        cosw = orbits.cosw.value[planets.orbit_map][None, :]
+        sinw = orbits.sinw.value[planets.orbit_map][None, :]
+        inc = orbits.inc.value[planets.orbit_map][None, :]
 
         M = (t_grid - tp) * n
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
@@ -112,20 +114,38 @@ class Transit(Component):
         b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
         Z = r_norm * sin_wf * sin_i
 
-        # 3. Limb Darkening Setup
-        u1_mapped = self.u1.value[self.inst_map_tensor]
-        u2_mapped = self.u2.value[self.inst_map_tensor]
-        u_stack = pt.stack([u1_mapped, u2_mapped], axis=0)  # Shape (2, N_obs)
+        # 3. Limb Darkening Setup (per observation, mapped from per-instrument values)
+        u1_mapped = self.u1.value[self.inst_map_tensor]  # (N_obs,)
+        u2_mapped = self.u2.value[self.inst_map_tensor]  # (N_obs,)
+        # Normalisation: integral of the quadratic LD law over the projected stellar disk.
+        # With basis c = [1-u1-u2, u1, u2] and s_off = [π, 2π/3, 0]:
+        #   norm = dot(s_off, c) = π*(1-u1-u2) + (2π/3)*u1
+        ld_norm = np.pi * (1.0 - u1_mapped - u2_mapped) + (2.0 * np.pi / 3.0) * u1_mapped
 
         # 4. Exoplanet-core Transit Model
         for p_idx in range(planets.n_elements):
-            b_p = b[:, p_idx]
-            p_ratio_p = p_ratio[:, p_idx]
-            Z_p = Z[:, p_idx]
+            b_p = b[:, p_idx]  # (N_obs,) sky-plane separation in units of R_*
+            Z_p = Z[:, p_idx]  # (N_obs,) line-of-sight coord (+ = planet in front of star)
+            r_p = planets.p.value[p_idx]  # scalar R_p/R_*
 
-            decrement = ops.quad_limb_dark(u_stack, b_p, p_ratio_p)
-            decrement = pt.where(Z_p > 0, decrement, 0.0)  # Hide secondary eclipses
-            lc_model += decrement
+            # quad_solution_vector(b, r) -> (N_obs, 3) solution vector s.
+            # Broadcast scalar r_p to (N_obs,) following the ops.kepler() pattern.
+            sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
+
+            # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
+            # Formula verified numerically: lc = dot(s, c) / dot(s_off, c)
+            flux_frac = (
+                sol[:, 0] * (1.0 - u1_mapped - u2_mapped) +
+                sol[:, 1] * u1_mapped +
+                sol[:, 2] * u2_mapped
+            ) / ld_norm
+
+            # Fraction of stellar flux blocked (0 off-disk, ≈ r² at disk centre)
+            blocked = 1.0 - flux_frac
+
+            # Primary transit only; secondary eclipse (planet behind star) has Z < 0
+            blocked = pt.where(Z_p > 0.0, blocked, 0.0)
+            lc_model = lc_model - blocked
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
@@ -146,12 +166,12 @@ class Transit(Component):
 
         if planets is not None and orbits is not None:
             t_grid = t_input[:, None]
-            tp = orbits.tp.value[system.orbit_map][None, :]
-            n = orbits.n.value[system.orbit_map][None, :]
-            ecc = orbits.ecc.value[system.orbit_map][None, :]
-            cosw = orbits.cosw.value[system.orbit_map][None, :]
-            sinw = orbits.sinw.value[system.orbit_map][None, :]
-            inc = orbits.inc.value[system.orbit_map][None, :]
+            tp = orbits.tp.value[planets.orbit_map][None, :]
+            n = orbits.n.value[planets.orbit_map][None, :]
+            ecc = orbits.ecc.value[planets.orbit_map][None, :]
+            cosw = orbits.cosw.value[planets.orbit_map][None, :]
+            sinw = orbits.sinw.value[planets.orbit_map][None, :]
+            inc = orbits.inc.value[planets.orbit_map][None, :]
 
             M = (t_grid - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
@@ -168,19 +188,25 @@ class Transit(Component):
             b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
             Z = r_norm * sin_wf * sin_i
 
-            # Broadcast limb darkening to (2, 1) to match (N_times,) impact parameters
-            u1_inst = self.u1.value[inst_idx]
+            u1_inst = self.u1.value[inst_idx]  # scalar for this instrument
             u2_inst = self.u2.value[inst_idx]
-            u_stack = pt.stack([u1_inst, u2_inst], axis=0)[:, None]
+            ld_norm_inst = np.pi * (1.0 - u1_inst - u2_inst) + (2.0 * np.pi / 3.0) * u1_inst
 
             decrement_matrix_list = []
             for p_idx in range(planets.n_elements):
-                b_p = b[:, p_idx]
-                p_ratio_p = p_ratio[:, p_idx]
+                b_p = b[:, p_idx]   # (N_times,)
                 Z_p = Z[:, p_idx]
-                decrement = ops.quad_limb_dark(u_stack, b_p, p_ratio_p)
-                decrement = pt.where(Z_p > 0, decrement, 0.0)
-                decrement_matrix_list.append(decrement)
+                r_p = planets.p.value[p_idx]
+
+                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
+                flux_frac = (
+                    sol[:, 0] * (1.0 - u1_inst - u2_inst) +
+                    sol[:, 1] * u1_inst +
+                    sol[:, 2] * u2_inst
+                ) / ld_norm_inst
+                # Negative so that _compiled_full_lc output + baseline gives a transit dip
+                blocked = pt.where(Z_p > 0.0, 1.0 - flux_frac, 0.0)
+                decrement_matrix_list.append(-blocked)
 
             lc_matrix = pt.stack(decrement_matrix_list, axis=1)  # (N_times, N_planets)
 
