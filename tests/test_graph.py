@@ -42,25 +42,25 @@ def test_independent_parameters_all_appear_in_result():
 
 def test_dependency_precedes_dependent_parameter():
     """
-    Given compA has 'x' (no deps) and 'y' that depends on 'x',
+    Given compA has 'x' (free) and 'y' (derived, depends on 'x'),
     When determine_pymc_build_order is called,
     Then 'compA.x' appears before 'compA.y' in the result.
     """
-    comps = {"compA": _FakeComp("compA", {"x": None, "y": None})}
-    cm = _FakeConfigManager(dep_map={"compA.y": ["x"]})  # intra-component dep
+    comps = {"compA": _FakeComp("compA", {"x": None, "y": "default"})}
+    cm = _FakeConfigManager(dep_map={"compA.y": ["x"]})
     order = determine_pymc_build_order(comps, cm)
     assert order.index("compA.x") < order.index("compA.y")
 
 
 def test_cross_component_dependency_is_respected():
     """
-    Given compB.y explicitly depends on compA.x (cross-component),
+    Given compB.y (derived) explicitly depends on compA.x (free, cross-component),
     When determine_pymc_build_order is called,
     Then 'compA.x' precedes 'compB.y' in the result.
     """
     comps = {
         "compA": _FakeComp("compA", {"x": None}),
-        "compB": _FakeComp("compB", {"y": None}),
+        "compB": _FakeComp("compB", {"y": "default"}),
     }
     cm = _FakeConfigManager(dep_map={"compB.y": ["compA.x"]})
     order = determine_pymc_build_order(comps, cm)
@@ -69,12 +69,12 @@ def test_cross_component_dependency_is_respected():
 
 def test_missing_dependency_raises_value_error():
     """
-    Given compA.y depends on 'compB.z' but compB has no 'z' in its manifest,
+    Given compA.y (derived) depends on 'compB.z' but compB has no 'z' in its manifest,
     When determine_pymc_build_order is called,
     Then a ValueError is raised naming the missing dependency.
     """
     comps = {
-        "compA": _FakeComp("compA", {"y": None}),
+        "compA": _FakeComp("compA", {"y": "default"}),
         "compB": _FakeComp("compB", {"w": None}),
     }
     cm = _FakeConfigManager(dep_map={"compA.y": ["compB.z"]})
@@ -84,11 +84,11 @@ def test_missing_dependency_raises_value_error():
 
 def test_circular_dependency_raises_value_error():
     """
-    Given compA.x depends on compA.y and compA.y depends on compA.x,
+    Given compA.x (derived) depends on compA.y and compA.y (derived) depends on compA.x,
     When determine_pymc_build_order is called,
     Then a ValueError naming a circular reference is raised.
     """
-    comps = {"compA": _FakeComp("compA", {"x": None, "y": None})}
+    comps = {"compA": _FakeComp("compA", {"x": "default", "y": "default"})}
     cm = _FakeConfigManager(dep_map={"compA.x": ["y"], "compA.y": ["x"]})
     with pytest.raises(ValueError, match="[Cc]ircular"):
         determine_pymc_build_order(comps, cm)

@@ -99,6 +99,12 @@ class MulensInstrument(Component):
                 self._estimate_q_source(t, m, xyz_delta, ra_rad, dec_rad)
             )
 
+            self._check_data_format(
+                t, m, e, xyz_delta, ra_rad, dec_rad,
+                self.fs_init[-1], self.q_source_init[-1],
+                self.config[i].get("file", f"instrument {i}"),
+            )
+
             all_times.append(t)
             all_mags.append(m)
             all_errs.append(e)
@@ -112,6 +118,67 @@ class MulensInstrument(Component):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations (for _estimate_baseline_flux)
         self.observer_pos_abs = np.vstack(all_obspos_abs).astype(float)  # absolute barycentric (for get_magnification_op)
+
+    def _check_data_format(self, t, m, e, xyz_delta, ra_rad, dec_rad,
+                           f_total_init, q_source_init, label):
+        """Warn if peak residuals suggest data is in flux units, not magnitudes.
+
+        The baseline is always self-consistent (f_total_init is derived from it),
+        so we check the event peak: if |model_mag_peak - obs_peak| >> sigma,
+        the model and data are in incompatible spaces (flux vs. magnitude).
+        """
+        if f_total_init <= 0:
+            return
+
+        # Re-derive trajectory to identify peak epochs (same as _estimate_baseline_flux)
+        cm = self.config_manager
+        def _get(key, default=None):
+            data = cm.user_params.get(key)
+            if data is None:
+                return default
+            return data.get("initval", default) if isinstance(data, dict) else float(data)
+
+        t0 = _get("lens.0.t_0")
+        u0 = _get("lens.0.u_0")
+        tE = _get("lens.0.t_E")
+        if t0 is None or u0 is None:
+            return
+
+        pi_E_N = _get("lens.0.pi_E_N", 0.0)
+        pi_E_E = _get("lens.0.pi_E_E", 0.0)
+        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
+
+        x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
+        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
+        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
+                   - y * np.sin(ra_rad) * np.sin(dec_rad)
+                   + z * np.cos(dec_rad))
+        tau   = (t - float(t0)) / tE_safe
+        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
+        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
+        A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+
+        peak_mask = A_traj > 1.5
+        if np.sum(peak_mask) < 3:
+            return
+
+        # Model magnitudes at peak: what we expect to see if data are in magnitudes
+        q = float(np.clip(q_source_init, 0.05, 1.95))
+        model_flux_peak = f_total_init * (q * A_traj[peak_mask] + (1.0 - q))
+        model_mag_peak  = -2.5 * np.log10(np.maximum(model_flux_peak, 1e-30))
+
+        residuals   = m[peak_mask] - model_mag_peak
+        rms_peak    = float(np.sqrt(np.mean(residuals ** 2)))
+        typical_err = float(np.median(e))
+
+        if typical_err > 0 and rms_peak > 10.0 * typical_err:
+            logger.warning(
+                f"[{label}] Peak residuals ({rms_peak:.3g}) are "
+                f"{rms_peak / typical_err:.0f}× the typical error ({typical_err:.3g}). "
+                f"Data may be in flux units — add 'data_format: flux' to the YAML "
+                f"config block for this instrument if so."
+            )
 
     def _estimate_baseline_flux(self, t, m, xyz_au, ra_rad, dec_rad):
         """
@@ -368,16 +435,19 @@ class MulensInstrument(Component):
             "err_scale": None,
         }
 
-        # band_ndx: optional per-instrument mapping to a Band component instance
-        self.band_ndx = np.array(
-            [c.get("band_ndx", -1) for c in self.config], dtype=int
-        )
-        if np.any(self.band_ndx >= 0):
-            logger.warning(
-                "band_ndx is set, but limb darkening is not yet wired into the "
-                "magnification Op: finite-source magnifications will ignore the "
-                "band component's LD coefficients."
-            )
+        # Map each instrument to a Band instance by name.
+        band_names = [c.get("band", None) for c in self.config]
+        if hasattr(system, 'band'):
+            name_to_idx = {name: i for i, name in enumerate(system.band.names)}
+            self.band_map = np.array([
+                name_to_idx[n] if (n is not None and n in name_to_idx) else -1
+                for n in band_names
+            ], dtype=int)
+            missing = [n for n in band_names if n is not None and n not in name_to_idx]
+            for n in missing:
+                logger.warning(f"Instrument references unknown band '{n}'; LD will be skipped.")
+        else:
+            self.band_map = np.full(self.n_elements, -1, dtype=int)
 
     def build_likelihood(self, model, system):
 
@@ -405,7 +475,30 @@ class MulensInstrument(Component):
         # 2. Magnification — both symbolic and Op paths take absolute barycentric AU.
         #    get_magnification_op dispatches: PSPL→symbolic (NUTS-friendly),
         #    binary/finite-source→MulensModel Op (use Metropolis).
-        A = system.lens.get_magnification_op(t, self.observer_pos_abs, system, index=0)
+        #
+        #    When finite source is active, pass u1 and bandpass from the connected
+        #    Band component.  Multiple distinct bands across instruments are not yet
+        #    supported for finite-source LD; the first band found is used.
+        u1 = None
+        bandpass = None
+        if (system.lens.finite_source[0]
+                and hasattr(system, 'band')
+                and np.any(self.band_map >= 0)):
+            band_indices = [self.band_map[i] for i in range(self.n_elements)
+                            if self.band_map[i] >= 0]
+            unique = sorted(set(band_indices))
+            if len(unique) > 1:
+                logger.warning(
+                    "Multiple bands for finite-source instruments; using first band's u1."
+                )
+            band_idx = unique[0]
+            u1 = system.band.u1.value[band_idx]
+            bandpass = system.band.names[band_idx]
+
+        system.lens.resolve_auto_vbbl(self.time, index=0)
+        A = system.lens.get_magnification_op(
+            t, self.observer_pos_abs, system, index=0, u1=u1, bandpass=bandpass
+        )
 
         # 3. Flux Model
         fs = self.f_source.value[self.inst_map_tensor]
@@ -441,16 +534,16 @@ class MulensInstrument(Component):
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
 
-        # Normalized apparent magnification: (f_s*A + f_b) / (f_s + f_b).
-        # Equals 1 at baseline regardless of blending, so all instruments
-        # are on the same scale.
+        # Δmag = mag(t) − mag_baseline = −2.5·log10(A_eff).
+        # Zero at baseline, negative when brighter, independent of f_total.
         model_flux = fs_inst * A + fb_inst
         f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
-        model_A_eff = model_flux / f_total_inst
+        A_eff = model_flux / f_total_inst
+        model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))
 
-        self._compiled_A_eff = pytensor.function(
+        self._compiled_delta_mag = pytensor.function(
             inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
-            outputs=model_A_eff,
+            outputs=model_delta_mag,
             on_unused_input='ignore'
         )
 
@@ -496,35 +589,19 @@ class MulensInstrument(Component):
             for obs_loc in unique_observers
         }
 
-        # Data normalization: use median sampled f_total so data and model traces
-        # are on the same scale.  The model A_eff = q_frac*A + (1-q_frac) is
-        # independent of f_total, so when the sampler moves log_f_total away
-        # from fs_init the data must follow.  Falls back to fs_init if the
-        # parameter isn't in plot_params (e.g. starting-model single-point plot).
-        log_ft_param = next(
-            (p for p in system.plot_params
-             if hasattr(p, 'label') and 'log_f_total' in str(p.label)
-             and self.prefix in str(p.label)),
-            None
-        )
-        if log_ft_param is not None and points:
-            log_ft_samples = np.array([
-                np.atleast_1d(point.get(log_ft_param.label,
-                                        np.log10(self.fs_init)))
-                for point in points
-            ])  # (n_samples, n_instruments)
-            f_norm = 10.0 ** np.median(log_ft_samples, axis=0)
-        else:
-            f_norm = np.array(self.fs_init)
+        # Per-instrument baseline magnitude from the data-derived fs_init.
+        # Δmag = mag(t) − mag_baseline is 0 at baseline for every instrument,
+        # so all datasets land on the same scale with no model-flux dependency.
+        mag_baseline = np.array([
+            -2.5 * np.log10(max(f, 1e-30)) for f in self.fs_init
+        ])
 
         def draw(ax):
             for i in range(self.n_elements):
                 mask = (self.inst_map == i)
-                F_obs = 10.0 ** (-0.4 * self.mag[mask])
-                A_eff = F_obs / f_norm[i]
-                sigma_A_eff = 0.4 * np.log(10) * self.err[mask] * A_eff
+                delta_mag = self.mag[mask] - mag_baseline[i]
                 ax.errorbar(
-                    self.time[mask], A_eff, yerr=sigma_A_eff,
+                    self.time[mask], delta_mag, yerr=self.err[mask],
                     fmt='.', color=inst_color[i], alpha=0.6, zorder=1, label=self.names[i]
                 )
             for obs_loc in unique_observers:
@@ -538,13 +615,14 @@ class MulensInstrument(Component):
                         for p in system.plot_params
                     ]
                     try:
-                        y_model = self._compiled_A_eff(t_model, obs_pretty, i, *param_values)
+                        y_model = self._compiled_delta_mag(t_model, obs_pretty, i, *param_values)
                         alpha = 0.8 if len(points) == 1 else 0.1
                         ax.plot(t_model, y_model, '-', color=inst_color[i], lw=1.5, alpha=alpha, zorder=2)
                     except Exception as e:
                         logger.warning(f"Model eval failed for observer '{obs_loc}': {e}")
             ax.set_xlabel("Time [BJD]")
-            ax.set_ylabel("Magnification")
+            ax.set_ylabel("mag − mag$_0$")
+            ax.invert_yaxis()
             ax.legend()
 
         fig, ax = plt.subplots(figsize=(12, 6))

@@ -324,7 +324,7 @@ class Lens(Component):
         l2_type, l2_idx = self.lens_bodies[index][1]
         m1 = self._body_mass(system, *self.lens_bodies[index][0])
         m2 = self._body_mass(system, l2_type, l2_idx)
-        q = m2 / m1
+        q = m2 / pt.maximum(m1, 1e-10)
 
         pi_rel = self.pi_rel.value[index]
         mu = self.mu_rel_mag.value[index]
@@ -408,7 +408,7 @@ class Lens(Component):
         forced = self.use_op[index]
         return forced or (n_lenses > 1) or use_rho
 
-    def get_magnification_op(self, times, obs_pos, system, index=0):
+    def get_magnification_op(self, times, obs_pos, system, index=0, u1=None, bandpass=None):
         """Magnification dispatcher.
 
         For point-source PSPL (n_lenses==1, finite_source=False, use_op=False)
@@ -421,6 +421,11 @@ class Lens(Component):
         - Op path:       absolute barycentric positions (AU); the Op
           converts them to geocentric (satellite - earth_actual) before
           passing to MulensModel, which expects geocentric input.
+
+        u1/bandpass: when finite_source is True and a Band component is wired,
+        u1 (a PyTensor scalar) and bandpass (str) are passed so the Op can call
+        set_limb_coeff_u and get_magnification(bandpass=...).  Passing neither
+        falls back to uniform-source finite-source magnification.
 
         Set ``use_op: true`` in the lens YAML block to force the Op (e.g. for
         testing or when MulensModel's finite-source parallax is needed).
@@ -445,6 +450,9 @@ class Lens(Component):
         use_rho = self.finite_source[index]
         n_lenses = self.n_lens_bodies[index]
 
+        # Apply LD only for finite-source and when a band is connected.
+        effective_bandpass = bandpass if (use_rho and u1 is not None) else None
+
         times_tensor = pt.as_tensor_variable(times)
         obs_tensor = pt.as_tensor_variable(obs_pos)
 
@@ -454,17 +462,155 @@ class Lens(Component):
             if use_rho:
                 param_list.append(self.rho.value[index])
             param_list.extend([bp['s'], bp['q'], bp['alpha']])
+            if effective_bandpass is not None:
+                param_list.append(u1)
             mag_op = BinaryLensMagOp(coords=coords, mag_method=self.mag_method[index],
-                                     use_rho=use_rho)
+                                     use_rho=use_rho, bandpass=effective_bandpass)
         else:
             sp = self._get_safe_mm_params(index)
             param_list = [sp['t0'], sp['u0'], sp['tE'], sp['pi_N'], sp['pi_E']]
             if use_rho:
                 param_list.append(self.rho.value[index])
+            if effective_bandpass is not None:
+                param_list.append(u1)
             mag_op = MulensMagOp(coords=coords, mag_method=self.mag_method[index],
-                                 use_rho=use_rho)
+                                 use_rho=use_rho, bandpass=effective_bandpass)
 
         return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
+
+    # ------------------------------------------------------------------
+    # Auto method brackets
+    # ------------------------------------------------------------------
+
+    def _get_initval(self, param, event_idx=0):
+        """Look up a resolved initval from config_manager, checking name and index forms."""
+        cm = self.config_manager
+        name = self.names[event_idx] if event_idx < len(self.names) else str(event_idx)
+        for key in [f"lens.{name}.{param}", f"lens.{event_idx}.{param}"]:
+            entry = cm.user_params.get(key)
+            if entry is not None:
+                val = entry.get("initval") if isinstance(entry, dict) else entry
+                if val is not None:
+                    return float(val)
+        return None
+
+    def resolve_auto_vbbl(self, times_np, index=0, threshold=0.001,
+                          buffer=0.5, max_eval=2000):
+        """Replace 'auto_vbbl' with a concrete bracket list computed at initvals.
+
+        Runs hexadecapole and VBM on a time grid, finds intervals where they
+        differ by more than `threshold` (fractional), pads each interval by
+        `buffer` days, and stores the result in self.mag_method[index].
+
+        Intentionally skips parallax — we only need approximate caustic-crossing
+        timing for method selection, not a precise fit.
+        """
+        if self.mag_method[index] != "auto_vbbl":
+            return
+
+        import MulensModel as mm
+
+        g = self._get_initval
+        t_0   = g("t_0",   index)
+        u_0   = g("u_0",   index)
+        t_E   = g("t_E",   index)
+        s_val = g("s",     index)
+        q_val = g("q",     index)
+        # alpha in degrees; try direct value first, fall back to cosalpha/sinalpha
+        alpha_deg = g("alpha", index)
+        if alpha_deg is None:
+            ca = g("cosalpha", index)
+            sa = g("sinalpha", index)
+            if ca is not None and sa is not None:
+                alpha_deg = float(np.degrees(np.arctan2(sa, ca)))
+
+        if any(v is None for v in [t_0, u_0, t_E, s_val, q_val, alpha_deg]):
+            logger.warning("auto_vbbl: missing initvals for bracket computation; "
+                           "falling back to VBM everywhere.")
+            self.mag_method[index] = [float(times_np.min()) - 1.0, "VBM",
+                                      float(times_np.max()) + 1.0]
+            return
+
+        params = {
+            "t_0":   t_0,
+            "u_0":   max(abs(u_0), 1e-9) * (1 if u_0 >= 0 else -1),
+            "t_E":   max(t_E, 1e-4),
+            "s":     max(s_val, 1e-6),
+            "q":     float(np.clip(q_val, 1e-9, 1.0)),
+            "alpha": alpha_deg,
+        }
+        if self.finite_source[index]:
+            rho = g("rho", index)
+            if rho is not None:
+                params["rho"] = max(rho, 1e-9)
+
+        # Build eval grid: subsample if data is very dense
+        if len(times_np) > max_eval:
+            step = len(times_np) // max_eval
+            eval_times = np.sort(times_np[::step])
+        else:
+            eval_times = np.sort(times_np)
+
+        t_lo = float(eval_times[0])
+        t_hi = float(eval_times[-1])
+
+        try:
+            model_hex = mm.Model(parameters=params)
+            model_vbm = mm.Model(parameters=params)
+            model_hex.set_magnification_methods([t_lo - 1.0, "hexadecapole", t_hi + 1.0])
+            model_vbm.set_magnification_methods([t_lo - 1.0, "VBM",          t_hi + 1.0])
+
+            A_hex = np.asarray(model_hex.get_magnification(eval_times))
+            A_vbm = np.asarray(model_vbm.get_magnification(eval_times))
+
+            diff = np.abs(A_hex - A_vbm) / np.maximum(np.abs(A_vbm), 1.0)
+            needs_vbm = diff > threshold
+
+        except Exception as e:
+            logger.warning(f"auto_vbbl: bracket computation failed ({e}); "
+                           "falling back to VBM everywhere.")
+            self.mag_method[index] = [t_lo - 1.0, "VBM", t_hi + 1.0]
+            return
+
+        if not np.any(needs_vbm):
+            self.mag_method[index] = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
+            logger.info("auto_vbbl: hexadecapole sufficient everywhere "
+                        f"(max diff {diff.max():.4f} < threshold {threshold})")
+            return
+
+        # Build contiguous VBM intervals with buffer
+        brackets = []
+        in_vbm = False
+        for i, t in enumerate(eval_times):
+            if needs_vbm[i] and not in_vbm:
+                t_start = max(t_lo - 1.0, t - buffer)
+                if brackets:
+                    brackets.append(t_start)
+                    brackets.append("VBM")
+                else:
+                    brackets = [t_lo - 1.0, "hexadecapole", t_start, "VBM"]
+                in_vbm = True
+            elif not needs_vbm[i] and in_vbm:
+                t_end = min(t_hi + 1.0, t + buffer)
+                brackets.append(t_end)
+                brackets.append("hexadecapole")
+                in_vbm = False
+
+        if in_vbm:
+            brackets.append(t_hi + 1.0)
+            brackets.append("hexadecapole")
+
+        # Ensure the bracket list ends with a sentinel time
+        if not brackets:
+            brackets = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
+        elif not isinstance(brackets[-1], float):
+            brackets.append(t_hi + 1.0)
+
+        n_vbm = sum(1 for b in brackets if b == "VBM")
+        logger.info(f"auto_vbbl: {n_vbm} VBM interval(s) "
+                    f"(threshold={threshold}, buffer={buffer} d, "
+                    f"max diff={diff.max():.4f})")
+        self.mag_method[index] = brackets
 
     def compile_plotters(self, model, system):
         pass

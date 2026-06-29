@@ -166,30 +166,28 @@ def test_microlensing_sympy_pytensor_equivalence():
     assert np.isclose(te_sympy, t_E_pt, rtol=1e-8), "t_E mismatch!"
 
 
-def test_microlensing_contradiction_warning(caplog):
+def test_microlensing_contradiction_no_override(caplog):
     """
-    Verifies that providing contradictory physical values triggers
-    a logged warning to the user.
+    When all variables in a violated equation are RANK_USER, the solver must
+    leave every user value untouched and log a debug message — not silently
+    sacrifice one value to satisfy the equation.
     """
-    # 1. Define Topology
+    # Given: distances that imply pi_rel ~ 0.125, but user also sets pi_rel = 0.999
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}]
     }
-
-    # Provide Mass/Distances that imply t_E ~ 34 days,
-    # but explicitly provide t_E = 100 days.
     user_params = {
         "star.Lens.distance": 4000.0,
         "star.Source.distance": 8000.0,
         "lens.Lens.pi_rel": 0.999
     }
 
-    # 2. Pass topology and explicitly trigger the solver
     import logging
     cm = ConfigManager(user_params, system_config=system_config)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         cm.finalize_user_params()
 
-    assert "contradiction detected" in caplog.text.lower()
-    assert "sacrificing" in caplog.text.lower()
+    # When all variables are RANK_USER the solver skips and logs at debug level
+    assert "over-constrained" in caplog.text.lower()
+    assert "leaving all user values unchanged" in caplog.text.lower()

@@ -1,29 +1,46 @@
 band:
-  u1:
-    lower: -1.0
-    upper: 2.0
+  # Kipping (2013) q1/q2 parameterization for quadratic LD.
+  # Both parameters are bounded [0,1], which guarantees physical u1/u2.
+  q1:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.2
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "q_1"
+    description: "Kipping limb-darkening parameter"
+  q2:
+    lower: 0.0
+    upper: 1.0
     initval: 0.3
-    init_scale: 0.1
+    init_scale: 0.05
+    unit: ""
+    internal_unit: ""
+    latex: "q_2"
+    description: "Kipping limb-darkening parameter"
+  # u1 is the linear LD coefficient for both laws:
+  #   linear law  — sampled directly (no expression used)
+  #   quadratic   — derived via Kipping: 2 * sqrt(q1) * q2
+  u1:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.3
+    init_scale: 0.05
     unit: ""
     internal_unit: ""
     latex: "u_1"
     description: "Linear limb-darkening coefficient"
+    expressions:
+      default:
+        func_name: "calc_u1_from_kipping"
+        deps: ["q1", "q2"]
   u2:
-    lower: -1.0
-    upper: 2.0
-    initval: 0.1
-    init_scale: 0.1
     unit: ""
     internal_unit: ""
     latex: "u_2"
     description: "Quadratic limb-darkening coefficient"
-  # Linear LD (single coefficient, used when ld_law = linear)
-  gamma:
-    lower: -1.0
-    upper: 2.0
-    initval: 0.5
-    init_scale: 0.1
-    unit: ""
-    internal_unit: ""
-    latex: "\\Gamma"
-    description: "Linear limb-darkening coefficient"
+    expressions:
+      default:
+        func_name: "calc_u2_from_kipping"
+        deps: ["q1", "q2"]

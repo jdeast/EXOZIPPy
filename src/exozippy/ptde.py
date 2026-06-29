@@ -16,6 +16,8 @@ copy-on-write, avoiding the picklability constraint that blocks cloudpickle
 Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """
 import logging
+import signal
+import time
 
 import numpy as np
 import arviz as az
@@ -103,6 +105,11 @@ def _make_starts(n_chains, raw_start, logp_fn, rng):
     return starts
 
 
+def _worker_init():
+    """Pool worker: ignore SIGINT so only the parent handles graceful stop."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def _map_logp(pool, proposals):
     if pool is None:
         return [_eval_logp(p) for p in proposals]
@@ -113,6 +120,53 @@ def _pick_two(rng, n, exclude):
     """Pick two distinct indices from [0, n) excluding `exclude`."""
     idx = rng.choice(n - 1, 2, replace=False)
     return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
+
+
+def _convergence_check_schedule(min_draws=100, growth=0.9):
+    """Yield cumulative draw counts at which to run a convergence check.
+
+    Positions: round(min_draws / growth**j) for j=0,1,2,...
+    Default (growth=0.9): 100, 111, 123, 137, 152, ...
+    Gaps grow by ~11% each check, so we check frequently early and less often later.
+    """
+    j, prev = 0, 0
+    while True:
+        n = round(min_draws / growth ** j)
+        if n > prev:
+            yield n
+            prev = n
+        j += 1
+
+
+def _check_convergence(stored_raw, n_draws, min_ess, max_rhat):
+    """Compute R-hat and ESS on stored_raw[:, :n_draws].
+
+    Returns (converged, max_rhat_val, min_ess_val).
+    None thresholds are treated as "no limit" for that statistic.
+    """
+    data = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
+    try:
+        idata_partial = az.from_dict(posterior=data)
+        rhat_ds = az.rhat(idata_partial)
+        ess_ds = az.ess(idata_partial)
+    except Exception:
+        return False, float("nan"), float("nan")
+
+    rhat_vals = [float(v.values.max()) for v in rhat_ds.data_vars.values()
+                 if v.values.size and not np.all(np.isnan(v.values))]
+    ess_vals = [float(v.values.min()) for v in ess_ds.data_vars.values()
+                if v.values.size and not np.all(np.isnan(v.values))]
+
+    if not rhat_vals or not ess_vals:
+        return False, float("nan"), float("nan")
+
+    max_rhat_val = max(rhat_vals)
+    min_ess_val = min(ess_vals)
+    converged = (
+        (max_rhat is None or max_rhat_val <= max_rhat)
+        and (min_ess is None or min_ess_val >= min_ess)
+    )
+    return converged, max_rhat_val, min_ess_val
 
 
 def ptde_sample(
@@ -136,6 +190,9 @@ def ptde_sample(
     seed=None,
     log_interval=None,
     plot_prefix=None,
+    min_ess=1000,
+    max_rhat=1.01,
+    maxtime=None,
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -238,9 +295,27 @@ def ptde_sample(
         f"PTDE: {n_temps} rungs × {n_chains} chains = {total_proposals} proposals/step, "
         f"{actual_cores} cores  "
         f"T=[{', '.join(f'{t:.1f}' for t in temperatures)}]")
-    pool = (mp.get_context("fork").Pool(actual_cores)
+    pool = (mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
             if actual_cores > 1 else None)
 
+    # Early-stop state: mutable list so the closure can write back to us.
+    stop_requested = [False]
+    actual_draws = 0
+    start_time = time.time()
+
+    _do_convergence = (min_ess is not None or max_rhat is not None) and n_chains >= 2
+    _check_gen = _convergence_check_schedule() if _do_convergence else None
+    _next_check = [next(_check_gen)] if _check_gen else [None]
+
+    def _sigint_handler(sig, frame):
+        if stop_requested[0]:
+            raise KeyboardInterrupt   # second Ctrl+C: abort immediately
+        stop_requested[0] = True
+        logger.info(
+            "PTDE: stop requested — finishing current step "
+            "(Ctrl+C again to abort immediately)")
+
+    old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
     try:
         # initial logp evaluations
         flat_starts = [populations[k][i]
@@ -322,6 +397,7 @@ def ptde_sample(
                     for key in model_keys:
                         stored_raw[key][i, draw_idx] = populations[0][i][key]
                     stored_lp[i, draw_idx] = logps[0][i]
+                actual_draws = draw_idx + 1
 
             # 6. progress log + gamma adaptation during tune
             if (step + 1) % log_every == 0:
@@ -355,19 +431,55 @@ def ptde_sample(
                     + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]"
                        if n_temps > 1 else ""))
 
+            # 7. early-stop checks
+            if stop_requested[0]:
+                if actual_draws == 0:
+                    logger.warning("PTDE: stop requested during tune — no draws to save")
+                    raise KeyboardInterrupt
+                logger.info(f"PTDE: stopping after {actual_draws} draws (user interrupt)")
+                break
+
+            if maxtime is not None and (time.time() - start_time) > maxtime:
+                if actual_draws == 0:
+                    logger.warning(f"PTDE: time limit {maxtime:.0f}s reached during tune — no draws to save")
+                    raise KeyboardInterrupt
+                logger.info(
+                    f"PTDE: wall-clock limit {maxtime:.0f}s reached "
+                    f"after {actual_draws} draws")
+                break
+
+            if (phase == "draw"
+                    and _next_check[0] is not None
+                    and actual_draws >= _next_check[0]):
+                converged, rhat_val, ess_val = _check_convergence(
+                    stored_raw, actual_draws, min_ess, max_rhat)
+                logger.info(
+                    f"PTDE convergence @ {actual_draws} draws: "
+                    f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")
+                _next_check[0] = next(_check_gen, None)
+                if converged:
+                    logger.info("PTDE: convergence criterion met, wrapping up")
+                    break
+
     finally:
+        signal.signal(signal.SIGINT, old_sigint)
         if pool is not None:
             pool.close()
             pool.join()
 
     # convert raw → physical for every stored draw
+    if actual_draws == 0:
+        raise RuntimeError("PTDE: sampling stopped during tune — no draws were collected")
+    if actual_draws < draws:
+        logger.info(f"PTDE: early stop — {actual_draws}/{draws} draws collected")
+
     logger.info(
-        f"PTDE: converting {n_chains} × {draws} draws to physical space…")
+        f"PTDE: converting {n_chains} × {actual_draws} draws to physical space…")
     chain_lists = {name: [] for name in out_var_names}
 
     for i in range(n_chains):
         draw_lists = {name: [] for name in out_var_names}
-        for d in range(draws):
+        for d in range(actual_draws):
             raw_vals = [stored_raw[k][i, d] for k in raw_var_names]
             phys_vals = raw_to_phys(*raw_vals)
             for name, val in zip(out_var_names, phys_vals):
@@ -387,13 +499,13 @@ def ptde_sample(
 
     idata = az.from_dict(
         posterior=posterior_dict,
-        sample_stats={"lp": stored_lp},
+        sample_stats={"lp": stored_lp[:, :actual_draws]},
     )
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
     logger.info(
-        f"PTDE done: accept(T=1)={ar_T1:.3f}  "
+        f"PTDE done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
         + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]"
            if n_temps > 1 else ""))
 

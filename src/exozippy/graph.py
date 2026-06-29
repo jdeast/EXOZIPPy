@@ -23,12 +23,21 @@ def determine_pymc_build_order(active_components, config_manager):
             global_key = f"{comp_name}.{param_name}"
 
             cfg = config_manager.resolve(comp.prefix, param_name, shape=(comp.n_elements,))
-            options = comp.manifest[param_name] or {}
-            expr_key = options if isinstance(options, str) else options.get("expr_key", "default")
+            raw = comp.manifest[param_name]
+            if isinstance(raw, str):
+                expr_key = raw          # e.g. "default"
+            elif isinstance(raw, dict):
+                expr_key = raw.get("expr_key")  # explicit key or None
+            else:
+                expr_key = None         # None → free parameter, no expression
+            # Fall back to "default" only when the manifest explicitly requested it
+            # via the "default" string shorthand.  A bare None means free parameter.
+            if expr_key is None:
+                expr_key = "default" if raw is not None else None
             expressions_dict = cfg.get("expressions", {})
 
-            if expr_key in expressions_dict:
-                manifest_deps = options.get("deps") if isinstance(options, dict) else None
+            if expr_key is not None and expr_key in expressions_dict:
+                manifest_deps = raw.get("deps") if isinstance(raw, dict) else None
                 dep_names = manifest_deps if manifest_deps is not None else expressions_dict[expr_key].get("deps", [])
                 for d in dep_names:
                     if "." in d:

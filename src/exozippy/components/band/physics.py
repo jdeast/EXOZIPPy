@@ -1,19 +1,14 @@
-import numpy as np
-from scipy.interpolate import RegularGridInterpolator
+import pytensor.tensor as pt
 from exozippy.physics_registry import register_physics
 
 
 @register_physics
-def claret_ld_quadratic(teff, logg, feh, grid):
-    """Interpolate quadratic LD coefficients (u1, u2) from a Claret grid.
+def calc_u1_from_kipping(q1, q2):
+    """Kipping (2013): u1 = 2*sqrt(q1)*q2"""
+    return 2.0 * pt.sqrt(q1) * q2
 
-    grid must be a dict with keys 'teff', 'logg', 'feh', 'u1', 'u2'
-    (1D axes and matching N-D value arrays).
-    """
-    axes = (grid['teff'], grid['logg'], grid['feh'])
-    interp_u1 = RegularGridInterpolator(axes, grid['u1'], method='linear',
-                                         bounds_error=False, fill_value=None)
-    interp_u2 = RegularGridInterpolator(axes, grid['u2'], method='linear',
-                                         bounds_error=False, fill_value=None)
-    pt = np.array([[float(teff), float(logg), float(feh)]])
-    return float(interp_u1(pt)[0]), float(interp_u2(pt)[0])
+
+@register_physics
+def calc_u2_from_kipping(q1, q2):
+    """Kipping (2013): u2 = sqrt(q1)*(1 - 2*q2)"""
+    return pt.sqrt(q1) * (1.0 - 2.0 * q2)

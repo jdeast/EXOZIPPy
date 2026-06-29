@@ -30,23 +30,28 @@ galacticmodel:
   - name: "DC2018_128"
     anchor_idx: 1              # source is star.1
 
+band:
+  - name: "Z087"
+    filter: "Roman.WFI.Z087"
+    ld_law: "linear"
+
 mulensinstrument:
   - name: "Roman"
     file: "n20180816.Z087.WFIRST18.128.txt"
     data_format: flux          # file stores normalized flux, not magnitudes
     observer_location: roman_simulated_2018dc  # MMEXOFAST wfirst_ephemeris_W149.txt, J2000 equatorial
+    band: "Z087"
 
 parameter_file: "DC2018_128.params.yaml"
 
 sampler:
-  pymc:
-    step_method: "PTDE" # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
-    n_temps: 8           # temperature rungs (EXOFASTv2 parity)
-    T_max: 200           # hottest temperature (EXOFASTv2 parity)
-    # n_chains: defaults to 2 × n_params
-    # cores: defaults to 75% of physical cores
-    tune: 5000
-    draws: 100000
-    nthin: 10
-    check_curvatures: False
-    recompute_trace: True
+  method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
+  n_temps: 8              # temperature rungs (EXOFASTv2 parity)
+  T_max: 200              # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2 × n_params
+  # cores: defaults to 75% of physical cores
+  tune: 5000
+  draws: 15000
+  nthin: 1
+  check_curvatures: False
+  recompute_trace: True

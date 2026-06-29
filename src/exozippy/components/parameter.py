@@ -590,8 +590,7 @@ class Parameter:
                 if not use_logit[i]:
                     raw_initvals[j] = ((inits[i] - gaussian_mus[i])
                                        / max(gaussian_scales[i], 1e-30))
-            # Saved so run.py can build the true raw starting point explicitly
-            # (model.initial_point() is not trusted to honor these).
+            # Saved so run.py can override model.initial_point() with the correct raw start.
             self.raw_initval = raw_initvals
             par_raw = pm.Normal(f"{self.label}_raw",
                                 mu=0,
@@ -713,7 +712,23 @@ class Parameter:
 
         return self.value
 
-    def generate_posterior(self, posterior_bundle):
+    def generate_posterior(self, posterior_bundle, param_lookup=None):
+        """Evaluate this parameter's expression over the posterior.
+
+        Parameters
+        ----------
+        posterior_bundle : mapping of name → array
+            Posterior draws.  When ``param_lookup`` is provided the values are
+            assumed to be in *user* units (as stored in the trace); they are
+            converted to internal units before evaluating the PyTensor expression
+            and the result is converted back to user units before returning.
+            When ``param_lookup`` is ``None`` the bundle is assumed to already
+            be in internal units (e.g. single-point evaluation during
+            ``inspect_start``).
+        param_lookup : dict[str, Parameter], optional
+            Map from parameter label to Parameter object, used to look up
+            conversion factors for the input variables.
+        """
         if self.label in posterior_bundle:
             return posterior_bundle[self.label]
         if self.expression is None:
@@ -732,9 +747,11 @@ class Parameter:
             if hasattr(n, 'name') and n.name in posterior_bundle
         ]
 
-        # fixed parameter, just return the scalar
+        # fixed parameter, just return the scalar (convert output to user units)
         if not inputs_in_posterior:
             val = np.asarray(expr.eval(), dtype=float)
+            if param_lookup is not None:
+                val = val * np.squeeze(np.asarray(self._get_conversion_factors(), dtype=float))
             if val.size > 1:
                 return val
             return val.item()
@@ -757,6 +774,14 @@ class Parameter:
             # az.extract puts the 'sample' dimension LAST.
             # Move it to the FIRST dimension so we can loop over it safely: (n_samples, *shape)
             val = np.moveaxis(val, -1, 0)
+
+            # When the posterior is in user units, convert each input to internal
+            # units so the PyTensor expression (compiled with internal-unit nodes)
+            # receives the values it expects.
+            if param_lookup is not None and n.name in param_lookup:
+                in_factor = np.squeeze(
+                    np.asarray(param_lookup[n.name]._get_conversion_factors(), dtype=float))
+                val = val / in_factor
 
             if n_samples is None:
                 n_samples = val.shape[0]
@@ -786,6 +811,12 @@ class Parameter:
             args = [_match_ndim(arr[i], n)
                     for arr, n in zip(input_data, inputs_in_posterior)]
             result[i] = calc_func(*args)
+
+        # Convert internal-unit result to user units when the inputs came from a
+        # user-unit posterior (param_lookup provided).
+        if param_lookup is not None:
+            out_factor = np.squeeze(np.asarray(self._get_conversion_factors(), dtype=float))
+            result = result * out_factor
 
         # Return the proper shape with 'sample' at the end again to match ArviZ's format
         return np.moveaxis(result, 0, -1)
@@ -1092,9 +1123,9 @@ class Parameter:
     # Posterior summary
     # ---------
     def compute_summary(self, nsigma: float = 1.0) -> Any:
-        # arr from az.extract places the 'sample' dimension LAST
-        arr = getattr(self.posterior, "values", self.posterior)
-        arr = self.from_internal(arr)
+        # arr from az.extract places the 'sample' dimension LAST.
+        # Posterior is stored in user units (from the user-unit trace Deterministic).
+        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
 
         def get_stat(data):
             med = float(np.nanquantile(data, 0.5))

@@ -14,12 +14,12 @@ galacticmodel:
 parameter_file: "gm.params.yaml"
 
 sampler:
-  pymc:
-    tune: 2000
-    draws: 3000
-    chains: 4
-    ncores: 1
-    init: "adapt_diag"
-    target_accept: 0.99
-    check_curvatures: True
-    recompute_trace: True
+  method: nuts
+  tune: 2000
+  draws: 3000
+  chains: 4
+  cores: 1
+  init: adapt_diag
+  target_accept: 0.99
+  check_curvatures: True
+  recompute_trace: True

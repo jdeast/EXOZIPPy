@@ -62,7 +62,8 @@ def _safe_rho(value):
 def _build_pspl_model(p, coords, mag_method, use_rho=False):
     """Construct a MulensModel for PSPL (+ optional finite source).
 
-    Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho]
+    Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + optional [u1]
+    Extra trailing elements (u1) are ignored by the builder; LD is applied in perform().
     """
     mm_params = _base_mm_params(p)
     if use_rho:
@@ -94,6 +95,7 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     """Construct a MulensModel for a binary lens.
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
+    Extra trailing elements (u1) are ignored by the builder; LD is applied in perform().
     """
     mm_params = _base_mm_params(p)
     idx = 5
@@ -127,15 +129,19 @@ class _MagOpBase(Op):
 
     Subclasses set `_builder` to the model-construction function, which fixes
     the expected param-vector layout.
+
+    When `bandpass` is not None, u1 is expected as the last element of the param
+    vector. It is applied via set_limb_coeff_u before magnification is computed.
     """
     itypes = [pt.dvector, pt.dvector, pt.dmatrix]
     otypes = [pt.dvector]
     _builder = None
 
-    def __init__(self, coords, mag_method, use_rho=False):
+    def __init__(self, coords, mag_method, use_rho=False, bandpass=None):
         self.coords = coords
         self.mag_method = mag_method
         self.use_rho = use_rho
+        self.bandpass = bandpass  # None = no LD; str = apply u1 LD for this bandpass
         self._coord_cache = {}
 
     def infer_shape(self, fgraph, node, input_shapes):
@@ -145,14 +151,20 @@ class _MagOpBase(Op):
         p, times_np, obs_pos_np = inputs
         model = self._builder(p, self.coords, self.mag_method, self.use_rho)
         sat_coord = _get_sat_coord(obs_pos_np, times_np, self._coord_cache)
-        outputs[0][0] = np.asarray(model.get_magnification(times_np,
-                                                            satellite_skycoord=sat_coord))
+        with np.errstate(invalid='ignore', divide='ignore'):
+            if self.bandpass is not None:
+                model.set_limb_coeff_u(self.bandpass, float(p[-1]))
+                A = model.get_magnification(times_np, satellite_skycoord=sat_coord,
+                                            bandpass=self.bandpass)
+            else:
+                A = model.get_magnification(times_np, satellite_skycoord=sat_coord)
+        outputs[0][0] = np.asarray(A)
 
     def pullback(self, inputs, outputs, cotangents):
         p, times, obs_pos = inputs
         g = cotangents[0]
         grad_op = _MagGradOp(type(self)._builder, self.coords,
-                             self.mag_method, self.use_rho)
+                             self.mag_method, self.use_rho, self.bandpass)
         return [
             grad_op(p, times, obs_pos, g),
             DisconnectedType()(),
@@ -170,23 +182,24 @@ class _MagOpBase(Op):
 class MulensMagOp(_MagOpBase):
     """PyTensor Op wrapping MulensModel for PSPL (+ optional finite source).
 
-    Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho]
+    Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + optional [u1]
     """
     _builder = staticmethod(_build_pspl_model)
 
-    def __init__(self, coords, mag_method="point_source", use_rho=False):
-        super().__init__(coords, mag_method, use_rho)
+    def __init__(self, coords, mag_method="point_source", use_rho=False, bandpass=None):
+        super().__init__(coords, mag_method, use_rho, bandpass)
 
 
 class BinaryLensMagOp(_MagOpBase):
     """PyTensor Op wrapping MulensModel for binary lens (+ optional finite source).
 
     Param vector: [t_0, u_0, t_E, pi_E_N, pi_E_E] + optional [rho] + [s, q, alpha_deg]
+    + optional [u1]
     """
     _builder = staticmethod(_build_binary_model)
 
-    def __init__(self, coords, mag_method="auto_vbbl", use_rho=False):
-        super().__init__(coords, mag_method, use_rho)
+    def __init__(self, coords, mag_method="auto_vbbl", use_rho=False, bandpass=None):
+        super().__init__(coords, mag_method, use_rho, bandpass)
 
 
 class _MagGradOp(Op):
@@ -194,11 +207,12 @@ class _MagGradOp(Op):
     itypes = [pt.dvector, pt.dvector, pt.dmatrix, pt.dvector]
     otypes = [pt.dvector]
 
-    def __init__(self, builder, coords, mag_method, use_rho=False, eps=1e-6):
+    def __init__(self, builder, coords, mag_method, use_rho=False, bandpass=None, eps=1e-6):
         self._builder = builder
         self.coords = coords
         self.mag_method = mag_method
         self.use_rho = use_rho
+        self.bandpass = bandpass
         self.eps = eps
         self._coord_cache = {}
 
@@ -207,7 +221,12 @@ class _MagGradOp(Op):
 
     def _calc(self, p, times_1d, sat_coord):
         model = self._builder(p, self.coords, self.mag_method, self.use_rho)
-        return model.get_magnification(times_1d, satellite_skycoord=sat_coord)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            if self.bandpass is not None:
+                model.set_limb_coeff_u(self.bandpass, float(p[-1]))
+                return model.get_magnification(times_1d, satellite_skycoord=sat_coord,
+                                               bandpass=self.bandpass)
+            return model.get_magnification(times_1d, satellite_skycoord=sat_coord)
 
     def perform(self, node, inputs, outputs):
         params, times_np, obs_pos_np, g = inputs

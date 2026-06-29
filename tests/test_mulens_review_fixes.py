@@ -247,27 +247,6 @@ def test_q_source_estimate_sharp_caustic_crossing():
     )
 
 
-def test_band_ndx_warns_that_ld_is_not_wired(caplog):
-    """
-    Given an instrument config that sets band_ndx,
-    When register_parameters runs,
-    Then a warning states that limb darkening is not yet applied to the
-      magnification (instead of silently dropping it).
-    """
-    # Arrange
-    inst = MulensInstrument([{"file": "unused.txt", "band_ndx": 0}],
-                            _DummyConfigManager())
-    inst.fs_init = [1000.0]
-    inst.q_source_init = [1.0]
-
-    # Act
-    with caplog.at_level(logging.WARNING):
-        inst.register_parameters(_DummySystem())
-
-    # Assert
-    assert any("limb darkening" in record.message for record in caplog.records)
-
-
 # ---------------------------------------------------------------------------
 # q derived from masses (regression for ghost-parameter bug)
 # ---------------------------------------------------------------------------

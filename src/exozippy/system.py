@@ -141,8 +141,8 @@ class System(Component):
         starting value is always initval even when an explicit prior mean
         mu != initval.
 
-        We do NOT trust model.initial_point() here: at this stage it can draw
-        from the (intentionally very wide) priors instead of our initvals.
+        We override model.initial_point() here to guarantee the physical
+        starting value is always our initval.
         """
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
@@ -201,29 +201,31 @@ class System(Component):
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
-        #posterior = idata.posterior
         posterior = az.extract(idata)
+        param_lookup = self.get_parameter_lookup()
 
         # Dynamically discover all components (Stars, Planets, Orbits, Instruments, etc.)
         for attr_name, comp in self.__dict__.items():
             if isinstance(comp, Component) and comp is not self:
-                self._set_comp_posterior(comp, posterior)
+                self._set_comp_posterior(comp, posterior, param_lookup)
 
-    def _set_comp_posterior(self, component, posterior):
+    def _set_comp_posterior(self, component, posterior, param_lookup):
         for attr_name in dir(component):
             attr = getattr(component, attr_name)
 
             if isinstance(attr, Parameter):
                 if attr.label in posterior:
-                    # Case A: It was a named node in the graph
+                    # Case A: Named Deterministic in the trace (user units).
                     attr.posterior = posterior[attr.label]
                 elif attr.expression is not None:
-                    # Case B: It was 'Floating' math; calculate it now
-                    attr.posterior = attr.generate_posterior(posterior)
+                    # Case B: Not in the trace; evaluate the PyTensor expression.
+                    # Pass param_lookup so generate_posterior converts user-unit
+                    # inputs → internal → evaluates → back to user units.
+                    attr.posterior = attr.generate_posterior(posterior, param_lookup=param_lookup)
 
             # Recurse to children (Stars, Planets, etc.)
             elif isinstance(attr, Component) and attr is not component:
-                self._set_comp_posterior(attr, posterior)
+                self._set_comp_posterior(attr, posterior, param_lookup)
 
     def get_parameter_lookup(self):
         """

@@ -33,12 +33,12 @@ mulensinstrument:
 parameter_file: "ob08092.params.yaml"
 
 sampler:
-  pymc:
-    tune: 1000 # generally need longer tuning for mulensing
-    draws: 1000
-    chains: 4
-    cores: 4
-    init: "adapt_diag"
-    target_accept: 0.99
-    check_curvatures: False
-    recompute_trace: True
+  method: nuts
+  tune: 1000              # generally need longer tuning for mulensing
+  draws: 1000
+  chains: 4
+  cores: 4
+  init: adapt_diag
+  target_accept: 0.99
+  check_curvatures: False
+  recompute_trace: True

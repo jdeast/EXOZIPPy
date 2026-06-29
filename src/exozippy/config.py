@@ -399,6 +399,12 @@ class ConfigManager:
                     if "sigma" in ov and "init_scale" not in ov and resolved["sigma"] is not None:
                         apply_value("init_scale", resolved.get("init_scale"), i, ov["sigma"])
 
+                    # If user gave mu but not initval, start the chain at mu rather
+                    # than the defaults.yaml value — the user's prior center is always
+                    # a better starting point than an arbitrary global default.
+                    if "mu" in ov and "initval" not in ov:
+                        apply_value("initval", resolved["initval"], i, ov["mu"])
+
         return resolved
 
     def get_conversion_factor(self, component_type, param_name, full_path=None):
@@ -427,35 +433,81 @@ class ConfigManager:
     @staticmethod
     def standardize_param_names(user_params, config):
         """
-        Transforms user-facing component names into strict internal indices.
-        Example: 'rvinstrument.EXPERT.gamma' -> 'rvinstrument.0.gamma'
+        Translate all user-facing parameter keys to canonical internal index form.
+
+        Three input forms are accepted, processed in two passes so that explicit
+        per-instance values always win over broadcast values regardless of file order:
+
+          Pass 1 — 3-part keys (highest precedence):
+            star.A.teff   →  star.0.teff   (name looked up in config list)
+            star.0.teff   →  star.0.teff   (already indexed; stored as-is)
+
+          Pass 2 — 2-part keys (broadcast to all instances):
+            star.teff     →  star.0.teff, star.1.teff, …
+            sed.errscale  →  sed.errscale  (flat-dict component; kept as-is)
+
+        After this function, self.user_params contains only indexed or flat-dict
+        keys internally.  The 2-part form is purely a user convenience.
         """
-        standardized = {}
         if not user_params:
-            return standardized
+            return {}
 
+        standardized = {}
+
+        # Pass 1: resolve 3-part keys to index form.
         for key, val in user_params.items():
-            parts = key.split(".")
-            if len(parts) == 3:
-                comp_type, comp_name, param_name = parts
+            parts = key.split(".", 2)
+            if len(parts) != 3:
+                continue
 
-                # STRICT CHECK: Ensure the prefix actually exists in the YAML
-                if comp_type not in config:
-                    raise ValueError(
-                        f"\n!!! STRICT NAMING ERROR !!!\n"
-                        f"Parameter '{key}' uses the prefix '{comp_type}', but '{comp_type}' "
-                        f"is not defined in your system configuration.\n"
-                        f"Ensure your YAML block names match your parameter prefixes exactly."
-                    )
+            comp_type, comp_name, param_name = parts
 
-                try:
-                    idx = next(i for i, c in enumerate(config[comp_type]) if c.get("name") == comp_name)
-                    standard_key = f"{comp_type}.{idx}.{param_name}"
-                    standardized[standard_key] = val
-                    continue
-                except StopIteration:
-                    pass  # Name wasn't found in the config block, leave it as-is
-            standardized[key] = val
+            if comp_type not in config:
+                raise ValueError(
+                    f"\n!!! STRICT NAMING ERROR !!!\n"
+                    f"Parameter '{key}' uses the prefix '{comp_type}', but '{comp_type}' "
+                    f"is not defined in your system configuration.\n"
+                    f"Ensure your YAML block names match your parameter prefixes exactly."
+                )
+
+            comp_list = config[comp_type]
+            if not isinstance(comp_list, list):
+                standardized[key] = val  # flat-dict component 3-part key: keep as-is
+                continue
+
+            try:
+                idx = next(
+                    i for i, c in enumerate(comp_list)
+                    if isinstance(c, dict) and c.get("name") == comp_name
+                )
+                standardized[f"{comp_type}.{idx}.{param_name}"] = val
+            except StopIteration:
+                standardized[key] = val  # numeric index or unknown name: keep as-is
+
+        # Pass 2: expand 2-part keys for list components.
+        # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
+        for key, val in user_params.items():
+            parts = key.split(".", 2)
+            if len(parts) != 2:
+                continue
+
+            comp_type, param_name = parts
+            comp_list = config.get(comp_type)
+
+            if not isinstance(comp_list, list):
+                standardized[key] = val  # flat-dict or unknown component: keep as-is
+                continue
+
+            for i in range(len(comp_list)):
+                indexed_key = f"{comp_type}.{i}.{param_name}"
+                if indexed_key not in standardized:
+                    standardized[indexed_key] = val
+
+        # Pass 3: 1-part and other unhandled keys (e.g. 'run').
+        for key, val in user_params.items():
+            if "." not in key and key not in standardized:
+                standardized[key] = val
+
         return standardized
 
     def finalize_user_params(self):
@@ -536,12 +588,27 @@ class ConfigManager:
             else:
                 user_val = val
 
-            # Prevent overwriting dictionaries
-            if final_path not in self.user_params or not isinstance(self.user_params[final_path], dict):
+            # standardize_param_names stores entries under the index form
+            # (star.0.teff) while final_path uses the name form (star.A.teff).
+            # Check both so we don't create a spurious duplicate entry.
+            existing_key = None
+            for try_key in (final_path, path):
+                if try_key in self.user_params and isinstance(self.user_params[try_key], dict):
+                    existing_key = try_key
+                    break
+
+            if existing_key is None:
                 self.user_params[final_path] = {"initval": user_val, "derived": True}
             else:
-                self.user_params[final_path]["initval"] = user_val
-                self.user_params[final_path]["derived"] = True
+                existing = self.user_params[existing_key]
+                # Don't clobber a user-specified Gaussian prior: if the user gave
+                # mu but no initval, resolve() will use mu as the starting point.
+                # Injecting the default-derived initval here would undo that.
+                if "mu" in existing and "initval" not in existing:
+                    existing["derived"] = True
+                else:
+                    existing["initval"] = user_val
+                    existing["derived"] = True
 
     def prune_dependency_cycles(self, cycle_nodes):
         """
@@ -734,6 +801,8 @@ class ConfigManager:
             if not all(s in resolved for s in syms):
                 continue
             for target_str in syms:
+                if scale_provenance.get(target_str, 0) >= RANK_USER:
+                    continue
                 inputs = [s for s in syms if s != target_str]
                 if not all(s in resolved_scales for s in inputs):
                     continue
@@ -780,12 +849,20 @@ class ConfigManager:
                     continue
                 new_rank = min(RANK_DERIVED_USER, scale_provenance[derived_str])
                 parents = [s for s in syms if s != derived_str]
+                # Skip the expensive sp.solve if no parent can benefit
+                if not any(
+                    scale_provenance.get(p, 0) < RANK_USER and new_rank > scale_provenance.get(p, 0)
+                    for p in parents
+                ):
+                    continue
                 try:
                     sols = sp.solve(eq, sp.Symbol(derived_str))
                     if not sols:
                         continue
                     sol = sols[0]
                     for parent_str in parents:
+                        if scale_provenance.get(parent_str, 0) >= RANK_USER:
+                            continue
                         if new_rank <= scale_provenance.get(parent_str, 0):
                             continue
                         parent_sym = sp.Symbol(parent_str)
@@ -879,10 +956,18 @@ class ConfigManager:
         new_rank = max(rank_floor, min(RANK_DERIVED_USER, min_input_rank))
 
         if is_contradiction:
-            logger.warning(
-                f"Over-constrained contradiction detected.\n"
-                f"  Equation: {eq}\n"
-                f"  Action: sacrificing '{target}' to enforce physical consistency.")
+            # All variables in this equation were explicitly set by the user.
+            # Overriding any of them would silently discard user intent — this
+            # commonly happens with "default identity" relations like
+            # Eq(radiussed, radius) when the user intentionally gave the two
+            # parameters different MAP values on a second-iteration run.
+            # Leave every value untouched and let the sampler and likelihood
+            # sort out any inconsistency.
+            logger.debug(
+                f"Over-constrained: all variables in '{eq}' have user rank "
+                f"but equation is violated (error={error:.4g}). "
+                f"Leaving all user values unchanged.")
+            return False
 
         return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
                                    inputs, pinned_vars=pinned_vars)

@@ -1,5 +1,7 @@
 
 import gc
+import importlib
+import time
 import yaml
 import numpy as np
 import math
@@ -41,7 +43,7 @@ class DEMetropolis(pm.DEMetropolis):
 
 # local imports
 from .logger import setup_logging
-from .mkparam import backup_params, mkprior
+from .mkparam import mkprior
 from .outputs.latex import build_latex_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
@@ -67,29 +69,34 @@ def run_fit(config):
 
     setup_logging(prefix, config.get("logger_level", "INFO"))
 
-    # 2. Load the sampler settings
+    # 2. Load the sampler settings (flat under sampler:)
     sampler_cfg = config.get("sampler", {})
-    pymc_cfg = sampler_cfg.get("pymc", {})
-    init = pymc_cfg.get("init", "adapt_diag")
-    tune = int(pymc_cfg.get("tune", 2000))
-    draws = int(pymc_cfg.get("draws", 2000))
-    chains = int(pymc_cfg.get("chains", 4))
-    _cores_raw = pymc_cfg.get("cores", None)
+    init          = sampler_cfg.get("init", "adapt_diag")
+    tune          = int(sampler_cfg.get("tune", 2000))
+    draws         = int(sampler_cfg.get("draws", 2000))
+    chains        = int(sampler_cfg.get("chains", 4))
+    _cores_raw    = sampler_cfg.get("cores", None)
     if _cores_raw is not None:
         cores = int(_cores_raw)
     else:
         _phys = mp.cpu_count()
         cores = max(1, min(int(_phys * 0.75), _phys - 1))
-    target_accept = pymc_cfg.get("target_accept", 0.9)
-    step_method = pymc_cfg.get("step_method", "NUTS")
-    n_temps = int(pymc_cfg.get("n_temps", 8))
-    T_max = float(pymc_cfg.get("T_max", 200.0))
-    _n_chains_raw = pymc_cfg.get("n_chains", None)
-    n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
-    recompute_trace = pymc_cfg.get("recompute_trace", False)
-    nthin = int(pymc_cfg.get("nthin", 1))
-    check_curvatures = pymc_cfg.get("check_curvatures", True)
-    profile = pymc_cfg.get("profile", False)
+    target_accept   = sampler_cfg.get("target_accept", 0.9)
+    method          = sampler_cfg.get("method", "nuts").lower()
+    n_temps         = int(sampler_cfg.get("n_temps", 8))
+    T_max           = float(sampler_cfg.get("T_max", 200.0))
+    _n_chains_raw   = sampler_cfg.get("n_chains", None)
+    n_chains        = int(_n_chains_raw) if _n_chains_raw is not None else None
+    recompute_trace = sampler_cfg.get("recompute_trace", False)
+    nthin           = int(sampler_cfg.get("nthin", 1))
+    check_curvatures = sampler_cfg.get("check_curvatures", True)
+    profile         = sampler_cfg.get("profile", False)
+    _min_ess_raw    = sampler_cfg.get("min_ess", 1000)
+    min_ess         = int(_min_ess_raw) if _min_ess_raw is not None else None
+    _max_rhat_raw   = sampler_cfg.get("max_rhat", 1.01)
+    max_rhat        = float(_max_rhat_raw) if _max_rhat_raw is not None else None
+    _maxtime_raw    = sampler_cfg.get("maxtime", None)
+    maxtime         = float(_maxtime_raw) if _maxtime_raw is not None else None
     if profile: pytensor.config.profile = True
 
     # 3. Build the stellar system into a PyMC Graph
@@ -107,8 +114,7 @@ def run_fit(config):
 
         # Build the raw starting point explicitly: 0 for logit params,
         # (initval - mu)/sigma for Gaussian-path params, so the physical
-        # start is always initval (model.initial_point() is not trusted —
-        # it can draw randomly from our intentionally huge priors).
+        # start is always our initval.
         raw_start = system.get_raw_start(model)
 
         # convert raw starting point to the internal starting point
@@ -133,7 +139,7 @@ def run_fit(config):
         else:
             # do the sampling and save the results
             nuts_scales = np.array(nuts_scales).flatten()
-            if step_method == "PTDE":
+            if method == "ptde":
                 idata = ptde_sample(
                     model, system, draws, tune,
                     n_temps=n_temps,
@@ -141,8 +147,42 @@ def run_fit(config):
                     n_chains=n_chains,
                     cores=cores,
                     plot_prefix=str(prefix),
+                    min_ess=min_ess,
+                    max_rhat=max_rhat,
+                    maxtime=maxtime,
                 )
+            elif method in ("numpyro", "blackjax"):
+                try:
+                    importlib.import_module(method)
+                except ImportError:
+                    logger.warning(
+                        f"{method} is not installed — falling back to PyMC NUTS. "
+                        f"Install it with: pip install {method}"
+                    )
+                    method = "nuts"
+                if method != "nuts":
+                    import jax
+                    jax.config.update("jax_enable_x64", True)
+                    from pymc.sampling.jax import sample_jax_nuts
+                    chain_method = sampler_cfg.get("chain_method", "parallel")
+                    idata = sample_jax_nuts(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        target_accept=target_accept,
+                        initvals=internal_start,
+                        chain_method=chain_method,
+                        idata_kwargs={"log_likelihood": False},
+                        nuts_sampler=method,
+                    )
             else:
+                nuts_callback = None
+                if maxtime is not None:
+                    _nuts_start = time.time()
+                    def nuts_callback(trace, draw):
+                        if time.time() - _nuts_start > maxtime:
+                            logger.info(f"NUTS: wall-clock limit {maxtime:.0f}s reached")
+                            raise KeyboardInterrupt
                 step = pm.NUTS(target_accept=target_accept)
                 idata = pm.sample(
                     draws=draws,
@@ -152,7 +192,8 @@ def run_fit(config):
                     step=step,
                     cores=cores,
                     return_inferencedata=True,
-                    idata_kwargs={"log_likelihood": False}
+                    idata_kwargs={"log_likelihood": False},
+                    callback=nuts_callback,
                 )
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
@@ -167,6 +208,10 @@ def run_fit(config):
                         lp_vals, dims=["chain", "draw"],
                         coords={"chain": idata.posterior.chain,
                                 "draw": idata.posterior.draw})
+            # Convert sampled variables to user-facing units before archiving.
+            # This makes the trace file, trace plots, ArviZ summary, and
+            # mkparam output all use the same units the user specified.
+            _convert_posterior_to_user_units(idata, system.get_parameter_lookup())
             az.to_netcdf(idata, trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
@@ -211,13 +256,11 @@ def run_fit(config):
                        caption=r"Median and 68\% Confidence intervals for " + prefix.stem)
 
     # Generate final plots
-    draws = get_draws(idata)
+    draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
-    # Preserve the current params.yaml, then write a MAP-seeded successor
     try:
-        backup_params(config)
         mkprior(config, trace_path=trace_path)
     except Exception:
         logger.exception("mkprior failed (non-fatal)")
@@ -237,8 +280,11 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
     logger.info("-" * table_width)
     logger.info("--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------")
     logger.info("--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------")
-    logger.info("--------           abs(Curv) >~ 1e4 will impact efficiency and require more tuning steps                               --------")
-    logger.info("--------           abs(Curv) ~< 1e-4 may artificially truncate your posteriors or severely impact efficiency           --------")
+    logger.info("--------           The deviation from ideal primarily impacts tuning efficiency.                                       --------")
+    logger.info("--------           It can easily tolerate factors of 10,000+ from ideal with a longer tuning phase.                    --------")
+    logger.info("--------           However, the initial scale does impact the steepness of bounds on derived parameters.               --------")
+    logger.info("--------           Scales that are too large will create softer bounds that might introduce real biases.               --------")
+    logger.info("--------           Scales that are too small will create harder bounds that lead to divergences.                       --------")
     logger.info("--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------")
     logger.info("-" * table_width)
     header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user) |"
@@ -666,12 +712,33 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
             plt.close(fig)
             gc.collect()
 
-def get_draws(idata, n_draws=50):
+def _convert_posterior_to_user_units(idata, param_lookup):
+    """Convert idata.posterior in-place from internal math units to user units.
+
+    Each non-raw variable in the posterior whose Parameter has a non-trivial
+    unit conversion is multiplied by the internal→user factor.  This is called
+    once after sampling so that the saved trace, trace plots, ArviZ summary,
+    and mkparam output are all in user-facing units (e.g. jupiterMass, m/s).
+    """
+    for var_name in list(idata.posterior.data_vars):
+        if var_name.endswith('_raw') or var_name not in param_lookup:
+            continue
+        factor = np.squeeze(np.asarray(
+            param_lookup[var_name]._get_conversion_factors(), dtype=float))
+        if np.all(factor == 1.0):
+            continue
+        idata.posterior[var_name] = idata.posterior[var_name] * factor
+
+
+def get_draws(idata, n_draws=50, param_lookup=None):
     """
     Extracts a random subset of draws from the posterior for plotting.
+
+    The trace is stored in user units.  Component physics functions expect
+    internal units, so each variable is divided by its conversion factor
+    before being returned when ``param_lookup`` is provided.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
-    # This gives us a dataset where every variable has a 'sample' axis
     post = az.extract(idata, combined=True)
 
     total_available = post.sample.size
@@ -682,9 +749,14 @@ def get_draws(idata, n_draws=50):
 
     draw_list = []
     for idx in indices:
-        # Create a point dictionary for this specific draw
-        # .isel(sample=idx) selects the values at that index across all variables
-        point = {var: post[var].isel(sample=idx).values for var in post.data_vars}
+        point = {}
+        for var in post.data_vars:
+            val = post[var].isel(sample=idx).values
+            if param_lookup is not None and var in param_lookup and not var.endswith('_raw'):
+                factor = np.squeeze(
+                    np.asarray(param_lookup[var]._get_conversion_factors(), dtype=float))
+                val = val / factor
+            point[var] = val
         draw_list.append(point)
 
     return draw_list

@@ -22,27 +22,35 @@ galacticmodel:
   - name: "OB140939"
     anchor_idx: 1 # in mulensing, we anchor to the source by convention
 
+band:
+  - name: "OGLE_I"
+    filter: "OGLE.I"
+    ld_law: "linear"
+  - name: "Spitzer_36"
+    filter: "Spitzer.IRAC.36"
+    ld_law: "linear"
+
 mulensinstrument:
   - name: "OGLE4"
     file: "n20100310.I.OGLE.OB140939.dat"
-    filter: "I"
     zero_point: ""
     observer_location: "earth" # earth, spitzer, kepler, roman, lat/lon, or filename of horizons ephemeris to interpolate
+    band: "OGLE_I"
   - name: "Spitzer"
     file: "n20140605.L.Spitzer.OB140939.dat"
-    filter: "Spit36" # From Yee+ 2014
     zero_point: ""
     observer_location: "spitzer"
+    band: "Spitzer_36"
 
 parameter_file: "ob140939.params.yaml"
 
 sampler:
-  pymc:
-    tune: 4000 # generally need longer tuning for mulensing
-    draws: 5000
-    chains: 4
-    cores: 4
-    init: "adapt_diag"
-    target_accept: 0.99
-    check_curvatures: True
-    recompute_trace: True
+  method: nuts
+  tune: 4000              # generally need longer tuning for mulensing
+  draws: 5000
+  chains: 4
+  cores: 4
+  init: adapt_diag
+  target_accept: 0.99
+  check_curvatures: True
+  recompute_trace: True

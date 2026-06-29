@@ -84,9 +84,9 @@ The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scan
 `Parameter` is the universal node wrapper. Key points:
 - All numeric fields (`initval`, `init_scale`, `lower`, `upper`, `mu`, `sigma`) are stored in **internal units** after `__post_init__` applies the unit conversion factor.
 - `unit` is the user-facing unit (from `defaults.yaml` or user override); `internal_unit` is the math unit.
-- `sigma = 0` → parameter is fixed. `sigma > 0` → Gaussian potential applied. No sigma + `init_scale` → wide uniform (raw `N(0, 1000)`).
+- `sigma = 0` → parameter is fixed. `sigma > 0` → Gaussian potential applied. No sigma + `init_scale` → uniform prior on `[lower, upper]` via logit transform.
 - Symbolic PyTensor nodes passed as `initval` are preserved as-is (no unit conversion applied).
-- `build_pymc()` uses non-centered parameterization: raw `N(0, sigma_raw)` mapped to physical space via scale + shift.
+- `build_pymc()` uses non-centered parameterization: raw `N(0, 1)` mapped to physical space via logit or linear scale + shift.
 
 ### Physics registry
 

@@ -78,10 +78,16 @@
   - Required local patch of PyMC bug
   - Implemented hybrid of DEMetropolisZ and DEMetropolis to take advantage of exploration benefits of intra-chain exchange (DEMetropolis) while maintaining independence for proper convergence stats (DEMetropolisZ uses its own history)
    - This is better than EXOFASTv2's sampler, which is equivalent to DEMetropolis/setting n_groups=1
- - Implement Parallel tempering and make a hybrid analogous to EXOFASTv2's sampler
+ - Implemented Parallel tempering + Differential Evolution sampler, analogous to EXOFASTv2's sampler
   - Better than HMC for multi-modal exploration (like we expect for mulensing)
   - HMC doesn't play well with gradient free Op implementation of MulensModel
-  - Claude thinks SMC is not applicable to our use case
+  - adaptive step sizes to optimize temperature scaling
+  - Robbins-Monro temperature ladder adaptation (Vousden, Farr & Mandel 2016,
+    ptemcee): after each swap attempt between rungs k and k+1, update
+    Δ(log T_k) += γ_n · (accepted - r*), γ_n ~ 1/n^0.7, r* ≈ 0.234;
+    freeze ladder at end of tune phase. Eliminates need to hand-tune T_max.
+    ptde.py already has adapt_ladder / target_swap_rate stubs for this.
+  - check that we're actually using numpyro when specified
 
 * one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 
@@ -111,7 +117,7 @@
   - astrometry: ??
 
 * output new prior file from old run
- - implemented but not tested
+ - implemented but not well tested, seems to break KELT-4A.
 
 * automatic stopping upon mixing (user-settable R-hat / ESS thresholds;
   may need to wait for PyMC support)

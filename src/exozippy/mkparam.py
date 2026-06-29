@@ -1,7 +1,7 @@
 """mkparam - Seed a params.yaml from the MAP of a previous trace."""
 
 import logging
-import shutil
+import re
 from pathlib import Path
 
 import arviz as az
@@ -34,37 +34,38 @@ def _find_existing(existing_params, comp_key, idx, name, param):
     return None, None
 
 
-def backup_params(config, base_dir=None):
-    """
-    Copy the parameter file to a versioned backup (params.2.yaml, params.3.yaml, …).
+def _normalize_key(key, config):
+    """Rewrite comp.0.param index notation to comp.Name.param for readability."""
+    parts = key.split(".", 2)
+    if len(parts) == 3:
+        comp_key, idx_or_name, param = parts
+        try:
+            idx = int(idx_or_name)
+            instance_names = _get_instance_names(config, comp_key)
+            if idx < len(instance_names):
+                return f"{comp_key}.{instance_names[idx]}.{param}"
+        except ValueError:
+            pass
+    return key
 
-    Returns the backup Path, or None if no parameter file is configured.
+
+def _next_versioned_path(param_path):
+    """Return the path with its version suffix incremented by one.
+
+    foo.params.yaml      → foo.params.2.yaml
+    foo.params.2.yaml    → foo.params.3.yaml
+    foo.params.12.yaml   → foo.params.13.yaml
     """
-    if isinstance(config, (str, Path)):
-        base_dir = Path(config).parent
-        config = _load_yaml(str(config))
+    p = Path(param_path)
+    suffix = p.suffix  # ".yaml"
+    # Strip the last extension to expose possible version number
+    stem = p.name[: p.name.rfind(suffix)]  # e.g. "foo.params" or "foo.params.2"
+    m = re.search(r'^(.*?)\.(\d+)$', stem)
+    if m:
+        base, n = m.group(1), int(m.group(2))
     else:
-        base_dir = Path(base_dir or ".")
-
-    param_file = config.get("parameter_file")
-    if not param_file:
-        return None
-    param_path = base_dir / param_file
-    if not param_path.exists():
-        return None
-
-    stem = param_path.stem    # e.g. "ob140939.params"
-    suffix = param_path.suffix  # ".yaml"
-    n = 2
-    while True:
-        backup = param_path.parent / f"{stem}.{n}{suffix}"
-        if not backup.exists():
-            break
-        n += 1
-
-    shutil.copy2(param_path, backup)
-    logger.info(f"mkprior: params backup → {backup}")
-    return backup
+        base, n = stem, 1
+    return p.parent / f"{base}.{n + 1}{suffix}"
 
 
 def mkprior(config, base_dir=None, trace_path=None, output_path=None):
@@ -101,21 +102,9 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
     if output_path is None:
         param_file = config.get("parameter_file")
         if param_file:
-            p = base_dir / param_file
-            param_dir = p.parent
-            # Strip the trailing ".yaml"/".yml" to get the base stem
-            # e.g. "kelt4.params.yaml" → "kelt4.params"
-            base_stem = p.name[: p.name.rfind(".")]
+            output_path = _next_versioned_path(base_dir / param_file)
         else:
-            param_dir = base_dir
-            base_stem = f"{run_name}.params"
-        n = 2
-        while True:
-            candidate = param_dir / f"{base_stem}.{n}.yaml"
-            if not candidate.exists():
-                break
-            n += 1
-        output_path = candidate
+            output_path = base_dir / f"{run_name}.params.2.yaml"
 
     param_file = config.get("parameter_file")
     existing_params = {}
@@ -168,8 +157,19 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
         instance_names = _get_instance_names(config, comp_key)
 
         for i, (mv, sv) in enumerate(zip(map_vals, std_vals)):
-            name = instance_names[i] if i < len(instance_names) else str(i)
-            out_key = f"{comp_key}.{name}.{param}"
+            if instance_names:
+                name = instance_names[i] if i < len(instance_names) else str(i)
+                out_key = f"{comp_key}.{name}.{param}"
+            elif len(map_vals) == 1:
+                # Component uses a flat-dict config (no named instances).
+                # Write the 2-part key to match the trace variable name so the
+                # next run can find the entry without hitting a name-lookup crash.
+                name = None
+                out_key = f"{comp_key}.{param}"
+            else:
+                # Multiple unnamed instances — fall back to numeric index.
+                name = str(i)
+                out_key = f"{comp_key}.{i}.{param}"
 
             existing_key, existing_entry = _find_existing(
                 existing_params, comp_key, i, name, param
@@ -177,21 +177,26 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
             if existing_key:
                 consumed_existing.add(existing_key)
 
-            has_prior = isinstance(existing_entry, dict) and (
-                "mu" in existing_entry or "sigma" in existing_entry
-            )
-            if has_prior:
-                entry = {
-                    "mu": float(np.round(mv, 8)),
-                    "init_scale": float(np.round(sv, 8)),
-                }
-                if "sigma" in existing_entry:
-                    entry["sigma"] = existing_entry["sigma"]
-            else:
-                entry = {
-                    "initval": float(np.round(mv, 8)),
-                    "init_scale": float(np.round(sv, 8)),
-                }
+            # Always set initval to the MAP value so the next run starts there.
+            # Preserve mu/sigma/bounds from the existing entry unchanged — mu is
+            # the prior center, not the starting point, so it must not move.
+            entry = {
+                "initval": float(np.round(mv, 8)),
+                "init_scale": float(np.round(sv, 8)),
+            }
+            if isinstance(existing_entry, dict):
+                for prior_key in ("mu", "sigma", "lower", "upper"):
+                    if prior_key in existing_entry:
+                        entry[prior_key] = existing_entry[prior_key]
+                # If the original had a Gaussian prior (sigma > 0) but no
+                # explicit mu, the original initval was the prior center.
+                # Promote it to mu so the prior doesn't shift as initval
+                # moves to the MAP on successive mkparam runs.
+                existing_sigma = existing_entry.get("sigma")
+                if (existing_sigma is not None and float(existing_sigma) != 0
+                        and "mu" not in existing_entry
+                        and "initval" in existing_entry):
+                    entry["mu"] = existing_entry["initval"]
 
             output[out_key] = entry
 
@@ -200,11 +205,24 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
     # Pass through existing entries not touched by the trace only if they carry
     # a constraint (prior, bound, or fixed value).  Pure initval-only entries
     # on non-sampled parameters are stale guesses — discard them.
+    # Normalize all keys to name notation (star.A.param) regardless of how the
+    # existing file expressed them (star.0.param or star.param).
     for key, val in existing_params.items():
         if key not in consumed_existing:
             if isinstance(val, dict) and not (_CONSTRAINT_FIELDS & val.keys()):
                 continue
-            output[key] = val
+            # For non-sampled constraint parameters (e.g. a Gaia parallax prior
+            # applied as a potential on distance), promote initval→mu so the
+            # prior center is explicit and cannot accidentally drift if initval
+            # is ever edited.  Same logic as for sampled parameters above.
+            if isinstance(val, dict):
+                sigma = val.get("sigma")
+                if (sigma is not None and float(sigma) != 0
+                        and "mu" not in val
+                        and "initval" in val):
+                    val = dict(val)
+                    val["mu"] = val["initval"]
+            output[_normalize_key(key, config)] = val
 
     output_path = Path(output_path)
     with open(output_path, "w") as f:

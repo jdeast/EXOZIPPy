@@ -38,20 +38,17 @@ rvinstrument:
   - name: "TRES"
     file: "KELT-4b.TRES.rv"
 
-parameter_file: "kelt4.params.yaml"
-#parameter_file: "kelt4.params.2.yaml" # broken
+#parameter_file: "kelt4.params.yaml"
+parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
 
 sampler:
-  backend: "pymc" # TODO: "affine_invariant", "differential_evolution", "parallel_tempering", "multinest"
-  pymc:
-    tune: 2000
-    draws: 4000
-    chains: 4
-    cores: 4
-    init: "adapt_diag"
-    target_accept: 0.95
-    #nuts_sampler: "pymc" # "numpyro", "blackjax", "nutpie"
-    nuts_sampler: "numpyro"
-    check_curvatures: True
-    recompute_trace: True # if False and an existing prefix.nc file exists, it will load that rather than re-sample
-    profile: False
+  method: nuts #numpyro         # nuts, numpyro, blackjax, ptde
+  tune: 2000
+  draws: 4000
+  chains: 4
+  cores: 4
+  init: adapt_diag
+  target_accept: 0.95
+  check_curvatures: True
+  recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling
+  profile: False
