@@ -57,6 +57,14 @@ logger = logging.getLogger(__name__)
 # debugging imports
 # import ipdb
 
+KNOWN_SAMPLER_KEYS = {
+    "init", "tune", "draws", "chains", "cores", "target_accept",
+    "method", "n_temps", "T_max", "n_chains", "recompute_trace",
+    "nthin", "check_curvatures", "profile", "min_ess", "max_rhat",
+    "maxtime", "chain_method",
+}
+
+
 def run_fit(config):
     """
     The main library entry point to run an orbital fit.
@@ -82,7 +90,7 @@ def run_fit(config):
         _phys = mp.cpu_count()
         cores = max(1, min(int(_phys * 0.75), _phys - 1))
     target_accept   = sampler_cfg.get("target_accept", 0.9)
-    method          = sampler_cfg.get("method", "nuts").lower()
+    method          = sampler_cfg.get("method", None)   # None → auto-select after system is built
     n_temps         = int(sampler_cfg.get("n_temps", 8))
     T_max           = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw   = sampler_cfg.get("n_chains", None)
@@ -99,10 +107,42 @@ def run_fit(config):
     maxtime         = float(_maxtime_raw) if _maxtime_raw is not None else None
     if profile: pytensor.config.profile = True
 
+    # Warn about unrecognized keys in the sampler block so they are never silently ignored.
+    _unknown_sampler_keys = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    if _unknown_sampler_keys:
+        logger.warning(
+            f"Unrecognized key(s) in the sampler block will be ignored: "
+            f"{_unknown_sampler_keys}. "
+            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
+        )
+
     # 3. Build the stellar system into a PyMC Graph
     system = System(config)
     system.prepare() # this triggers I/O
     model = system.build_model()
+
+    # Aggregate sampler requirements from all active components.
+    # Components advertise incompatible/recommended samplers via sampler_requirements();
+    # run.py stays agnostic about which component imposes the constraint.
+    _incompatible, _recommended, _reasons = set(), set(), []
+    for comp in system.active_components.values():
+        reqs = comp.sampler_requirements()
+        _incompatible.update(reqs.get('incompatible', set()))
+        if 'recommended' in reqs:
+            _recommended.add(reqs['recommended'])
+        if 'reason' in reqs:
+            _reasons.append(reqs['reason'])
+
+    if method is None:
+        method = next(iter(_recommended)) if _recommended else "nuts"
+    elif method.lower() in _incompatible:
+        rec_str = next(iter(_recommended)) if _recommended else "ptde"
+        reason_str = "; ".join(_reasons) if _reasons else "incompatible with this model"
+        logger.warning(
+            f"Sampler '{method}' cannot be used with this model ({reason_str}). "
+            f"Set 'method: {rec_str}' in the sampler block."
+        )
+    method = method.lower()
 
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
@@ -139,6 +179,16 @@ def run_fit(config):
         else:
             # do the sampling and save the results
             nuts_scales = np.array(nuts_scales).flatten()
+            if method in ("numpyro", "blackjax", "nutpie"):
+                try:
+                    importlib.import_module(method)
+                except ImportError:
+                    logger.warning(
+                        f"{method} is not installed — falling back to PyMC NUTS. "
+                        f"Install with: poetry install --extras jax"
+                    )
+                    method = "nuts"
+
             if method == "ptde":
                 idata = ptde_sample(
                     model, system, draws, tune,
@@ -152,29 +202,37 @@ def run_fit(config):
                     maxtime=maxtime,
                 )
             elif method in ("numpyro", "blackjax"):
-                try:
-                    importlib.import_module(method)
-                except ImportError:
-                    logger.warning(
-                        f"{method} is not installed — falling back to PyMC NUTS. "
-                        f"Install it with: pip install {method}"
-                    )
-                    method = "nuts"
-                if method != "nuts":
-                    import jax
-                    jax.config.update("jax_enable_x64", True)
-                    from pymc.sampling.jax import sample_jax_nuts
-                    chain_method = sampler_cfg.get("chain_method", "parallel")
-                    idata = sample_jax_nuts(
-                        draws=draws,
-                        tune=tune,
-                        chains=chains,
-                        target_accept=target_accept,
-                        initvals=internal_start,
-                        chain_method=chain_method,
-                        idata_kwargs={"log_likelihood": False},
-                        nuts_sampler=method,
-                    )
+                import jax
+                jax.config.update("jax_enable_x64", True)
+                from pymc.sampling.jax import sample_jax_nuts
+                chain_method = sampler_cfg.get("chain_method", "parallel")
+                idata = sample_jax_nuts(
+                    draws=draws,
+                    tune=tune,
+                    chains=chains,
+                    target_accept=target_accept,
+                    initvals=internal_start,
+                    chain_method=chain_method,
+                    idata_kwargs={"log_likelihood": False},
+                    nuts_sampler=method,
+                )
+            elif method == "nutpie":
+                # nutpie ignores initvals; it uses init_mean: a flat float64
+                # array in model.free_RVs order (raw/unconstrained space).
+                nutpie_init_mean = np.concatenate([
+                    np.asarray(raw_start[v.name], dtype=float).ravel()
+                    for v in model.free_RVs
+                ])
+                idata = pm.sample(
+                    draws=draws,
+                    tune=tune,
+                    chains=chains,
+                    nuts_sampler="nutpie",
+                    target_accept=target_accept,
+                    nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
+                    cores=cores,
+                    return_inferencedata=True,
+                )
             else:
                 nuts_callback = None
                 if maxtime is not None:
@@ -212,6 +270,7 @@ def run_fit(config):
             # This makes the trace file, trace plots, ArviZ summary, and
             # mkparam output all use the same units the user specified.
             _convert_posterior_to_user_units(idata, system.get_parameter_lookup())
+            _sanitize_netcdf_attrs(idata)
             az.to_netcdf(idata, trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
@@ -711,6 +770,22 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
             pdf.savefig(fig)
             plt.close(fig)
             gc.collect()
+
+def _sanitize_netcdf_attrs(idata):
+    """Flatten dict-valued attrs to JSON strings so xarray can serialize to netCDF.
+
+    nutpie stores rich metadata (dicts) in sample_stats attrs; netCDF only allows
+    scalars/strings/arrays.
+    """
+    import json
+    for group in idata._groups:
+        ds = getattr(idata, group, None)
+        if ds is None or not hasattr(ds, "attrs"):
+            continue
+        for k, v in list(ds.attrs.items()):
+            if isinstance(v, dict):
+                ds.attrs[k] = json.dumps(v)
+
 
 def _convert_posterior_to_user_units(idata, param_lookup):
     """Convert idata.posterior in-place from internal math units to user units.

@@ -149,15 +149,21 @@ class _MagOpBase(Op):
 
     def perform(self, node, inputs, outputs):
         p, times_np, obs_pos_np = inputs
-        model = self._builder(p, self.coords, self.mag_method, self.use_rho)
-        sat_coord = _get_sat_coord(obs_pos_np, times_np, self._coord_cache)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            if self.bandpass is not None:
-                model.set_limb_coeff_u(self.bandpass, float(p[-1]))
-                A = model.get_magnification(times_np, satellite_skycoord=sat_coord,
-                                            bandpass=self.bandpass)
-            else:
-                A = model.get_magnification(times_np, satellite_skycoord=sat_coord)
+        try:
+            model = self._builder(p, self.coords, self.mag_method, self.use_rho)
+            sat_coord = _get_sat_coord(obs_pos_np, times_np, self._coord_cache)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                if self.bandpass is not None:
+                    model.set_limb_coeff_u(self.bandpass, float(p[-1]))
+                    A = model.get_magnification(times_np, satellite_skycoord=sat_coord,
+                                                bandpass=self.bandpass)
+                else:
+                    A = model.get_magnification(times_np, satellite_skycoord=sat_coord)
+        except (ValueError, RuntimeError):
+            # Invalid parameter combination (e.g. NaN source position from extreme
+            # parallax values during sampler exploration). Return NaN so the
+            # likelihood evaluates to -inf and the sampler rejects the proposal.
+            A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A)
 
     def pullback(self, inputs, outputs, cotangents):
@@ -220,13 +226,16 @@ class _MagGradOp(Op):
         return [input_shapes[0]]
 
     def _calc(self, p, times_1d, sat_coord):
-        model = self._builder(p, self.coords, self.mag_method, self.use_rho)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            if self.bandpass is not None:
-                model.set_limb_coeff_u(self.bandpass, float(p[-1]))
-                return model.get_magnification(times_1d, satellite_skycoord=sat_coord,
-                                               bandpass=self.bandpass)
-            return model.get_magnification(times_1d, satellite_skycoord=sat_coord)
+        try:
+            model = self._builder(p, self.coords, self.mag_method, self.use_rho)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                if self.bandpass is not None:
+                    model.set_limb_coeff_u(self.bandpass, float(p[-1]))
+                    return model.get_magnification(times_1d, satellite_skycoord=sat_coord,
+                                                   bandpass=self.bandpass)
+                return model.get_magnification(times_1d, satellite_skycoord=sat_coord)
+        except (ValueError, RuntimeError):
+            return np.full(len(times_1d), np.nan)
 
     def perform(self, node, inputs, outputs):
         params, times_np, obs_pos_np, g = inputs

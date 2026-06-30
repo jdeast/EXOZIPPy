@@ -408,6 +408,28 @@ class Lens(Component):
         forced = self.use_op[index]
         return forced or (n_lenses > 1) or use_rho
 
+    def sampler_requirements(self):
+        """Declare sampler constraints for this lens configuration.
+
+        Binary/finite-source lenses use the MulensModel Op, which is not
+        differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
+        will produce invalid results; PTDE is required.
+
+        PSPL lenses use a symbolic PyTensor formula and are NUTS-compatible,
+        so no constraints are returned.
+        """
+        if any(self.uses_op(i) for i in range(len(self.n_lens_bodies))):
+            return {
+                'incompatible': {'nuts', 'numpyro', 'blackjax'},
+                'recommended': 'ptde',
+                'reason': (
+                    "binary/finite-source microlensing uses the MulensModel Op, "
+                    "which is not differentiable — gradient-based samplers produce "
+                    "invalid results"
+                ),
+            }
+        return {}
+
     def get_magnification_op(self, times, obs_pos, system, index=0, u1=None, bandpass=None):
         """Magnification dispatcher.
 

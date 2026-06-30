@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 import pymc as pm
 import pytensor.tensor as pt
 from scipy.interpolate import CubicSpline
+from scipy.optimize import nnls
 
 from astropy.coordinates import (
     get_body_barycentric,
@@ -92,17 +93,16 @@ class MulensInstrument(Component):
             all_obspos.append(xyz_delta)
             all_obspos_abs.append(xyz_abs)
 
-            self.fs_init.append(
-                self._estimate_baseline_flux(t, m, xyz_delta, ra_rad, dec_rad)
+            f_total, q_source = self._estimate_flux_components(
+                t, m, xyz_delta, ra_rad, dec_rad, i
             )
-            self.q_source_init.append(
-                self._estimate_q_source(t, m, xyz_delta, ra_rad, dec_rad)
-            )
+            self.fs_init.append(f_total)
+            self.q_source_init.append(q_source)
 
             self._check_data_format(
                 t, m, e, xyz_delta, ra_rad, dec_rad,
-                self.fs_init[-1], self.q_source_init[-1],
                 self.config[i].get("file", f"instrument {i}"),
+                data_format=self.config[i].get("data_format", "magnitude"),
             )
 
             all_times.append(t)
@@ -116,21 +116,22 @@ class MulensInstrument(Component):
         self.mag      = np.concatenate(all_mags).astype(float)
         self.err      = np.concatenate(all_errs).astype(float)
         self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations (for _estimate_baseline_flux)
+        self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations
         self.observer_pos_abs = np.vstack(all_obspos_abs).astype(float)  # absolute barycentric (for get_magnification_op)
 
     def _check_data_format(self, t, m, e, xyz_delta, ra_rad, dec_rad,
-                           f_total_init, q_source_init, label):
-        """Warn if peak residuals suggest data is in flux units, not magnitudes.
+                           label, data_format="magnitude"):
+        """Warn if data appears fainter at peak than at baseline.
 
-        The baseline is always self-consistent (f_total_init is derived from it),
-        so we check the event peak: if |model_mag_peak - obs_peak| >> sigma,
-        the model and data are in incompatible spaces (flux vs. magnitude).
+        By the time this runs m is always in magnitudes (flux data has already been
+        converted).  A valid microlensing event must show brightening (smaller mag
+        value) near peak.  If the data instead grows fainter, either:
+          - data_format is 'magnitude' but the data are really in flux units, or
+          - data_format is 'flux' but the data are really in magnitudes.
+
+        Returns silently when the dataset has fewer than 3 epochs near baseline
+        (e.g., Spitzer peak-only data) — no comparison is possible there.
         """
-        if f_total_init <= 0:
-            return
-
-        # Re-derive trajectory to identify peak epochs (same as _estimate_baseline_flux)
         cm = self.config_manager
         def _get(key, default=None):
             data = cm.user_params.get(key)
@@ -159,43 +160,47 @@ class MulensInstrument(Component):
         u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
         A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
 
-        peak_mask = A_traj > 1.5
-        if np.sum(peak_mask) < 3:
+        baseline_mask = A_traj < 1.1
+        peak_mask     = A_traj > 1.5
+
+        # Skip if no baseline coverage (e.g., Spitzer peak-only data)
+        if np.sum(baseline_mask) < 3 or np.sum(peak_mask) < 3:
             return
 
-        # Model magnitudes at peak: what we expect to see if data are in magnitudes
-        q = float(np.clip(q_source_init, 0.05, 1.95))
-        model_flux_peak = f_total_init * (q * A_traj[peak_mask] + (1.0 - q))
-        model_mag_peak  = -2.5 * np.log10(np.maximum(model_flux_peak, 1e-30))
+        m_baseline = float(np.median(m[baseline_mask]))
+        m_peak     = float(np.median(m[peak_mask]))
 
-        residuals   = m[peak_mask] - model_mag_peak
-        rms_peak    = float(np.sqrt(np.mean(residuals ** 2)))
-        typical_err = float(np.median(e))
+        # In magnitudes, brighter = smaller value.  Peak must be brighter.
+        if m_peak > m_baseline:
+            typical_err = float(np.median(np.abs(e)))
+            n_sigma = (m_peak - m_baseline) / max(typical_err, 0.001)
+            if n_sigma > 10.0:
+                if data_format == "flux":
+                    logger.warning(
+                        f"[{label}] After flux→mag conversion, data appears fainter at "
+                        f"peak ({m_peak:.3g}) than at baseline ({m_baseline:.3g}) — "
+                        f"{n_sigma:.0f}σ offset.  Data may actually be in magnitudes; "
+                        f"remove 'data_format: flux' from the YAML config block if so."
+                    )
+                else:
+                    logger.warning(
+                        f"[{label}] Data appears fainter at peak ({m_peak:.3g}) than at "
+                        f"baseline ({m_baseline:.3g}) — {n_sigma:.0f}σ offset.  "
+                        f"Data may be in flux units; add 'data_format: flux' to the "
+                        f"YAML config block for this instrument if so."
+                    )
 
-        if typical_err > 0 and rms_peak > 10.0 * typical_err:
-            logger.warning(
-                f"[{label}] Peak residuals ({rms_peak:.3g}) are "
-                f"{rms_peak / typical_err:.0f}× the typical error ({typical_err:.3g}). "
-                f"Data may be in flux units — add 'data_format: flux' to the YAML "
-                f"config block for this instrument if so."
-            )
+    def _estimate_flux_components(self, t, m, xyz_au, ra_rad, dec_rad, inst_idx):
+        """Estimate f_total and q_source = f_source / f_total for one instrument.
 
-    def _estimate_baseline_flux(self, t, m, xyz_au, ra_rad, dec_rad):
-        """
-        Estimate the unmagnified (baseline) total flux for one instrument.
+        If the user has specified f_source and/or f_blend in their params file,
+        those values are respected:
+          - both given  → skip estimation entirely, derive q from the ratio
+          - f_source only → fix it and solve for f_blend via median residuals
+          - f_blend only  → fix it and solve for f_source via NNLS
+          - neither       → solve for both via NNLS on F = f_source·A + f_blend
 
-        Strategy:
-        - Compute the Paczynski impact-parameter trajectory u(t) for this
-          observer using geocentric-deviation positions (Skowron+2011 convention)
-          and the lens parameters already available in user_params.
-        - If the data contains observations near baseline (A < 1.05),
-          return the median flux of those points.
-        - Otherwise (peak-only coverage, e.g. Spitzer), divide the
-          estimated peak flux by the peak magnification A(u_min) to
-          recover the baseline.
-
-        Falls back to the data median if t_0 or u_0 are not yet in
-        user_params (e.g. the user has not supplied them).
+        Falls back to the data median / q=0.95 when t_0 or u_0 are absent.
         """
         cm = self.config_manager
 
@@ -205,17 +210,29 @@ class MulensInstrument(Component):
                 return default
             return data.get("initval", default) if isinstance(data, dict) else float(data)
 
-        t0    = _get("lens.0.t_0")
-        u0    = _get("lens.0.u_0")
-        tE    = _get("lens.0.t_E")
+        def _get_flux(param):
+            # user_params keys are normalized to index form by standardize_param_names
+            val = _get(f"mulensinstrument.{inst_idx}.{param}")
+            return float(val) if val is not None else None
+
+        t0     = _get("lens.0.t_0")
+        u0     = _get("lens.0.u_0")
+        tE     = _get("lens.0.t_E")
         pi_E_N = _get("lens.0.pi_E_N", 0.0)
         pi_E_E = _get("lens.0.pi_E_E", 0.0)
 
-        if t0 is None or u0 is None:
-            return 10.0 ** (-0.4 * np.median(m))
+        f_source_user = _get_flux("f_source")
+        f_blend_user  = _get_flux("f_blend")
 
-        # Project heliocentric observer positions onto the sky-plane
-        # North/East axes (same convention as get_magnification).
+        if f_source_user is not None and f_blend_user is not None:
+            f_total = f_source_user + f_blend_user
+            q_source = float(np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95))
+            return f_total, q_source
+
+        if t0 is None or u0 is None:
+            f_total = 10.0 ** (-0.4 * np.median(m))
+            return f_total, 0.95
+
         x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
         delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
@@ -224,90 +241,34 @@ class MulensInstrument(Component):
 
         tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
         tau   = (t - float(t0)) / tE_safe
-        # MulensModel convention: minus on both N and E in tau, plus on N in u.
         tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
         u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
         u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
         A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
 
-        # Baseline-covered: at least 3 points with A < 1.05
-        baseline_mask = A_traj < 1.05
-        if np.sum(baseline_mask) >= 3:
-            return 10.0 ** (-0.4 * np.median(m[baseline_mask]))
+        F_obs = 10.0 ** (-0.4 * m)
 
-        # Peak-only: back-calculate from u_min over the observed window.
-        # Using the 10th magnitude percentile (brightest ~10%) as F_peak_est
-        # and assuming pure source (q_frac = 1) as the zeroth-order approximation.
-        u_min  = max(float(np.min(u_traj)), 1e-6)
-        A_peak = (u_min ** 2 + 2.0) / (u_min * np.sqrt(u_min ** 2 + 4.0))
-        F_peak_est = 10.0 ** (-0.4 * np.percentile(m, 10))
-        return F_peak_est / A_peak
+        if f_source_user is not None:
+            f_blend_est = max(float(np.median(F_obs - f_source_user * A_traj)), 0.0)
+            f_source_est = f_source_user
+        elif f_blend_user is not None:
+            (f_source_est,), _ = nnls(A_traj.reshape(-1, 1), F_obs - f_blend_user)
+            f_blend_est = f_blend_user
+        else:
+            X = np.column_stack([A_traj, np.ones(len(A_traj))])
+            (f_source_est, f_blend_est), _ = nnls(X, F_obs)
 
-    def _estimate_q_source(self, t, m, xyz_delta, ra_rad, dec_rad):
-        """Estimate q_source = f_source / f_total from data and initial lens params.
+        f_total = f_source_est + f_blend_est
+        if f_total < 1e-30 or f_source_est < 1e-30:
+            f_total = 10.0 ** (-0.4 * np.median(m))
+            return f_total, 0.95
 
-        For baseline-covered instruments (>=3 points with A_traj < 1.05):
-          q_source = (A_eff_obs - 1) / (A_peak_model - 1)
-        where A_eff_obs is the ratio of observed peak flux to observed baseline flux
-        and A_peak_model is A(u_min) from the initial PSPL trajectory.
-
-        Returns a float (clamped to 0.05–1.95), or 0.95 if underdetermined.
-        """
-        cm = self.config_manager
-
-        def _get(key, default=None):
-            data = cm.user_params.get(key)
-            if data is None:
-                return default
-            return data.get("initval", default) if isinstance(data, dict) else float(data)
-
-        t0 = _get("lens.0.t_0")
-        u0 = _get("lens.0.u_0")
-        tE = _get("lens.0.t_E")
-        pi_E_N = _get("lens.0.pi_E_N", 0.0)
-        pi_E_E = _get("lens.0.pi_E_E", 0.0)
-
-        if t0 is None or u0 is None:
-            return 0.95
-
-        x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
-        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
-                   - y * np.sin(ra_rad) * np.sin(dec_rad)
-                   + z * np.cos(dec_rad))
-
-        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
-        tau = (t - float(t0)) / tE_safe
-        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
-        u_traj = np.sqrt(tau_p**2 + u_p**2)
-        A_traj = (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
-
-        baseline_mask = A_traj < 1.05
-        if np.sum(baseline_mask) < 3:
-            return 0.95
-
-        f_baseline = 10.0 ** (-0.4 * np.median(m[baseline_mask]))
-
-        u_min = max(float(np.min(u_traj)), 1e-6)
-        A_peak_model = (u_min**2 + 2.0) / (u_min * np.sqrt(u_min**2 + 4.0))
-        if A_peak_model < 1.01:
-            return 0.95
-
-        # Observed peak: maximum flux among the top 10% PSPL-ordered points.
-        # Median would underestimate the peak for sharp caustic crossings where
-        # the true peak spans only a few data points within the top 10%.
-        n_peak = max(1, len(m) // 10)
-        peak_idx = np.argsort(u_traj)[:n_peak]
-        f_peak_obs = np.max(10.0 ** (-0.4 * m[peak_idx]))
-
-        A_eff_obs = f_peak_obs / f_baseline
-        q_est = (A_eff_obs - 1.0) / (A_peak_model - 1.0)
-        q_est = float(np.clip(q_est, 0.05, 1.95))
+        q_source = float(np.clip(f_source_est / f_total, 0.05, 0.95))
         logger.debug(
-            f"q_source estimate: A_eff_obs={A_eff_obs:.4f}, A_peak_model={A_peak_model:.4f} → q={q_est:.4f}"
+            f"NNLS flux decomp: f_source={f_source_est:.3e}, f_blend={f_blend_est:.3e}"
+            f" → q_source={q_source:.4f}"
         )
-        return q_est
+        return f_total, q_source
 
     def _abs_to_delta(self, t, xyz_abs):
         """Convert absolute barycentric positions to Skowron+2011 geocentric deviations.

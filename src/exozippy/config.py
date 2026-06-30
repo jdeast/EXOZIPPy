@@ -59,6 +59,29 @@ init_scale, or both.
 
 The logic of the config manager is independent of any specific components.
 """
+
+
+def _meaningful_change(new_val, old_val, new_rank, old_rank, tolerance,
+                       resolved, provenance, target_str):
+    """Return True iff _execute_solve should apply this update and signal progress.
+
+    Propagates a rank improvement silently (updates provenance but returns False)
+    when the value itself hasn't changed.  Returning False when the value is
+    unchanged prevents the relaxation loop from running to max_iter on systems
+    that have converged but still have two competing derivation paths for the
+    same variable.
+    """
+    if old_val is None:
+        return True   # Condition A: variable was previously unknown — always an update
+    ref = max(abs(new_val), abs(old_val), 1e-9)
+    if abs(new_val - old_val) / ref >= tolerance:
+        return True   # value changed meaningfully
+    # Value unchanged; propagate rank silently if it improved
+    if new_rank > old_rank:
+        provenance[target_str] = new_rank
+    return False
+
+
 class ConfigManager:
     def __init__(self, user_params, system_config=None):
         self.raw_user_params = user_params
@@ -748,22 +771,36 @@ class ConfigManager:
 
         # 2. The Relaxation Engine
         logger.info("Solving for starting values/scales of sampled parameters given user/data/default initialization....")
-        updated = True
         iteration = 0
         max_iter = 100  # Failsafe
         _CYCLE_HIST = 6  # how many recent values to keep per variable
         value_history = {}  # {var_name: [recent rounded values]}
         pinned_vars = set()  # variables locked out of further updates due to cycle
 
-        while updated and iteration < max_iter:
-            updated = False
+        while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
 
             for eq in self.all_relations:
-                if self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
-                                        pinned_vars):
-                    updated = True
+                self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
+                                     pinned_vars)
+
+            # Convergence check: compare end-of-iteration state to start-of-iteration.
+            # This correctly handles intra-iteration oscillation (two equations fighting
+            # over the same variable within one pass): individual updates may fire on
+            # each equation, but if the net state is unchanged the loop should stop.
+            net_changed = False
+            for k, v in resolved.items():
+                old = resolved_snapshot.get(k)
+                if old is None:
+                    net_changed = True
+                    break
+                ref = max(abs(v), abs(old), 1e-9)
+                if abs(v - old) / ref >= tolerance:
+                    net_changed = True
+                    break
+            if not net_changed:
+                break
 
             # Cycle detection: track per-variable history; pin any that oscillate.
             # Pinning lets other variables keep converging instead of stopping the loop.
@@ -970,10 +1007,10 @@ class ConfigManager:
             return False
 
         return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
-                                   inputs, pinned_vars=pinned_vars)
+                                   inputs, pinned_vars=pinned_vars, tolerance=tolerance)
 
     def _execute_solve(self, eq, target_str, resolved, provenance, new_rank, resolved_scales, scale_provenance, inputs,
-                       pinned_vars=None):
+                       pinned_vars=None, tolerance=1e-3):
         if pinned_vars and target_str in pinned_vars:
             return False
 
@@ -986,6 +1023,10 @@ class ConfigManager:
             solver_func = self.custom_solvers[lookup_key]
             try:
                 valid_val = float(solver_func(resolved, self.system_config, idx))
+                if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
+                                          provenance.get(target_str, 0), tolerance,
+                                          resolved, provenance, target_str):
+                    return False
                 resolved[target_str] = valid_val
                 provenance[target_str] = new_rank
                 logger.debug(f"Updated {target_str} = {valid_val:.4g} (custom solver)")
@@ -1111,6 +1152,10 @@ class ConfigManager:
 
         # 5. Apply Value and Armor
         if valid_val is not None:
+            if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
+                                      provenance.get(target_str, 0), tolerance,
+                                      resolved, provenance, target_str):
+                return False
             # 5b. Jacobian-filtered rank refinement.
             # Replace raw min(input_ranks) with min(active_input_ranks), where
             # "active" means the input has a non-negligible Jacobian contribution.

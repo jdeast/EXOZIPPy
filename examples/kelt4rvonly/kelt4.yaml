@@ -42,7 +42,7 @@ rvinstrument:
 parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
 
 sampler:
-  method: nuts #numpyro         # nuts, numpyro, blackjax, ptde
+  method: blackjax #numpyro         # numpyro, nutpie, nuts, blackjax, ptde
   tune: 2000
   draws: 4000
   chains: 4

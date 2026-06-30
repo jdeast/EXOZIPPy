@@ -48,31 +48,40 @@ def _geometric_ladder(n_temps, T_max):
 
 
 def _probe_scales(raw_start, logp_fn):
-    """Finite-difference probe: set per-element proposal scales.
+    """Adaptive probe: find per-element proposal scales where one step costs ~0.5 nats.
 
-    Each element is scaled so a single-element perturbation costs at most
-    budget=2 nats below MAP.  Mirrors the DEMetropolis block in run.py.
+    Matches EXOFASTv2's exofast_getmcmcscale: bisects probe magnitude (both signs)
+    until Δlogp ≈ 0.5 (= Δχ²=1).  Falls back to 0.1 when no signal is found,
+    avoiding the old fixed-probe default of 1.0 that sent proposals outside tight
+    priors and caused ~1000 retries per chain.
     """
     map_lp = float(logp_fn(raw_start))
-    budget = 2.0   # nats per parameter element
-    probe_delta = 0.01
+    target_delta = 0.5   # nats; Δlogp=0.5 ↔ Δχ²=1 (EXOFASTv2 convention)
 
     scales = {}
     tight = []
     for key, val in raw_start.items():
         n = val.size
-        s = np.ones(n)
+        s = np.full(n, 0.1)   # conservative fallback (old default 1.0 → many retries)
         for i in range(n):
-            probe = {k: v.copy() for k, v in raw_start.items()}
-            probe[key] = probe[key].copy()
-            probe[key].flat[i] += probe_delta
-            plp = float(logp_fn(probe))
-            delta = map_lp - plp
-            if delta > 0 and np.isfinite(delta):
-                sens = delta / probe_delta ** 2
-                s.flat[i] = min(1.0, np.sqrt(budget / sens))
-                if s.flat[i] < 0.5:
-                    tight.append(f"{key}[{i}]: sens={sens:.2g} scale={s.flat[i]:.3g}")
+            found = False
+            for probe_mag in [0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 2.0]:
+                if found:
+                    break
+                for sign in (1.0, -1.0):
+                    dp = sign * probe_mag
+                    probe = {k: v.copy() for k, v in raw_start.items()}
+                    probe[key] = probe[key].copy()
+                    probe[key].flat[i] += dp
+                    plp = float(logp_fn(probe))
+                    delta = map_lp - plp
+                    if delta > 0 and np.isfinite(delta):
+                        # Quadratic approx: scale² × (delta/dp²) = target_delta
+                        s.flat[i] = min(1.0, abs(dp) * np.sqrt(target_delta / delta))
+                        found = True
+                        break
+            if s.flat[i] < 0.5:
+                tight.append(f"{key}[{i}]: scale={s.flat[i]:.3g}")
         scales[key] = s.reshape(val.shape)
 
     if tight:
@@ -81,27 +90,47 @@ def _probe_scales(raw_start, logp_fn):
 
 
 def _make_starts(n_chains, raw_start, logp_fn, rng):
-    """Generate n_chains starting points near MAP using probe-based scaling."""
+    """Generate n_chains starting points near MAP using probe-based scaling.
+
+    Mirrors EXOFASTv2: scatter chains by factor × scale where
+    factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
+    threshold), and apply exponential decay only when proposals hit hard prior
+    boundaries (lp=-inf).  Raises RuntimeError if a chain cannot be initialized
+    within max_iter retries.
+    """
     map_lp, scales = _probe_scales(raw_start, logp_fn)
     n_params = sum(v.size for v in raw_start.values())
-    threshold = map_lp - 2.0 * n_params
-    logger.info(f"PTDE init: MAP lp={map_lp:.1f}, threshold={threshold:.1f}")
+    factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
+    max_iter = 1000
+    logger.info(
+        f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}"
+    )
 
     starts = [{k: v.copy() for k, v in raw_start.items()}]
     for j in range(1, n_chains):
-        niter = 0
-        while True:
-            eff = 1.0 / np.exp(niter / 1000.0)
+        for niter in range(max_iter):
+            eff = factor / np.exp(niter / 1000.0)
             prop = {k: v + eff * scales[k] * rng.standard_normal(v.shape)
                     for k, v in raw_start.items()}
             lp = float(logp_fn(prop))
-            if np.isfinite(lp) and lp > threshold:
+            if np.isfinite(lp):
                 starts.append(prop)
+                logger.debug(
+                    f"PTDE init chain {j}: accepted after {niter} retries "
+                    f"(lp={lp:.1f}, Δlp={lp - map_lp:.1f})"
+                )
                 break
-            niter += 1
-            if niter % 500 == 0:
+            if niter % 200 == 0 and niter > 0:
                 logger.warning(
-                    f"PTDE init chain {j}: {niter} retries (lp={lp:.1f})")
+                    f"PTDE init chain {j}: {niter} retries still seeking finite lp "
+                    f"(eff={eff:.3g})"
+                )
+        else:
+            raise RuntimeError(
+                f"PTDE chain {j} initialization failed after {max_iter} retries. "
+                f"Check init_scale values in your params.yaml — a parameter may be "
+                f"starting outside its prior bounds."
+            )
     return starts
 
 

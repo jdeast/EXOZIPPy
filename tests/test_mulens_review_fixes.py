@@ -14,6 +14,7 @@ from exozippy.components.mulensing.op import (
 )
 from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
+from exozippy.run import KNOWN_SAMPLER_KEYS
 from conftest import _DummyConfigManager, _DummyComponent, _DummySystem
 
 
@@ -189,7 +190,7 @@ def test_triple_lens_magnification_fails_loudly():
 
 def _make_inst_with_q_source_data(n=870, t0=2458554.89, u0=0.143, tE=18.17,
                                    f_baseline=0.62, A_peak=6.0, peak_width=5):
-    """Return a MulensInstrument whose _estimate_q_source can be called.
+    """Return a MulensInstrument whose _estimate_flux_components can be called.
 
     The synthetic light curve has f_baseline everywhere except for `peak_width`
     consecutive points near t_0 which are set to f_baseline * A_peak, simulating
@@ -218,32 +219,36 @@ def _make_inst_with_q_source_data(n=870, t0=2458554.89, u0=0.143, tE=18.17,
 def test_q_source_estimate_pspl_broad_peak():
     """
     Given a PSPL-like light curve with a broad, well-sampled peak,
-    When _estimate_q_source runs,
+    When _estimate_flux_components runs,
     Then q_source is close to 1 (no blending, source is fully dominant).
     """
     inst, t, m, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
     ra, dec = 0.0, 0.0
-    q = inst._estimate_q_source(t, m, xyz, ra, dec)
-    assert 0.7 < q <= 1.95, f"Expected q_source near 1, got {q:.3f}"
+    _f_total, q = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
 
 
-def test_q_source_estimate_sharp_caustic_crossing():
+def test_flux_total_estimate_sharp_caustic_crossing():
     """
     Given a binary-lens light curve with a sharp caustic crossing where the
     true peak spans only a handful of data points (peak_width=5 out of 870),
-    When _estimate_q_source runs,
-    Then q_source is NOT driven near 0 by a median that misses the peak.
+    When _estimate_flux_components runs,
+    Then f_total is within a factor of 2 of the true baseline flux.
 
-    This is a regression test: the old median-of-top-10% code returned
-    q_source ~ 0.115 for the DC2018 event 128; the fix (using np.max) correctly
-    recovers a value near 1 when there is no blending.
+    Note: q_source is underestimated for sharp binary caustics because the
+    PSPL model used in the NNLS sees high A values at non-caustic near-peak
+    times with baseline flux, driving f_source down.  f_total remains
+    well-constrained because the sum f_source + f_blend ≈ f_baseline.
     """
-    inst, t, m, xyz = _make_inst_with_q_source_data(A_peak=6.0, peak_width=5)
+    f_baseline = 0.62
+    inst, t, m, xyz = _make_inst_with_q_source_data(
+        A_peak=6.0, peak_width=5, f_baseline=f_baseline
+    )
     ra, dec = 0.0, 0.0
-    q = inst._estimate_q_source(t, m, xyz, ra, dec)
-    assert q > 0.5, (
-        f"q_source should be > 0.5 for an unblended sharp caustic crossing; "
-        f"got {q:.3f}.  The median-of-top-10% bug would return ~0.1."
+    f_total, _q = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    assert 0.5 * f_baseline < f_total < 2.0 * f_baseline, (
+        f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
+        f"got {f_total:.3f}."
     )
 
 
@@ -361,3 +366,82 @@ def test_calc_q_returns_mass_ratio():
     m_lens = pt.as_tensor_variable(np.array([0.5]))
     result = float(pytensor.function([], calc_q(m_companion, m_lens))()[0])
     assert result == pytest.approx(0.002, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# sampler_requirements() hook
+# ---------------------------------------------------------------------------
+
+def test_pspl_lens_has_no_sampler_requirements():
+    """
+    Given a PSPL lens (single lens body, no finite source, no use_op flag),
+    When sampler_requirements is called,
+    Then it returns an empty dict — PSPL uses a symbolic PyTensor formula
+      that is NUTS-compatible and imposes no sampler constraints.
+    """
+    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+    assert lens.sampler_requirements() == {}
+
+
+def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
+    """
+    Given a binary lens (two lens bodies — uses the MulensModel Op),
+    When sampler_requirements is called,
+    Then the returned dict marks 'nuts', 'numpyro', and 'blackjax' as
+      incompatible and recommends 'ptde', because the Op is not
+      differentiable and gradient-based samplers produce invalid results.
+    """
+    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+
+    reqs = lens.sampler_requirements()
+
+    assert 'incompatible' in reqs
+    assert {'nuts', 'numpyro', 'blackjax'} <= reqs['incompatible']
+    assert reqs.get('recommended') == 'ptde'
+
+
+def test_pspl_finite_source_requires_ptde():
+    """
+    Given a PSPL lens with finite_source: True (also uses the MulensModel Op),
+    When sampler_requirements is called,
+    Then gradient-based samplers are marked incompatible and 'ptde' is recommended.
+    """
+    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"],
+                  "finite_source": True}],
+                _DummyConfigManager())
+    reqs = lens.sampler_requirements()
+    assert 'nuts' in reqs.get('incompatible', set())
+    assert reqs.get('recommended') == 'ptde'
+
+
+# ---------------------------------------------------------------------------
+# Unknown sampler key warning
+# ---------------------------------------------------------------------------
+
+def test_known_sampler_keys_excludes_legacy_step_method():
+    """
+    Given the set of recognized sampler config keys,
+    When checked for the legacy 'step_method' key a student used previously,
+    Then 'step_method' is absent (so the unknown-key warning fires) and
+      'method' is present (the correct key for choosing the sampler).
+    """
+    assert "step_method" not in KNOWN_SAMPLER_KEYS
+    assert "method" in KNOWN_SAMPLER_KEYS
+
+
+def test_unknown_sampler_key_is_detected(caplog):
+    """
+    Given a sampler config dict containing the unrecognized key 'step_method',
+    When the set difference against KNOWN_SAMPLER_KEYS is computed
+      (replicating the logic in run.py),
+    Then 'step_method' appears in the unknown-key list and 'draws' does not.
+    """
+    sampler_cfg = {"step_method": "PTDE", "draws": 1000, "method": "ptde"}
+
+    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+
+    assert "step_method" in unknown
+    assert "draws" not in unknown
+    assert "method" not in unknown

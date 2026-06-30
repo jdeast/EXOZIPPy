@@ -8,15 +8,15 @@ star:
     mist: False
     sed: "NextGen" # or name model: "NextGen" [MISTv1, MISTv2]
 
-#parameter_file: "hat3.params.yaml"
-parameter_file: "hat3.params.2.yaml"
+parameter_file: "hat3.params.yaml"
+#parameter_file: "hat3.params.2.yaml"
 
 sed:
   path: "*.sed.*"
   file: "hat3_sed.yaml"
 
 sampler:
-  method: numpyro         # nuts, numpyro, blackjax, ptde
+  method: numpyro         # nuts, numpyro, nutpie, blackjax, ptde
   tune: 500
   draws: 1000
   chains: 4

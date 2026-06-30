@@ -208,6 +208,20 @@ class Component(ABC):
         """
         pass
 
+    def sampler_requirements(self):
+        """Return sampler constraints imposed by this component.
+
+        Returns a dict with optional keys:
+          'incompatible' : set of method names that cannot be used
+          'recommended'  : preferred method name (str)
+          'reason'       : human-readable explanation for warnings (str)
+
+        The default implementation returns no constraints.  Override when a
+        component uses non-differentiable Ops (e.g. MulensModel) that are
+        incompatible with gradient-based samplers.
+        """
+        return {}
+
     def _is_sampling_param(self, attr):
         """Helper to identify parameters that need to be passed to the compiled function."""
         return isinstance(attr, Parameter) and attr.expression is None

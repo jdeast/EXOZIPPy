@@ -166,6 +166,33 @@ def test_microlensing_sympy_pytensor_equivalence():
     assert np.isclose(te_sympy, t_E_pt, rtol=1e-8), "t_E mismatch!"
 
 
+def test_calc_theta_E_negative_pi_rel_returns_zero_not_nan():
+    """
+    Given a negative pi_rel (source in front of the lens — unphysical),
+    When calc_theta_E is called,
+    Then it returns exactly 0.0 (not NaN), so downstream parameters
+      (rho, pi_E) remain finite and the Op does not receive NaN inputs.
+    The build_likelihood potentials (event_rate_prior = log(theta_E) = -inf)
+    ensure the sampler rejects such proposals.
+    """
+    # Arrange
+    calc_theta_E = PHYSICS_REGISTRY["calc_theta_E"]
+    mass = pt.as_tensor_variable(0.5)
+
+    # Act: pi_rel < 0 means source is closer than lens
+    theta_E_neg = calc_theta_E(mass, pt.as_tensor_variable(-0.1)).eval()
+    theta_E_zero = calc_theta_E(mass, pt.as_tensor_variable(0.0)).eval()
+
+    # Assert: finite zero, not NaN
+    assert np.isfinite(theta_E_neg), f"Expected finite 0.0, got {theta_E_neg}"
+    assert theta_E_neg == 0.0, f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    assert theta_E_zero == 0.0
+
+    # Positive pi_rel still works correctly
+    theta_E_pos = calc_theta_E(mass, pt.as_tensor_variable(0.125)).eval()
+    assert theta_E_pos > 0.0
+
+
 def test_microlensing_contradiction_no_override(caplog):
     """
     When all variables in a violated equation are RANK_USER, the solver must

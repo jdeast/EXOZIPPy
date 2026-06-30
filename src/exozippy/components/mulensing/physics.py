@@ -14,8 +14,12 @@ def calc_pi_rel(dist_lens, dist_source):
 
 @register_physics
 def calc_theta_E(mass_lens, pi_rel):
-    # Angular Einstein Radius in mas. Guard against negative pi_rel (lens behind source)
-    return pt.sqrt(KAPPA * mass_lens * pi_rel)
+    # Angular Einstein Radius in mas.
+    # Guard against negative pi_rel (source in front of lens): no lensing occurs,
+    # but we must return a finite value so downstream parameters (rho, pi_E) don't
+    # propagate NaN into the Op.  The lens.build_likelihood potentials penalise
+    # this unphysical configuration so the sampler rejects it.
+    return pt.sqrt(KAPPA * mass_lens * pt.maximum(pi_rel, 0.0))
 
 @register_physics
 def calc_mu_ra_rel(pm_ra_lens, pm_ra_source):
@@ -60,7 +64,8 @@ def calc_f_blend(log_f_total, q_source):
 @register_physics
 def calc_rho(radius, distance, theta_E):
     theta_star_mas = (radius * RSUN_TO_AU / distance) * 1000.0
-    return theta_star_mas/theta_E
+    theta_E_safe = pt.maximum(pt.nan_to_num(theta_E, nan=0.0), 1e-10)
+    return theta_star_mas / theta_E_safe
 
 @register_physics
 def calc_alpha(cosalpha, sinalpha):

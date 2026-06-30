@@ -1,7 +1,7 @@
 run:
   name: "DC2018_128"
 
-prefix: "fitresults/DC2018_128"
+prefix: "fitresults/DC2018_128_2"
 
 # Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
 # MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
@@ -42,7 +42,8 @@ mulensinstrument:
     observer_location: roman_simulated_2018dc  # MMEXOFAST wfirst_ephemeris_W149.txt, J2000 equatorial
     band: "Z087"
 
-parameter_file: "DC2018_128.params.yaml"
+#parameter_file: "DC2018_128.params.yaml"
+parameter_file: "DC2018_128.params.2.yaml"
 
 sampler:
   method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
