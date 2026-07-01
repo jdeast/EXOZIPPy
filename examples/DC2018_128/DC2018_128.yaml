@@ -2,6 +2,7 @@ run:
   name: "DC2018_128"
 
 prefix: "fitresults/DC2018_128_2"
+logger_level: DEBUG
 
 # Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
 # MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg

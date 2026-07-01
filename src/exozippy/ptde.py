@@ -16,6 +16,7 @@ copy-on-write, avoiding the picklability constraint that blocks cloudpickle
 Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """
 import logging
+import os
 import signal
 import time
 
@@ -23,6 +24,16 @@ import numpy as np
 import arviz as az
 import multiprocessing as mp
 import pytensor
+
+# Force single-threaded BLAS/OMP in every forked worker.  Without this,
+# numpy (OpenBLAS/MKL) and C extensions (VBBinaryLensing) each spawn their
+# own thread pool, producing n_workers × n_blas_threads threads on a fixed
+# number of physical cores and causing catastrophic scheduler thrash.
+# These must be set BEFORE fork so children inherit them.
+for _tvar in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+              "MKL_NUM_THREADS", "BLAS_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_tvar, "1")
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +156,33 @@ def _map_logp(pool, proposals):
     return pool.map(_eval_logp, proposals)
 
 
+def _map_logp_timeout(pool, proposals, timeout):
+    """Evaluate logps with a per-step wall-clock deadline.
+
+    Proposals that don't complete within `timeout` seconds receive -inf so the
+    parent loop can proceed without blocking on a single slow VBBinaryLensing
+    caustic integration.  The worker continues running in the background and
+    will be available for future tasks once it finishes.
+
+    Returns (lps, n_timed_out).
+    """
+    if pool is None:
+        return [_eval_logp(p) for p in proposals], 0
+
+    async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
+    deadline = time.time() + timeout
+    lps = []
+    n_timed_out = 0
+    for r in async_results:
+        remaining = max(0.001, deadline - time.time())
+        try:
+            lps.append(r.get(timeout=remaining))
+        except mp.TimeoutError:
+            lps.append(-np.inf)
+            n_timed_out += 1
+    return lps, n_timed_out
+
+
 def _pick_two(rng, n, exclude):
     """Pick two distinct indices from [0, n) excluding `exclude`."""
     idx = rng.choice(n - 1, 2, replace=False)
@@ -222,6 +260,7 @@ def ptde_sample(
     min_ess=1000,
     max_rhat=1.01,
     maxtime=None,
+    eval_timeout=None,
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -374,6 +413,7 @@ def ptde_sample(
         for step in range(total_steps):
             phase = "tune" if step < tune else "draw"
             draw_idx = step - tune
+            _t0 = time.time()
 
             # 1. build DE proposals for every chain at every temperature
             props_flat = []
@@ -387,9 +427,11 @@ def ptde_sample(
                             for key in model_keys}
                     props_flat.append(prop)
                     prop_map.append((k, i))
+            _t_build = time.time()
 
             # 2. evaluate all logps in parallel
             prop_lps = _map_logp(pool, props_flat)
+            _t_eval = time.time()
 
             # 3. Metropolis accept/reject at effective temperature T_k
             for idx, (k, i) in enumerate(prop_map):
@@ -419,6 +461,16 @@ def ptde_sample(
                         (logps[k][i], logps[k+1][j]) = (
                             logps[k+1][j], logps[k][i])
                         n_swap_accept[k] += 1
+
+            _t_step = time.time()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"PTDE step {step+1} ({phase})  "
+                    f"total={_t_step-_t0:.3f}s  "
+                    f"build={_t_build-_t0:.3f}s  "
+                    f"eval={_t_eval-_t_build:.3f}s  "
+                    f"rest={_t_step-_t_eval:.3f}s  "
+                    f"T1_lp=[{min(logps[0]):.1f},{max(logps[0]):.1f}]")
 
             # 5. store T=1 draws
             if phase == "draw":
