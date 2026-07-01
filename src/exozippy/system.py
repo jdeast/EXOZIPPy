@@ -32,8 +32,20 @@ class System(Component):
             self.user_params = user_params
         else:
             user_params_file = self.config.get("parameter_file", None)
+            if user_params_file is None:
+                raise ValueError(
+                    "No 'parameter_file' key found in your config YAML. "
+                    "Add a line like:\n"
+                    "  parameter_file: myfit.params.yaml\n"
+                    "and create that file (or copy an example from the examples/ directory)."
+                )
             if not os.path.exists(user_params_file):
-                raise ValueError("The user must specify a valid parameter_file")
+                raise FileNotFoundError(
+                    f"parameter_file '{user_params_file}' not found. "
+                    f"This path is resolved relative to the directory from which you "
+                    f"run exozippy (currently: {os.getcwd()}). "
+                    f"Check that the file exists and the path in your config YAML is correct."
+                )
             with open(str(user_params_file), 'r') as f:
                 self.user_params = yaml.safe_load(f)
 

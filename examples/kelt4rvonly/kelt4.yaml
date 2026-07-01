@@ -38,11 +38,11 @@ rvinstrument:
   - name: "TRES"
     file: "KELT-4b.TRES.rv"
 
-#parameter_file: "kelt4.params.yaml"
-parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
+parameter_file: "kelt4.params.yaml"
+#parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
 
 sampler:
-  method: blackjax #numpyro         # numpyro, nutpie, nuts, blackjax, ptde
+  method: numpyro #numpyro         # numpyro, nutpie, nuts, blackjax, ptde
   tune: 2000
   draws: 4000
   chains: 4

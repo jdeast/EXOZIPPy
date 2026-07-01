@@ -1,0 +1,339 @@
+EXOZIPPy Comprehensive Code Review
+====================================
+Generated: 2026-06-30
+Scope: Full codebase — standardization, test coverage, vestigial code, modularity, readability.
+Also includes: diff-based bug review of commits 21abca8..0aa1ee2 + staged changes.
+
+See todo.txt for prioritized action items derived from this review.
+
+
+CONFIRMED BUGS (from recent diff)
+----------------------------------
+lens.py:621  resolve_auto_vbbl — malformed bracket list when VBM extends to last data
+  point. The `if in_vbm:` block appends both `t_hi+1.0` AND `"hexadecapole"`, leaving
+  brackets[-1] as a string; the cleanup clause then appends a SECOND `t_hi+1.0`.
+  MulensModel receives [..., t_hi+1.0, "hexadecapole", t_hi+1.0] which is malformed.
+  Fix: remove `brackets.append("hexadecapole")` from the `if in_vbm:` block (line 623).
+
+run.py:176   recompute_trace=False skips _convert_posterior_to_user_units. Old traces
+  are in internal units; compute_summary (which no longer calls from_internal) then
+  produces wrong-unit parameter tables silently.
+
+mkparam.py:68  _next_versioned_path returns base.(n+1).yaml without checking if that
+  file already exists. Two runs from the same params.yaml overwrite each other's
+  mkprior output. The old backup_params loop used `while not candidate.exists()`.
+
+run.py:781   _sanitize_netcdf_attrs accesses private ArviZ attribute `idata._groups`.
+  Works today; not guaranteed stable across ArviZ version bumps. Public alternative:
+  iterate over known group names with getattr(idata, name, None).
+
+lens.py:194  `q` changed from a free parameter to derived (M_companion/M_primary).
+  Existing binary-lens params.yaml files that set lens.0.q directly are silently
+  ignored. No warning emitted. DC2018_128 and KMT-2019-BLG-1806 examples affected.
+
+
+DEAD / VESTIGIAL CODE
+----------------------
+Priority: delete these. They are either unreachable or would crash if called.
+
+run.py:839   _initialize_internal_maps() — free function (not a method) that takes
+  `self` as a parameter and references Star, Planet, Orbit, pt — none imported in
+  run.py. Never called. Delete entirely.
+
+run.py:28    _fix_de_stats, DEMetropolisZ, DEMetropolis — comment on line 27 says
+  "Not currently used (PTDE replaced DEMetropolis)". ~15 lines. Delete or move to
+  an experimental module.
+
+run.py:22    `from pymc.initial_point import make_initial_point_fn` — never used.
+
+run.py:14-17, 58, 169-173, 294-308 — stale commented-out pytensor config, ipdb
+  imports, and a large disabled pair-plot block mixed into live code.
+
+config.py:25  class ProvenanceState — defined but never instantiated anywhere.
+
+config.py:22  RANK_DERIVED_MIXED = 40 — defined but never referenced in any logic path.
+
+config.py:1232  _attempt_rank_upgrade() and _solve_and_update() — two methods (~120
+  lines total) that form a dead alternative relaxation path. _attempt_rank_upgrade is
+  never called; _solve_and_update is only called by _attempt_rank_upgrade.
+
+config.py:1341  print_contradiction_warning() — defined but never called; the active
+  code path logs directly via logger.debug.
+
+parameter.py:873  _get_conversion_factors_old() — explicitly named "_old", never called.
+
+parameter.py:824  get_scale() — references self.name which does not exist on Parameter
+  (field is self.label). Would raise AttributeError if called. Never called.
+
+parameter.py:831  get_physical_value() — never called from anywhere.
+
+parameter.py:284,303,310,322 — dataclass fields mask, is_derived, auto_estimated,
+  table_note — written but never read after construction. table_note is set in
+  defaults.yaml for two star parameters but the LaTeX output ignores it.
+
+system.py:62   entity_directory = {} — built in __init__ but never stored on self
+  or used outside the constructor.
+
+system.py:177  get_physical_point() — never called from anywhere.
+
+mulensinstrument.py:415  `raise NotImplemented` — NotImplemented is the numeric
+  operator sentinel, not an exception class. Raises TypeError at runtime instead of
+  NotImplementedError. Followed by an `if False:` block of permanently dead code.
+  Both should be removed.
+
+mulensinstrument.py:50,119  self._raw_time_list and self.observer_pos (geocentric
+  deviations) — stored on self but never read outside the methods that set them.
+
+parameter.py:22-23, mulensinstrument.py:9-10/26-29 — duplicate `import pytensor.tensor
+  as pt` and `import pymc as pm` in the same file.
+
+system.py:1  `#import ipdb` — stale.
+
+
+UNTESTED CODE (no test coverage)
+---------------------------------
+tests/test_integration_kelt4.py now covers the basic kelt4rvonly pipeline end-to-end
+(system build → NUTS → unit conversion → trace save → mkprior). Remaining gaps:
+
+run.py:176   recompute_trace=False load path — also has the unit-bug above
+run.py:327   inspect_start with calc_curvature=True — only tested False; fatal-NaN
+             raise at line 525 never triggered
+run.py:549   make_corner() — entire corner-plot generator untested
+run.py:620   _compute_lp_from_model() — fork-based lp recomputation untested
+run.py:709   save_multipage_trace() — entire PDF trace-plot system untested
+run.py:774   _sanitize_netcdf_attrs() — only reached with nutpie; never tested
+lens.py:519  resolve_auto_vbbl() — never called from any test; all three exit paths
+             (missing initvals fallback, MulensModel exception, hex-sufficient) dark
+mulensinstrument.py:122  _check_data_format() — both warning branches never triggered
+mulensinstrument.py:193  _estimate_flux_components() — only the all-NNLS path is
+             tested; the three user-specified flux branches are not
+mulensinstrument.py:290  get_observer_position() satellite/topocentric paths —
+             ephemeris interpolation, lat/lon parsing, ValueError untested
+ptde.py:129  chain-init RuntimeError after max_iter retries — never triggered in tests
+ptde.py:289  initvals parameter path — assert len check and bypass of _make_starts
+ptde.py:480  convergence early-stop (min_ess/max_rhat/maxtime) — none tested
+mkparam.py:71  mkprior no-lp fallback — when trace has no lp in sample_stats
+mkparam.py:93  mkprior config-as-string/Path path — all tests pass a dict directly
+band.py:46   mixed ld_law across Band instances (some quadratic, some linear)
+outputs/latex.py:25  build_latex_output() — end-to-end LaTeX assembly never tested
+
+
+POOR STANDARDIZATION
+---------------------
+Stage numbering is inconsistent. component.py docstring uses Stage 0/1. system.py
+uses Stage 1/2. mulensinstrument.py uses Stage 1a. CLAUDE.md uses Stage 1a/1b/2-6.
+Pick one (CLAUDE.md's 1a/1b convention) and apply it everywhere.
+
+System inherits Component but never calls super().__init__() (system.py:26). System
+then stubs out build_likelihood, register_parameters, and prefix as no-ops just to
+satisfy the ABC. System is not semantically a Component; the inheritance is misleading.
+Consider making System not inherit from Component, or using composition.
+
+hasattr guards on abstract methods (system.py:73,74,78,117) — always True because
+ABCs prevent instantiation without implementing them. The guards imply the interface
+is optional when it is not. Replace with direct calls.
+
+Raw rank literals in lens.py:215,226,234 use rank=20, rank=25, rank=30. Values 25
+and 30 are not exported from config.py (which defines RANK_DEFAULT=20, etc.). If
+these intermediate ranks are intentional, they need named constants.
+
+Three copies of the same _get() lookup closure in mulensinstrument.py (lines 136,
+207, 517) with two different names (_get, _get_param). lens.py adds a fourth
+implementation as _get_initval (line 507). This should be a single method on
+ConfigManager or the Component base class.
+
+raise NotImplemented instead of raise NotImplementedError (mulensinstrument.py:416).
+
+Bare `except:` clauses in parameter.py:99,108,356,963; run.py:377,386;
+mulensinstrument.py:314. These catch KeyboardInterrupt and SystemExit. All should
+be `except Exception:` at minimum.
+
+self.label attribute is set inconsistently — Lens, MulensInstrument, Star, Planet,
+Orbit, RVInstrument all set it; Band does not. Component base class does not declare
+it. No consistent purpose or usage pattern.
+
+_get_safe_mm_params (lens.py:295) returns keys 'pi_N'/'pi_E' while the canonical
+parameter names everywhere else are 'pi_E_N'/'pi_E_E'. Private dialect vs. public.
+
+Manifest fourth form (mulensinstrument.py:392): {"initval": ...} with no expr_key
+is an undocumented form that works by accident. CLAUDE.md documents three forms.
+
+yaml_key = "band" on Band (band.py:18) is redundant — the factory falls back to the
+lowercase class name, which is already "band". Either remove it from Band or add it
+consistently to all components that need non-default keys.
+
+warnings.warn (mulensinstrument.py:362) — only place in the entire component layer
+not using logger.warning. Replace for consistency.
+
+
+MODULARITY
+-----------
+These functions exceed 100 lines and do multiple things:
+
+ptde_sample      ptde.py:201         ~340 lines
+  Split at: compilation+init+pool setup / main loop / raw→physical conversion
+
+build_pymc       parameter.py:442    ~272 lines
+  Already has 7 numbered sections; each section (shape setup, role classification,
+  logit/Gaussian branch, raw variable construction, physical reconstruction,
+  prior application) could be its own private method.
+
+run_fit          run.py:68           ~259 lines
+  Sampler config extraction (~15 local variables) → _parse_sampler_config()
+  Sampler dispatch → _dispatch_sampler()
+  Postprocessing → separate functions already partially exist
+
+inspect_start    run.py:327          ~220 lines
+  Inner functions safe_float and smart_format are redefined on every iteration.
+  Move to module level or parametrize them.
+
+resolve_and_validate_parameters  config.py:705  ~220 lines
+  Three natural splits: _initialize_resolved_state / relaxation loop / _propagate_scales
+
+_execute_solve   config.py:1012      ~218 lines
+  Custom solver / SymPy solve / nsolve fallback / root disambiguation / value
+  application / Jacobian rank refinement — each deserves a named helper.
+
+ConfigManager    config.py:85        ~1265 lines total
+  Responsibilities: YAML loading, param resolution, unit conversion, symbolic
+  relaxation, scale propagation. The relaxation engine alone warrants a class.
+
+Parameter        parameter.py:262    ~886 lines total
+  PyMC graph materialization, posterior evaluation, LaTeX output, summary stats —
+  four distinct concerns on one class.
+
+The parallax-projection formula (project xyz to delta_e/delta_n) is duplicated
+identically in _check_data_format (mulensinstrument.py:152) and _estimate_flux_components
+(mulensinstrument.py:236). Extract as _project_xyz(t, xyz_au, ra, dec, ...).
+
+
+READABILITY
+------------
+run_fit local-variable explosion (lines 82-108): fifteen _foo_raw/foo = int(...)
+pairs for sampler config. A SamplerConfig dataclass would collapse this to one line.
+
+stop_requested = [False] and _next_check = [None] in ptde.py:331,337 — list-as-
+mutable-cell is a Python 2 closure workaround. _next_check is only mutated in the
+main loop body (not a closure); use a plain variable. For stop_requested, use nonlocal.
+
+g = self._get_initval in lens.py:535 — single-letter alias inside a 116-line method.
+Not obvious to a reader.
+
+safe_float and smart_format in inspect_start are inner functions redefined on every
+call to the function. Move to module level.
+
+resolve_auto_vbbl bracket state machine (lens.py:604-635) — 30-line inline state
+machine for building [time, method, ..., time] lists. Replace with np.diff on
+needs_vbm to get transition indices, then build brackets in a comprehension.
+
+Magic numbers without names:
+  run.py:91        0.75 — core count fraction (define CORE_FRACTION)
+  lens.py:337      365.25 — days per year
+  config.py:~1074  signal.alarm(2) — solver timeout in seconds
+  run.py:577       seed=42 — corner plot RNG seed
+  run.py:582       math.erf(1/sqrt(2)) — 1-sigma quantile, already available as
+                   SIGMA_1_LOW/SIGMA_1_HIGH in parameter.py
+
+UnitTranslator.get_latex (parameter.py:~169) references `self.label` inside a
+@classmethod — `self` is not valid there; raises NameError if an unrecognized unit
+is encountered. Should be a fixed error string.
+
+assert in ptde.py:289 (assert len(initvals) == n_chains) — bare assert in production
+code is suppressed by python -O. Replace with an explicit ValueError.
+
+
+ADDITIONAL REVIEW TOPICS (not yet audited)
+-------------------------------------------
+These areas were identified as valuable but not yet examined in detail.
+
+NUMERICAL CORRECTNESS
+  The highest-value audit for a scientific fitter. Does the physics produce
+  known-correct answers on analytic cases?
+  - PSPL formula: inject (t_0, u_0, t_E, pi_E_N, pi_E_E) from a published event,
+    fit synthetic data, verify recovery within expected uncertainty.
+  - Parallax sign conventions: verify against Skowron+2011 / Gould+2004 on a
+    published event with known parallax solution. (Sign errors are plausible given
+    the existing parallax-convention memory note.)
+  - RV: Keplerian orbit should reproduce known RV semi-amplitude K exactly.
+  - SED: Teff/logg/feh → luminosity/radius consistency against isochrone tables.
+  This catches physics bugs, sign errors, and unit errors simultaneously — no amount
+  of code-quality review substitutes for it.
+
+NUMERICAL STABILITY / DTYPE CONSISTENCY
+  PyTensor silently downcasts to float32 in some contexts; JAX requires float64.
+  - Verify `jax.config.update("jax_enable_x64", True)` is applied before any JAX
+    computation (currently done in the numpyro/blackjax branch of run.py, but jax
+    may already have been imported and initialized before that line).
+  - Check whether any intermediate tensor is accidentally float32, particularly in
+    microlensing parallax where small numbers matter (pi_E ~ 0.01).
+  - Check log(sigmoid) clipping: the _MAX_ARG=700 cap in potentials.py is correct
+    for float64 but would be wrong for float32.
+
+BACKWARDS COMPATIBILITY AND YAML SCHEMA MIGRATION
+  The pymc: indent removal (commit 5bd615d) breaks all existing YAML files silently.
+  - Audit what other YAML schema changes have accumulated without a migration guide.
+  - Consider a config validator that catches renamed/removed keys with a clear error
+    message rather than silently ignoring them (the KNOWN_SAMPLER_KEYS warning in
+    run.py is a good start; extend to the full config structure).
+  - Document which YAML keys are stable API vs. internal/experimental.
+
+DEPENDENCY HYGIENE
+  The poetry.lock has tight pins to work around specific bugs:
+  - pytensor<2.35: Kepler JAX dispatch bug (see pytensor_jax_bug.txt / issue #2264)
+  - jax<0.5.0: compatibility with numpyro/blackjax pins
+  - blackjax>=0.8.0,<0.9.0: very narrow pin — is there a known incompatibility
+    above 0.9? Document with the upstream issue number so the pin can be relaxed.
+  Each workaround pin should have a TODO comment with the upstream issue URL and the
+  minimum version at which the fix is expected, so pins don't linger indefinitely.
+
+LOGGING QUALITY AND USER-FACING ERROR MESSAGES
+  Are the messages a new user sees when something goes wrong actually helpful?
+  - Good examples: STRICT NAMING ERROR in config.py; "Did you mean 'method'?" warning.
+  - Gaps: many failure paths (bad YAML structure, wrong component name, missing data
+    file) produce Python tracebacks rather than a clean diagnostic.
+  - Worth a dedicated pass: for each common user mistake, what does the user see?
+
+REPRODUCIBILITY
+  Given a params.yaml and a random seed, does EXOZIPPy produce the same trace?
+  - The PTDE sampler uses mp.get_context("fork"). Fork-based multiprocessing has
+    known safety issues on macOS (fork + Objective-C runtime) and produces
+    non-reproducible results when the parent's numpy RNG state is inherited by
+    workers. Workers should each receive an independent seeded RNG derived from
+    the parent seed (e.g., numpy.random.SeedSequence.spawn).
+  - The `seed` parameter in ptde_sample sets the parent numpy RNG but does not
+    guarantee worker independence across platforms.
+  - NUTS/numpyro/nutpie seeds should be documented and passed explicitly.
+
+PUBLIC API SURFACE
+  There is no __all__ in any module; the public interface is effectively just the
+  CLI entry point. If collaborators start importing components directly they have no
+  stability guarantee.
+  - Decide what the public API is (System, Component, Parameter, run_fit, mkprior?)
+    and mark the rest as private with leading underscores.
+  - Consider a top-level src/exozippy/__init__.py that exposes only the intended
+    public names.
+
+
+COMPLETED
+----------
+- tests/test_integration_kelt4.py: kelt4rvonly end-to-end integration test (5 passing tests)
+- system.py: improved FileNotFoundError message for missing parameter_file
+- outputs/latex.py: build_csv_output() writes <prefix>_results.csv alongside LaTeX files
+- outputs/latex.py: build_latex_output() gains tablecomments= kwarg → \tablecomments{}
+- lens.py:623: fixed malformed bracket list in resolve_auto_vbbl (extra "hexadecapole" removed)
+- lens.py: tightened resolve_auto_vbbl buffer default 0.5→0.1 days
+- mulensinstrument.py:416: raise NotImplemented → raise NotImplementedError; removed dead if False block
+
+PRIORITY ORDERING
+-----------------
+1. Delete the dead code block (run.py:839, config.py:1232, parameter.py:824/831/873,
+   system.py:177, mulensinstrument.py if False block already done).
+2. Fix mulensinstrument.py:416 — replace raise NotImplemented with raise NotImplementedError.
+3. Delete the dead code block (run.py:839, config.py:1232, parameter.py:824/831/873,
+   system.py:177, mulensinstrument.py:415 if False block).
+4. Fix recompute_trace=False path to apply unit conversion after loading the trace.
+5. Fix _next_versioned_path to check file existence before returning the path.
+6. Extract _project_xyz helper to remove duplication in mulensinstrument.py.
+7. Standardize stage numbering across all files to match CLAUDE.md (1a/1b/2-6).
+8. Replace all bare `except:` with `except Exception:`.
+9. Break up run_fit, build_pymc, ptde_sample at their natural seams.

@@ -413,20 +413,9 @@ class MulensInstrument(Component):
     def build_likelihood(self, model, system):
 
         if hasattr(system, 'sed'):
-            raise NotImplemented
-            expected_fs = system.sed.Source.get_band_flux("OGLE_I") # this is the part we need from the SED
-            sigma_fs = 0.05 * expected_fs
-            pm.Potential(f"{self.prefix}_sedprior",
-                         -0.5 * pt.sqr((self.f_source.value - expected_fs) / sigma_fs))
-        else:
-            if False:
-                # Linear anchor: f_source ~ 0.2 * f_bol
-                # this accounts for heavy extinction in the bulge, but is highly uncertain
-                expected_fs = pt.log(0.2 * system.star.fbol.value[system.lens.source_map])
-                sigma_fs = 1.0
-                log_f_source = pt.log(self.f_source.value)
-                pm.Potential(f"{self.prefix}.fbolprior",
-                             -0.5 * pt.sqr((log_f_source - expected_fs) / sigma_fs))
+            raise NotImplementedError(
+                "SED-based f_source prior for mulensing instruments is not yet implemented."
+            )
 
         # 1. Constants
         t = pm.Data("mu_time", self.time)

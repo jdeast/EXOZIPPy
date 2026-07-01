@@ -517,12 +517,18 @@ class Lens(Component):
         return None
 
     def resolve_auto_vbbl(self, times_np, index=0, threshold=0.001,
-                          buffer=0.5, max_eval=2000):
+                          buffer=0.1, max_eval=2000):
         """Replace 'auto_vbbl' with a concrete bracket list computed at initvals.
 
         Runs hexadecapole and VBM on a time grid, finds intervals where they
         differ by more than `threshold` (fractional), pads each interval by
         `buffer` days, and stores the result in self.mag_method[index].
+
+        `buffer` covers two effects: (1) the sharp transition zone where
+        hexadecapole begins to fail (~rho*t_E wide, typically 0.05-0.2 d), and
+        (2) gaps in the evaluation grid when data is subsampled (max_eval).
+        0.1 d is appropriate for a well-initialised model; increase to 0.2-0.5 d
+        if initvals are rough.
 
         Intentionally skips parallax — we only need approximate caustic-crossing
         timing for method selection, not a precise fit.
@@ -620,7 +626,6 @@ class Lens(Component):
 
         if in_vbm:
             brackets.append(t_hi + 1.0)
-            brackets.append("hexadecapole")
 
         # Ensure the bracket list ends with a sentinel time
         if not brackets:

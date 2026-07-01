@@ -133,6 +133,35 @@
 * per-instrument plot color: allow the user to specify a color for any
   instrument in the config, overriding the default plotting color cycle
 
+* code quality — see code_review.txt for full details and priority ordering
+  done:
+  - integration test: tests/test_integration_kelt4.py (5 passing, covers kelt4rvonly pipeline)
+  - system.py: clear FileNotFoundError message when parameter_file is missing or wrong path
+  - outputs/latex.py: build_csv_output() → <prefix>_results.csv (parname_index/value/up_err/low_err)
+  - outputs/latex.py: tablecomments= kwarg added to build_latex_output()
+  - lens.py:623: fixed malformed auto_vbbl bracket list (removed extra "hexadecapole" append)
+  - lens.py: tightened resolve_auto_vbbl buffer default 0.5→0.1 days
+  remaining bugs (priority order):
+  - run.py:176 (recompute_trace=False skips unit conversion → wrong-unit tables)
+  - mkparam.py:68 (_next_versioned_path overwrites existing files)
+  - mulensinstrument.py:416: fixed (raise NotImplementedError + removed if False block)
+  - dead code to delete: run.py _initialize_internal_maps + DEMetropolisZ block;
+    config.py ProvenanceState + RANK_DERIVED_MIXED + _attempt_rank_upgrade +
+    _solve_and_update; parameter.py _get_conversion_factors_old + get_scale +
+    get_physical_value; system.py get_physical_point; mulensinstrument.py if False block
+  - standardize: stage labels, bare except→except Exception, _get closure duplication,
+    _project_xyz helper, magic numbers
+  - numerical correctness tests: inject known (t_0, u_0, t_E, pi_E) and verify
+    recovery; check RV Keplerian K exactly; parallax sign vs Skowron+2011/Gould+2004
+  - numerical stability: audit for accidental float32 tensors; verify jax float64
+    flag fires before first JAX import; check _MAX_ARG=700 assumption holds
+  - dependency pins: document upstream issue URL + expected-fix version for each
+    workaround pin (pytensor<2.35, jax<0.5.0, blackjax<0.9.0)
+  - reproducibility: PTDE fork-based workers inherit parent RNG state non-reproducibly;
+    use numpy.random.SeedSequence.spawn to give each worker an independent seed
+  - yaml schema: add config validator for renamed/removed keys; document stable API keys
+  - public API: add __all__ or decide what's public vs. internal
+
 * blind spots:
   * checkpoints
   * pytensor cache bloat

@@ -1,3 +1,4 @@
+import csv
 import pathlib
 import numpy as np
 from ..components import Parameter
@@ -22,8 +23,51 @@ def _instance_subhead(name):
     )
 
 
+def build_csv_output(system, csv_filename):
+    """Write a machine-readable CSV of posterior results.
+
+    Comment header line lists columns: parname, value, up_err, low_err
+
+    One row per parameter instance. Fixed parameters have empty error columns.
+    """
+    rows = []
+    for comp in system.get_all_components():
+        comp_params = [v for v in comp.__dict__.values() if isinstance(v, Parameter)]
+        printable = [p for p in comp_params if p.print_to_table]
+        for p in printable:
+            n_instances = _instance_count(p)
+            if p.posterior is not None and p.summary is None:
+                p.compute_summary()
+
+            if n_instances == 1:
+                name = p.label
+                if p.summary is not None:
+                    med, ep, em = p.summary.format(sigfigs=2)
+                    rows.append((name, med, ep, em))
+                elif p.initval is not None:
+                    val = float(np.atleast_1d(p.from_internal(p.initval))[0])
+                    rows.append((name, val, "", ""))
+            else:
+                for i in range(n_instances):
+                    name = p.get_display_label(i)
+                    if p.summary is not None:
+                        summ_list = p.summary if isinstance(p.summary, list) else [p.summary]
+                        s = summ_list[i] if i < len(summ_list) else summ_list[-1]
+                        med, ep, em = s.format(sigfigs=2)
+                        rows.append((name, med, ep, em))
+                    elif p.initval is not None:
+                        inits = np.atleast_1d(p.from_internal(p.initval))
+                        val = float(inits[i] if i < len(inits) else inits[-1])
+                        rows.append((name, val, "", ""))
+
+    with open(csv_filename, "w", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        f.write("# parname, value, up_err, low_err\n")
+        writer.writerows(rows)
+
+
 def build_latex_output(system, var_filename="variables.tex", template_filename="table_template.tex",
-                       caption=None):
+                       caption=None, tablecomments=None):
 
     all_defs = []
     all_table_lines = []
@@ -99,6 +143,8 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
         f.write(r"\startdata" + "\n")
         f.writelines(all_table_lines)
         f.write(r"\enddata" + "\n")
+        if tablecomments:
+            f.write(rf"\tablecomments{{{tablecomments}}}" + "\n")
         f.write(r"\end{deluxetable*}" + "\n")
         f.write(r"\bibliographystyle{aasjournalv7}" + "\n")
         f.write(r"\bibliography{References}" + "\n")

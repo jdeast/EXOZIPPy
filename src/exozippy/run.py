@@ -44,7 +44,7 @@ class DEMetropolis(pm.DEMetropolis):
 # local imports
 from .logger import setup_logging
 from .mkparam import mkprior
-from .outputs.latex import build_latex_output
+from .outputs.latex import build_latex_output, build_csv_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
 from exozippy.ptde import ptde_sample
@@ -308,11 +308,12 @@ def run_fit(config):
     #)
     #plt.show()
 
-    # Generate latex table
+    # Generate latex table and machine-readable CSV
     build_latex_output(system,
                        var_filename=str(prefix) + '_definitions.tex',
                        template_filename=str(prefix) + '_template.tex',
                        caption=r"Median and 68\% Confidence intervals for " + prefix.stem)
+    build_csv_output(system, csv_filename=str(prefix) + '_results.csv')
 
     # Generate final plots
     draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
