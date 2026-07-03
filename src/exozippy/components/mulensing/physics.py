@@ -68,5 +68,5 @@ def calc_rho(radius, distance, theta_E):
     return theta_star_mas / theta_E_safe
 
 @register_physics
-def calc_alpha(cosalpha, sinalpha):
-    return pt.arctan2(sinalpha, cosalpha)
+def calc_alpha(xalpha, yalpha):
+    return pt.arctan2(yalpha, xalpha)

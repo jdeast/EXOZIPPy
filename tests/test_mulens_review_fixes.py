@@ -154,7 +154,7 @@ def test_n_lens_bodies_are_accepted_and_sized_per_companion():
     Given a lens config with three lens bodies (one primary + two companions),
     When the Lens registers its parameters,
     Then construction succeeds (no triple-lens rejection) and the companion
-      geometry parameters s/cosalpha/sinalpha are sized per companion.
+      geometry parameters s/xalpha/yalpha are sized per companion.
     """
     # Arrange
     lens = Lens([{"lenses": ["star.0", "planet.0", "planet.1"],
@@ -170,8 +170,8 @@ def test_n_lens_bodies_are_accepted_and_sized_per_companion():
     # Assert
     assert lens.n_companions == 2
     assert lens.manifest["s"]["shape"] == (2,)
-    assert lens.manifest["cosalpha"]["shape"] == (2,)
-    assert lens.manifest["sinalpha"]["shape"] == (2,)
+    assert lens.manifest["xalpha"]["shape"] == (2,)
+    assert lens.manifest["yalpha"]["shape"] == (2,)
 
 
 def test_triple_lens_magnification_fails_loudly():
@@ -250,6 +250,46 @@ def test_flux_total_estimate_sharp_caustic_crossing():
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
         f"got {f_total:.3f}."
     )
+
+
+def test_log_f_total_bootstrap_yields_to_user_params():
+    """
+    Given a MulensInstrument with a data-estimated total flux,
+    When register_parameters declares the manifest,
+    Then log_f_total is pushed as a RANK_DERIVED_DATA hint (so a user value in
+      params.yaml wins) and the manifest carries no direct initval override
+      (which would bypass provenance ranking and clobber the user's restart
+      point from a previous MAP).
+    """
+    from exozippy.config import RANK_DERIVED_DATA
+
+    class _RecordingConfigManager(_DummyConfigManager):
+        def __init__(self):
+            self.hints = {}
+
+        def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
+            self.hints[path] = (value, rank)
+
+    # Arrange
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config = [{"file": "dummy.txt"}]
+    inst.n_elements = 1
+    inst.names = ["Roman"]
+    inst.config_manager = _RecordingConfigManager()
+    inst.fs_init = [0.6038]
+    inst.q_source_init = [0.65]
+
+    # Act
+    inst.register_parameters(_DummySystem())
+
+    # Assert
+    assert inst.manifest["log_f_total"] is None, (
+        "manifest must not set initval directly — it would override the user's "
+        "params.yaml value regardless of provenance rank"
+    )
+    hint_val, hint_rank = inst.config_manager.hints["mulensinstrument.0.log_f_total"]
+    assert hint_val == pytest.approx(np.log10(0.6038))
+    assert hint_rank == RANK_DERIVED_DATA
 
 
 # ---------------------------------------------------------------------------

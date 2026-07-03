@@ -40,6 +40,7 @@
           - support all SVO bands
         - faster?
         - harder? or maybe easier?
+      - check if a specified band is ever used. If not, skip/warn.
     - vcve parameterization:
       - refactor to remove the sign parameter
         - compute both solutions and incorporate the joint logaddexp summed likelihood
@@ -52,6 +53,7 @@
     - mulensing? is that useful?
     - might go in a generic instrument class
   - SED
+    - do user bounds slice the BC grid accordingly? If not, it should (same for evolutionary model grid)
     - multi-star systems
     - MIST BC table
     - _inject_grid_bounds should move from __init__ to load_data; requires a
@@ -145,6 +147,7 @@
   - run.py:176 (recompute_trace=False skips unit conversion → wrong-unit tables)
   - mkparam.py:68 (_next_versioned_path overwrites existing files)
   - mulensinstrument.py:416: fixed (raise NotImplementedError + removed if False block)
+  - cosalpha/sinalpha → xalpha/yalpha rename; mkprior now converts back to alpha via arctan2
   - dead code to delete: run.py _initialize_internal_maps + DEMetropolisZ block;
     config.py ProvenanceState + RANK_DERIVED_MIXED + _attempt_rank_upgrade +
     _solve_and_update; parameter.py _get_conversion_factors_old + get_scale +

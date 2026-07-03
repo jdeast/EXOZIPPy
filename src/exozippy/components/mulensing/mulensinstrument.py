@@ -375,9 +375,10 @@ class MulensInstrument(Component):
         q_source_init = np.array(self.q_source_init)
 
         # Inject hints for derived f_source / f_blend so the relaxation engine
-        # can resolve initial values.  Also push the data-estimated q_source as a
-        # RANK_DERIVED_DATA hint so it overrides the defaults.yaml 0.95 while still
-        # yielding to any explicit user override in params.yaml (RANK_USER wins).
+        # can resolve initial values.  Also push the data-estimated q_source and
+        # log_f_total as RANK_DERIVED_DATA hints so they override the defaults.yaml
+        # values while still yielding to any explicit user override in params.yaml
+        # (RANK_USER wins — essential when restarting a fit from a previous MAP).
         for i in range(self.n_elements):
             q = q_source_init[i]
             f_source_guess = f_total_init[i] * q
@@ -387,9 +388,14 @@ class MulensInstrument(Component):
             self.config_manager.add_hint(
                 f"{self.prefix}.{i}.q_source", q, rank=RANK_DERIVED_DATA
             )
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.log_f_total",
+                float(np.log10(f_total_init[i])),
+                rank=RANK_DERIVED_DATA,
+            )
 
         self.manifest = {
-            "log_f_total": {"initval": np.log10(f_total_init)},
+            "log_f_total": None,
             "q_source": None,
             "f_source": "default",
             "f_blend": "default",
@@ -497,19 +503,33 @@ class MulensInstrument(Component):
             on_unused_input='ignore'
         )
 
+        # Baseline flux at a given parameter point, used by plot() to normalize
+        # the data onto the same Δmag scale as the model curves.
+        self._compiled_f_total = pytensor.function(
+            inputs=[inst_idx] + param_symbols,
+            outputs=f_total_inst,
+            on_unused_input='ignore'
+        )
+
     def plot(self, system, points, filename_prefix="debug"):
         if isinstance(points, dict): points = [points]
         if len(points) == 0: return
 
         # Model time grid: ±5 tE around t_0 when known, else full data span
         cm = self.config_manager
-        def _get_param(key):
-            d = cm.user_params.get(key)
-            if d is None: return None
-            return d.get("initval") if isinstance(d, dict) else float(d)
+        _lens_name = (cm.system_config.get("lens") or [{}])[0].get("name", "0")
 
-        t0 = _get_param("lens.0.t_0")
-        tE = _get_param("lens.0.t_E")
+        def _get_param(base_param):
+            # Try numeric index form first (user-provided params), then name form
+            # (derived params stored by finalize_user_params under the name key).
+            for key in (f"lens.0.{base_param}", f"lens.{_lens_name}.{base_param}"):
+                d = cm.user_params.get(key)
+                if d is not None:
+                    return d.get("initval") if isinstance(d, dict) else float(d)
+            return None
+
+        t0 = _get_param("t_0")
+        tE = _get_param("t_E")
         if t0 is not None and tE is not None:
             t_model = np.linspace(t0 - 5.0*tE, t0 + 5.0*tE, 2000).astype(np.float64)
         else:
@@ -539,11 +559,23 @@ class MulensInstrument(Component):
             for obs_loc in unique_observers
         }
 
-        # Per-instrument baseline magnitude from the data-derived fs_init.
-        # Δmag = mag(t) − mag_baseline is 0 at baseline for every instrument,
-        # so all datasets land on the same scale with no model-flux dependency.
+        def _point_values(point):
+            return [
+                float(np.squeeze(np.asarray(point.get(p.label, p.initval))))
+                if getattr(p.value, "ndim", 0) == 0
+                else np.atleast_1d(point.get(p.label, p.initval))
+                for p in system.plot_params
+            ]
+
+        # Per-instrument baseline magnitude from the f_total of the plotted
+        # point (first point when several are drawn), so the data land on the
+        # same Δmag scale as the self-normalized model curves.  Normalizing by
+        # the stage-1 fs_init estimate instead would shift the data by any
+        # error in that estimate, faking a constant model-data offset.
+        ref_values = _point_values(points[0])
         mag_baseline = np.array([
-            -2.5 * np.log10(max(f, 1e-30)) for f in self.fs_init
+            -2.5 * np.log10(max(float(self._compiled_f_total(i, *ref_values)), 1e-30))
+            for i in range(self.n_elements)
         ])
 
         def draw(ax):
@@ -558,12 +590,7 @@ class MulensInstrument(Component):
                 i = obs_to_inst[obs_loc]
                 obs_pretty = obs_model_pos[obs_loc]
                 for point in points:
-                    param_values = [
-                        float(np.squeeze(np.asarray(point.get(p.label, p.initval))))
-                        if getattr(p.value, "ndim", 0) == 0
-                        else np.atleast_1d(point.get(p.label, p.initval))
-                        for p in system.plot_params
-                    ]
+                    param_values = _point_values(point)
                     try:
                         y_model = self._compiled_delta_mag(t_model, obs_pretty, i, *param_values)
                         alpha = 0.8 if len(points) == 1 else 0.1

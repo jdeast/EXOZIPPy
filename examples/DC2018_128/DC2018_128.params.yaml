@@ -24,7 +24,7 @@ lens.Lens.s:
     initval: 0.97875222
     init_scale: 0.00068642
 
-# alpha: relaxation engine propagates initval/init_scale to cosalpha/sinalpha.
+# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.
 lens.Lens.alpha:
     initval: -52.15111097728343
     init_scale: 0.5472813114829904
@@ -74,5 +74,5 @@ star.Source.radius:
 
 # log_f_total init_scale was 0 in the previous run (data hint overrode the
 # default), causing Metropolis to take zero-size steps on this parameter.
-mulensinstrument.Roman.log_f_total:
+mulensinstrument.Roman_Z087.log_f_total:
     init_scale: 1e-4

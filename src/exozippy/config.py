@@ -15,6 +15,50 @@ import re
 
 class SymbolicTimeout(Exception): pass
 
+# Instance names appear as the middle part of dotted parameter paths
+# (star.MyName.teff), so they must be safe to split on "." and must not
+# collide with the internal index notation (star.0.teff).
+_VALID_INSTANCE_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def validate_instance_names(system_config):
+    """Fatal-error check on user-supplied component instance names.
+
+    Rejects names that would corrupt parameter-path parsing:
+      - non-string names (YAML ``name: 128`` arrives as an int)
+      - characters outside [A-Za-z0-9_-] ("." splits paths; whitespace,
+        brackets, etc. break resolve()/mkparam key matching)
+      - all-digit names, which alias the internal index notation
+        (a component named "1" would silently resolve to instance index 1)
+    """
+    for comp_key, entries in (system_config or {}).items():
+        if not isinstance(entries, list):
+            continue
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict) or "name" not in entry:
+                continue
+            name = entry["name"]
+            where = f"{comp_key}[{i}]"
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"Invalid name {name!r} for {where}: names must be strings. "
+                    f"Quote it in your config YAML (name: \"{name}\")."
+                )
+            if not _VALID_INSTANCE_NAME.match(name):
+                raise ValueError(
+                    f"Invalid name '{name}' for {where}: names may only contain "
+                    f"letters, digits, underscores, and hyphens. Characters like "
+                    f"'.' or spaces would break parameter-path parsing "
+                    f"(e.g. '{comp_key}.{name}.param')."
+                )
+            if name.isdigit():
+                raise ValueError(
+                    f"Invalid name '{name}' for {where}: purely numeric names "
+                    f"collide with the internal index notation "
+                    f"({comp_key}.0, {comp_key}.1, ...). Add a non-digit "
+                    f"character (e.g. name: \"{comp_key}_{name}\")."
+                )
+
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
 RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
@@ -87,8 +131,9 @@ class ConfigManager:
         self.raw_user_params = user_params
         self.custom_solvers = {}
 
-        # If config is provided, standardize right away
+        # If config is provided, validate names then standardize right away
         if system_config is not None:
+            validate_instance_names(system_config)
             self.user_params = self.standardize_param_names(user_params, system_config)
         else:
             self.user_params = user_params

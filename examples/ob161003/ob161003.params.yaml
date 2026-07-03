@@ -1,0 +1,90 @@
+# Jung et al, 2017, Table 2, 2S2L standard solution
+lens.Lens.t_0:
+    initval: 2457551.038
+    init_scale: 0.201
+
+#lens.??.t_0:
+#    initval: 2457552.517
+#    init_scale: 0.134
+
+lens.Lens.u_0:
+    initval: 0.059
+    init_scale: 0.013
+
+#lens.??.u_0:
+#    initval: 0.135
+#    init_scale: 0.006
+
+lens.Lens.t_E:
+    initval: 28.931
+    init_scale: 0.665
+
+lens.Lens.s:
+    initval: 1.033
+    init_scale: 0.011
+
+# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.
+# value from literature might be in different convention!
+lens.Lens.alpha:
+    initval: 48.243
+    init_scale: 0.859
+
+lens.Lens.rho:
+    initval: 0.000451
+    init_scale: 0.0002
+
+#lens.??.rho:
+#    initval: 0.001293
+#    init_scale: 0.000161
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
+# this through the symbolic relation  q * M_primary = M_companion
+# to set the companion's mass initval automatically.
+lens.Lens.q:
+    initval: 1.188
+    init_scale: 0.039
+
+star.Lens.ra:
+    initval: 264.10513
+    sigma: 0
+star.Lens.dec:
+    initval: -27.188861
+    sigma: 0
+star.SourceA.ra:
+    initval: 264.10513
+    sigma: 0
+star.SourceA.dec:
+    initval: -27.188861
+    sigma: 0
+star.SourceB.ra:
+    initval: 264.10513
+    sigma: 0
+star.SourceB.dec:
+    initval: -27.188861
+    sigma: 0
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.SourceA.teff:
+    sigma: 0.0
+star.SourceA.feh:
+    sigma: 0.0
+star.SourceB.teff:
+    sigma: 0.0
+star.SourceB.feh:
+    sigma: 0.0
+planet.Companion.radius:
+    sigma: 0
+
+# Source radius is unconstrained without SED data (same reasoning as Lens.radius).
+star.SourceA.radius:
+    sigma: 0.0
+star.SourceB.radius:
+    sigma: 0.0
+

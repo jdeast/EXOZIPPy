@@ -13,7 +13,7 @@ lens_pm_dec, source_pm_dec = sp.symbols('lens_pm_dec source_pm_dec')
 pi_E_N, pi_E_E = sp.symbols('pi_E_N pi_E_E')
 rho, source_radius = sp.symbols('rho source_radius')
 q_lens, companion_mass = sp.symbols('q_lens companion_mass')
-alpha, cosalpha, sinalpha = sp.symbols('alpha cosalpha sinalpha')
+alpha, xalpha, yalpha = sp.symbols('alpha xalpha yalpha')
 
 comp_key = "lens"
 
@@ -63,8 +63,8 @@ def get_symbol_map(lens_config_list):
         "mu_dec_rel": "mu_dec_rel",
 
         "alpha": "alpha",
-        "cosalpha": "cosalpha",
-        "sinalpha": "sinalpha",
+        "xalpha": "xalpha",
+        "yalpha": "yalpha",
 
         "lens_mass": f"star.{l_idx}.mass",
         "lens_distance": f"star.{l_idx}.distance",
@@ -126,13 +126,18 @@ RELATIONS = [
     # or known masses → q for diagnostics.
     sp.Eq(q_lens * lens_mass, companion_mass),
 
-    # Source trajectory angle: alpha (radians, internal) → cosalpha, sinalpha.
-    # These relations let a user supply alpha+init_scale in params.yaml; the
-    # relaxation engine propagates initvals and scales to the sampled cosalpha/sinalpha.
-    # alpha itself is not in the symbol map for PSPL events (no cosalpha/sinalpha
+    # Source trajectory angle: alpha (radians, internal) → xalpha, yalpha.
+    # xalpha = r·cos(alpha), yalpha = r·sin(alpha), where r is a free positive
+    # scale sampled from the N(0,1) prior — only the direction arctan2(y,x) matters.
+    # Wide bounds (±100) and N(0,1) priors give a uniform marginal prior on alpha;
+    # bounding to [-1,1] would break isotropy and bias angles near ±45°.
+    # The relaxation engine uses these only forward (alpha → xalpha, yalpha):
+    # given alpha, set xalpha=cos(alpha), yalpha=sin(alpha) as unit-circle seeds.
+    # mkprior converts the sampled xalpha/yalpha back to alpha via arctan2.
+    # alpha itself is not in the symbol map for PSPL events (no xalpha/yalpha
     # registered), so both relations are automatically inert for point-source fits.
-    sp.Eq(cosalpha, sp.cos(alpha)),
-    sp.Eq(sinalpha, sp.sin(alpha)),
+    sp.Eq(xalpha, sp.cos(alpha)),
+    sp.Eq(yalpha, sp.sin(alpha)),
 ]
 
 

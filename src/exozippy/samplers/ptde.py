@@ -339,7 +339,7 @@ def ptde_sample(
             internal_starts.append(phys_dict)
         for comp in system.active_components.values():
             comp.plot(system, internal_starts,
-                      filename_prefix=plot_prefix + "_ensemble_start")
+                      filename_prefix=plot_prefix + "_start_ensemble")
 
     # Replicate T=1 starts to all rungs; hotter chains spread quickly during tune
     populations = [

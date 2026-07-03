@@ -1,7 +1,57 @@
 import pytest
-from exozippy.config import ConfigManager
+from exozippy.config import ConfigManager, validate_instance_names
 from exozippy.components.rvinstrument.rvinstrument import RVInstrument
 from exozippy.components.parameter import Parameter
+
+
+@pytest.mark.parametrize("bad_name, match", [
+    ("My.Star", "letters, digits, underscores, and hyphens"),
+    ("My Star", "letters, digits, underscores, and hyphens"),
+    ("star[0]", "letters, digits, underscores, and hyphens"),
+    ("", "letters, digits, underscores, and hyphens"),
+    ("1", "index notation"),
+    ("128", "index notation"),
+    (128, "must be strings"),
+    (1.5, "must be strings"),
+])
+def test_invalid_instance_name_raises_value_error(bad_name, match):
+    """
+    Given a config whose instance name would corrupt parameter-path parsing
+      (dots, spaces, brackets, empty, all-digit, or non-string),
+    When the ConfigManager is constructed with that system config,
+    Then a ValueError naming the offending component entry is raised.
+    """
+    config = {"star": [{"name": bad_name}]}
+    with pytest.raises(ValueError, match=match):
+        ConfigManager({}, system_config=config)
+
+
+def test_valid_instance_names_are_accepted():
+    """
+    Given names using the full legal charset (letters, digits, _ and -),
+    When validate_instance_names runs,
+    Then no error is raised (hyphenated survey names must keep working).
+    """
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "mulensinstrument": [{"name": "Roman_Z087"}],
+        "galacticmodel": [{"name": "KMT-2019-BLG-1806"}],
+    }
+    validate_instance_names(config)
+
+
+def test_unnamed_instances_and_flat_components_are_skipped():
+    """
+    Given entries without a 'name' key and non-list (flat dict) components,
+    When validate_instance_names runs,
+    Then they are ignored rather than crashing the validator.
+    """
+    config = {
+        "star": [{"teff": 5778}],          # unnamed instance → defaults to index
+        "sed": {"errscale": 1.0},          # flat-dict component
+        "prefix": "fitresults/model",      # non-component scalar key
+    }
+    validate_instance_names(config)
 
 
 def test_duplicate_component_names_raise_value_error():

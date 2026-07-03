@@ -1,8 +1,8 @@
 run:
   name: "DC2018_128"
 
-prefix: "fitresults/DC2018_128_2"
-logger_level: DEBUG
+prefix: "fitresults/DC2018_128"
+#logger_level: DEBUG
 
 # Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
 # MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
@@ -35,16 +35,24 @@ band:
   - name: "Z087"
     filter: "Roman.WFI.Z087"
     ld_law: "linear"
+#  - name: "W149"
+#    filter: "Roman.WFI.W149"
+#    ld_law: "linear"
 
 mulensinstrument:
-  - name: "Roman"
+  - name: "Roman_Z087"
     file: "n20180816.Z087.WFIRST18.128.txt"
     data_format: flux          # file stores normalized flux, not magnitudes
     observer_location: roman_simulated_2018dc  # MMEXOFAST wfirst_ephemeris_W149.txt, J2000 equatorial
     band: "Z087"
+#  - name: "Roman_W149"
+#    file: "n20180816.W149.WFIRST18.128.txt"
+#    data_format: flux
+#    observer_location: roman_simulated_2018dc
+#    band: "W149"
 
-#parameter_file: "DC2018_128.params.yaml"
-parameter_file: "DC2018_128.params.2.yaml"
+parameter_file: "DC2018_128.params.yaml"
+#parameter_file: "DC2018_128.params.2.yaml"
 
 sampler:
   method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
@@ -52,8 +60,8 @@ sampler:
   T_max: 200              # hottest temperature (EXOFASTv2 parity)
   # n_chains: defaults to 2 × n_params
   # cores: defaults to 75% of physical cores
-  tune: 5000
-  draws: 15000
+  tune: 0
+  draws: 500
   nthin: 1
   check_curvatures: False
   recompute_trace: True

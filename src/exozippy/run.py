@@ -47,7 +47,7 @@ from .mkparam import mkprior
 from .outputs.latex import build_latex_output, build_csv_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
-from exozippy.ptde import ptde_sample
+from exozippy.samplers.ptde import ptde_sample
 
 
 import pytensor

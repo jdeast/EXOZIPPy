@@ -200,6 +200,29 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
 
             output[out_key] = entry
 
+    # Convert xalpha/yalpha pairs → alpha (degrees).
+    # xalpha and yalpha are sampled on wide bounds (±100) so that only the direction
+    # arctan2(y, x) matters; their individual values are not meaningful cosine/sine
+    # values and must not be written to params.yaml as-is.  The relaxation engine
+    # derives xalpha/yalpha from alpha via cos/sin, so writing alpha is correct.
+    _x_keys = {k[:-len(".xalpha")]: k for k in list(output) if k.endswith(".xalpha")}
+    _y_keys = {k[:-len(".yalpha")]: k for k in list(output) if k.endswith(".yalpha")}
+    for prefix in set(_x_keys) & set(_y_keys):
+        x_key, y_key = _x_keys[prefix], _y_keys[prefix]
+        xv, yv = output[x_key]["initval"], output[y_key]["initval"]
+        xs, ys = output[x_key].get("init_scale", 0.0), output[y_key].get("init_scale", 0.0)
+        alpha_deg = float(np.degrees(np.arctan2(yv, xv)))
+        r_sq = xv**2 + yv**2
+        sigma_deg = float(np.degrees(
+            np.sqrt((yv / r_sq)**2 * xs**2 + (xv / r_sq)**2 * ys**2)
+        )) if r_sq > 0 else 0.0
+        del output[x_key]
+        del output[y_key]
+        output[f"{prefix}.alpha"] = {
+            "initval": float(np.round(alpha_deg, 8)),
+            "init_scale": float(np.round(sigma_deg, 8)),
+        }
+
     _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
 
     # Pass through existing entries not touched by the trace only if they carry

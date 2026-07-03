@@ -6,7 +6,7 @@ import numpy as np
 import pymc as pm
 import pytest
 
-from exozippy.ptde import _geometric_ladder, ptde_sample
+from exozippy.samplers.ptde import _geometric_ladder, ptde_sample
 
 
 # ---------------------------------------------------------------------------

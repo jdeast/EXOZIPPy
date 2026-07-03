@@ -1,0 +1,80 @@
+run:
+  name: "OGLE-2016-BLG-1003"
+
+prefix: "fitresults/OGLE-2016-BLG-1003"
+#logger_level: DEBUG
+
+# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+#
+# system architecture:
+#   star.0 = Lens      (primary lens host)
+#   star.1 = Source    (background source)
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "SourceA"
+  - name: "SourceB"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1", "star.2"]
+    finite_source: False
+
+galacticmodel:
+  - name: "OGLE-2016-BLG-1003"
+    anchor_idx: 1              # source is star.1
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  - name: "R"
+    filter: "MOA/MOA.Red"
+    ld_law: "linear"
+  - name: "V"
+    filter: "Generic/Cousins.V"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "OGLE"
+    file: "n20140130.I.OGLE.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "MOA"
+    file: "n20150210.R.MOA.OGLE-2016-BLG-1003.dat"
+    band: "R"
+  - name: "KMTC"
+    file: "n20160221.I.KMTC.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTS"
+    file: "n20160222.I.KMTS.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTA"
+    file: "n20160224.I.KMTA.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTC"
+    file: "n20160227.V.KMTC.OGLE-2016-BLG-1003.dat"
+    band: "V"
+  - name: "KMTS"
+    file: "n20160317.V.KMTS.OGLE-2016-BLG-1003.dat"
+    band: "V"
+
+parameter_file: "ob161003.params.yaml"
+#parameter_file: "ob161003.params.2.yaml"
+
+sampler:
+  method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
+  n_temps: 8              # temperature rungs (EXOFASTv2 parity)
+  T_max: 200              # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2 × n_params
+  # cores: defaults to 75% of physical cores
+  tune: 0
+  draws: 500
+  nthin: 1
+  check_curvatures: False
+  recompute_trace: True

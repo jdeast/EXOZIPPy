@@ -534,7 +534,7 @@ class Parameter:
                 # Gaussian potential in section A — always N(mu, sigma) regardless
                 # of whiten.  Using min(sigma, init_scale) makes chain initialization
                 # spread by init_scale in physical space when init_scale < sigma
-                # (e.g. cosalpha/sinalpha where sigma=1 encodes a uniform-angle
+                # (e.g. xalpha/yalpha where sigma=1 encodes a uniform-angle
                 # prior but init_scale reflects the actual alpha uncertainty).
                 whiten = (min(sigmas[i], scales[i]) if has_sigma else scales[i])
                 # Keep the start off the exact bound. The floor is in units of

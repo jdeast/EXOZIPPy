@@ -185,9 +185,9 @@ class Lens(Component):
         if self.n_companions >= 1:
             companion_shape = (self.n_companions,)
             self.manifest["s"] = {"shape": companion_shape}
-            self.manifest["cosalpha"] = {"shape": companion_shape}
-            self.manifest["sinalpha"] = {"shape": companion_shape}
-            # alpha derived from cosalpha/sinalpha; internal unit = rad, display = deg
+            self.manifest["xalpha"] = {"shape": companion_shape}
+            self.manifest["yalpha"] = {"shape": companion_shape}
+            # alpha derived from xalpha/yalpha via arctan2; internal unit = rad, display = deg
             self.manifest["alpha"] = {"expr_key": "default", "shape": companion_shape}
             # q = M_companion / M_primary; companion component type varies by config
             companion_type = self.lens_bodies[0][1][0]
@@ -204,10 +204,10 @@ class Lens(Component):
         # Seed alpha hint (degrees, user unit) so inspect_start can display it
         # even before the expression graph is built.
         inst = self.names[0] if self.names else "0"
-        ca_entry = (self.config_manager.user_params.get(f"lens.{inst}.cosalpha")
-                    or self.config_manager.user_params.get(f"lens.0.cosalpha") or {})
-        sa_entry = (self.config_manager.user_params.get(f"lens.{inst}.sinalpha")
-                    or self.config_manager.user_params.get(f"lens.0.sinalpha") or {})
+        ca_entry = (self.config_manager.user_params.get(f"lens.{inst}.xalpha")
+                    or self.config_manager.user_params.get(f"lens.0.xalpha") or {})
+        sa_entry = (self.config_manager.user_params.get(f"lens.{inst}.yalpha")
+                    or self.config_manager.user_params.get(f"lens.0.yalpha") or {})
         ca = ca_entry.get("initval")
         sa = sa_entry.get("initval")
         if ca is not None and sa is not None:
@@ -340,10 +340,10 @@ class Lens(Component):
         pi_E_E_tot = pt.switch(is_physical,
             pi_rel / theta_E_tot_safe * self.mu_ra_rel.value[index] / mu_safe, 0.0)
 
-        # s/cosalpha/sinalpha are indexed by companion (binary = companion 0),
+        # s/xalpha/yalpha are indexed by companion (binary = companion 0),
         # not by event.
-        alpha_deg = pt.arctan2(self.sinalpha.value[0],
-                               self.cosalpha.value[0]) * (180.0 / np.pi)
+        alpha_deg = pt.arctan2(self.yalpha.value[0],
+                               self.xalpha.value[0]) * (180.0 / np.pi)
 
         return {
             't0': s['t0'], 'u0': s['u0'],
@@ -544,11 +544,11 @@ class Lens(Component):
         t_E   = g("t_E",   index)
         s_val = g("s",     index)
         q_val = g("q",     index)
-        # alpha in degrees; try direct value first, fall back to cosalpha/sinalpha
+        # alpha in degrees; try direct value first, fall back to xalpha/yalpha
         alpha_deg = g("alpha", index)
         if alpha_deg is None:
-            ca = g("cosalpha", index)
-            sa = g("sinalpha", index)
+            ca = g("xalpha", index)
+            sa = g("yalpha", index)
             if ca is not None and sa is not None:
                 alpha_deg = float(np.degrees(np.arctan2(sa, ca)))
 

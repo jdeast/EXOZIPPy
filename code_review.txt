@@ -323,6 +323,10 @@ COMPLETED
 - lens.py:623: fixed malformed bracket list in resolve_auto_vbbl (extra "hexadecapole" removed)
 - lens.py: tightened resolve_auto_vbbl buffer default 0.5→0.1 days
 - mulensinstrument.py:416: raise NotImplemented → raise NotImplementedError; removed dead if False block
+- mkparam.py: xalpha/yalpha pairs converted back to alpha (degrees) in mkprior output
+- lens/defaults/symbolic_physics/physics: cosalpha/sinalpha renamed to xalpha/yalpha; symbolic
+  relations corrected (arctan2 direction only; old sp.Eq(cosalpha,cos(alpha)) was invertible and
+  gave wrong results when xalpha/yalpha were off the unit circle)
 
 PRIORITY ORDERING
 -----------------

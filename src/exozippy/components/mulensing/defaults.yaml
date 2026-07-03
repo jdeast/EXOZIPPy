@@ -114,7 +114,7 @@ lens:
         deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
   # Binary lens parameters (N_lenses - 1 per event)
   q:
-    lower: 0.0
+    lower: 1e-10
     upper: 1.0
     unit: ""
     internal_unit: ""
@@ -134,17 +134,18 @@ lens:
     expressions:
       default:
         func_name: "calc_alpha"
-        deps: [ "cosalpha", "sinalpha" ]
+        deps: [ "xalpha", "yalpha" ]
+  # might want to parameterize this like Yee's that increases sampling at s=1
   s:
-    lower: 0.001
-    upper: 1000.0
+    lower: 0.05 # smallest known is 0.3; VBM might be problematic at higher values
+    upper: 20.0 # widest known is 5.3; VBM might be problematic at higher values
     initval: 1.0
     init_scale: 0.05
     unit: ""
     internal_unit: ""
     latex: "s"
     description: "Projected binary separation (Einstein radii)"
-  cosalpha:
+  xalpha:
     lower: -100.0
     upper: 100.0
     initval: 0.0
@@ -153,9 +154,9 @@ lens:
     sigma: 1.0
     unit: ""
     internal_unit: ""
-    latex: "\\cos\\alpha"
-    description: "cos of source trajectory angle"
-  sinalpha:
+    latex: "x_{\\alpha}"
+    description: "x-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
+  yalpha:
     lower: -100.0
     upper: 100.0
     initval: 0.0
@@ -164,8 +165,8 @@ lens:
     sigma: 1.0
     unit: ""
     internal_unit: ""
-    latex: "\\sin\\alpha"
-    description: "sin of source trajectory angle"
+    latex: "y_{\\alpha}"
+    description: "y-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
 mulensinstrument:
   log_f_total:
     initval: -6
