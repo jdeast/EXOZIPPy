@@ -24,6 +24,21 @@
       - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
       - needs: q_source parameterization generalized (currently 1 scalar per instrument)
       - needs: BinaryLensMagOp extended or new 2L2S Op
+    - triple lens (3L1S) direct-VBM backend: NOT DONE
+      - blocked by lens.py:554 NotImplementedError (n_lens_bodies > 2); param/config
+        layer already N-lens generic (per-companion s/alpha, per-body masses wired
+        via lens_bodies list)
+      - prerequisite: hpc_optimization.txt P2 (direct-VBM Op bypassing MulensModel)
+        must land for binary first — MulensModel itself caps at 2 lens bodies
+      - needs: verify VBMicrolensing 5.5's actual N-lens magnification API (check
+        during P3's VBM source read; do not assume function names)
+      - needs: generalize BinaryLensMagOp's param unpacking to a variable-length
+        companion tail instead of fixed [s, q, alpha_deg]
+      - needs: redo P1's hex-vs-VBM bracketing benchmark for N=3 — do not assume
+        the binary "VBM everywhere" conclusion carries over (higher-degree image
+        polynomial, up to 10 images per Rhie 2002)
+      - orthogonal to 2L2S above (lens multiplicity vs source multiplicity); may
+        eventually compose (3L2S) but keep scoped separately for now
     - confirm (and document) conventions (origin, alpha, parallax sign)
     - explore samplers and parameterizations
       - identify best practices

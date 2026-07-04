@@ -176,30 +176,42 @@ class ConfigManager:
                     if not isinstance(entry_cfg, dict):
                         continue
 
-                    raw_map = module.get_symbol_map(entry_cfg)
+                    # A component may return a single symbol map, or a list of
+                    # maps when one config entry instantiates the relations
+                    # multiple times (e.g. a lens with N sources instantiates
+                    # the per-source parameter chain once per source).
+                    raw_maps = module.get_symbol_map(entry_cfg)
+                    if not isinstance(raw_maps, list):
+                        raw_maps = [raw_maps]
 
-                    instance_map = {}
-                    for sym_name, path in raw_map.items():
-                        if "." in str(path):
-                            instance_map[sym_name] = path
-                        else:
-                            instance_map[sym_name] = f"{yaml_key}.{i}.{path}"
+                    for raw_map in raw_maps:
+                        instance_map = {}
+                        for sym_name, path in raw_map.items():
+                            if "." in str(path):
+                                instance_map[sym_name] = path
+                            else:
+                                instance_map[sym_name] = f"{yaml_key}.{i}.{path}"
 
-                    for _, full_path in instance_map.items():
-                        self.master_symbol_map[full_path] = sp.Symbol(full_path)
+                        for _, full_path in instance_map.items():
+                            self.master_symbol_map[full_path] = sp.Symbol(full_path)
 
-                    # Extract the exact SymPy objects (with all their assumptions) from the equations
-                    module_symbols = set()
-                    for rel in getattr(module, "RELATIONS", []):
-                        module_symbols.update(rel.free_symbols)
+                        # Extract the exact SymPy objects (with all their assumptions) from the equations
+                        module_symbols = set()
+                        for rel in getattr(module, "RELATIONS", []):
+                            module_symbols.update(rel.free_symbols)
 
-                    subs = {}
-                    for sym in module_symbols:
-                        if sym.name in instance_map:
-                            subs[sym] = sp.Symbol(instance_map[sym.name])
+                        subs = {}
+                        for sym in module_symbols:
+                            if sym.name in instance_map:
+                                subs[sym] = sp.Symbol(instance_map[sym.name])
 
-                    for rel in getattr(module, "RELATIONS", []):
-                        self.all_relations.append(rel.subs(subs))
+                        for rel in getattr(module, "RELATIONS", []):
+                            rel_inst = rel.subs(subs)
+                            # Maps sharing symbols (e.g. per-source maps with a
+                            # common lens mass) produce identical instances of
+                            # the shared relations; keep one copy.
+                            if rel_inst not in self.all_relations:
+                                self.all_relations.append(rel_inst)
 
         for defaults_file in components_dir.rglob("defaults.yaml"):
             with open(defaults_file, "r") as f:
@@ -569,7 +581,12 @@ class ConfigManager:
             for i in range(len(comp_list)):
                 indexed_key = f"{comp_type}.{i}.{param_name}"
                 if indexed_key not in standardized:
-                    standardized[indexed_key] = val
+                    # Each instance must get its OWN dict: downstream code
+                    # (finalize_user_params inject-back, init_scale sync)
+                    # mutates these entries per-instance, and a shared object
+                    # would let the last instance's write clobber all others
+                    # (e.g. per-source radii solved from rho).
+                    standardized[indexed_key] = copy.deepcopy(val)
 
         # Pass 3: 1-part and other unhandled keys (e.g. 'run').
         for key, val in user_params.items():

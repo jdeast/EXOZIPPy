@@ -157,30 +157,43 @@ def _map_logp(pool, proposals):
 
 
 def _map_logp_timeout(pool, proposals, timeout):
-    """Evaluate logps with a per-step wall-clock deadline.
+    """Evaluate logps with a per-call wall-clock timeout.
 
-    Proposals that don't complete within `timeout` seconds receive -inf so the
-    parent loop can proceed without blocking on a single slow VBBinaryLensing
-    caustic integration.  The worker continues running in the background and
-    will be available for future tasks once it finishes.
+    Each proposal individually gets up to `timeout` seconds (not a deadline
+    shared across the whole batch — a slow-but-legitimate early proposal must
+    not eat into the budget of proposals evaluated later in the same step).
+    A proposal that doesn't complete in time receives -inf, so the caller's
+    normal Metropolis accept/reject logic rejects it automatically.
 
-    Returns (lps, n_timed_out).
+    A logp evaluation can call into external/compiled code that occasionally
+    enters a genuine infinite loop for some pathological parameter
+    combination. When that happens the worker process that drew the
+    timed-out proposal is stuck forever and never becomes available again;
+    this function has no way to kill a single worker without tearing down
+    the whole Pool, so the caller is responsible for recycling `pool`
+    whenever `timed_out` is non-empty. Without that, a long run slowly
+    bleeds workers, one per hang, until the pool is exhausted.
+
+    With no pool (single-core / serial mode), there is no subprocess to time
+    out, so `timeout` cannot be enforced -- proposals run to completion as
+    before. The caller should warn about this once at startup if cores<=1.
+
+    Returns (lps, timed_out) where timed_out is a list of indices into
+    `proposals`.
     """
     if pool is None:
-        return [_eval_logp(p) for p in proposals], 0
+        return [_eval_logp(p) for p in proposals], []
 
     async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
-    deadline = time.time() + timeout
     lps = []
-    n_timed_out = 0
-    for r in async_results:
-        remaining = max(0.001, deadline - time.time())
+    timed_out = []
+    for idx, r in enumerate(async_results):
         try:
-            lps.append(r.get(timeout=remaining))
+            lps.append(r.get(timeout=timeout))
         except mp.TimeoutError:
             lps.append(-np.inf)
-            n_timed_out += 1
-    return lps, n_timed_out
+            timed_out.append(idx)
+    return lps, timed_out
 
 
 def _pick_two(rng, n, exclude):
@@ -288,6 +301,15 @@ def ptde_sample(
     seed : int | None
     log_interval : int | None — steps between progress log lines (None → 5%)
     plot_prefix : str | None  — if set, generate ensemble-start plots at this path prefix
+    eval_timeout : float | None  — user-settable per-call wall-clock timeout (seconds)
+               for a single logp evaluation (default None = no timeout; proposals run
+               to completion no matter how long they take). Opt in with a value
+               (e.g. 10.0) for models whose logp can call into a backend known to
+               occasionally hang on pathological parameter combinations. A call that
+               doesn't return within the timeout is treated as -inf (the proposal is
+               rejected by the normal accept/reject logic) and the worker pool is
+               recycled, since the stuck worker may never return.
+               Has no effect when cores<=1 (no worker pool to enforce it against).
 
     Returns
     -------
@@ -366,10 +388,63 @@ def ptde_sample(
     pool = (mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
             if actual_cores > 1 else None)
 
+    if eval_timeout is not None and pool is None:
+        logger.warning(
+            f"PTDE: eval_timeout={eval_timeout:.0f}s has no effect with a single "
+            f"core (cores={actual_cores}) — there is no worker process to enforce "
+            f"a wall-clock timeout against a hung logp call.")
+
     # Early-stop state: mutable list so the closure can write back to us.
     stop_requested = [False]
     actual_draws = 0
     start_time = time.time()
+    n_eval_timeouts = [0]  # mutable box, incremented by _eval_logps_safe
+
+    def _eval_logps_safe(proposals, step_label, index_labels=None):
+        """Evaluate logps for `proposals`, honoring eval_timeout if set.
+
+        A logp call that exceeds eval_timeout is treated as -inf, which the
+        normal Metropolis accept/reject logic rejects automatically. The full
+        (raw and physical) parameter set that triggered the timeout is
+        logged so the run can be reproduced and diagnosed offline. The
+        worker process that was evaluating it may never return on its own,
+        so the pool is recycled whenever a timeout occurs — otherwise a long
+        run slowly bleeds workers, one per hang, until none are left.
+
+        index_labels : list[str] | None — optional per-proposal identity
+            (e.g. "rung 3 chain 12"), same length/order as `proposals`, used
+            in place of a bare index in the timeout log message.
+        """
+        nonlocal pool
+        if eval_timeout is None:
+            return _map_logp(pool, proposals)
+
+        lps, timed_out = _map_logp_timeout(pool, proposals, eval_timeout)
+        if timed_out:
+            n_eval_timeouts[0] += len(timed_out)
+            for idx in timed_out:
+                raw_vals = [proposals[idx][k] for k in raw_var_names]
+                phys_vals = raw_to_phys(*raw_vals)
+                phys_params = {name: np.asarray(val).tolist()
+                               for name, val in zip(out_var_names, phys_vals)}
+                raw_params = {k: np.asarray(v).tolist()
+                              for k, v in proposals[idx].items()}
+                who = index_labels[idx] if index_labels is not None else f"proposal {idx}"
+                logger.error(
+                    f"PTDE: logp call exceeded eval_timeout={eval_timeout:.0f}s "
+                    f"at {step_label} ({who}) — rejecting this proposal.\n"
+                    f"  physical params: {phys_params}\n"
+                    f"  raw params: {raw_params}")
+            if pool is not None:
+                logger.warning(
+                    f"PTDE: recycling worker pool after {len(timed_out)} "
+                    f"timeout(s) at {step_label} — a hung worker never "
+                    f"rejoins the pool on its own.")
+                pool.terminate()
+                pool.join()
+                pool = mp.get_context("fork").Pool(
+                    actual_cores, initializer=_worker_init)
+        return lps
 
     _do_convergence = (min_ess is not None or max_rhat is not None) and n_chains >= 2
     _check_gen = _convergence_check_schedule() if _do_convergence else None
@@ -388,7 +463,10 @@ def ptde_sample(
         # initial logp evaluations
         flat_starts = [populations[k][i]
                        for k in range(n_temps) for i in range(n_chains)]
-        all_lps = _map_logp(pool, flat_starts)
+        flat_start_labels = [f"rung {k} chain {i}"
+                              for k in range(n_temps) for i in range(n_chains)]
+        all_lps = _eval_logps_safe(flat_starts, "initial evaluation",
+                                    index_labels=flat_start_labels)
         logps = [
             [all_lps[k * n_chains + i] for i in range(n_chains)]
             for k in range(n_temps)
@@ -430,7 +508,10 @@ def ptde_sample(
             _t_build = time.time()
 
             # 2. evaluate all logps in parallel
-            prop_lps = _map_logp(pool, props_flat)
+            prop_labels = [f"rung {k} chain {i}" for k, i in prop_map]
+            prop_lps = _eval_logps_safe(
+                props_flat, f"step {step + 1} ({phase})",
+                index_labels=prop_labels)
             _t_eval = time.time()
 
             # 3. Metropolis accept/reject at effective temperature T_k
@@ -588,6 +669,7 @@ def ptde_sample(
     logger.info(
         f"PTDE done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
         + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]"
-           if n_temps > 1 else ""))
+           if n_temps > 1 else "")
+        + (f"  eval_timeouts={n_eval_timeouts[0]}" if n_eval_timeouts[0] else ""))
 
     return idata

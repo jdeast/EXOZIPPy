@@ -5,7 +5,12 @@ from ...constants import KAPPA, RSUN_TO_AU
 # These MUST match the strings produced by ConfigManager.finalize_user_params
 t_0, u_0, t_E = sp.symbols('t_0 u_0 t_E')
 theta_E, mu_rel_mag = sp.symbols('theta_E mu_rel_mag')
-pi_rel, lens_mass = sp.symbols('pi_rel lens_mass')
+pi_rel = sp.symbols('pi_rel')
+# lens_mass_total drives theta_E/t_E/rho/pi_E (community convention: binary-lens
+# parameters are referenced to the TOTAL lens mass).  For single lenses it maps
+# directly to the primary star's mass; for binaries it maps to lens.0.mlens_total
+# and the mass-sum relation below ties it to the per-body masses.
+lens_mass_total, primary_lens_mass = sp.symbols('lens_mass_total primary_lens_mass')
 lens_distance, source_distance = sp.symbols('lens_distance source_distance')
 mu_ra_rel, mu_dec_rel = sp.symbols('mu_ra_rel mu_dec_rel')
 lens_pm_ra, source_pm_ra = sp.symbols('lens_pm_ra source_pm_ra')
@@ -24,11 +29,20 @@ def get_symbol_map(lens_config_list):
     body assignments.  Supports both the legacy lens_ndx/source_ndx keys and the
     NLNS lenses:/sources: list syntax.
 
+    Returns a LIST of symbol maps, one per source body (NSNL): each source has
+    its own trajectory, so the per-source parameter chain (t_0, u_0, rho, t_E,
+    theta_E, pi_rel, pi_E_*, mu_*) is instantiated once per source at the
+    element-index paths lens.<j>.<param>, where j is the source's slot in the
+    ``sources:`` list (matching element j of the lens component's vector
+    parameters).  Lens-side and companion symbols are shared across all maps;
+    ConfigManager dedupes the resulting identical relation instances.
+
     companion_mass is only added to the map for binary events (len(lenses) > 1).
     When absent, any RELATION that mentions companion_mass or q_lens will be
     skipped by the relaxation engine (all symbols must be in master_symbol_map).
     """
     companion_mass_path = None
+    is_binary_lens = False
 
     if "lenses" in lens_config_list:
         lenses = lens_config_list["lenses"]
@@ -36,60 +50,79 @@ def get_symbol_map(lens_config_list):
         l_idx = int(l_idx)
 
         sources = lens_config_list.get("sources", ["star.1"])
-        s_comp, s_idx = sources[0].split(".")
-        s_idx = int(s_idx)
 
         if len(lenses) > 1:
+            is_binary_lens = True
             c_comp, c_idx = lenses[1].split(".")
             companion_mass_path = f"{c_comp}.{c_idx}.mass"
     else:
         l_idx = int(lens_config_list.get("lens_ndx", 0))
-        s_idx = int(lens_config_list.get("source_ndx", 1))
+        sources = [f"star.{int(lens_config_list.get('source_ndx', 1))}"]
 
-    result = {
-        "t_0": "t_0",
-        "u_0": "u_0",
-        "t_E": "t_E",
-        "rho": "rho",
-        "q_lens": "q",   # → lens.{i}.q after yaml_key prefix
+    # theta_E/t_E/rho/pi_E are referenced to the TOTAL lens mass: the primary
+    # star's mass for a single lens, the derived lens.0.mlens_total for a
+    # binary (tied to the per-body masses by the mass-sum relation).
+    if is_binary_lens:
+        lens_mass_total_path = "lens.0.mlens_total"
+    else:
+        lens_mass_total_path = f"star.{l_idx}.mass"
 
-        "theta_E": "theta_E",
-        "pi_rel": "pi_rel",
-        "pi_E_N": "pi_E_N",
-        "pi_E_E": "pi_E_E",
+    maps = []
+    for j, src in enumerate(sources):
+        s_comp, s_idx = src.split(".")
+        s_idx = int(s_idx)
 
-        "mu_rel_mag": "mu_rel_mag",
-        "mu_ra_rel": "mu_ra_rel",
-        "mu_dec_rel": "mu_dec_rel",
+        result = {
+            # Per-source trajectory chain: element j of the lens vector params.
+            # Explicit full paths — only one lens event is allowed, so the
+            # element index unambiguously identifies the source slot.
+            "t_0": f"lens.{j}.t_0",
+            "u_0": f"lens.{j}.u_0",
+            "t_E": f"lens.{j}.t_E",
+            "rho": f"lens.{j}.rho",
 
-        "alpha": "alpha",
-        "xalpha": "xalpha",
-        "yalpha": "yalpha",
+            "theta_E": f"lens.{j}.theta_E",
+            "pi_rel": f"lens.{j}.pi_rel",
+            "pi_E_N": f"lens.{j}.pi_E_N",
+            "pi_E_E": f"lens.{j}.pi_E_E",
 
-        "lens_mass": f"star.{l_idx}.mass",
-        "lens_distance": f"star.{l_idx}.distance",
-        "lens_pm_ra": f"star.{l_idx}.pm_ra",
-        "lens_pm_dec": f"star.{l_idx}.pm_dec",
-        "lens_ra": f"star.{l_idx}.ra",
-        "lens_dec": f"star.{l_idx}.dec",
+            "mu_rel_mag": f"lens.{j}.mu_rel_mag",
+            "mu_ra_rel": f"lens.{j}.mu_ra_rel",
+            "mu_dec_rel": f"lens.{j}.mu_dec_rel",
 
-        "source_mass": f"star.{s_idx}.mass",
-        "source_radius": f"star.{s_idx}.radius",
-        "source_distance": f"star.{s_idx}.distance",
-        "source_pm_ra": f"star.{s_idx}.pm_ra",
-        "source_pm_dec": f"star.{s_idx}.pm_dec",
-        "source_ra": f"star.{s_idx}.ra",
-        "source_dec": f"star.{s_idx}.dec",
-    }
+            # Shared per-companion geometry (companion slot 0)
+            "q_lens": "lens.0.q",
+            "alpha": "lens.0.alpha",
+            "xalpha": "lens.0.xalpha",
+            "yalpha": "lens.0.yalpha",
 
-    if companion_mass_path:
-        result["companion_mass"] = companion_mass_path
+            "lens_mass_total": lens_mass_total_path,
+            "lens_distance": f"star.{l_idx}.distance",
+            "lens_pm_ra": f"star.{l_idx}.pm_ra",
+            "lens_pm_dec": f"star.{l_idx}.pm_dec",
+            "lens_ra": f"star.{l_idx}.ra",
+            "lens_dec": f"star.{l_idx}.dec",
 
-    return result
+            "source_mass": f"{s_comp}.{s_idx}.mass",
+            "source_radius": f"{s_comp}.{s_idx}.radius",
+            "source_distance": f"{s_comp}.{s_idx}.distance",
+            "source_pm_ra": f"{s_comp}.{s_idx}.pm_ra",
+            "source_pm_dec": f"{s_comp}.{s_idx}.pm_dec",
+            "source_ra": f"{s_comp}.{s_idx}.ra",
+            "source_dec": f"{s_comp}.{s_idx}.dec",
+        }
+
+        if companion_mass_path:
+            result["companion_mass"] = companion_mass_path
+            result["primary_lens_mass"] = f"star.{l_idx}.mass"
+
+        maps.append(result)
+
+    return maps
 
 RELATIONS = [
-    # Einstein Radius
-    sp.Eq(theta_E ** 2, KAPPA * lens_mass * pi_rel),
+    # Einstein Radius (total lens mass)
+    sp.Eq(theta_E ** 2, KAPPA * lens_mass_total * pi_rel),
 
     # Relative Parallax (dist in pc -> pi in mas)
     sp.Eq(pi_rel, (1000 / lens_distance) - (1000 / source_distance)),
@@ -114,17 +147,21 @@ RELATIONS = [
     # This gives the solver a direct rank-100 path when mass and pi_E are both
     # user-supplied, bypassing the distance hint and avoiding sign ambiguity in
     # the quadratic for mu_ra_rel / mu_dec_rel.
-    sp.Eq(pi_rel, KAPPA * lens_mass * (pi_E_N ** 2 + pi_E_E ** 2)),
+    sp.Eq(pi_rel, KAPPA * lens_mass_total * (pi_E_N ** 2 + pi_E_E ** 2)),
 
     # Finite Source (R_sun to AU, then to mas)
     sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E),
 
     # Binary lens mass ratio: q = M_companion / M_primary
-    # companion_mass is only in the symbol map for binary events, so this relation
-    # is automatically inert for PSPL (relaxation engine skips equations with
-    # unregistered symbols).  Propagates: user-supplied q → companion mass initval,
-    # or known masses → q for diagnostics.
-    sp.Eq(q_lens * lens_mass, companion_mass),
+    # companion_mass/primary_lens_mass are only in the symbol map for binary
+    # events, so these relations are automatically inert for PSPL (relaxation
+    # engine skips equations with unregistered symbols).  Propagates:
+    # user-supplied q → companion mass initval, or known masses → q.
+    sp.Eq(q_lens * primary_lens_mass, companion_mass),
+
+    # Total lens mass = sum of body masses (binary only; inert for PSPL where
+    # lens_mass_total maps directly onto the primary star's mass).
+    sp.Eq(lens_mass_total, primary_lens_mass + companion_mass),
 
     # Source trajectory angle: alpha (radians, internal) → xalpha, yalpha.
     # xalpha = r·cos(alpha), yalpha = r·sin(alpha), where r is a free positive

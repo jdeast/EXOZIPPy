@@ -112,10 +112,22 @@ lens:
       default:
         func_name: "calc_rho"
         deps: [ "star.radius[source_map]", "star.distance[source_map]", "theta_E" ]
+  mlens_total:
+    lower: 0.0
+    upper: 500.0
+    unit: "solMass"
+    internal_unit: "solMass"
+    latex: "M_{\\rm L,tot}"
+    description: "Total lens mass (all bodies)"
+    debug_print: true
+    expressions:
+      default:
+        func_name: "calc_mlens_total"
+        deps: [ "star.mass[lens_map]" ]  # overridden per-config with all lens bodies
   # Binary lens parameters (N_lenses - 1 per event)
   q:
     lower: 1e-10
-    upper: 1.0
+    upper: 100.0  # q > 1 is legal (companion more massive than the "primary"); MulensModel supports it
     unit: ""
     internal_unit: ""
     latex: "q"
@@ -186,6 +198,15 @@ mulensinstrument:
     internal_unit: ""
     latex: "q_s"
     description: "Source fraction f_s / (f_s + f_b)"
+  q_flux:
+    initval: 1.0
+    init_scale: 0.1
+    lower: 0.0
+    upper: 1000.0
+    unit: ""
+    internal_unit: ""
+    latex: "q_F"
+    description: "Binary source flux ratio (f_s2 / f_s1)"
   f_source:
     lower: 0.0
     upper: 1000.0

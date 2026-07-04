@@ -47,9 +47,12 @@ class MulensInstrument(Component):
         all_times, all_mags, all_errs, inst_indices = [], [], [], []
         self.fs_init = []
         self.q_source_init = []
+        self.q_flux_init = []      # per-instrument f_s2/f_s1 (binary source)
         self._raw_time_list = []
         all_obspos = []
         all_obspos_abs = []
+
+        self._n_sources = int(system.lens.n_sources)
 
         # Source RA/Dec (degrees from resolve → radians for projection math)
         source_ndx = int(system.lens.source_map[0])
@@ -93,11 +96,12 @@ class MulensInstrument(Component):
             all_obspos.append(xyz_delta)
             all_obspos_abs.append(xyz_abs)
 
-            f_total, q_source = self._estimate_flux_components(
+            f_total, q_source, q_flux = self._estimate_flux_components(
                 t, m, xyz_delta, ra_rad, dec_rad, i
             )
             self.fs_init.append(f_total)
             self.q_source_init.append(q_source)
+            self.q_flux_init.append(q_flux)
 
             self._check_data_format(
                 t, m, e, xyz_delta, ra_rad, dec_rad,
@@ -190,19 +194,93 @@ class MulensInstrument(Component):
                         f"YAML config block for this instrument if so."
                     )
 
+    @staticmethod
+    def _pspl_magnification(t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E):
+        """Point-source Paczynski magnification along one source trajectory."""
+        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
+        tau   = (t - float(t0)) / tE_safe
+        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
+        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
+        return (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+
+    @staticmethod
+    def _binary_magnification_columns(t, n_src, _get):
+        """Per-source magnification columns using the full binary-lens model.
+
+        The flux bootstrap needs magnification columns that actually
+        distinguish the sources.  For binary-source events the PSPL wings are
+        nearly collinear (the trajectories differ mostly through their caustic
+        features), which makes the NNLS decomposition degenerate; the binary
+        model at the seeded (s, q, alpha) breaks that degeneracy.
+
+        Returns a list of n_src columns, or None when the binary geometry is
+        not specified (single-lens event, or missing per-source params) or
+        MulensModel fails — the caller then falls back to the PSPL columns.
+        Parallax is intentionally ignored (flux scales only).
+        """
+        s_val = _get("lens.0.s")
+        q_val = _get("lens.0.q")
+        alpha = _get("lens.0.alpha")
+        if s_val is None or q_val is None or alpha is None:
+            return None
+
+        try:
+            import MulensModel as mm
+            cols = []
+            for j in range(n_src):
+                t0 = _get(f"lens.{j}.t_0")
+                u0 = _get(f"lens.{j}.u_0")
+                tE = _get(f"lens.{j}.t_E", _get("lens.0.t_E"))
+                if t0 is None or u0 is None or tE is None:
+                    return None
+                params = {
+                    "t_0": float(t0),
+                    "u_0": float(np.sign(u0) * max(abs(u0), 1e-9)),
+                    "t_E": max(float(tE), 1e-4),
+                    "s": max(float(s_val), 1e-6),
+                    "q": float(np.clip(q_val, 1e-9, 100.0)),
+                    "alpha": float(alpha),
+                }
+                rho = _get(f"lens.{j}.rho")
+                if rho is not None:
+                    params["rho"] = max(float(rho), 1e-9)
+                model = mm.Model(params)
+                if rho is not None:
+                    window = 3.0 * params["t_E"]
+                    model.set_magnification_methods(
+                        [params["t_0"] - window, "VBM", params["t_0"] + window])
+                cols.append(np.asarray(model.get_magnification(t)))
+            return cols
+        except Exception as e:
+            logger.warning(f"Binary-lens flux bootstrap failed ({e}); "
+                           "falling back to PSPL columns.")
+            return None
+
     def _estimate_flux_components(self, t, m, xyz_au, ra_rad, dec_rad, inst_idx):
-        """Estimate f_total and q_source = f_source / f_total for one instrument.
+        """Estimate (f_total, q_source, q_flux) for one instrument.
+
+        f_total  = total baseline flux (all sources + blend)
+        q_source = (Σ_j f_s,j) / f_total
+        q_flux   = f_s,2 / f_s,1 (binary source; 1.0 for single source)
+
+        With N sources the decomposition solves the linear model
+        F(t) = Σ_j f_s,j · A_j(t) + f_b via NNLS, where A_j is the PSPL
+        magnification along source j's trajectory (lens.<j>.t_0/u_0/t_E).
+        The binary-lens perturbation is irrelevant here — we only need flux
+        scales, not a precise model.
 
         If the user has specified f_source and/or f_blend in their params file,
-        those values are respected:
+        those values are respected (they are TOTALS over sources):
           - both given  → skip estimation entirely, derive q from the ratio
           - f_source only → fix it and solve for f_blend via median residuals
           - f_blend only  → fix it and solve for f_source via NNLS
-          - neither       → solve for both via NNLS on F = f_source·A + f_blend
+          - neither       → solve everything via NNLS
 
         Falls back to the data median / q=0.95 when t_0 or u_0 are absent.
         """
         cm = self.config_manager
+        n_src = getattr(self, "_n_sources", 1)
 
         def _get(key, default=None):
             data = cm.user_params.get(key)
@@ -214,6 +292,9 @@ class MulensInstrument(Component):
             # user_params keys are normalized to index form by standardize_param_names
             val = _get(f"mulensinstrument.{inst_idx}.{param}")
             return float(val) if val is not None else None
+
+        q_flux_user = _get_flux("q_flux")
+        q_flux_fallback = q_flux_user if q_flux_user is not None else 1.0
 
         t0     = _get("lens.0.t_0")
         u0     = _get("lens.0.u_0")
@@ -227,11 +308,11 @@ class MulensInstrument(Component):
         if f_source_user is not None and f_blend_user is not None:
             f_total = f_source_user + f_blend_user
             q_source = float(np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95))
-            return f_total, q_source
+            return f_total, q_source, q_flux_fallback
 
         if t0 is None or u0 is None:
             f_total = 10.0 ** (-0.4 * np.median(m))
-            return f_total, 0.95
+            return f_total, 0.95, q_flux_fallback
 
         x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
@@ -239,16 +320,46 @@ class MulensInstrument(Component):
                    - y * np.sin(ra_rad) * np.sin(dec_rad)
                    + z * np.cos(dec_rad))
 
-        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
-        tau   = (t - float(t0)) / tE_safe
-        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
-        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
-        A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+        # One magnification column per source trajectory.  Prefer the full
+        # binary-lens model (breaks the NNLS degeneracy between overlapping
+        # source trajectories); fall back to PSPL columns.  Missing per-source
+        # params (j > 0) degrade gracefully to the single-source estimate.
+        A_cols = self._binary_magnification_columns(t, n_src, _get)
+        if A_cols is None:
+            A_cols = [self._pspl_magnification(t, delta_e, delta_n,
+                                               t0, u0, tE, pi_E_N, pi_E_E)]
+            for j in range(1, n_src):
+                t0_j = _get(f"lens.{j}.t_0")
+                u0_j = _get(f"lens.{j}.u_0")
+                tE_j = _get(f"lens.{j}.t_E", tE)
+                if t0_j is None or u0_j is None:
+                    logger.warning(
+                        f"lens.{j}.t_0/u_0 missing — flux bootstrap treats source {j} "
+                        f"as blended into source 0."
+                    )
+                    continue
+                A_cols.append(self._pspl_magnification(t, delta_e, delta_n,
+                                                       t0_j, u0_j, tE_j,
+                                                       pi_E_N, pi_E_E))
 
+        A_traj = A_cols[0]
         F_obs = 10.0 ** (-0.4 * m)
 
-        if f_source_user is not None:
+        q_flux_est = q_flux_fallback
+        if len(A_cols) > 1:
+            # Multi-source NNLS: F = Σ_j f_s,j · A_j + f_b
+            X = np.column_stack(A_cols + [np.ones(len(t))])
+            sol, _ = nnls(X, F_obs)
+            f_srcs, f_blend_est = sol[:-1], sol[-1]
+            f_source_est = float(np.sum(f_srcs))
+            if q_flux_user is None and f_srcs[0] > 1e-30 and len(f_srcs) > 1:
+                q_flux_est = float(np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3))
+            if f_source_user is not None and f_source_est > 1e-30:
+                # honor the user's total source flux; keep the NNLS ratio
+                f_blend_est = max(float(np.median(
+                    F_obs - X[:, :-1] @ (f_srcs * f_source_user / f_source_est))), 0.0)
+                f_source_est = f_source_user
+        elif f_source_user is not None:
             f_blend_est = max(float(np.median(F_obs - f_source_user * A_traj)), 0.0)
             f_source_est = f_source_user
         elif f_blend_user is not None:
@@ -261,14 +372,14 @@ class MulensInstrument(Component):
         f_total = f_source_est + f_blend_est
         if f_total < 1e-30 or f_source_est < 1e-30:
             f_total = 10.0 ** (-0.4 * np.median(m))
-            return f_total, 0.95
+            return f_total, 0.95, q_flux_est
 
         q_source = float(np.clip(f_source_est / f_total, 0.05, 0.95))
         logger.debug(
             f"NNLS flux decomp: f_source={f_source_est:.3e}, f_blend={f_blend_est:.3e}"
-            f" → q_source={q_source:.4f}"
+            f" → q_source={q_source:.4f}, q_flux={q_flux_est:.4f}"
         )
-        return f_total, q_source
+        return f_total, q_source, q_flux_est
 
     def _abs_to_delta(self, t, xyz_abs):
         """Convert absolute barycentric positions to Skowron+2011 geocentric deviations.
@@ -402,6 +513,24 @@ class MulensInstrument(Component):
             "err_scale": None,
         }
 
+        # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
+        # (sources have different colors, so the ratio is chromatic).
+        n_sources = getattr(self, "_n_sources", 1)
+        if n_sources > 1:
+            if n_sources > 2:
+                raise NotImplementedError(
+                    f"{self._n_sources}-source flux modeling is not yet "
+                    "implemented: the per-instrument flux ratio q_flux only "
+                    "handles 2 sources. The per-source magnification path is "
+                    "generic; generalize the flux parameterization to add more."
+                )
+            self.manifest["q_flux"] = None
+            for i in range(self.n_elements):
+                self.config_manager.add_hint(
+                    f"{self.prefix}.{i}.q_flux", float(self.q_flux_init[i]),
+                    rank=RANK_DERIVED_DATA,
+                )
+
         # Map each instrument to a Band instance by name.
         band_names = [c.get("band", None) for c in self.config]
         if hasattr(system, 'band'):
@@ -451,17 +580,29 @@ class MulensInstrument(Component):
             u1 = system.band.u1.value[band_idx]
             bandpass = system.band.names[band_idx]
 
-        system.lens.resolve_auto_vbbl(self.time, index=0)
-        A = system.lens.get_magnification_op(
-            t, self.observer_pos_abs, system, index=0, u1=u1, bandpass=bandpass
-        )
+        # One magnification curve per source trajectory (NSNL)
+        n_src = self._n_sources
+        A_per_source = []
+        for j in range(n_src):
+            system.lens.resolve_auto_vbbl(self.time, index=j)
+            A_per_source.append(system.lens.get_magnification_op(
+                t, self.observer_pos_abs, system, index=j, u1=u1, bandpass=bandpass
+            ))
 
-        # 3. Flux Model
+        # 3. Flux Model: F = Σ_j f_s,j·A_j + f_b, with f_s,1 = f_s/(1+q_F),
+        #    f_s,2 = f_s·q_F/(1+q_F) (q_F per instrument — sources differ in color)
         fs = self.f_source.value[self.inst_map_tensor]
         fb = self.f_blend.value[self.inst_map_tensor]
         k_scale = self.err_scale.value[self.inst_map_tensor]
 
-        model_flux = fs * A + fb
+        if n_src == 1:
+            model_flux = fs * A_per_source[0] + fb
+        else:
+            qf = self.q_flux.value[self.inst_map_tensor]
+            qf_safe = pt.maximum(qf, 0.0)
+            model_flux = (fs / (1.0 + qf_safe) * A_per_source[0]
+                          + fs * qf_safe / (1.0 + qf_safe) * A_per_source[1]
+                          + fb)
 
         # Guard against negative flux causing log10(NaN) crash during tuning
         safe_flux = pt.maximum(model_flux, 1e-12)
@@ -485,14 +626,24 @@ class MulensInstrument(Component):
 
         param_symbols = [p.value for p in system.plot_params]
 
-        A = system.lens.get_magnification_op(t_input, obs_pos_input, system, index=0)
+        n_src = self._n_sources
+        A_per_source = [
+            system.lens.get_magnification_op(t_input, obs_pos_input, system, index=j)
+            for j in range(n_src)
+        ]
 
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
 
         # Δmag = mag(t) − mag_baseline = −2.5·log10(A_eff).
         # Zero at baseline, negative when brighter, independent of f_total.
-        model_flux = fs_inst * A + fb_inst
+        if n_src == 1:
+            model_flux = fs_inst * A_per_source[0] + fb_inst
+        else:
+            qf_inst = pt.maximum(self.q_flux.value[inst_idx], 0.0)
+            model_flux = (fs_inst / (1.0 + qf_inst) * A_per_source[0]
+                          + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
+                          + fb_inst)
         f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
         A_eff = model_flux / f_total_inst
         model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))

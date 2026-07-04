@@ -4,31 +4,32 @@ run:
 prefix: "fitresults/OGLE-2016-BLG-1003"
 #logger_level: DEBUG
 
-# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
-# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+# OGLE-2016-BLG-1003: binary source + binary lens (2S2L).
+# Jung et al. 2017, ApJ 841, 75 — "standard" 2S2L solution (Table 1):
+#   t_0,1~2457551.04, u_0,1~0.059, t_0,2~2457552.52, u_0,2~0.135,
+#   t_E~28.9 d, s~1.033, q~1.19, alpha~48.2 deg, rho_1~4.5e-4, rho_2~1.3e-3
 #
 # system architecture:
-#   star.0 = Lens      (primary lens host)
-#   star.1 = Source    (background source)
-#   planet.0 = Companion (secondary lens body)
+#   star.0 = Lens     (primary lens)
+#   star.1 = LensB    (secondary lens body; q~1.19 → stellar, not planetary)
+#   star.2 = SourceA  (brighter source)
+#   star.3 = SourceB  (fainter source)
 
 star:
   - name: "Lens"
+  - name: "LensB"
   - name: "SourceA"
   - name: "SourceB"
 
-planet:
-  - name: "Companion"
-
 lens:
   - name: "Lens"
-    lenses:  ["star.0", "planet.0"]
-    sources: ["star.1", "star.2"]
-    finite_source: False
+    lenses:  ["star.0", "star.1"]
+    sources: ["star.2", "star.3"]
+    finite_source: True
 
 galacticmodel:
   - name: "OGLE-2016-BLG-1003"
-    anchor_idx: 1              # source is star.1
+    anchor_idx: 2              # anchor on SourceA (star.2)
 
 band:
   - name: "I"
@@ -48,24 +49,23 @@ mulensinstrument:
   - name: "MOA"
     file: "n20150210.R.MOA.OGLE-2016-BLG-1003.dat"
     band: "R"
-  - name: "KMTC"
+  - name: "KMTC_I"
     file: "n20160221.I.KMTC.OGLE-2016-BLG-1003.dat"
     band: "I"
-  - name: "KMTS"
+  - name: "KMTS_I"
     file: "n20160222.I.KMTS.OGLE-2016-BLG-1003.dat"
     band: "I"
-  - name: "KMTA"
+  - name: "KMTA_I"
     file: "n20160224.I.KMTA.OGLE-2016-BLG-1003.dat"
     band: "I"
-  - name: "KMTC"
+  - name: "KMTC_V"
     file: "n20160227.V.KMTC.OGLE-2016-BLG-1003.dat"
     band: "V"
-  - name: "KMTS"
+  - name: "KMTS_V"
     file: "n20160317.V.KMTS.OGLE-2016-BLG-1003.dat"
     band: "V"
 
 parameter_file: "ob161003.params.yaml"
-#parameter_file: "ob161003.params.2.yaml"
 
 sampler:
   method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)

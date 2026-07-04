@@ -54,6 +54,16 @@ def calc_q(mass_companion, mass_lens):
     return mass_companion / mass_lens
 
 @register_physics
+def calc_mlens_total(*masses):
+    # Total lens mass: sum over all lens bodies.  theta_E, t_E, rho, and pi_E
+    # are referenced to the TOTAL mass for multi-body lenses (community
+    # convention for binary-lens parameters).
+    total = masses[0]
+    for m in masses[1:]:
+        total = total + m
+    return total
+
+@register_physics
 def calc_f_source(log_f_total, q_source):
     return pt.power(10, log_f_total) * q_source
 

@@ -65,3 +65,4 @@ sampler:
   nthin: 1
   check_curvatures: False
   recompute_trace: True
+  eval_timeout: 10        # VBMicrolensing can hang for some (s, q); reject and move on

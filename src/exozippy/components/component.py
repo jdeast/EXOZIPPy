@@ -104,12 +104,15 @@ class Component(ABC):
         options = dict(options)  # don't mutate the manifest via the pops below
 
         # Manifest entries may override the shape for parameters that are not
-        # one-per-element (e.g. one (s, alpha) per lens companion).
+        # one-per-element (e.g. one (s, alpha) per lens companion), and the
+        # per-element names used for user-param resolution and display labels
+        # (e.g. per-source lens params named after the source stars).
         shape = tuple(options.pop("shape", None) or (self.n_elements,))
+        names = options.pop("names", None) or getattr(self, 'names', None)
 
         # 1. Grab configuration properties agnostically
         cfg = self.config_manager.resolve(
-            self.prefix, param_name, shape=shape, names=getattr(self, 'names', None)
+            self.prefix, param_name, shape=shape, names=names
         )
 
         expr_key = options.pop("expr_key", None)
@@ -174,7 +177,7 @@ class Component(ABC):
         full_params = {**cfg, **options}
         param_obj = Parameter(
             label=f"{self.prefix}.{param_name}",
-            names=getattr(self, 'names', None),
+            names=names,
             expression=expression,
             user_params=self.config_manager.user_params,
             **full_params

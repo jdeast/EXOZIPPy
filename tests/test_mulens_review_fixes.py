@@ -224,7 +224,7 @@ def test_q_source_estimate_pspl_broad_peak():
     """
     inst, t, m, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
     ra, dec = 0.0, 0.0
-    _f_total, q = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    _f_total, q, _q_flux = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
     assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
 
 
@@ -245,7 +245,7 @@ def test_flux_total_estimate_sharp_caustic_crossing():
         A_peak=6.0, peak_width=5, f_baseline=f_baseline
     )
     ra, dec = 0.0, 0.0
-    f_total, _q = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    f_total, _q, _q_flux = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
     assert 0.5 * f_baseline < f_total < 2.0 * f_baseline, (
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
         f"got {f_total:.3f}."

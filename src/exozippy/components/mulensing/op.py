@@ -103,7 +103,7 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         mm_params['rho'] = _safe_rho(p[idx])
         idx += 1
     mm_params['s'] = float(max(float(p[idx]), 1e-6))
-    mm_params['q'] = float(np.clip(float(p[idx + 1]), 1e-9, 1.0))
+    mm_params['q'] = float(np.clip(float(p[idx + 1]), 1e-9, 100.0))
     mm_params['alpha'] = float(p[idx + 2])
 
     model = mm.Model(parameters=mm_params, coords=coords)
