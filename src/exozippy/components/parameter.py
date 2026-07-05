@@ -673,6 +673,12 @@ class Parameter:
             # Use init_scale for barrier steepness (falls back to gaussian_scales
             # for Gaussian params, where gaussian_scales = sigma).
             barrier_scales = np.where(use_logit, scales, gaussian_scales)
+            # A missing scale (e.g. a derived vector element the relaxation
+            # engine never resolved) must soften the barrier, not poison the
+            # whole logp with NaN.
+            barrier_scales = np.where(
+                np.isfinite(barrier_scales) & (barrier_scales > 0),
+                barrier_scales, 1.0)
 
             has_lower = ~np.isinf(lowers) & needs_barrier
             if np.any(has_lower):

@@ -50,8 +50,15 @@ def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
     return pi_E_mag * (mu_ra_rel / mu_rel_mag)
 
 @register_physics
-def calc_q(mass_companion, mass_lens):
-    return mass_companion / mass_lens
+def calc_q(*masses):
+    # (companion_1, ..., companion_k, primary) -> per-companion mass ratios
+    # q_j = M_companion_j / M_primary.  Each dep arrives as a length-1 slice
+    # (scalar bracket maps in Lens.build_maps); k companions concatenate to a
+    # shape-(k,) vector.
+    companions, primary = masses[:-1], masses[-1]
+    if len(companions) == 1:
+        return companions[0] / primary
+    return pt.concatenate([pt.atleast_1d(c) for c in companions]) / primary
 
 @register_physics
 def calc_mlens_total(*masses):

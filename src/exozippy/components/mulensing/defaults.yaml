@@ -104,6 +104,12 @@ lens:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel", "mu_dec_rel"]
   rho:
+    # Soft upper barrier only: real events have rho <~ 0.5, and rho >~ a few
+    # both erases the microlensing signal (A -> 1) and drives VBM's
+    # finite-source machinery into its most expensive regime (see the
+    # eval_timeout analysis in the DC2018_128 example).  No lower bound:
+    # rho > 0 by construction, and a barrier at 0 would bias small-rho fits.
+    upper: 10.0
     unit: ""
     internal_unit: ""
     latex: "\\rho"
@@ -126,7 +132,11 @@ lens:
         deps: [ "star.mass[lens_map]" ]  # overridden per-config with all lens bodies
   # Binary lens parameters (N_lenses - 1 per event)
   q:
-    lower: 1e-10
+    # Lower bound sits 10x below the most optimistic Roman detection floor
+    # (~Moon mass, q ~ 1e-7 at 0.3 Msun); below it the companion is pure
+    # nuisance volume with a likelihood flat in (s, alpha, q).  See
+    # vbm_fix.txt section 6.
+    lower: 1e-8
     upper: 100.0  # q > 1 is legal (companion more massive than the "primary"); MulensModel supports it
     unit: ""
     internal_unit: ""
@@ -136,7 +146,8 @@ lens:
     expressions:
       default:
         func_name: "calc_q"
-        deps: ["planet.mass[companion_mass_map]", "star.mass[primary_lens_map]"]
+        # overridden per-config: one scalar map per companion, primary last
+        deps: ["planet.mass[companion0_mass_map]", "star.mass[primary_lens_map]"]
   alpha:
     unit: "deg"
     internal_unit: "rad"
@@ -149,8 +160,13 @@ lens:
         deps: [ "xalpha", "yalpha" ]
   # might want to parameterize this like Yee's that increases sampling at s=1
   s:
-    lower: 0.05 # smallest known is 0.3; VBM might be problematic at higher values
-    upper: 20.0 # widest known is 5.3; VBM might be problematic at higher values
+    # Bounds leave >~2x margin beyond every published solution (smallest
+    # known ~0.3, widest ~5.3) while keeping tempering chains out of VBM's
+    # expensive corners (see vbm_fix.txt section 6; the s=20 wall hosted the
+    # extreme-magnification eval_timeout excursions in DC2018_128).  Events
+    # genuinely needing s > 10 should override in their params file.
+    lower: 0.1
+    upper: 10.0
     initval: 1.0
     init_scale: 0.05
     unit: ""

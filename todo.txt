@@ -24,21 +24,21 @@
       - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
       - needs: q_source parameterization generalized (currently 1 scalar per instrument)
       - needs: BinaryLensMagOp extended or new 2L2S Op
-    - triple lens (3L1S) direct-VBM backend: NOT DONE
-      - blocked by lens.py:554 NotImplementedError (n_lens_bodies > 2); param/config
-        layer already N-lens generic (per-companion s/alpha, per-body masses wired
-        via lens_bodies list)
-      - prerequisite: hpc_optimization.txt P2 (direct-VBM Op bypassing MulensModel)
-        must land for binary first — MulensModel itself caps at 2 lens bodies
-      - needs: verify VBMicrolensing 5.5's actual N-lens magnification API (check
-        during P3's VBM source read; do not assume function names)
-      - needs: generalize BinaryLensMagOp's param unpacking to a variable-length
-        companion tail instead of fixed [s, q, alpha_deg]
-      - needs: redo P1's hex-vs-VBM bracketing benchmark for N=3 — do not assume
-        the binary "VBM everywhere" conclusion carries over (higher-degree image
-        polynomial, up to 10 images per Rhie 2002)
-      - orthogonal to 2L2S above (lens multiplicity vs source multiplicity); may
-        eventually compose (3L2S) but keep scoped separately for now
+    - triple/N lens direct-VBM backend: DONE (2026-07-04)
+      - VBMDirectMagOp (op.py) handles n_lens_bodies >= 3 via VBM
+        SetLensGeometry + MultiMag2 (Multipoly method for N=3, Nopoly for N=4+);
+        lens.py:554's NotImplementedError now only fires for the mulensmodel
+        backend (still binary-capped, by MulensModel itself)
+      - trajectory-frame lens geometry (companion j at s_j*(cos a_j,-sin a_j)
+        from the primary, CoM origin, mass fractions summing to 1) verified to
+        reduce exactly to the binary case at N=2 (8e-5, i.e. VBM's own Tol)
+      - remaining gap: 3+ body mlens_total/q initvals require explicit body
+        masses in the params file (the symbolic relaxation engine's mass-sum/q
+        relations are binary-only; see symbolic_physics.get_symbol_map) — a
+        user-supplied q cannot yet back-propagate to a companion mass for N>=3
+      - untested at scale: MultiMag2 cost for N>=3 is ~30x a binary call
+        (~240ms vs ~7ms per 870-epoch light curve in a quick check); no
+        benchmark yet on a real 3-body example config
     - confirm (and document) conventions (origin, alpha, parallax sign)
     - explore samplers and parameterizations
       - identify best practices
@@ -105,6 +105,21 @@
     freeze ladder at end of tune phase. Eliminates need to hand-tune T_max.
     ptde.py already has adapt_ladder / target_swap_rate stubs for this.
   - check that we're actually using numpyro when specified
+  - PRIORITY (2026-07-04, see hpc_optimization.txt P12 + vbm_fix.txt §7): a
+    real 13,370-step DC2018_128 PTDE run showed per-step eval time jump from
+    0.14s to a sustained 1.7-2.0s once the DE population dispersed. Root
+    cause: hot tempering rungs routinely draw (s,q,rho) in genuine
+    near-caustic territory (11.7% of 870-epoch light curves in that regime
+    exceed 1s of VBM contour-integration cost), and with 320 proposals/step
+    gathered together, at least one such draw is essentially guaranteed
+    every step, gating the whole batch even though T=1 (the only
+    scientifically relevant rung) stays cheap. Multi-node MPI (P9) does NOT
+    fix this — it's one slow draw, not 320-way queueing pressure. The two
+    highest-leverage fixes are: (a) looser VBM Tol/RelTol at hot rungs
+    (they're already flattened, don't need 1e-3 photometric precision — this
+    directly shrinks the expensive tail), and (b) rung thinning (update hot
+    rungs less often, directly reducing the number of chances per step to
+    draw from that tail).
 
 * one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 

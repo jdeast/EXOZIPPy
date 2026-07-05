@@ -56,7 +56,84 @@ Do them roughly in order; P1, P5, P6, P7, P8 are independent quick wins.
 ================================================================================
 
 --------------------------------------------------------------------------------
+STATUS UPDATE — 2026-07-04.  P1, P2, P3 landed.  Read this before picking a prompt.
+--------------------------------------------------------------------------------
+P1 (drop hexadecapole from auto_vbbl), P2 (direct-VBM Op bypassing MulensModel,
+plus an unplanned P2b: N>=3 lens bodies via VBM SetLensGeometry+MultiMag2) are
+DONE and merged.  P3's upstream target (VBMicrolensing) turned out to have a
+correctness/performance BUG, not just a missing batched API — see vbm_fix.txt
+for the full writeup; short version below.  All measurements and fixes are
+independently reproducible: scripts/validate_vbm_safedist.py (the safedist
+scans), scripts/repro_vbm_timeout.py (replay any eval_timeout event from a run
+log), tests/test_vbm_direct_vs_mulensmodel.py (backend A/B + guard coverage).
+
+Per-call wins, confirmed (examples/DC2018_128, single 870-epoch light curve):
+  hexadecapole everywhere (old prod) ....... 24.0 ms
+  P1: VBM everywhere, MulensModel backend .... 9.7 ms
+  P2: vbm_direct backend ..................... 7.0 ms
+That is real and it is why the first ~500 steps of a fresh PTDE run show
+eval time ~0.14 s/step (vs. the old ~0.18-0.20 s/step) — see below for why it
+does not hold for the rest of the run.
+
+THE HEADLINE FINDING FROM P3's REVIEW (not what was expected):
+  VBMicrolensing's BinaryMag2 point-source shortcut requires
+  `safedist > 4*rho^2`, but `safedist` (squared distance from the source to
+  the caustic region of influence) is only ever COMPUTED for q < 0.01
+  (the planetary-caustic formula). For q >= 0.01 it silently keeps its
+  initialization value of 10, so for rho > sqrt(10)/2 ~ 1.6 the shortcut can
+  NEVER fire — VBM runs the full finite-source contour integration even for
+  a source 10^5 Einstein radii from the lens where A=1 to machine precision,
+  at ~0.1 s/call. This, not a missing batched API, was the actual cause of
+  most of the DC2018_128 eval_timeout rejections (14 of 16 in the original
+  log). Fixed in two layers: (a) upstream, in the local VBMicrolensing clone
+  (~/python/VBMicrolensing, uncommitted, PR plan in VBMicrolensing.md) —
+  safedist = (d - R_inf)^2 for d > R_inf = s + 1/s + 2 when q >= 0.01;
+  (b) mirrored in VBMDirectMagOp._magnify (op.py) so the PyPI wheel is fast
+  too regardless of whether the upstream PR lands. Validated: caustic
+  containment scan (1148 (s,q) geometries, min clearance 9.4% of R_inf),
+  boundary-accuracy scan (max |dA| = 5.7e-5 at the guard boundary, 0.06x
+  VBM's Tol), 4000-point random A/B (max rel diff 1.5e-4). See vbm_fix.txt
+  sections 1-4 for the full derivation and section 5 for limitations.
+
+PRODUCTION RESULT — the ~10x step speedup did NOT materialize in aggregate,
+and the reason reprioritizes everything below (full data in vbm_fix.txt §7,
+reproducible with scripts/repro_vbm_timeout.py --epochs on
+examples/DC2018_128/fitresults/DC2018_128.log):
+  A real 13,370-step PTDE run (2026-07-04, vbm_direct backend + the
+  far-field guard) shows per-step eval time start at 0.14 s (matches the P1+P2
+  expectation) then jump to a SUSTAINED 1.7-2.0 s for essentially the entire
+  rest of the 7-hour run — ~10x WORSE than the pre-fix baseline, not better.
+  eval_timeout events dropped from 16 (in ~1700 steps) to 3 (in 13,370 steps)
+  — the far-field bug genuinely is fixed — but replaying those 3 events in
+  isolation (scripts/repro_vbm_timeout.py --epochs) shows they complete in
+  2-3 MILLISECONDS: their own parameter values were never intrinsically slow.
+  The sustained slowdown is instead the NEAR-ZONE finite-source cost
+  distribution (genuine caustic-adjacent contour integration, which the
+  far-field guard deliberately does not touch) sampled at hot tempering
+  rungs: characterizing 870-epoch light curves at (s,q,rho) drawn uniformly
+  from the prior a hot rung explores shows a heavy tail — median 15 ms, but
+  P90 1.7 s, 11.7% of curves exceed 1 s. With 320 proposals/step and the
+  sampler's gather blocking on the SLOWEST of all 320, the odds that NONE
+  land in that tail are (1-0.117)^320 ~ 1e-17 — i.e. every step is
+  essentially guaranteed to contain one genuinely expensive draw, almost
+  always from a hot rung (T=1's posterior stays tight near the real
+  solution and is cheap). This is a TEMPERATURE-LADDER / SCHEDULING problem,
+  not a magnification-backend bug.
+
+  REPRIORITIZATION: P9 (multi-node MPI) does NOT fix this — more cores only
+  help when MANY of the 320 proposals are slow at once (queueing/dispatch
+  latency); here it is typically ONE slow draw per step, and that single
+  worker's task duration is unaffected by how many other cores exist. P12's
+  ideas (rung thinning, and a new one below: looser Tol at hot rungs) attack
+  the actual mechanism and are now the priority. P9 is demoted to "do once
+  n_params grows enough that dispatch latency dominates," not before.
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 PROMPT 1 — Stop emitting hexadecapole from auto_vbbl (biggest single win, ~4x)
+DONE (2026-07-04). resolve_auto_vbbl now always emits VBM/VBBL for multi-body
+lenses (lens.py); PSPL finite-source switched Lee09 -> Yoo04 (op.py). Measured
+24.0ms -> 9.7ms per 870-epoch call. See STATUS UPDATE above.
 --------------------------------------------------------------------------------
 In src/exozippy/components/mulensing/lens.py, resolve_auto_vbbl() (line ~519)
 selects between "hexadecapole" and "VBM" brackets by *accuracy* at the initval
@@ -88,6 +165,11 @@ Do not change VBM Tol/RelTol defaults in this prompt.
 
 --------------------------------------------------------------------------------
 PROMPT 2 — Bypass MulensModel in the Op hot path (call VBM directly)
+DONE (2026-07-04). VBMDirectMagOp in op.py; lens YAML key backend:
+vbm_direct (default) | mulensmodel. Measured 9.7ms -> 7.0ms per 870-epoch
+call; matches MulensModel to 1e-12 rel (tests/test_vbm_direct_vs_mulensmodel.py).
+Unplanned extension (P2b): N>=3 lens bodies via VBM SetLensGeometry+MultiMag2,
+reducing to the binary case at N=2 to 8e-5 (VBM's own Tol). See STATUS UPDATE.
 --------------------------------------------------------------------------------
 Context: src/exozippy/components/mulensing/op.py rebuilds an mm.Model in every
 perform() call (~1 ms of SkyCoord string parsing + object churn), then
@@ -142,6 +224,18 @@ P3 stalls.
 
 --------------------------------------------------------------------------------
 PROMPT 3 — PR to VBMicrolensing: batched, GIL-releasing magnification API
+PARTIALLY DONE / REDIRECTED (2026-07-04). The review found something more
+important than the batched API: a correctness/perf bug (BinaryMag2's
+point-source shortcut never fires for q>=0.01, rho>1.6 — see STATUS UPDATE
+and vbm_fix.txt). That fix + the GIL-release patch both live, uncommitted,
+in ~/python/VBMicrolensing (build needs
+CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++; system gcc 8.5 < required 9).
+Neither is upstream yet; EXOZIPPy's poetry env still uses the PyPI wheel, so
+production runs rely on the op-level mirror guard (VBMDirectMagOp), not the
+patch. Pybind overhead measured on this box (~1.7 us/call) is much smaller
+than hpc_optimization's original 20us/call estimate, so the batched-API
+payoff below is smaller than projected — do the safedist PR first (it is
+what actually mattered).
 --------------------------------------------------------------------------------
 Context: after P2 the per-eval cost is dominated by ~870 pybind round-trips
 (~20 us each) into VBM.BinaryMag2.  VBMicrolensing 5.5's python bindings
@@ -295,7 +389,12 @@ completes in <1 s and returns rhat/ess within a few percent of the full-array
 values.
 
 --------------------------------------------------------------------------------
-PROMPT 9 — Multi-node PTDE via MPI (after P1-P3; know the latency budget)
+PROMPT 9 — Multi-node PTDE via MPI (DEMOTED — does not fix the current
+bottleneck; see STATUS UPDATE above.  The measured problem is ONE slow
+near-zone draw per step among 320, not 320-way queueing pressure — that one
+worker's task duration is unaffected by adding more nodes/cores.  Revisit
+once P12's fixes are in and/or n_params grows enough that dispatch latency
+(not per-call cost) dominates.)
 --------------------------------------------------------------------------------
 Context: PTDE parallelism is a fork Pool capped at one node (dc128.job:
 "#$ -pe mthread 64" on Hydra/SGE).  Total useful width is n_temps x n_chains
@@ -385,12 +484,27 @@ No EXOZIPPy code changes in this prompt beyond a standalone benchmark script
 in scripts/.
 
 --------------------------------------------------------------------------------
-PROMPT 12 — PTDE algorithmic experiments (optional, after the above)
+PROMPT 12 — PTDE algorithmic experiments (PROMOTED — this is the fix for the
+2026-07-04 production finding: a hot-rung near-zone finite-source draw gates
+essentially every step.  Items 0 and 1 directly attack that; do them first.)
 --------------------------------------------------------------------------------
-Lower-priority ideas, each cheap to test once steps are ~20 ms:
+0. (NEW, highest priority) Looser Tol/RelTol at hot rungs. Hot rungs (large T)
+   already evaluate a heavily flattened target (lp/T) — they don't need
+   1e-3 photometric precision, they need to keep the DE population diverse
+   enough to feed swaps. VBMDirectMagOp / BinaryLensMagOp currently share one
+   Tol across all rungs. Give the Op a per-rung Tol (e.g. Tol=1e-3 at k=0,
+   relaxing to ~1e-2 or ~3e-2 by k=K-1); BinaryMagDark's annuli loop exits
+   as soon as currerr < Tol, so this directly shrinks the expensive tail
+   (scripts/ nearzone_cost.py-style benchmarking showed median 15ms/mean
+   445ms/P90 1.7s at Tol=1e-3 for near-zone light curves — rerun that sweep
+   at Tol=1e-2/3e-2 to quantify the win before implementing). Validate: swap
+   acceptance rates and T=1 posterior unchanged (only hot-rung *precision*
+   changes, not their target distribution's support).
 1. Rung thinning: hotter rungs exist only to feed swaps; try updating rungs
-   k>=K/2 every 2nd step (halves eval count ~25-40%).  Validate: swap
-   acceptance rates and T=1 autocorrelation time unchanged on DC128.
+   k>=K/2 every 2nd step (halves eval count ~25-40%, and halves the number
+   of chances per step for a hot rung to land in the expensive tail).
+   Validate: swap acceptance rates and T=1 autocorrelation time unchanged on
+   DC128.
 2. Adaptive temperature ladder: the Robbins-Monro hook (target_swap_rate,
    adapt_ladder) is already reserved in the API (ptde.py line ~254).
    Implement Vousden et al. 2016-style ladder adaptation during tune,

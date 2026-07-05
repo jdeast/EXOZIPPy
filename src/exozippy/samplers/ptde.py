@@ -15,6 +15,7 @@ copy-on-write, avoiding the picklability constraint that blocks cloudpickle
 
 Returns arviz.InferenceData compatible with the EXOZIPPy pipeline.
 """
+import gc
 import logging
 import os
 import signal
@@ -442,6 +443,13 @@ def ptde_sample(
                     f"rejoins the pool on its own.")
                 pool.terminate()
                 pool.join()
+                # Terminated Pools sit in reference cycles (handler threads,
+                # worker sentinels, queue pipes) that only the cyclic GC
+                # frees; without an explicit collect each recycle leaks
+                # ~2 fds per worker until the process hits EMFILE
+                # ("Too many open files") after enough timeouts.
+                pool = None
+                gc.collect()
                 pool = mp.get_context("fork").Pool(
                     actual_cores, initializer=_worker_init)
         return lps

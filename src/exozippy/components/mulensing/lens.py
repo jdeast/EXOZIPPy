@@ -6,7 +6,7 @@ import numpy as np
 from exozippy.components.component import Component
 from exozippy.constants import KAPPA
 from exozippy.potentials import soft_lower_bound
-from .op import MulensMagOp, BinaryLensMagOp
+from .op import MulensMagOp, BinaryLensMagOp, VBMDirectMagOp
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,17 @@ class Lens(Component):
         # (useful for testing or when MulensModel's parallax handling is needed).
         self.use_op = [c.get("use_op", False) for c in self.config]
 
+        # backend: which magnification engine the multi-lens Op path uses.
+        #   vbm_direct  — call VBMicrolensing directly (default; ~5x faster,
+        #                 supports 2+ lens bodies)
+        #   mulensmodel — rebuild an mm.Model per call (A/B reference; binary only)
+        self.backend = self.config[0].get("backend", "vbm_direct")
+        if self.backend not in ("vbm_direct", "mulensmodel"):
+            raise ValueError(
+                f"lens.backend must be 'vbm_direct' or 'mulensmodel', "
+                f"got '{self.backend}'."
+            )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -185,6 +196,18 @@ class Lens(Component):
         """Return the PyTensor mass node for a given body."""
         return getattr(system, comp_type).mass.value[ndx]
 
+    def _mass_initval(self, comp_type, ndx):
+        """Best-effort mass initval (solMass) for a body at stage 2, from
+        user_params mass or logmass entries; None when neither is given."""
+        up = self.config_manager.user_params
+        entry = up.get(f"{comp_type}.{ndx}.mass")
+        val = entry.get("initval") if isinstance(entry, dict) else entry
+        if val is not None:
+            return float(val)
+        entry = up.get(f"{comp_type}.{ndx}.logmass")
+        val = entry.get("initval") if isinstance(entry, dict) else entry
+        return float(10.0 ** float(val)) if val is not None else None
+
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a component
         or instance that does not exist (instead of an AttributeError deep in
@@ -225,11 +248,14 @@ class Lens(Component):
 
         if self.n_companions >= 1:
             # Scalar maps (length-1) so the bracket-slice dep yields a scalar
-            # mass rather than a full-component mass array.
+            # mass rather than a full-component mass array.  One map per
+            # companion: companions may live in different component types
+            # (star vs planet), so each mass needs its own bracket dep.
             _, p_ndx = self.lens_bodies[0][0]
             self.primary_lens_map = np.array([p_ndx], dtype=int)
-            _, c_ndx = self.lens_bodies[0][1]
-            self.companion_mass_map = np.array([c_ndx], dtype=int)
+            for j, (_, c_ndx) in enumerate(self.lens_bodies[0][1:]):
+                setattr(self, f"companion{j}_mass_map",
+                        np.array([c_ndx], dtype=int))
 
     def register_parameters(self, system):
         """Stage 2: Declare the manifest."""
@@ -267,27 +293,56 @@ class Lens(Component):
             self.manifest["yalpha"] = {"shape": companion_shape}
             # alpha derived from xalpha/yalpha via arctan2; internal unit = rad, display = deg
             self.manifest["alpha"] = {"expr_key": "default", "shape": companion_shape}
-            # q = M_companion / M_primary; companion component type varies by config
-            companion_type = self.lens_bodies[0][1][0]
+            # q_j = M_companion_j / M_primary; companion component types vary
+            # by config, hence one scalar bracket dep per companion.
+            companion_mass_deps = [
+                f"{c_type}.mass[companion{j}_mass_map]"
+                for j, (c_type, _) in enumerate(self.lens_bodies[0][1:])
+            ]
             self.manifest["q"] = {
                 "expr_key": "default",
                 "shape": companion_shape,
-                "deps": [f"{companion_type}.mass[companion_mass_map]",
-                         "star.mass[primary_lens_map]"],
+                "deps": companion_mass_deps + ["star.mass[primary_lens_map]"],
             }
-            # Binary-lens convention: theta_E (and hence t_E, rho, pi_E) is
+            # Multi-lens convention: theta_E (and hence t_E, rho, pi_E) is
             # referenced to the TOTAL lens mass, matching the published
             # parameterization.  mlens_total sums the body masses and replaces
             # the primary mass in the theta_E dependency chain.
             self.manifest["mlens_total"] = {
                 "expr_key": "default",
                 "shape": (1,),
-                "deps": ["star.mass[primary_lens_map]",
-                         f"{companion_type}.mass[companion_mass_map]"],
+                "deps": ["star.mass[primary_lens_map]"] + companion_mass_deps,
             }
             theta_entry = dict(self.manifest["theta_E"])
             theta_entry["deps"] = ["mlens_total", "pi_rel"]
             self.manifest["theta_E"] = theta_entry
+
+        if self.n_companions >= 2:
+            # The symbolic relaxation engine only knows the binary mass-sum
+            # and q relations (see symbolic_physics.get_symbol_map), so for
+            # 3+ lens bodies the mlens_total and per-slot q initvals are
+            # seeded from the per-body mass initvals instead — body masses
+            # (or logmass) must be supplied in the params file; a user q
+            # cannot back-propagate to a companion mass here.  Rank 40
+            # (derived-mixed): overrides defaults, yields to explicit user
+            # values.
+            body_masses = [self._mass_initval(c_type, c_ndx)
+                           for c_type, c_ndx in self.lens_bodies[0]]
+            if any(m is None for m in body_masses):
+                missing = [f"{ct}.{cn}" for (ct, cn), m
+                           in zip(self.lens_bodies[0], body_masses) if m is None]
+                logger.info(
+                    f"No mass initval for lens body/bodies {missing}; cannot "
+                    "seed lens.0.mlens_total or per-companion q — supply body "
+                    "masses (or logmass) in the params file for 3+ body lenses."
+                )
+            else:
+                self.config_manager.add_hint(
+                    "lens.0.mlens_total", float(sum(body_masses)), rank=40)
+                for j, m_c in enumerate(body_masses[1:]):
+                    q_j = m_c / body_masses[0]
+                    self.config_manager.add_hint(f"lens.{j}.q", q_j, rank=40)
+                    self.config_manager.add_scale_hint(f"lens.{j}.q", 0.1 * q_j)
 
         if any(self.finite_source):
             self.manifest["rho"] = per_source("default")
@@ -551,13 +606,11 @@ class Lens(Component):
         Set ``use_op: true`` in the lens YAML block to force the Op (e.g. for
         testing or when MulensModel's finite-source parallax is needed).
         """
-        if self.n_lens_bodies[0] > 2:
+        if self.n_lens_bodies[0] > 2 and self.backend != "vbm_direct":
             raise NotImplementedError(
-                f"{self.n_lens_bodies[0]}-lens magnification is not yet "
-                "available: the MulensModel backend supports at most 2 lens "
-                "bodies. The N-lens parameters (per-companion s/alpha, "
-                "per-body masses) are wired; a triple+ backend (e.g. "
-                "VBMicrolensing) still needs to be integrated here."
+                f"{self.n_lens_bodies[0]}-lens magnification requires "
+                "backend: vbm_direct (VBMicrolensing MultiMag2); the "
+                "MulensModel backend supports at most 2 lens bodies."
             )
 
         if not self.uses_op(index):
@@ -577,7 +630,22 @@ class Lens(Component):
         times_tensor = pt.as_tensor_variable(times)
         obs_tensor = pt.as_tensor_variable(obs_pos)
 
-        if n_lenses == 2:
+        if n_lenses >= 2 and self.backend == "vbm_direct":
+            sp = self._get_safe_mm_params(index)
+            param_list = [sp['t0'], sp['u0'], sp['tE'], sp['pi_N'], sp['pi_E']]
+            if use_rho:
+                param_list.append(self.rho.value[index])
+            for j in range(self.n_companions):
+                q_j = pt.clip(pt.nan_to_num(self.q.value[j], nan=1e-9),
+                              1e-9, 100.0)
+                alpha_deg_j = pt.arctan2(self.yalpha.value[j],
+                                         self.xalpha.value[j]) * (180.0 / np.pi)
+                param_list.extend([self.s.value[j], q_j, alpha_deg_j])
+            if effective_bandpass is not None:
+                param_list.append(u1)
+            mag_op = VBMDirectMagOp(coords=coords, n_companions=self.n_companions,
+                                    use_rho=use_rho, bandpass=effective_bandpass)
+        elif n_lenses == 2:
             bp = self._get_binary_mm_params(system, index)
             param_list = [bp['t0'], bp['u0'], bp['tE'], bp['pi_N'], bp['pi_E']]
             if use_rho:
@@ -620,133 +688,37 @@ class Lens(Component):
                     return float(val)
         return None
 
-    def resolve_auto_vbbl(self, times_np, index=0, threshold=0.001,
-                          buffer=0.1, max_eval=2000):
-        """Replace 'auto_vbbl' with a concrete bracket list computed at initvals.
+    def resolve_auto_vbbl(self, times_np, index=0):
+        """Replace 'auto_vbbl' with a concrete method list for multi-body lenses.
 
-        ``index`` is the SOURCE slot: each source has its own trajectory and
-        therefore its own caustic-crossing times and bracket list.
+        Historically this computed hexadecapole-vs-VBM brackets on a time
+        grid, but MulensModel implements binary-lens hexadecapole as 13
+        python-level VBM.BinaryMag0 calls per epoch while VBM's BinaryMag2
+        runs the equivalent quadrupole safety test internally in C++ and
+        short-circuits to point-source when safe.  Measured on DC2018_128:
+        hexadecapole 32.9 ms vs VBM-everywhere 7.7 ms per 870-point call, at
+        equal or better accuracy — so the bracket machinery optimized for the
+        wrong cost model and was removed (see hpc_optimization.txt, P1).
 
-        Runs hexadecapole and VBM on a time grid, finds intervals where they
-        differ by more than `threshold` (fractional), pads each interval by
-        `buffer` days, and stores the result in self.mag_method[index].
+        Single-lens events are left untouched: 'auto_vbbl' is resolved inside
+        the PSPL model builder (point_source + finite-source window), and the
+        VBM/VBBL methods emitted here are binary-lens-only.
 
-        `buffer` covers two effects: (1) the sharp transition zone where
-        hexadecapole begins to fail (~rho*t_E wide, typically 0.05-0.2 d), and
-        (2) gaps in the evaluation grid when data is subsampled (max_eval).
-        0.1 d is appropriate for a well-initialised model; increase to 0.2-0.5 d
-        if initvals are rough.
-
-        Intentionally skips parallax — we only need approximate caustic-crossing
-        timing for method selection, not a precise fit.
+        Only the mulensmodel backend consumes the resulting method list; the
+        default vbm_direct backend always calls BinaryMag2/MultiMag2.
         """
         if self.mag_method[index] != "auto_vbbl":
             return
-
-        import MulensModel as mm
-
-        g = self._get_initval
-        # Per-source trajectory params use the source slot; the companion
-        # geometry (s, q, alpha) is shared across sources (companion slot 0).
-        t_0   = g("t_0",   index)
-        u_0   = g("u_0",   index)
-        t_E   = g("t_E",   index)
-        s_val = g("s",     0)
-        q_val = g("q",     0)
-        # alpha in degrees; try direct value first, fall back to xalpha/yalpha
-        alpha_deg = g("alpha", 0)
-        if alpha_deg is None:
-            ca = g("xalpha", 0)
-            sa = g("yalpha", 0)
-            if ca is not None and sa is not None:
-                alpha_deg = float(np.degrees(np.arctan2(sa, ca)))
-
-        if any(v is None for v in [t_0, u_0, t_E, s_val, q_val, alpha_deg]):
-            logger.warning("auto_vbbl: missing initvals for bracket computation; "
-                           "falling back to VBM everywhere.")
-            self.mag_method[index] = [float(times_np.min()) - 1.0, "VBM",
-                                      float(times_np.max()) + 1.0]
+        if self.n_lens_bodies[0] < 2:
             return
 
-        params = {
-            "t_0":   t_0,
-            "u_0":   max(abs(u_0), 1e-9) * (1 if u_0 >= 0 else -1),
-            "t_E":   max(t_E, 1e-4),
-            "s":     max(s_val, 1e-6),
-            "q":     float(np.clip(q_val, 1e-9, 100.0)),
-            "alpha": alpha_deg,
-        }
-        if self.finite_source[0]:
-            rho = g("rho", index)
-            if rho is not None:
-                params["rho"] = max(rho, 1e-9)
-
-        # Build eval grid: subsample if data is very dense
-        if len(times_np) > max_eval:
-            step = len(times_np) // max_eval
-            eval_times = np.sort(times_np[::step])
-        else:
-            eval_times = np.sort(times_np)
-
-        t_lo = float(eval_times[0])
-        t_hi = float(eval_times[-1])
-
-        try:
-            model_hex = mm.Model(parameters=params)
-            model_vbm = mm.Model(parameters=params)
-            model_hex.set_magnification_methods([t_lo - 1.0, "hexadecapole", t_hi + 1.0])
-            model_vbm.set_magnification_methods([t_lo - 1.0, "VBM",          t_hi + 1.0])
-
-            A_hex = np.asarray(model_hex.get_magnification(eval_times))
-            A_vbm = np.asarray(model_vbm.get_magnification(eval_times))
-
-            diff = np.abs(A_hex - A_vbm) / np.maximum(np.abs(A_vbm), 1.0)
-            needs_vbm = diff > threshold
-
-        except Exception as e:
-            logger.warning(f"auto_vbbl: bracket computation failed ({e}); "
-                           "falling back to VBM everywhere.")
-            self.mag_method[index] = [t_lo - 1.0, "VBM", t_hi + 1.0]
-            return
-
-        if not np.any(needs_vbm):
-            self.mag_method[index] = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
-            logger.info("auto_vbbl: hexadecapole sufficient everywhere "
-                        f"(max diff {diff.max():.4f} < threshold {threshold})")
-            return
-
-        # Build contiguous VBM intervals with buffer
-        brackets = []
-        in_vbm = False
-        for i, t in enumerate(eval_times):
-            if needs_vbm[i] and not in_vbm:
-                t_start = max(t_lo - 1.0, t - buffer)
-                if brackets:
-                    brackets.append(t_start)
-                    brackets.append("VBM")
-                else:
-                    brackets = [t_lo - 1.0, "hexadecapole", t_start, "VBM"]
-                in_vbm = True
-            elif not needs_vbm[i] and in_vbm:
-                t_end = min(t_hi + 1.0, t + buffer)
-                brackets.append(t_end)
-                brackets.append("hexadecapole")
-                in_vbm = False
-
-        if in_vbm:
-            brackets.append(t_hi + 1.0)
-
-        # Ensure the bracket list ends with a sentinel time
-        if not brackets:
-            brackets = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
-        elif not isinstance(brackets[-1], float):
-            brackets.append(t_hi + 1.0)
-
-        n_vbm = sum(1 for b in brackets if b == "VBM")
-        logger.info(f"auto_vbbl: {n_vbm} VBM interval(s) "
-                    f"(threshold={threshold}, buffer={buffer} d, "
-                    f"max diff={diff.max():.4f})")
-        self.mag_method[index] = brackets
+        t_lo = float(np.min(times_np))
+        t_hi = float(np.max(times_np))
+        method = "VBM" if self.finite_source[0] else "VBBL"
+        self.mag_method[index] = [t_lo - 1.0, method, t_hi + 1.0]
+        logger.info(f"auto_vbbl: using {method} everywhere for source {index} "
+                    "(hexadecapole bracketing removed — VBM's internal C++ "
+                    "point-source test is faster; see hpc_optimization.txt P1)")
 
     def compile_plotters(self, model, system):
         pass

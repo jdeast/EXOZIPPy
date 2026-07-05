@@ -53,8 +53,14 @@ def get_symbol_map(lens_config_list):
 
         if len(lenses) > 1:
             is_binary_lens = True
-            c_comp, c_idx = lenses[1].split(".")
-            companion_mass_path = f"{c_comp}.{c_idx}.mass"
+            if len(lenses) == 2:
+                c_comp, c_idx = lenses[1].split(".")
+                companion_mass_path = f"{c_comp}.{c_idx}.mass"
+            # 3+ bodies: the binary mass-sum/q relations below cannot
+            # represent the extra companions, so companion_mass stays
+            # unregistered (both relations go inert) and
+            # Lens.register_parameters seeds lens.0.mlens_total with a hint
+            # summing the per-body mass initvals instead.
     else:
         l_idx = int(lens_config_list.get("lens_ndx", 0))
         sources = [f"star.{int(lens_config_list.get('source_ndx', 1))}"]

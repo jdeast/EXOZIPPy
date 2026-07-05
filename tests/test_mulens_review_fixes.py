@@ -174,18 +174,38 @@ def test_n_lens_bodies_are_accepted_and_sized_per_companion():
     assert lens.manifest["yalpha"]["shape"] == (2,)
 
 
-def test_triple_lens_magnification_fails_loudly():
+def test_triple_lens_mulensmodel_backend_fails_loudly():
     """
-    Given a lens with three bodies (no magnification backend for N > 2 yet),
+    Given a lens with three bodies and backend: mulensmodel (which caps the
+      lens side at binary),
     When get_magnification_op is called,
     Then a NotImplementedError names the backend limitation instead of
       silently computing a binary-lens magnification.
+
+    The default vbm_direct backend supports 3+ bodies via VBMicrolensing
+    MultiMag2 (see test_vbm_direct_vs_mulensmodel.py).
     """
     lens = Lens([{"lenses": ["star.0", "planet.0", "planet.1"],
-                  "sources": ["star.1"]}],
+                  "sources": ["star.1"],
+                  "backend": "mulensmodel"}],
                 _DummyConfigManager())
     with pytest.raises(NotImplementedError, match="backend"):
         lens.get_magnification_op(None, None, None, index=0)
+
+
+def test_lens_backend_defaults_to_vbm_direct_and_validates():
+    """
+    Given a lens block without a backend key,
+    When the Lens is constructed,
+    Then backend defaults to 'vbm_direct'; an unknown backend raises.
+    """
+    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+                _DummyConfigManager())
+    assert lens.backend == "vbm_direct"
+
+    with pytest.raises(ValueError, match="backend"):
+        Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"],
+               "backend": "nope"}], _DummyConfigManager())
 
 
 def _make_inst_with_q_source_data(n=870, t0=2458554.89, u0=0.143, tE=18.17,
@@ -368,28 +388,28 @@ def test_companion_mass_map_points_to_correct_index():
     Given a binary lens where the companion is planet.0,
     When build_maps runs,
     Then primary_lens_map points to star index 0 and
-      companion_mass_map points to planet index 0.
+      companion0_mass_map points to planet index 0.
     """
     lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
                 _DummyConfigManager())
     lens.build_maps()
 
     np.testing.assert_array_equal(lens.primary_lens_map, [0])
-    np.testing.assert_array_equal(lens.companion_mass_map, [0])
+    np.testing.assert_array_equal(lens.companion0_mass_map, [0])
 
 
 def test_companion_mass_map_stellar_binary_points_to_second_star():
     """
     Given a stellar binary (star.0 primary, star.1 companion),
     When build_maps runs,
-    Then companion_mass_map points to star index 1.
+    Then companion0_mass_map points to star index 1.
     """
     lens = Lens([{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
                 _DummyConfigManager())
     lens.build_maps()
 
     np.testing.assert_array_equal(lens.primary_lens_map, [0])
-    np.testing.assert_array_equal(lens.companion_mass_map, [1])
+    np.testing.assert_array_equal(lens.companion0_mass_map, [1])
 
 
 def test_calc_q_returns_mass_ratio():
