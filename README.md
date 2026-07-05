@@ -1,7 +1,7 @@
 # EXOZIPPy
 [DeepWiki](https://www.deepwiki.com/jdeast/EXOZIPPy)
 
-This will eventually be a python analog of EXOFASTv2, but it is not officially released yet. Many features are missing, not tested, or not functional. If you'd like to help with development, please contact me at jason.eastman@cfa.harvard.edu
+This will eventually be a python successor to EXOFASTv2, but it is not officially released yet. Many features are missing, not tested, or not functional. If you'd like to help with development, please contact me at jason.eastman@cfa.harvard.edu
 
 When we officially release the code, it'll be a pip installable package. For now, install it with conda (PyMC 5 is a heavy dependency and can only reliably be installed with conda):
 
