@@ -67,11 +67,24 @@ star.dec:
     initval: -27.188861
     sigma: 0
 
-# these shouldn't be fit for such models (on the to do list)
-# but as a temporary hack, we're just going to fix them at their arbitrary starting values
-star.radius:
+# Lens radii aren't constrained by anything in this model (no SED data, and
+# finite_source/rho only couples to the SOURCE radii below) — fix them at
+# their arbitrary starting values.  teff/feh have no physics wiring at all
+# without an SED/isochrone component, so fix those for every star.
+star.Lens.radius:
+    sigma: 0.0
+star.LensB.radius:
     sigma: 0.0
 star.teff:
     sigma: 0.0
 star.feh:
     sigma: 0.0
+
+# Source radii are NOT fixed: rho (fit directly against the finite-source
+# lightcurve shape) is derived from radius via calc_rho(radius, distance,
+# theta_E), so floating radius lets the data's rho constraint propagate
+# through to a real physical posterior instead of being clamped at the
+# value back-solved from the seeded rho above.  initval/init_scale still
+# come from that back-solve (via the relaxation engine + Jacobian scale
+# propagation), so the starting point and step size are well-informed;
+# only the hard fix is removed.

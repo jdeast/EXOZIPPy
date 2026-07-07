@@ -18,6 +18,12 @@ the paper.  This example exercises EXOZIPPy's NSNL pathway:
   addition to the usual f_source (total) and f_blend.
 - theta_E/t_E/rho/pi_E are referenced to the TOTAL lens mass
   (lens.mlens_total), matching the community convention for binary lenses.
+- Source radii (star.SourceA.radius, star.SourceB.radius) float freely
+  (bounded, no sigma fix): rho is DERIVED from radius via
+  calc_rho(radius, distance, theta_E), so the finite-source lightcurve shape
+  constrains radius directly through rho rather than radius being clamped at
+  the value back-solved from a seeded rho. Lens radii stay fixed (no
+  finite-source coupling; unconstrained without SED data).
 
 Conventions: Jung et al. report alpha = 48.243 deg; MulensModel (EXOZIPPy's
 magnification backend) uses alpha_MM = 180 - alpha_paper (see the comment in

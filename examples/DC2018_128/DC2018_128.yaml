@@ -23,13 +23,11 @@ lens:
   - name: "Lens"
     lenses:  ["star.0", "planet.0"]
     sources: ["star.1"]
-    finite_source: True
-    #mag_method: "auto_vbbl"  # default for binary+finite_source
-    t0_par: 2458554.89         # approximate t_0 from MMEXOFAST
+    finite_source: False
 
 galacticmodel:
   - name: "DC2018_128"
-    anchor_idx: 1              # source is star.1
+    anchor_idx: 1  # we anchor the galactic model to the source star, star.1
 
 band:
   - name: "Z087"
@@ -58,10 +56,10 @@ sampler:
   method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
   n_temps: 8              # temperature rungs (EXOFASTv2 parity)
   T_max: 200              # hottest temperature (EXOFASTv2 parity)
-  # n_chains: defaults to 2 × n_params
+  # n_chains: defaults to 2*n_params
   # cores: defaults to 75% of physical cores
-  tune: 0
-  draws: 500
+  tune: 5000
+  draws: 50000
   nthin: 1
   check_curvatures: False
   recompute_trace: True

@@ -127,7 +127,32 @@ Developers are forced to pass all unit tests before pushing a commit via git hoo
 Anytime a developer fixes a bug, a new unit test following the above convention should be added.
 The test should demonstrate failure before the fix and success after the fix.
 
-# 5. AI use:
+# 5. Project stage & workflow
+
+EXOZIPPy is pre-1.0 (see version in pyproject.toml) and not yet formally released.
+Expect breaking changes and rough edges; that's normal at this stage, not a bug in
+the process. The workflow is scaled to match:
+
+- Trivial fixes (typos, one-line bugs, doc tweaks) can go straight to `master`.
+- Anything a collaborator or student might be relying on (parameter semantics,
+  YAML schema, sampler defaults, shared core files) should go through a
+  short-lived branch and a pull request — self-merged is fine, no external
+  review is required at this stage. The point is the diff trail and CI, not
+  gatekeeping: if something breaks downstream later, there's a specific PR to
+  point at instead of a week of direct pushes.
+- Open a GitHub issue for anything worth a durable record: a design decision,
+  a bug a student/collaborator reports, or multi-step work you might pause or
+  hand off. Don't feel obligated to file one for every change — a good commit
+  message already covers most of what a trivial-fix issue would say.
+- Every push and PR against `master` runs the test suite via GitHub Actions
+  (`.github/workflows/tests.yml`); a red run is worth fixing before it lands
+  regardless of how the change got there.
+
+This will tighten once external contributors show up (mandatory review before
+merge, since you can't self-review someone else's PR the same way), but there's
+no reason to front-load that formality before it's load-bearing.
+
+# 6. AI use:
 
 AI use is encouraged, but thorough review and testing is essential. Create unit tests that verify/confirm the output for all essential code (see above). Unit testing is especially critical with AI generated code, as it is often tunnel visioned and drops important features not relevant to the bug.
 
