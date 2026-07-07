@@ -318,9 +318,18 @@ class VBMDirectMagOp(Op):
         vbm.a1 = 0.0 if u1 is None else u1
         if self.n_companions == 1:
             s, q, _ = companions[0]
+            mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
+            if not self.use_rho:
+                # Point source (user's finite_source: False): Mag2's
+                # finite-source integration returns NaN for an exactly-zero
+                # source radius (confirmed against VBM directly), so always
+                # use the point-source call rather than gating on distance.
+                # Gated on the user's config flag, not the numeric value of
+                # rho, since rho is otherwise a derived/sampled quantity.
+                return np.array([mag0(s, q, xi, yi)
+                                  for xi, yi in zip(x.tolist(), y.tolist())])
             r_inf = s + 1.0 / s + 2.0
             far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
-            mag2, mag0 = vbm.BinaryMag2, vbm.BinaryMag0
             return np.array([
                 mag0(s, q, xi, yi) if isfar else mag2(s, q, xi, yi, rho)
                 for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())
@@ -338,9 +347,12 @@ class VBMDirectMagOp(Op):
             pos[j + 1] = (s * np.cos(alpha_rad), -s * np.sin(alpha_rad))
         pos -= m @ pos
         vbm.SetLensGeometry(np.column_stack([pos, m]).ravel().tolist())
+        mag2, mag0 = vbm.MultiMag2, vbm.MultiMag0
+        if not self.use_rho:
+            return np.array([mag0(xi, yi)
+                              for xi, yi in zip(x.tolist(), y.tolist())])
         r_inf = max(s + 1.0 / s for (s, _, _) in companions) + 2.0
         far = (x * x + y * y) > (r_inf + 2.0 * rho) ** 2
-        mag2, mag0 = vbm.MultiMag2, vbm.MultiMag0
         return np.array([
             mag0(xi, yi) if isfar else mag2(xi, yi, rho)
             for xi, yi, isfar in zip(x.tolist(), y.tolist(), far.tolist())

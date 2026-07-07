@@ -6,7 +6,7 @@ import numpy as np
 import pymc as pm
 import pytest
 
-from exozippy.samplers.ptde import _geometric_ladder, ptde_sample
+from exozippy.samplers.ptde import _active_rungs, _geometric_ladder, ptde_sample
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +131,83 @@ def test_ptde_returns_inferencedata_with_expected_structure():
     assert "draw" in post.dims
     assert post.sizes["draw"] == 30
     assert "lp" in idata.sample_stats.data_vars
+
+
+# ---------------------------------------------------------------------------
+# _active_rungs (rung thinning)
+# ---------------------------------------------------------------------------
+
+def test_active_rungs_no_thinning_returns_all_rungs_every_step():
+    """
+    Given thin_factor=1 (default, disabled),
+    When _active_rungs is called at any step,
+    Then every rung is active, regardless of thin_start.
+    """
+    for step in range(5):
+        assert _active_rungs(step, n_temps=8, thin_start=4, thin_factor=1) == list(range(8))
+
+
+def test_active_rungs_cold_rungs_always_active():
+    """
+    Given thinning enabled (factor=2, start=4),
+    When _active_rungs is called at any step,
+    Then rungs below thin_start (0-3) are always in the result.
+    """
+    for step in range(6):
+        active = _active_rungs(step, n_temps=8, thin_start=4, thin_factor=2)
+        assert set(range(4)).issubset(active)
+
+
+def test_active_rungs_hot_rungs_thinned_on_alternate_steps():
+    """
+    Given thinning enabled (factor=2, start=4, n_temps=8),
+    When _active_rungs is called across steps 0 and 1,
+    Then hot rungs (4-7) are active on step 0 (all 8 rungs) and absent on
+      step 1 (only rungs 0-3).
+    """
+    assert _active_rungs(0, n_temps=8, thin_start=4, thin_factor=2) == list(range(8))
+    assert _active_rungs(1, n_temps=8, thin_start=4, thin_factor=2) == [0, 1, 2, 3]
+    assert _active_rungs(2, n_temps=8, thin_start=4, thin_factor=2) == list(range(8))
+
+
+def test_ptde_rung_thinning_runs_end_to_end():
+    """
+    Given a simple 2-temp model with rung_thin_factor=2,
+    When ptde_sample runs,
+    Then it completes and returns the expected InferenceData structure
+      (rung thinning must not break basic sampling).
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    idata = ptde_sample(
+        model, system, draws=30, tune=20,
+        n_temps=4, T_max=8.0, n_chains=4, cores=1, seed=1,
+        log_interval=100, rung_thin_factor=2, rung_thin_start=2,
+    )
+    assert idata.posterior.sizes["draw"] == 30
+    assert idata.posterior.sizes["chain"] == 4
+
+
+def test_ptde_collect_rung_timing_runs_end_to_end(caplog):
+    """
+    Given collect_rung_timing=True on a multi-temp model,
+    When ptde_sample runs,
+    Then it completes normally and logs a per-rung timing summary line
+      for every rung.
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("INFO", logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            model, system, draws=20, tune=20,
+            n_temps=3, T_max=8.0, n_chains=4, cores=1, seed=3,
+            log_interval=100, collect_rung_timing=True,
+        )
+    assert idata.posterior.sizes["draw"] == 20
+    messages = "\n".join(r.message for r in caplog.records)
+    assert "PTDE per-rung logp timing" in messages
+    for k in range(3):
+        assert f"rung {k}" in messages
 
 
 def test_ptde_posterior_mean_near_true_values():

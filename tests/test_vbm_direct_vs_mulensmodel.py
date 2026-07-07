@@ -125,6 +125,25 @@ def test_triple_lens_magnification_evaluates():
     assert np.all(A >= 1.0 - 1e-6)
 
 
+def test_vbm_direct_point_source_is_finite_near_and_far():
+    """
+    Given use_rho=False (user's finite_source: False) and epochs spanning
+      both near-caustic and far-field trajectory points,
+    When the direct Op is evaluated,
+    Then every output is finite. VBM's BinaryMag2 finite-source integrator
+      returns NaN for an exactly-zero source radius, so rho=0 near-caustic
+      calls must be dispatched to the point-source BinaryMag0 rather than
+      gated on distance like the finite-source (rho>0) case.
+    """
+    times, obs = _times_and_obs(n=400)
+    f = _compile(VBMDirectMagOp(coords=_COORDS, n_companions=1, use_rho=False))
+    order_no_rho = [k for k in _ORDER if k not in ("rho", "u1")]
+    p = np.array([_MAP[k] for k in order_no_rho])
+    A = f(p, times, obs)
+    assert np.all(np.isfinite(A)), "point-source path produced NaN"
+    assert np.all(A >= 1.0 - 1e-6)
+
+
 def test_vbm_direct_nan_params_yield_nan():
     """
     Given a parameter vector containing NaN (sampler exploring junk),

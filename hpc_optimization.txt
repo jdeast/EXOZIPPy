@@ -130,6 +130,91 @@ examples/DC2018_128/fitresults/DC2018_128.log):
 --------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
+STATUS UPDATE — 2026-07-07.  P13's diagnostic run; a real (unrelated) VBM NaN
+bug found+fixed; P12.0's correctness-vs-cost question resolved analytically.
+--------------------------------------------------------------------------------
+1. PER-RUNG TIMING DIAGNOSTIC (P13's "do this first" item): DONE.
+   ptde_sample(collect_rung_timing=True) (also a sampler.collect_rung_timing
+   YAML key) times every _eval_logp call and logs a per-rung summary
+   (n/median/mean/p90/max/n_slow(>0.1s)) at the end of a run. Zero overhead
+   when off (module-global flag set before fork, same pattern as
+   _PTDE_LOGP_FN). Tests: tests/test_ptde.py::test_ptde_collect_rung_timing_
+   runs_end_to_end.
+
+   RESULT (examples/DC2018_128, 400 steps from the MAP, n_temps=8, T_max=200,
+   40 chains/rung, no rung thinning, 16,040 calls/rung):
+     rungs 0-5 (T=1.0 .. 44.0):  0 calls  > 0.1 s, out of 16,040 each.
+     rung 6    (T=93.8):        14 calls  > 0.1 s  (max 1.28 s)
+     rung 7    (T=200.0):      115 calls  > 0.1 s  (max 1.35 s)
+   This SUPERSEDES P13's rough "~19 concurrently slow tasks" estimate (which
+   assumed rungs 4-7, ~160 chains, all contribute) and is much closer to the
+   "same rung, different chains" anecdote from the 2026-07-04 log (n=3
+   events, all rung 6) that P13 flagged as too small a sample to trust: the
+   pathology is genuinely concentrated in the top TWO rungs only, and even
+   there it is rare (0.4% of rung-7 calls, 0.09% of rung-6 calls) — not a
+   dense, many-concurrent-stragglers regime. Practical upshot for P13: since
+   concurrency is typically 0-1 (occasionally 2) slow tasks per step, not
+   ~19, async dispatch's realistic ceiling is closer to the ORIGINAL "~26
+   idle cores behind 1 straggler" framing than the walked-back estimate in
+   the PROMPT 13 text — worth re-reading that section with this number in
+   hand before scoping an async prototype.
+
+2. A REAL, UNRELATED BUG found while investigating a user-reported crash on
+   finite_source: False (point-source, no rho): VBM's BinaryMag2/MultiMag2
+   return NaN when called with rho=0.0 exactly (confirmed directly against
+   VBM: BinaryMag2(s,q,x,y,0.0) -> nan at points where BinaryMag0 correctly
+   returns the point-source magnification). VBMDirectMagOp._magnify's
+   far-field guard only reroutes DISTANT epochs to the point-source call
+   (Mag0); near-caustic epochs still called Mag2 with rho=0, which is exactly
+   where BinaryMag2's finite-source integrator breaks down for a zero-size
+   source. FIX (op.py _magnify): dispatch on self.use_rho (set once at Op
+   construction from the user's finite_source config) rather than on the
+   per-call numeric rho value — rho is otherwise a derived/sampled tensor
+   that should not gate control flow at eval time. Point-source calls now
+   always use Mag0/MultiMag0 unconditionally, never Mag2/MultiMag2. Verified:
+   unit test (test_vbm_direct_vs_mulensmodel.py::
+   test_vbm_direct_point_source_is_finite_near_and_far) plus a full 55,000-
+   step production PTDE run on DC2018_128 with finite_source: False, which
+   completed all steps with no NaN penalty (previously crashed at
+   initialization). This is unrelated to the P1-P13 performance work — pure
+   correctness bug, orthogonal axis (rho=0 exactness) from the safedist bug
+   (rho>1.6 exactness).
+
+3. P12.0 CORRECTNESS-VS-COST QUESTION (raised during review): does the
+   swap-time strict-Tol recompute (required so the swap acceptance ratio
+   compares one consistent density, not two different Tol-biased ones)
+   negate most of per-rung Tol's benefit? Worked through analytically:
+     - Within-rung Metropolis moves at a fixed Tol_k are still exact MCMC
+       against a (Tol_k-biased) target; harmless since hot-rung draws are
+       never stored. Only the SWAP move needs both sides at one Tol, since
+       its detailed-balance proof requires one density function evaluated at
+       two temperatures, not two different approximations.
+     - THE FIX MUST CACHE THE STRICT-TOL SWAP LOGP PER STATE, not recompute
+       it on every swap attempt. A state only needs strict re-evaluation
+       once, the first time it's used in a swap decision after being newly
+       accepted; cache alongside the loose-Tol logp and invalidate only on
+       the next accepted DE move. Recomputing on every attempt instead of
+       caching risks negating the benefit for exactly the persistent-
+       straggler case that matters most (a chain parked near a caustic for
+       many steps would otherwise pay full strict-Tol cost on every swap
+       attempt drawn into it).
+     - Quantified against the 400-step diagnostic above: 129 total slow
+       proposals at rungs 6-7, of which (uncorrelated with acceptance rate
+       ~4-13%) roughly ~13 are expected to be ACCEPTED into the population
+       and thus require one cached strict-Tol reconciliation each — ~13 s of
+       added cost over 400 steps (~0.03 s/step). Against that: with
+       apply_async dispatch the SLOWEST of 320 concurrent tasks sets the
+       step's wall-clock floor, so each of the 129 slow-call OCCURRENCES
+       (not just the 13 accepted ones) currently stalls its step by close to
+       its full duration — roughly 129/400 ~= 32% of steps in that run paid
+       close to a full straggler penalty. Collapsing those via looser Tol is
+       a clear net win over the ~0.03 s/step cached-reconciliation cost.
+     CONCLUSION: implement per-rung Tol with the swap-logp cache described
+     above; the correctness fix is cheap enough not to be a reason to skip
+     P12.0.
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 PROMPT 1 — Stop emitting hexadecapole from auto_vbbl (biggest single win, ~4x)
 DONE (2026-07-04). resolve_auto_vbbl now always emits VBM/VBBL for multi-body
 lenses (lens.py); PSPL finite-source switched Lee09 -> Yoo04 (op.py). Measured
@@ -497,19 +582,99 @@ essentially every step.  Items 0 and 1 directly attack that; do them first.)
    as soon as currerr < Tol, so this directly shrinks the expensive tail
    (scripts/ nearzone_cost.py-style benchmarking showed median 15ms/mean
    445ms/P90 1.7s at Tol=1e-3 for near-zone light curves — rerun that sweep
-   at Tol=1e-2/3e-2 to quantify the win before implementing). Validate: swap
-   acceptance rates and T=1 posterior unchanged (only hot-rung *precision*
-   changes, not their target distribution's support).
-1. Rung thinning: hotter rungs exist only to feed swaps; try updating rungs
-   k>=K/2 every 2nd step (halves eval count ~25-40%, and halves the number
-   of chances per step for a hot rung to land in the expensive tail).
-   Validate: swap acceptance rates and T=1 autocorrelation time unchanged on
-   DC128.
+   at Tol=1e-2/3e-2 to quantify the win before implementing).
+
+   CORRECTNESS REQUIREMENT (raised during review, NOT optional): PT's swap
+   move has a detailed-balance proof that requires BOTH sides of a swap to
+   be evaluated with the SAME density function, differing only by the
+   temperature exponent. ptde.py's swap code currently compares
+   logps[k+1][j] and logps[k][i] as cached values from each rung's own last
+   DE-move evaluation:
+       log_a = ((logps[k+1][j] - logps[k][i])
+                * (1.0/temperatures[k] - 1.0/temperatures[k+1]))
+   If rungs used DIFFERENT Tol for those cached values, this expression
+   compares two different approximate functions, not one function at two
+   temperatures — the swap acceptance ratio silently stops being the one
+   the detailed-balance proof covers, and an under-precision logp value
+   can flow down through successive swaps into T=1, corrupting the "exact"
+   posterior this whole architecture exists to keep clean. Hot rungs having
+   a slightly different (coarser) OWN stationary distribution is harmless
+   in isolation (their draws are discarded) — the swap step is the ONLY
+   channel where that approximation can leak into T=1, so it is the only
+   place needing a fix.
+   FIX: whenever a swap is being DECIDED (not for the rungs' own internal DE
+   moves), re-evaluate BOTH participating states at one shared, exact
+   (T=1-grade) Tol, regardless of what Tol either rung used for its DE
+   moves. This keeps the swap move a valid detailed-balance-preserving
+   transition on one consistent density. Cost: swaps happen once per
+   adjacent-rung pair per swap_interval (<=n_temps-1=7 pairs/step here), so
+   this adds ~14 extra full-Tol evals/step against the ~160 loose-Tol DE
+   evals being saved -- a good trade, but it means "per-rung Tol" is not
+   just "pass a different Tol to the Op" -- the swap section of ptde.py
+   needs this re-evaluation wired in before the T=1 posterior can be
+   trusted.
+   IMPLEMENTATION REQUIREMENT (resolved 2026-07-07, see STATUS UPDATE above):
+   cache the strict-Tol swap logp PER STATE (compute once, the first time a
+   given accepted state is needed for a swap decision; reuse for every
+   subsequent swap attempt on that same state; invalidate only when the
+   rung's next DE move is accepted). Recomputing on every swap attempt
+   instead of caching can eat most or all of the benefit for a chain that
+   sits near a caustic for many steps (repeated full-cost recompute on a
+   state that never changed). With caching, the analysis in the STATUS
+   UPDATE above estimates the reconciliation overhead at ~0.03 s/step against
+   the DC2018_128 diagnostic's straggler cost -- a clear net win.
+   Validate: swap acceptance rates and T=1 posterior unchanged (only
+   hot-rung *precision* changes for their own DE moves, never for a swap
+   decision or for anything that ends up in T=1's stored draws).
+1. Rung thinning: DONE (2026-07-04). ptde.py: _active_rungs() + rung_thin_factor
+   / rung_thin_start kwargs (YAML: sampler.rung_thin_factor/rung_thin_start;
+   default factor=1 = disabled, fully backward compatible). Rungs below
+   rung_thin_start (default n_temps//2, clamped >=1 so T=1 is never thinned)
+   propose every step; rungs at/above it only propose every
+   rung_thin_factor-th step -- directly cutting the number of chances per
+   step for a hot rung to land in the expensive tail. Swaps are unaffected
+   (they exchange cached (population, logp) pairs, no new eval needed).
+   Verified on DC2018_128 with factor=2/start=4: n_props alternates
+   320->160->320 per DEBUG step log, eval time roughly halves on thinned
+   steps. Tests: tests/test_ptde.py (_active_rungs unit tests + an
+   end-to-end smoke test).
+   IMPORTANT CAVEAT (raised during review): this only reduces the FREQUENCY
+   of a hot-rung straggler blocking the batch, not the blocking itself when
+   it occurs — a fully asynchronous/non-blocking dispatch (submit proposals
+   via imap_unordered and let fast chains advance without waiting on a
+   straggler) would eliminate the blocking entirely rather than just
+   thinning its frequency, but requires resolving how DE proposals draw
+   "current" partner states from asynchronously-updating chains and how
+   step-synchronized diagnostics (R-hat/ESS windows, gamma adaptation) are
+   redefined per-chain. Not attempted here; worth a dedicated design pass if
+   thinning's measured win is insufficient. Validate (still open): swap
+   acceptance rates and T=1 autocorrelation time unchanged on DC128 relative
+   to no-thinning, on a full-length run (this session only smoke-tested
+   correctness, not mixing quality).
 2. Adaptive temperature ladder: the Robbins-Monro hook (target_swap_rate,
    adapt_ladder) is already reserved in the API (ptde.py line ~254).
    Implement Vousden et al. 2016-style ladder adaptation during tune,
    targeting uniform swap acceptance ~0.2-0.4; often lets n_temps drop from
    8 to 4-6 => proportional eval savings.
+   NOTE (2026-07-05, does NOT directly fix the DC2018_128 cost finding):
+   standard Vousden/Robbins-Monro adapts spacing purely for swap-acceptance
+   uniformity -- a MIXING criterion, not a COST criterion. A rung can have
+   perfectly healthy swap statistics while sitting at a temperature whose
+   stationary distribution happens to concentrate on expensive parameter
+   combinations; those are largely independent properties (swap rate
+   depends on how much adjacent rungs' distributions overlap; eval cost
+   depends on WHERE in (s,q,rho) a rung's distribution concentrates). It
+   still helps INDIRECTLY (fewer total rungs needed => less total exposure
+   to whatever expensive window exists), but is not a targeted fix.
+   SPECULATIVE EXTENSION worth flagging, not promising: a cost-aware ladder
+   adaptation that penalizes the Robbins-Monro update by measured per-rung
+   eval cost (not just swap acceptance), explicitly trading a bit of
+   mixing uniformity for less time spent at expensive temperatures. This is
+   a real research extension beyond the textbook algorithm -- do items 0/1
+   and the diagnostic below first; only chase this if per-rung timing data
+   (see PROMPT 13's diagnostic) shows a persistent, reproducible expensive
+   temperature WINDOW (not just small-sample noise) that a fixed ladder
+   cannot avoid.
 3. Snooker DE moves (ter Braak & Vrugt 2008) mixed at ~10%: better mixing at
    fixed n_chains, possibly allowing n_chains < 2*n_params for large models.
 4. Convergence-informed draw budget: with min_ess=1000 the configured
@@ -518,6 +683,159 @@ essentially every step.  Items 0 and 1 directly attack that; do them first.)
    mechanism) and document that pattern in the README.
 Each experiment: implement behind a flag, compare ESS/second against baseline
 on DC128 with identical seeds, keep only what wins.
+
+--------------------------------------------------------------------------------
+PROMPT 13 — Asynchronous (non-blocking) PTDE dispatch (NEW, 2026-07-05;
+COMPLEMENTS P12, does not replace it -- see the "does this obsolete per-rung
+Tol?" discussion below before starting)
+--------------------------------------------------------------------------------
+Context: rung thinning (P12.1, DONE) only reduces the FREQUENCY with which a
+hot-rung straggler stalls the whole step; on the steps where hot rungs do
+propose, the current design still waits for the single slowest of all
+active proposals before ANY chain can advance -- not because of poor
+scheduling (see below), but because no chain's next-step proposal can be
+BUILT until the whole batch resolves, since it depends on updated
+populations from every rung.
+
+WHAT KIND OF WAITING IS THIS -- cores waiting for chains, or chains for
+cores? (raised during review, 2026-07-05) The dispatch code
+(_map_logp_timeout, active whenever eval_timeout is set, as it is for
+DC2018_128) submits all 320 proposals via individual pool.apply_async calls
+in one tight loop -- NOT pool.map's default chunked dispatch. apply_async
+has no chunking: every proposal lands in the pool's shared task queue
+essentially instantly (a python loop constructing dicts is microseconds/
+iteration, far faster than even the fastest single evaluation), so by the
+time any worker finishes its first task and asks for more, ALL 320 are
+already queued and get handed out dynamically to whichever worker frees up
+next. This is already close to optimal WITHIN-step load balancing; there is
+no "unlucky worker stuck with a bad chunk" failure mode here to fix by
+reordering or prioritizing which chain gets dispatched first. Submitting
+hot (likely-slow) rungs before cold ones would not change the makespan --
+the fast cold-rung tasks clear the queue so quickly that essentially all
+workers reach the hot-rung portion of the queue at nearly the same time
+regardless of submission order.
+The actual constraint is a SYNCHRONIZATION BARRIER, not a scheduling-order
+problem: a fast, already-finished chain's next DE proposal needs its
+rung-mates' CURRENT states, and "current" is only well-defined once the
+whole step resolves. "Let the chain that's ahead keep going instead of
+waiting" is not a simpler alternative to async dispatch -- it IS async
+dispatch's mechanism, just described from the chain's-eye view instead of
+the core's-eye view.
+How much is genuinely idle vs. genuinely busy matters a lot for how big a
+win this is, and the two data points available disagree:
+  - A rough estimate from the near-zone cost scan (11.7% of hot-rung-like
+    870-epoch draws exceed 1s) applied to ~160 hot-rung proposals (rungs
+    4-7 all active) suggests up to ~19 CONCURRENTLY slow tasks per step --
+    in which case async's ceiling is bounded by (cores - concurrently-slow)
+    ~ 27-19 ~ 8 cores' worth of gain, not 26.
+  - But the empirical evidence cuts the other way: ALL THREE of the
+    eval_timeout>10s events actually logged in the 2026-07-04 13,370-step
+    run came from the SAME rung (rung 6, T~93.8 -- the second-hottest, NOT
+    the hottest rung 7), at DIFFERENT chains each time (14, 38, 13). That
+    is more consistent with a couple of chains at one problematic
+    temperature than nineteen concurrent stragglers spread across four
+    rungs -- though n=3 is too small to be confident either way.
+  A plausible (unverified) reason an INTERMEDIATE-but-not-hottest rung
+  could be the worst offender: at T=1, logp strongly favors the true tiny
+  rho (~0.005, safely cheap); at the hottest rung (T=200) the target is so
+  flat it likely spends real time pinned near the prior EDGES (s->0.1 or
+  10, extreme q), where bound barriers and the far-field guard make
+  evaluation cheap again; an intermediate rung can be flat enough to
+  wander into moderate-s/moderate-rho territory without being flat enough
+  to get pushed all the way to a cheap boundary -- precisely the expensive
+  middle ground. This has NOT been verified; the current logs only have a
+  chain/rung LABEL for events that hit the explicit eval_timeout, not
+  per-rung timing for the sub-threshold slowdown that dominates the
+  sustained ~1.7-2.0s median step cost.
+  DIAGNOSTIC WORTH DOING FIRST (cheap, resolves the ambiguity above before
+  committing to P13's scope): have _eval_logp (or its caller) record
+  elapsed wall time per call, and log it broken down by rung index (the
+  (k, i) mapping in prop_map already identifies which rung each evaluation
+  belongs to -- this is bookkeeping already available in the parent, no
+  new information needs to cross the worker boundary beyond one float).
+  Run once on DC2018_128 and look at the per-rung cost distribution before
+  deciding whether P13 is worth 8 cores' benefit or 26.
+  DONE (2026-07-07, see STATUS UPDATE above): ptde_sample(collect_rung_
+  timing=True). Result on DC2018_128 (400 steps from MAP): slow (>0.1s)
+  calls are confined to rungs 6-7 only, and rare even there (0.4%/0.09% of
+  calls) -- concurrency is typically 0-1, occasionally 2, NOT the ~19
+  estimated above. This resolves the ambiguity in favor of the "few
+  concentrated stragglers" picture, closer to the original ~26-idle-cores
+  framing than the walked-back one -- re-read the "HOW MUCH IS GENUINELY
+  IDLE" paragraph above with this number before scoping an async
+  prototype.
+
+DOES THIS MAKE PER-RUN TOL (P12.0) OBSOLETE? No -- they fix different
+things and compose:
+  - Async removes STALLING: no chain has to wait idle for another chain's
+    slow evaluation. It does NOT reduce the absolute CPU-seconds a hot rung
+    needs per evaluation -- a genuinely expensive near-caustic
+    BinaryMagDark call still takes however long it takes on whatever core
+    is running it.
+  - The near-zone benchmark in vbm_fix.txt found MEAN cost (445ms) far
+    above MEDIAN (15ms) for hot-rung-like draws -- the mean, not just the
+    max, is tail-dominated. Under a fixed core budget (e.g. 27), aggregate
+    hot-rung throughput is bounded by (cores allocated to hot rungs) /
+    (mean per-eval cost), NOT by the max. So even with perfect async
+    scheduling, hot rungs would still consume a disproportionate share of
+    total CPU-seconds for evaluations whose OWN draws are never kept (only
+    T=1 is stored) -- their only purpose is offering good swap partners to
+    colder rungs. Loosening Tol at hot rungs directly shrinks that mean
+    cost (BinaryMagDark's annuli loop exits sooner), freeing real CPU
+    budget for more/faster hot-rung iterations -> better, more frequent
+    swaps -> better T=1 mixing per wall-clock second, independent of
+    whatever dispatch architecture is running underneath.
+  - Do both: async fixes the SCHEDULING pathology (no more forced idling);
+    per-rung Tol fixes the COMPUTE pathology (hot rungs doing unnecessarily
+    precise work). Async without Tol still burns disproportionate CPU on
+    hot-rung precision nobody needs; Tol without async still stalls 26
+    idle workers behind 1 slow one on the steps it happens. Together they
+    address distinct, additive terms in the throughput budget.
+
+Task (bigger and riskier than P12 -- scope as its own session; keep the
+existing synchronous ptde_sample as a fallback/default, do not remove it):
+1. Prototype an event-driven dispatch loop: maintain up to `cores` proposals
+   in flight via pool.apply_async with a callback (or poll a queue of
+   AsyncResult objects); whenever one resolves, do its accept/reject
+   immediately, then build and dispatch that chain's NEXT proposal right
+   away using whatever states its DE partners (j1, j2 in the same rung)
+   currently hold -- which may be "last accepted" rather than
+   "just-updated" if a partner's own evaluation is still in flight.
+2. Validity question (do not skip): using stale/in-flight partner states in
+   a DE move is used in the async-ensemble-MCMC literature but changes the
+   move's detailed-balance argument versus the synchronous version this
+   codebase currently implements. Before trusting posterior output,
+   validate on the toy 2-D correlated Gaussian already in test_ptde.py
+   (test_ptde_posterior_mean_near_true_values) with both quantitative
+   checks (recovered mean/std, ESS/wall-second vs the synchronous
+   baseline) and enough draws to see a stable ESS estimate -- do not accept
+   a plausible-looking mean alone as proof of correctness.
+3. Swaps need a new schedule independent of "once per synchronized step":
+   e.g. attempt a swap between a random adjacent-rung chain pair every time
+   N new evaluations have landed for that rung pair, or on a wall-clock
+   timer, using each chain's latest completed (state, logp) -- this part
+   IS unaffected by staleness (logp(x) doesn't depend on when x was last
+   touched, only on x itself), so it's lower-risk than the DE-partner
+   question above.
+4. Diagnostics/storage currently assume a shared step index across all
+   n_chains at rung 0 (stored_raw is (n_chains, draws)). Async chains
+   finish different numbers of iterations by any wall-clock checkpoint;
+   redesign storage as per-chain growing lists (or preallocate generously
+   and trim), and decide how R-hat/ESS handle unequal chain lengths
+   (truncate all chains to the shortest at check time is the simplest
+   correct option).
+5. Gamma adaptation (target_accept-driven) currently uses a shared
+   "n_accept/n_propose since last log" window across all rungs at a
+   synchronized log_every cadence; redefine per T=1-rung-only (that's the
+   only rate it actually uses) with a wall-clock or move-count window
+   instead of a step-count window.
+Acceptance: on DC2018_128 (or a synthetic model with an injected
+"pathological" nuisance parameter that deterministically reproduces a
+single-straggler-per-step scenario, for a clean A/B), measure ESS/wall-second
+for T=1 under (a) current synchronous dispatch, (b) synchronous + rung
+thinning, (c) async dispatch, (d) async + per-rung Tol. Expect (c) > (b) and
+(d) > (c); if (c) is not clearly better than (b), the added complexity and
+statistical risk are not worth it and P12 alone should remain the answer.
 
 --------------------------------------------------------------------------------
 HOUSEKEEPING NOTES (fold into whichever prompt touches the file first)

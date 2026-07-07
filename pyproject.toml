@@ -1,9 +1,21 @@
 [tool.poetry]
 name = "exozippy"
 version = "0.1.0"
-description = "general modeling code"
-authors = ["jason.eastman@cfa.harvard.edu"]
+description = "general modeling fitting code"
+authors = ["Jason Eastman <jason.eastman@cfa.harvard.edu>","Phoebe Sandhaus <pjs5535@psu.edu>"]
 readme = "README.md"
+homepage = "https://github.com/jdeast/EXOZIPPy"
+license = "BSD-3-Clause"
+keywords = ["exofast", "exofastv2", "exoplanet", "transit", "radial velocity", "sed", "mist", "microlensing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+]
 packages = [{include = "exozippy", from = "src"}]
 
 [tool.poetry.dependencies]

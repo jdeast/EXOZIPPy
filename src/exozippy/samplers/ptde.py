@@ -43,9 +43,31 @@ logger = logging.getLogger(__name__)
 # pickling.  Proposals (dicts of numpy arrays) are the only IPC payload.
 _PTDE_LOGP_FN = None
 
+# Diagnostic flag (see ptde_sample(collect_rung_timing=...) and
+# hpc_optimization.txt P13): set in the parent before forking, like
+# _PTDE_LOGP_FN, so workers inherit it via copy-on-write. When True,
+# _eval_logp times its own call and returns (lp, elapsed_seconds) instead of
+# a bare float, so the parent can attribute wall time to a rung via
+# prop_map -- resolves whether slow evaluations concentrate in a few
+# chains/rungs or spread across many, which determines how much benefit an
+# async dispatch redesign (P13) would realistically deliver.
+_PTDE_COLLECT_TIMING = False
+
 
 def _eval_logp(proposal):
-    """Worker: evaluate logp for one raw-space proposal dict."""
+    """Worker: evaluate logp for one raw-space proposal dict.
+
+    Returns a bare float normally. When _PTDE_COLLECT_TIMING is set, returns
+    (lp, elapsed_seconds) instead (diagnostic mode; see module docstring
+    above _PTDE_COLLECT_TIMING).
+    """
+    if _PTDE_COLLECT_TIMING:
+        t0 = time.perf_counter()
+        try:
+            lp = float(_PTDE_LOGP_FN(proposal))
+        except Exception:
+            lp = -np.inf
+        return lp, time.perf_counter() - t0
     try:
         return float(_PTDE_LOGP_FN(proposal))
     except Exception:
@@ -188,11 +210,15 @@ def _map_logp_timeout(pool, proposals, timeout):
     async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
     lps = []
     timed_out = []
+    # Keep the timeout sentinel the same shape _eval_logp returns (a bare
+    # float, or (lp, elapsed) in collect_rung_timing diagnostic mode) so
+    # every entry in `lps` is uniformly typed for the caller to unpack.
+    timeout_val = (-np.inf, timeout) if _PTDE_COLLECT_TIMING else -np.inf
     for idx, r in enumerate(async_results):
         try:
             lps.append(r.get(timeout=timeout))
         except mp.TimeoutError:
-            lps.append(-np.inf)
+            lps.append(timeout_val)
             timed_out.append(idx)
     return lps, timed_out
 
@@ -201,6 +227,30 @@ def _pick_two(rng, n, exclude):
     """Pick two distinct indices from [0, n) excluding `exclude`."""
     idx = rng.choice(n - 1, 2, replace=False)
     return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
+
+
+def _active_rungs(step, n_temps, thin_start, thin_factor):
+    """Rung indices that propose a DE move at this step.
+
+    Rungs below thin_start always propose; rungs at or above it only
+    propose every thin_factor-th step (thin_factor<=1 -> always, i.e. no
+    thinning). Swaps are unaffected by thinning -- they only exchange
+    already-cached (population, logp) pairs between adjacent rungs, so a
+    rung that skipped its own DE move this step can still participate in
+    a swap using its last-computed logp.
+
+    Rationale (hpc_optimization.txt P12): PTDE's per-step wall time is
+    gated by the SLOWEST of all n_temps*n_chains proposals. Hot rungs
+    (large T) explore a heavily flattened target and routinely draw
+    parameter combinations that are individually expensive to evaluate but
+    scientifically irrelevant (only the T=1 rung's draws are kept). Thinning
+    them directly cuts the number of chances per step to draw from that
+    expensive tail, at the cost of slower mixing for swap partners.
+    """
+    if thin_factor <= 1:
+        return list(range(n_temps))
+    return [k for k in range(n_temps)
+            if k < thin_start or step % thin_factor == 0]
 
 
 def _convergence_check_schedule(min_draws=100, growth=0.9):
@@ -268,6 +318,9 @@ def ptde_sample(
     # Reserved for future Robbins-Monro temperature adaptation:
     target_swap_rate=None,
     adapt_ladder=False,
+    rung_thin_factor=1,
+    rung_thin_start=None,
+    collect_rung_timing=False,
     seed=None,
     log_interval=None,
     plot_prefix=None,
@@ -299,6 +352,21 @@ def ptde_sample(
     swap_interval : int  — attempt temperature swaps every N steps
     target_swap_rate, adapt_ladder  — reserved for Robbins-Monro (not yet
                implemented; hook is here so the API won't need to change)
+    rung_thin_factor : int  — update rungs >= rung_thin_start only every
+               rung_thin_factor-th step (default 1 = no thinning, every rung
+               proposes every step). Directly cuts the number of chances per
+               step that a hot, heavily-flattened rung draws a parameter
+               combination that is expensive to evaluate but scientifically
+               irrelevant (see hpc_optimization.txt P12). Swaps are
+               unaffected -- they exchange cached (population, logp) pairs
+               and need no new evaluation.
+    rung_thin_start : int | None  — first rung index subject to thinning;
+               None -> n_temps // 2. Clamped to >= 1: the T=1 rung (index 0,
+               the only one whose draws are kept) is never thinned.
+    collect_rung_timing : bool  — diagnostic (see hpc_optimization.txt P13):
+               record per-call wall time and attribute it to a rung, logging
+               a summary (count/median/mean/p90/max per rung) when sampling
+               finishes. Default False (zero overhead when off).
     seed : int | None
     log_interval : int | None — steps between progress log lines (None → 5%)
     plot_prefix : str | None  — if set, generate ensemble-start plots at this path prefix
@@ -316,10 +384,20 @@ def ptde_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
-    global _PTDE_LOGP_FN
+    global _PTDE_LOGP_FN, _PTDE_COLLECT_TIMING
+    _PTDE_COLLECT_TIMING = collect_rung_timing
 
     rng = np.random.default_rng(seed)
     temperatures = _geometric_ladder(n_temps, T_max)
+
+    _rung_thin_factor = max(1, int(rung_thin_factor))
+    _rung_thin_start = (n_temps // 2 if rung_thin_start is None
+                        else int(rung_thin_start))
+    _rung_thin_start = max(1, min(_rung_thin_start, n_temps))  # never thin T=1
+    if _rung_thin_factor > 1 and _rung_thin_start < n_temps:
+        logger.info(
+            f"PTDE: rung thinning enabled — rungs >= {_rung_thin_start} "
+            f"(of {n_temps}) propose every {_rung_thin_factor} steps")
 
     # compile logp ONCE; store in module global BEFORE forking workers
     logp_fn = model.compile_logp()
@@ -400,8 +478,9 @@ def ptde_sample(
     actual_draws = 0
     start_time = time.time()
     n_eval_timeouts = [0]  # mutable box, incremented by _eval_logps_safe
+    rung_times = [[] for _ in range(n_temps)]  # per-rung wall times (collect_rung_timing only)
 
-    def _eval_logps_safe(proposals, step_label, index_labels=None):
+    def _eval_logps_safe(proposals, step_label, index_labels=None, rungs=None):
         """Evaluate logps for `proposals`, honoring eval_timeout if set.
 
         A logp call that exceeds eval_timeout is treated as -inf, which the
@@ -415,10 +494,20 @@ def ptde_sample(
         index_labels : list[str] | None — optional per-proposal identity
             (e.g. "rung 3 chain 12"), same length/order as `proposals`, used
             in place of a bare index in the timeout log message.
+        rungs : list[int] | None — optional per-proposal rung index, same
+            length/order as `proposals`. When collect_rung_timing is set,
+            per-call wall times are attributed to these rungs.
         """
         nonlocal pool
         if eval_timeout is None:
-            return _map_logp(pool, proposals)
+            raw = _map_logp(pool, proposals)
+            if _PTDE_COLLECT_TIMING:
+                lps = [r[0] for r in raw]
+                if rungs is not None:
+                    for r, k in zip(raw, rungs):
+                        rung_times[k].append(r[1])
+                return lps
+            return raw
 
         lps, timed_out = _map_logp_timeout(pool, proposals, eval_timeout)
         if timed_out:
@@ -452,6 +541,11 @@ def ptde_sample(
                 gc.collect()
                 pool = mp.get_context("fork").Pool(
                     actual_cores, initializer=_worker_init)
+        if _PTDE_COLLECT_TIMING:
+            if rungs is not None:
+                for r, k in zip(lps, rungs):
+                    rung_times[k].append(r[1])
+            return [r[0] for r in lps]
         return lps
 
     _do_convergence = (min_ess is not None or max_rhat is not None) and n_chains >= 2
@@ -473,8 +567,10 @@ def ptde_sample(
                        for k in range(n_temps) for i in range(n_chains)]
         flat_start_labels = [f"rung {k} chain {i}"
                               for k in range(n_temps) for i in range(n_chains)]
+        flat_start_rungs = [k for k in range(n_temps) for i in range(n_chains)]
         all_lps = _eval_logps_safe(flat_starts, "initial evaluation",
-                                    index_labels=flat_start_labels)
+                                    index_labels=flat_start_labels,
+                                    rungs=flat_start_rungs)
         logps = [
             [all_lps[k * n_chains + i] for i in range(n_chains)]
             for k in range(n_temps)
@@ -501,10 +597,11 @@ def ptde_sample(
             draw_idx = step - tune
             _t0 = time.time()
 
-            # 1. build DE proposals for every chain at every temperature
+            # 1. build DE proposals for every chain at every ACTIVE temperature
+            #    (rung thinning skips hot rungs on most steps; see _active_rungs)
             props_flat = []
             prop_map = []
-            for k in range(n_temps):
+            for k in _active_rungs(step, n_temps, _rung_thin_start, _rung_thin_factor):
                 pop_k = populations[k]
                 for i in range(n_chains):
                     j1, j2 = _pick_two(rng, n_chains, i)
@@ -519,7 +616,8 @@ def ptde_sample(
             prop_labels = [f"rung {k} chain {i}" for k, i in prop_map]
             prop_lps = _eval_logps_safe(
                 props_flat, f"step {step + 1} ({phase})",
-                index_labels=prop_labels)
+                index_labels=prop_labels,
+                rungs=[k for k, i in prop_map])
             _t_eval = time.time()
 
             # 3. Metropolis accept/reject at effective temperature T_k
@@ -555,6 +653,7 @@ def ptde_sample(
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     f"PTDE step {step+1} ({phase})  "
+                    f"n_props={len(props_flat)}  "
                     f"total={_t_step-_t0:.3f}s  "
                     f"build={_t_build-_t0:.3f}s  "
                     f"eval={_t_eval-_t_build:.3f}s  "
@@ -679,5 +778,20 @@ def ptde_sample(
         + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]"
            if n_temps > 1 else "")
         + (f"  eval_timeouts={n_eval_timeouts[0]}" if n_eval_timeouts[0] else ""))
+
+    if collect_rung_timing:
+        logger.info("PTDE per-rung logp timing (seconds):")
+        for k in range(n_temps):
+            times = rung_times[k]
+            if not times:
+                logger.info(f"  rung {k} (T={temperatures[k]:.1f}): no calls")
+                continue
+            arr = np.asarray(times)
+            n_slow = int((arr > 0.1).sum())
+            logger.info(
+                f"  rung {k} (T={temperatures[k]:.1f}): n={len(arr)}  "
+                f"median={np.median(arr):.3f}  mean={arr.mean():.3f}  "
+                f"p90={np.percentile(arr, 90):.3f}  max={arr.max():.3f}  "
+                f"n_slow(>0.1s)={n_slow}")
 
     return idata

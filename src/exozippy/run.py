@@ -62,6 +62,7 @@ KNOWN_SAMPLER_KEYS = {
     "method", "n_temps", "T_max", "n_chains", "recompute_trace",
     "nthin", "check_curvatures", "profile", "min_ess", "max_rhat",
     "maxtime", "chain_method", "eval_timeout",
+    "rung_thin_factor", "rung_thin_start", "collect_rung_timing",
 }
 
 
@@ -107,6 +108,10 @@ def run_fit(config):
     maxtime         = float(_maxtime_raw) if _maxtime_raw is not None else None
     _eval_timeout_raw = sampler_cfg.get("eval_timeout", None)
     eval_timeout    = float(_eval_timeout_raw) if _eval_timeout_raw is not None else None
+    rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
+    _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
+    rung_thin_start = int(_rung_thin_start_raw) if _rung_thin_start_raw is not None else None
+    collect_rung_timing = bool(sampler_cfg.get("collect_rung_timing", False))
     if profile: pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
@@ -203,6 +208,9 @@ def run_fit(config):
                     max_rhat=max_rhat,
                     maxtime=maxtime,
                     eval_timeout=eval_timeout,
+                    rung_thin_factor=rung_thin_factor,
+                    rung_thin_start=rung_thin_start,
+                    collect_rung_timing=collect_rung_timing,
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax

@@ -39,6 +39,18 @@
       - untested at scale: MultiMag2 cost for N>=3 is ~30x a binary call
         (~240ms vs ~7ms per 870-epoch light curve in a quick check); no
         benchmark yet on a real 3-body example config
+    - point-source (finite_source: False) NaN bug: DONE (2026-07-07)
+      - VBMDirectMagOp._magnify (op.py) called VBM's BinaryMag2/MultiMag2
+        with rho=0.0 for near-caustic epochs (the far-field guard only
+        reroutes distant epochs to the point-source call); VBM's
+        finite-source integrator returns NaN for an exactly-zero source
+        radius. Fixed by dispatching on self.use_rho (set once from the
+        user's finite_source config at Op construction) instead of the
+        per-call rho value. Verified: unit test
+        (test_vbm_direct_point_source_is_finite_near_and_far) + a full
+        55,000-step production PTDE run on DC2018_128 with
+        finite_source: False completing with no NaN (previously crashed at
+        initialization).
     - confirm (and document) conventions (origin, alpha, parallax sign)
     - explore samplers and parameterizations
       - identify best practices
@@ -120,6 +132,49 @@
     directly shrinks the expensive tail), and (b) rung thinning (update hot
     rungs less often, directly reducing the number of chances per step to
     draw from that tail).
+    - (b) rung thinning: DONE (2026-07-04) — ptde.py _active_rungs() +
+      sampler.rung_thin_factor/rung_thin_start YAML keys. Only reduces the
+      FREQUENCY of a hot-rung straggler blocking the batch, not the
+      blocking itself; still needs a full-length DC128 run to confirm swap
+      rates / T=1 autocorrelation are unaffected (only smoke-tested so far).
+    - per-rung timing diagnostic: DONE (2026-07-07) —
+      ptde_sample(collect_rung_timing=True) / sampler.collect_rung_timing
+      YAML key; logs per-rung n/median/mean/p90/max/n_slow(>0.1s) at the end
+      of a run. Result on DC2018_128 (400 steps from MAP): slow calls
+      confined to rungs 6-7 only (0/16040 on rungs 0-5; 14/16040 on rung 6;
+      115/16040 on rung 7) — concurrency is typically 0-1 stragglers per
+      step, not the ~19 previously estimated. See hpc_optimization.txt
+      2026-07-07 STATUS UPDATE for the full numbers.
+    - (a) per-rung Tol: NOT DONE (implementation). Non-trivial — Tol is
+      baked into the magnification Op at graph-compile time, shared by every
+      rung's proposals in the one compiled logp function; needs either N
+      separate compiled logp functions (one per rung) or a live-mutable Tol
+      the worker sets before each _eval_logp call, keyed by which rung a
+      proposal belongs to. Correctness-vs-cost question RESOLVED
+      (2026-07-07, analytically, see hpc_optimization.txt): the swap-time
+      strict-Tol recompute required for detailed balance does NOT negate
+      most of the benefit, PROVIDED it is cached per-state (computed once
+      per newly-accepted state, reused for subsequent swap attempts on that
+      state) rather than recomputed on every swap attempt. Estimated
+      overhead ~0.03 s/step against a straggler cost that currently stalls
+      ~32% of steps — implement with the cache; skipping it risks negating
+      the win for exactly the persistent-straggler case that matters most.
+    - also raised: a fully asynchronous/non-blocking dispatch (fast chains
+      never wait on a hot-rung straggler) would eliminate the blocking
+      entirely rather than just reducing its frequency, but requires
+      redesigning how DE proposals draw partner states from
+      asynchronously-updating chains and how step-synchronized diagnostics
+      are computed per-chain. Not attempted; a bigger design question than
+      rung thinning or per-rung Tol. Written up as hpc_optimization.txt P13
+      (2026-07-05): NOT a substitute for per-rung Tol — async fixes
+      scheduling (nobody idles waiting on a straggler), Tol fixes the
+      actual compute cost (hot-rung evaluations are cheaper), and a fixed
+      core budget means both matter independently. Do P13 as its own
+      scoped session; keep synchronous ptde_sample as the fallback. The
+      2026-07-07 diagnostic (above) shows concurrency is typically low
+      (0-1 stragglers/step), closer to the original "~26 idle cores" framing
+      than the walked-back "~19 concurrent" estimate — informs P13's scope
+      if/when it's picked up.
 
 * one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 
