@@ -104,7 +104,7 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 
 def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
     """
-    Given the kelt4rvonly example seeded at the MAP from kelt4.params.2.yaml,
+    Given the kelt4rvonly example seeded at the MAP from kelt4.params.yaml,
     When run_fit completes with 1 draw starting near MAP,
     Then key parameters are within physically plausible ranges (user units).
     """
@@ -147,13 +147,13 @@ def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):
 
 def test_run_fit_kelt4_mkprior_written(kelt4_result):
     """
-    Given the kelt4rvonly example with parameter_file: kelt4.params.2.yaml,
+    Given the kelt4rvonly example with parameter_file: kelt4.params.yaml,
     When run_fit completes,
     Then mkprior writes the next versioned params file in the work directory.
     """
     _, work_dir = kelt4_result
-    # kelt4.params.2.yaml → next version is kelt4.params.3.yaml
-    expected = work_dir / "kelt4.params.3.yaml"
+    # kelt4.params.yaml → next version is kelt4.params.2.yaml
+    expected = work_dir / "kelt4.params.2.yaml"
     assert expected.exists(), (
         f"mkprior did not write {expected.name}; "
         f"yaml files present: {[f.name for f in work_dir.glob('*.yaml')]}"
