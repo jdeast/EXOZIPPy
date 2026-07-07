@@ -16,7 +16,7 @@ import astropy.constants as const
 # internal imports
 #from exozippy.constants import *
 from ...constants import *
-from .filters import filter as VOID
+from ...filters import filter as VOID
 from .bc_grid import _load_alias_table, resolve_filter_name
 #import exozippy.components.sed.filters.filter as VOID
 #from exozippy.components.sed.bc_grid import _load_alias_table, resolve_filter_name
@@ -32,6 +32,9 @@ try:
 except NameError:
     current_dir = Path.cwd()
 
+source_code_dir = current_dir.parent.parent  # source code two directories up
+DEFAULT_FILTER_ROOT = source_code_dir / "filters"
+DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
 class Plot:
 
@@ -41,12 +44,12 @@ class Plot:
     markers = ["o", "D", "v"] # circle, diamond, triangle
 
     # read in extinction values
-    extinction_dir = current_dir / "models" / "extinction_law.ascii"
+    extinction_dir = DEFAULT_MODEL_ROOT / "extinction_law.ascii"
     extinction_df = pd.read_csv(extinction_dir, names=['wavelength', 'extinction'], 
                                 delimiter=' ', index_col=False, skipinitialspace=True)
     
     # read in filter magnitude systems
-    filtersys_dir = current_dir / "filters" / "filter_magsys.txt"
+    filtersys_dir = DEFAULT_FILTER_ROOT / "filter_magsys.txt"
     filtersys_df = pd.read_csv(filtersys_dir, sep='\t', comment='#', skipinitialspace=True)
 
     filter_alias_df = _load_alias_table()
@@ -133,13 +136,13 @@ class Plot:
         self.sedmodel = self.system.sed.sedmodel
 
         try:
-            df_spec = pd.read_csv(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.spectra.csv")
-            df_wave = pd.read_csv(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.wavelength.csv")
+            df_spec = pd.read_csv(DEFAULT_MODEL_ROOT / f"{self.sedmodel}" / "BCs" / f"{self.sedmodel}.spectra.csv")
+            df_wave = pd.read_csv(DEFAULT_MODEL_ROOT / f"{self.sedmodel}" / "BCs" / f"{self.sedmodel}.wavelength.csv")
         except:
             print(f"No spectra found for ``{self.sedmodel}`` model.\n"
                 "Defaulting to using ``NextGen`` spectra for plotting.")
-            df_spec = pd.read_csv(current_dir / "models" / "NextGen" / "NextGen.spectra.csv")
-            df_wave = pd.read_csv(current_dir / "models" / "NextGen" / "NextGen.wavelength.csv")
+            df_spec = pd.read_csv(DEFAULT_MODEL_ROOT / "NextGen" / "BCs" / "NextGen.spectra.csv")
+            df_wave = pd.read_csv(DEFAULT_MODEL_ROOT / "NextGen" / "BCs" / "NextGen.wavelength.csv")
 
         df_spec['flux'] = df_spec['flux'].apply(json.loads).apply(np.array)
 
@@ -159,7 +162,7 @@ class Plot:
             self.grid_axes          :  Set(List)
                                         'grid' axes that the model will be interpolated on
         """
-        with open(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.grid.yaml", 'r') as f:
+        with open(DEFAULT_MODEL_ROOT / f"{self.sedmodel}" / "BCs" / f"{self.sedmodel}.grid.yaml", 'r') as f:
             self.model_grid_yaml = yaml.safe_load(f)
 
         # when dealing with the raw model spectra 

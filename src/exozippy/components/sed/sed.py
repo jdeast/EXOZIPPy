@@ -31,7 +31,7 @@ from .bc_grid import (
     peek_grid_axes,
     slice_bc,
     RegularGridInterpolator,
-    DEFAULT_BC_ROOT,
+    DEFAULT_MODEL_ROOT,
 )
 from ..star.physics import calc_logg, calc_luminosity
 
@@ -100,7 +100,7 @@ class SED(Component):
         self.config = config if isinstance(config, dict) else config[0]
 
         self.label = "SED Parameters"
-        self.bc_root = Path(self.config.get("bc_root", DEFAULT_BC_ROOT))
+        self.model_root = Path(self.config.get("model_root", DEFAULT_MODEL_ROOT))
 
         # for now lets assume only one SED file
         self.sedfile = self.config.get("file")
@@ -165,7 +165,7 @@ class SED(Component):
 
         try:
             axes = peek_grid_axes(
-                model=self.sedmodel, bc_root=self.bc_root
+                model=self.sedmodel, model_root=self.model_root
             )
         except FileNotFoundError as e:
             # If the grid isn't findable at construction time,
@@ -174,7 +174,7 @@ class SED(Component):
             # that's a load-time failure, not an init failure.
             logger.warning(
                 f"SED could not peek grid axes for model={self.sedmodel} "
-                f"at {self.bc_root}: {e}. Skipping bound injection."
+                f"at {self.model_root}: {e}. Skipping bound injection."
             )
 
         self.grid_axes = axes
@@ -279,9 +279,9 @@ class SED(Component):
     def _ensure_model_data(self):
         """Download large model data files from Zenodo if not present locally."""
         urls = self._MODEL_DATA_URLS.get(self.sedmodel, {})
-        model_dir = current_dir / "models" / self.sedmodel
+        bc_dir = DEFAULT_MODEL_ROOT / self.sedmodel / "BCs"
         for filename, url in urls.items():
-            dest = model_dir / filename
+            dest = bc_dir / filename
             if not dest.exists():
                 logger.info(f"Downloading {filename} from Zenodo...")
                 urllib.request.urlretrieve(url, dest)
@@ -299,7 +299,7 @@ class SED(Component):
         grid = build_bc_grid(
             user_filter_names=self.filters,
             model=self.sedmodel,
-            bc_root=self.bc_root,
+            model_root=self.model_root,
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
@@ -479,10 +479,10 @@ class SED(Component):
             return
         
         # retrieve model plotting class
-        plot_class_path = Path(current_dir / "models" / system.sed.sedmodel / "plot.py")
+        plot_class_path = DEFAULT_MODEL_ROOT / system.sed.sedmodel / "BCs" / "plot.py"
         parsed_ast = ast.parse(plot_class_path.read_text())
         plot_cls_str = [node.name for node in parsed_ast.body if isinstance(node, ast.ClassDef)][0]
-        mod_name = f"exozippy.components.sed.models.{system.sed.sedmodel}.plot"
+        mod_name = f"exozippy.models.{system.sed.sedmodel}.BCs.plot"
         module = importlib.import_module(mod_name)
         plot_cls = getattr(module, plot_cls_str)
         plot_obj = plot_cls(system, points)

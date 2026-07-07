@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 from scipy.interpolate import interpn
 
-from ...plot import Plot
+from exozippy.components.sed.plot import Plot
 
 
 class NextGenPlot(Plot):

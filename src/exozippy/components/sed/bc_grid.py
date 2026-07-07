@@ -1,20 +1,18 @@
 """
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
-This module replaces the spectra grid / filter integration machinery
-from `Code for Models/Classes/Grid.py` + `Spectra.py` + `Filter.py`
-with a direct interpolation over a precomputed BC grid. Given a set
-of filter names and a model name ("NextGen" in v1), it loads the
-matching per-feh BC files from the `BCs/{MODEL}/{FACILITY}/` tree
-and builds a pytensor-compatible RegularGridInterpolator over
+Given a set of filter names and a model name ("NextGen" in v1), 
+it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/` 
+tree and builds a pytensor-compatible RegularGridInterpolator over
 (lgTeff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.
 
 File layout assumed (the NextGen tree):
-    {bc_root}/
+    {model_root}/
         {model}/                     e.g. "NextGen"
-            {facility}/              e.g. "2MASS", "GAIA", "WISE"
-                feh{+/-X.X}_afe{+/-Y.Y}.{FACILITY}
+            BCs/
+                {facility}/              e.g. "2MASS", "GAIA", "WISE"
+                    feh{+/-X.X}_afe{+/-Y.Y}.{FACILITY}
 
 Each file is whitespace-delimited with 5 header lines (`#` prefixed)
 and columns:
@@ -62,12 +60,15 @@ try:
 except NameError:
     current_dir = Path.cwd()
 
+source_code_dir = current_dir.parent.parent  # source code two directories up
+DEFAULT_FILTER_ROOT = source_code_dir / "filters"
+
 _FILTERNAMES_ = "filternames.txt"
 
 
-def _load_alias_table(path: Path = current_dir) -> pd.DataFrame | None:
+def _load_alias_table(path: Path = DEFAULT_FILTER_ROOT) -> pd.DataFrame | None:
     """Load the VOID↔MIST↔SVO name alias table, if present."""
-    _FILTERNAMES_TXT = path / "filters" / _FILTERNAMES_
+    _FILTERNAMES_TXT = path / _FILTERNAMES_
     if not _FILTERNAMES_TXT.exists():
         return None
     return pd.read_csv(
@@ -124,7 +125,7 @@ def facility_from_svo_name(svo_name: str) -> str:
 
 # Default root; callers should override via the SED config when not
 # running out of the project directory.
-DEFAULT_BC_ROOT = Path(__file__).parent / "models"
+DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
 # compile pattern for bolometric correction tables
 _FEH_FILENAME_RE = re.compile(r"feh(?P<feh>[+-]\d+\.\d+)_afe(?P<alpha>[+-]\d+\.\d+)\.(?P<facility>\w+)")
@@ -182,13 +183,13 @@ def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
 
 
 def _collect_facility_files(
-    bc_root: Path, model: str, facility: str
+    model_root: Path, model: str, facility: str
 ) -> List[Path]:
-    subdir = bc_root / model
+    subdir = model_root / model / "BCs"
     if not subdir.is_dir():
         raise FileNotFoundError(
             f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model.")
-    subdir = subdir / "BCs" / facility
+    subdir = subdir / facility
     if not subdir.is_dir():
         raise NotImplementedError(
             f"Bolometric corrections not calculated for ``{facility}``. Specify a different filter set.\n Future implementation will automate this step.")
@@ -198,7 +199,7 @@ def _collect_facility_files(
 
 def peek_grid_axes(
     model: str = "NextGen",
-    bc_root: Path | str = DEFAULT_BC_ROOT,
+    model_root: Path | str = DEFAULT_MODEL_ROOT,
 ) -> Dict[str, np.ndarray]:
     """
     Cheap axis-metadata reader for the BC grid.
@@ -215,9 +216,9 @@ def peek_grid_axes(
     Parameters
     ----------
     model : str
-        BC model name (selects the first-level subdirectory of bc_root).
-    bc_root : Path
-        Root directory holding the {model}/{facility}/feh*_afe*.{FAC}
+        BC model name (selects the first-level subdirectory of model_root).
+    model_root : Path
+        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FAC}
         tree.
 
     Returns
@@ -228,8 +229,8 @@ def peek_grid_axes(
         feh_pts   : np.ndarray, shape (n_feh,)
         av_pts    : np.ndarray, shape (n_av,)
     """
-    bc_root = Path(bc_root)
-    model_dir = bc_root / model / "BCs"
+    model_root = Path(model_root)
+    model_dir = model_root / model / "BCs"
     if not model_dir.is_dir():
         raise FileNotFoundError(
             f"BC model directory not found: {model_dir}"
@@ -282,7 +283,7 @@ def peek_grid_axes(
 def build_bc_grid(
     user_filter_names: Sequence[str],
     model: str = "NextGen",
-    bc_root: Path | str = DEFAULT_BC_ROOT,
+    model_root: Path | str = DEFAULT_MODEL_ROOT,
 ) -> Dict:
     """
     Assemble a 4D BC grid for a specific set of filters.
@@ -293,9 +294,9 @@ def build_bc_grid(
         Filter labels as they appear in the .sed file (VOID-style,
         e.g. "2MASS.J", "Gaia.G", "WISE.W1").
     model : str
-        BC model name; selects the first-level subdirectory of bc_root.
-    bc_root : Path
-        Root directory holding the {model}/{facility}/feh*_afe*.{FACILITY}
+        BC model name; selects the first-level subdirectory of model_root.
+    model_root : Path
+        Root directory holding the {model}/BCs/{facility}/feh*_afe*.{FACILITY}
         tree.
 
     Returns
@@ -311,7 +312,7 @@ def build_bc_grid(
             MIST BC column names, in the same order as the requested
             user_filter_names.
     """
-    bc_root = Path(bc_root)
+    model_root = Path(model_root)
     alias_df = _load_alias_table()
 
     # 1. Resolve user names -> MIST column names and group by facility.
@@ -327,9 +328,9 @@ def build_bc_grid(
     # into one monolithic grid.
     per_facility_frames: Dict[str, Dict[float, pd.DataFrame]] = {}
     for fac, items in by_facility.items():
-        feh_files = _collect_facility_files(bc_root, model, fac)
+        feh_files = _collect_facility_files(model_root, model, fac)
         if not feh_files:
-            file_dir = bc_root / model / "BCs" / fac
+            file_dir = model_root / model / "BCs" / fac
             raise FileNotFoundError(
                 f"No BC files for facility '{fac}' under "
                 f"{file_dir}"
