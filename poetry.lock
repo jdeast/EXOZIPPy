@@ -447,33 +447,107 @@ files = [
 
 [[package]]
 name = "arviz"
-version = "0.23.4"
-description = "Exploratory analysis of Bayesian models"
+version = "1.2.0"
+description = "Expose features from _ArviZverse_ refactored packages together in the ``arviz`` namespace."
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.12"
 groups = ["main", "dev"]
 files = [
-    {file = "arviz-0.23.4-py3-none-any.whl", hash = "sha256:c46c7faf8a06abadc9b5b64000584062ecbc20c2298e2bd6dfba04bb01a684ca"},
-    {file = "arviz-0.23.4.tar.gz", hash = "sha256:611be826995066036c9443ea98d11486c279ef3da3b6cdc5c0816fab434115b9"},
+    {file = "arviz-1.2.0-py3-none-any.whl", hash = "sha256:3b2b313b4b57ebb2e028c5237e4eacbd4f56084d0162128f8f1f42266c7cf515"},
+    {file = "arviz-1.2.0.tar.gz", hash = "sha256:ce9d8233691e37dc4b57b670ac1da3cca0f9312280fb0d77e7cd743772d2895c"},
 ]
 
 [package.dependencies]
-h5netcdf = ">=1.0.2"
-h5py = "*"
-matplotlib = ">=3.8"
-numpy = ">=1.26.0"
-packaging = "*"
-pandas = ">=2.1.0"
-platformdirs = "*"
-scipy = ">=1.11.0"
-setuptools = ">=60.0.0"
-typing_extensions = ">=4.1.0"
-xarray = ">=2023.7.0"
-xarray-einstats = ">=0.3"
+arviz_base = ">=1.2.0,<1.3.0"
+arviz_plots = ">=1.2.0,<1.3.0"
+arviz_stats = {version = ">=1.2.0,<1.3.0", extras = ["xarray"]}
 
 [package.extras]
-all = ["bokeh (>=3)", "contourpy", "dask[distributed]", "dm-tree (>=0.1.8)", "netcdf4", "numba", "ujson", "xarray (>=2024.11.0)", "zarr (>=2.5.0,<3)"]
-preview = ["arviz-base[h5netcdf]", "arviz-plots", "arviz-stats[xarray]"]
+bokeh = ["arviz_plots[bokeh]"]
+check = ["build", "pre-commit"]
+doc = ["h5netcdf", "h5py", "jupyter-sphinx", "matplotlib", "myst-nb", "myst-parser[linkify]", "pydata-sphinx-theme (>=0.13)", "sphinx (>=5)", "sphinx-copybutton", "sphinx-design", "sphinx-notfound-page", "sphinx-togglebutton", "sphinxcontrib-youtube", "sphobjinv"]
+h5netcdf = ["arviz_base[h5netcdf]"]
+matplotlib = ["arviz_plots[matplotlib]"]
+netcdf4 = ["arviz_base[netcdf4]"]
+plotly = ["arviz_plots[plotly]"]
+test = ["pytest"]
+zarr = ["arviz_base[zarr]"]
+
+[[package]]
+name = "arviz-base"
+version = "1.2.0"
+description = "Base ArviZ features and converters."
+optional = false
+python-versions = ">=3.12"
+groups = ["main", "dev"]
+files = [
+    {file = "arviz_base-1.2.0-py3-none-any.whl", hash = "sha256:a3f7023b665823068ff4b973bb6205eacc65f3c0a446cc099d7e5326b50f1ffc"},
+    {file = "arviz_base-1.2.0.tar.gz", hash = "sha256:be06f9c15c53a951a971bef697e6b0a68497aae4d1670be065dd8f0482e9efca"},
+]
+
+[package.dependencies]
+lazy_loader = ">=0.4"
+numpy = ">=2"
+typing-extensions = ">=3.10"
+xarray = ">=2024.11.0"
+
+[package.extras]
+check = ["build", "docstub (==0.4)", "mypy", "pre-commit"]
+ci = ["cloudpickle", "pre-commit"]
+doc = ["h5netcdf[h5py]", "jupyter-sphinx", "myst-nb", "myst-parser[linkify]", "numpydoc", "sphinx (>=5)", "sphinx-book-theme", "sphinx-copybutton", "sphinx-design", "watermark"]
+h5netcdf = ["h5netcdf[h5py]"]
+netcdf4 = ["netcdf4"]
+test = ["pytest", "pytest-cov", "scipy", "xarray (!=2025.8.0)"]
+zarr = ["zarr"]
+
+[[package]]
+name = "arviz-plots"
+version = "1.2.0"
+description = "ArviZ-plots provides ready to use and composable plots for Bayesian Workflow."
+optional = false
+python-versions = ">=3.12"
+groups = ["main", "dev"]
+files = [
+    {file = "arviz_plots-1.2.0-py3-none-any.whl", hash = "sha256:2e16ed95ce6d6fbb171d60f7300f50c520ebeeb132be7539591a018076f66f16"},
+    {file = "arviz_plots-1.2.0.tar.gz", hash = "sha256:e1f462aa0ac02fb957aabcae2cfcbee9bc089a029c94dab83fa2ed02d02098f3"},
+]
+
+[package.dependencies]
+arviz-base = ">=1.2,<1.3"
+arviz-stats = {version = ">=1.2,<1.3", extras = ["xarray"]}
+
+[package.extras]
+bokeh = ["bokeh (>=3.4)"]
+doc = ["h5netcdf[h5py]", "jupyter-sphinx", "myst-nb", "myst-parser[linkify]", "numpydoc", "plotly (<6)", "sphinx (>=6)", "sphinx-book-theme", "sphinx-copybutton", "sphinx-design"]
+matplotlib = ["matplotlib (>=3.9)"]
+plotly = ["plotly (>=5.19)", "webcolors"]
+test = ["h5netcdf[h5py]", "hypothesis", "kaleido", "pytest", "pytest-cov"]
+
+[[package]]
+name = "arviz-stats"
+version = "1.2.0"
+description = "Statistical computation and diagnostics for ArviZ."
+optional = false
+python-versions = ">=3.12"
+groups = ["main", "dev"]
+files = [
+    {file = "arviz_stats-1.2.0-py3-none-any.whl", hash = "sha256:f9084addeb1abdbab6e9816f0a063118bc4ff7c48ce9141a4dad20b0e41410ae"},
+    {file = "arviz_stats-1.2.0.tar.gz", hash = "sha256:fc49e6e75f4fce953987a9bf17dc39950e1f12e7cd73f865257e5d1b6a5ee114"},
+]
+
+[package.dependencies]
+arviz-base = {version = ">=1.2,<1.3", optional = true, markers = "extra == \"xarray\""}
+numpy = ">=2"
+scipy = ">=1.13"
+xarray = {version = ">=2024.11.0", optional = true, markers = "extra == \"xarray\""}
+xarray-einstats = {version = "*", optional = true, markers = "extra == \"xarray\""}
+
+[package.extras]
+doc = ["h5netcdf[h5py]", "jupyter-sphinx", "myst-nb", "myst-parser[linkify]", "numpydoc", "sphinx (<9)", "sphinx-book-theme", "sphinx-copybutton", "sphinx-design", "sphinx_autosummary_accessors"]
+numba = ["numba", "xarray_einstats[einops,numba]"]
+test = ["pytest", "pytest-cov"]
+test-xarray = ["h5netcdf[h5py]", "pytest", "pytest-cov"]
+xarray = ["arviz-base (>=1.2,<1.3)", "xarray (>=2024.11.0)", "xarray-einstats"]
 
 [[package]]
 name = "astropy"
@@ -1056,7 +1130,7 @@ version = "1.3.3"
 description = "Python library for calculating contours of 2D quadrilateral grids"
 optional = false
 python-versions = ">=3.11"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "contourpy-1.3.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:709a48ef9a690e1343202916450bc48b9e51c049b089c7f79a267b46cffcdaa1"},
     {file = "contourpy-1.3.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:23416f38bfd74d5d28ab8429cc4d63fa67d5068bd711a85edb1c3fb0c3e2f381"},
@@ -1234,7 +1308,7 @@ version = "0.12.1"
 description = "Composable style cycles"
 optional = false
 python-versions = ">=3.8"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30"},
     {file = "cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c"},
@@ -1424,43 +1498,33 @@ files = [
 tests = ["asttokens (>=2.1.0)", "coverage", "coverage-enable-subprocess", "ipython", "littleutils", "pytest", "rich ; python_version >= \"3.11\""]
 
 [[package]]
-name = "exoplanet-core"
-version = "0.3.1"
+name = "exoplanet_core"
+version = "0.3.2.dev19+gfcbe4a4f7"
 description = "The compiled backend for exoplanet"
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.12"
 groups = ["main"]
-files = [
-    {file = "exoplanet_core-0.3.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:470bb6dde44184907a76c8f06587994bc3b3bbbac7bd9ec05088562e314ea1fc"},
-    {file = "exoplanet_core-0.3.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:7c6f1a186ed423449303d3bc871d0eac4b39e9cea42ebd3c509cd20f1bfaf8ae"},
-    {file = "exoplanet_core-0.3.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d011332537b38d7fbef1e9947de809d05a2639a40c1a1d5fd6b90c2405450dc1"},
-    {file = "exoplanet_core-0.3.1-cp310-cp310-win_amd64.whl", hash = "sha256:15da68790573fe46917d69e21d4d5a39f89cb9f1b7b563f62fdbecd183b521a4"},
-    {file = "exoplanet_core-0.3.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:05f9dd3aba365e7f143fcd85f53d3f383ede1225be193c09c2aa74c5bbc854bc"},
-    {file = "exoplanet_core-0.3.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:d8ee4e9908797add276c41fc1f65a168065d17db7ea1d3ee790f4a55bc33a03b"},
-    {file = "exoplanet_core-0.3.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c450d0e32ddf2e741092a2e86d15d0bdf03f27ea1c95d1a85a71997a53615495"},
-    {file = "exoplanet_core-0.3.1-cp311-cp311-win_amd64.whl", hash = "sha256:54d739039eaabf0304d07cb2e5551f03ad6e75e8af6a133bfb88baef74f4d6d1"},
-    {file = "exoplanet_core-0.3.1-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:4e2bcf0e9b48195818073c7d89b895a1201841d6da3b390739597c248e73de15"},
-    {file = "exoplanet_core-0.3.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:418463fa07fd8f4fed4f7b4fa6416dfd7dc359af94f9fb36565ebd365821576c"},
-    {file = "exoplanet_core-0.3.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f957d1c93b9acab2551c1bcbbe88b7205178f9d59d8d52f7836c8f2ce53f8062"},
-    {file = "exoplanet_core-0.3.1-cp312-cp312-win_amd64.whl", hash = "sha256:6d723a4ff3e8edb3ada5922687fbc4d1f1fa2ba949b344a842eb0af87b10bcb7"},
-    {file = "exoplanet_core-0.3.1-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:671471f4dc8cf5ebcbb52e0862505a05ab18e03637e7f48158aeec114727a419"},
-    {file = "exoplanet_core-0.3.1-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:d5b4a4256649c382adc808c65bd16fa727aac6e7333a3e9423c9c2f712b4eac2"},
-    {file = "exoplanet_core-0.3.1-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:15e64e0d0c8e845144655b9bc454abb787b97a06714f895768fe9d6d5c7ee483"},
-    {file = "exoplanet_core-0.3.1-cp39-cp39-win_amd64.whl", hash = "sha256:4d2bed27cf55bfd4f4b47086798402e156794bcff60c7e14f2a86ee652e97bdf"},
-    {file = "exoplanet_core-0.3.1.tar.gz", hash = "sha256:bc742ca183f81e17b0dcfe81287f659ad7fc11db1aa21cb6214a937dbf6d9db8"},
-]
+files = []
+develop = false
 
 [package.dependencies]
 numpy = "*"
 pymc = {version = ">=5.0.0", optional = true, markers = "extra == \"pymc\""}
+pytensor = {version = ">=2.0", optional = true, markers = "extra == \"pymc\""}
 
 [package.extras]
-benchmark = ["batman-package", "exoplanet (==0.4.5)", "kepler.py", "pytest", "pytest-benchmark", "radvel", "starry"]
-comparison = ["batman-package", "numpy (<1.22)", "starry", "xarray (<2023.10.0)"]
-jax = ["jax", "jaxlib"]
-pymc = ["pymc (>=5.0.0)"]
-pymc3 = ["numpy (<1.22)", "pymc3 (>=3.9)"]
+benchmark = ["batman-package ; python_version < \"3.12\"", "exoplanet (==0.4.5) ; python_version < \"3.12\"", "kepler.py", "pytest", "pytest-benchmark", "radvel ; python_version < \"3.12\"", "starry ; python_version < \"3.12\""]
+comparison = ["batman-package ; python_version < \"3.12\"", "numpy (<1.22) ; python_version < \"3.12\"", "starry ; python_version < \"3.12\"", "xarray (<2023.10.0) ; python_version < \"3.12\""]
+jax = ["jax (>=0.5.0)"]
+pymc = ["pymc (>=5.0.0)", "pytensor (>=2.0)"]
+pymc3 = ["numpy (<1.22) ; python_version < \"3.12\"", "pymc3 (>=3.9) ; python_version < \"3.12\""]
 test = ["pytest"]
+
+[package.source]
+type = "git"
+url = "https://github.com/exoplanet-dev/exoplanet-core.git"
+reference = "HEAD"
+resolved_reference = "fcbe4a4f7e2580cadaefd0c432c67ac5741bdd5e"
 
 [[package]]
 name = "fastcore"
@@ -1544,7 +1608,7 @@ version = "4.63.0"
 description = "Tools to manipulate font files"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "fonttools-4.63.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:e3297a6a4059b4acc3a1e9a8b04741f240a80044eef08ebd32e8b5bcdddce75b"},
     {file = "fonttools-4.63.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:b1cd75a03ad8cb5bc40c90bfde68c0c47de423aa19e5c0f362b43520645eea94"},
@@ -1862,34 +1926,12 @@ files = [
 ]
 
 [[package]]
-name = "h5netcdf"
-version = "1.8.1"
-description = "netCDF4 via h5py"
-optional = false
-python-versions = ">=3.9"
-groups = ["main", "dev"]
-files = [
-    {file = "h5netcdf-1.8.1-py3-none-any.whl", hash = "sha256:a76ed7cfc9b8a8908ea7057c4e57e27307acff1049b7f5ed52db6c2247636879"},
-    {file = "h5netcdf-1.8.1.tar.gz", hash = "sha256:9b396a4cc346050fc1a4df8523bc1853681ec3544e0449027ae397cb953c7a16"},
-]
-
-[package.dependencies]
-numpy = "*"
-packaging = "*"
-
-[package.extras]
-h5py = ["h5py"]
-h5pyd = ["h5pyd"]
-pyfive = ["pyfive (>=1.0.0)"]
-test = ["h5py", "netCDF4", "pyfive (>=1.0.0)", "pytest"]
-
-[[package]]
 name = "h5py"
 version = "3.16.0"
 description = "Read and write HDF5 files from Python"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "h5py-3.16.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:e06f864bedb2c8e7c1358e6c73af48519e317457c444d6f3d332bb4e8fa6d7d9"},
     {file = "h5py-3.16.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ec86d4fffd87a0f4cb3d5796ceb5a50123a2a6d99b43e616e5504e66a953eca3"},
@@ -2304,67 +2346,72 @@ type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 
 [[package]]
 name = "jax"
-version = "0.4.38"
+version = "0.10.2"
 description = "Differentiate, compile, and transform Numpy code."
 optional = true
-python-versions = ">=3.10"
+python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "jax-0.4.38-py3-none-any.whl", hash = "sha256:78987306f7041ea8500d99df1a17c33ed92620c2268c4c3677fb24e06712be64"},
-    {file = "jax-0.4.38.tar.gz", hash = "sha256:43bae65881628319e0a2148e8f81a202fbc2b8d048e35c7cb1df2416672fa4a8"},
+    {file = "jax-0.10.2-py3-none-any.whl", hash = "sha256:724d73c4678d8b06f6a6ab4db1b8a2fea8cd4f1e2c2564f99601634ec7b8d1c6"},
+    {file = "jax-0.10.2.tar.gz", hash = "sha256:bf77428a8c2e6904c4f46d5ab12aa5cfc6cad2179f07f7e4c0fc75ac86ef0639"},
 ]
 
 [package.dependencies]
-jaxlib = "0.4.38"
-ml_dtypes = ">=0.4.0"
-numpy = {version = ">=1.26.0", markers = "python_version >= \"3.12\""}
+jaxlib = ">=0.10.1,<=0.10.2"
+ml_dtypes = ">=0.5.0"
+numpy = ">=2.0"
 opt_einsum = "*"
-scipy = {version = ">=1.11.1", markers = "python_version >= \"3.12\""}
+scipy = ">=1.14"
 
 [package.extras]
-ci = ["jaxlib (==0.4.36)"]
-cuda = ["jax-cuda12-plugin[with-cuda] (==0.4.38)", "jaxlib (==0.4.38)"]
-cuda12 = ["jax-cuda12-plugin[with-cuda] (==0.4.38)", "jaxlib (==0.4.38)"]
-cuda12-local = ["jax-cuda12-plugin (==0.4.38)", "jaxlib (==0.4.38)"]
-cuda12-pip = ["jax-cuda12-plugin[with-cuda] (==0.4.38)", "jaxlib (==0.4.38)"]
+ci = ["jaxlib (==0.10.1)"]
+cuda = ["jax-cuda12-plugin[with-cuda] (==0.10.2)", "jaxlib (==0.10.2)"]
+cuda12 = ["jax-cuda12-plugin[with-cuda] (==0.10.2)", "jaxlib (==0.10.2)"]
+cuda12-local = ["jax-cuda12-plugin (==0.10.2)", "jaxlib (==0.10.2)"]
+cuda13 = ["jax-cuda13-plugin[with-cuda] (==0.10.2)", "jaxlib (==0.10.2)"]
+cuda13-local = ["jax-cuda13-plugin (==0.10.2)", "jaxlib (==0.10.2)"]
 k8s = ["kubernetes"]
-minimum-jaxlib = ["jaxlib (==0.4.38)"]
-tpu = ["jaxlib (==0.4.38)", "libtpu (==0.0.7)", "libtpu-nightly (==0.1.dev20241010+nightly.cleanup)", "requests"]
+minimum-jaxlib = ["jaxlib (==0.10.1)"]
+rocm7-local = ["jax-rocm7-plugin (==0.10.2.*)", "jaxlib (==0.10.2)"]
+tpu = ["jaxlib (==0.10.2)", "libtpu (==0.0.42.*)", "requests"]
+xprof = ["xprof"]
 
 [[package]]
 name = "jaxlib"
-version = "0.4.38"
+version = "0.10.2"
 description = "XLA library for JAX"
 optional = true
-python-versions = ">=3.10"
+python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "jaxlib-0.4.38-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:55c19b9d3f33a6fc59f644aa5a21fba02639ccdd776cb4a9b5526625f57839ff"},
-    {file = "jaxlib-0.4.38-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:30b2f52cb50d74734af2f477c2533a7a583e3bb7b2c8acdeb361ee77d940577a"},
-    {file = "jaxlib-0.4.38-cp310-cp310-manylinux2014_aarch64.whl", hash = "sha256:ee19c163a8fdf0839d4c18b88a5fbfb4e731ba7c437416d3e5483e570bb764e4"},
-    {file = "jaxlib-0.4.38-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:61aeccb9a27c67fdb8450f6357240019cd4511cb9d62a44e4764756d384853ad"},
-    {file = "jaxlib-0.4.38-cp310-cp310-win_amd64.whl", hash = "sha256:d6ab745a89d0fb737a36fe1d8b86659e3fffe6ee8303b20651b26193d5edc0ef"},
-    {file = "jaxlib-0.4.38-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:b67fdeabd6dfed08b7768f3bdffb521160085f8305669bd197beef61d08de08b"},
-    {file = "jaxlib-0.4.38-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:3fb0eaae7369157afecbead50aaf29e73ffddfa77a2335d721bd9794f3c510e4"},
-    {file = "jaxlib-0.4.38-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:43db58c4c427627296366a56c10318e1f00f503690e17f94bb4344293e1995e0"},
-    {file = "jaxlib-0.4.38-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:2751ff7037d6a997d0be0e77cc4be381c5a9f9bb8b314edb755c13a6fd969f45"},
-    {file = "jaxlib-0.4.38-cp311-cp311-win_amd64.whl", hash = "sha256:35226968fc9de6873d1571670eac4117f5ed80e955f7a1775204d1044abe16c6"},
-    {file = "jaxlib-0.4.38-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:3fefea985f0415816f3bbafd3f03a437050275ef9bac9a72c1314e1644ac57c1"},
-    {file = "jaxlib-0.4.38-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f33bcafe32c97a562ecf6894d7c41674c80c0acdedfa5423d49af51147149874"},
-    {file = "jaxlib-0.4.38-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:496f45b0e001a2341309cd0c74af0b670537dced79c168cb230cfcc773f0aa86"},
-    {file = "jaxlib-0.4.38-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:dad6c0a96567c06d083c0469fec40f201210b099365bd698be31a6d2ec88fd59"},
-    {file = "jaxlib-0.4.38-cp312-cp312-win_amd64.whl", hash = "sha256:966cdec36cfa978f5b4582bcb4147fe511725b94c1a752dac3a5f52ce46b6fa3"},
-    {file = "jaxlib-0.4.38-cp313-cp313-macosx_10_14_x86_64.whl", hash = "sha256:41e55ae5818a882e5789e848f6f16687ac132bcfbb5a5fa114a5d18b78d05f2d"},
-    {file = "jaxlib-0.4.38-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6fe326b8af366387dd47ccf312583b2b17fed12712c9b74a648b18a13cbdbabf"},
-    {file = "jaxlib-0.4.38-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:248cca3771ebf24b070f49701364ceada33e6139445b06c782cca5ac5ad92bf4"},
-    {file = "jaxlib-0.4.38-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:2ce77ba8cda9259a4bca97afc1c722e4291a6c463a63f8d372c6edc85117d625"},
-    {file = "jaxlib-0.4.38-cp313-cp313-win_amd64.whl", hash = "sha256:4103db0b3a38a5dc132741237453c24d8547290a22079ba1b577d6c88c95300a"},
+    {file = "jaxlib-0.10.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5a98873fc867623b81f2bee15d554b8edd6588a183d01fa50d21b1e3db96ff2b"},
+    {file = "jaxlib-0.10.2-cp311-cp311-manylinux_2_27_aarch64.whl", hash = "sha256:d44565dcfd1b4f60f76d911c6512118a8a4fc764bdef92663fecb8bfccd54f23"},
+    {file = "jaxlib-0.10.2-cp311-cp311-manylinux_2_27_x86_64.whl", hash = "sha256:1faca3c5d4662cb4a6130a68105d68bb520764817e165d6eebfd6786c0d1f30f"},
+    {file = "jaxlib-0.10.2-cp311-cp311-win_amd64.whl", hash = "sha256:e7a9214e6b0b9e0825d905573d1bbf2253c20e9d7464a63e085b60519975553f"},
+    {file = "jaxlib-0.10.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:47bb7c011515ea862be7e8313f40f9c56cbec09dc98a0fcb5016785fcd454c01"},
+    {file = "jaxlib-0.10.2-cp312-cp312-manylinux_2_27_aarch64.whl", hash = "sha256:53b72977ae582c03a9e8e1cdee1efbf8ebc1418270965b0e69eade57acf40331"},
+    {file = "jaxlib-0.10.2-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:fe88ec443714c4379968b6c109f9fa617c7ad19b802828e4d7bf861cd66da4b7"},
+    {file = "jaxlib-0.10.2-cp312-cp312-win_amd64.whl", hash = "sha256:4b08f5fbc596b83f76308181863996f93d901d1f09cfd4e130a65c1998e1b371"},
+    {file = "jaxlib-0.10.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:4df530afa354a22dc1747a5d560640450cbb895d49889338a3f58c76a4c76c8e"},
+    {file = "jaxlib-0.10.2-cp313-cp313-manylinux_2_27_aarch64.whl", hash = "sha256:45b28b0238697ab74bbcf20411aafb6db42acc31836cc2fd711e5cf056bf9556"},
+    {file = "jaxlib-0.10.2-cp313-cp313-manylinux_2_27_x86_64.whl", hash = "sha256:9e4818b4a8756fd3918766ca2aa5342125809f4f08a6fe46026d4386e7c23644"},
+    {file = "jaxlib-0.10.2-cp313-cp313-win_amd64.whl", hash = "sha256:c75d6f1df1c9cff08e110b4a21c79560fdc502f4288972d6b117d25dafd44352"},
+    {file = "jaxlib-0.10.2-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:4c202d8ff7c1f3b5049dbd8f1e30e52759cd4e0a5835f0b3c7ae076a05818e28"},
+    {file = "jaxlib-0.10.2-cp313-cp313t-manylinux_2_27_aarch64.whl", hash = "sha256:b7b029bb95d981566750475b9719a9d6b66ed5dd2748851667899b6cfe075299"},
+    {file = "jaxlib-0.10.2-cp313-cp313t-manylinux_2_27_x86_64.whl", hash = "sha256:e8b126097d609b0c6e6786e89f6dd6978adc02ebd5f63a1c61293fbac7821305"},
+    {file = "jaxlib-0.10.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:72eba28b12fee02616fa42aa4b881b4ab62d7757c7843c462401d3fb34a27be4"},
+    {file = "jaxlib-0.10.2-cp314-cp314-manylinux_2_27_aarch64.whl", hash = "sha256:f18f56fee90699cfba9b6627045a7a299702cb0e2af82ce180d9a6a7c8048093"},
+    {file = "jaxlib-0.10.2-cp314-cp314-manylinux_2_27_x86_64.whl", hash = "sha256:ca34f363197fb0ac4082582ca755007910369e33f8a8ba3d35ed94b71070107d"},
+    {file = "jaxlib-0.10.2-cp314-cp314-win_amd64.whl", hash = "sha256:99818b0a18adc0b899abf4873795e8d65169441d87ab2e5cbb228e73d0f25808"},
+    {file = "jaxlib-0.10.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:fc62997fce8831819551a2a5469a818169b09582b5b648c102d11ac7205bb812"},
+    {file = "jaxlib-0.10.2-cp314-cp314t-manylinux_2_27_aarch64.whl", hash = "sha256:a24d6e3cba263978293eae8b41330d5ccf24d6cdd1a6bcd4e82aff34e767620d"},
+    {file = "jaxlib-0.10.2-cp314-cp314t-manylinux_2_27_x86_64.whl", hash = "sha256:5a2ac7aed7c4e661f67600bbcdec9e589151c1efec91f4cdb8d484af1a45c895"},
 ]
 
 [package.dependencies]
-ml-dtypes = ">=0.2.0"
-numpy = ">=1.24"
-scipy = {version = ">=1.11.1", markers = "python_version >= \"3.12\""}
+ml_dtypes = ">=0.5.0"
+numpy = ">=2.0"
+scipy = ">=1.14"
 
 [[package]]
 name = "jaxopt"
@@ -2557,7 +2604,7 @@ version = "1.5.0"
 description = "A fast implementation of the Cassowary constraint solver"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "kiwisolver-1.5.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:32cc0a5365239a6ea0c6ed461e8838d053b57e397443c0ca894dcc8e388d4374"},
     {file = "kiwisolver-1.5.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:cc0b66c1eec9021353a4b4483afb12dfd50e3669ffbb9152d6842eb34c7e29fd"},
@@ -2677,6 +2724,26 @@ files = [
     {file = "kiwisolver-1.5.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:59cd8683f575d96df5bb48f6add94afc055012c29e28124fcae2b63661b9efb1"},
     {file = "kiwisolver-1.5.0.tar.gz", hash = "sha256:d4193f3d9dc3f6f79aaed0e5637f45d98850ebf01f7ca20e69457f3e8946b66a"},
 ]
+
+[[package]]
+name = "lazy-loader"
+version = "0.5"
+description = "Makes it easy to load subpackages and functions on demand."
+optional = false
+python-versions = ">=3.9"
+groups = ["main", "dev"]
+files = [
+    {file = "lazy_loader-0.5-py3-none-any.whl", hash = "sha256:ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005"},
+    {file = "lazy_loader-0.5.tar.gz", hash = "sha256:717f9179a0dbed357012ddad50a5ad3d5e4d9a0b8712680d4e687f5e6e6ed9b3"},
+]
+
+[package.dependencies]
+packaging = "*"
+
+[package.extras]
+dev = ["changelist (==0.5)", "spin (==0.15)"]
+lint = ["pre-commit (==4.3.0)"]
+test = ["coverage[toml] (>=7.2)", "pytest (>=8.0)", "pytest-cov (>=5.0)"]
 
 [[package]]
 name = "lightkurve"
@@ -2892,7 +2959,7 @@ version = "3.10.9"
 description = "Python plotting package"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "matplotlib-3.10.9-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:77210dce9cb8153dffc967efaae990543392563d5a376d4dd8539bebcb0ed217"},
     {file = "matplotlib-3.10.9-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:1e7698ac9868428e84d2c967424803b2472ff7167d9d6590d4204ed775343c3b"},
@@ -3627,31 +3694,28 @@ numpy = ">=2.4rc1,<2.5"
 
 [[package]]
 name = "numpyro"
-version = "0.15.3"
-description = "Pyro PPL on NumPy"
+version = "0.21.0"
+description = "Probabilistic programming with NumPy powered by JAX for autograd and JIT compilation to GPU/TPU/CPU."
 optional = true
-python-versions = ">=3.9"
+python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "numpyro-0.15.3-py3-none-any.whl", hash = "sha256:12b4817868c0b2b5ab4fc09879896c8d39e84a0d47da7525d835569654354480"},
-    {file = "numpyro-0.15.3.tar.gz", hash = "sha256:f445eeae6200f883d790d65ce29ff245f7a9639bac3322d993eccf91c44023b3"},
+    {file = "numpyro-0.21.0-py3-none-any.whl", hash = "sha256:f89eb82303610d12edae057fb2180bab079434961357df9483d44ab04568543c"},
+    {file = "numpyro-0.21.0.tar.gz", hash = "sha256:fc4a90a024a08840868d46b5f9bdc416dfa3ab76c61691036b44ac2b8a77ac77"},
 ]
 
 [package.dependencies]
-jax = ">=0.4.25"
-jaxlib = ">=0.4.25"
+jax = ">=0.7.0"
+jaxlib = ">=0.7.0"
 multipledispatch = "*"
 numpy = "*"
 tqdm = "*"
 
 [package.extras]
-cpu = ["jax[cpu] (>=0.4.25)"]
-cuda = ["jax[cuda] (>=0.4.25)"]
-dev = ["dm-haiku", "flax", "funsor (>=0.4.1)", "graphviz", "jaxns (==2.4.8)", "matplotlib", "optax (>=0.0.6)", "pylab-sdk", "pyyaml", "requests", "tensorflow-probability (>=0.18.0)"]
-doc = ["ipython", "nbsphinx (>=0.8.9)", "readthedocs-sphinx-search (>=0.3.2)", "sphinx (>=5)", "sphinx-gallery", "sphinx-rtd-theme"]
-examples = ["arviz", "jupyter", "matplotlib", "pandas", "scikit-learn", "seaborn", "wordcloud"]
-test = ["importlib-metadata (<5.0)", "pyro-api (>=0.1.1)", "pytest (>=4.1)", "ruff (>=0.1.8)", "scikit-learn", "scipy (>=1.9)"]
-tpu = ["jax[tpu] (>=0.4.25)"]
+cpu = ["jax[cpu] (>=0.7.0)"]
+cuda12 = ["jax[cuda12] (>=0.7.0)"]
+cuda13 = ["jax[cuda13] (>=0.7.0)"]
+tpu = ["jax[tpu] (>=0.7.0)"]
 
 [[package]]
 name = "nutpie"
@@ -3991,7 +4055,7 @@ version = "12.2.0"
 description = "Python Imaging Library (fork)"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "pillow-12.2.0-cp310-cp310-macosx_10_10_x86_64.whl", hash = "sha256:a4e8f36e677d3336f35089648c8955c51c6d386a13cf6ee9c189c5f5bd713a9f"},
     {file = "pillow-12.2.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:2e589959f10d9824d39b350472b92f0ce3b443c0a3442ebf41c40cb8361c5b97"},
@@ -4100,7 +4164,7 @@ version = "4.9.6"
 description = "A small Python package for determining appropriate platform-specific dirs, e.g. a `user data dir`."
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev"]
+groups = ["dev"]
 files = [
     {file = "platformdirs-4.9.6-py3-none-any.whl", hash = "sha256:e61adb1d5e5cb3441b4b7710bea7e4c12250ca49439228cc1021c00dcfac0917"},
     {file = "platformdirs-4.9.6.tar.gz", hash = "sha256:3bfa75b0ad0db84096ae777218481852c0ebc6c727b3168c1b9e0118e458cf0a"},
@@ -4480,27 +4544,30 @@ windows-terminal = ["colorama (>=0.4.6)"]
 
 [[package]]
 name = "pymc"
-version = "5.25.1"
+version = "6.1.0"
 description = "Probabilistic Programming in Python: Bayesian Modeling and Probabilistic Machine Learning with PyTensor"
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.12"
 groups = ["main"]
 files = [
-    {file = "pymc-5.25.1-py3-none-any.whl", hash = "sha256:4e1185cf20052b9be44f2ac8705dc6c77ff7b8d347d920d5e28719d970d9fa15"},
-    {file = "pymc-5.25.1.tar.gz", hash = "sha256:9e739315c0547336b4c11127aae8b3750145b29cdd8e21609196594aa29c21f8"},
+    {file = "pymc-6.1.0-py3-none-any.whl", hash = "sha256:f6982d46ca37abd81de0ca39345bcf3e2200fa0871acee5d1961dd21f192f097"},
+    {file = "pymc-6.1.0.tar.gz", hash = "sha256:46b373387e4dc18d2df4be4ca48794effe3f8348a912d34c0f5955700d92a66b"},
 ]
 
 [package.dependencies]
-arviz = ">=0.13.0"
-cachetools = ">=4.2.1"
+arviz = ">=1.1.0,<2.0"
+cachetools = ">=4.2.1,<7"
 cloudpickle = "*"
 numpy = ">=1.25.0"
 pandas = ">=0.24.0"
-pytensor = ">=2.31.7,<2.32"
+pytensor = ">=3.1.2,<3.2"
 rich = ">=13.7.1"
 scipy = ">=1.4.1"
 threadpoolctl = ">=3.1.0,<4.0.0"
 typing-extensions = ">=3.7.4"
+
+[package.extras]
+nutpie = ["nutpie (>=0.16.10,<1)"]
 
 [[package]]
 name = "pyparsing"
@@ -4508,7 +4575,7 @@ version = "3.3.2"
 description = "pyparsing - Classes and methods to define and execute parsing grammars"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d"},
     {file = "pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc"},
@@ -4519,34 +4586,26 @@ diagrams = ["jinja2", "railroad-diagrams"]
 
 [[package]]
 name = "pytensor"
-version = "2.31.7"
+version = "3.1.2"
 description = "Optimizing compiler for evaluating mathematical expressions on CPUs and GPUs."
 optional = false
-python-versions = "<3.14,>=3.10"
+python-versions = "<3.15,>=3.12"
 groups = ["main"]
 files = [
-    {file = "pytensor-2.31.7-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:142814427e0e82d8f3db83529faa6073d33ce9e571cb22096547af19016ad025"},
-    {file = "pytensor-2.31.7-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:70e262a5c4be0055f25dbbb8512c1eb2899cb80e6a630b95ea387356a825f823"},
-    {file = "pytensor-2.31.7-cp310-cp310-musllinux_1_2_i686.whl", hash = "sha256:2343df3dc9eb46903a4c68591dcc36a05b2c9309a0748a47e3933a3864765d4d"},
-    {file = "pytensor-2.31.7-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:58927b06df3168e9df005dadc2869613f4fba12ed6b49096e8a3fc29583aaa9d"},
-    {file = "pytensor-2.31.7-cp310-cp310-win_amd64.whl", hash = "sha256:2ae4fca59c4858353b4025b48a09b07d80bced723369355b2284e357e5f15299"},
-    {file = "pytensor-2.31.7-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5983ced37b9c91fe7fb6c8cc44b432e68bfb266ffc0cab145406fba578039acb"},
-    {file = "pytensor-2.31.7-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:81f37c7b0ec42e2f5a0509b1753a0becac029dd902dad59360e24d5270d30d9c"},
-    {file = "pytensor-2.31.7-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:44bf1e2ee2e49cfbc95cc9fbeac4534dc18fc325735ad13ae8ef585cce7b7bf8"},
-    {file = "pytensor-2.31.7-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:9ff160177c7209f5803715e297d9052eff968f4ae50e3ad787ee496bf0fd53af"},
-    {file = "pytensor-2.31.7-cp311-cp311-win_amd64.whl", hash = "sha256:38acc41d2724fad9f87795106754b5e79f9374ec35450a0b3382c5fbe01bc850"},
-    {file = "pytensor-2.31.7-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c863122dc61638aa87c7277da984fe266eba6cf53e04a0cf5acbeac1fbe4e325"},
-    {file = "pytensor-2.31.7-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1489a55acb192528974f343f8cc67fc53cac0fbeb0bc02d4281f0a207fa506b5"},
-    {file = "pytensor-2.31.7-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:e79aaea8e1a94d115bcd895c82f8a6bf0dd651518a980108ca718ff182afb24b"},
-    {file = "pytensor-2.31.7-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:5aab6ff129ed85910b42965eef4a58b53d072c123200763677b6787a165d1aab"},
-    {file = "pytensor-2.31.7-cp312-cp312-win_amd64.whl", hash = "sha256:ab478a722dedc89e31634f189343a416293e27555be6ea6f4620598f05ecd583"},
-    {file = "pytensor-2.31.7-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:2c3b463f392bb46d99ce9f060faaae13420277f446de5f4d6c18ac095bf83439"},
-    {file = "pytensor-2.31.7-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e5abd20541c9d9a4340fde4da63cab5a6b4ec3228f0070b539bb6188f2255512"},
-    {file = "pytensor-2.31.7-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:99468fb50b3765b43bb82a3f411dcd37b3f5ce922870d8374ddf9cbc01033d68"},
-    {file = "pytensor-2.31.7-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:e7df2d29568602544eb1733d09075a6f229470fc6b96fc03ba8036997eef58a7"},
-    {file = "pytensor-2.31.7-cp313-cp313-win_amd64.whl", hash = "sha256:f1b533058ad2503aa40df7db3aec99cfb1eff5c158ec7cb58892db940ff585ac"},
-    {file = "pytensor-2.31.7-py2.py3-none-any.whl", hash = "sha256:d7f89c7eaedd8ce4323289602b41be28e8aaee14c73a52c701079f25c4247aa8"},
-    {file = "pytensor-2.31.7.tar.gz", hash = "sha256:0af99e240c95bc0223886eefb4343b0e9dc6fba349b70b107b3a6fbb9cb66409"},
+    {file = "pytensor-3.1.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:00a0d4429327ba233b8db7013ff045b0c1005475f8a1bf1e5007d1ef0913a1ff"},
+    {file = "pytensor-3.1.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dead2057a875a1cdeec5f95d346ecbbaadbcb479463b582e75689965d7a19da6"},
+    {file = "pytensor-3.1.2-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:d5479ba2c25ae8876fe63df2d2180786a4c228dac3fcf1a83fb55f31969bbd79"},
+    {file = "pytensor-3.1.2-cp312-cp312-win_amd64.whl", hash = "sha256:1f3e51bffb5be25ca70a33b4828a9d006678ef8bfe5c495c362068a894adb0cd"},
+    {file = "pytensor-3.1.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:f58c7bc5dbd40639b1c20ca373c40eed3893cf639a0510ad27a42d848cbc6de5"},
+    {file = "pytensor-3.1.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:30d48fcc8b5074c97b5decf3a1fb75011e94ccc1cff27d42889776bb111fefdf"},
+    {file = "pytensor-3.1.2-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a71563375bd4095a16feb0499668c67b4c425766f65391840cf26572443e4589"},
+    {file = "pytensor-3.1.2-cp313-cp313-win_amd64.whl", hash = "sha256:c8523f988b683312a1ec4d5ff1594efc0a534d3a65b2eb676d35a67da65edea2"},
+    {file = "pytensor-3.1.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:05fde8ccb262330d11fea88258dea5a41d245b587558fdc900c5f0e331caddfe"},
+    {file = "pytensor-3.1.2-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5848e481bb9df27b57657f42086234abfde3d9a14baf31ed1ea508fcef1a5ec7"},
+    {file = "pytensor-3.1.2-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:55905d7e229e4faf47bab7d4d1eb6ded41d6cbf51c4274e15f884435a002227b"},
+    {file = "pytensor-3.1.2-cp314-cp314-win_amd64.whl", hash = "sha256:533a79947a284967a7011c9200f8a8971928fdda097dbf19ebc7a8d9e5f7d7a3"},
+    {file = "pytensor-3.1.2-py2.py3-none-any.whl", hash = "sha256:5ec79dd1b36d1a6401e609a37ad337dd6cc977cb7078b9cf48964dbe776cb93d"},
+    {file = "pytensor-3.1.2.tar.gz", hash = "sha256:2b0eafee4a431654dc3b836bd904211e4dccf8756820ea415d46b82d2d1c26ea"},
 ]
 
 [package.dependencies]
@@ -4555,7 +4614,8 @@ etuples = "*"
 filelock = ">=3.15"
 logical-unification = "*"
 miniKanren = "*"
-numpy = ">=1.17.0"
+numba = ">=0.58,<=0.65.1"
+numpy = ">=2.0"
 scipy = ">=1,<2"
 setuptools = ">=59.0.0"
 
@@ -4563,8 +4623,8 @@ setuptools = ">=59.0.0"
 complete = ["pytensor[jax]", "pytensor[numba]"]
 development = ["pytensor[complete]", "pytensor[rtd]", "pytensor[tests]"]
 jax = ["jax", "jaxlib"]
-numba = ["llvmlite", "numba (>=0.57)"]
-rtd = ["pydot", "pydot-ng", "pydot2", "pygments", "sphinx (>=5.1.0,<6)"]
+numba = ["llvmlite", "numba (>=0.58,<=0.65.1)"]
+rtd = ["pydot", "pygments", "sphinx (>=5.1.0,<6)"]
 tests = ["coverage (>=5.1)", "pre-commit", "pytest", "pytest-benchmark", "pytest-cov (>=2.6.1)", "pytest-mock", "pytest-sphinx"]
 
 [[package]]
@@ -5167,7 +5227,7 @@ version = "82.0.1"
 description = "Most extensible Python build backend with support for C/C++ extension modules"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "setuptools-82.0.1-py3-none-any.whl", hash = "sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb"},
     {file = "setuptools-82.0.1.tar.gz", hash = "sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9"},
@@ -6151,4 +6211,4 @@ jax = []
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "de75e8359a201fbfe6e70122b9e4bb0efcb12138d27335d8519462aeecdae674"
+content-hash = "b2422779e7da066bda9d9295013e02304f1bb1b225841898cd46d639189b1742"

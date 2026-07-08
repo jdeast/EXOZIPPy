@@ -224,7 +224,6 @@ def run_fit(config):
                     target_accept=target_accept,
                     initvals=internal_start,
                     chain_method=chain_method,
-                    idata_kwargs={"log_likelihood": False},
                     nuts_sampler=method,
                 )
             elif method == "nutpie":
@@ -261,7 +260,6 @@ def run_fit(config):
                     step=step,
                     cores=cores,
                     return_inferencedata=True,
-                    idata_kwargs={"log_likelihood": False},
                     callback=nuts_callback,
                 )
             if nthin > 1:
@@ -282,7 +280,7 @@ def run_fit(config):
             # mkparam output all use the same units the user specified.
             _convert_posterior_to_user_units(idata, system.get_parameter_lookup())
             _sanitize_netcdf_attrs(idata)
-            az.to_netcdf(idata, trace_path)
+            idata.to_netcdf(trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
@@ -730,14 +728,14 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
         thin_kwargs = {"posterior": idata.posterior.isel(draw=sl)}
         if hasattr(idata, "sample_stats"):
             thin_kwargs["sample_stats"] = idata.sample_stats.isel(draw=sl)
-        idata = az.InferenceData(**thin_kwargs)
+        idata = az.from_dict(thin_kwargs)
 
     # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
     # the fix that computes and persists it right after pm.sample().
     # Fall back to computing it for old trace files.
     ss_vars = list(idata.sample_stats.data_vars) if hasattr(idata, "sample_stats") else []
     if "lp" in ss_vars:
-        lp_idata, lp_var = idata["sample_stats"], "lp"
+        lp_idata, lp_var = idata, "lp"
     elif model is not None:
         logger.info("lp not in trace — computing from model (old trace file)")
         import xarray as xr
@@ -749,7 +747,7 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
                 lp_vals, dims=["chain", "draw"],
                 coords={"chain": idata.posterior.chain,
                         "draw": idata.posterior.draw})
-            lp_idata, lp_var = idata["sample_stats"], "lp"
+            lp_idata, lp_var = idata, "lp"
         else:
             lp_idata, lp_var = None, None
     else:
@@ -762,9 +760,10 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
         # into its own floating figure, leaving our fig blank.  Let ArviZ
         # own the figure and retrieve it from the returned axes instead.
         if lp_var and lp_idata is not None:
-            lp_axes = az.plot_trace(lp_idata, var_names=[lp_var],
-                                    figsize=(12, 3))
-            fig_lp = lp_axes.flat[0].figure
+            lp_pc = az.plot_trace(lp_idata, var_names=[lp_var],
+                                  group="sample_stats",
+                                  figure_kwargs={"figsize": (12, 3)})
+            fig_lp = lp_pc.viz["figure"].item()
             fig_lp.suptitle("Trace Plots: log-posterior (lp)", fontsize=14)
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             pdf.savefig(fig_lp)
@@ -774,9 +773,9 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
         for page_num, (chunk, n_rows) in enumerate(
             _chunk_by_rows(idata, var_names, rows_per_page), start=1
         ):
-            axes_arr = az.plot_trace(idata, var_names=chunk,
-                                     figsize=(12, 3 * n_rows))
-            fig = axes_arr.flat[0].figure
+            pc = az.plot_trace(idata, var_names=chunk,
+                              figure_kwargs={"figsize": (12, 3 * n_rows)})
+            fig = pc.viz["figure"].item()
             fig.suptitle(f"Trace Plots: Page {page_num}", fontsize=14)
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             pdf.savefig(fig)
@@ -790,7 +789,7 @@ def _sanitize_netcdf_attrs(idata):
     scalars/strings/arrays.
     """
     import json
-    for group in idata._groups:
+    for group in idata.children:
         ds = getattr(idata, group, None)
         if ds is None or not hasattr(ds, "attrs"):
             continue
@@ -826,7 +825,7 @@ def get_draws(idata, n_draws=50, param_lookup=None):
     before being returned when ``param_lookup`` is provided.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
-    post = az.extract(idata, combined=True)
+    post = az.extract(idata, combined=True, keep_dataset=True)
 
     total_available = post.sample.size
     n_to_extract = min(n_draws, total_available)

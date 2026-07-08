@@ -277,7 +277,7 @@ def _check_convergence(stored_raw, n_draws, min_ess, max_rhat):
     """
     data = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
     try:
-        idata_partial = az.from_dict(posterior=data)
+        idata_partial = az.from_dict({"posterior": data})
         rhat_ds = az.rhat(idata_partial)
         ess_ds = az.ess(idata_partial)
     except Exception:
@@ -766,10 +766,10 @@ def ptde_sample(
             arr = arr.squeeze(-1)
         posterior_dict[name] = arr
 
-    idata = az.from_dict(
-        posterior=posterior_dict,
-        sample_stats={"lp": stored_lp[:, :actual_draws]},
-    )
+    idata = az.from_dict({
+        "posterior": posterior_dict,
+        "sample_stats": {"lp": stored_lp[:, :actual_draws]},
+    })
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)

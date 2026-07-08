@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytensor
 import pytensor.tensor as pt
-import pytensor.graph.basic  # Add this to be safe for the .ancestors call
+import pytensor.graph.traversal
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
@@ -746,7 +746,7 @@ class Parameter:
         if hasattr(expr, 'value') and hasattr(expr, 'unit'):
             expr = expr.value
 
-        all_nodes = pytensor.graph.basic.ancestors([expr])
+        all_nodes = pytensor.graph.traversal.ancestors([expr])
 
         inputs_in_posterior = [
             n for n in all_nodes

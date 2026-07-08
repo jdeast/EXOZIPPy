@@ -20,12 +20,12 @@ packages = [{include = "exozippy", from = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
-pytensor = ">=2.31.7,<2.35.0"
+pytensor = ">=3.1.2,<3.2.0"
 pandas = ">=1.3.6,<3.0.0"
-arviz = ">=0.20.0,<1.0.0"
+arviz = ">=1.1.0,<2.0.0"
 dm-tree = ">=0.1.8"
 numpy = ">=2.0"
-pymc = ">=5.10.0,<6.0.0"
+pymc = ">=6.0.0,<7.0.0"
 pyyaml = ">=6.0.3,<7.0.0"
 matplotlib = ">=3.10.9,<4.0.0"
 astropy = ">=7.2.0,<8.0.0"
@@ -34,7 +34,7 @@ corner = ">=2.2.3,<3.0.0"
 mulensmodel = ">=3.9.0,<4.0.0"
 jplephem = ">=2.24,<3.0"
 lightkurve = ">=2.6.0,<3.0.0"
-exoplanet-core = { version = ">=0.3.1", extras = ["pymc"] }
+exoplanet-core = { git = "https://github.com/exoplanet-dev/exoplanet-core.git", extras = ["pymc"] }
 click = ">=8.3.3,<9.0.0"
 h5py = ">=3.16.0,<4.0.0"
 numba = ">=0.65.1,<0.66.0"
@@ -54,12 +54,13 @@ scipy-stubs = ">=1.17.1.5,<2.0.0.0"
 pandas-stubs = "=3.0.3.260530,<4.0.0.0"
 
 # Optional dependencies for JAX support
-jax = { version = "<0.5.0", optional = true }
-jaxlib = { version = "<0.5.0", optional = true }
-numpyro = { version = "<0.16.0", optional = true }
-# blackjax 0.8.x requires jax>=0.3.13 which is satisfied by our jax<0.5.0 pin.
-# The Kepler JAX dispatch broke in pytensor 2.35–2.38; we already cap pytensor<2.35.
-blackjax = { version = ">=0.8.0,<0.9.0", optional = true }
+# jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend (exoplanet-dev/exoplanet-core#143);
+# the prior <0.5.0 cap was a workaround for a pytensor 2.35-2.38 Kepler JAX dispatch bug that
+# no longer applies now that we're on pytensor 3.x.
+jax = { version = ">=0.5.0,<1.0.0", optional = true }
+jaxlib = { version = ">=0.5.0,<1.0.0", optional = true }
+numpyro = { version = ">=0.21.0,<1.0.0", optional = true }
+blackjax = { version = ">=0.8.0,<2.0.0", optional = true }
 nutpie = { version = ">=0.13.0", optional = true }
 pytest-timeout = "^2.4.0"
 

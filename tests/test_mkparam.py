@@ -42,7 +42,7 @@ def _make_idata(var_values: dict, lp: float = -10.0, tmpdir=None,
     posterior_ds = xr.Dataset(data_vars)
     sample_stats_ds = xr.Dataset({"lp": lp_arr})
 
-    idata = az.InferenceData(posterior=posterior_ds, sample_stats=sample_stats_ds)
+    idata = az.from_dict({"posterior": posterior_ds, "sample_stats": sample_stats_ds})
 
     trace_path = tmpdir / "trace.nc"
     idata.to_netcdf(str(trace_path))
