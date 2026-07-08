@@ -1926,6 +1926,28 @@ files = [
 ]
 
 [[package]]
+name = "h5netcdf"
+version = "1.8.1"
+description = "netCDF4 via h5py"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "h5netcdf-1.8.1-py3-none-any.whl", hash = "sha256:a76ed7cfc9b8a8908ea7057c4e57e27307acff1049b7f5ed52db6c2247636879"},
+    {file = "h5netcdf-1.8.1.tar.gz", hash = "sha256:9b396a4cc346050fc1a4df8523bc1853681ec3544e0449027ae397cb953c7a16"},
+]
+
+[package.dependencies]
+numpy = "*"
+packaging = "*"
+
+[package.extras]
+h5py = ["h5py"]
+h5pyd = ["h5pyd"]
+pyfive = ["pyfive (>=1.0.0)"]
+test = ["h5py", "netCDF4", "pyfive (>=1.0.0)", "pytest"]
+
+[[package]]
 name = "h5py"
 version = "3.16.0"
 description = "Read and write HDF5 files from Python"
@@ -6211,4 +6233,4 @@ jax = []
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "b2422779e7da066bda9d9295013e02304f1bb1b225841898cd46d639189b1742"
+content-hash = "85f8eeba221e505fb68407d6f3aec37867969f840e462d410701cefe57ae8f25"

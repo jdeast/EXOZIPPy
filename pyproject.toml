@@ -44,6 +44,7 @@ gaiadr3-zeropoint = ">=0.0.1"
 # OS specific dependencies
 mkl = { version = "^2023.0", markers = "sys_platform == 'win32'" }
 mkl-include = { version = "^2023.0", markers = "sys_platform == 'win32'" }
+h5netcdf = "^1.8.1"
 
 [tool.poetry.group.dev.dependencies]
 ipdb = ">=0.13.13,<0.14.0"
