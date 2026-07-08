@@ -17,6 +17,28 @@ from exozippy.linking import extract_links
 
 class SymbolicTimeout(Exception): pass
 
+
+import contextlib
+
+@contextlib.contextmanager
+def _sympy_time_limit(seconds=2):
+    """Hard wall-clock limit for a block of symbolic work.
+
+    sp.solve (and evalf on its solutions) can hang effectively forever on
+    certain equation/target pairs, and which pairs get attempted depends on
+    hash-seed-sensitive iteration order -- so an unguarded call is a latent
+    intermittent hang.  Raises SymbolicTimeout when the limit is hit.
+    """
+    def handler(signum, frame):
+        raise SymbolicTimeout()
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
 # Instance names appear as the middle part of dotted parameter paths
 # (star.MyName.teff), so they must be safe to split on "." and must not
 # collide with the internal index notation (star.0.teff).
@@ -1025,20 +1047,21 @@ class ConfigManager:
                 if not all(s in resolved_scales for s in inputs):
                     continue
                 try:
-                    sols = sp.solve(eq, sp.Symbol(target_str))
-                    if not sols:
-                        continue
-                    sol = sols[0]
-                    var = 0.0
-                    active_inputs = []
-                    for inp in inputs:
-                        inp_sym = sp.Symbol(inp)
-                        if not sol.has(inp_sym):
+                    with _sympy_time_limit(2):
+                        sols = sp.solve(eq, sp.Symbol(target_str))
+                        if not sols:
                             continue
-                        d = float(sp.diff(sol, inp_sym).evalf(subs=resolved))
-                        if np.isfinite(d) and abs(d) < 1e15:
-                            var += (d * resolved_scales[inp]) ** 2
-                            active_inputs.append(inp)
+                        sol = sols[0]
+                        var = 0.0
+                        active_inputs = []
+                        for inp in inputs:
+                            inp_sym = sp.Symbol(inp)
+                            if not sol.has(inp_sym):
+                                continue
+                            d = float(sp.diff(sol, inp_sym).evalf(subs=resolved))
+                            if np.isfinite(d) and abs(d) < 1e15:
+                                var += (d * resolved_scales[inp]) ** 2
+                                active_inputs.append(inp)
                     if var <= 0 or not active_inputs:
                         continue
                     new_scale = float(np.sqrt(var))
@@ -1046,6 +1069,8 @@ class ConfigManager:
                     if new_rank > scale_provenance.get(target_str, 0):
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_rank
+                except SymbolicTimeout:
+                    logger.debug(f"Forward scale pass timed out solving {eq} for {target_str}; skipped.")
                 except Exception as e:
                     pass
 
@@ -1074,28 +1099,31 @@ class ConfigManager:
                 ):
                     continue
                 try:
-                    sols = sp.solve(eq, sp.Symbol(derived_str))
-                    if not sols:
-                        continue
-                    sol = sols[0]
-                    for parent_str in parents:
-                        if scale_provenance.get(parent_str, 0) >= RANK_USER:
+                    with _sympy_time_limit(2):
+                        sols = sp.solve(eq, sp.Symbol(derived_str))
+                        if not sols:
                             continue
-                        if new_rank <= scale_provenance.get(parent_str, 0):
-                            continue
-                        parent_sym = sp.Symbol(parent_str)
-                        if not sol.has(parent_sym):
-                            continue
-                        d = float(sp.diff(sol, parent_sym).evalf(subs=resolved))
-                        if not np.isfinite(d) or abs(d) < 1e-15:
-                            continue
-                        implied = sigma_derived / abs(d)
-                        resolved_scales[parent_str] = implied
-                        scale_provenance[parent_str] = new_rank
-                        logger.debug(
-                            f"Scale for {parent_str} informed by {derived_str} "
-                            f"(σ={sigma_derived:.4g} → {implied:.4g})"
-                        )
+                        sol = sols[0]
+                        for parent_str in parents:
+                            if scale_provenance.get(parent_str, 0) >= RANK_USER:
+                                continue
+                            if new_rank <= scale_provenance.get(parent_str, 0):
+                                continue
+                            parent_sym = sp.Symbol(parent_str)
+                            if not sol.has(parent_sym):
+                                continue
+                            d = float(sp.diff(sol, parent_sym).evalf(subs=resolved))
+                            if not np.isfinite(d) or abs(d) < 1e-15:
+                                continue
+                            implied = sigma_derived / abs(d)
+                            resolved_scales[parent_str] = implied
+                            scale_provenance[parent_str] = new_rank
+                            logger.debug(
+                                f"Scale for {parent_str} informed by {derived_str} "
+                                f"(σ={sigma_derived:.4g} → {implied:.4g})"
+                            )
+                except SymbolicTimeout:
+                    logger.debug(f"Backward scale pass timed out solving {eq} for {derived_str}; skipped.")
                 except Exception:
                     pass
 
@@ -1329,11 +1357,12 @@ class ConfigManager:
         # 3. Fallback to nsolve if analytical failed
         if not solutions:
             try:
-                guess = float(resolved.get(target_str, 1.0))
-                sub_dict = {s: resolved[str(s)] for s in inputs}
-                expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
-                solutions = [sp.nsolve(expr, target_sym, guess)]
-                used_nsolve = True
+                with _sympy_time_limit(2):
+                    guess = float(resolved.get(target_str, 1.0))
+                    sub_dict = {s: resolved[str(s)] for s in inputs}
+                    expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
+                    solutions = [sp.nsolve(expr, target_sym, guess)]
+                    used_nsolve = True
             except Exception:
                 return False
 
