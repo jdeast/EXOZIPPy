@@ -1,0 +1,17 @@
+# Photometry, RV, ephemeris, and stellar-atmosphere/filter data files.
+# GitHub's linguist classifier misidentifies these numeric data tables as
+# Roff (no recognized extension -> falls back to a content classifier that
+# false-positives on whitespace/number-heavy text), which is why the repo
+# language stats showed ~92% Roff / ~8% Python instead of reflecting the
+# actual Python codebase. Mark them vendored so they're excluded from stats.
+*.dat linguist-vendored
+*.rv linguist-vendored
+*.eph linguist-vendored
+*.filter linguist-vendored
+*.WISE linguist-vendored
+*.GAIA linguist-vendored
+*.2MASS linguist-vendored
+*.ascii linguist-vendored
+examples/**/*.txt linguist-vendored
+src/exozippy/components/sed/filters/** linguist-vendored
+src/exozippy/components/sed/models/** linguist-vendored
