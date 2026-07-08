@@ -760,12 +760,9 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
         # into its own floating figure, leaving our fig blank.  Let ArviZ
         # own the figure and retrieve it from the returned axes instead.
         if lp_var and lp_idata is not None:
-            lp_pc = az.plot_trace(lp_idata, var_names=[lp_var],
-                                  group="sample_stats",
-                                  figure_kwargs={"figsize": (12, 3)})
-            fig_lp = lp_pc.viz["figure"].item()
-            fig_lp.suptitle("Trace Plots: log-posterior (lp)", fontsize=14)
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            fig_lp = _render_trace_page(lp_idata, [lp_var], n_rows=1,
+                                        title="Trace Plots: log-posterior (lp)",
+                                        group="sample_stats")
             pdf.savefig(fig_lp)
             plt.close(fig_lp)
             gc.collect()
@@ -773,14 +770,28 @@ def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
         for page_num, (chunk, n_rows) in enumerate(
             _chunk_by_rows(idata, var_names, rows_per_page), start=1
         ):
-            pc = az.plot_trace(idata, var_names=chunk,
-                              figure_kwargs={"figsize": (12, 3 * n_rows)})
-            fig = pc.viz["figure"].item()
-            fig.suptitle(f"Trace Plots: Page {page_num}", fontsize=14)
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            fig = _render_trace_page(idata, chunk, n_rows,
+                                     title=f"Trace Plots: Page {page_num}")
             pdf.savefig(fig)
             plt.close(fig)
             gc.collect()
+
+
+def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
+    """One trace-plot page: dist column + trace column, one row per element.
+
+    plot_trace_dist (not plot_trace) is the ArviZ 1.0 equivalent of the old
+    dist + trace two-column layout; plain plot_trace now renders only the
+    trace lines.  compact=False keeps one row per vector element, matching
+    the rows_per_page pagination math.
+    """
+    pc = az.plot_trace_dist(idata, var_names=var_names, group=group,
+                            compact=False,
+                            figure_kwargs={"figsize": (12, 3 * n_rows)})
+    fig = pc.viz["figure"].item()
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    return fig
 
 def _sanitize_netcdf_attrs(idata):
     """Flatten dict-valued attrs to JSON strings so xarray can serialize to netCDF.
