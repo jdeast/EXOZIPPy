@@ -73,7 +73,7 @@ class Star(Component):
         if in_system('mann'):
             self.manifest.update({"distance": None, "appks": None, "absks": "default"})
 
-        if in_system('lens') or in_system('galacticmodel') or in_system('astrometry'):
+        if in_system('lens') or in_system('galacticmodel') or in_system('astrometryinstrument'):
             self.manifest.update({
                 "ra": None, "dec": None, "pm_ra": None,
                 "pm_dec": None, "distance": None

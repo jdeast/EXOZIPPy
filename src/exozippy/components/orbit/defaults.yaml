@@ -89,6 +89,15 @@ orbit:
       from_vcve:
         func_name: "calc_omega_from_vcve"
         deps: ["cosw", "sinw"]
+  bigomega:
+    lower: 0.0
+    upper: 360.0
+    initval: 180.0
+    init_scale: 30.0
+    unit: "deg"
+    internal_unit: "rad"
+    latex: "\\Omega"
+    description: "Longitude of Ascending Node"
   cosi:
     lower: -1.0
     upper: 1.0

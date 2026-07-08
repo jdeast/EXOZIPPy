@@ -73,7 +73,18 @@ class Orbit(Component):
                 "tp": "default",
             })
 
-        i180_arr = np.atleast_1d(getattr(self, 'i180', False))
+        # Astrometry constrains the longitude of the ascending node and
+        # breaks the i <-> 180-i degeneracy, so sample bigomega and allow
+        # the full inclination range when an astrometry component is active.
+        topology_keys = []
+        if hasattr(system, 'config') and hasattr(system.config, 'keys'):
+            topology_keys = list(system.config.keys())
+        has_astrometry = (hasattr(system, 'astrometryinstrument')
+                          or 'astrometryinstrument' in topology_keys)
+        if has_astrometry:
+            self.manifest["bigomega"] = None
+
+        i180_arr = np.atleast_1d(getattr(self, 'i180', False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         self.manifest["cosi"] = {"lower": derived_lowers}
 
@@ -91,6 +102,62 @@ class Orbit(Component):
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
         return pt.arctan2(sinf, cosf)
+
+    def get_sky_position(self, t, a_scale, orbit_map, relative=False):
+        """
+        Vectorized sky-plane offsets of an orbiting body.
+
+        t: (N_obs,) vector of times [BJD_TDB]
+        a_scale: (N_planets,) amplitude scaling, e.g. the photocenter or
+                 relative semimajor axis in mas; sets the output units
+        orbit_map: integer map from planet slots to orbit elements
+        relative: False -> the primary/photocenter orbit around the
+                  barycenter (uses omega_*); True -> the companion's orbit
+                  relative to the primary (omega_* + 180 deg)
+
+        Returns (dE, dN), each (N_obs, N_planets): offsets toward East and
+        North in the units of a_scale.
+
+        Conventions (EXOFASTv2): omega is the argument of periastron of the
+        PRIMARY's orbit (omega_*). bigomega is the position angle of the
+        ascending node, measured East of North, where the ascending node is
+        the node at which the body recedes from the observer -- consistent
+        with the sign of get_radial_velocity (the primary crosses its
+        ascending node at omega_* + f = 0, where its RV is maximal).
+        Without RV data, (bigomega, omega) and (bigomega+180, omega+180)
+        are degenerate.
+        """
+        t_grid = t[:, None]
+        tp = self.tp.value[orbit_map][None, :]
+        n = self.n.value[orbit_map][None, :]
+        ecc = self.ecc.value[orbit_map][None, :]
+        cosw = self.cosw.value[orbit_map][None, :]
+        sinw = self.sinw.value[orbit_map][None, :]
+        cosi = self.cosi.value[orbit_map][None, :]
+        bigomega = self.bigomega.value[orbit_map][None, :]
+        cosO = pt.cos(bigomega)
+        sinO = pt.sin(bigomega)
+
+        if relative:
+            # The companion's argument of periastron is omega_* + pi
+            cosw = -cosw
+            sinw = -sinw
+
+        M = (t_grid - tp) * n
+        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+
+        # Separation from the barycenter (or primary) in units of a_scale
+        r = a_scale[None, :] * (1.0 - ecc ** 2) / (1.0 + ecc * cosf)
+
+        # cos/sin(omega + f)
+        coswf = cosw * cosf - sinw * sinf
+        sinwf = sinw * cosf + cosw * sinf
+
+        # Thiele-Innes projection (North, East), PA measured East of North:
+        # at omega + f = 0 (ascending node) the body sits at PA = bigomega.
+        dN = r * (cosO * coswf - sinO * sinwf * cosi)
+        dE = r * (sinO * coswf + cosO * sinwf * cosi)
+        return dE, dN
 
     def get_radial_velocity(self, t, K, orbit_map):
         """
