@@ -147,7 +147,7 @@ class _MagOpBase(Op):
         self.bandpass = bandpass  # None = no LD; str = apply u1 LD for this bandpass
         self._coord_cache = {}
 
-    def infer_shape(self, fgraph, node, input_shapes):
+    def infer_shape(self, node, input_shapes):
         return [input_shapes[1]]
 
     def perform(self, node, inputs, outputs):
@@ -270,20 +270,38 @@ class VBMDirectMagOp(Op):
         self._relative_accuracy = float(relative_accuracy)
         # One VBM instance per Op; PTDE fork workers each inherit a private
         # copy-on-write copy, so per-instance scratch state is never shared.
-        self._vbm = VBMicrolensing.VBMicrolensing()
-        self._vbm.Tol = self._accuracy
-        self._vbm.RelTol = self._relative_accuracy
+        self._vbm = self._build_vbm()
+        self._delta_cache = {}
+
+    def _build_vbm(self):
+        vbm = VBMicrolensing.VBMicrolensing()
+        vbm.Tol = self._accuracy
+        vbm.RelTol = self._relative_accuracy
         if self.n_companions >= 2:
             # Multipoly beats the Nopoly default for 3 lenses; Nopoly wins
             # for 4+ (VBM docs, Bozza+2025 A&A 694, 219).  Must precede
             # SetLensGeometry, so it is fixed here.
             if self.n_companions == 2:
-                self._vbm.SetMethod(VBMicrolensing.VBMicrolensing.Method.Multipoly)
+                vbm.SetMethod(VBMicrolensing.VBMicrolensing.Method.Multipoly)
             else:
-                self._vbm.SetMethod(VBMicrolensing.VBMicrolensing.Method.Nopoly)
-        self._delta_cache = {}
+                vbm.SetMethod(VBMicrolensing.VBMicrolensing.Method.Nopoly)
+        return vbm
 
-    def infer_shape(self, fgraph, node, input_shapes):
+    def __getstate__(self):
+        # The VBMicrolensing SWIG object isn't picklable (needed for numba's
+        # object-mode dispatch, which pickles perform()'s closure to cache it
+        # to disk, and for spawn-based multiprocessing). Drop it and the
+        # epoch-keyed cache; both are cheap to rebuild in __setstate__.
+        state = self.__dict__.copy()
+        del state["_vbm"]
+        state["_delta_cache"] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._vbm = self._build_vbm()
+
+    def infer_shape(self, node, input_shapes):
         return [input_shapes[1]]
 
     def _deltas(self, times_np, obs_pos_np):
@@ -438,7 +456,7 @@ class _MagGradOp(Op):
         self.eps = eps
         self._coord_cache = {}
 
-    def infer_shape(self, fgraph, node, input_shapes):
+    def infer_shape(self, node, input_shapes):
         return [input_shapes[0]]
 
     def _calc(self, p, times_1d, sat_coord):

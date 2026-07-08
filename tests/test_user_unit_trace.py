@@ -43,7 +43,7 @@ def _make_idata(var_values: dict, n_chains=1, n_draws=4):
     for name, val in var_values.items():
         arr = np.full((n_chains, n_draws), float(val))
         data_vars[name] = xr.DataArray(arr, dims=["chain", "draw"])
-    return az.InferenceData(posterior=xr.Dataset(data_vars))
+    return az.from_dict({"posterior": xr.Dataset(data_vars)})
 
 
 # ──────────────────────────────────────────────────────────────────────────────

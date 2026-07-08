@@ -213,7 +213,7 @@ class System(Component):
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
-        posterior = az.extract(idata)
+        posterior = az.extract(idata, keep_dataset=True)
         param_lookup = self.get_parameter_lookup()
 
         # Dynamically discover all components (Stars, Planets, Orbits, Instruments, etc.)

@@ -5,6 +5,7 @@ import arviz as az
 import numpy as np
 import pymc as pm
 import pytest
+import xarray as xr
 
 from exozippy.samplers.ptde import _active_rungs, _geometric_ladder, ptde_sample
 
@@ -122,7 +123,7 @@ def test_ptde_returns_inferencedata_with_expected_structure():
         log_interval=100,
     )
 
-    assert isinstance(idata, az.InferenceData)
+    assert isinstance(idata, xr.DataTree)
     assert hasattr(idata, "posterior")
     post = idata.posterior
     assert "x" in post.data_vars
