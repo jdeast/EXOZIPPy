@@ -173,18 +173,118 @@ class Component(ABC):
 
             expression = lambda: func(*dep_nodes)
 
+        # 2b. Wire up user-defined parameter links (initval/mu/lower/upper
+        # expressions from the params file referencing other parameters).
+        element_links = self._wire_user_links(model, param_name, system, cfg, expression)
+
         # 3. Create Parameter Node
         full_params = {**cfg, **options}
         param_obj = Parameter(
             label=f"{self.prefix}.{param_name}",
             names=names,
             expression=expression,
+            element_links=element_links,
             user_params=self.config_manager.user_params,
             **full_params
         )
 
         setattr(self, param_name, param_obj)
         return param_obj.build_pymc()
+
+    def _wire_user_links(self, model, param_name, system, cfg, expression):
+        """
+        Translate the ConfigManager's user-defined links targeting this
+        parameter into per-element PyTensor closures for Parameter.build_pymc.
+
+        Each closure receives this parameter's own physical vector (internal
+        units) so same-parameter references (star.A.age -> star.B.age) resolve
+        without leaving the node; external references are materialized lazily
+        through add_parameter, exactly like physics expression dependencies.
+        Unit convention: referenced parameters contribute their values in
+        their own user units; the result is taken in the target's user unit.
+        """
+        cm = self.config_manager
+        get_links = getattr(cm, "get_element_links", None)
+        if get_links is None:
+            return None
+        links = get_links(self.prefix, param_name)
+        if not links:
+            return None
+
+        from ..linking import sympy_to_pytensor
+
+        sigma_arr = cfg.get("sigma")
+        out = {}
+        for fld, per_elem in links.items():
+            for idx, plink in per_elem.items():
+                # Classify the runtime role of this link.
+                if fld == "initval":
+                    s = sigma_arr[idx] if sigma_arr is not None else np.nan
+                    if s == 0:
+                        key = "hard"     # derived element: tracks the expression exactly
+                    elif s > 0:
+                        key = "mu"       # soft link: Gaussian penalty on the difference
+                    else:
+                        continue         # initialization-only; solver already applied it
+                elif fld == "mu":
+                    key = "mu"
+                elif fld in ("lower", "upper"):
+                    key = fld
+                else:
+                    continue             # sigma / init_scale: static snapshots
+
+                if expression is not None and key != "mu":
+                    raise ValueError(
+                        f"[{self.prefix}.{param_name}] link '{plink.expr_str}' targets "
+                        f"field '{fld}', but this parameter is derived from a physics "
+                        f"expression; only soft (mu) links are supported there.")
+
+                ext_vals = {}     # dep path -> tensor in the dep's USER units
+                self_refs = {}    # dep path -> (element index, user->internal factor)
+                for dep in plink.dep_paths:
+                    dparts = dep.split('.')
+                    dcomp, didx, dparam = dparts[0], int(dparts[1]), dparts[2]
+                    dfactor = cm.get_conversion_factor(dcomp, dparam, full_path=dep)
+                    if dcomp == self.prefix and dparam == param_name:
+                        self_refs[dep] = (didx, dfactor)
+                        continue
+                    comp = self if dcomp == self.prefix else getattr(system, dcomp, None)
+                    if comp is None:
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
+                            f"references component '{dcomp}', which is not active.")
+                    if not (hasattr(comp, dparam) and isinstance(getattr(comp, dparam), Parameter)):
+                        comp.add_parameter(model, dparam, system)
+                    node = getattr(comp, dparam).value
+                    if getattr(node, 'ndim', 0) >= 1:
+                        node = node[didx]
+                    elif didx != 0:
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] link '{plink.expr_str}': "
+                            f"'{dep}' indexes element {didx} of a scalar parameter.")
+                    ext_vals[dep] = node / dfactor if dfactor != 1.0 else node
+
+                tfactor = cm.get_conversion_factor(
+                    self.prefix, param_name,
+                    full_path=f"{self.prefix}.{idx}.{param_name}")
+
+                def make_fn(plink=plink, ext_vals=ext_vals, self_refs=self_refs,
+                            tfactor=tfactor):
+                    def fn(phys_internal):
+                        vals = dict(ext_vals)
+                        for dep, (j, f) in self_refs.items():
+                            v = phys_internal[j]
+                            vals[dep] = v / f if f != 1.0 else v
+                        user_val = sympy_to_pytensor(plink.expr, vals)
+                        return user_val * tfactor if tfactor != 1.0 else user_val
+                    return fn
+
+                out.setdefault(key, {})[idx] = {
+                    "fn": make_fn(),
+                    "intra_deps": {j for (j, _) in self_refs.values()},
+                }
+
+        return out or None
 
     @abstractmethod
     def build_likelihood(self, model, system):

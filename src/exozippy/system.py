@@ -124,6 +124,18 @@ class System(Component):
                     if param_name in getattr(comp, 'manifest', {}):
                         comp.add_parameter(model, param_name, self)
 
+            # Warn about user-defined parameter links whose target was never
+            # materialized (e.g. star.A.age linked in the params file, but the
+            # current model configuration does not build 'age').
+            for target in getattr(self.config_manager, 'links', {}):
+                t_comp, t_param = target.split('.')[0], target.split('.')[-1]
+                comp = self.active_components.get(t_comp)
+                if comp is None or not isinstance(getattr(comp, t_param, None), Parameter):
+                    logger.warning(
+                        f"Parameter link on '{target}' had no effect: "
+                        f"'{t_comp}.{t_param}' is not built by the current model "
+                        f"configuration.")
+
             # Stage 6: LIKELIHOOD
             for comp in self.active_components.values():
                 if hasattr(comp, 'build_likelihood'): comp.build_likelihood(model, system=self)

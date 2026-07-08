@@ -13,6 +13,8 @@ import time
 logger = logging.getLogger(__name__)
 import re
 
+from exozippy.linking import extract_links
+
 class SymbolicTimeout(Exception): pass
 
 # Instance names appear as the middle part of dotted parameter paths
@@ -131,10 +133,16 @@ class ConfigManager:
         self.raw_user_params = user_params
         self.custom_solvers = {}
 
+        # User-defined parameter links (expression strings in numeric fields).
+        # Populated by extract_links, which also strips the strings from
+        # user_params so downstream numeric code never sees them.
+        self.links = {}
+
         # If config is provided, validate names then standardize right away
         if system_config is not None:
             validate_instance_names(system_config)
             self.user_params = self.standardize_param_names(user_params, system_config)
+            self.links = extract_links(self.user_params, system_config)
         else:
             self.user_params = user_params
 
@@ -225,6 +233,45 @@ class ConfigManager:
     def register_custom_solver(self, target_str, solver_func):
         self.custom_solvers[target_str] = solver_func
 
+    # ----------------------------
+    # User-defined parameter links
+    # ----------------------------
+
+    def _link_internal_expr(self, plink):
+        """
+        Convert a ParamLink's user-unit expression to internal units.
+
+        The user writes f(deps) where each dep contributes its value in its
+        own user unit and the result is in the target's user unit.  The
+        relaxation engine works in internal units, so substitute
+        dep -> dep_internal / factor_dep and multiply by factor_target.
+        """
+        subs = {}
+        for dep in plink.dep_paths:
+            parts = dep.split('.')
+            f = self.get_conversion_factor(parts[0], parts[-1], full_path=dep)
+            if f != 1.0:
+                subs[sp.Symbol(dep)] = sp.Symbol(dep) / f
+        tparts = plink.target_path.split('.')
+        tf = self.get_conversion_factor(tparts[0], tparts[-1],
+                                        full_path=plink.target_path)
+        expr = plink.expr.subs(subs) if subs else plink.expr
+        return tf * expr if tf != 1.0 else expr
+
+    def get_element_links(self, comp_type, param_name):
+        """
+        Return the user-defined links targeting elements of one parameter:
+        {field: {element_index: ParamLink}}.  Used by Component.add_parameter
+        to wire dynamic (runtime) links into the PyMC graph.
+        """
+        out = {}
+        for target, fields in self.links.items():
+            parts = target.split('.')
+            if len(parts) == 3 and parts[0] == comp_type and parts[2] == param_name:
+                for fld, plink in fields.items():
+                    out.setdefault(fld, {})[int(parts[1])] = plink
+        return out
+
     def get_resolved_path(self, component_prefix, dep_str, resolved_maps):
         """
         Handles 'star.mass[star_map]' -> 'star.1.mass'
@@ -242,6 +289,7 @@ class ConfigManager:
         self.system_config = config
         # Modernize the names to strict index format before running any staging logic
         self.user_params = self.standardize_param_names(self.raw_user_params, config)
+        self.links = extract_links(self.user_params, config)
 
     def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
         """
@@ -313,7 +361,14 @@ class ConfigManager:
             else:
                 base[k] = v
 
-    def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None):
+    def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None,
+                element=None):
+        # `element` targets a single specific instance when resolving with
+        # shape=(): the per-element user-param keys are built with that index
+        # instead of the local loop index.  Without it, resolving star.1.age
+        # one element at a time would read star.0.age's user entry and bleed
+        # element-0 overrides (e.g. sigma: 0) into its siblings.
+
         # 1. Grab an isolated copy of the global root default blueprint
         base = copy.deepcopy(self.base_defaults.get(param_name, {}))
 
@@ -336,12 +391,16 @@ class ConfigManager:
                 base["expressions"] = copy.deepcopy(root_cfg["expressions"])
 
         n_elements = int(np.prod(shape)) if shape != () else 1
+
+        def _eff_idx(i):
+            return element if (element is not None and n_elements == 1) else i
+
         base_unit_str = base.get("unit", "")
         new_unit_str = None
 
         keys_to_check_global = []
         for i in range(n_elements):
-            keys = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            keys = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
             keys_to_check_global.extend(keys)
@@ -422,7 +481,7 @@ class ConfigManager:
         if self.propagated_scales:
             for i in range(n_elements):
                 prop_keys = [f"{component_type}.{param_name}",
-                             f"{component_type}.{i}.{param_name}"]
+                             f"{component_type}.{_eff_idx(i)}.{param_name}"]
                 if names and i < len(names):
                     prop_keys.append(f"{component_type}.{names[i]}.{param_name}")
                 for k in prop_keys:
@@ -435,7 +494,7 @@ class ConfigManager:
         # (e.g. bulge distances). They override defaults.yaml but yield to the
         # user's explicit init_scale below.
         for i in range(n_elements):
-            scale_keys = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            scale_keys = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
             if names and i < len(names):
                 scale_keys.append(f"{component_type}.{names[i]}.{param_name}")
             for k in scale_keys:
@@ -445,7 +504,7 @@ class ConfigManager:
                     break
 
         for i in range(n_elements):
-            keys_to_check = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            keys_to_check = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
             if names and i < len(names):
                 keys_to_check.append(f"{component_type}.{names[i]}.{param_name}")
 
@@ -637,6 +696,18 @@ class ConfigManager:
                     if "." in path:
                         logger.debug(f"Unmapped: {path} (tried translated: {translated_path})")
 
+        # --- REGISTER LINK TARGETS AND DEPENDENCIES AS SYMBOLS ---
+        # A link target/dep may not appear in any component's symbol map
+        # (e.g. star.age has no symbolic relations); registering it here lets
+        # the relaxation engine seed it from defaults.yaml and solve the
+        # directed link assignments.
+        for target, fields in self.links.items():
+            for plink in fields.values():
+                for path in [target] + list(plink.dep_paths):
+                    if path not in self.master_symbol_map:
+                        self.master_symbol_map[path] = sp.Symbol(path)
+                        logger.debug(f"Registered link symbol: {path}")
+
         # --- FALLBACK TO LEAFS ---
         for path in list(self.user_params.keys()):
             if path not in self.master_symbol_map:
@@ -695,6 +766,36 @@ class ConfigManager:
                     existing["initval"] = user_val
                     existing["derived"] = True
 
+        # --- SNAPSHOT USER-LINK EXPRESSIONS FOR STATIC FIELDS ---
+        # sigma / init_scale links are static by design; lower / upper links
+        # additionally need a numeric snapshot so the logit transform can be
+        # set up (the dynamic tensor bound replaces it at runtime).
+        for target, fields in self.links.items():
+            entry = self.user_params.get(target)
+            if not isinstance(entry, dict):
+                entry = {}
+                self.user_params[target] = entry
+            for fld, plink in fields.items():
+                if fld in ("initval", "mu"):
+                    continue  # handled by the directed relaxation pass
+                if not all(d in resolved_flat for d in plink.dep_paths):
+                    logger.warning(
+                        f"Link '{target}.{fld} = {plink.expr_str}' could not be "
+                        f"snapshot: unresolved dependencies "
+                        f"{[d for d in plink.dep_paths if d not in resolved_flat]}.")
+                    continue
+                try:
+                    val_int = float(self._link_internal_expr(plink).evalf(subs=resolved_flat))
+                except Exception as e:
+                    logger.warning(
+                        f"Link '{target}.{fld} = {plink.expr_str}' snapshot "
+                        f"evaluation failed: {e}")
+                    continue
+                tparts = target.split('.')
+                tf = self.get_conversion_factor(tparts[0], tparts[-1], full_path=target)
+                entry[fld] = val_int / tf
+                logger.debug(f"Link snapshot: {target}.{fld} = {entry[fld]:.6g} (user units)")
+
     def prune_dependency_cycles(self, cycle_nodes):
         """
         Forcefully removes nodes from the dependency graph that are known
@@ -727,7 +828,8 @@ class ConfigManager:
             comp_type = parts[0]
             param_name = parts[-1]
 
-            cfg = self.resolve(comp_type, param_name)
+            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            cfg = self.resolve(comp_type, param_name, element=el)
 
             # --- Replicate Parameter.is_sampled logic ---
             # 1. is_config_present: Internal math variables (logradius, etc.) won't exist in defaults.yaml
@@ -777,7 +879,8 @@ class ConfigManager:
         for path_str, sym in self.master_symbol_map.items():
             parts = path_str.split('.')
             c_type, p_name = parts[0], parts[-1]
-            cfg = self.resolve(c_type, p_name)
+            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            cfg = self.resolve(c_type, p_name, element=el)
 
             # Read rank directly from base_defaults (not from resolve() return dict)
             param_rank = (self.base_defaults.get(c_type, {}).get(p_name, {}).get('rank')
@@ -831,6 +934,18 @@ class ConfigManager:
                 resolved_scales[path_str] = float(up['sigma']) * factor
                 scale_provenance[path_str] = RANK_USER
 
+        # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, RANK_USER)
+        # initval/mu links are directed: the target is defined in terms of its
+        # dependencies, never the reverse.  They are re-asserted every
+        # iteration so downstream physics relations always see the linked
+        # value, and RANK_USER provenance protects it from being overridden.
+        directed_links = []
+        for link_target, link_fields in self.links.items():
+            for link_field, plink in link_fields.items():
+                if link_field in ("initval", "mu"):
+                    directed_links.append(
+                        (link_target, link_field, plink, self._link_internal_expr(plink)))
+
         # 2. The Relaxation Engine
         logger.info("Solving for starting values/scales of sampled parameters given user/data/default initialization....")
         iteration = 0
@@ -842,6 +957,10 @@ class ConfigManager:
         while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
+
+            self._apply_directed_links(directed_links, resolved, provenance,
+                                       resolved_scales, scale_provenance,
+                                       tolerance, pinned_vars)
 
             for eq in self.all_relations:
                 self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
@@ -985,6 +1104,58 @@ class ConfigManager:
         self.propagated_scales = dict(resolved_scales)
 
         return resolved
+
+    def _apply_directed_links(self, directed_links, resolved, provenance,
+                              resolved_scales, scale_provenance, tolerance,
+                              pinned_vars=None):
+        """
+        Assert user-defined link assignments (target := f(deps), internal units).
+
+        An 'initval' link IS the user's value for the target, so it always
+        wins (RANK_USER).  A 'mu' link only seeds the starting point, so it
+        yields to an explicit numeric initval (which also carries RANK_USER).
+        Scales propagate through the link Jacobian at RANK_DERIVED_USER so an
+        explicit user init_scale still wins.
+        """
+        for target, fld, plink, expr_int in directed_links:
+            if pinned_vars and target in pinned_vars:
+                continue
+            if not all(d in resolved for d in plink.dep_paths):
+                continue
+            if fld == "mu" and provenance.get(target, 0) >= RANK_USER:
+                continue
+            try:
+                val = float(expr_int.evalf(subs=resolved))
+            except (TypeError, ValueError) as e:
+                logger.debug(f"Link '{target} := {plink.expr_str}' not evaluable yet: {e}")
+                continue
+
+            if _meaningful_change(val, resolved.get(target), RANK_USER,
+                                  provenance.get(target, 0), tolerance,
+                                  resolved, provenance, target):
+                resolved[target] = val
+                provenance[target] = RANK_USER
+                logger.debug(f"Updated {target} = {val:.4g} (user link: {plink.expr_str})")
+
+            # Scale propagation through the link Jacobian
+            if scale_provenance.get(target, 0) >= RANK_USER:
+                continue
+            var = 0.0
+            any_input = False
+            for dep in plink.dep_paths:
+                dep_scale = resolved_scales.get(dep)
+                if dep_scale is None:
+                    continue
+                try:
+                    d = float(sp.diff(expr_int, sp.Symbol(dep)).evalf(subs=resolved))
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(d) and abs(d) < 1e15:
+                    var += (d * dep_scale) ** 2
+                    any_input = True
+            if any_input and var > 0 and RANK_DERIVED_USER > scale_provenance.get(target, 0):
+                resolved_scales[target] = float(np.sqrt(var))
+                scale_provenance[target] = RANK_DERIVED_USER
 
     def _relax_equation(self, eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
                         pinned_vars=None):
@@ -1167,7 +1338,7 @@ class ConfigManager:
                 return False
 
         # 4. Validation — collect all in-bounds solutions
-        cfg = self.resolve(parts[0], parts[-1], shape=())
+        cfg = self.resolve(parts[0], parts[-1], shape=(), element=idx)
         lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
         upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
 
@@ -1327,7 +1498,8 @@ class ConfigManager:
 
         # 1. Setup bounds and solver lookups
         parts = target_str.split('.')
-        cfg = self.resolve(parts[0], parts[-1], shape=())
+        el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+        cfg = self.resolve(parts[0], parts[-1], shape=(), element=el)
         lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
         upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
 

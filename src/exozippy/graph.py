@@ -47,6 +47,22 @@ def determine_pymc_build_order(active_components, config_manager):
                     else:
                         forward_graph[global_key].add(f"{comp_name}.{d}")
 
+    # 2b. Add edges for user-defined parameter links (params-file expressions
+    # referencing other parameters).  Same-parameter element links (star.A.age
+    # -> star.B.age) are resolved inside build_pymc and would appear here as
+    # self-loops, so they are skipped.
+    for target, fields in (getattr(config_manager, "links", None) or {}).items():
+        tparts = target.split('.')
+        tkey = f"{tparts[0]}.{tparts[-1]}"
+        if tkey not in forward_graph:
+            continue
+        for plink in fields.values():
+            for dep in plink.dep_paths:
+                dparts = dep.split('.')
+                dkey = f"{dparts[0]}.{dparts[-1]}"
+                if dkey != tkey and dkey in forward_graph:
+                    forward_graph[tkey].add(dkey)
+
     # 3. Validate that all dependencies are actually registered nodes
     for node, deps in forward_graph.items():
         for d in deps:

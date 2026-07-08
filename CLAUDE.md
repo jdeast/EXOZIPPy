@@ -88,6 +88,17 @@ The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scan
 - Symbolic PyTensor nodes passed as `initval` are preserved as-is (no unit conversion applied).
 - `build_pymc()` uses non-centered parameterization: raw `N(0, 1)` mapped to physical space via logit or linear scale + shift.
 
+### User-defined parameter links (`linking.py`)
+
+Any of the six numeric fields in a `params.yaml` entry may be a string expression referencing other parameters (`star.A.age: {initval: star.B.age, sigma: 0}`, `orbit.b.omega: {initval: "orbit.c.omega + 180", sigma: 0}`, `star.A.av: {lower: star.B.av}`). Semantics:
+- `initval` link + `sigma: 0` → hard link: the element is never sampled and deterministically tracks the expression.
+- `initval` link + `sigma > 0` (or a `mu` link) → soft link: sampled normally plus a Gaussian `pm.Potential` on the difference.
+- `initval` link, no sigma → initialization seeding only (relaxation-engine snapshot, no runtime tie).
+- `lower`/`upper` link → dynamic hard bound: the logit transform maps into the tensor-valued interval; a `-log(span)` potential keeps the conditional prior normalized.
+- `sigma`/`init_scale` link → static numeric snapshot from the relaxation-engine solution.
+
+Referenced parameters contribute their values in **their own user units**; the result is read in the **target's user unit**. `ConfigManager` extracts links at construction (`extract_links` strips the strings from `user_params`), the relaxation engine asserts `initval`/`mu` links as directed RANK_USER assignments each iteration, `Component._wire_user_links` builds the PyTensor closures (same-parameter element references are resolved inside `build_pymc` via `set_subtensor`; cross-parameter references use the lazy `add_parameter` recursion), and `graph.py` adds cross-parameter build-order edges. Tests: `tests/test_linked_params.py`.
+
 ### Physics registry
 
 `@register_physics` (in `physics_registry.py`) populates `PHYSICS_REGISTRY` at import time. The `add_parameter` method in `Component` looks up `func_name` from `defaults.yaml` in this registry to wire up PyTensor expression lambdas. Any new physics function must use this decorator.

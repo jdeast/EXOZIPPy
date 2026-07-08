@@ -288,6 +288,12 @@ class Parameter:
     expression: Any = None
     shape: tuple = ()
 
+    # User-defined per-element links (see linking.py), wired up by
+    # Component.add_parameter: {"hard"|"mu"|"lower"|"upper": {elem_idx:
+    # {"fn": callable(phys_internal_vector) -> scalar tensor (internal units),
+    #  "intra_deps": set of same-parameter element indices referenced}}}.
+    element_links: Any = None
+
     # "Physical" bounds (can be tightened by user_params, not expanded).
     lower: Optional[Number] = None
     upper: Optional[Number] = None
@@ -630,8 +636,58 @@ class Parameter:
         elif isinstance(phys_val, np.ndarray) and phys_val.dtype == object:
             phys_val = pt.stack(phys_val.tolist())
 
+        # 5b. USER-DEFINED ELEMENT LINKS (dynamic bounds + hard links)
+        links = self.element_links or {}
+        dyn_span_logps = []
+        if links:
+            if expr_raw is not None and any(k in links for k in ("hard", "lower", "upper")):
+                raise ValueError(
+                    f"Parameter '{self.label}': hard/bound links are not supported "
+                    f"on derived (expression) parameters; only 'mu' links are.")
+
+            # Dynamic bounds: re-map the element's sigmoid coordinate q into
+            # the tensor-valued interval.  q comes from the same logit raw
+            # coordinate, so the bound is a hard constraint by construction.
+            dyn_idx = sorted(set(links.get("lower", {})) | set(links.get("upper", {})))
+            for i in dyn_idx:
+                if not use_logit[i] and is_sampled[i]:
+                    raise ValueError(
+                        f"Parameter '{self.label}'[{i}]: a dynamic bound link "
+                        f"requires finite static lower/upper bounds (used to "
+                        f"set up the logit transform).")
+                lo_t = (links["lower"][i]["fn"](phys_val)
+                        if i in links.get("lower", {}) else pt.constant(lowers[i]))
+                up_t = (links["upper"][i]["fn"](phys_val)
+                        if i in links.get("upper", {}) else pt.constant(uppers[i]))
+                span_t = pt.maximum(up_t - lo_t, 1e-12)
+                q_i = pt.sigmoid(pt.clip(lq[i], -30.0, 30.0))
+                phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
+                if is_sampled[i]:
+                    # Normalize the conditional uniform: p(val | bounds) = 1/span.
+                    # For static bounds this term is a constant and is omitted;
+                    # for dynamic bounds it must be included or the bound
+                    # parameter feels a spurious flat-prior volume reward.
+                    dyn_span_logps.append(-pt.log(span_t))
+
+            # Hard links (initval link with sigma=0): the element deterministically
+            # tracks its expression.  Same-parameter references are applied in
+            # dependency order so chains (A := f(B), B := g(C)) resolve correctly.
+            hard = links.get("hard", {})
+            if hard:
+                import graphlib
+                intra_graph = {i: (set(spec.get("intra_deps", ())) & set(hard))
+                               for i, spec in hard.items()}
+                try:
+                    order = list(graphlib.TopologicalSorter(intra_graph).static_order())
+                except graphlib.CycleError as e:
+                    raise ValueError(
+                        f"Parameter '{self.label}': circular hard links between "
+                        f"elements: {e}")
+                for i in order:
+                    phys_val = pt.set_subtensor(phys_val[i], hard[i]["fn"](phys_val))
+
         # 6. ASSIGN TO SELF.VALUE
-        track_node = bool(np.any(is_sampled)) or self.force_node
+        track_node = bool(np.any(is_sampled)) or self.force_node or bool(links)
 
         if actual_shape == ():
             val_to_save = phys_val if expr_raw is not None else phys_val[0]
@@ -655,6 +711,12 @@ class Parameter:
         #    N(0,1); no double-count.
         gaussian_prior_mask = ((is_derived | (is_sampled & use_logit & has_sigma_prior))
                                & ~np.isnan(sigmas) & (sigmas > 0))
+        # Elements with a dynamic (linked) prior center get their Gaussian
+        # potential below with a tensor-valued mu — exclude them here so the
+        # penalty is not double-counted against the static center.
+        mu_links = links.get("mu", {}) if links else {}
+        for i in mu_links:
+            gaussian_prior_mask[i] = False
         if np.any(gaussian_prior_mask):
             prior_mus = np.where(~np.isnan(mus), mus, inits)
             mask = pt.as_tensor_variable(gaussian_prior_mask)
@@ -662,6 +724,24 @@ class Parameter:
                               / pt.as_tensor_variable(np.where(sigmas > 0, sigmas, 1.0))) ** 2
             pm.Potential(f"gaussian_prior.{self.label}",
                          pm.math.sum(pt.where(mask, penalty, 0.0)))
+
+        # A2. Gaussian potentials with LINKED (tensor-valued) centers: soft
+        #     links tie this element to an expression of other parameters,
+        #     penalizing the difference at every step of the chain.
+        for i, spec in mu_links.items():
+            sig_i = sigmas[i]
+            if np.isnan(sig_i) or sig_i <= 0:
+                raise ValueError(
+                    f"Parameter '{self.label}'[{i}]: a soft link (Gaussian "
+                    f"penalty on a linked center) requires sigma > 0; got "
+                    f"sigma={sig_i}. Use sigma: 0 for a hard link.")
+            mu_t = spec["fn"](val_flat)
+            pm.Potential(f"link_mu.{self.label}.{i}",
+                         -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2)
+
+        # A3. Normalization of dynamic-bound conditional uniform priors.
+        if dyn_span_logps:
+            pm.Potential(f"link_span.{self.label}", sum(dyn_span_logps))
 
         # B. Soft bounds for derived params (and the rare half-bounded sampled
         #    param, where only one bound is finite so the logit transform does
