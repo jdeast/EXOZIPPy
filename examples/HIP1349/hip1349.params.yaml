@@ -1,0 +1,52 @@
+# Starting values / priors for HIP 1349 (HD 1273)
+# Reference astrometry: Hipparcos catalog (ESA 1997), J1991.25.
+# Orbit initialized at the DMSA/O solution (P=411.449 d, a0=19.94 mas,
+# e=0.5671, omega=4.68 deg, i=80.48 deg, Omega=352.57 deg); the values
+# below are printed by get_hipparcos_iad.py.
+
+star.A.mass:
+  initval: 0.90       # G8V primary
+  sigma: 0.08
+star.A.radius:
+  initval: 0.85
+  sigma: 0.08
+star.A.teff:
+  initval: 5350
+  sigma: 150
+star.A.feh:
+  initval: 0.0
+  sigma: 0.2
+
+star.A.ra:
+  initval: 4.22329974
+star.A.dec:
+  initval: -52.65159230
+star.A.pm_ra:
+  initval: 314.94
+star.A.pm_dec:
+  initval: 182.50
+star.A.distance:
+  initval: 23.015     # 1000/parallax, parallax = 43.45 mas
+
+# Companion mass initialized so the dark-companion photocenter orbit
+# matches a0 = 19.94 mas given M1 = 0.9 Msun (a_phot = a_rel * M2/Mtot):
+# M2 ~ 0.54 Msun.  NOTE: if the companion contributes light in Hp, this
+# "mass" describes the photocenter orbit, not the true companion mass.
+planet.B.mass:
+  initval: 565.0      # jupiterMass
+planet.B.radius:
+  initval: 5.0
+  sigma: 0            # not constrained by astrometry
+
+orbit.B.period:
+  initval: 411.449
+orbit.B.tc:
+  initval: 2448275.5433
+orbit.B.secosw:
+  initval: 0.75055    # e = 0.5671, omega_* = 4.68 deg
+orbit.B.sesinw:
+  initval: 0.06144
+orbit.B.bigomega:
+  initval: 352.57
+orbit.B.cosi:
+  initval: 0.16539    # i = 80.48 deg

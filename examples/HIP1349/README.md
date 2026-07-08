@@ -1,0 +1,36 @@
+# HIP 1349: real Hipparcos epoch astrometry
+
+HIP 1349 (HD 1273, G8V, 23 pc) has an orbital (O-type) solution in the
+Hipparcos Double and Multiple Systems Annex: a 411-day photocenter orbit
+with a0 = 19.9 mas.  This example fits the REAL 1997-consortium
+Intermediate Astrometric Data (IAD) -- 1-D along-scan abscissae with scan
+angles, the same data structure as Gaia epoch astrometry -- using the
+`astrometryinstrument` component in `mode: gaia`.
+
+```
+poetry run python get_hipparcos_iad.py    # (re)download + reconstruct
+poetry run exozippy hip1349.yaml
+```
+
+`get_hipparcos_iad.py` downloads the IAD from the ESA Hipparcos tools
+service, reconstructs the full along-scan coordinate relative to the
+J1991.25 catalog position, and validates:
+
+- epoch self-consistency of the proper-motion partials;
+- our Earth-ephemeris along-scan parallax factors against the
+  consortium's (agree to < 1e-3);
+- that the published DMSA/O orbit, projected along-scan with EXOZIPPy's
+  Thiele-Innes conventions, fully explains the abscissa residuals
+  (chi2/N: 33 raw -> 1.1 after subtracting the orbit).  This confirms the
+  DMSA/O (omega, Omega, i) convention matches the EXOFASTv2 convention
+  implemented here.
+
+DMSA/O solution (ESA 1997) to compare against: P = 411.4 d,
+a0 = 19.94 mas, e = 0.567, omega = 4.7 deg, i = 80.5 deg,
+Omega = 352.6 deg, parallax = 43.45 mas.
+
+Caveats (demo, not publication): FAST and NDAC abscissae of the same
+orbit are correlated (IA10) but treated as independent; the companion is
+assumed dark, so the fitted "companion mass" describes the photocenter
+orbit; with no RVs the (Omega, omega) -> (Omega+180, omega+180)
+degeneracy is unbroken.
