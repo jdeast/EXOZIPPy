@@ -499,7 +499,9 @@ class AstrometryInstrument(Component):
                          yerr=d["err_N"], fmt="o", ms=3, alpha=0.5, zorder=3,
                          label="data")
         axL.invert_xaxis()  # East to the left
-        axL.set_aspect("equal", adjustable="datalim")
+        # No equal aspect here: the pm-dominated path is highly anisotropic
+        # and equal axes squeeze the parallax/orbit loops into invisibility
+        # (the orbit panel keeps equal aspect, where shape fidelity matters).
         axL.set_xlabel(r"$\Delta\alpha^*$ [mas]")
         axL.set_ylabel(r"$\Delta\delta$ [mas]")
         axL.set_title("Path on sky")
@@ -548,10 +550,10 @@ class AstrometryInstrument(Component):
                      zorder=5, label="ascending node")
 
             # Direction of motion: a curved arrow tracing the orbit away
-            # from the ascending node, drawn 10% outside the orbit itself.
-            t_arc = np.linspace(t_node, t_node + 0.12 * P, 60)
+            # from the ascending node, drawn 25% outside the orbit itself.
+            t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
             xa, ya = self._compiled_photo[i](t_arc.astype(np.float64), *vals)
-            xa, ya = 1.10 * np.asarray(xa), 1.10 * np.asarray(ya)
+            xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
             axR.plot(xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6)
             axR.annotate("", xy=(xa[-1], ya[-1]), xytext=(xa[-2], ya[-2]),
                          zorder=6,
