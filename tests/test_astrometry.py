@@ -631,3 +631,32 @@ def test_finite_logp_and_gradient(astrometry_system):
     assert np.isfinite(logp)
     dlogp = model.compile_dlogp()(point)
     assert np.all(np.isfinite(dlogp))
+
+
+@pytest.mark.slow
+def test_jax_gradient_finite_with_massive_companion(astrometry_system):
+    """
+    Given: a system whose companion is a 9.6 Msun black hole
+           (m_total = 10.6 Msun, i.e. 500 * m_total >> 709)
+    When: the logp gradient is evaluated through the JAX backend
+          (the numpyro/blackjax sampling path)
+    Then: every gradient is finite.
+
+    Regression: planet.build_likelihood's log(sigmoid(500*m_total))
+    potential NaN'd in the JAX gradient once exp(500*m_total) overflowed
+    (m_total > 1.42 Msun) -- an unselected jnp.where branch of pytensor's
+    softplus -- silently freezing every numpyro chain at its start while
+    the C-backend gradient stayed finite.
+    """
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    from pymc.sampling.jax import get_jaxified_logp
+
+    system, model, point = astrometry_system
+    logp_fn = get_jaxified_logp(model)
+    vals = [point[v.name] for v in model.value_vars]
+    assert np.isfinite(float(logp_fn(vals)))
+    grads = jax.grad(lambda vs: logp_fn(vs))(vals)
+    bad = [v.name for v, g in zip(model.value_vars, grads)
+           if not np.all(np.isfinite(np.asarray(g)))]
+    assert not bad, f"non-finite JAX gradients: {bad}"

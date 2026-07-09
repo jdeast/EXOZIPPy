@@ -1,6 +1,6 @@
 # HIP 1349: real Hipparcos epoch astrometry
 
-HIP 1349 (HD 1273, G8V, 23 pc) has an orbital (O-type) solution in the
+HIP 1349 (HD 1273, G2V, V = 6.84, 23 pc) has an orbital (O-type) solution in the
 Hipparcos Double and Multiple Systems Annex: a 411-day photocenter orbit
 with a0 = 19.9 mas.  This example fits the REAL 1997-consortium
 Intermediate Astrometric Data (IAD) -- 1-D along-scan abscissae with scan
@@ -28,6 +28,21 @@ J1991.25 catalog position, and validates:
 DMSA/O solution (ESA 1997) to compare against: P = 411.4 d,
 a0 = 19.94 mas, e = 0.567, omega = 4.7 deg, i = 80.5 deg,
 Omega = 352.6 deg, parallax = 43.45 mas.
+
+## References
+
+- Data: ESA 1997, "The Hipparcos and Tycho Catalogues", ESA SP-1200
+  (VizieR I/239).  The Intermediate Astrometric Data format is described
+  in Vol. 1, Sect. 2.8; see also van Leeuwen & Evans 1998, A&AS 130, 157.
+- Orbit: the DMSA/O entry adopted P, e, and omega from the SPECTROSCOPIC
+  orbit of Bopp, Evans, Laing & Deeming 1970, MNRAS 147, 355 (dmRef 13;
+  those elements have no errors in the annex), and fit T_p, a0, i, and
+  Omega astrometrically.  Because omega comes from an RV orbit (the
+  primary's omega), the DMSA/O Omega = 352.6 deg is anchored to the true
+  ascending node -- which is why the annex can quote Omega > 180 deg even
+  though Hipparcos astrometry alone cannot distinguish the nodes.  Adding
+  the Bopp et al. RVs to this fit would break the 180-deg degeneracy and
+  is a natural extension of this example.
 
 Caveats (demo, not publication): FAST and NDAC abscissae of the same
 orbit are correlated (IA10) but treated as independent; the companion is

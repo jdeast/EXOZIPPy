@@ -4,11 +4,11 @@
 # the G star; the orbit and companion mass are free (initialized at the
 # published solution).
 #
-# init_scale is set to roughly the published 1-sigma uncertainty wherever
-# the defaults are badly mismatched to this dataset (e.g. the ra/dec
-# default of 2e-5 deg = 72 mas vs the ~0.05 mas posterior); large
-# mismatches leave NUTS with a poorly conditioned mass matrix and stuck
-# chains.
+# init_scale is tuned to the 'Unity Curv' column of the pre-flight audit
+# (init_scale -> scale/sqrt(|curv|)): this simulated DR4 dataset constrains
+# the orbit far better than the published DR3-era uncertainties (e.g.
+# sigma_P ~ 0.001 d, not 0.05 d).  Well-matched scales keep NUTS healthy
+# from the first tuning step.
 
 star.G.mass:
   initval: 0.93
@@ -30,13 +30,13 @@ star.G.ra:
   init_scale: 1.5e-8      # deg; ~0.05 mas in true arc
 star.G.dec:
   initval: -0.58109202
-  init_scale: 1.5e-8
+  init_scale: 8.0e-9
 star.G.pm_ra:
   initval: -7.70
-  init_scale: 0.03
+  init_scale: 0.02
 star.G.pm_dec:
   initval: -25.85
-  init_scale: 0.03
+  init_scale: 0.02
 star.G.distance:
   initval: 478.5          # 1000/parallax[mas], parallax = 2.09 mas
   init_scale: 5.0
@@ -44,31 +44,31 @@ star.G.distance:
 # The dark companion ("planet" component): 9.62 Msun in jupiterMass units
 planet.BH.mass:
   initval: 10077.6
-  init_scale: 150.0
+  init_scale: 26.0
 planet.BH.radius:
   initval: 1.0
   sigma: 0          # irrelevant for a dark, non-transiting companion
 
 orbit.BH.period:
   initval: 185.59
-  init_scale: 0.05
+  init_scale: 0.001
 orbit.BH.tc:
   initval: 2457404.3239   # from Tp = 2457387.9 (printed by simulate_gaia_astrometry.py)
-  init_scale: 0.3
+  init_scale: 0.015
 orbit.BH.secosw:
   initval: 0.65487        # e = 0.451, omega_* = 12.8 deg
-  init_scale: 0.01
+  init_scale: 5.0e-4
 orbit.BH.sesinw:
   initval: 0.14878
-  init_scale: 0.01
+  init_scale: 8.0e-4
 orbit.BH.bigomega:
   initval: 97.8           # seeds xbigomega/ybigomega on the unit circle
 orbit.BH.cosi:
   initval: -0.59622       # i = 126.6 deg
-  init_scale: 0.005
+  init_scale: 0.001
 
 # Center-of-mass RV (the auto-initialization uses the data mean, which is
 # ~10 km/s off for this eccentric, unevenly sampled orbit)
 rvinstrument.AllRV.gamma:
   initval: 46600.0        # m/s
-  init_scale: 600.0
+  init_scale: 30.0

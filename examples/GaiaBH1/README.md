@@ -42,6 +42,15 @@ recedes; consistent with the RV sign convention, so the joint fit breaks
 the (Omega, omega) -> (Omega+180, omega+180) degeneracy that astrometry
 alone leaves).
 
+Expected recovery: the joint fit lands close to, but not exactly on, the
+published joint solution, because the REAL RVs are in mild (~1 sigma)
+tension with the simulated astrometry (which encodes the joint solution):
+the posterior pulls omega and e to El-Badry's RV-only values (omega =
+13.9 deg, e = 0.447), dragging correlated ~2 sigma shifts in M_BH,
+parallax, and cosi.  A reference run gives Omega = 93.7 +/- 2.2,
+omega = 14.0 +/- 1.1, e = 0.447 +/- 0.005, M_BH = 8.6 +/- 0.3 Msun with
+~0.5% divergences, r_hat = 1.00, and bulk ESS > 5000 on all parameters.
+
 The published solution to compare against (Table 1, astrometry + RVs):
 
 | parameter | value |

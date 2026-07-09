@@ -3,6 +3,7 @@ import numpy as np
 import pytensor.tensor as pt
 import pymc as pm
 from exozippy.components.component import Component
+from exozippy.potentials import soft_lower_bound, soft_upper_bound
 from . import physics
 
 logger = logging.getLogger(__name__)
@@ -52,15 +53,23 @@ class Planet(Component):
                 self.config_manager.add_hint(f"planet.{i}.K", k_ms_guess)
 
     def build_likelihood(self, model, system):
-        steepness = 500.0
-        pm.Potential(f"{self.prefix}.m_pos_constraint", pm.math.log(pt.sigmoid(self.m_total.value * steepness)))
+        # Soft barriers via the shared clipped log-sigmoid helpers.
+        # scale * softness = 0.0088 reproduces the historical steepness of
+        # 500 nats/unit.  The raw pm.math.log(pt.sigmoid(z)) form used here
+        # previously NaNs in the JAX gradient once z > ~709 (exp(z) overflows
+        # inside an unselected jnp.where branch of pytensor's softplus): any
+        # system with m_total > 1.42 Msun silently froze every numpyro chain
+        # at its starting point.  See potentials.py.
+        pm.Potential(f"{self.prefix}.m_pos_constraint",
+                     soft_lower_bound(self.m_total.value, 0.0, scale=0.88))
 
         if "orbit" not in system.active_components:
             return
 
         orbits = system.orbit
-        diff = self.max_ecc.value - orbits.ecc.value[self.orbit_map]
-        pm.Potential(f"{self.prefix}.e_collision_bound", pm.math.log(pt.sigmoid(diff * steepness)))
+        pm.Potential(f"{self.prefix}.e_collision_bound",
+                     soft_upper_bound(orbits.ecc.value[self.orbit_map],
+                                      self.max_ecc.value, scale=0.88))
 
 
         if self.n_elements < 2: return

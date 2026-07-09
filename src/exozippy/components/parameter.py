@@ -790,7 +790,13 @@ class Parameter:
             # at the walls so the sampler always feels a restoring gradient
             # (computing it through the clipped sigmoid would plateau, leaving
             # a flat region where a chain could drift unboundedly).
-            log_jac = -pt.softplus(lq) - pt.softplus(-lq)
+            # |lq| is capped at 700: pytensor's JAX softplus NaNs in the
+            # gradient once exp(|lq|) overflows (an unselected jnp.where
+            # branch; see potentials.py) -- beyond 700 the exact value is
+            # linear in lq anyway, so the restoring slope is unchanged.
+            lq_safe = pt.clip(lq, -700.0, 700.0)
+            log_jac = (-pt.softplus(lq_safe) - pt.softplus(-lq_safe)
+                       - pt.maximum(pt.abs(lq) - 700.0, 0.0))
             correction = pt.where(logit_mask,
                                   log_jac + 0.5 * pt.sqr(raw_vector),
                                   pt.zeros_like(raw_vector))

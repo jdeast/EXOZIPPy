@@ -5,13 +5,13 @@
 # below are printed by get_hipparcos_iad.py.
 
 star.A.mass:
-  initval: 0.90       # G8V primary
+  initval: 1.0        # G2V primary
   sigma: 0.08
 star.A.radius:
-  initval: 0.85
-  sigma: 0.08
+  initval: 1.0
+  sigma: 0.1
 star.A.teff:
-  initval: 5350
+  initval: 5800
   sigma: 150
 star.A.feh:
   initval: 0.0
