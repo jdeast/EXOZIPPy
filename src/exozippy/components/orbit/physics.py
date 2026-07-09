@@ -24,6 +24,13 @@ def calc_omega(secosw, sesinw):
     return pt.switch(pt.eq(e_raw, 0.0), np.pi / 2.0, pt.arctan2(sesinw, secosw))
 
 @register_physics
+def calc_bigomega(xbigomega, ybigomega):
+    # Longitude of the ascending node from its direction vector; the radius
+    # is a free positive scale absorbed by the N(0,1) priors (same geometry
+    # sampler trick as the microlensing trajectory angle alpha).
+    return pt.arctan2(ybigomega, xbigomega)
+
+@register_physics
 def calc_sinw(omega):
     return pt.sin(omega)
 

@@ -217,12 +217,21 @@ def run_fit(config):
                 jax.config.update("jax_enable_x64", True)
                 from pymc.sampling.jax import sample_jax_nuts
                 chain_method = sampler_cfg.get("chain_method", "parallel")
+                # jitter=False: the JAX samplers default to jittering each
+                # chain by U(-1, 1) in raw (whitened) space, i.e. +/- one
+                # init_scale per parameter.  We deliberately construct the
+                # start from the relaxation-engine solution; when an
+                # init_scale is much wider than the posterior (common for
+                # conservative user scales), the jitter launches chains at
+                # logp ~ -1e6 and the step size collapses to zero (100%
+                # divergences).  Opt back in with 'jitter: true'.
                 idata = sample_jax_nuts(
                     draws=draws,
                     tune=tune,
                     chains=chains,
                     target_accept=target_accept,
                     initvals=internal_start,
+                    jitter=sampler_cfg.get("jitter", False),
                     chain_method=chain_method,
                     nuts_sampler=method,
                 )

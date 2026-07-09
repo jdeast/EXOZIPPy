@@ -790,7 +790,13 @@ class Parameter:
             # at the walls so the sampler always feels a restoring gradient
             # (computing it through the clipped sigmoid would plateau, leaving
             # a flat region where a chain could drift unboundedly).
-            log_jac = -pt.softplus(lq) - pt.softplus(-lq)
+            # |lq| is capped at 700: pytensor's JAX softplus NaNs in the
+            # gradient once exp(|lq|) overflows (an unselected jnp.where
+            # branch; see potentials.py) -- beyond 700 the exact value is
+            # linear in lq anyway, so the restoring slope is unchanged.
+            lq_safe = pt.clip(lq, -700.0, 700.0)
+            log_jac = (-pt.softplus(lq_safe) - pt.softplus(-lq_safe)
+                       - pt.maximum(pt.abs(lq) - 700.0, 0.0))
             correction = pt.where(logit_mask,
                                   log_jac + 0.5 * pt.sqr(raw_vector),
                                   pt.zeros_like(raw_vector))
@@ -1128,7 +1134,7 @@ class Parameter:
             return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
         return rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}" + "\n"
 
-    def to_table_line(self, sigfigs: int = 2) -> str:
+    def to_table_line(self, sigfigs: int = 2, note_mark: Optional[str] = None) -> str:
         if self.latex is None:
             raise ValueError(f"{self.label}: latex symbol not set.")
         if self.description is None:
@@ -1136,6 +1142,7 @@ class Parameter:
 
         safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
+        mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
 
@@ -1164,7 +1171,7 @@ class Parameter:
             prior_text = "\\" + self.latex_varname + "prior"
 
             lines.append(
-                rf"~~~~${symbol}$\dotfill & "
+                rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
                 rf"{self.description}{unit_text}\dotfill & "
                 rf"{val_txt}\dotfill & "
                 rf"{prior_text} \\" + "\n"
@@ -1172,7 +1179,8 @@ class Parameter:
 
         return "".join(lines)
 
-    def to_table_line_at(self, index: int, sigfigs: int = 2) -> str:
+    def to_table_line_at(self, index: int, sigfigs: int = 2,
+                         note_mark: Optional[str] = None) -> str:
         """Single table row for element ``index``, without an instance subscript.
 
         Used when the enclosing section header already identifies the instance.
@@ -1187,6 +1195,7 @@ class Parameter:
 
         safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
+        mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
 
         if self.print_to_table:
             val_txt = "\\" + self.latex_varname + idx_str
@@ -1199,7 +1208,7 @@ class Parameter:
         prior_text = "\\" + self.latex_varname + "prior"
 
         return (
-            rf"~~~~${self.latex}$\dotfill & "
+            rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
             rf"{self.description}{unit_text}\dotfill & "
             rf"{val_txt}\dotfill & "
             rf"{prior_text} \\" + "\n"

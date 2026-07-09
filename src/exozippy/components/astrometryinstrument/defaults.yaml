@@ -1,0 +1,33 @@
+astrometryinstrument:
+  jitter_variance:
+    lower: -10.0
+    upper: 1.0e8
+    initval: 0.0
+    init_scale: 0.01
+    unit: "mas2"
+    internal_unit: "mas2"
+    latex: "\\sigma_{A}^2"
+    description: "Astrometric Jitter Variance"
+  jitter:
+    unit: "mas"
+    internal_unit: "mas"
+    latex: "\\sigma_A"
+    description: "Astrometric Jitter"
+    expressions:
+      default:
+        func_name: "calc_astrom_jitter"
+        deps: [ "jitter_variance" ]
+  fluxfrac:
+    # Fractional flux of the companion(s) in this instrument's band,
+    # beta = F_2 / (F_1 + F_2).  The photocenter semimajor axis is
+    # a_phot = a_rel * (M_2/M_tot - beta); beta = 0 (default, fixed)
+    # corresponds to a dark companion (photocenter = primary).
+    lower: 0.0
+    upper: 1.0
+    initval: 0.0
+    init_scale: 0.01
+    sigma: 0.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\beta"
+    description: "Companion Flux Fraction"

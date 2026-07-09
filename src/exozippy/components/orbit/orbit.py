@@ -1,5 +1,9 @@
+import logging
+
 import numpy as np
 import astropy.units as u
+
+logger = logging.getLogger(__name__)
 
 # pymc/exoplanet imports
 import pytensor.tensor as pt
@@ -73,9 +77,135 @@ class Orbit(Component):
                 "tp": "default",
             })
 
-        i180_arr = np.atleast_1d(getattr(self, 'i180', False))
+        # Astrometry constrains the longitude of the ascending node and
+        # breaks the i <-> 180-i degeneracy, so sample the node direction
+        # vector (xbigomega, ybigomega; each N(0,1) -> uniform marginal on
+        # bigomega, like the microlensing trajectory angle alpha) and allow
+        # the full inclination range when an astrometry component is active.
+        topology_keys = []
+        if hasattr(system, 'config') and hasattr(system.config, 'keys'):
+            topology_keys = list(system.config.keys())
+        has_astrometry = (hasattr(system, 'astrometryinstrument')
+                          or 'astrometryinstrument' in topology_keys)
+        if has_astrometry:
+            self.manifest["xbigomega"] = None
+            self.manifest["ybigomega"] = None
+            self.manifest["bigomega"] = "default"
+
+            # The (bigomega, omega) <-> (bigomega+180, omega+180)
+            # transformation is a reflection through the sky plane
+            # (z -> -z): invisible to ANY astrometry, absolute or relative.
+            # Only radial information (RVs) identifies the ascending node.
+            has_rv = (hasattr(system, 'rvinstrument')
+                      or 'rvinstrument' in topology_keys)
+            if not has_rv:
+                self._restrict_bigomega_halfplane(shape)
+
+        i180_arr = np.atleast_1d(getattr(self, 'i180', False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         self.manifest["cosi"] = {"lower": derived_lowers}
+
+    def _restrict_bigomega_halfplane(self, shape):
+        """Astrometry without RVs: restrict bigomega to [0, 180] deg.
+
+        (bigomega, omega_*) and (bigomega+180, omega_*+180) is a reflection
+        through the sky plane, so it produces identical astrometry of every
+        kind (absolute, epoch, and relative); only RVs identify which node
+        is ascending.  Bounding ybigomega >= 0 selects the bigomega in
+        [0, 180] mode.  Seeds in (180, 360) are remapped to the equivalent
+        solution -- which flips (xbigomega, ybigomega) AND (secosw,
+        sesinw), and shifts tc so the orbit's position-vs-time is
+        unchanged.  A table note documents the artificial boundary on
+        omega_* and bigomega.
+        """
+        note = (r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
+                r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
+                r"degenerate (which node is ascending is unknown); "
+                r"$\Omega$ is artificially restricted to "
+                r"$[0^\circ, 180^\circ]$ to select one mode.")
+
+        # NOTE: this runs at stage 2, BEFORE the relaxation engine, so only
+        # user-provided initvals (and defaults) are visible here.  The x/y
+        # direction vector is therefore derived directly from the user's
+        # bigomega initval; the manifest initvals set below override the
+        # relaxation-engine seeds at build time.
+        cm = self.config_manager
+        n_el = int(np.prod(shape))
+
+        def rslv(name):
+            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)["initval"]
+            if val is None:
+                return np.full(n_el, np.nan)
+            return np.atleast_1d(val).astype(float).copy()
+
+        factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
+        bo = rslv("bigomega") * factor_bo   # rad; NaN where unseeded
+
+        # Unseeded elements start at bigomega = 90 deg (center of the
+        # allowed half-plane; y = 0 would sit exactly on the new bound).
+        x_init = np.where(np.isnan(bo), 0.0, np.cos(bo))
+        y_init = np.where(np.isnan(bo), 1.0, np.sin(bo))
+
+        # Seeds with bigomega in (180, 360): remap to the degenerate
+        # partner (bigomega - 180, omega_* + 180, and tc shifted so the
+        # position-vs-time model is unchanged).
+        flip = y_init < 0.0
+        if np.any(flip):
+            logger.warning(
+                f"[{self.prefix}] bigomega initval(s) in (180, 360) deg but no "
+                f"RVs are present; remapping element(s) {np.where(flip)[0]} to "
+                f"the degenerate (bigomega-180, omega+180) solution.")
+
+            # Orientation in the user's own terms: prefer explicit ecc+omega
+            # initvals; otherwise secosw/sesinw (user or defaults).
+            sc0 = rslv("secosw")
+            ss0 = rslv("sesinw")
+            factor_om = cm.get_conversion_factor(self.prefix, "omega") or 1.0
+            om = rslv("omega") * factor_om
+            e_u = rslv("ecc")
+            have_ew = ~np.isnan(om) & ~np.isnan(e_u)
+            sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
+            ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
+
+            tc0 = rslv("tc")
+            # The relaxation engine has not run yet, so a user-supplied
+            # 'period' has not been propagated to logP; prefer it directly.
+            period_user = rslv("period")
+            period = np.where(~np.isnan(period_user), period_user,
+                              10.0 ** rslv("logP"))
+
+            def _M_c(ecc, w):
+                E_c = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * (1.0 - np.sin(w)),
+                                       np.sqrt(1.0 + ecc) * np.cos(w))
+                return E_c - ecc * np.sin(E_c)
+
+            ecc0 = np.clip(sc0 ** 2 + ss0 ** 2, 0.0, 0.9999)
+            w0 = np.arctan2(ss0, sc0)
+            n_mm = 2.0 * np.pi / period
+            tp = tc0 - _M_c(ecc0, w0) / n_mm
+            tc_new = tp + _M_c(ecc0, w0 + np.pi) / n_mm
+
+            x_init = np.where(flip, -x_init, x_init)
+            y_init = np.where(flip, -y_init, y_init)
+            sc_init = np.where(flip, -sc0, sc0)
+            ss_init = np.where(flip, -ss0, ss0)
+            tc_init = np.where(flip, tc_new, tc0)
+
+            self.manifest["secosw"] = {**self.manifest["secosw"], "initval": sc_init}
+            self.manifest["sesinw"] = {**self.manifest["sesinw"], "initval": ss_init}
+            half_period = period / 2.0
+            self.manifest["tc"] = {**self.manifest["tc"], "initval": tc_init,
+                                   "lower": tc_init - half_period,
+                                   "upper": tc_init + half_period}
+
+        # Keep seeded boundary values (bigomega exactly 0 or 180) strictly
+        # inside the ybigomega >= 0 bound.
+        y_init = np.maximum(y_init, 1e-6)
+
+        self.manifest["xbigomega"] = {"initval": x_init}
+        self.manifest["ybigomega"] = {"initval": y_init, "lower": 0.0}
+        self.manifest["bigomega"] = {"expr_key": "default", "table_note": note}
+        self.manifest["omega"] = {"expr_key": "default", "table_note": note}
 
     def build_likelihood(self, model, system):
         pass
@@ -91,6 +221,63 @@ class Orbit(Component):
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
         return pt.arctan2(sinf, cosf)
+
+    def get_sky_position(self, t, a_scale, orbit_map, relative=False):
+        """
+        Vectorized sky-plane offsets of an orbiting body.
+
+        t: (N_obs,) vector of times [BJD_TDB]
+        a_scale: (N_planets,) amplitude scaling, e.g. the photocenter or
+                 relative semimajor axis in mas; sets the output units
+        orbit_map: integer map from planet slots to orbit elements
+        relative: False -> the primary/photocenter orbit around the
+                  barycenter (uses omega_*); True -> the companion's orbit
+                  relative to the primary (omega_* + 180 deg)
+
+        Returns (dE, dN), each (N_obs, N_planets): offsets toward East and
+        North in the units of a_scale.
+
+        Conventions (EXOFASTv2): omega is the argument of periastron of the
+        PRIMARY's orbit (omega_*). bigomega is the position angle of the
+        ascending node, measured East of North, where the ascending node is
+        the node at which the body recedes from the observer -- consistent
+        with the sign of get_radial_velocity (the primary crosses its
+        ascending node at omega_* + f = 0, where its RV is maximal).
+        Without RVs, (bigomega, omega) and (bigomega+180, omega+180) are
+        exactly degenerate for astrometry of every kind (a reflection
+        through the sky plane); see _restrict_bigomega_halfplane.
+        """
+        t_grid = t[:, None]
+        tp = self.tp.value[orbit_map][None, :]
+        n = self.n.value[orbit_map][None, :]
+        ecc = self.ecc.value[orbit_map][None, :]
+        cosw = self.cosw.value[orbit_map][None, :]
+        sinw = self.sinw.value[orbit_map][None, :]
+        cosi = self.cosi.value[orbit_map][None, :]
+        bigomega = self.bigomega.value[orbit_map][None, :]
+        cosO = pt.cos(bigomega)
+        sinO = pt.sin(bigomega)
+
+        if relative:
+            # The companion's argument of periastron is omega_* + pi
+            cosw = -cosw
+            sinw = -sinw
+
+        M = (t_grid - tp) * n
+        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+
+        # Separation from the barycenter (or primary) in units of a_scale
+        r = a_scale[None, :] * (1.0 - ecc ** 2) / (1.0 + ecc * cosf)
+
+        # cos/sin(omega + f)
+        coswf = cosw * cosf - sinw * sinf
+        sinwf = sinw * cosf + cosw * sinf
+
+        # Thiele-Innes projection (North, East), PA measured East of North:
+        # at omega + f = 0 (ascending node) the body sits at PA = bigomega.
+        dN = r * (cosO * coswf - sinO * sinwf * cosi)
+        dE = r * (sinO * coswf + cosO * sinwf * cosi)
+        return dE, dN
 
     def get_radial_velocity(self, t, K, orbit_map):
         """

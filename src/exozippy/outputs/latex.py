@@ -72,6 +72,17 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
     all_defs = []
     all_table_lines = []
 
+    # Distinct Parameter.table_note texts get sequential tablenotemark
+    # letters; the matching \tablenotetext lines are emitted after \enddata.
+    note_marks = {}
+
+    def _mark_for(p):
+        if not getattr(p, "table_note", None):
+            return None
+        if p.table_note not in note_marks:
+            note_marks[p.table_note] = chr(ord("a") + len(note_marks))
+        return note_marks[p.table_note]
+
     all_defs.append(r"\providecommand{\bjdtdb}{\ensuremath{\rm {BJD_{TDB}}}}" + "\n")
     all_defs.append(r"\providecommand{\feh}{\ensuremath{\left[{\rm Fe}/{\rm H}\right]}}" + "\n")
     all_defs.append(r"\providecommand{\teff}{\ensuremath{T_{\rm eff}}}" + "\n")
@@ -109,7 +120,7 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
             for p in printable:
-                all_table_lines.append(p.to_table_line())
+                all_table_lines.append(p.to_table_line(note_mark=_mark_for(p)))
         else:
             # Component-level header (no instance name — sub-headers carry that)
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
@@ -121,10 +132,10 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
                 for p in printable:
                     p_n = _instance_count(p)
                     if p_n > 1:
-                        all_table_lines.append(p.to_table_line_at(i))
+                        all_table_lines.append(p.to_table_line_at(i, note_mark=_mark_for(p)))
                     elif i == 0:
                         # Scalar param shared across instances: show once
-                        all_table_lines.append(p.to_table_line())
+                        all_table_lines.append(p.to_table_line(note_mark=_mark_for(p)))
 
     with open(var_filename, 'w') as f:
         f.write(f"% ExoZIPPy Generated Variables - {system.name}\n")
@@ -143,6 +154,8 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
         f.write(r"\startdata" + "\n")
         f.writelines(all_table_lines)
         f.write(r"\enddata" + "\n")
+        for text, mark in note_marks.items():
+            f.write(rf"\tablenotetext{{{mark}}}{{{text}}}" + "\n")
         if tablecomments:
             f.write(rf"\tablecomments{{{tablecomments}}}" + "\n")
         f.write(r"\end{deluxetable*}" + "\n")

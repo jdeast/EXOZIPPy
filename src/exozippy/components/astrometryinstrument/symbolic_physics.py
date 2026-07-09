@@ -5,41 +5,42 @@ import sympy as sp
 # ---------------------------------------------------------
 
 # All parameters are strictly real.
-# Positivity bounds (e.g., jitter > 0) are enforced downstream by defaults.yaml
+# Positivity bounds are enforced downstream by defaults.yaml
 # NOTE: symbol names must match the get_symbol_map keys exactly; the
-# ConfigManager substitutes relation symbols by sym.name, so a mismatched
-# name (e.g. 'jittervar') leaves the symbol unbound in the relations.
-gamma = sp.symbols('gamma', real=True)
+# ConfigManager substitutes relation symbols by sym.name.
 jitter = sp.symbols('jitter', real=True)
 jitter_variance = sp.symbols('jitter_variance', real=True)
+fluxfrac = sp.symbols('fluxfrac', real=True)
+
+comp_key = "astrometryinstrument"
 
 # ---------------------------------------------------------
 # 2. Symbol Map
 # ---------------------------------------------------------
-# Maps SymPy symbols back to the local parameter keys inside the RV Instrument component.
+# Maps SymPy symbols back to the local parameter keys inside the
+# Astrometry Instrument component.
 
 def get_symbol_map(config):
     return {
-        "gamma": "gamma",
         "jitter": "jitter",
-        "jitter_variance": "jitter_variance"
+        "jitter_variance": "jitter_variance",
+        "fluxfrac": "fluxfrac",
     }
 
 # ---------------------------------------------------------
 # 3. Physics Relations
 # ---------------------------------------------------------
-# Units:
-# gamma and jitter are typically in m/s (or whatever your global RV unit is).
+# Units: jitter in mas, jitter_variance in mas^2.
 
 RELATIONS = [
-    # Reparameterization Bridge (Base-10)
-    # Allows the user to provide 'jitter' but the sampler to step in 'logjitter'
+    # Reparameterization bridge: user may provide 'jitter', sampler steps
+    # in 'jitter_variance'
     sp.Eq(jitter_variance, jitter**2)
 ]
 
 
 def get_solver_paths():
     """
-    Returns the equations defining the state of an RV Instrument.
+    Returns the equations defining the state of an Astrometry Instrument.
     """
     return RELATIONS

@@ -1,0 +1,61 @@
+# Injected truth for the simulated G+M binary (see simulate_astrometry.py)
+
+star.G.mass:
+  initval: 0.80
+  sigma: 0.04
+star.G.radius:
+  initval: 0.75
+  sigma: 0.05
+star.G.teff:
+  initval: 5300
+  sigma: 100
+star.G.feh:
+  initval: 0.0
+  sigma: 0.1
+
+star.G.ra:
+  initval: 150.0
+  init_scale: 5.0e-8      # deg; ~0.15 mas
+star.G.dec:
+  initval: 35.0
+  init_scale: 5.0e-8
+star.G.pm_ra:
+  initval: 120.0
+  init_scale: 0.05
+star.G.pm_dec:
+  initval: -80.0
+  init_scale: 0.05
+star.G.distance:
+  initval: 20.0
+  init_scale: 0.05
+
+planet.M.mass:
+  initval: 261.9        # 0.25 Msun in jupiterMass
+  init_scale: 5.0
+planet.M.radius:
+  initval: 3.0
+  sigma: 0              # not constrained by astrometry
+
+orbit.M.period:
+  initval: 1095.75
+  init_scale: 2.0
+orbit.M.tc:
+  initval: 2457549.6369
+  init_scale: 2.0
+orbit.M.secosw:
+  initval: 0.33933      # e = 0.35, omega_* = 55 deg
+  init_scale: 0.01
+orbit.M.sesinw:
+  initval: 0.48462
+  init_scale: 0.01
+orbit.M.bigomega:
+  initval: 210.0
+orbit.M.cosi:
+  initval: 0.46947      # i = 62 deg
+  init_scale: 0.005
+
+# The M dwarf contributes 2% of the light in the absolute-imaging band,
+# shrinking the photocenter orbit; fixed at the injected value (sigma: 0
+# is the component default).
+astrometryinstrument.GroundAbs.fluxfrac:
+  initval: 0.02

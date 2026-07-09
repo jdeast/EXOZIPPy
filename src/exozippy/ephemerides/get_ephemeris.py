@@ -32,8 +32,12 @@ def get_ephemeris(target_id, start_time, stop_time, step='1h', outfile=None):
                    location='500@0',
                    epochs={'start': start_time, 'stop': stop_time, 'step': step})
 
-    # Retrieve vectors (units are AU and AU/day by default)
-    vecs = obj.vectors()
+    # Retrieve vectors (units are AU and AU/day by default).
+    # refplane='earth' returns ICRF/J2000 *equatorial* coordinates, matching
+    # astropy's get_body_barycentric used for observer_location='earth'.
+    # The astroquery default (refplane='ecliptic') silently returns ecliptic
+    # coordinates, rotated 23.4 deg from what the projection math assumes.
+    vecs = obj.vectors(refplane='earth')
 
     # Convert dates to MJD for easy interpolation later
     # vecs['datetime_jd'] is the Julian Date
@@ -49,7 +53,8 @@ def get_ephemeris(target_id, start_time, stop_time, step='1h', outfile=None):
     if outfile is None:
         outfile = f"ephemeris_{target_id.replace('-', 'm')}.txt"
 
-    header = f"Target: {target_id} (Center: 500@0)\nSource: JPL Horizons\nColumns: MJD, X [AU], Y [AU], Z [AU]"
+    header = (f"Target: {target_id} (Center: 500@0, frame: ICRF/J2000 equatorial)\n"
+              f"Source: JPL Horizons\nColumns: BJD_TDB, X [AU], Y [AU], Z [AU]")
 
     np.savetxt(outfile, data, header=header, fmt=['%.8f', '%.12f', '%.12f', '%.12f'])
     logger.info(f"Ephemeris saved to {outfile}")

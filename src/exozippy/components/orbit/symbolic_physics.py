@@ -11,6 +11,7 @@ ecosw, esinw = sp.symbols('ecosw esinw', real=True)
 m_total = sp.symbols('m_total', real=True) # Needs to be mapped to the planet's m_total
 M_c = sp.symbols('M_c', real=True)
 t_s, f_s, E_s, M_s, n = sp.symbols('t_s f_s E_s M_s n', real=True)
+bigomega, xbigomega, ybigomega = sp.symbols('bigomega xbigomega ybigomega', real=True)
 
 comp_key = "orbit"
 
@@ -21,10 +22,20 @@ def get_symbol_map(config):
         "secosw": "secosw",
         "sesinw": "sesinw",
         "ecc": "ecc",
+        # omega must be mapped: without it the relations instantiate with a
+        # bare shared 'omega' symbol, user omega initvals never bind, and
+        # secosw is solved from ecc = secosw^2 + sesinw^2 with an
+        # unresolvable sign ambiguity (wrong-branch omega ~ 180 deg).
+        "omega": "omega",
+        "ecosw": "ecosw",
+        "esinw": "esinw",
         "cosi": "cosi",
         "inc": "inc",
         "sini": "sini",
-        "tc": "tc"
+        "tc": "tc",
+        "bigomega": "bigomega",
+        "xbigomega": "xbigomega",
+        "ybigomega": "ybigomega",
     }
 
 RELATIONS = [
@@ -46,6 +57,14 @@ RELATIONS = [
 
     sp.Eq(inc, sp.acos(cosi)),
     sp.Eq(sini, sp.sin(inc)),
+
+    # Ascending-node direction vector (same sampler geometry as the
+    # microlensing trajectory angle alpha): the engine uses these only
+    # forward (bigomega -> xbigomega, ybigomega) to seed the unit-circle
+    # direction from a user-supplied bigomega; the sampled xbigomega and
+    # ybigomega have N(0,1) priors, giving a uniform marginal on bigomega.
+    sp.Eq(xbigomega, sp.cos(bigomega)),
+    sp.Eq(ybigomega, sp.sin(bigomega)),
 
     # the solver hangs on transcendental equations
     #sp.Eq(t_p, tc - (M_c / (2*sp.pi/period))),

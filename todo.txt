@@ -82,6 +82,15 @@
   - astrometry
    - verified gaia with simulated astrometry, HIP example.
    - verify with GJ105 (2D data path)
+   - investigate the bigomega 0/180 fold for no-RV fits: the ybigomega >= 0
+     truncation biases boundary-hugging posteriors (HIP1349: Omega =
+     176.5 +/- 2.7 vs DMSA 172.6 +/- 3.4; zero origin-crossings in 16k
+     draws because the crossing sweeps Omega through 90 at finite radius).
+     Candidate fix: drop the y bound (full circle; the exact degenerate
+     modes are antipodal, so straight lines through the origin connect
+     them with NO likelihood barrier, like xalpha/yalpha) and fold
+     (bigomega, omega, tc) mod 180 at reporting time; alternative: rotate
+     the cut to bigomega_init +/- 90 so the wall stays away from the mode.
   - nbody
   - doppler tomography
 
