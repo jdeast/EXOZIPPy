@@ -32,5 +32,10 @@ Omega = 352.6 deg, parallax = 43.45 mas.
 Caveats (demo, not publication): FAST and NDAC abscissae of the same
 orbit are correlated (IA10) but treated as independent; the companion is
 assumed dark, so the fitted "companion mass" describes the photocenter
-orbit; with no RVs the (Omega, omega) -> (Omega+180, omega+180)
-degeneracy is unbroken.
+orbit.  With photocenter astrometry only (no RVs), (Omega, omega) and
+(Omega+180, omega+180) are exactly degenerate, so EXOZIPPy restricts
+Omega to [0, 180] deg (and notes this in the LaTeX table).  The DMSA/O
+solution quotes Omega = 352.6 deg, which lies in the other mode: the fit
+automatically remaps the starting point and should recover
+Omega ~ 172.6 deg, omega ~ 184.7 deg (the degenerate partner of the
+published values).

@@ -12,8 +12,10 @@ component:
 - `mode: rel` -- relative astrometry (time, separation, position angle)
   of the companion with respect to the primary (a_rel = 106 mas).
 
-There are no RVs, so the (Omega, omega) -> (Omega+180, omega+180)
-degeneracy is unbroken; the fit starts at the injected mode.
+There are no RVs, but the relative astrometry observes which side of the
+primary the companion is on, so the (Omega, omega) -> (Omega+180,
+omega+180) degeneracy of photocenter-only fits does not apply here and
+Omega is sampled over the full circle.
 
 ```
 poetry run python simulate_astrometry.py   # regenerate the data

@@ -7,8 +7,11 @@ logger_level: INFO
 # HIP 1349 (HD 1273): real Hipparcos 1-D epoch astrometry (the 1997
 # Intermediate Astrometric Data) of a G8V star with a 411-day DMSA/O
 # photocenter orbit.  See get_hipparcos_iad.py and README.md.
-# No RVs: (Omega, omega) <-> (Omega+180, omega+180) remains degenerate,
-# and the companion is assumed dark (the fit describes the photocenter).
+# Photocenter-only (no RVs): (Omega, omega) <-> (Omega+180, omega+180) is
+# exactly degenerate, so Omega is restricted to [0, 180] deg and the
+# DMSA/O starting point (Omega = 352.6) is automatically remapped to its
+# degenerate partner.  The companion is assumed dark (the fit describes
+# the photocenter orbit).
 
 star:
   - name: "A"
