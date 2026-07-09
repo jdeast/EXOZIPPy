@@ -19,14 +19,13 @@ star.0.feh:
 orbit.0.period:
   initval: 2.9895933
 orbit.0.tc:
-  initval: 2456190.302013
+  #initval: 2456190.302013
+  initval: 2459634.3
   #init_scale: 0.0055082686
 orbit.0.cosi:
   initval: 0.11996
-  sigma: 0
 planet.0.radius:
   initval: 1.706
-  sigma: 0.0
 rvinstrument.EXPERT.gamma:
   #init_scale: 11.1130411925
 rvinstrument.FIES.gamma:
