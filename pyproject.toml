@@ -41,9 +41,25 @@ numba = ">=0.65.1,<0.66.0"
 astroquery = ">=0.4.7"
 gaiadr3-zeropoint = ">=0.0.1"
 
+# Optional: microlensing extra (pip install exozippy[microlensing] / poetry install -E microlensing)
+mmexofast = { git = "https://github.com/jenniferyee/MMEXOFAST.git", optional = true }
+sfit-minimizer = { git = "https://github.com/jenniferyee/sfit_minimizer.git", optional = true }
+emcee = { version = "^3.1.6", optional = true }
+
+# jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend (exoplanet-dev/exoplanet-core#143);
+# the prior <0.5.0 cap was a workaround for a pytensor 2.35-2.38 Kepler JAX dispatch bug that
+# no longer applies now that we're on pytensor 3.x.
+jax = ">=0.5.0,<1.0.0"
+jaxlib = ">=0.5.0,<1.0.0"
+numpyro = ">=0.21.0,<1.0.0"
+blackjax = ">=0.8.0,<2.0.0"
+nutpie = ">=0.13.0"
+
 # OS specific dependencies
 mkl = { version = "^2023.0", markers = "sys_platform == 'win32'" }
 mkl-include = { version = "^2023.0", markers = "sys_platform == 'win32'" }
+# NetCDF write backend for idata.to_netcdf(); arviz/xarray no longer pull one
+# in by default (it's an optional "io" extra), but we need it to save traces.
 h5netcdf = "^1.8.1"
 
 [tool.poetry.group.dev.dependencies]
@@ -53,26 +69,10 @@ pre-commit = ">=4.6.0,<5.0.0"
 ipykernel = ">=7.2.0,<8.0.0"
 scipy-stubs = ">=1.17.1.5,<2.0.0.0"
 pandas-stubs = "=3.0.3.260530,<4.0.0.0"
-
-# Optional dependencies for JAX support
-# jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend (exoplanet-dev/exoplanet-core#143);
-# the prior <0.5.0 cap was a workaround for a pytensor 2.35-2.38 Kepler JAX dispatch bug that
-# no longer applies now that we're on pytensor 3.x.
-jax = { version = ">=0.5.0,<1.0.0", optional = true }
-jaxlib = { version = ">=0.5.0,<1.0.0", optional = true }
-numpyro = { version = ">=0.21.0,<1.0.0", optional = true }
-blackjax = { version = ">=0.8.0,<2.0.0", optional = true }
-nutpie = { version = ">=0.13.0", optional = true }
 pytest-timeout = "^2.4.0"
 
-
-[tool.poetry.group.microlensing.dependencies]
-mmexofast = {git = "https://github.com/jenniferyee/MMEXOFAST.git"}
-sfit-minimizer = {git = "https://github.com/jenniferyee/sfit_minimizer.git"}
-emcee = "^3.1.6"
-
 [tool.poetry.extras]
-jax = ["jax", "jaxlib", "numpyro", "blackjax", "nutpie"]
+microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]
