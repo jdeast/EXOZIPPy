@@ -382,7 +382,16 @@ class AstrometryInstrument(Component):
         dec = get(star.dec.label, d["dec_ref"])
         pm_ra = get(star.pm_ra.label, 0.0)
         pm_dec = get(star.pm_dec.label, 0.0)
-        plx = get(star.parallax.label, 0.0)
+        # parallax is a derived parameter and is usually absent from
+        # posterior draws; falling back to 0 silently removed the parallax
+        # wiggles from the plots.  Recover it from the sampled distance.
+        plx = point.get(star.parallax.label)
+        if plx is not None:
+            plx = np.atleast_1d(plx)[s]
+        else:
+            dist = get(star.distance.label,
+                       np.atleast_1d(star.distance.initval)[s])
+            plx = 1000.0 / dist
 
         dE = (ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS + pm_ra * dt_yr + plx * d["P_E"]
         dN = (dec - d["dec_ref"]) * RAD2MAS + pm_dec * dt_yr + plx * d["P_N"]
@@ -487,8 +496,10 @@ class AstrometryInstrument(Component):
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
         dE_orb, dN_orb = self._compiled_photo[i](t_dense.astype(np.float64), *vals)
+        axL.plot(dE_lin, dN_lin, ":", color="tab:blue", lw=0.8, zorder=1,
+                 label="pm + parallax")
         axL.plot(dE_lin + dE_orb, dN_lin + dN_orb, "-", color="0.4", lw=0.8,
-                 zorder=1, label="pm + parallax + orbit")
+                 zorder=2, label="pm + parallax + orbit")
 
         dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
         dE_orb_o, dN_orb_o = self._compiled_photo[i](t.astype(np.float64), *vals)
