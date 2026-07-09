@@ -337,15 +337,56 @@ def test_bigomega_halfplane_without_rvs():
     assert "degenerate" in orbit.manifest["bigomega"]["table_note"]
     assert "degenerate" in orbit.manifest["omega"]["table_note"]
 
-    # Relative astrometry observes which side of the primary the companion
-    # is on, breaking the degeneracy: no restriction in that case.
+    # The degeneracy is a reflection through the sky plane, invisible to
+    # ALL astrometry including relative: the restriction applies to
+    # rel-mode-only systems too.
     rel = _DummySystem()
     rel.config = {"orbit": [{}],
                   "astrometryinstrument": [{"mode": "rel"}]}
     orbit_rel = Orbit([{"name": "b"}], ConfigManager({}))
     orbit_rel.register_parameters(system=rel)
-    assert orbit_rel.manifest["xbigomega"] is None
-    assert orbit_rel.manifest["ybigomega"] is None
+    assert np.all(np.atleast_1d(orbit_rel.manifest["ybigomega"]["lower"]) == 0.0)
+
+
+def test_relative_track_invariant_under_node_flip(compiled_sky_functions):
+    """
+    Given: the degenerate transformation (bigomega, omega) ->
+           (bigomega+180, omega+180) with tp held fixed
+    When: the RELATIVE sky track is evaluated
+    Then: it is identical -- the transformation is a reflection through
+          the sky plane, so no astrometry (absolute or relative) can
+          distinguish the two modes; only RVs identify the ascending node
+    """
+    sky_fn, rv_fn = compiled_sky_functions
+    omega, ecc, bigom, cosi = 0.97, 0.35, 3.67, 0.44  # bigomega > 180 deg
+    t = np.linspace(_TC, _TC + _P_DAYS, 101)
+    a = np.array([10.0])
+
+    # tp fixed: shift tc so calc_tp lands on the same tp with omega+pi
+    tp = _tp_from_tc(_TC, _P_DAYS, ecc, omega)
+    tc2 = tp + (_TC - _tp_from_tc(_TC, _P_DAYS, ecc, omega + np.pi))
+
+    vals1 = [np.array([np.log10(_P_DAYS)]), np.array([_TC]),
+             np.array([np.sqrt(ecc) * np.cos(omega)]),
+             np.array([np.sqrt(ecc) * np.sin(omega)]),
+             np.array([cosi]),
+             np.array([np.cos(bigom)]), np.array([np.sin(bigom)])]
+    vals2 = [np.array([np.log10(_P_DAYS)]), np.array([tc2]),
+             np.array([-np.sqrt(ecc) * np.cos(omega)]),
+             np.array([-np.sqrt(ecc) * np.sin(omega)]),
+             np.array([cosi]),
+             np.array([-np.cos(bigom)]), np.array([-np.sin(bigom)])]
+
+    _, _, dE1, dN1 = sky_fn(*vals1, t, a)
+    _, _, dE2, dN2 = sky_fn(*vals2, t, a)
+    np.testing.assert_allclose(dE2, dE1, atol=1e-6)
+    np.testing.assert_allclose(dN2, dN1, atol=1e-6)
+
+    # ... while the RVs of the two modes are NOT the same (sign flip of
+    # the reflex velocity), which is what actually breaks the degeneracy
+    (rv1,) = rv_fn(*vals1, t, np.array([1.0]))
+    (rv2,) = rv_fn(*vals2, t, np.array([1.0]))
+    assert np.max(np.abs(rv1 - rv2)) > 0.5
 
 
 def test_bigomega_seed_above_180_remaps_to_degenerate_partner():

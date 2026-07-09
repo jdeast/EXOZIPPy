@@ -12,10 +12,14 @@ component:
 - `mode: rel` -- relative astrometry (time, separation, position angle)
   of the companion with respect to the primary (a_rel = 106 mas).
 
-There are no RVs, but the relative astrometry observes which side of the
-primary the companion is on, so the (Omega, omega) -> (Omega+180,
-omega+180) degeneracy of photocenter-only fits does not apply here and
-Omega is sampled over the full circle.
+There are no RVs, so the (Omega, omega) -> (Omega+180, omega+180)
+degeneracy is exact -- it is a reflection through the sky plane,
+invisible to all astrometry (absolute AND relative); only RVs identify
+which node is ascending.  EXOZIPPy therefore restricts Omega to
+[0, 180] deg (noted in the LaTeX table), and the injected mode
+(Omega = 210, omega = 55) is automatically remapped at initialization to
+its degenerate partner: the fit should recover Omega ~ 30 deg,
+omega ~ 235 deg.
 
 ```
 poetry run python simulate_astrometry.py   # regenerate the data

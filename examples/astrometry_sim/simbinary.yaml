@@ -6,9 +6,11 @@ logger_level: INFO
 
 # Fully simulated nearby G+M binary: 2-D absolute astrometry of the
 # photocenter (luminous companion, fluxfrac = 0.02) plus relative
-# separation/PA measurements of the companion.  No RVs, but the relative
-# astrometry breaks the (Omega, omega) -> (Omega+180, omega+180)
-# degeneracy of photocenter-only fits.  See simulate_astrometry.py.
+# separation/PA measurements of the companion.  No RVs: the
+# (Omega, omega) -> (Omega+180, omega+180) degeneracy is exact, so Omega
+# is restricted to [0, 180] and the injected mode (Omega = 210) is
+# automatically remapped to its degenerate partner (Omega ~ 30,
+# omega ~ 235).  See simulate_astrometry.py.
 
 star:
   - name: "G"

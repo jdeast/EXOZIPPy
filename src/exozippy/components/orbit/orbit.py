@@ -92,23 +92,13 @@ class Orbit(Component):
             self.manifest["ybigomega"] = None
             self.manifest["bigomega"] = "default"
 
+            # The (bigomega, omega) <-> (bigomega+180, omega+180)
+            # transformation is a reflection through the sky plane
+            # (z -> -z): invisible to ANY astrometry, absolute or relative.
+            # Only radial information (RVs) identifies the ascending node.
             has_rv = (hasattr(system, 'rvinstrument')
                       or 'rvinstrument' in topology_keys)
-            # Relative astrometry also breaks the (bigomega, omega) <->
-            # (bigomega+180, omega+180) degeneracy: it observes which side
-            # of the primary the companion is on (the transformation flips
-            # the relative track).  Only unresolved (photocenter-only)
-            # astrometry without RVs leaves it unbroken.
-            astro = getattr(system, 'astrometryinstrument', None)
-            if astro is not None and hasattr(astro, 'modes'):
-                has_rel = 'rel' in astro.modes
-            else:
-                entries = []
-                if hasattr(system, 'config') and hasattr(system.config, 'get'):
-                    entries = system.config.get('astrometryinstrument') or []
-                has_rel = any(isinstance(c, dict) and c.get('mode', 'gaia') == 'rel'
-                              for c in entries)
-            if not has_rv and not has_rel:
+            if not has_rv:
                 self._restrict_bigomega_halfplane(shape)
 
         i180_arr = np.atleast_1d(getattr(self, 'i180', False)) | has_astrometry
@@ -116,21 +106,22 @@ class Orbit(Component):
         self.manifest["cosi"] = {"lower": derived_lowers}
 
     def _restrict_bigomega_halfplane(self, shape):
-        """Photocenter-only astrometry: restrict bigomega to [0, 180] deg.
+        """Astrometry without RVs: restrict bigomega to [0, 180] deg.
 
-        For unresolved astrometry, (bigomega, omega_*) and (bigomega+180,
-        omega_*+180) produce identical photocenter tracks; RVs or relative
-        astrometry distinguish them.  Bounding ybigomega >= 0 selects the
-        bigomega in [0, 180] mode.  Seeds in (180, 360) are remapped to the
-        equivalent solution -- which flips (xbigomega, ybigomega) AND
-        (secosw, sesinw), and shifts tc so the orbit's position-vs-time is
+        (bigomega, omega_*) and (bigomega+180, omega_*+180) is a reflection
+        through the sky plane, so it produces identical astrometry of every
+        kind (absolute, epoch, and relative); only RVs identify which node
+        is ascending.  Bounding ybigomega >= 0 selects the bigomega in
+        [0, 180] mode.  Seeds in (180, 360) are remapped to the equivalent
+        solution -- which flips (xbigomega, ybigomega) AND (secosw,
+        sesinw), and shifts tc so the orbit's position-vs-time is
         unchanged.  A table note documents the artificial boundary on
         omega_* and bigomega.
         """
-        note = (r"With photocenter astrometry but no RVs or relative "
-                r"astrometry, $(\Omega, \omega_*)$ and "
+        note = (r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
                 r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
-                r"degenerate; $\Omega$ is artificially restricted to "
+                r"degenerate (which node is ascending is unknown); "
+                r"$\Omega$ is artificially restricted to "
                 r"$[0^\circ, 180^\circ]$ to select one mode.")
 
         # NOTE: this runs at stage 2, BEFORE the relaxation engine, so only
@@ -252,9 +243,9 @@ class Orbit(Component):
         the node at which the body recedes from the observer -- consistent
         with the sign of get_radial_velocity (the primary crosses its
         ascending node at omega_* + f = 0, where its RV is maximal).
-        For photocenter-only astrometry (no RVs, no relative astrometry),
-        (bigomega, omega) and (bigomega+180, omega+180) are degenerate;
-        see _restrict_bigomega_halfplane.
+        Without RVs, (bigomega, omega) and (bigomega+180, omega+180) are
+        exactly degenerate for astrometry of every kind (a reflection
+        through the sky plane); see _restrict_bigomega_halfplane.
         """
         t_grid = t[:, None]
         tp = self.tp.value[orbit_map][None, :]

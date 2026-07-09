@@ -36,11 +36,12 @@ Per-instrument config keys:
 Conventions follow EXOFASTv2: omega is the argument of periastron of the
 primary's orbit (omega_*); bigomega is the position angle of the ascending
 node (East of North), where the ascending node is the node at which the
-body recedes from the observer.  See Orbit.get_sky_position.  For
-photocenter-only fits (no RVs, no relative astrometry) the exact
-(bigomega, omega) <-> (bigomega+180, omega+180) degeneracy is handled by
-restricting bigomega to [0, 180] (Orbit._restrict_bigomega_halfplane),
-with a table note documenting the artificial boundary.
+body recedes from the observer.  See Orbit.get_sky_position.  Without
+RVs, (bigomega, omega) <-> (bigomega+180, omega+180) is exactly
+degenerate for astrometry of every kind (which node is ascending is
+unknowable from sky-plane data); this is handled by restricting bigomega
+to [0, 180] (Orbit._restrict_bigomega_halfplane), with a table note
+documenting the artificial boundary.
 
 Model limitations (v1): the photocenter wobble sums over all planets with
 a single per-instrument companion flux fraction (fluxfrac, default 0 =
