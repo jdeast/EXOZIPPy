@@ -10,6 +10,7 @@ transit:
   jitter_variance:
     lower: -1000.0
     upper: 100000.0
+    initval: 0.0
     init_scale: 0.000001
     unit: ""
     internal_unit: ""
