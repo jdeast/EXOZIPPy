@@ -1,37 +1,25 @@
-* write unit tests for high coverage
-  - add GitHub Actions workflow (.github/workflows/test.yml) to run pytest on
-    every push, so collaborator commits are also tested (pre-commit only covers
-    local commits and can be bypassed or not implemented by devs)
+* CI
+  - more unit tests for higher coverage
+  - unit test speed optimization
+  - GitHub Actions (.github/workflows/test.yml)
+    - now runs pytest for every commit to master
+      - but fails? investigate
+    - make a requirement for push?
+    - expand to all branches?
+    - eventually, after the official release, we'll forbid direct push to master
 
 * user-linkable parameters in params.yaml
-  - equality:   orbit.b.omega: {expr: "orbit.A.omega + pi"}
-  - inequality (dynamic lower bounds): (star.B.av: {lower: "star.A.av"})
-  - same-orbit: star.A.age: {expr: "star.B.age"}
+  - done but needs validation
 
 * more features/components:
   - microlensing
-    - MulensModel Op
-     - PSPL: DONE
-     - 2L1S: Done
-     - Need finite source effects + limb darkening
-      - band component scaffold DONE (band/band.py)
-      - but band_ndx stored in mulensinstrument is never wired into the magnification Op
-      - LD coefficients not yet passed to get_magnification_op
-    - binary source (2L2S / 1L2S): NOT DONE
-      - source_bodies list structure and NotImplementedError guard are in place
-      - needs: t_0, u_0, rho vectorized to (N_events, N_sources)
-      - needs: f_source reshaped to (N_instruments, N_sources) in mulensinstrument
-      - needs: model_flux = sum_s(f_source[i,s] * A_s) + f_blend[i] in build_likelihood
-      - needs: q_source parameterization generalized (currently 1 scalar per instrument)
-      - needs: BinaryLensMagOp extended or new 2L2S Op
-    - triple/N lens direct-VBM backend: DONE (2026-07-04)
-      - VBMDirectMagOp (op.py) handles n_lens_bodies >= 3 via VBM
-        SetLensGeometry + MultiMag2 (Multipoly method for N=3, Nopoly for N=4+);
-        lens.py:554's NotImplementedError now only fires for the mulensmodel
-        backend (still binary-capped, by MulensModel itself)
-      - trajectory-frame lens geometry (companion j at s_j*(cos a_j,-sin a_j)
-        from the primary, CoM origin, mass fractions summing to 1) verified to
-        reduce exactly to the binary case at N=2 (8e-5, i.e. VBM's own Tol)
+     - limb darkening priors from table/atmosphere
+     - standardize band with SED component
+    - binary source (2L2S / 1L2S):
+      - Done but needs testing/validation
+      - generalization to N sources?
+    - triple/N lens direct-VBM backend:
+      - Done but needs testing/validation
       - remaining gap: 3+ body mlens_total/q initvals require explicit body
         masses in the params file (the symbolic relaxation engine's mass-sum/q
         relations are binary-only; see symbolic_physics.get_symbol_map) — a
@@ -39,30 +27,21 @@
       - untested at scale: MultiMag2 cost for N>=3 is ~30x a binary call
         (~240ms vs ~7ms per 870-epoch light curve in a quick check); no
         benchmark yet on a real 3-body example config
-    - point-source (finite_source: False) NaN bug: DONE (2026-07-07)
-      - VBMDirectMagOp._magnify (op.py) called VBM's BinaryMag2/MultiMag2
-        with rho=0.0 for near-caustic epochs (the far-field guard only
-        reroutes distant epochs to the point-source call); VBM's
-        finite-source integrator returns NaN for an exactly-zero source
-        radius. Fixed by dispatching on self.use_rho (set once from the
-        user's finite_source config at Op construction) instead of the
-        per-call rho value. Verified: unit test
-        (test_vbm_direct_point_source_is_finite_near_and_far) + a full
-        55,000-step production PTDE run on DC2018_128 with
-        finite_source: False completing with no NaN (previously crashed at
-        initialization).
-    - confirm (and document) conventions (origin, alpha, parallax sign)
+    - conventions
+      - confirm (and document) our conventions (origin, alpha, parallax sign)
+      - derive other conventions?
     - explore samplers and parameterizations
       - identify best practices
       - make templates for ideal workflows for examples
     - explore degeneracies (close/wide, u_0 sign, alpha ± pi)
+    - provide tools to isolate/summarize degenerate solutions
   - transits
     - ttvs
     - long cadence
     - light travel time
     - limb darkening
       - compute our own table using SED infrastructure?
-        - self consistency is great
+        - self-consistency is great
         - generality
           - support all SVO bands
         - faster?
@@ -75,6 +54,9 @@
         - The soft shield (sigmoid) guides the sampler and protects the physics.
         - The hard shield (clip) is a stop to protect the math (it must be impossible to draw a NaN likelihood)
       - omega analogous to alpha
+  - Generic instrument class
+    - parent to rvinstrument, mulensinstrument, transitinstrument, astrometryinstrument
+    - defines GPs, etc
   - GPs
     - both RVs and Transits, periodic or red
     - mulensing? is that useful?
@@ -98,25 +80,22 @@
    - Mann
    - Torres
   - astrometry
-   - especially gaia data handling
+   - verified gaia with simulated astrometry, HIP example.
+   - verify with GJ105 (2D data path)
   - nbody
   - doppler tomography
 
 * samplers
- - DEMC is implemented but not well exercised
+ - DEMC is implemented but not wired in (replace with PTDE)
   - Required local patch of PyMC bug
-  - Implemented hybrid of DEMetropolisZ and DEMetropolis to take advantage of exploration benefits of intra-chain exchange (DEMetropolis) while maintaining independence for proper convergence stats (DEMetropolisZ uses its own history)
-   - This is better than EXOFASTv2's sampler, which is equivalent to DEMetropolis/setting n_groups=1
  - Implemented Parallel tempering + Differential Evolution sampler, analogous to EXOFASTv2's sampler
-  - Better than HMC for multi-modal exploration (like we expect for mulensing)
+  - Probably better than HMC for multi-modal exploration (like we expect for mulensing)
   - HMC doesn't play well with gradient free Op implementation of MulensModel
-  - adaptive step sizes to optimize temperature scaling
   - Robbins-Monro temperature ladder adaptation (Vousden, Farr & Mandel 2016,
     ptemcee): after each swap attempt between rungs k and k+1, update
     Δ(log T_k) += γ_n · (accepted - r*), γ_n ~ 1/n^0.7, r* ≈ 0.234;
     freeze ladder at end of tune phase. Eliminates need to hand-tune T_max.
     ptde.py already has adapt_ladder / target_swap_rate stubs for this.
-  - check that we're actually using numpyro when specified
   - PRIORITY (2026-07-04, see hpc_optimization.txt P12 + vbm_fix.txt §7): a
     real 13,370-step DC2018_128 PTDE run showed per-step eval time jump from
     0.14s to a sustained 1.7-2.0s once the DE population dispersed. Root
@@ -176,6 +155,8 @@
       than the walked-back "~19 concurrent" estimate — informs P13's scope
       if/when it's picked up.
 
+* light travel time, other system-level time corrections
+
 * one way expressions for the easy route of Kepler's equation, propagating times to starting conditions
 
 * symbolic_physics and physics.py/defaults.yaml support for t14, tau, t14s, taus, ts, tt?
@@ -202,12 +183,6 @@
   - transit: BLS
   - RV: lomb scargle
   - astrometry: ??
-
-* output new prior file from old run
- - implemented but not well tested, seems to break KELT-4A.
-
-* automatic stopping upon mixing (user-settable R-hat / ESS thresholds;
-  may need to wait for PyMC support)
 
 * config.py cleanup: the unit_scaling (base->user) and get_conversion_factor
   (user->internal) two-layer conversion in resolve() is fragile; we fixed the
