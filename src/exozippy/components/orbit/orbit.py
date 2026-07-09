@@ -1,5 +1,9 @@
+import logging
+
 import numpy as np
 import astropy.units as u
+
+logger = logging.getLogger(__name__)
 
 # pymc/exoplanet imports
 import pytensor.tensor as pt
@@ -74,7 +78,9 @@ class Orbit(Component):
             })
 
         # Astrometry constrains the longitude of the ascending node and
-        # breaks the i <-> 180-i degeneracy, so sample bigomega and allow
+        # breaks the i <-> 180-i degeneracy, so sample the node direction
+        # vector (xbigomega, ybigomega; each N(0,1) -> uniform marginal on
+        # bigomega, like the microlensing trajectory angle alpha) and allow
         # the full inclination range when an astrometry component is active.
         topology_keys = []
         if hasattr(system, 'config') and hasattr(system.config, 'keys'):
@@ -82,11 +88,133 @@ class Orbit(Component):
         has_astrometry = (hasattr(system, 'astrometryinstrument')
                           or 'astrometryinstrument' in topology_keys)
         if has_astrometry:
-            self.manifest["bigomega"] = None
+            self.manifest["xbigomega"] = None
+            self.manifest["ybigomega"] = None
+            self.manifest["bigomega"] = "default"
+
+            has_rv = (hasattr(system, 'rvinstrument')
+                      or 'rvinstrument' in topology_keys)
+            # Relative astrometry also breaks the (bigomega, omega) <->
+            # (bigomega+180, omega+180) degeneracy: it observes which side
+            # of the primary the companion is on (the transformation flips
+            # the relative track).  Only unresolved (photocenter-only)
+            # astrometry without RVs leaves it unbroken.
+            astro = getattr(system, 'astrometryinstrument', None)
+            if astro is not None and hasattr(astro, 'modes'):
+                has_rel = 'rel' in astro.modes
+            else:
+                entries = []
+                if hasattr(system, 'config') and hasattr(system.config, 'get'):
+                    entries = system.config.get('astrometryinstrument') or []
+                has_rel = any(isinstance(c, dict) and c.get('mode', 'gaia') == 'rel'
+                              for c in entries)
+            if not has_rv and not has_rel:
+                self._restrict_bigomega_halfplane(shape)
 
         i180_arr = np.atleast_1d(getattr(self, 'i180', False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         self.manifest["cosi"] = {"lower": derived_lowers}
+
+    def _restrict_bigomega_halfplane(self, shape):
+        """Photocenter-only astrometry: restrict bigomega to [0, 180] deg.
+
+        For unresolved astrometry, (bigomega, omega_*) and (bigomega+180,
+        omega_*+180) produce identical photocenter tracks; RVs or relative
+        astrometry distinguish them.  Bounding ybigomega >= 0 selects the
+        bigomega in [0, 180] mode.  Seeds in (180, 360) are remapped to the
+        equivalent solution -- which flips (xbigomega, ybigomega) AND
+        (secosw, sesinw), and shifts tc so the orbit's position-vs-time is
+        unchanged.  A table note documents the artificial boundary on
+        omega_* and bigomega.
+        """
+        note = (r"With photocenter astrometry but no RVs or relative "
+                r"astrometry, $(\Omega, \omega_*)$ and "
+                r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
+                r"degenerate; $\Omega$ is artificially restricted to "
+                r"$[0^\circ, 180^\circ]$ to select one mode.")
+
+        # NOTE: this runs at stage 2, BEFORE the relaxation engine, so only
+        # user-provided initvals (and defaults) are visible here.  The x/y
+        # direction vector is therefore derived directly from the user's
+        # bigomega initval; the manifest initvals set below override the
+        # relaxation-engine seeds at build time.
+        cm = self.config_manager
+        n_el = int(np.prod(shape))
+
+        def rslv(name):
+            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)["initval"]
+            if val is None:
+                return np.full(n_el, np.nan)
+            return np.atleast_1d(val).astype(float).copy()
+
+        factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
+        bo = rslv("bigomega") * factor_bo   # rad; NaN where unseeded
+
+        # Unseeded elements start at bigomega = 90 deg (center of the
+        # allowed half-plane; y = 0 would sit exactly on the new bound).
+        x_init = np.where(np.isnan(bo), 0.0, np.cos(bo))
+        y_init = np.where(np.isnan(bo), 1.0, np.sin(bo))
+
+        # Seeds with bigomega in (180, 360): remap to the degenerate
+        # partner (bigomega - 180, omega_* + 180, and tc shifted so the
+        # position-vs-time model is unchanged).
+        flip = y_init < 0.0
+        if np.any(flip):
+            logger.warning(
+                f"[{self.prefix}] bigomega initval(s) in (180, 360) deg but no "
+                f"RVs are present; remapping element(s) {np.where(flip)[0]} to "
+                f"the degenerate (bigomega-180, omega+180) solution.")
+
+            # Orientation in the user's own terms: prefer explicit ecc+omega
+            # initvals; otherwise secosw/sesinw (user or defaults).
+            sc0 = rslv("secosw")
+            ss0 = rslv("sesinw")
+            factor_om = cm.get_conversion_factor(self.prefix, "omega") or 1.0
+            om = rslv("omega") * factor_om
+            e_u = rslv("ecc")
+            have_ew = ~np.isnan(om) & ~np.isnan(e_u)
+            sc0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.cos(om), sc0)
+            ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
+
+            tc0 = rslv("tc")
+            # The relaxation engine has not run yet, so a user-supplied
+            # 'period' has not been propagated to logP; prefer it directly.
+            period_user = rslv("period")
+            period = np.where(~np.isnan(period_user), period_user,
+                              10.0 ** rslv("logP"))
+
+            def _M_c(ecc, w):
+                E_c = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * (1.0 - np.sin(w)),
+                                       np.sqrt(1.0 + ecc) * np.cos(w))
+                return E_c - ecc * np.sin(E_c)
+
+            ecc0 = np.clip(sc0 ** 2 + ss0 ** 2, 0.0, 0.9999)
+            w0 = np.arctan2(ss0, sc0)
+            n_mm = 2.0 * np.pi / period
+            tp = tc0 - _M_c(ecc0, w0) / n_mm
+            tc_new = tp + _M_c(ecc0, w0 + np.pi) / n_mm
+
+            x_init = np.where(flip, -x_init, x_init)
+            y_init = np.where(flip, -y_init, y_init)
+            sc_init = np.where(flip, -sc0, sc0)
+            ss_init = np.where(flip, -ss0, ss0)
+            tc_init = np.where(flip, tc_new, tc0)
+
+            self.manifest["secosw"] = {**self.manifest["secosw"], "initval": sc_init}
+            self.manifest["sesinw"] = {**self.manifest["sesinw"], "initval": ss_init}
+            half_period = period / 2.0
+            self.manifest["tc"] = {**self.manifest["tc"], "initval": tc_init,
+                                   "lower": tc_init - half_period,
+                                   "upper": tc_init + half_period}
+
+        # Keep seeded boundary values (bigomega exactly 0 or 180) strictly
+        # inside the ybigomega >= 0 bound.
+        y_init = np.maximum(y_init, 1e-6)
+
+        self.manifest["xbigomega"] = {"initval": x_init}
+        self.manifest["ybigomega"] = {"initval": y_init, "lower": 0.0}
+        self.manifest["bigomega"] = {"expr_key": "default", "table_note": note}
+        self.manifest["omega"] = {"expr_key": "default", "table_note": note}
 
     def build_likelihood(self, model, system):
         pass
@@ -124,8 +252,9 @@ class Orbit(Component):
         the node at which the body recedes from the observer -- consistent
         with the sign of get_radial_velocity (the primary crosses its
         ascending node at omega_* + f = 0, where its RV is maximal).
-        Without RV data, (bigomega, omega) and (bigomega+180, omega+180)
-        are degenerate.
+        For photocenter-only astrometry (no RVs, no relative astrometry),
+        (bigomega, omega) and (bigomega+180, omega+180) are degenerate;
+        see _restrict_bigomega_halfplane.
         """
         t_grid = t[:, None]
         tp = self.tp.value[orbit_map][None, :]

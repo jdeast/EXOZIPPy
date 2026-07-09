@@ -6,9 +6,12 @@ import sympy as sp
 
 # All parameters are strictly real.
 # Positivity bounds (e.g., jitter > 0) are enforced downstream by defaults.yaml
+# NOTE: symbol names must match the get_symbol_map keys exactly; the
+# ConfigManager substitutes relation symbols by sym.name, so a mismatched
+# name (e.g. 'jittervar') leaves the symbol unbound in the relations.
 gamma = sp.symbols('gamma', real=True)
 jitter = sp.symbols('jitter', real=True)
-jitter_variance = sp.symbols('jittervar', real=True)
+jitter_variance = sp.symbols('jitter_variance', real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map

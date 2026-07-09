@@ -89,15 +89,37 @@ orbit:
       from_vcve:
         func_name: "calc_omega_from_vcve"
         deps: ["cosw", "sinw"]
+  xbigomega:
+    lower: -100.0
+    upper: 100.0
+    initval: 1.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "x_{\\Omega}"
+    description: "x-component of ascending node direction (N(0,1) prior -> uniform prior on bigomega)"
+  ybigomega:
+    lower: -100.0
+    upper: 100.0
+    initval: 0.0
+    init_scale: 0.01
+    mu: 0.0
+    sigma: 1.0
+    unit: ""
+    internal_unit: ""
+    latex: "y_{\\Omega}"
+    description: "y-component of ascending node direction (N(0,1) prior -> uniform prior on bigomega)"
   bigomega:
-    lower: 0.0
-    upper: 360.0
-    initval: 180.0
-    init_scale: 30.0
     unit: "deg"
     internal_unit: "rad"
     latex: "\\Omega"
     description: "Longitude of Ascending Node"
+    expressions:
+      default:
+        func_name: "calc_bigomega"
+        deps: [ "xbigomega", "ybigomega" ]
   cosi:
     lower: -1.0
     upper: 1.0

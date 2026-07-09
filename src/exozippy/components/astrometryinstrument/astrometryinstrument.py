@@ -36,7 +36,11 @@ Per-instrument config keys:
 Conventions follow EXOFASTv2: omega is the argument of periastron of the
 primary's orbit (omega_*); bigomega is the position angle of the ascending
 node (East of North), where the ascending node is the node at which the
-body recedes from the observer.  See Orbit.get_sky_position.
+body recedes from the observer.  See Orbit.get_sky_position.  For
+photocenter-only fits (no RVs, no relative astrometry) the exact
+(bigomega, omega) <-> (bigomega+180, omega+180) degeneracy is handled by
+restricting bigomega to [0, 180] (Orbit._restrict_bigomega_halfplane),
+with a table note documenting the artificial boundary.
 
 Model limitations (v1): the photocenter wobble sums over all planets with
 a single per-instrument companion flux fraction (fluxfrac, default 0 =
@@ -342,6 +346,18 @@ class AstrometryInstrument(Component):
             on_unused_input="ignore",
         )
 
+        # Orbital elements in internal units (per planet), for the node/
+        # direction annotations of the sky plot.
+        orb = system.orbit
+        omap = system.planet.orbit_map
+        self._compiled_elements = pytensor.function(
+            inputs=param_symbols,
+            outputs=[orb.tp.value[omap], orb.n.value[omap],
+                     orb.ecc.value[omap], orb.omega.value[omap],
+                     orb.bigomega.value[omap]],
+            on_unused_input="ignore",
+        )
+
     def _point_values(self, system, point):
         vals = []
         for p in system.plot_params:
@@ -436,3 +452,116 @@ class AstrometryInstrument(Component):
             plt.tight_layout()
             plt.savefig(f"{filename_prefix}_astrometry_{d['name']}.pdf")
             plt.close()
+
+            if d["mode"] in ("gaia", "abs"):
+                self.plot_sky(system, ref_point, i, filename_prefix)
+
+    def plot_sky(self, system, point, i, filename_prefix="debug"):
+        """
+        Two-panel sky plot for an absolute-astrometry instrument, in the
+        style of El-Badry et al. (2023) Figure 3, but with East to the LEFT
+        (standard on-sky orientation; their Delta-RA axis increases to the
+        right).
+
+        Left: the full path of the photocenter on the sky (proper motion +
+        parallax + orbit) over the data span, with the model position at
+        each observation epoch.
+        Right: the photocenter orbit alone, with the barycenter, the line
+        of nodes, the ascending node (where the photocenter recedes from
+        the observer), and the direction of motion.
+        """
+        d = self.datasets[i]
+        t = d["time"]
+        vals = self._point_values(system, point)
+        fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6))
+
+        # ---------------- left: full path over the data span ----------------
+        t_dense = np.linspace(t.min(), t.max(), 4000)
+        # parallax factors on the dense grid (numpy, same observer)
+        xyz = get_observer_position(t_dense, observer_location=self.observers[i])
+        P_E = xyz[:, 0] * np.sin(d["ra_ref"]) - xyz[:, 1] * np.cos(d["ra_ref"])
+        P_N = (xyz[:, 0] * np.cos(d["ra_ref"]) * np.sin(d["dec_ref"])
+               + xyz[:, 1] * np.sin(d["ra_ref"]) * np.sin(d["dec_ref"])
+               - xyz[:, 2] * np.cos(d["dec_ref"]))
+        d_dense = dict(d, P_E=P_E, P_N=P_N)
+        dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
+        dE_orb, dN_orb = self._compiled_photo[i](t_dense.astype(np.float64), *vals)
+        axL.plot(dE_lin + dE_orb, dN_lin + dN_orb, "-", color="0.4", lw=0.8,
+                 zorder=1, label="pm + parallax + orbit")
+
+        dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
+        dE_orb_o, dN_orb_o = self._compiled_photo[i](t.astype(np.float64), *vals)
+        axL.plot(dE_lin_o + dE_orb_o, dN_lin_o + dN_orb_o, "r.", ms=5,
+                 zorder=2, label="observation epochs")
+        if d["mode"] == "abs":
+            axL.errorbar(d["dE_obs"], d["dN_obs"], xerr=d["err_E"],
+                         yerr=d["err_N"], fmt="o", ms=3, alpha=0.5, zorder=3,
+                         label="data")
+        axL.invert_xaxis()  # East to the left
+        axL.set_aspect("equal", adjustable="datalim")
+        axL.set_xlabel(r"$\Delta\alpha^*$ [mas]")
+        axL.set_ylabel(r"$\Delta\delta$ [mas]")
+        axL.set_title("Path on sky")
+        axL.legend(loc="best", fontsize="small")
+
+        # ---------------- right: orbit alone, with annotations --------------
+        # elements in internal units (per planet)
+        tp_arr, n_arr, ecc_arr, w_arr, bigom_arr = self._compiled_elements(*vals)
+        P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
+        t1 = t.max()
+        t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
+        dE_o, dN_o = self._compiled_photo[i](t_orb.astype(np.float64), *vals)
+        axR.plot(dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit")
+        dE_ep, dN_ep = self._compiled_photo[i](t.astype(np.float64), *vals)
+        axR.plot(dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs")
+        axR.plot(0, 0, "k+", ms=12, mew=2, zorder=4)  # barycenter
+
+        n_planets = len(np.atleast_1d(tp_arr))
+        if n_planets == 1:
+            tp = float(np.atleast_1d(tp_arr)[0])
+            n_mm = float(np.atleast_1d(n_arr)[0])
+            ecc = float(np.atleast_1d(ecc_arr)[0])
+            w = float(np.atleast_1d(w_arr)[0])
+            bigom = float(np.atleast_1d(bigom_arr)[0])
+            P = 2.0 * np.pi / n_mm
+
+            # Line of nodes: through the barycenter at PA = bigomega
+            r_max = 1.1 * np.max(np.hypot(dE_o, dN_o))
+            axR.plot([r_max * np.sin(bigom), -r_max * np.sin(bigom)],
+                     [r_max * np.cos(bigom), -r_max * np.cos(bigom)],
+                     "--", color="0.5", lw=1, zorder=1, label="line of nodes")
+
+            # Ascending node: f = -omega_*; with our conventions the
+            # photocenter crosses it moving AWAY from the observer (max RV)
+            f_node = -w
+            E_node = 2.0 * np.arctan2(
+                np.sqrt(1 - ecc) * np.sin(f_node / 2.0),
+                np.sqrt(1 + ecc) * np.cos(f_node / 2.0))
+            M_node = E_node - ecc * np.sin(E_node)
+            t_node = tp + M_node / n_mm
+            # shift into the plotted window
+            t_node += np.ceil((t_orb[0] - t_node) / P) * P
+            (xn,), (yn,) = self._compiled_photo[i](
+                np.array([t_node], dtype=np.float64), *vals)
+            axR.plot(xn, yn, "o", color="tab:blue", ms=10, mfc="none", mew=2,
+                     zorder=5, label="ascending node")
+
+            # Direction of motion: arrow along the orbit leaving the node
+            (x2,), (y2,) = self._compiled_photo[i](
+                np.array([t_node + 0.06 * P], dtype=np.float64), *vals)
+            axR.annotate("", xy=(x2, y2), xytext=(xn, yn), zorder=6,
+                         arrowprops=dict(arrowstyle="-|>", color="tab:blue",
+                                         lw=2, mutation_scale=22,
+                                         shrinkA=0, shrinkB=0))
+
+        axR.invert_xaxis()  # East to the left
+        axR.set_aspect("equal", adjustable="datalim")
+        axR.set_xlabel(r"$\Delta\alpha^*$ [mas]")
+        axR.set_ylabel(r"$\Delta\delta$ [mas]")
+        axR.set_title("Photocenter orbit")
+        axR.legend(loc="best", fontsize="small")
+
+        fig.suptitle(f"{d['name']} ({system.name})")
+        fig.tight_layout()
+        fig.savefig(f"{filename_prefix}_astrometry_{d['name']}_sky.pdf")
+        plt.close(fig)

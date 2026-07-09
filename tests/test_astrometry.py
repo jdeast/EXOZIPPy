@@ -123,6 +123,8 @@ def compiled_sky_functions():
 
         with pm.Model():
             orbit_comp.register_parameters(system=dummy_system)
+            assert "xbigomega" in orbit_comp.manifest
+            assert "ybigomega" in orbit_comp.manifest
             assert "bigomega" in orbit_comp.manifest
             for param_name in orbit_comp.manifest:
                 orbit_comp.add_parameter(model=pm.modelcontext(None),
@@ -140,7 +142,8 @@ def compiled_sky_functions():
 
             free_inputs = [orbit_comp.logP.value, orbit_comp.tc.value,
                            orbit_comp.secosw.value, orbit_comp.sesinw.value,
-                           orbit_comp.cosi.value, orbit_comp.bigomega.value]
+                           orbit_comp.cosi.value, orbit_comp.xbigomega.value,
+                           orbit_comp.ybigomega.value]
             sky_fn = pytensor.function(
                 inputs=free_inputs + [t_var, a_var],
                 outputs=[dE_star, dN_star, dE_rel, dN_rel],
@@ -158,7 +161,8 @@ def _free_vals(omega, ecc, bigom, cosi):
     return [np.array([np.log10(_P_DAYS)]), np.array([_TC]),
             np.array([np.sqrt(ecc) * np.cos(omega)]),
             np.array([np.sqrt(ecc) * np.sin(omega)]),
-            np.array([cosi]), np.array([bigom])]
+            np.array([cosi]),
+            np.array([np.cos(bigom)]), np.array([np.sin(bigom)])]
 
 
 @pytest.mark.parametrize("case", _CASES,
@@ -297,14 +301,96 @@ def test_bigomega_only_registered_with_astrometry():
     orbit_plain = Orbit([{"name": "b"}], cm)
     orbit_plain.register_parameters(system=plain)
     assert "bigomega" not in orbit_plain.manifest
+    assert "xbigomega" not in orbit_plain.manifest
     assert np.all(np.atleast_1d(orbit_plain.manifest["cosi"]["lower"]) == 0.0)
 
     astro = _DummySystem()
-    astro.config = {"orbit": [{}], "astrometryinstrument": []}
+    astro.config = {"orbit": [{}], "astrometryinstrument": [],
+                    "rvinstrument": []}
     orbit_astro = Orbit([{"name": "b"}], cm)
     orbit_astro.register_parameters(system=astro)
-    assert "bigomega" in orbit_astro.manifest
+    assert "xbigomega" in orbit_astro.manifest
+    assert "ybigomega" in orbit_astro.manifest
+    assert orbit_astro.manifest["xbigomega"] is None  # RVs: full circle
+    assert orbit_astro.manifest["bigomega"] == "default"
     assert np.all(np.atleast_1d(orbit_astro.manifest["cosi"]["lower"]) == -1.0)
+
+
+def test_bigomega_halfplane_without_rvs():
+    """
+    Given: an astrometry system with NO RV instrument
+    When: the orbit manifest is registered
+    Then: ybigomega gets a lower bound of 0 (bigomega in [0, 180]),
+          unseeded elements start at bigomega = 90 deg, and omega/bigomega
+          carry a table note documenting the artificial boundary
+    """
+    astro = _DummySystem()
+    astro.config = {"orbit": [{}], "astrometryinstrument": []}
+
+    orbit = Orbit([{"name": "b"}], ConfigManager({}))
+    orbit.register_parameters(system=astro)
+
+    y_entry = orbit.manifest["ybigomega"]
+    assert np.all(np.atleast_1d(y_entry["lower"]) == 0.0)
+    assert np.all(np.atleast_1d(y_entry["initval"]) == 1.0)
+    assert np.all(np.atleast_1d(orbit.manifest["xbigomega"]["initval"]) == 0.0)
+    assert "degenerate" in orbit.manifest["bigomega"]["table_note"]
+    assert "degenerate" in orbit.manifest["omega"]["table_note"]
+
+    # Relative astrometry observes which side of the primary the companion
+    # is on, breaking the degeneracy: no restriction in that case.
+    rel = _DummySystem()
+    rel.config = {"orbit": [{}],
+                  "astrometryinstrument": [{"mode": "rel"}]}
+    orbit_rel = Orbit([{"name": "b"}], ConfigManager({}))
+    orbit_rel.register_parameters(system=rel)
+    assert orbit_rel.manifest["xbigomega"] is None
+    assert orbit_rel.manifest["ybigomega"] is None
+
+
+def test_bigomega_seed_above_180_remaps_to_degenerate_partner():
+    """
+    Given: a no-RV astrometry system whose bigomega initval is in (180, 360)
+    When: the orbit manifest is registered
+    Then: the seed is remapped to the exactly-degenerate solution:
+          (x, y) -> (-x, -y), (secosw, sesinw) -> (-secosw, -sesinw), and
+          tc shifted so the position-vs-time model is unchanged
+    """
+    ecc, w, bigom, P, tc = 0.3, np.radians(40.0), np.radians(250.0), 100.0, 2455000.0
+    user_params = {
+        "orbit.0.logP": {"initval": np.log10(P)},
+        "orbit.0.tc": {"initval": tc},
+        "orbit.0.secosw": {"initval": np.sqrt(ecc) * np.cos(w)},
+        "orbit.0.sesinw": {"initval": np.sqrt(ecc) * np.sin(w)},
+        "orbit.0.bigomega": {"initval": np.degrees(bigom)},
+    }
+    astro = _DummySystem()
+    astro.config = {"orbit": [{"name": "b"}], "astrometryinstrument": []}
+    cm = ConfigManager(user_params, system_config=astro.config)
+    cm.finalize_user_params()
+    orbit = Orbit([{"name": "b"}], cm)
+    orbit.register_parameters(system=astro)
+
+    x = float(np.atleast_1d(orbit.manifest["xbigomega"]["initval"])[0])
+    y = float(np.atleast_1d(orbit.manifest["ybigomega"]["initval"])[0])
+    assert y >= 0.0
+    bigom_new = np.arctan2(y, x)
+    assert np.isclose(np.mod(bigom_new - (bigom - np.pi), 2 * np.pi), 0.0,
+                      atol=1e-4) or \
+        np.isclose(np.mod(bigom_new - (bigom - np.pi), 2 * np.pi), 2 * np.pi,
+                   atol=1e-4)
+
+    sc = float(np.atleast_1d(orbit.manifest["secosw"]["initval"])[0])
+    ss = float(np.atleast_1d(orbit.manifest["sesinw"]["initval"])[0])
+    assert np.isclose(sc, -np.sqrt(ecc) * np.cos(w), atol=1e-4)
+    assert np.isclose(ss, -np.sqrt(ecc) * np.sin(w), atol=1e-4)
+
+    # tc shift preserves the physical orbit: same time of periastron
+    tc_new = float(np.atleast_1d(orbit.manifest["tc"]["initval"])[0])
+    tp_old = _tp_from_tc(tc, P, ecc, w)
+    tp_new = _tp_from_tc(tc_new, P, ecc, w + np.pi)
+    assert np.isclose(np.mod(tp_new - tp_old, P), 0.0, atol=1e-6) or \
+        np.isclose(np.mod(tp_new - tp_old, P), P, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
