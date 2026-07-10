@@ -1,0 +1,77 @@
+run:
+  name: "DC2018_128"
+
+prefix: "fitresults/DC2018_128"
+#logger_level: DEBUG
+
+# HPC variant of DC2018_128.yaml: run via dc128.job (SGE, -pe mthread 64).
+# sampler.cores below must match dc128.job's "-pe mthread N" exactly. PTDE's
+# cores default is 75% of mp.cpu_count(), which reads the PHYSICAL node's
+# core count, not the number of slots SGE actually granted the job -- on a
+# node with more physical cores than the job's grant, that oversubscribes
+# the job's own allocation (observed: -pe mthread 64 but PTDE spawned 96
+# workers on a 96-core node) and inflates memory further, since PTDE forks
+# one persistent worker per core and every one inherits the parent's full
+# footprint via copy-on-write. If you change -pe mthread in dc128.job,
+# change cores here to match.
+
+# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+#
+# system architecture:
+#   star.0 = Lens      (primary lens host)
+#   star.1 = Source    (background source)
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: False
+
+galacticmodel:
+  - name: "DC2018_128"
+    anchor_idx: 1  # we anchor the galactic model to the source star, star.1
+
+band:
+  - name: "Z087"
+    filter: "Roman.WFI.Z087"
+    ld_law: "linear"
+#  - name: "W149"
+#    filter: "Roman.WFI.W149"
+#    ld_law: "linear"
+
+mulensinstrument:
+  - name: "Roman_Z087"
+    file: "n20180816.Z087.WFIRST18.128.txt"
+    data_format: flux          # file stores normalized flux, not magnitudes
+    observer_location: roman_simulated_2018dc  # MMEXOFAST wfirst_ephemeris_W149.txt, J2000 equatorial
+    band: "Z087"
+#  - name: "Roman_W149"
+#    file: "n20180816.W149.WFIRST18.128.txt"
+#    data_format: flux
+#    observer_location: roman_simulated_2018dc
+#    band: "W149"
+
+parameter_file: "DC2018_128.params.yaml"
+#parameter_file: "DC2018_128.params.2.yaml"
+
+sampler:
+  method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
+  n_temps: 8              # temperature rungs (EXOFASTv2 parity)
+  T_max: 200              # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2*n_params
+  cores: 64               # must match dc128.job's "-pe mthread 64" (see note above)
+  tune: 5000
+  draws: 50000
+  nthin: 1
+  check_curvatures: False
+  recompute_trace: True
+  eval_timeout: 10        # VBMicrolensing can hang for some (s, q); reject and move on
