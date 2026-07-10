@@ -1,6 +1,7 @@
 
 import gc
 import importlib
+import signal
 import time
 import yaml
 import numpy as np
@@ -261,16 +262,27 @@ def run_fit(config):
                             logger.info(f"NUTS: wall-clock limit {maxtime:.0f}s reached")
                             raise KeyboardInterrupt
                 step = pm.NUTS(target_accept=target_accept)
-                idata = pm.sample(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    init=init,
-                    step=step,
-                    cores=cores,
-                    return_inferencedata=True,
-                    callback=nuts_callback,
-                )
+                # Map SIGTERM to Python's default SIGINT handler so a batch
+                # scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`)
+                # can interrupt sampling the same way a terminal Ctrl+C
+                # already does, instead of Python's default SIGTERM action
+                # (immediate termination with no partial trace saved). pm.sample
+                # already handles a KeyboardInterrupt raised mid-sampling
+                # gracefully -- that's exactly how the maxtime cutoff above works.
+                old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
+                try:
+                    idata = pm.sample(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        init=init,
+                        step=step,
+                        cores=cores,
+                        return_inferencedata=True,
+                        callback=nuts_callback,
+                    )
+                finally:
+                    signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
             # Ensure lp is in sample_stats; compute and persist if missing.

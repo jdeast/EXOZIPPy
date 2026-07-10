@@ -179,8 +179,12 @@ def _make_starts(n_chains, raw_start, logp_fn, rng):
 
 
 def _worker_init():
-    """Pool worker: ignore SIGINT so only the parent handles graceful stop."""
+    """Pool worker: ignore SIGINT/SIGTERM so only the parent handles graceful
+    stop. A batch scheduler typically signals the whole process group, and a
+    worker that died mid pool.map() would break the parent's current step
+    (BrokenProcessPool) instead of letting it finish and wrap up cleanly."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 def _map_logp(pool, proposals):
@@ -389,6 +393,12 @@ def ptde_sample(
                rejected by the normal accept/reject logic) and the worker pool is
                recycled, since the stuck worker may never return.
                Has no effect when cores<=1 (no worker pool to enforce it against).
+    maxtime : float | None  — wall-clock budget in seconds; sampling stops
+               gracefully once exceeded, keeping whatever draws were already
+               collected. SIGINT (Ctrl+C) or SIGTERM (e.g. `qsig -s SIGTERM
+               <job_id>` / `kill -TERM <pid>`) trigger the same graceful
+               stop-after-this-step behavior on demand, without waiting for
+               maxtime.
 
     Returns
     -------
@@ -588,15 +598,21 @@ def ptde_sample(
     _check_gen = _convergence_check_schedule() if _do_convergence else None
     _next_check = [next(_check_gen)] if _check_gen else [None]
 
-    def _sigint_handler(sig, frame):
+    def _stop_handler(sig, frame):
         if stop_requested[0]:
-            raise KeyboardInterrupt   # second Ctrl+C: abort immediately
+            raise KeyboardInterrupt   # second signal: abort immediately
         stop_requested[0] = True
         logger.info(
-            "PTDE: stop requested — finishing current step "
-            "(Ctrl+C again to abort immediately)")
+            f"PTDE: stop requested ({signal.Signals(sig).name}) — finishing "
+            "current step (send the signal again to abort immediately)")
 
-    old_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+    # SIGTERM gets the same handler as SIGINT so a batch scheduler (e.g.
+    # `qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`) can request the same
+    # graceful stop-after-this-step behavior as a Ctrl+C at a terminal,
+    # instead of Python's default SIGTERM action (immediate termination,
+    # discarding whatever draws were already collected).
+    old_sigint = signal.signal(signal.SIGINT, _stop_handler)
+    old_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
     try:
         # initial logp evaluations
         flat_starts = [populations[k][i]
@@ -768,6 +784,7 @@ def ptde_sample(
 
     finally:
         signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
         if pool is not None:
             pool.close()
             pool.join()
