@@ -29,8 +29,16 @@ import pytensor
 # Force single-threaded BLAS/OMP in every forked worker.  Without this,
 # numpy (OpenBLAS/MKL) and C extensions (VBBinaryLensing) each spawn their
 # own thread pool, producing n_workers × n_blas_threads threads on a fixed
-# number of physical cores and causing catastrophic scheduler thrash.
-# These must be set BEFORE fork so children inherit them.
+# number of physical cores and causing catastrophic scheduler thrash -- and,
+# separately, each with a memory arena sized to the (over-subscribed) thread
+# count, which is what actually blows up h_vmem once forked N-ways.
+# exozippy/__init__.py already sets these before numpy/pytensor/pymc/arviz/
+# jax are imported at all -- the only point where it's effective, since a
+# native thread pool can't be shrunk after the fact by setting os.environ
+# once numpy et al. are already loaded (import exozippy always runs
+# __init__.py first, before this module). This block is redundant there;
+# kept as a guard for any environment that imports ptde.py without ever
+# importing the exozippy package proper.
 for _tvar in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
               "MKL_NUM_THREADS", "BLAS_NUM_THREADS",
               "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
