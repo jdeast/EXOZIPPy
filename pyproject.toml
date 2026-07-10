@@ -61,6 +61,7 @@ mkl-include = { version = "^2023.0", markers = "sys_platform == 'win32'" }
 # NetCDF write backend for idata.to_netcdf(); arviz/xarray no longer pull one
 # in by default (it's an optional "io" extra), but we need it to save traces.
 h5netcdf = "^1.8.1"
+lxml = ">=5.0"
 
 [tool.poetry.group.dev.dependencies]
 ipdb = ">=0.13.13,<0.14.0"

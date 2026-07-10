@@ -155,7 +155,7 @@ def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
             if stripped.startswith("filters"):
                 line_numfilters = l + 1
             if l == line_numfilters:
-                numfilters = int(stripped[0])
+                numfilters = int(stripped.split()[0])
             if stripped.startswith("lgTef"):
                 header_line = stripped
                 break
@@ -324,29 +324,56 @@ def build_bc_grid(
 
     # 2. For each facility, load all feh files, keeping only the
     # requested columns. We stash them per feh so we can later stack
-    # into one monolithic grid.
+    # into one monolithic grid. Missing facilities/columns trigger
+    # one-time auto-generation from the model spectra (make_bc.py).
     per_facility_frames: Dict[str, Dict[float, pd.DataFrame]] = {}
     for fac, items in by_facility.items():
-        feh_files = _collect_facility_files(bc_root, model, fac)
+        fac_svo = [svo_names[idx] for idx, _ in items]
+        wanted_cols = [mist for _, mist in items]
+
+        try:
+            feh_files = _collect_facility_files(bc_root, model, fac)
+        except (FileNotFoundError, NotImplementedError):
+            from .make_bc import generate_missing_facility
+            if not generate_missing_facility(fac, fac_svo, model, bc_root):
+                raise
+            feh_files = _collect_facility_files(bc_root, model, fac)
         if not feh_files:
             file_dir = bc_root / model / "BCs" / fac
             raise FileNotFoundError(
                 f"No BC files for facility '{fac}' under "
                 f"{file_dir}"
             )
-        wanted_cols = [mist for _, mist in items]
+
+        def _read_all(files):
+            frames_ = {}
+            missing_ = set()
+            for p in files:
+                feh = _parse_feh_from_filename(p.name)
+                df, file_filters = _read_single_bc_file(p)
+                missing_ |= set(wanted_cols) - set(file_filters)
+                frames_[feh] = df
+            return frames_, missing_
+
+        raw_frames, missing = _read_all(feh_files)
+        if missing:
+            # Facility exists but lacks some requested columns; generate
+            # the missing ones (make_bc merges into the existing files
+            # without touching the existing columns).
+            from .make_bc import generate_missing_facility
+            miss_svo = [svo_names[idx] for idx, mist in items if mist in missing]
+            if generate_missing_facility(fac, miss_svo, model, bc_root):
+                raw_frames, missing = _read_all(
+                    _collect_facility_files(bc_root, model, fac))
+        if missing:
+            raise NotImplementedError(
+                f"Bolometric corrections unavailable for ``{sorted(missing)}`` "
+                f"and auto-generation failed; see the log above, or run "
+                f"scripts/make_bc_tables.py manually."
+            )
+
         frames: Dict[float, pd.DataFrame] = {}
-        for p in feh_files:
-            feh = _parse_feh_from_filename(p.name)
-            df, file_filters = _read_single_bc_file(p)
-            missing = set(wanted_cols) - set(file_filters)
-            if missing:
-                warnings.warn(
-                    f"Bolometric corrections not calculated for "
-                    f"``{sorted(missing)}``.\n Removing ``{sorted(missing)}`` from fit. "
-                    f"Future implementation will automate filter calculations.", 
-                    UserWarning)
-                wanted_cols = set(wanted_cols) - missing
+        for feh, df in raw_frames.items():
             keep = ["teff", "logg", "feh", "Av"] + wanted_cols
             frames[feh] = df[keep].copy()
         per_facility_frames[fac] = frames
