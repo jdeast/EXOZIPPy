@@ -32,6 +32,14 @@ Per-instrument config keys:
   epoch             : reference epoch [BJD_TDB] for ra/dec/pm (default:
                       mean time of all gaia/abs observations)
   sep_unit          : rel mode separation unit (default 'mas')
+  band              : name of a band: block (filter identity for the
+                      SED-derived fluxfrac below)
+  companion_star_ndx: index of the star modeling the luminous companion.
+                      When band, companion_star_ndx, and a sed: block are
+                      all present, the photocenter flux fraction is
+                      derived from the SED (beta = F_c/(F_c+F_host) in
+                      the band) instead of being sampled; the sampled
+                      fluxfrac element is fixed (unused).
 
 Conventions follow EXOFASTv2: omega is the argument of periastron of the
 primary's orbit (omega_*); bigomega is the position angle of the ascending
@@ -194,9 +202,59 @@ class AstrometryInstrument(Component):
             "fluxfrac": None,
         }
 
+        # SED-derived fluxfrac: instruments with band + companion_star_ndx
+        # in a system with a sed: block get their photocenter flux
+        # fraction from the SED (see _sed_beta_node). Fix the sampled
+        # fluxfrac element (it is unused) unless the user already
+        # configured it.
+        self._sed_fluxfrac = [False] * self.n_elements
+        if "sed" in (self.config_manager.system_config or {}):
+            for i, c in enumerate(self.config):
+                if c.get("band") is None or c.get("companion_star_ndx") is None:
+                    continue
+                self._sed_fluxfrac[i] = True
+                key = f"{self.prefix}.{i}.fluxfrac"
+                existing = self.config_manager.user_params.get(key)
+                if existing is None:
+                    self.config_manager.user_params[key] = {"sigma": 0}
+                elif isinstance(existing, dict):
+                    existing.setdefault("sigma", 0)
+
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)
     # ------------------------------------------------------------------
+    def _sed_beta_node(self, system, i):
+        """
+        Photocenter flux fraction for instrument i: the SED-predicted
+        beta = F_companion / (F_companion + F_host) in the instrument's
+        band when configured (see module docstring), else the sampled
+        fluxfrac element. Falls back to the sampled parameter with a
+        warning if the band's filter is missing from the SED's BC grid.
+        """
+        if not getattr(self, "_sed_fluxfrac", [False] * self.n_elements)[i]:
+            return self.fluxfrac.value[i]
+
+        sed = system.sed
+        band_name = self.config[i].get("band")
+        band_names = list(system.band.names) if hasattr(system, "band") else []
+        if band_name not in band_names:
+            raise ValueError(
+                f"astrometryinstrument {self.names[i]} references unknown "
+                f"band '{band_name}'. Available bands: {band_names}.")
+        filter_key = system.band.filter_mist[band_names.index(band_name)]
+        if not sed.has_filter(filter_key):
+            logger.warning(
+                f"astrometryinstrument {self.names[i]}: band filter "
+                f"'{filter_key}' is not in the SED's BC grid; using the "
+                f"sampled fluxfrac (fixed at its initval).")
+            return self.fluxfrac.value[i]
+
+        host = int(self.star_map[i])
+        comp = int(self.config[i]["companion_star_ndx"])
+        F_c = 10 ** (-0.4 * sed.predict_star_appmag(comp, filter_key, system))
+        F_h = 10 ** (-0.4 * sed.predict_star_appmag(host, filter_key, system))
+        return F_c / (F_c + F_h)
+
     def _photocenter_amplitude(self, system, beta):
         """Per-planet photocenter semimajor axis in mas: a_rel*(B - beta)*plx."""
         planets = system.planet
@@ -248,7 +306,9 @@ class AstrometryInstrument(Component):
             mode = d["mode"]
             t = d["time"]
             jv = self.jitter_variance.value[i]
-            beta = self.fluxfrac.value[i]
+            beta = self._sed_beta_node(system, i)
+            if self._sed_fluxfrac[i]:
+                pm.Deterministic(f"{self.prefix}.{name}.fluxfrac_sed", beta)
 
             if mode in ("gaia", "abs"):
                 dE, dN = self._absolute_model(system, d, t, beta, has_orbit)
@@ -327,7 +387,7 @@ class AstrometryInstrument(Component):
         # Photocenter orbit (summed over planets), per instrument (beta varies)
         self._compiled_photo = []
         for i in range(self.n_elements):
-            beta = self.fluxfrac.value[i]
+            beta = self._sed_beta_node(system, i)
             a_phot = self._photocenter_amplitude(system, beta)
             dE_orb, dN_orb = system.orbit.get_sky_position(
                 t_input, a_phot, system.planet.orbit_map)

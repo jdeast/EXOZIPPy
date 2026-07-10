@@ -464,11 +464,6 @@ class MulensInstrument(Component):
 
     def build_likelihood(self, model, system):
 
-        if hasattr(system, 'sed'):
-            raise NotImplementedError(
-                "SED-based f_source prior for mulensing instruments is not yet implemented."
-            )
-
         # 1. Constants
         t = pm.Data("mu_time", self.time)
         obs_mag = pm.Data("mu_obs_mag", self.mag)
@@ -534,6 +529,99 @@ class MulensInstrument(Component):
             sigma=sigma,
             observed=obs_mag
         )
+
+        # 5. SED-based source flux constraint (issue #18)
+        if hasattr(system, "sed"):
+            self._build_sed_flux_constraint(model, system)
+
+    def _build_sed_flux_constraint(self, model, system):
+        """
+        Tie each instrument's calibrated baseline source flux to the
+        SED-predicted source magnitude (issue #18).
+
+        The light curve's fluxes live in the data file's magnitude system
+        (F = 10**(-0.4 m)), so -2.5*log10(f_source) is the instrumental
+        source magnitude. A per-lightcurve zeropoint links it to the
+        calibrated SED prediction:
+
+            m_SED = -2.5*log10(f_source) + zp
+
+        zp is realized as a Deterministic, zp_i = m_SED + 2.5*log10(f_s,i),
+        with a Gaussian potential from its (mu, sigma) config (defaults:
+        0 +/- 0.2 mag). This is the analytic marginalization of a zp
+        nuisance tied exactly through the equation above; it adds no
+        sampled dimension and leaves the (log_f_total, q_source)
+        parameterization untouched. sigma=0 is disallowed (an exact zp
+        would make f_source deterministic given the SED; use a small
+        sigma for a well-known calibration instead).
+
+        For binary sources the constraint is on the TOTAL source flux
+        against the SED-predicted blend of all source stars; a per-source
+        flux-ratio (q_flux) constraint is future work.
+
+        Opt-in per instrument, `sed_constrain_blend: true` additionally
+        ties f_blend to the SED-predicted blend of the modeled non-source
+        stars through the same zeropoint (Gaussian potential with
+        `sed_blend_sigma`, default 0.2 mag). f_blend also contains any
+        unrelated field stars, so leave this off unless the blend is
+        understood.
+        """
+        sed = system.sed
+        source_indices = [int(i) for i in system.lens.source_map]
+        n_stars = system.star.n_elements
+        other_indices = [i for i in range(n_stars) if i not in source_indices]
+
+        zp_cfg = self.config_manager.resolve(
+            self.prefix, "zeropoint", shape=(self.n_elements,),
+            names=self.names)
+        zp_mu = np.asarray(zp_cfg.get("mu"), dtype=float)
+        zp_sigma = np.asarray(zp_cfg.get("sigma"), dtype=float)
+
+        for i, name in enumerate(self.names):
+            band_idx = int(self.band_map[i])
+            if band_idx < 0:
+                logger.info(
+                    f"mulensinstrument {name}: no band reference; skipping "
+                    f"SED flux constraint.")
+                continue
+            filter_key = system.band.filter_mist[band_idx]
+            if not sed.has_filter(filter_key):
+                logger.warning(
+                    f"mulensinstrument {name}: band filter '{filter_key}' "
+                    f"is not in the SED's BC grid; skipping SED flux "
+                    f"constraint.")
+                continue
+            if zp_sigma[i] == 0:
+                raise ValueError(
+                    f"mulensinstrument.{name}.zeropoint has sigma=0. An "
+                    f"exact zeropoint would make f_source deterministic "
+                    f"given the SED; give a small nonzero sigma instead "
+                    f"(e.g. 0.01).")
+
+            m_src_pred = sed.predict_blend_appmag(
+                source_indices, filter_key, system)
+            fs_i = pt.maximum(self.f_source.value[i], 1e-30)
+            zp = pm.Deterministic(
+                f"{self.prefix}.{name}.zeropoint",
+                m_src_pred + 2.5 * pt.log10(fs_i))
+            pm.Potential(
+                f"{self.prefix}.{name}.zeropoint_prior",
+                -0.5 * ((zp - zp_mu[i]) / zp_sigma[i]) ** 2)
+
+            if self.config[i].get("sed_constrain_blend", False):
+                if not other_indices:
+                    logger.warning(
+                        f"mulensinstrument {name}: sed_constrain_blend is "
+                        f"set but every modeled star is a source; skipping.")
+                    continue
+                blend_sigma = float(self.config[i].get("sed_blend_sigma", 0.2))
+                m_blend_pred = sed.predict_blend_appmag(
+                    other_indices, filter_key, system)
+                fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
+                m_blend_inst = -2.5 * pt.log10(fb_i) + zp
+                pm.Potential(
+                    f"{self.prefix}.{name}.sed_blend_prior",
+                    -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2)
 
     def compile_plotters(self, model, system):
         """Compile fast PyTensor functions for the lightcurve."""
