@@ -607,6 +607,17 @@ class SED(Component):
         F_sum = pt.sum(10 ** (-0.4 * m[idx]))
         return -2.5 * pt.log10(F_sum)
 
+    def predict_flux_fraction(self, star_idx, filter_key, system):
+        """
+        Fraction of the total flux of all modeled stars contributed by
+        one star in one filter. Used for transit deblending
+        (depth dilution) and the astrometric photocenter fluxfrac.
+        """
+        col = self.filter_column(filter_key)
+        m = self._predicted_appmag_node(system)[:, col]   # (nstars,)
+        F = 10 ** (-0.4 * m)
+        return F[star_idx] / pt.sum(F)
+
     # ------------------------------------------------------------------
     # 4) build_likelihood — Normal likelihood over the .sed filter rows
     #    (blended/differential magnitudes), plus the teffsed/fbolsed
