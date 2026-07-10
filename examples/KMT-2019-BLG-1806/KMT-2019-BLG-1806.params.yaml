@@ -66,10 +66,15 @@ star.Source.feh:
 planet.Companion.radius:
     sigma: 0
 
-# The Source's radius and teff are now constrained through the light
-# curve's calibrated baseline source flux (the sed: block + per-lightcurve
-# zeropoint), so they are free. Seeded near a bulge turnoff star, which
-# is what I_source ~ 18.9 at ~8 kpc implies.
+# The Source's radius and teff are free: the sed: block ties the
+# SED-predicted source I mag to each light curve's baseline source flux
+# through per-lightcurve zeropoints. Note the absolute flux scale comes
+# from the zeropoint PRIOR (0 +/- 0.2 mag per site), not the data -- the
+# light curves only constrain the site-to-site relative calibration, so
+# the source posteriors below are prior-anchored at the ~0.1 mag level.
+# Real catalog photometry in the .sed file would break that degeneracy.
+# Seeded near a bulge turnoff star, which is what I_source ~ 18.9 at
+# ~8 kpc implies.
 star.Source.radius:
     initval: 1.2
 star.Source.teff:
