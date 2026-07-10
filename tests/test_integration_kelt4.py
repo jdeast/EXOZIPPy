@@ -38,7 +38,9 @@ def kelt4_result(tmp_path_factory):
 
     shutil.copytree(
         EXAMPLE_DIR, work_dir,
-        ignore=shutil.ignore_patterns("fitresults"),
+        # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
+        # dangling symlink that would abort the copy.
+        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()
