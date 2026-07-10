@@ -25,6 +25,8 @@ import numpy as np
 import arviz as az
 import multiprocessing as mp
 import pytensor
+import pytensor.tensor as pt
+from pytensor.graph.replace import vectorize_graph
 
 # Force single-threaded BLAS/OMP in every forked worker.  Without this,
 # numpy (OpenBLAS/MKL) and C extensions (VBBinaryLensing) each spawn their
@@ -411,11 +413,36 @@ def ptde_sample(
     logp_fn = model.compile_logp()
     _PTDE_LOGP_FN = logp_fn
 
-    # compile raw→physical function ONCE for the final output conversion
+    # compile raw→physical function ONCE for the final output conversion.
+    # raw_to_phys is the single-sample form, kept for the (rare) eval_timeout
+    # diagnostic log path, which converts exactly one proposal at a time.
+    # raw_to_phys_batched vectorizes the same graph over an extra leading
+    # sample axis (pytensor's vectorize_graph -- adds the batch dim to every
+    # op in the graph rather than looping in Python) and is what the
+    # ensemble-start-plot and final posterior conversions use, since those
+    # can be tens of thousands to millions of samples: the free_RVs +
+    # deterministics graph is pure elementwise/indexing math (each
+    # Parameter's physical-unit conversion; verified empirically that no
+    # deterministic here touches the magnification Ops, which only feed the
+    # likelihood), so it vectorizes cleanly and cuts what was a
+    # Python-level per-sample loop (dominant cost: interpreter + pytensor
+    # call overhead, not the underlying math) down to a handful of batched
+    # calls. See hpc_optimization.txt PROMPT 7.
     output_vars = model.free_RVs + model.deterministics
     raw_to_phys = pytensor.function(
         inputs=model.free_RVs,
         outputs=output_vars,
+        on_unused_input="ignore",
+    )
+    _batched_inputs = [
+        pt.tensor(name=f"batched_{v.name}", dtype=v.type.dtype,
+                  shape=(None,) + v.type.shape)
+        for v in model.free_RVs
+    ]
+    raw_to_phys_batched = pytensor.function(
+        inputs=_batched_inputs,
+        outputs=vectorize_graph(output_vars,
+                                 replace=dict(zip(model.free_RVs, _batched_inputs))),
         on_unused_input="ignore",
     )
     raw_var_names = [v.name for v in model.free_RVs]   # ordered input names
@@ -438,14 +465,15 @@ def ptde_sample(
     else:
         t1_starts = _make_starts(n_chains, raw_start, logp_fn, rng)
 
-    # ensemble start plots (T=1 starts only; raw→physical via already-compiled fn)
+    # ensemble start plots (T=1 starts only; raw→physical via the batched fn)
     if plot_prefix is not None:
         logger.info("Generating ensemble start plots...")
-        internal_starts = []
-        for start in t1_starts:
-            raw_vals = [start[k] for k in raw_var_names]
-            phys_dict = dict(zip(out_var_names, raw_to_phys(*raw_vals)))
-            internal_starts.append(phys_dict)
+        batched_vals = raw_to_phys_batched(
+            *[np.stack([s[k] for s in t1_starts], axis=0) for k in raw_var_names])
+        internal_starts = [
+            {name: np.asarray(val)[i] for name, val in zip(out_var_names, batched_vals)}
+            for i in range(len(t1_starts))
+        ]
         for comp in system.active_components.values():
             comp.plot(system, internal_starts,
                       filename_prefix=plot_prefix + "_start_ensemble")
@@ -752,24 +780,30 @@ def ptde_sample(
 
     logger.info(
         f"PTDE: converting {n_chains} × {actual_draws} draws to physical space…")
-    chain_lists = {name: [] for name in out_var_names}
 
-    for i in range(n_chains):
-        draw_lists = {name: [] for name in out_var_names}
-        for d in range(actual_draws):
-            raw_vals = [stored_raw[k][i, d] for k in raw_var_names]
-            phys_vals = raw_to_phys(*raw_vals)
-            for name, val in zip(out_var_names, phys_vals):
-                draw_lists[name].append(np.atleast_1d(np.asarray(val, dtype=float)))
-        for name in out_var_names:
-            chain_lists[name].append(
-                np.stack(draw_lists[name], axis=0))   # (draws, ...)
+    # Flatten (n_chains, draws) -> (n_total,) per raw variable and run the
+    # batched converter in chunks (bounds memory for large n_params/draws;
+    # chunk_size is independent of param count/shape, only of sample count).
+    n_total = n_chains * actual_draws
+    flat_raw = {k: stored_raw[k][:, :actual_draws].reshape(
+                    (n_total,) + raw_start[k].shape)
+                for k in raw_var_names}
+    chunk_size = 20000
+    out_chunks = {name: [] for name in out_var_names}
+    for start in range(0, n_total, chunk_size):
+        end = min(start + chunk_size, n_total)
+        chunk_out = raw_to_phys_batched(
+            *[flat_raw[k][start:end] for k in raw_var_names])
+        for name, val in zip(out_var_names, chunk_out):
+            out_chunks[name].append(np.asarray(val, dtype=float))
 
     # assemble posterior dict: (n_chains, draws, ...) per variable
     posterior_dict = {}
     for name in out_var_names:
-        arr = np.stack(chain_lists[name], axis=0)   # (n_chains, draws, ...)
-        # atleast_1d adds a trailing dim-1 for scalar params; squeeze it away
+        arr = np.concatenate(out_chunks[name], axis=0)   # (n_total, ...)
+        arr = arr.reshape((n_chains, actual_draws) + arr.shape[1:])
+        # old per-sample path ran every value through atleast_1d then squeezed
+        # a trailing dim-1 for scalar params -- match that convention here.
         if arr.ndim > 2 and arr.shape[-1] == 1:
             arr = arr.squeeze(-1)
         posterior_dict[name] = arr
