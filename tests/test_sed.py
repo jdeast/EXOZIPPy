@@ -786,6 +786,14 @@ def test_sed_init_injects_grid_bounds_into_config_manager(minimal_sed_file):
     assert teff_entry["upper"] < 200_000
 
 
+def _stub_system(star_names=("A",)):
+    """Minimal stand-in for System: just the star roster load_data needs."""
+    from types import SimpleNamespace
+
+    star = SimpleNamespace(names=list(star_names), n_elements=len(star_names))
+    return SimpleNamespace(star=star)
+
+
 def test_sed_load_data_populates_filters_and_bc_grid(minimal_sed_file):
     """
     Given a SED component initialised with a three-filter .sed YAML,
@@ -798,7 +806,7 @@ def test_sed_load_data_populates_filters_and_bc_grid(minimal_sed_file):
     sed, _ = _make_sed(minimal_sed_file)
 
     # ACT
-    sed.load_data(system=None)
+    sed.load_data(system=_stub_system())
 
     # ASSERT
     assert len(sed.filters) == 3
@@ -825,7 +833,7 @@ def test_sed_load_data_raises_when_sed_file_is_none(minimal_sed_file):
 
     # ACT & ASSERT
     with pytest.raises(ValueError, match="missing the required 'file' key"):
-        sed.load_data(system=None)
+        sed.load_data(system=_stub_system())
 
 
 def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
@@ -846,3 +854,195 @@ def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
     # ASSERT
     assert hasattr(sed, "errscale"), "SED missing self.errscale after add_parameter"
     assert sed.errscale is not None
+
+
+# ---------------------------------------------------------------------------
+# Section 10 — Multi-star photType parsing and blended/differential mags
+# ---------------------------------------------------------------------------
+
+_MULTISTAR_SED_YAML = """\
+model: NextGen
+filters:
+  - name: 2MASS.J
+    mag: 8.000
+    err: 0.020
+    photType:
+      pos: [Lens, Source]
+  - name: 2MASS.H
+    mag: 2.100
+    err: 0.050
+    photType:
+      pos: [Source]
+      neg: [0]
+  - name: 2MASS.Ks
+    mag: 7.750
+    err: 0.018
+"""
+
+
+@pytest.fixture()
+def multistar_sed_file(tmp_path):
+    """Write a two-star .sed YAML with blend, diff, and default rows."""
+    p = tmp_path / "test_multistar.sed"
+    p.write_text(_MULTISTAR_SED_YAML)
+    return str(p)
+
+
+def test_load_data_builds_blend_matrix_from_photType(multistar_sed_file):
+    """
+    Given a two-star system and a .sed file with a blended row (pos by
+    names), a differential row (pos by name, neg by index), and a row
+    with no photType,
+    When load_data runs,
+    Then blend_matrix holds +1/-1/0 coefficients per the EXOFASTv2
+    convention, defaulting to an all-star blend when photType is absent,
+    and combo_labels describe each combination.
+    """
+    # ARRANGE
+    sed, _ = _make_sed(multistar_sed_file)
+    system = _stub_system(star_names=("Lens", "Source"))
+
+    # ACT
+    sed.load_data(system)
+
+    # ASSERT
+    assert sed.blend_matrix.shape == (3, 2)
+    assert sed.blend_matrix[0].tolist() == [1, 1]      # Lens+Source blend
+    assert sed.blend_matrix[1].tolist() == [-1, 1]     # Source - Lens
+    assert sed.blend_matrix[2].tolist() == [1, 1]      # default: all stars
+    assert sed.combo_labels == ["Lens+Source", "Source-Lens", "Lens+Source"]
+    # one observation per row, not per star
+    assert sed.mag.shape == (3,)
+    assert sed.err.shape == (3,)
+
+
+def test_load_data_accepts_blend_alias_for_pos(tmp_path):
+    """
+    Given a .sed row using the original `blend:` keyword,
+    When load_data runs,
+    Then it is treated as an alias for `pos`.
+    """
+    # ARRANGE
+    p = tmp_path / "alias.sed"
+    p.write_text(
+        "model: NextGen\n"
+        "filters:\n"
+        "  - name: 2MASS.J\n"
+        "    mag: 8.0\n"
+        "    err: 0.02\n"
+        "    photType:\n"
+        "      blend: [1]\n"
+    )
+    sed, _ = _make_sed(str(p))
+
+    # ACT
+    sed.load_data(_stub_system(star_names=("A", "B")))
+
+    # ASSERT
+    assert sed.blend_matrix[0].tolist() == [0, 1]
+    assert sed.combo_labels == ["B"]
+
+
+@pytest.mark.parametrize(
+    "phot_yaml, match",
+    [
+        ("photType:\n      pos: [A]\n      neg: [A]", "both pos and neg"),
+        ("photType:\n      flux: [A]", "Unknown photType key"),
+        ("photType:\n      pos: []", "non-empty"),
+        ("photType:\n      pos: [Nobody]", "Unknown star reference"),
+        ("photType:\n      pos: [5]", "out of range"),
+        ("photType:\n      blend: [A]\n      pos: [B]", "alias"),
+    ],
+)
+def test_load_data_rejects_invalid_photType(tmp_path, phot_yaml, match):
+    """
+    Given malformed photType entries (pos/neg overlap, unknown keys,
+    empty pos, unknown star names, out-of-range indices, blend+pos),
+    When load_data runs,
+    Then a ValueError naming the problem is raised.
+    """
+    # ARRANGE
+    p = tmp_path / "bad.sed"
+    p.write_text(
+        "model: NextGen\n"
+        "filters:\n"
+        "  - name: 2MASS.J\n"
+        "    mag: 8.0\n"
+        "    err: 0.02\n"
+        f"    {phot_yaml}\n"
+    )
+    sed, _ = _make_sed(str(p))
+
+    # ACT & ASSERT
+    with pytest.raises(ValueError, match=match):
+        sed.load_data(_stub_system(star_names=("A", "B")))
+
+
+def test_combined_appmag_matches_hand_computed_blend_and_diff(multistar_sed_file):
+    """
+    Given per-star predicted magnitudes m = [[10, 12, 14], [11, 12, 15]]
+    and the multistar blend matrix (blend, diff, default-blend rows),
+    When _combined_appmag_node is evaluated,
+    Then blended rows equal -2.5*log10(sum of star fluxes) and the
+    differential row equals m_pos - m_neg.
+    """
+    # ARRANGE
+    sed, _ = _make_sed(multistar_sed_file)
+    sed.load_data(_stub_system(star_names=("Lens", "Source")))
+
+    m_star = np.array([[10.0, 12.0, 14.0],
+                       [11.0, 12.0, 15.0]])
+    sed._m_pred_matrix = pt.as_tensor_variable(m_star)
+
+    # ACT
+    combined = sed._combined_appmag_node(system=None).eval()
+
+    # ASSERT
+    F = 10 ** (-0.4 * m_star)
+    expected_blend_J = -2.5 * np.log10(F[0, 0] + F[1, 0])
+    expected_diff_H = m_star[1, 1] - m_star[0, 1]   # -2.5*log10(F_S/F_L)
+    expected_blend_K = -2.5 * np.log10(F[0, 2] + F[1, 2])
+    np.testing.assert_allclose(
+        combined, [expected_blend_J, expected_diff_H, expected_blend_K],
+        rtol=1e-10)
+
+
+def test_predict_star_and_blend_appmag_use_filter_columns(multistar_sed_file):
+    """
+    Given a loaded two-star SED and a stubbed per-star magnitude matrix,
+    When predict_star_appmag / predict_blend_appmag are called with a
+    filter in any naming convention (user, MIST, SVO),
+    Then they return that star's magnitude / the blended magnitude of
+    the requested stars in the right grid column.
+    """
+    # ARRANGE
+    sed, _ = _make_sed(multistar_sed_file)
+    sed.load_data(_stub_system(star_names=("Lens", "Source")))
+
+    m_star = np.array([[10.0, 12.0, 14.0],
+                       [11.0, 12.0, 15.0]])
+    sed._m_pred_matrix = pt.as_tensor_variable(m_star)
+
+    # ACT
+    m_source_H = sed.predict_star_appmag(1, "2MASS.H", system=None).eval()
+    m_blend_J = sed.predict_blend_appmag([0, 1], "2MASS_J", system=None).eval()
+
+    # ASSERT
+    assert m_source_H == pytest.approx(12.0)
+    F = 10 ** (-0.4 * m_star[:, 0])
+    assert m_blend_J == pytest.approx(-2.5 * np.log10(F.sum()))
+
+
+def test_filter_column_raises_for_unknown_filter(multistar_sed_file):
+    """
+    Given a loaded SED,
+    When filter_column is asked for a filter not in the BC grid,
+    Then a KeyError naming the filter and the available ones is raised.
+    """
+    # ARRANGE
+    sed, _ = _make_sed(multistar_sed_file)
+    sed.load_data(_stub_system(star_names=("Lens", "Source")))
+
+    # ACT & ASSERT
+    with pytest.raises(KeyError, match="NotAFilter"):
+        sed.filter_column("NotAFilter")
