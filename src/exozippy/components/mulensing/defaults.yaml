@@ -254,3 +254,14 @@ mulensinstrument:
     internal_unit: ""
     latex: "k"
     description: "Error scaling factor"
+  # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
+  # with this Gaussian prior as a potential (see
+  # mulensinstrument._build_sed_flux_constraint). Override per light curve
+  # in params.yaml; sigma must be nonzero.
+  zeropoint:
+    mu: 0.0
+    sigma: 0.2
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "ZP"
+    description: "Photometric zeropoint of the light curve's magnitude system (m_cal = -2.5 log10(f) + ZP)"

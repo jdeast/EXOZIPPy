@@ -21,30 +21,33 @@ from exozippy.run import run_fit
 
 pytestmark = pytest.mark.slow
 
-EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4rvonly"
+EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
 
 @pytest.fixture(scope="module")
 def kelt4_result(tmp_path_factory):
     """
-    Copy the kelt4rvonly example to a temp directory, run run_fit once with minimal
-    sampler settings, and return (out_dir, work_dir) for all tests to share.
+    Copy the kelt4 example to a temp directory, run run_fit once (on the
+    RV-only config, kelt4_rvonly.yaml) with minimal sampler settings, and
+    return (out_dir, work_dir) for all tests to share.
 
     work_dir — copy of the example directory (data files, params yaml)
     out_dir  — where trace, plots, and mkprior output are written
     """
-    work_dir = tmp_path_factory.mktemp("kelt4_work") / "kelt4rvonly"
+    work_dir = tmp_path_factory.mktemp("kelt4_work") / "kelt4"
     out_dir = tmp_path_factory.mktemp("kelt4_out")
 
     shutil.copytree(
         EXAMPLE_DIR, work_dir,
-        ignore=shutil.ignore_patterns("fitresults"),
+        # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
+        # dangling symlink that would abort the copy.
+        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()
     os.chdir(work_dir)
     try:
-        with open("kelt4.yaml") as f:
+        with open("kelt4_rvonly.yaml") as f:
             config = yaml.safe_load(f)
 
         config["prefix"] = str(out_dir / "KELT-4A")

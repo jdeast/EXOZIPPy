@@ -1,0 +1,70 @@
+run:
+  name: "KMT-2019-BLG-1806"
+
+prefix: "fitresults/KMT-2019-BLG-1806"
+
+# Roman Data Challenge 2018, LC 128.  Binary lens + finite source (2L1S).
+# MMEXOFAST solution: t_E~18.2d, s~0.98, q~0.0011, alpha~-52 deg
+#
+# system architecture:
+#   star.0 = Lens      (primary lens host)
+#   star.1 = Source    (background source)
+#   planet.0 = Companion (secondary lens body)
+
+star:
+  - name: "Lens"
+  - name: "Source"
+
+planet:
+  - name: "Companion"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "planet.0"]
+    sources: ["star.1"]
+    finite_source: True
+    #mag_method: "auto_vbbl"  # default for binary+finite_source
+    t0_par: 2458715.481879152         # approximate t_0 from MMEXOFAST
+
+galacticmodel:
+  - name: "KMT-2019-BLG-1806"
+    anchor_idx: 1              # source is star.1
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+
+# SED block: even with no catalog photometry (see the .sed file), this
+# activates the source flux constraint -- each light curve's calibrated
+# baseline f_source is tied to the SED-predicted source I mag through a
+# per-lightcurve zeropoint (default prior 0 +/- 0.2 mag).
+sed:
+  file: "KMT-2019-BLG-1806.sed.yaml"
+
+mulensinstrument:
+  - name: "KMTC04" #telescope name
+    file: "n20260624.I.KMTC04.pys"
+    band: "I"
+
+  - name: "KMTS04" #telescope name
+    file: "n20260624.I.KMTS04.pys"
+    band: "I"
+
+  - name: "KMTA04" #telescope name
+    file: "n20260624.I.KMTA04.pys"
+    band: "I"
+
+parameter_file: "KMT-2019-BLG-1806.params.yaml"
+
+sampler:
+  method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
+  n_temps: 8           # temperature rungs (EXOFASTv2 parity)
+  T_max: 200           # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2 × n_params
+  # cores: defaults to 75% of physical cores
+  tune: 350
+  draws: 650
+  nthin: 1
+  check_curvatures: False
+  recompute_trace: True

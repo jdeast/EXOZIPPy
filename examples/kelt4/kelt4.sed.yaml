@@ -1,0 +1,95 @@
+# TIC 165297570 = KELT-4A, wired in as the 3-star (A, B, C) SED deblend.
+#
+# KELT-4A is in the Washington Double Star catalog (sep 1.6", WDS mag2=12.99)
+#   -- that companion is the unresolved B+C pair.
+# Gaia (resolution ~0.4") resolves A cleanly at this separation/delta-mag,
+#   consistent with RUWE = 1.0230 (not elevated) -- pos: [A].
+# 2MASS (~2-4") and WISE (~6") cannot resolve a 1.6" pair -- genuinely
+#   A+B+C blended, so they keep the default photType (blend of all stars).
+# Gaia DR3 photometry used with GAIA/GAIA2r filter curves (DR2); differences are <1 mmag for typical stars
+# GALEX: atmospheric models are unreliable in the UV
+
+model: NextGen
+nstars: 3   # A, B, C
+filters:
+    - name: "GAIA/GAIA2r.G"
+      mag: 9.965562
+      err: 0.02
+      photType:
+        pos: [A]
+
+    - name: "GAIA/GAIA2r.Gbp"
+      mag: 10.165902
+      err: 0.02
+      photType:
+        pos: [A]
+
+    - name: "GAIA/GAIA2r.Grp"
+      mag: 9.514663
+      err: 0.02
+      photType:
+        pos: [A]
+
+    - name: "2MASS/2MASS.J"
+      mag: 9.017
+      err: 0.021
+
+    - name: "2MASS/2MASS.H"
+      mag: 8.79
+      err: 0.023
+
+    - name: "2MASS/2MASS.Ks"
+      mag: 8.689
+      err: 0.02
+
+    - name: "WISE/WISE.W1"
+      mag: 8.604
+      err: 0.03
+
+    - name: "WISE/WISE.W2"
+      mag: 8.636
+      err: 0.03
+
+    - name: "WISE/WISE.W3"
+      mag: 8.637
+      err: 0.03
+
+    - name: "WISE/WISE.W4"
+      mag: 8.6
+      err: 0.387
+
+    # Resolved B-vs-C differential magnitude: components appear about
+    # equally bright in Fig. 8 (Eastman+2016 discovery paper), same NIRC2
+    # Kp AO frame as the KA/KBC photometry in KELT-4_A-BC.rel.dat. Very
+    # loose by-eye estimate, not a formal measurement.
+    - name: "Keck/NIRC2.Kp"
+      mag: 0.0
+      err: 0.5
+      photType:
+        pos: [B]
+        neg: [C]
+
+    # - name: "TYCHO/TYCHO.B"
+    #   mag: 10.605
+    #   err: 0.042
+
+    # - name: "TYCHO/TYCHO.V"
+    #   mag: 10.042
+    #   err: 0.035
+
+    # - name: "Generic/Bessell.B"
+    #   mag: 10.473
+    #   err: 0.02
+
+    # - name: "Generic/Bessell.V"
+    #   mag: 9.981
+    #   err: 0.02
+
+    # - name: "SLOAN/SDSS.i"
+    #   mag: 9.708
+    #   err: 0.02
+
+    # - name: "GALEX/GALEX.NUV"
+    #   mag: 14.226
+    #   err: 0.1
+

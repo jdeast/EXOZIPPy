@@ -197,6 +197,25 @@
   (user->internal) two-layer conversion in resolve() is fragile; we fixed the
   propagated_scales/scale_hints bug but the underlying design could be simplified
 
+* init_scale: replace symbolic-Jacobian estimation with iterative/empirical probing
+  - current approach (config.py relaxation engine) propagates init_scale through
+    RELATIONS via symbolic Jacobians -- works but is enormously complex, and only
+    encodes how units/relations chain together, not how tightly the data actually
+    constrains each parameter
+  - proposal: (1) build a first-pass graph using coarse hardcoded/default scales
+    just to get a working, finite-loglike model; (2) probe each free element for
+    the scale where delta-loglike ~ 1 nat, same mechanism already used to scatter
+    PTDE chains (_probe_scales in samplers/ptde.py:92, mirrors EXOFASTv2's
+    exofast_getmcmcscale); (3) rebuild the final graph/whitened parameterization
+    using those empirical scales as init_scale
+  - benefit: grounds init_scale in actual local likelihood curvature (what
+    whitening is for) instead of a heuristic proxy; lets us drop the symbolic
+    Jacobian solver machinery and the user-facing init_scale override entirely
+  - caveats: still need a coarse bootstrap scale to get pass-1 working (not fully
+    eliminated, just demoted to "good enough to evaluate"); probe gives marginal/
+    diagonal curvature only, so it won't fix mixing from correlated parameters
+    (period-t0, e-omega) any better than the current approach does
+
 * master Instrument class: mulensinstrument, rvinstrument, and
   transitinstrument should inherit from a shared Instrument base (common
   file loading, err_scale, plotting hooks, per-instrument config handling)

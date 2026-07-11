@@ -916,22 +916,48 @@ def get_diagonal_curvature(model, point):
     vars_to_check = model.value_vars
     curvatures = []
 
-    for var in vars_to_check:
+    free_vars = [var.name for var in model.value_vars]
+    filtered_point = {k: point[k] for k in free_vars if k in point}
+
+    n_vars = len(vars_to_check)
+    logger.info(f"Computing sampler curvature for {n_vars} parameter group(s) "
+                f"(this compiles one gradient graph per group and can take a while)...")
+    t_start = time.time()
+
+    for i, var in enumerate(vars_to_check):
         grad = ptg.grad(logp_node, var)
-        curv = ptg.grad(grad.sum(), var)
 
-        # Compile the function
-        fn = model.compile_fn(curv, on_unused_input='ignore')
+        try:
+            curv = ptg.grad(grad.sum(), var)
+            fn = model.compile_fn(curv, on_unused_input='ignore')
+            val = np.atleast_1d(fn(filtered_point))
+        except ValueError:
+            # Some physics ops (e.g. exoplanet_core's limb-darkening solution-vector
+            # op used by the transit component) only implement a first-order
+            # pullback, so a second nested ptg.grad() through them raises
+            # "Backpropagation is only supported for the solution vector".
+            # Fall back to a central-difference estimate of the Hessian diagonal
+            # built from the (working) first-order gradient function.
+            logger.info(f"  [{i + 1}/{n_vars}] {var.name}: exact 2nd derivative "
+                        f"unsupported by an op in the graph, falling back to "
+                        f"finite differences")
+            grad_fn = model.compile_fn(grad, on_unused_input='ignore')
+            x0 = np.atleast_1d(np.asarray(filtered_point[var.name], dtype=float))
+            orig_shape = np.asarray(filtered_point[var.name]).shape
+            val = np.empty(x0.size)
+            eps = 1e-5 * np.maximum(np.abs(x0), 1.0)
+            for j in range(x0.size):
+                xp, xm = x0.copy(), x0.copy()
+                xp[j] += eps[j]
+                xm[j] -= eps[j]
+                pt_plus = dict(filtered_point, **{var.name: xp.reshape(orig_shape)})
+                pt_minus = dict(filtered_point, **{var.name: xm.reshape(orig_shape)})
+                gp = np.atleast_1d(grad_fn(pt_plus)).sum()
+                gm = np.atleast_1d(grad_fn(pt_minus)).sum()
+                val[j] = (gp - gm) / (2 * eps[j])
 
-        # fn.f.maker.inputs contains the expected variable objects
-        #expected_names = [v.name for v in fn.f.maker.inputs]
-        #filtered_point = {k: v for k, v in point.items() if k in expected_names}
-
-        free_vars = [var.name for var in model.value_vars]
-        filtered_point = {k: point[k] for k in free_vars if k in point}
-
-        # Pass the filtered dictionary as a single positional argument
-        val = np.atleast_1d(fn(filtered_point))
         curvatures.append(val)
+        elapsed = time.time() - t_start
+        logger.info(f"  [{i + 1}/{n_vars}] {var.name} done ({elapsed:.1f}s elapsed)")
 
     return np.concatenate(curvatures)

@@ -1,0 +1,81 @@
+# Seeded from MMEXOFAST solution 0 (0-indexed)
+# Source: examples/DC2018_128/mmexofast.json
+# n_solutions in file: 2
+#
+# MMEXOFAST uncertainties are mapped to init_scale, NOT sigma.
+# init_scale = sampling hint only (no logp penalty).
+# sigma = Gaussian prior (would double-count the data).
+
+lens.Lens.t_0:
+    initval: 2458715.481879152 
+    init_scale: 0.015347577631473541
+
+lens.Lens.u_0:
+    initval: 0.029253113064634916
+    init_scale: 0.0023704367070083703 
+
+# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
+# Provided here as an initval hint to seed the relaxation engine.
+lens.Lens.t_E:
+    initval: 118.21545915658051
+    init_scale: 9.31901476898495
+
+lens.Lens.s:
+    initval: 1.046765512297066
+    init_scale: 0.0813705351607
+
+# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.
+lens.Lens.alpha:
+    initval: 57.02894037839297
+    init_scale: 0.5501884465970441
+
+lens.Lens.rho:
+    initval: 1.1022118088011409e-08
+    init_scale: 0.0000191849239509
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
+# this through the symbolic relation  q * M_primary = M_companion
+# to set the companion's mass initval automatically.
+lens.Lens.q:
+    initval: 2.5493624633395966e-05
+    init_scale: 0.0000325104876682
+
+star.Lens.ra:
+    initval: 266.62325
+    sigma: 0
+star.Lens.dec:
+    initval: -24.27227
+    sigma: 0
+star.Source.ra:
+    initval: 266.62325
+    sigma: 0
+star.Source.dec:
+    initval: -24.27227
+    sigma: 0
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0
+planet.Companion.radius:
+    sigma: 0
+
+# The Source's radius and teff are free: the sed: block ties the
+# SED-predicted source I mag to each light curve's baseline source flux
+# through per-lightcurve zeropoints. Note the absolute flux scale comes
+# from the zeropoint PRIOR (0 +/- 0.2 mag per site), not the data -- the
+# light curves only constrain the site-to-site relative calibration, so
+# the source posteriors below are prior-anchored at the ~0.1 mag level.
+# Real catalog photometry in the .sed file would break that degeneracy.
+# Seeded near a bulge turnoff star, which is what I_source ~ 18.9 at
+# ~8 kpc implies.
+star.Source.radius:
+    initval: 1.2
+star.Source.teff:
+    initval: 5800

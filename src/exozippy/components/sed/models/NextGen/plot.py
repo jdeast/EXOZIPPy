@@ -30,54 +30,44 @@ class NextGenPlot(Plot):
 
     def _calc_compiled_func(self):
         """
-        Calculates the two compiled functions for use in plotting:
-        Logg and predicted magnitudes
+        Evaluates the compiled functions for use in plotting: loggsed,
+        per-star predicted magnitudes, and the per-row combined
+        (blended/differential) magnitudes.
+
+        The compiled functions take the FULL plot-parameter bundle
+        (vector parameters stay vectors), so one call per draw covers
+        all stars at once.
 
         Created Class Attributes
         -------
-            self.logg_vals_draws :  np.ndarray, shape (ndraws, nstars)
-            self.mag_pred_draws  :  np.ndarray, shape (ndraws, nstars, nfilters)
+            self.logg_vals_draws     :  np.ndarray, shape (ndraws, nstars)
+            self.mag_pred_draws      :  np.ndarray, shape (ndraws, nstars, nfilters)
+            self.combined_pred_draws :  np.ndarray, shape (ndraws, nfilters)
         """
         # grab compiled functions
-        mag_compiled = getattr(self.system.sed, "_compiled_mag_predictors", [None])
-        logg_compiled = getattr(self.system.sed, "_compiled_logg_calc", [None])
+        mag_compiled = getattr(self.system.sed, "_compiled_mag_predictors", None)
+        logg_compiled = getattr(self.system.sed, "_compiled_logg_calc", None)
+        combined_compiled = getattr(self.system.sed, "_compiled_combined_mag", None)
 
-        # collect parameters used as inputs to compiled functions
         logg_vals_draws = np.zeros((self.ndraws, self.nstars))
         mag_pred_draws = np.zeros((self.ndraws, self.nstars, self.nfilters))
+        combined_pred_draws = np.zeros((self.ndraws, self.nfilters))
+
         for d, draw in enumerate(self.draws):
-            logg_params = []
-            mag_params = []
-            for p in self.system.plot_params:
-                val = np.asarray(
-                draw.get(p.label, p.initval), dtype=np.float64
-                    )
-                mag_params = np.append(mag_params, np.atleast_1d(val), axis=0)
-                if p.label in ['star.logmass', 'star.radiussed']:
-                    logg_params = np.append(logg_params, np.atleast_1d(val), axis=0)
-            # reshape arrays into shapes compatible with function inputs
-            logg_params = np.reshape(logg_params, (self.nstars, 2, 1)) 
-            mag_params = np.reshape(mag_params, (len(self.system.plot_params), self.nstars, 1)) 
-            
-            # calculate outputs for compiled functions
-            logg_vals = np.array([])
-            mag_vals_pred = np.array([])
-            for nstar in range(self.nstars):
-                if self.nstars == 1:
-                    l_params = logg_params[nstar]
-                else:
-                    l_params = logg_params[:, nstar]
-                m_params = mag_params[:, nstar]
-                logg_vals = np.append(logg_vals, np.atleast_1d(logg_compiled(*l_params)))
-                mag_vals_pred = np.append(mag_vals_pred, np.atleast_1d(mag_compiled(*m_params)))
-
-            mag_vals_pred = np.reshape(mag_vals_pred, (self.nstars, self.system.sed.nfilters))
-
-            logg_vals_draws[d, :] = logg_vals
-            mag_pred_draws[d, :] = mag_vals_pred
+            params = [
+                float(np.squeeze(np.asarray(draw.get(p.label, p.initval))))
+                if getattr(p.value, "ndim", 0) == 0
+                else np.atleast_1d(draw.get(p.label, p.initval)).astype(np.float64)
+                for p in self.system.plot_params
+            ]
+            mag_pred_draws[d] = mag_compiled(*params)
+            logg_vals_draws[d] = logg_compiled(*params)
+            if combined_compiled is not None:
+                combined_pred_draws[d] = combined_compiled(*params)
 
         self.logg_vals_draws = logg_vals_draws
         self.mag_pred_draws = mag_pred_draws
+        self.combined_pred_draws = combined_pred_draws
 
 
     def _interp_spectra(self):

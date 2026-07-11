@@ -1,0 +1,33 @@
+# Relative astrometry of KELT-4A with respect to the BC photocenter.
+# For use with astrometryinstrument (mode: rel, star_ndx: <A>, planet_ndx: <BC>,
+# sep_unit: arcsec). NOT YET wired into kelt4.yaml -- data staging only.
+#
+# Columns: time[BJD_TDB]  sep[arcsec]  err_sep[arcsec]  pa[deg]  err_pa[deg]
+#
+# pa is the position angle East of North (per astrometryinstrument convention).
+# time = J2000.0 + (decimal_year - 2000.0) * 365.25 (Julian-year epoch -> JD;
+# TT/TDB distinction is negligible at this precision).
+#
+# WARNING: rows marked (*) had no published sep/pa uncertainty in the source
+# table -- err_sep/err_pa below are PLACEHOLDERS (0.05 arcsec, 2.0 deg;
+# typical for visual/photographic double-star micrometry of that era).
+# Replace with the real published uncertainties before using this in a fit.
+#
+# Source photometry from the same table (not astrometry -- kept here for
+# reference toward the pending 3-star SED work, not read by
+# astrometryinstrument):
+#   epoch      VA      VBC     RA     RBC     JA      JBC     KA      KBC
+#   1972.230   9.500   14.000  --     --      --      --      --      --
+#   1972.249   9.500   14.000  --     --      --      --      --      --
+#   1987.430   10.130  12.370  9.81   11.96   --      --      --      --
+#   1991.250   10.186  12.992  --     --      --      --      --      --
+#   1991.530   10.042  12.992  --     --      --      --      --      --
+#   2012.3464  --      --      --     --      9.193   10.94   8.972   10.35
+#
+# epoch      time[BJD_TDB]  sep     err_sep  pa      err_pa   source
+2441402.007      1.430   0.05    38.900   2.00   # 1972.230  source 1 (*)
+2441408.947      1.570   0.05    34.000   2.00   # 1972.249  source 1 (*)
+2446953.808      1.380   0.05    35.000   2.00   # 1987.430  source 2 (*)
+2448349.062      1.553   0.043   31.000   2.00   # 1991.250  source 3 (sep err published; pa err *)
+2448451.333      1.560   0.05    33.100   2.00   # 1991.530  source 4 (*)
+2456054.523      1.5732  0.0018  28.887   0.070  # 2012.3464 source 5

@@ -123,6 +123,14 @@ Referenced parameters contribute their values in **their own user units**; the r
 
 User-facing paths always use three dot-separated parts: `<component>.<instance_name>.<param>` (e.g., `star.Lens.distance`). Internally, instance names are standardized to indices (`star.0.distance`). `ConfigManager.resolve()` checks all three forms (`comp.param`, `comp.0.param`, `comp.Name.param`).
 
+### Bands, filters, and SED flux constraints
+
+The Band component is the single carrier of filter identity and limb darkening: instruments (`transit`, `mulensinstrument`, optionally `astrometryinstrument`) reference a `band:` block by name; each band's `filter:` string is resolved through the SED alias table (`components/sed/filters/filternames.txt`, columns Keivan/MIST/Claret/SVO/VOID) into canonical names at load time. Transit LD (q1/q2/u1/u2) lives on Band, not on the transit component.
+
+The SED component supports n stars: each `.sed` filter row's `photType: {pos: [...], neg: [...]}` (with `blend:` as an alias for `pos`; entries are star names or indices) builds a +1/0/-1 blend matrix; blended rows are flux sums, `neg` makes the row a differential magnitude (`-2.5*log10(F_pos/F_neg)`). An empty `filters:` list is legal — the SED then only serves cross-component flux predictions (`predict_star_appmag`, `predict_blend_appmag`, `predict_flux_fraction`). BC tables for missing filters auto-generate from the model spectra (`components/sed/make_bc.py`, CLI `scripts/make_bc_tables.py`).
+
+Cross-component hooks when a `sed:` block exists: `mulensinstrument` ties each light curve's `f_source` to the SED-predicted source mag through a per-lightcurve `zeropoint` (Deterministic + Gaussian potential, default 0 +/- 0.2 mag; `sed_constrain_blend: true` opts f_blend in); `transit` dilutes depths by the host's SED flux fraction in the band; `astrometryinstrument` derives its photocenter `fluxfrac` from the SED when given `band:` + `companion_star_ndx:`.
+
 ## Tests
 
 Tests follow AAA (Arrange / Act / Assert) with Given/When/Then docstrings. All tests that use `System` must call `system.prepare()` before `system.build_model()`. RA/Dec user params are in **degrees** (the default unit); `Parameter.__post_init__` converts to radians internally.

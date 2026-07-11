@@ -18,13 +18,48 @@ class Transit(Component):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
         self.files = [c.get("file") for c in self.config]
-        self.filters = [c.get("filter", "Kepler") for c in self.config]
+        # Filter identity and limb darkening live on the Band component;
+        # each instrument references a band block by name.
+        self.band_names = [c.get("band") for c in self.config]
+        deprecated_filters = [c.get("filter") for c in self.config if c.get("filter")]
+        if deprecated_filters:
+            logger.warning(
+                "transit 'filter:' is deprecated and ignored; reference a "
+                "band: block instead (bands carry the filter identity and "
+                "limb darkening)."
+            )
         self.total_detrend_cols = 0
         self.n_total_obs = 0
+        # SED depth-dilution node, built once by build_likelihood and
+        # reused by compile_plotters.
+        self._dilution_node = None
 
     @property
     def prefix(self):
         return "transit"
+
+    def sampler_requirements(self):
+        """Declare sampler constraints for limb-darkened transit models.
+
+        The quadratic limb-darkening solution vector (exoplanet_core's
+        ``quad_solution_vector`` Op) is only differentiable through
+        PyTensor's own gradient machinery (used by the C/numba-backed
+        'nuts' and 'nutpie' samplers). The installed exoplanet_core's
+        jax_support wires the PyTensor Op straight to the raw,
+        non-custom_jvp JAX FFI call, so any sampler that funcifies the
+        whole logp graph to JAX ('numpyro', 'blackjax') fails at HMC
+        init with "cannot be differentiated".
+        """
+        return {
+            'incompatible': {'numpyro', 'blackjax'},
+            'recommended': 'nuts',
+            'reason': (
+                "the transit component's limb-darkening op "
+                "(exoplanet_core quad_solution_vector) is not "
+                "differentiable through JAX with the installed "
+                "exoplanet_core build — use a PyTensor-backed sampler"
+            ),
+        }
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
@@ -71,11 +106,68 @@ class Transit(Component):
             "baseline": {"initval": self.baseline_init},
             "jitter_variance": {"lower": self.jittervar_lower},
             "jitter": "default",
-            "q1": "default", "q2": "default", "u1": "default", "u2": "default"
         }
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
+
+        # Limb darkening comes from the Band component; map each
+        # instrument (and each observation) to its band. A transit model
+        # cannot be computed without LD, so a missing/unknown band
+        # reference is an error, not a warning.
+        if not hasattr(system, "band"):
+            raise ValueError(
+                "Transit instruments require band: blocks (bands carry the "
+                "filter identity and limb-darkening parameters)."
+            )
+        name_to_idx = {name: i for i, name in enumerate(system.band.names)}
+        missing = [
+            (self.names[i], n) for i, n in enumerate(self.band_names)
+            if n not in name_to_idx
+        ]
+        if missing:
+            raise ValueError(
+                f"Transit instrument(s) reference unknown band(s): "
+                f"{missing}. Available bands: {list(name_to_idx)}."
+            )
+        self.band_map = np.array(
+            [name_to_idx[n] for n in self.band_names], dtype=int)
+        self.obs_band_map = self.band_map[self.inst_map]
+
+    def _build_dilution(self, system):
+        """
+        Per-instrument SED-predicted depth dilution factor
+        F_host / sum_j F_j in the instrument's band, as a (n_elements,)
+        tensor (Deterministic "transit.dilution" for diagnostics), or
+        None if no instrument's band filter is in the SED's BC grid.
+        Instruments whose band filter is unavailable get dilution 1.
+        """
+        if getattr(self, "_dilution_node", None) is not None:
+            return self._dilution_node
+
+        sed = system.sed
+        band = system.band
+        dils = []
+        any_diluted = False
+        for i in range(self.n_elements):
+            band_idx = int(self.band_map[i])
+            filter_key = band.filter_mist[band_idx]
+            if filter_key and sed.has_filter(filter_key):
+                host = int(band.star_indices[band_idx])
+                dils.append(sed.predict_flux_fraction(host, filter_key, system))
+                any_diluted = True
+            else:
+                logger.warning(
+                    f"transit {self.names[i]}: band filter '{filter_key}' "
+                    f"is not in the SED's BC grid; no depth deblending "
+                    f"applied for this instrument."
+                )
+                dils.append(pt.constant(1.0))
+        if not any_diluted:
+            return None
+        self._dilution_node = pm.Deterministic(
+            f"{self.prefix}.dilution", pt.stack(dils))
+        return self._dilution_node
 
     def build_likelihood(self, model, system):
         time = pm.Data("transit_time", self.time)
@@ -164,9 +256,25 @@ class Transit(Component):
         b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
         Z = r_norm * sin_wf * sin_i
 
-        # 3. Limb Darkening Setup (per observation, mapped from per-instrument values)
-        u1_mapped = self.u1.value[self.inst_map_tensor]  # (N_obs,)
-        u2_mapped = self.u2.value[self.inst_map_tensor]  # (N_obs,)
+        # 3. Limb Darkening Setup (per observation, mapped from each
+        # instrument's Band). When every band uses the linear law, Band's
+        # manifest has no u2; the quadratic term is then zero.
+        band = system.band
+        u1_mapped = band.u1.value[self.obs_band_map_tensor]  # (N_obs,)
+        if "u2" in band.manifest:
+            u2_mapped = band.u2.value[self.obs_band_map_tensor]  # (N_obs,)
+        else:
+            u2_mapped = pt.zeros_like(u1_mapped)
+
+        # 3b. SED deblending (EXOFASTv2 parity): with more than one
+        # modeled star, only the host contributes the transit, so the
+        # observed depth is diluted by dil = F_host / sum_j F_j in the
+        # instrument's band (host = the band's star_ndx).
+        dil_obs = None
+        if hasattr(system, "sed") and system.star.n_elements > 1:
+            dil_inst = self._build_dilution(system)
+            if dil_inst is not None:
+                dil_obs = dil_inst[self.inst_map_tensor]  # (N_obs,)
         # exoplanet_core's quad_solution_vector returns s in starry's Green's basis,
         # not powers of mu. Converting the quadratic law (u1, u2) into that basis
         # requires the change-of-basis in Agol, Luger & Foreman-Mackey (2020),
@@ -201,6 +309,8 @@ class Transit(Component):
 
             # Primary transit only; secondary eclipse (planet behind star) has Z < 0
             blocked = pt.where(Z_p > 0.0, blocked, 0.0)
+            if dil_obs is not None:
+                blocked = blocked * dil_obs
             lc_model = lc_model - blocked
 
         if self.total_detrend_cols > 0:
@@ -244,8 +354,13 @@ class Transit(Component):
             b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
             Z = r_norm * sin_wf * sin_i
 
-            u1_inst = self.u1.value[inst_idx]  # scalar for this instrument
-            u2_inst = self.u2.value[inst_idx]
+            band = system.band
+            band_idx = self.band_map_tensor[inst_idx]
+            u1_inst = band.u1.value[band_idx]  # scalar for this instrument
+            if "u2" in band.manifest:
+                u2_inst = band.u2.value[band_idx]
+            else:
+                u2_inst = pt.zeros_like(u1_inst)
             # See build_likelihood for the Green's-basis change-of-basis derivation.
             c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
             c1_inst = u1_inst + 2.0 * u2_inst
@@ -266,6 +381,10 @@ class Transit(Component):
                 ) / ld_norm_inst
                 # Negative so that _compiled_full_lc output + baseline gives a transit dip
                 blocked = pt.where(Z_p > 0.0, 1.0 - flux_frac, 0.0)
+                # match the likelihood's SED depth dilution (built there first)
+                dil_node = getattr(self, "_dilution_node", None)
+                if dil_node is not None:
+                    blocked = blocked * dil_node[inst_idx]
                 decrement_matrix_list.append(-blocked)
 
             lc_matrix = pt.stack(decrement_matrix_list, axis=1)  # (N_times, N_planets)

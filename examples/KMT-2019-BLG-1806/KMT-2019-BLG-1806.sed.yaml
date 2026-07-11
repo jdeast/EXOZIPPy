@@ -1,0 +1,25 @@
+model: NextGen
+
+# No catalog photometry yet: with an empty filter list, the SED
+# component still constrains the Source star through the calibrated
+# microlensing baseline flux (the per-lightcurve zeropoint hook in
+# mulensinstrument -- the I-band BC grid is pulled in via the band
+# block's filter).
+#
+# To add catalog photometry of the (blended) baseline object, list
+# filter rows with a photType saying which stars contribute, e.g.:
+#
+# filters:
+#   - name: "2MASS.J"
+#     mag: 15.20
+#     err: 0.03
+#     photType:
+#       pos: [Lens, Source]     # blended J of the baseline object
+#
+#   - name: "Keck.K"            # e.g. AO resolved photometry
+#     mag: 2.10
+#     err: 0.05
+#     photType:
+#       pos: [Source]
+#       neg: [Lens]             # differential mag: m_S - m_L
+filters: []
