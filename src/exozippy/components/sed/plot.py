@@ -35,10 +35,16 @@ except NameError:
 
 class Plot:
 
-    colors_spec = ["#0a9396", "#ca6702", "#ee9b00"]
-    colors_obs = ["#005f73", "#bb3e03", "#ae7409"]
+    # Validated 8-hue categorical palette (light mode), fixed order --
+    # see dataviz skill references/palette.md. Same hex used for a given
+    # star/combo's spectrum curve (drawn translucent) and its data-point
+    # marker (drawn opaque), so identity is color-consistent across both;
+    # markers additionally vary by shape so identity is never color-alone.
+    colors_spec = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
+                   "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+    colors_obs = colors_spec
     linetypes = ["solid", "dashed", "dashdot", "dotted"]
-    markers = ["o", "D", "v"] # circle, diamond, triangle
+    markers = ["o", "D", "v", "s", "^", "P", "X", "*"]
 
     # read in extinction values
     extinction_dir = current_dir / "models" / "extinction_law.ascii"

@@ -741,12 +741,28 @@ class SED(Component):
         n_markers = len(plot_obj.markers)
         n_lines = len(plot_obj.linetypes)
 
+        # ---- fixed-order categorical identity -> color/marker/linestyle ----
+        # (dataviz: assign hues by identity, never cycle by position).
+        # Stars take the first nstars palette slots (star_names order); any
+        # additional multi-star combination measured in the data (e.g.
+        # "B+C") takes the next slot, in order of first appearance -- so a
+        # given identity's spectrum curve and data-point marker always
+        # share one color/style, and up to 8 distinct identities never
+        # collide (beyond 8 they wrap, matching the palette's design cap).
+        identities = list(plot_obj.star_names)
+        for combo in plot_obj.unique_combos:
+            if combo not in identities:
+                identities.append(combo)
+        id_color = {name: plot_obj.colors_obs[i % n_colors] for i, name in enumerate(identities)}
+        id_marker = {name: plot_obj.markers[i % n_markers] for i, name in enumerate(identities)}
+        id_line = {name: plot_obj.linetypes[i % n_lines] for i, name in enumerate(identities)}
+
         # ---- model spectra: one line per star, plus the blended total, ----
         # ---- plus any other multi-star combination the data measure    ----
         # ---- (e.g. "B+C" from an "A-(B+C)" differential row); the full  ----
         # ---- nstars set is "Total" and isn't duplicated here.           ----
         all_idx = frozenset(range(plot_obj.nstars))
-        sub_combos = []
+        sub_combos = []  # (label, sorted star-index list); size >= 2, not the full set
         seen_combos = set()
         for row in range(plot_obj.nfilters):
             bm = plot_obj.blend_matrix[row]
@@ -754,31 +770,33 @@ class SED(Component):
                 combo = frozenset(idx)
                 if len(combo) >= 2 and combo != all_idx and combo not in seen_combos:
                     seen_combos.add(combo)
-                    sub_combos.append(sorted(combo))
-        colors_sub = ["#6c757d", "#495057", "#adb5bd", "#ced4da"]
+                    combo_idx = sorted(combo)
+                    label = "+".join(plot_obj.star_names[i] for i in combo_idx)
+                    sub_combos.append((label, combo_idx))
 
         alpha_spec = 0.7 if plot_obj.ndraws == 1 else 0.15
         x_spec = plot_obj.df_wave['wavelength_micron']
         wave_ang = plot_obj.df_wave['wavelength_angstrom']
         for d, draw in enumerate(plot_obj.draws):
             for nstar in range(plot_obj.nstars):
+                name = plot_obj.star_names[nstar]
                 y_spec = np.log10(plot_obj.flux_model_draws[d][nstar]*wave_ang)
                 ax_top.plot(x_spec,
                             y_spec,
-                            ls=plot_obj.linetypes[nstar % n_lines],
-                            color=plot_obj.colors_spec[nstar % n_colors],
+                            ls=id_line[name],
+                            color=id_color[name],
                             alpha=alpha_spec,
-                            label=f"Star {plot_obj.star_names[nstar]}")
+                            label=f"Star {name}")
             if plot_obj.nstars > 1:
                 # blended total (exofast_multised plots this in black)
                 total = np.sum(plot_obj.flux_model_draws[d], axis=0)
                 ax_top.plot(x_spec, np.log10(total*wave_ang),
                             color="#001219", lw=1.2, alpha=alpha_spec)
-            for sci, combo_idx in enumerate(sub_combos):
+            for label, combo_idx in sub_combos:
                 combo_flux = np.sum(plot_obj.flux_model_draws[d][combo_idx], axis=0)
                 ax_top.plot(x_spec, np.log10(combo_flux*wave_ang),
-                            ls=plot_obj.linetypes[sci % n_lines],
-                            color=colors_sub[sci % len(colors_sub)],
+                            ls=id_line[label],
+                            color=id_color[label],
                             lw=1.0, alpha=alpha_spec)
 
         # ---- observed photometry: one point per plot point (a blended  ----
@@ -800,9 +818,9 @@ class SED(Component):
         alpha_res = 1.0 if plot_obj.nstars == 1 else 0.5
 
         for p in range(plot_obj.npoints):
-            ci = plot_obj.point_combo_idx[p]
-            color = plot_obj.colors_obs[ci % n_colors]
-            marker = plot_obj.markers[ci % n_markers]
+            label = plot_obj.point_labels[p]
+            color = id_color[label]
+            marker = id_marker[label]
 
             ax_top.errorbar(
                 x[p:p+1], y[p:p+1],
@@ -820,9 +838,9 @@ class SED(Component):
         for row in range(plot_obj.nfilters):
             # use the pos-side point's color/marker for this row's residual
             p = np.where((plot_obj.point_row == row) & (plot_obj.point_side == 1))[0][0]
-            ci = plot_obj.point_combo_idx[p]
-            color = plot_obj.colors_obs[ci % n_colors]
-            marker = plot_obj.markers[ci % n_markers]
+            label = plot_obj.point_labels[p]
+            color = id_color[label]
+            marker = id_marker[label]
 
             residual = plot_obj.mag_obs[row] - combined_pred_med[row]
             ax_bot.errorbar(
@@ -842,14 +860,15 @@ class SED(Component):
             # Two artists per star: translucent line + opaque marker
             legend_handles = []
             for nstar in range(plot_obj.nstars):
-                line = Line2D([0], [0], color=plot_obj.colors_spec[nstar],
-                                linestyle=plot_obj.linetypes[nstar],
+                name = plot_obj.star_names[nstar]
+                line = Line2D([0], [0], color=id_color[name],
+                                linestyle=id_line[name],
                                 alpha=0.7,
-                                label=f"Star {plot_obj.star_names[nstar]}")
+                                label=f"Star {name}")
                 marker = Line2D([0], [0], color='none',
-                                marker=plot_obj.markers[nstar],
-                                markerfacecolor=plot_obj.colors_obs[nstar],
-                                markeredgecolor=plot_obj.colors_obs[nstar],
+                                marker=id_marker[name],
+                                markerfacecolor=id_color[name],
+                                markeredgecolor=id_color[name],
                                 alpha=1.0)
                 legend_handles.append((line, marker))
 
@@ -866,23 +885,24 @@ class SED(Component):
             # entry per observed star combination ("A+B", "A-(B+C)", ...)
             legend_handles, labels = [], []
             for nstar in range(plot_obj.nstars):
+                name = plot_obj.star_names[nstar]
                 legend_handles.append(Line2D(
-                    [0], [0], color=plot_obj.colors_spec[nstar % n_colors],
-                    linestyle=plot_obj.linetypes[nstar % n_lines], alpha=0.7))
-                labels.append(f"Star {plot_obj.star_names[nstar]}")
+                    [0], [0], color=id_color[name],
+                    linestyle=id_line[name], alpha=0.7))
+                labels.append(f"Star {name}")
             legend_handles.append(Line2D([0], [0], color="#001219", lw=1.2))
             labels.append("Total")
-            for sci, combo_idx in enumerate(sub_combos):
+            for label, combo_idx in sub_combos:
                 legend_handles.append(Line2D(
-                    [0], [0], color=colors_sub[sci % len(colors_sub)],
-                    linestyle=plot_obj.linetypes[sci % n_lines], lw=1.0, alpha=0.7))
-                labels.append("+".join(plot_obj.star_names[i] for i in combo_idx))
-            for ci, combo in enumerate(plot_obj.unique_combos):
+                    [0], [0], color=id_color[label],
+                    linestyle=id_line[label], lw=1.0, alpha=0.7))
+                labels.append(label)
+            for combo in plot_obj.unique_combos:
                 legend_handles.append(Line2D(
                     [0], [0], color='none',
-                    marker=plot_obj.markers[ci % n_markers],
-                    markerfacecolor=plot_obj.colors_obs[ci % n_colors],
-                    markeredgecolor=plot_obj.colors_obs[ci % n_colors]))
+                    marker=id_marker[combo],
+                    markerfacecolor=id_color[combo],
+                    markeredgecolor=id_color[combo]))
                 labels.append(combo)
 
             ax_top.legend(handles=legend_handles, labels=labels,
