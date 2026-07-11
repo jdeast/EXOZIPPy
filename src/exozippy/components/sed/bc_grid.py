@@ -396,9 +396,16 @@ def build_bc_grid(
                 f"scripts/make_bc_tables.py manually."
             )
 
+        # Dedupe: the same MIST column may be requested by more than one
+        # .sed row (e.g. two independent V-band measurements, or the same
+        # filter used for both a blend row and a differential row).
+        # df[keep] with a repeated name would return a 2-D slice for that
+        # column, breaking the by-name lookup in step 4 below.
+        unique_wanted_cols = list(dict.fromkeys(wanted_cols))
+
         frames: Dict[float, pd.DataFrame] = {}
         for feh, df in raw_frames.items():
-            keep = ["teff", "logg", "feh", "Av"] + wanted_cols
+            keep = ["teff", "logg", "feh", "Av"] + unique_wanted_cols
             frames[feh] = df[keep].copy()
         per_facility_frames[fac] = frames
 

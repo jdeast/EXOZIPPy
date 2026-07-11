@@ -69,6 +69,81 @@ filters:
         pos: [B]
         neg: [C]
 
+    # A-(B+C) differential photometry, historical astrometry/photometry
+    # table (Eastman+2016 and refs therein; see KELT-4_A-BC.rel.dat for the
+    # full table with sources). mag = m_A - m_BC (pos: [A], neg: [B, C]).
+    # WARNING: no uncertainty was published for any of these mag_A/mag_BC
+    # values -- err below is a PLACEHOLDER; replace with real values.
+    # WARNING: the two 1972 V rows are suspiciously round (9.500/14.000)
+    # and disagree with the later, more precise-looking V rows by >2 mag
+    # (-4.5 vs ~-2.2 to -2.95) -- likely crude early visual/photographic
+    # estimates. Consider dropping or heavily down-weighting them.
+    - name: "Generic/Bessell.V"
+      mag: -4.500
+      err: 0.5
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1972.230, source 1
+
+    - name: "Generic/Bessell.V"
+      mag: -4.500
+      err: 0.5
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1972.249, source 1
+
+    - name: "Generic/Bessell.V"
+      mag: -2.240
+      err: 0.1
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1987.430, source 2
+
+    - name: "Generic/Bessell.V"
+      mag: -2.806
+      err: 0.1
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1991.250, source 3
+
+    - name: "Generic/Bessell.V"
+      mag: -2.950
+      err: 0.1
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1991.530, source 4 (matches WDS mag1/mag2 10.040/12.99)
+
+    - name: "Generic/Cousins.R"
+      mag: -2.150
+      err: 0.1
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 1987.430, source 2
+
+    # 2012.3464, source 5 (same high-res AO epoch as the Kp B-C row above
+    # and the tight sep/PA rows in KELT-4_A-BC.rel.dat / KELT-4_B-C.rel.dat;
+    # assuming NIRC2 J to match the Kp filter, not verified)
+    - name: "Keck/NIRC2.J"
+      mag: -1.747
+      err: 0.05
+      photType:
+        pos: [A]
+        neg: [B, C]
+
+    - name: "Keck/NIRC2.Kp"
+      mag: -1.378
+      err: 0.05
+      photType:
+        pos: [A]
+        neg: [B, C]
+      # 2012.3464, source 5
+
     # - name: "TYCHO/TYCHO.B"
     #   mag: 10.605
     #   err: 0.042
