@@ -1,6 +1,7 @@
 # Relative astrometry of KELT-4B with respect to KELT-4C.
-# For use with astrometryinstrument (mode: rel, star_ndx: <B>, planet_ndx: <C>,
-# sep_unit: mas). NOT YET wired into kelt4.yaml -- data staging only.
+# Wired into kelt4.yaml as astrometryinstrument 'BC' (mode: rel,
+# orbit: BC, sep_unit: mas): the model is the companion group (B)
+# relative to the primary group (C).
 #
 # Columns: time[BJD_TDB]  sep[mas]  err_sep[mas]  pa[deg]  err_pa[deg]
 #

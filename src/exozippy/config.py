@@ -28,8 +28,15 @@ def _sympy_time_limit(seconds=2):
     certain equation/target pairs, and which pairs get attempted depends on
     hash-seed-sensitive iteration order -- so an unguarded call is a latent
     intermittent hang.  Raises SymbolicTimeout when the limit is hit.
+
+    The handler re-arms the alarm before raising: if the exception fires
+    while the interpreter is inside a C-level frame that discards it (seen
+    in practice with JAX's gc callback -- "Exception ignored in
+    _xla_gc_callback" -- after which the guarded solve ran unbounded), the
+    next alarm gets another chance to land in interpretable bytecode.
     """
     def handler(signum, frame):
+        signal.alarm(1)
         raise SymbolicTimeout()
     old_handler = signal.signal(signal.SIGALRM, handler)
     signal.alarm(seconds)
@@ -154,6 +161,7 @@ class ConfigManager:
     def __init__(self, user_params, system_config=None):
         self.raw_user_params = user_params
         self.custom_solvers = {}
+        self.standalone_solvers = set()
 
         # User-defined parameter links (expression strings in numeric fields).
         # Populated by extract_links, which also strips the strings from
@@ -252,8 +260,21 @@ class ConfigManager:
         for rel in self.all_relations:
             logger.debug(f"Relation: {rel}")
 
-    def register_custom_solver(self, target_str, solver_func):
+    def register_custom_solver(self, target_str, solver_func, standalone=False):
+        """
+        Register a shortcut solver for 'comp.param' targets.
+
+        By default a custom solver only runs when the relaxation engine
+        attacks an equation containing the target (see _execute_solve).
+        standalone=True additionally runs it once per iteration on its own:
+        required when the target's defining relation always holds a second
+        derived unknown (e.g. orbit.m_total in the Kepler relation, whose
+        other side is the equally-unknown arsun), so the equation path can
+        never get down to one unknown by itself.
+        """
         self.custom_solvers[target_str] = solver_func
+        if standalone:
+            self.standalone_solvers.add(target_str)
 
     # ----------------------------
     # User-defined parameter links
@@ -984,6 +1005,9 @@ class ConfigManager:
                                        resolved_scales, scale_provenance,
                                        tolerance, pinned_vars)
 
+            self._run_standalone_solvers(resolved, provenance, tolerance,
+                                         pinned_vars)
+
             for eq in self.all_relations:
                 self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
                                      pinned_vars)
@@ -1132,6 +1156,40 @@ class ConfigManager:
         self.propagated_scales = dict(resolved_scales)
 
         return resolved
+
+    def _run_standalone_solvers(self, resolved, provenance, tolerance,
+                                pinned_vars=None):
+        """
+        Run standalone-registered custom solvers once per relaxation
+        iteration, for every instance path of their target in the symbol
+        map.  A solver that raises (missing dependencies) is retried next
+        iteration; results carry RANK_DERIVED_MIXED so user values and
+        data-derived hints always win, and re-fire as inputs refine.
+        """
+        for lookup_key in self.standalone_solvers:
+            solver_func = self.custom_solvers[lookup_key]
+            comp, param = lookup_key.split('.')[0], lookup_key.split('.')[-1]
+            for path in list(self.master_symbol_map):
+                parts = path.split('.')
+                if (len(parts) != 3 or parts[0] != comp or parts[2] != param
+                        or not parts[1].isdigit()):
+                    continue
+                if pinned_vars and path in pinned_vars:
+                    continue
+                try:
+                    val = float(solver_func(resolved, self.system_config,
+                                            int(parts[1])))
+                except Exception as e:
+                    logger.debug(f"Standalone solver for {path} deferred: {e}")
+                    continue
+                if not _meaningful_change(val, resolved.get(path),
+                                          RANK_DERIVED_MIXED,
+                                          provenance.get(path, 0), tolerance,
+                                          resolved, provenance, path):
+                    continue
+                resolved[path] = val
+                provenance[path] = RANK_DERIVED_MIXED
+                logger.debug(f"Updated {path} = {val:.4g} (standalone solver)")
 
     def _apply_directed_links(self, directed_links, resolved, provenance,
                               resolved_scales, scale_provenance, tolerance,

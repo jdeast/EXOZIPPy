@@ -64,6 +64,42 @@ star.C.radius:
   initval: 0.7
 star.C.teff:
   initval: 4800
+# --- Hierarchical orbits: geometry-derived seeds (Eastman+2016) ---
+# BC: B relative to C, one resolved epoch (2012.35): 49.14 mas -> 10.7 AU
+# projected at 218 pc; with M_B + M_C ~ 1.5 Msun, P ~ 29 yr.  logP is
+# seeded directly (the stage-2 tc window peeks at the logP initval before
+# the relaxation engine runs, so seeding through arsun would leave the tc
+# bounds at the 10-day default).
+orbit.BC.logP:
+  initval: 4.02      # ~29 yr
+  init_scale: 0.15
+orbit.BC.tc:
+  initval: 2456054.5  # the resolved AO epoch
+  init_scale: 1500.0
+# tc is seeded at the AO epoch = conjunction, where the companion sits
+# at PA = bigomega - 90 with projected sep = a*cosi (and the seed RV
+# contribution of the wide orbits is ~0), so bigomega = PA_obs + 90 and
+# a near-face-on cosi keep the seed model on the measured positions.
+orbit.BC.cosi:
+  initval: 0.95
+  init_scale: 0.1
+orbit.BC.bigomega:
+  initval: 55.2       # PA_obs (325.2) + 90, mod 360
+
+# A-BC: B+C photocenter relative to A: 1.57" -> 343 AU projected;
+# M_A + M_b + M_B + M_C ~ 2.7 Msun -> P ~ 3900 yr.
+orbit.A-BC.logP:
+  initval: 6.15       # ~3900 yr
+  init_scale: 0.3
+orbit.A-BC.tc:
+  initval: 2456054.5
+  init_scale: 150000.0
+orbit.A-BC.cosi:
+  initval: 0.95
+  init_scale: 0.1
+orbit.A-BC.bigomega:
+  initval: 118.9      # PA_obs (28.9) + 90
+
 orbit.0.period:
   initval: 2.9895933
 orbit.0.tc:

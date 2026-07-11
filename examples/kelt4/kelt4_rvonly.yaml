@@ -16,7 +16,8 @@ planet:
 
 orbit:
   - name: "b"
-    bodies : "b" # must match "name" of planets/stars. can be list for heirarchical orbits
+    primary: ["A"]    # optional here: omitting both keys pairs the orbit
+    companion: ["b"]  # with the planet whose orbit_ndx points at it
 
 #transit:
 #  - name: "TESS S48"

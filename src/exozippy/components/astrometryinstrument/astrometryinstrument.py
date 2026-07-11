@@ -19,16 +19,28 @@ Supports three data modes (set per instrument via 'mode' in the config):
 
   rel  : relative astrometry of a companion with respect to its host.
          File columns: time[BJD_TDB]  sep[mas]  err_sep[mas]  pa[deg]  err_pa[deg]
-         The position angle is measured East of North.  Use 'planet_ndx'
-         to select which companion the measurements refer to.
+         The position angle is measured East of North, of the orbit's
+         COMPANION group relative to its PRIMARY group.  Use 'orbit'
+         (orbit instance name or index) to select which orbit the
+         measurements trace; 'planet_ndx' remains as a legacy alias
+         (resolved through that planet's orbit_ndx).  When a group holds
+         several bodies, the modeled position is the group photocenter:
+         the barycenter orbit of the referenced orbit, plus the
+         photocenter wobble of any sub-orbit nested inside a group
+         (flux-weighted through the SED when 'band' is given; a dark
+         companion needs no SED; otherwise the photocenter is
+         approximated by the barycenter with a warning).
 
 Per-instrument config keys:
   file              : data file (whitespace-separated, '#' comments)
   mode              : gaia | abs | rel   (default gaia)
   observer_location : ephemeris for parallax factors (default 'gaia' for
                       gaia mode, 'earth' otherwise; see exozippy.ephemeris)
-  star_ndx          : index of the host star (default 0)
-  planet_ndx        : rel mode only, index of the companion (default 0)
+  star_ndx          : index of the host star (default 0); also sets the
+                      parallax used to scale rel-mode separations
+  orbit             : rel mode, orbit instance name (or index) the
+                      measurements trace
+  planet_ndx        : rel mode legacy alias for 'orbit' (default 0)
   epoch             : reference epoch [BJD_TDB] for ra/dec/pm (default:
                       mean time of all gaia/abs observations)
   sep_unit          : rel mode separation unit (default 'mas')
@@ -51,11 +63,13 @@ unknowable from sky-plane data); this is handled by restricting bigomega
 to [0, 180] (Orbit._restrict_bigomega_halfplane), with a table note
 documenting the artificial boundary.
 
-Model limitations (v1): the photocenter wobble sums over all planets with
-a single per-instrument companion flux fraction (fluxfrac, default 0 =
-dark companions); relative positions are Keplerian two-body (host wobble
-from other companions is neglected); light travel time and aberration are
-neglected.
+Model limitations (v1): the gaia/abs photocenter wobble sums over the
+orbits whose PRIMARY group contains the target star, with a single
+per-instrument companion flux fraction (fluxfrac, default 0 = dark
+companions); orbits holding the star in their companion group are not yet
+modeled there (warned).  Relative positions are Keplerian two-body per
+orbit plus one level of nested photocenter wobble; light travel time and
+aberration are neglected.
 """
 
 import logging
@@ -73,6 +87,7 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.ephemeris import get_observer_position
 from . import physics
 
@@ -98,6 +113,40 @@ class AstrometryInstrument(Component):
             c.get("observer_location", "gaia" if c.get("mode", "gaia") == "gaia" else "earth")
             for c in self.config
         ]
+
+        # rel mode: which orbit the measurements trace (name or index in
+        # 'orbit'; legacy 'planet_ndx' resolves through the planet's
+        # orbit_ndx).
+        sys_cfg = getattr(config_manager, "system_config", None) or {}
+        orbit_names = component_instance_names(sys_cfg, "orbit")
+        planet_cfgs = sys_cfg.get("planet") or []
+        if not isinstance(planet_cfgs, list):
+            planet_cfgs = [planet_cfgs]
+        self.rel_orbit = []
+        for i, c in enumerate(self.config):
+            if c.get("mode", "gaia") != "rel":
+                self.rel_orbit.append(None)
+                continue
+            ref = c.get("orbit")
+            if ref is not None:
+                if isinstance(ref, int) or str(ref).isdigit():
+                    idx = int(ref)
+                    if orbit_names and idx >= len(orbit_names):
+                        raise ValueError(
+                            f"[{self.prefix}.{self.names[i]}] orbit index "
+                            f"{idx} out of range; orbits are {orbit_names}.")
+                elif ref in orbit_names:
+                    idx = orbit_names.index(ref)
+                else:
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] unknown orbit "
+                        f"'{ref}'; orbits are {orbit_names}.")
+            else:
+                j = int(c.get("planet_ndx", 0))
+                p_cfg = planet_cfgs[j] if j < len(planet_cfgs) else {}
+                # same default as Planet.build_maps' orbit_map
+                idx = int((p_cfg or {}).get("orbit_ndx", 0))
+            self.rel_orbit.append(idx)
 
     @property
     def prefix(self):
@@ -255,22 +304,132 @@ class AstrometryInstrument(Component):
         F_h = 10 ** (-0.4 * sed.predict_star_appmag(host, filter_key, system))
         return F_c / (F_c + F_h)
 
-    def _photocenter_amplitude(self, system, beta):
-        """Per-planet photocenter semimajor axis in mas: a_rel*(B - beta)*plx."""
-        planets = system.planet
-        star = system.star
-        plx = star.parallax.value[planets.star_map_tensor]
-        mass_frac = planets.mass.value / planets.m_total.value
-        return planets.arsun.value * RSUN_AU * (mass_frac - beta) * plx
+    def _photocenter_terms(self, system, star_idx, beta):
+        """
+        Photocenter wobble of one star for gaia/abs data: per-orbit
+        semimajor axes in mas, a_phot = a_rel*(M_c/M_tot - beta)*plx, over
+        the orbits whose primary group contains the star.  Returns
+        (a_phot vector node, orbit index array), or (None, None) when no
+        orbit moves this star.
+        """
+        orbits = getattr(system, "orbit", None)
+        if orbits is None:
+            return None, None
+        members = orbits.star_membership(star_idx)
+        if any(role == "companion" for _, role in members):
+            names = [orbits.names[o] for o, role in members
+                     if role == "companion"]
+            logger.warning(
+                f"[{self.prefix}] star {star_idx} is in the COMPANION "
+                f"group of orbit(s) {names}; that photocenter contribution "
+                f"is not modeled for gaia/abs data yet.")
+        prim = [o for o, role in members if role == "primary"]
+        if not prim:
+            return None, None
+        if not hasattr(orbits, "arsun"):
+            raise ValueError(
+                f"[{self.prefix}] astrometry needs the orbit scale "
+                f"parameters (arsun/masses), but the orbit component's "
+                f"body groups did not resolve against the active system.")
+        omap = np.asarray(prim, dtype=int)
+        mass_frac = orbits.m_companion.value[omap] / orbits.m_total.value[omap]
+        plx = system.star.parallax.value[star_idx]
+        return orbits.arsun.value[omap] * RSUN_AU * (mass_frac - beta) * plx, omap
 
-    def _relative_amplitude(self, system):
-        """Per-planet relative semimajor axis in mas: a_rel * plx."""
-        planets = system.planet
-        star = system.star
-        plx = star.parallax.value[planets.star_map_tensor]
-        return planets.arsun.value * RSUN_AU * plx
+    def _pair_beta(self, system, i, o2):
+        """
+        Flux fraction beta = F_companion/(F_companion + F_primary) among
+        the bodies of orbit o2, in instrument i's band.  Planets are dark.
+        Returns None when both sides are luminous but no SED/band is
+        available to weigh them (caller approximates photocenter by
+        barycenter).
+        """
+        orbits = system.orbit
+        comp_stars = [idx for (t, idx) in orbits.companion_bodies[o2] if t == "star"]
+        prim_stars = [idx for (t, idx) in orbits.primary_bodies[o2] if t == "star"]
+        if not comp_stars and not prim_stars:
+            return None
+        if not comp_stars:
+            return 0.0
+        if not prim_stars:
+            return 1.0
 
-    def _absolute_model(self, system, d, t, beta, has_orbit):
+        band_name = self.config[i].get("band")
+        sed = getattr(system, "sed", None)
+        if band_name is not None and sed is not None:
+            band_names = list(system.band.names) if hasattr(system, "band") else []
+            if band_name not in band_names:
+                raise ValueError(
+                    f"astrometryinstrument {self.names[i]} references "
+                    f"unknown band '{band_name}'. Available: {band_names}.")
+            filter_key = system.band.filter_mist[band_names.index(band_name)]
+            if sed.has_filter(filter_key):
+                def group_flux(stars):
+                    F = 0.0
+                    for s_idx in stars:
+                        F = F + 10 ** (-0.4 * sed.predict_star_appmag(
+                            s_idx, filter_key, system))
+                    return F
+                F_c = group_flux(comp_stars)
+                F_p = group_flux(prim_stars)
+                return F_c / (F_c + F_p)
+            logger.warning(
+                f"astrometryinstrument {self.names[i]}: band filter "
+                f"'{filter_key}' is not in the SED's BC grid; "
+                f"approximating the photocenter of orbit "
+                f"{orbits.names[o2]} by its barycenter.")
+            return None
+        logger.warning(
+            f"astrometryinstrument {self.names[i]}: both sides of nested "
+            f"orbit {orbits.names[o2]} are luminous but no band/sed is "
+            f"configured; approximating its photocenter by its barycenter.")
+        return None
+
+    def _rel_model(self, system, i, t_node):
+        """
+        (dE, dN) of instrument i's rel-mode target: the companion group of
+        the referenced orbit relative to its primary group, in mas.  Each
+        group's position is its photocenter: the two-body barycenter arc,
+        corrected by the photocenter wobble of any orbit fully nested in a
+        group, r_phot - r_bary = (beta - M_c/M_tot) * r_rel.
+        """
+        orbits = system.orbit
+        o = self.rel_orbit[i]
+        if not hasattr(orbits, "arsun"):
+            raise ValueError(
+                f"[{self.prefix}.{self.names[i]}] relative astrometry "
+                f"needs the orbit scale parameters (arsun/masses), but the "
+                f"orbit component's body groups did not resolve against "
+                f"the active system.")
+        plx = system.star.parallax.value[self.star_map[i]]
+        a_rel = orbits.arsun.value[o] * RSUN_AU * plx
+        dE_rel, dN_rel = orbits.get_sky_position(
+            t_node, pt.stack([a_rel]), np.array([o]), relative=True)
+        dE, dN = dE_rel[:, 0], dN_rel[:, 0]
+
+        comp_set = set(orbits.companion_bodies[o])
+        prim_set = set(orbits.primary_bodies[o])
+        for o2 in range(orbits.n_elements):
+            if o2 == o:
+                continue
+            bodies2 = set(orbits.bodies(o2))
+            for group, sgn in ((comp_set, 1.0), (prim_set, -1.0)):
+                if len(group) < 2 or not bodies2 <= group:
+                    continue
+                beta = self._pair_beta(system, i, o2)
+                if beta is None:
+                    continue
+                mfrac = (orbits.m_companion.value[o2]
+                         / orbits.m_total.value[o2])
+                amp = (orbits.arsun.value[o2] * RSUN_AU * plx
+                       * (beta - mfrac) * sgn)
+                dE2, dN2 = orbits.get_sky_position(
+                    t_node, pt.stack([amp]), np.array([o2]), relative=True)
+                dE = dE + dE2[:, 0]
+                dN = dN + dN2[:, 0]
+        return dE, dN
+
+    def _absolute_model(self, system, d, t, beta):
         """(dE, dN) model in mas relative to the reference position."""
         star = system.star
         s = d["star_ndx"]
@@ -283,10 +442,10 @@ class AstrometryInstrument(Component):
               + star.pm_dec.value[s] * dt_yr
               + star.parallax.value[s] * d["P_N"])
 
-        if has_orbit:
-            a_phot = self._photocenter_amplitude(system, beta)
+        a_phot, omap = self._photocenter_terms(system, s, beta)
+        if a_phot is not None:
             dE_orb, dN_orb = system.orbit.get_sky_position(
-                pt.as_tensor_variable(t), a_phot, system.planet.orbit_map)
+                pt.as_tensor_variable(t), a_phot, omap)
             dE = dE + pt.sum(dE_orb, axis=1)
             dN = dN + pt.sum(dN_orb, axis=1)
 
@@ -296,10 +455,10 @@ class AstrometryInstrument(Component):
     # Stage 6
     # ------------------------------------------------------------------
     def build_likelihood(self, model, system):
-        has_orbit = hasattr(system, "orbit") and hasattr(system, "planet")
-        needs_star = any(m in ("gaia", "abs") for m in self.modes)
-        if needs_star and not hasattr(system, "star"):
-            raise ValueError(f"[{self.prefix}] gaia/abs astrometry requires a star component.")
+        if not hasattr(system, "star"):
+            raise ValueError(f"[{self.prefix}] astrometry requires a star component.")
+        if any(m == "rel" for m in self.modes) and not hasattr(system, "orbit"):
+            raise ValueError(f"[{self.prefix}] relative astrometry requires an orbit component.")
 
         for i, d in enumerate(self.datasets):
             name = d["name"]
@@ -311,7 +470,7 @@ class AstrometryInstrument(Component):
                 pm.Deterministic(f"{self.prefix}.{name}.fluxfrac_sed", beta)
 
             if mode in ("gaia", "abs"):
-                dE, dN = self._absolute_model(system, d, t, beta, has_orbit)
+                dE, dN = self._absolute_model(system, d, t, beta)
 
             if mode == "gaia":
                 w_model = dE * d["sin_psi"] + dN * d["cos_psi"]
@@ -338,17 +497,7 @@ class AstrometryInstrument(Component):
                 )
 
             else:  # rel
-                if not has_orbit:
-                    raise ValueError(
-                        f"[{self.prefix}.{name}] relative astrometry requires "
-                        f"orbit and planet components.")
-                j = int(self.planet_map[i])
-                a_rel = self._relative_amplitude(system)
-                dE_rel, dN_rel = system.orbit.get_sky_position(
-                    pt.as_tensor_variable(t), a_rel, system.planet.orbit_map,
-                    relative=True)
-                dEj = dE_rel[:, j]
-                dNj = dN_rel[:, j]
+                dEj, dNj = self._rel_model(system, i, pt.as_tensor_variable(t))
 
                 sep_model = pt.sqrt(pt.sqr(dEj) + pt.sqr(dNj))
                 pa_model = pt.arctan2(dEj, dNj)
@@ -377,45 +526,54 @@ class AstrometryInstrument(Component):
     # ------------------------------------------------------------------
     def compile_plotters(self, model, system):
         """Compile fast PyTensor functions for plotting."""
-        has_orbit = hasattr(system, "orbit") and hasattr(system, "planet")
-        if not has_orbit:
+        if not hasattr(system, "orbit") or not hasattr(system.orbit, "arsun"):
             return
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
 
-        # Photocenter orbit (summed over planets), per instrument (beta varies)
+        # Photocenter orbit (summed over the star's member orbits), per
+        # gaia/abs instrument (beta varies); None when nothing moves the star.
         self._compiled_photo = []
         for i in range(self.n_elements):
+            if self.modes[i] == "rel":
+                self._compiled_photo.append(None)
+                continue
             beta = self._sed_beta_node(system, i)
-            a_phot = self._photocenter_amplitude(system, beta)
+            a_phot, omap = self._photocenter_terms(
+                system, self.datasets[i]["star_ndx"], beta)
+            if a_phot is None:
+                self._compiled_photo.append(None)
+                continue
             dE_orb, dN_orb = system.orbit.get_sky_position(
-                t_input, a_phot, system.planet.orbit_map)
+                t_input, a_phot, omap)
             self._compiled_photo.append(pytensor.function(
                 inputs=[t_input] + param_symbols,
                 outputs=[pt.sum(dE_orb, axis=1), pt.sum(dN_orb, axis=1)],
                 on_unused_input="ignore",
             ))
 
-        # Relative orbit matrix (N_times, N_planets)
-        a_rel = self._relative_amplitude(system)
-        dE_rel, dN_rel = system.orbit.get_sky_position(
-            t_input, a_rel, system.planet.orbit_map, relative=True)
-        self._compiled_rel = pytensor.function(
-            inputs=[t_input] + param_symbols,
-            outputs=[dE_rel, dN_rel],
-            on_unused_input="ignore",
-        )
+        # Relative model per rel instrument (nested photocenter terms
+        # included; matches the likelihood graph exactly)
+        self._compiled_rel = []
+        for i in range(self.n_elements):
+            if self.modes[i] != "rel":
+                self._compiled_rel.append(None)
+                continue
+            dE, dN = self._rel_model(system, i, t_input)
+            self._compiled_rel.append(pytensor.function(
+                inputs=[t_input] + param_symbols,
+                outputs=[dE, dN],
+                on_unused_input="ignore",
+            ))
 
-        # Orbital elements in internal units (per planet), for the node/
+        # Orbital elements in internal units (all orbits), for the node/
         # direction annotations of the sky plot.
         orb = system.orbit
-        omap = system.planet.orbit_map
         self._compiled_elements = pytensor.function(
             inputs=param_symbols,
-            outputs=[orb.tp.value[omap], orb.n.value[omap],
-                     orb.ecc.value[omap], orb.omega.value[omap],
-                     orb.bigomega.value[omap]],
+            outputs=[orb.tp.value, orb.n.value,
+                     orb.ecc.value, orb.omega.value, orb.bigomega.value],
             on_unused_input="ignore",
         )
 
@@ -428,6 +586,16 @@ class AstrometryInstrument(Component):
             else:
                 vals.append(np.atleast_1d(val))
         return vals
+
+    def _eval_photo(self, i, t, vals):
+        """Photocenter orbit at times t for instrument i; zeros when no
+        orbit moves the instrument's star."""
+        fn = getattr(self, "_compiled_photo", None)
+        fn = fn[i] if fn is not None else None
+        if fn is None:
+            z = np.zeros(len(t), dtype=float)
+            return z, z.copy()
+        return fn(np.asarray(t, dtype=np.float64), *vals)
 
     def _linear_terms(self, d, t, point, system):
         """Numpy pm+parallax+offset model (mas) at the reference point."""
@@ -477,7 +645,7 @@ class AstrometryInstrument(Component):
                 dE_lin, dN_lin = self._linear_terms(d, t, ref_point, system)
                 for idx, point in enumerate(points):
                     vals = self._point_values(system, point)
-                    dE_orb, dN_orb = self._compiled_photo[i](t.astype(np.float64), *vals)
+                    dE_orb, dN_orb = self._eval_photo(i, t, vals)
                     w_model = ((dE_lin + dE_orb) * d["sin_psi"]
                                + (dN_lin + dN_orb) * d["cos_psi"])
                     alpha = 0.8 if len(points) == 1 else 0.1
@@ -490,12 +658,12 @@ class AstrometryInstrument(Component):
             elif d["mode"] == "abs":
                 dE_lin, dN_lin = self._linear_terms(d, t, ref_point, system)
                 vals = self._point_values(system, ref_point)
-                dE_orb, dN_orb = self._compiled_photo[i](t.astype(np.float64), *vals)
+                dE_orb, dN_orb = self._eval_photo(i, t, vals)
                 plt.errorbar(d["dE_obs"] - dE_lin, d["dN_obs"] - dN_lin,
                              xerr=d["err_E"], yerr=d["err_N"], fmt="o",
                              alpha=0.6, zorder=1, label="data - (pm+plx)")
                 t_lin_pretty = np.linspace(t.min(), t.max(), 2000)
-                dE_p, dN_p = self._compiled_photo[i](t_lin_pretty.astype(np.float64), *vals)
+                dE_p, dN_p = self._eval_photo(i, t_lin_pretty, vals)
                 plt.plot(dE_p, dN_p, "r-", lw=1, zorder=2, label="photocenter orbit")
                 plt.gca().invert_xaxis()  # East to the left
                 plt.gca().set_aspect("equal", adjustable="datalim")
@@ -505,12 +673,11 @@ class AstrometryInstrument(Component):
                 plt.legend(loc="best", fontsize="small")
 
             else:  # rel
-                j = int(self.planet_map[i])
                 vals = self._point_values(system, ref_point)
-                dE_m, dN_m = self._compiled_rel(t_pretty.astype(np.float64), *vals)
+                dE_m, dN_m = self._compiled_rel[i](t_pretty.astype(np.float64), *vals)
                 plt.errorbar(d["sep"] * np.sin(d["pa"]), d["sep"] * np.cos(d["pa"]),
                              fmt="o", alpha=0.6, zorder=1, label="data")
-                plt.plot(dE_m[:, j], dN_m[:, j], "r-", lw=1, zorder=2, label="model")
+                plt.plot(dE_m, dN_m, "r-", lw=1, zorder=2, label="model")
                 plt.plot(0, 0, "k*", markersize=12)
                 plt.gca().invert_xaxis()
                 plt.gca().set_aspect("equal", adjustable="datalim")
@@ -555,14 +722,14 @@ class AstrometryInstrument(Component):
                - xyz[:, 2] * np.cos(d["dec_ref"]))
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
-        dE_orb, dN_orb = self._compiled_photo[i](t_dense.astype(np.float64), *vals)
+        dE_orb, dN_orb = self._eval_photo(i, t_dense, vals)
         axL.plot(dE_lin, dN_lin, ":", color="tab:blue", lw=0.8, zorder=1,
                  label="pm + parallax")
         axL.plot(dE_lin + dE_orb, dN_lin + dN_orb, "-", color="0.4", lw=0.8,
                  zorder=2, label="pm + parallax + orbit")
 
         dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
-        dE_orb_o, dN_orb_o = self._compiled_photo[i](t.astype(np.float64), *vals)
+        dE_orb_o, dN_orb_o = self._eval_photo(i, t, vals)
         axL.plot(dE_lin_o + dE_orb_o, dN_lin_o + dN_orb_o, "r.", ms=5,
                  zorder=2, label="observation epochs")
         if d["mode"] == "abs":
@@ -584,9 +751,9 @@ class AstrometryInstrument(Component):
         P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
         t1 = t.max()
         t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
-        dE_o, dN_o = self._compiled_photo[i](t_orb.astype(np.float64), *vals)
+        dE_o, dN_o = self._eval_photo(i, t_orb, vals)
         axR.plot(dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit")
-        dE_ep, dN_ep = self._compiled_photo[i](t.astype(np.float64), *vals)
+        dE_ep, dN_ep = self._eval_photo(i, t, vals)
         axR.plot(dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs")
         axR.plot(0, 0, "k+", ms=12, mew=2, zorder=4)  # barycenter
 
@@ -615,15 +782,15 @@ class AstrometryInstrument(Component):
             t_node = tp + M_node / n_mm
             # shift into the plotted window
             t_node += np.ceil((t_orb[0] - t_node) / P) * P
-            (xn,), (yn,) = self._compiled_photo[i](
-                np.array([t_node], dtype=np.float64), *vals)
+            (xn,), (yn,) = self._eval_photo(
+                i, np.array([t_node], dtype=np.float64), vals)
             axR.plot(xn, yn, "o", color="tab:blue", ms=10, mfc="none", mew=2,
                      zorder=5, label="ascending node")
 
             # Direction of motion: a curved arrow tracing the orbit away
             # from the ascending node, drawn 25% outside the orbit itself.
             t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
-            xa, ya = self._compiled_photo[i](t_arc.astype(np.float64), *vals)
+            xa, ya = self._eval_photo(i, t_arc, vals)
             xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
             axR.plot(xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6)
             axR.annotate("", xy=(xa[-1], ya[-1]), xytext=(xa[-2], ya[-2]),
