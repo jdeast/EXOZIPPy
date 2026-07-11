@@ -311,6 +311,16 @@ class Component(ABC):
         """
         pass
 
+    def plot_corner(self, idata, filename_prefix="debug"):
+        """Optional: draw a component-specific posterior corner plot.
+
+        Called once, after sampling, when the full posterior (idata) is
+        available -- unlike plot(), which also runs pre-flight on a single
+        point where a corner plot would be meaningless. Default: no-op;
+        override in components that want one (see mulensing.Lens).
+        """
+        pass
+
     def sampler_requirements(self):
         """Return sampler constraints imposed by this component.
 

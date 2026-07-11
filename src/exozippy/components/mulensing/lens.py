@@ -5,6 +5,7 @@ import numpy as np
 
 from exozippy.components.component import Component
 from exozippy.constants import KAPPA
+from exozippy.corner_utils import collect_parameter_corner_samples, save_corner_plot
 from exozippy.potentials import soft_lower_bound
 from .op import MulensMagOp, BinaryLensMagOp, VBMDirectMagOp
 
@@ -725,3 +726,55 @@ class Lens(Component):
 
     def plot(self, system, points, filename_prefix="debug"):
         pass
+
+    def _companion_instance_names(self):
+        """Display names for per-companion vector elements (companion lens bodies)."""
+        system_config = getattr(self.config_manager, "system_config", None) or {}
+        names = []
+        for comp_type, ndx in self.lens_bodies[0][1:]:
+            entries = system_config.get(comp_type, [])
+            if ndx < len(entries) and isinstance(entries[ndx], dict) and entries[ndx].get("name"):
+                names.append(str(entries[ndx]["name"]))
+            else:
+                names.append(f"{comp_type}{ndx}")
+        return names
+
+    def plot_corner(self, idata, filename_prefix="debug"):
+        """Corner plot of the fitted lensing geometry: t_0, u_0, t_E, s, q,
+        alpha, rho -- whichever of these the event actually has (rho only for
+        finite-source events; s/q/alpha only when there is at least one lens
+        companion). Only meaningful with the full posterior, so this is
+        called once, after sampling, via plot_corner (not the twice-called
+        plot() hook, which also runs pre-flight on a single point).
+
+        t_E (and, for multi-body lenses, q and alpha) are pure physics
+        expressions with no sampled elements of their own, so they never get
+        a pm.Deterministic node and never appear in idata.posterior directly
+        (see Parameter.build_pymc's ``track_node`` logic) -- this reads each
+        Parameter's ``.posterior`` instead, which System.distribute_posterior
+        (already called earlier in run_fit, before this hook) reconstructs
+        for both tracked and pure-expression parameters alike.
+        """
+        src_names = self._source_instance_names() if self.n_sources > 1 else None
+        comp_names = self._companion_instance_names() if self.n_companions > 1 else None
+
+        def per_source_labels(param):
+            return [f"{param}[{name}]" for name in src_names] if src_names else None
+
+        def per_companion_labels(param):
+            return [f"{param}[{name}]" for name in comp_names] if comp_names else None
+
+        param_specs = [
+            (self.t_0, per_source_labels("t_0")),
+            (self.u_0, per_source_labels("u_0")),
+            (self.t_E, per_source_labels("t_E")),
+        ]
+        if hasattr(self, "rho"):
+            param_specs.append((self.rho, per_source_labels("rho")))
+        if self.n_companions >= 1:
+            param_specs.append((self.s, per_companion_labels("s")))
+            param_specs.append((self.q, per_companion_labels("q")))
+            param_specs.append((self.alpha, per_companion_labels("alpha")))
+
+        samples, labels = collect_parameter_corner_samples(param_specs)
+        save_corner_plot(samples, labels, f"{filename_prefix}_lens_corner.png")
