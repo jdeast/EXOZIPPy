@@ -4,7 +4,6 @@ import importlib
 import time
 import yaml
 import numpy as np
-import math
 import os
 import logging
 from pathlib import Path
@@ -46,6 +45,7 @@ from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.latex import build_latex_output, build_csv_output
 from .diagnostics import ModelAuditor
+from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
 from exozippy.samplers.ptde import ptde_sample
 
@@ -302,6 +302,12 @@ def run_fit(config):
 
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
     make_corner(model, idata, str(prefix) + "_corner.png")
+
+    # Component-specific corner plots (e.g. mulensing geometry). Unlike
+    # comp.plot(), which also runs pre-flight on a single point, this only
+    # runs here, once, when the full posterior (idata) actually exists.
+    for comp in system.active_components.values():
+        comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
     all_params = system.get_all_parameters()
@@ -566,57 +572,11 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             "This can be safely ignored if intentional, but check for typos.")
 
 def make_corner(model, idata, filename, max_samples=1000):
-    import corner
     all_vars = list(idata["posterior"].data_vars)
     physical_vars = [v for v in all_vars if "_raw" not in v and "_interval" not in v]
-
-    samples_list = []
-    labels = []
-
-    for v in physical_vars:
-        arr = idata["posterior"][v].stack(sample=("chain", "draw")).values
-        n_samples = arr.shape[-1]
-
-        if arr.ndim == 1:
-            samples_list.append(arr)
-            labels.append(v)
-        else:
-            arr_flat = arr.reshape(-1, n_samples)
-            n_elem = arr_flat.shape[0]
-            if n_elem > 100:
-                logger.warning(f"make_corner: {v} has {n_elem} elements — possible shape mismatch")
-            for i in range(n_elem):
-                samples_list.append(arr_flat[i])
-                labels.append(f"{v}[{i}]")
-
-    samples = np.array(samples_list).T
-
-    # Thin to cap corner.corner() memory — 1000 samples is sufficient for visual quality.
-    if samples.shape[0] > max_samples:
-        rng = np.random.default_rng(seed=42)
-        idx = rng.choice(samples.shape[0], size=max_samples, replace=False)
-        idx.sort()
-        samples = samples[idx]
-
-    minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
-    maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
-    n_samples_total = samples.shape[0]
-
-    try:
-        fig = corner.corner(
-            samples,
-            labels=labels,
-            quantiles=[minrank, 0.5, maxrank],
-            show_titles=True,
-            title_kwargs={"fontsize": 12}
-        )
-        # PDF vector backend holds every scatter marker path in memory during
-        # serialization → balloons to tens of GB for a 26×26 subplot figure.
-        # PNG (Agg) rasterizes to a fixed pixel buffer bounded by DPI × size.
-        fig.savefig(filename, dpi=150)
-        plt.close(fig)
-    except Exception as e:
-        logger.warning(f"Corner plot failed (sample size {n_samples_total}): {e}")
+    var_specs = [(v, None) for v in physical_vars]
+    samples, labels = collect_corner_samples(idata, var_specs)
+    save_corner_plot(samples, labels, filename, max_samples=max_samples)
 
 # Module-level globals for fork-based parallel lp evaluation.
 # PyTensor compiled functions can't be pickled, so they're set here before
