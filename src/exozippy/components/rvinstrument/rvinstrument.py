@@ -19,6 +19,10 @@ class RVInstrument(Component):
         self.label = "Instrument Parameters"
         self.files = [c.get("file") for c in self.config]
         self.units = [c.get("unit", u.m / u.s) for c in self.config]
+        # Which star the RVs are of; its Doppler signal is the sum over
+        # every orbit that star is a body of (planetary reflex and stellar
+        # companions alike).
+        self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
         self.total_detrend_cols = 0
         self.n_total_obs = 0
 
@@ -87,19 +91,55 @@ class RVInstrument(Component):
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
 
+    def _orbit_rv_terms(self, system, star_idx):
+        """
+        Per-orbit RV semi-amplitudes for one star: (K_vec, orbit_map) over
+        the orbits that star is a body of.  A primary-group member carries
+        the primary reflex K directly; a companion-group member moves with
+        the opposite phase (omega_* + 180 deg) and an amplitude scaled by
+        the group mass ratio, expressed here as a negated, rescaled K with
+        the same omega_* phase formula.
+        """
+        orbits = system.orbit
+        members = orbits.star_membership(star_idx)
+        if not members:
+            raise ValueError(
+                f"[{self.prefix}] star {star_idx} is not a body of any "
+                f"orbit; no RV model can be built. Add it to an orbit's "
+                f"primary/companion group.")
+        if not hasattr(orbits, "K"):
+            raise ValueError(
+                f"[{self.prefix}] the orbit component has no K parameter "
+                f"(its body groups did not resolve against the active "
+                f"system); RVs require orbits with resolvable bodies.")
+        k_nodes, omap = [], []
+        for o, role in members:
+            if role == "primary":
+                k_nodes.append(orbits.K.value[o])
+            else:
+                k_nodes.append(-orbits.K.value[o]
+                               * orbits.m_primary.value[o]
+                               / orbits.m_companion.value[o])
+            omap.append(o)
+        return pt.stack(k_nodes), np.asarray(omap, dtype=int)
+
     def build_likelihood(self, model, system):
         time = pm.Data("rv_time",self.time)
         rv = pm.Data("rv_data",self.rv)
         err = pm.Data("rv_err",self.err)
 
         orbits = system.orbit
-        planets = system.planet
+        if len(set(self.star_ndx)) > 1:
+            raise NotImplementedError(
+                f"[{self.prefix}] all RV instruments must observe the same "
+                f"star for now (got star_ndx={self.star_ndx}).")
 
         # 1. Construct the RV Model: start with the gamma constant offset
         rv_model = self.gamma.value[self.inst_map_tensor]
 
-        # sum the contribution from all planets
-        rv_model += pt.sum(orbits.get_radial_velocity(time, planets.K.value[planets.orbit_map], planets.orbit_map),axis=1)
+        # sum the contribution from every orbit containing the observed star
+        K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
+        rv_model += pt.sum(orbits.get_radial_velocity(time, K_vec, omap), axis=1)
 
         # detrending
         if self.total_detrend_cols > 0:
@@ -139,14 +179,14 @@ class RVInstrument(Component):
         param_symbols = [p.value for p in system.plot_params]
 
         # 3. Pull the physics from the system
-        planets = getattr(system, 'planet', None)
         orbits = getattr(system, 'orbit', None)
 
-        if planets is not None and orbits is not None:
-            K_mapped = planets.K.value[planets.orbit_map]
+        if orbits is not None:
+            K_vec, omap = self._orbit_rv_terms(system, self.star_ndx[0])
+            self._plot_orbit_map = omap
 
-            # The matrix of shape (N_times, N_planets)
-            rv_matrix_node = orbits.get_radial_velocity(t_input, K_mapped, planets.orbit_map)
+            # The matrix of shape (N_times, N_member_orbits)
+            rv_matrix_node = orbits.get_radial_velocity(t_input, K_vec, omap)
 
             # Save them to SELF, not the system!
             self._compiled_full_rv = pytensor.function(
@@ -240,30 +280,28 @@ class RVInstrument(Component):
 
     def plot_phased(self, system, points, filename_prefix="debug"):
         """
-        Generates a phased RV plot for each planet in the system.
-        Accesses planet parameters via vectorized indices.
+        Generates a phased RV plot for each orbit the observed star is a
+        body of, isolating that orbit's signal from the rest.
         """
-        planets = system.planet
-
         if isinstance(points, dict): points = [points]
 
-        # _compiled_rv_matrix returns (N_times, N_planets)
+        # _compiled_rv_matrix returns (N_times, N_member_orbits)
         compiled_matrix = self._compiled_rv_matrix
+        omap = self._plot_orbit_map
 
-        # Iterate through the number of planets defined in the component
-        for p_idx in range(planets.n_elements):
+        # Iterate over the member orbits (columns of the compiled matrix)
+        for col, o_idx in enumerate(omap):
             plt.figure(figsize=(10, 6))
 
             # 1. Setup Phase Grid using the reference point (first draw)
             ref_point = points[0]
 
-            # Accessing the vectorized period and tc for this specific planet index
-            # These are stored in the Orbit object owned by the system
+            # Accessing the vectorized period and tc for this orbit index
             P_vals = np.atleast_1d(ref_point.get(system.orbit.period.label))
             tc_vals = np.atleast_1d(ref_point.get(system.orbit.tc.label))
 
-            P_ref = float(P_vals[p_idx])
-            tc_ref = float(tc_vals[p_idx])
+            P_ref = float(P_vals[o_idx])
+            tc_ref = float(tc_vals[o_idx])
 
             #P_ref = float(np.atleast_1d(ref_point[system.orbits.period.label])[p_idx])
             #tc_ref = float(np.atleast_1d(ref_point[system.orbits.tc.label])[p_idx])
@@ -285,12 +323,12 @@ class RVInstrument(Component):
                     else:
                         param_values.append(np.atleast_1d(val))
 
-                # Get the (N_times, N_planets) matrix
+                # Get the (N_times, N_member_orbits) matrix
                 rv_matrix = compiled_matrix(t_model, *param_values)
-                y_planet = rv_matrix[:, p_idx]
+                y_orbit = rv_matrix[:, col]
 
                 alpha = 0.8 if len(points) == 1 else 0.1
-                plt.plot(phase_model[sort_m], y_planet[sort_m]*factor, 'r-', alpha=alpha, lw=1, zorder=2)
+                plt.plot(phase_model[sort_m], y_orbit[sort_m]*factor, 'r-', alpha=alpha, lw=1, zorder=2)
 
             # 3. Plot Phased Data (Isolating the planet)
             clean_params = []
@@ -301,12 +339,12 @@ class RVInstrument(Component):
                 else:
                     clean_params.append(np.atleast_1d(val))
 
-            # Get signals of ALL planets at observation times
+            # Get signals of ALL member orbits at observation times
             data_rv_matrix = compiled_matrix(self.time, *clean_params)
 
-            # Mask out the target planet to get the "background" RV
-            other_mask = np.ones(planets.n_elements, dtype=bool)
-            other_mask[p_idx] = False
+            # Mask out the target orbit to get the "background" RV
+            other_mask = np.ones(len(omap), dtype=bool)
+            other_mask[col] = False
             other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
 
             for i in range(self.n_elements):
@@ -327,10 +365,10 @@ class RVInstrument(Component):
             plt.axhline(0, color='black', linestyle=':', alpha=0.5)
             plt.xlabel(f"Phase (P = {P_ref:.5f} d, $T_c$ at 0.25)")
             plt.ylabel("Isolated RV [m/s]")
-            plt.title(f"Phased RV: {planets.names[p_idx]} ({system.name})")
+            plt.title(f"Phased RV: {system.orbit.names[o_idx]} ({system.name})")
             plt.legend(loc='best', fontsize='small')
             plt.tight_layout()
 
-            pdf_path = f"{filename_prefix}_RV_phased_{planets.names[p_idx]}.pdf"
+            pdf_path = f"{filename_prefix}_RV_phased_{system.orbit.names[o_idx]}.pdf"
             plt.savefig(pdf_path)
             plt.close()

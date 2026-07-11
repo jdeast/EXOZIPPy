@@ -11,27 +11,87 @@ import pymc as pm
 from exoplanet_core.pymc import ops as ops
 
 # local imports
-#from exozippy.components.parameter import Parameter
+from exozippy.components.parameter import Parameter
 from exozippy.components.component import Component
+from .bodies import parse_orbit_bodies
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
 
 class Orbit(Component):
+    """
+    Two-body Keplerian orbit between a primary and a companion body group
+    (see bodies.py for the group syntax).  Alongside the timing/geometry
+    elements, each orbit derives its own physical scale -- m_primary,
+    m_companion, m_total, arsun, K -- from the masses of its member bodies,
+    so hierarchical systems (e.g. B orbits C, B+C orbits A, planet b orbits
+    A) stay mass-consistent automatically: every orbit touching a body
+    reads the same star.mass/planet.mass nodes.  Each group is treated as a
+    point mass at its barycenter (standard hierarchical approximation).
+    """
     def __init__(self, config, config_manager):
         # 1. Initialize the base Component
         # sets self.config and self.config_manager
         super().__init__(config, config_manager)
         self.label = "Orbital Parameters"
 
-        self.primary = [c.get("primary","star.0") for c in self.config] # star zero is the host by default
-        self.companion = [c.get("companion", f"planet.{i}") for i, c in enumerate(self.config)] # the orbits are aligned, one per planet
+        self.primary_bodies, self.companion_bodies = parse_orbit_bodies(
+            self.config, getattr(config_manager, "system_config", None))
         self.i180 = [c.get("i180",False) for c in self.config]
         self.fitvcve = [c.get("fitvcve",False) for c in self.config]
 
     @property
     def prefix(self):
         return "orbit"
+
+    # ------------------------------------------------------------------
+    # Body groups
+    # ------------------------------------------------------------------
+    def bodies(self, i):
+        """All (comp_type, index) bodies of orbit i (both groups)."""
+        return self.primary_bodies[i] + self.companion_bodies[i]
+
+    def star_membership(self, star_idx):
+        """
+        Orbits containing star star_idx, as [(orbit_index, role), ...] with
+        role 'primary' or 'companion'.  Used by instruments to decide which
+        orbits move (or blend with) a given star.
+        """
+        out = []
+        key = ("star", int(star_idx))
+        for i in range(self.n_elements):
+            if key in self.primary_bodies[i]:
+                out.append((i, "primary"))
+            elif key in self.companion_bodies[i]:
+                out.append((i, "companion"))
+        return out
+
+    def build_maps(self):
+        """Stage 1b: 0/1 weight matrices mapping body masses into groups.
+
+        _group_w[side][comp_type] is an (n_orbits, n_<comp_type>) float
+        matrix; the group mass is its product with the component's mass
+        vector.  Matrices are built for every component type referenced by
+        at least one group.
+        """
+        sys_cfg = getattr(self.config_manager, "system_config", None) or {}
+        self._group_w = {"primary": {}, "companion": {}}
+        for side, groups in (("primary", self.primary_bodies),
+                             ("companion", self.companion_bodies)):
+            types = {t for g in groups for (t, _) in g}
+            for ctype in types:
+                section = sys_cfg.get(ctype) or []
+                if not isinstance(section, list):
+                    section = [section]
+                n_cols = max([len(section)] +
+                             [idx + 1 for g in groups for (t, idx) in g
+                              if t == ctype])
+                W = np.zeros((self.n_elements, n_cols))
+                for i, g in enumerate(groups):
+                    for (t, idx) in g:
+                        if t == ctype:
+                            W[i, idx] = 1.0
+                self._group_w[side][ctype] = W
 
     def register_parameters(self, system):
         """Stage 2: Calculate window constraints and declare the manifest."""
@@ -75,6 +135,24 @@ class Orbit(Component):
                 "esinw": "default",
                 "ecosw": "default",
                 "tp": "default",
+            })
+
+        # Physical scale of every orbit, from the member bodies' masses
+        # (see class docstring).  Group-mass deps name the mass vectors of
+        # whichever component types the groups actually reference; the
+        # weighted per-group sums are injected in add_parameter below.
+        # Bare orbits whose implicit default bodies do not exist (test
+        # harnesses, geometry-only systems) skip the scale parameters.
+        if self._validate_bodies(system):
+            body_types = sorted({t for i in range(self.n_elements)
+                                 for (t, _) in self.bodies(i)})
+            group_deps = [f"{t}.mass" for t in body_types]
+            self.manifest.update({
+                "m_primary": {"expr_key": "default", "deps": group_deps},
+                "m_companion": {"expr_key": "default", "deps": group_deps},
+                "m_total": "default",
+                "arsun": "default",
+                "K": "default",
             })
 
         # Astrometry constrains the longitude of the ascending node and
@@ -206,6 +284,90 @@ class Orbit(Component):
         self.manifest["ybigomega"] = {"initval": y_init, "lower": 0.0}
         self.manifest["bigomega"] = {"expr_key": "default", "table_note": note}
         self.manifest["omega"] = {"expr_key": "default", "table_note": note}
+
+    def _validate_bodies(self, system):
+        """Check body references against the live system topology.
+
+        Returns True when every body resolves to an active component
+        element, so the mass/scale parameters can be built.  Unresolvable
+        bodies raise if the user declared the groups explicitly; implicit
+        defaults (bare orbit in a test harness or geometry-only system)
+        just disable the scale parameters.
+        """
+        if not hasattr(system, "active_components"):
+            return False
+        for i in range(self.n_elements):
+            explicit = ("primary" in self.config[i]
+                        or "companion" in self.config[i])
+            for (ctype, idx) in self.bodies(i):
+                comp = getattr(system, ctype, None)
+                bad = (comp is None or not isinstance(comp, Component)
+                       or idx >= comp.n_elements)
+                if bad and explicit:
+                    n = comp.n_elements if isinstance(comp, Component) else 0
+                    raise ValueError(
+                        f"[{self.prefix}.{self.names[i]}] references body "
+                        f"'{ctype}.{idx}', but the active system has only "
+                        f"{n} '{ctype}' instance(s).")
+                if bad:
+                    logger.info(
+                        f"[{self.prefix}.{self.names[i]}] implicit body "
+                        f"'{ctype}.{idx}' is not in the system; orbit "
+                        f"mass/scale parameters (m_total, arsun, K) are "
+                        f"disabled.")
+                    return False
+        # A planet in a companion group should point its orbit_ndx here
+        # (transit/planet geometry reads the orbit through that map).
+        planet_cfgs = (getattr(self.config_manager, "system_config", None)
+                       or {}).get("planet") or []
+        for i in range(self.n_elements):
+            for (ctype, idx) in self.companion_bodies[i]:
+                if ctype != "planet" or idx >= len(planet_cfgs):
+                    continue
+                o_ndx = int((planet_cfgs[idx] or {}).get("orbit_ndx", 0))
+                if o_ndx != i:
+                    logger.warning(
+                        f"[{self.prefix}.{self.names[i]}] companion planet."
+                        f"{idx} has orbit_ndx={o_ndx}, not {i}; the planet's "
+                        f"transit/RV geometry will follow orbit {o_ndx} "
+                        f"while its mass moves this orbit.")
+        return True
+
+    _GROUP_MASS_SIDE = {"m_primary": "primary", "m_companion": "companion"}
+
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """
+        The group masses are weighted sums over other components' mass
+        vectors -- a matrix product the generic dep parser cannot express.
+        Intercept them here: build each referenced component's mass node,
+        pre-compute the per-group weighted sums, and hand them to the
+        generic machinery as context nodes keyed by the dep names.
+        """
+        side = self._GROUP_MASS_SIDE.get(param_name)
+        if side is not None and not context_nodes:
+            if not hasattr(self, "_group_w"):
+                self.build_maps()   # standalone use outside the lifecycle
+            context_nodes = dict(context_nodes or {})
+            for ctype, W in self._group_w[side].items():
+                comp = getattr(system, ctype, None)
+                if comp is None:
+                    # Standalone harness (validated systems raised at stage
+                    # 2): absent components contribute zero mass.
+                    context_nodes[f"{ctype}.mass"] = pt.zeros((self.n_elements,))
+                    continue
+                if not isinstance(getattr(comp, "mass", None), Parameter):
+                    comp.add_parameter(model, "mass", system)
+                context_nodes[f"{ctype}.mass"] = pt.dot(
+                    pt.as_tensor_variable(W), comp.mass.value)
+            # A group side may reference only a subset of the body types
+            # named in the shared deps list; the missing type contributes
+            # zero mass.
+            for ctype in ("star", "planet"):
+                dep = f"{ctype}.mass"
+                if dep not in context_nodes and any(
+                        d == dep for d in self.manifest[param_name]["deps"]):
+                    context_nodes[dep] = pt.zeros((self.n_elements,))
+        return super().add_parameter(model, param_name, system, context_nodes)
 
     def build_likelihood(self, model, system):
         pass

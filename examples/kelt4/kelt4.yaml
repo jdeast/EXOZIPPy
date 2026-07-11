@@ -20,9 +20,39 @@ sed:
 planet:
   - name: "b"
 
+# Hierarchical triple + planet: b orbits A, B orbits C, and the B+C pair
+# orbits A(+b).  primary/companion entries name stars/planets (or
+# "star.X"/"planet.X" paths); a multi-body group is treated as a point
+# mass at its barycenter.  Each orbit derives m_primary/m_companion/
+# m_total/arsun/K from the same star.mass/planet.mass nodes, so the three
+# orbits are automatically mass-consistent.
 orbit:
   - name: "b"
-    bodies : "b" # must match "name" of planets/stars. can be list for heirarchical orbits
+    primary: ["A"]
+    companion: ["b"]
+  - name: "BC"
+    primary: ["C"]
+    companion: ["B"]
+  - name: "A-BC"
+    primary: ["A", "b"]
+    companion: ["B", "C"]
+
+# Relative astrometry: each dataset traces one orbit (companion group
+# relative to primary group, PA East of North).  The A-BC data follow the
+# photocenter of the unresolved B+C pair; band: "V" lets the SED weigh the
+# B-vs-C fluxes for the nested photocenter wobble of the BC orbit.
+astrometryinstrument:
+  - name: "BC"
+    file: "KELT-4_B-C.rel.dat"
+    mode: "rel"
+    orbit: "BC"
+    sep_unit: "mas"
+  - name: "ABC"
+    file: "KELT-4_A-BC.rel.dat"
+    mode: "rel"
+    orbit: "A-BC"
+    sep_unit: "arcsec"
+    band: "V"
 
 transit:
   - name: "TESS_S48"
@@ -36,6 +66,8 @@ transit:
 band:
   - name: "TESS"
     filter: "TESS"
+  - name: "V"
+    filter: "V"
 
 rvinstrument:
   #- name: "EXPERT"

@@ -9,6 +9,15 @@ def calc_period(logP):
     return 10**logP
 
 @register_physics
+def calc_group_mass(*group_masses):
+    """Total mass of a body group: sum of the per-component-type weighted
+    sums injected by Orbit.add_parameter (one term per component type)."""
+    total = group_masses[0]
+    for m in group_masses[1:]:
+        total = total + m
+    return total
+
+@register_physics
 def calc_n(period):
     return TWOPI/period
 

@@ -12,7 +12,8 @@ planet:
 
 orbit:
   - name: "b"
-    bodies : "b"
+    primary: ["A"]
+    companion: ["b"]
 
 rvinstrument:
   - name: "HIRES"

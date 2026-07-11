@@ -26,7 +26,7 @@ def _config(lc_files, bands=("TESS",), transit_bands=None):
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b", "bodies": "b"}],
+        "orbit": [{"name": "b"}],
         "band": [
             {"name": b, "filter": "TESS", "ld_law": "quadratic"} for b in bands
         ],
@@ -142,7 +142,7 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
     config = {
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b"}],
-        "orbit": [{"name": "b", "bodies": "b"}],
+        "orbit": [{"name": "b"}],
         "band": [{"name": "V", "filter": "V", "ld_law": "quadratic",
                   "star_ndx": 0}],
         "transit": [{"name": "inst0", "file": lc, "band": "V"}],

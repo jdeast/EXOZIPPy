@@ -1,6 +1,9 @@
-# Relative astrometry of KELT-4A with respect to the BC photocenter.
-# For use with astrometryinstrument (mode: rel, star_ndx: <A>, planet_ndx: <BC>,
-# sep_unit: arcsec). NOT YET wired into kelt4.yaml -- data staging only.
+# Relative astrometry of the B+C photocenter with respect to KELT-4A
+# (sep/pa of the companion pair measured from A, PA East of North).
+# Wired into kelt4.yaml as astrometryinstrument 'ABC' (mode: rel,
+# orbit: A-BC, sep_unit: arcsec, band: V): the model is the companion
+# group (B+C) relative to the primary group (A+b), with the nested BC
+# photocenter wobble weighted by the SED V-band fluxes.
 #
 # Columns: time[BJD_TDB]  sep[arcsec]  err_sep[arcsec]  pa[deg]  err_pa[deg]
 #

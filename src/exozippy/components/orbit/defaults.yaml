@@ -38,6 +38,55 @@ orbit:
     latex: "T_C"
     description: "Time of Conjunction"
 
+  # --- Physical scale from the member bodies' masses ---
+  m_primary:
+    unit: "solMass"
+    internal_unit: "solMass"
+    latex: "M_{\\rm pri}"
+    description: "Primary Group Mass"
+    expressions:
+      default:
+        func_name: "calc_group_mass"
+        # deps are overridden per system in Orbit.register_parameters to
+        # name only the component types the groups actually reference
+        deps: ["star.mass", "planet.mass"]
+  m_companion:
+    unit: "solMass"
+    internal_unit: "solMass"
+    latex: "M_{\\rm comp}"
+    description: "Companion Group Mass"
+    expressions:
+      default:
+        func_name: "calc_group_mass"
+        deps: ["star.mass", "planet.mass"]
+  m_total:
+    unit: "solMass"
+    internal_unit: "solMass"
+    latex: "M_{\\rm tot}"
+    description: "Total Orbit Mass"
+    expressions:
+      default:
+        func_name: "calc_m_total"
+        deps: ["m_primary", "m_companion"]
+  arsun:
+    unit: "AU"
+    internal_unit: "solRad"
+    latex: "a"
+    description: "Semi-major Axis"
+    expressions:
+      default:
+        func_name: "calc_arsun"
+        deps: ["m_total", "period"]
+  K:
+    unit: "m/s"
+    internal_unit: "solRad/d"
+    latex: "K"
+    description: "RV Semi-amplitude (primary reflex)"
+    expressions:
+      default:
+        func_name: "calc_K"
+        deps: ["m_companion", "m_total", "ecc", "arsun", "sini", "period"]
+
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
   secosw:
     lower: -1.0

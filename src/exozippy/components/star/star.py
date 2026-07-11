@@ -73,11 +73,26 @@ class Star(Component):
         if in_system('mann'):
             self.manifest.update({"distance": None, "appks": None, "absks": "default"})
 
-        if in_system('lens') or in_system('galacticmodel') or in_system('astrometryinstrument'):
+        # Absolute astrometry (gaia/abs modes) constrains the reference
+        # position and proper motion; rel-mode data are differential and
+        # need only the parallax scale (distance), so those instruments do
+        # not add the ra/dec/pm parameters.
+        astrom_comp = getattr(system, 'astrometryinstrument', None)
+        if astrom_comp is not None:
+            astrom_modes = astrom_comp.modes
+        else:
+            astrom_cfgs = (getattr(self.config_manager, 'system_config', None)
+                           or {}).get('astrometryinstrument') or []
+            astrom_modes = [(c or {}).get("mode", "gaia") for c in astrom_cfgs]
+        has_abs_astrom = any(m in ("gaia", "abs") for m in astrom_modes)
+
+        if in_system('lens') or in_system('galacticmodel') or has_abs_astrom:
             self.manifest.update({
                 "ra": None, "dec": None, "pm_ra": None,
                 "pm_dec": None, "distance": None
             })
+        elif astrom_modes:
+            self.manifest.setdefault("distance", None)
 
         if in_system('galacticmodel'):
             self.manifest["rv"] = None
