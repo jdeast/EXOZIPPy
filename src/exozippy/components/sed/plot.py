@@ -112,10 +112,36 @@ class Plot:
         self.blend_matrix = self.system.sed.blend_matrix   # (nfilters, nstars)
         self.combo_labels = self.system.sed.combo_labels
 
-        # rows sharing a star combination share a color/marker
-        self.unique_combos = list(dict.fromkeys(self.combo_labels))
-        self.row_combo_idx = np.array(
-            [self.unique_combos.index(l) for l in self.combo_labels], dtype=int
+        # Expand each filter row into one "plot point" per side: a blended
+        # row (no neg) contributes one point (its pos side); a differential
+        # row contributes two -- pos and neg each imply their own
+        # model-anchored flux from the same measurement, so both
+        # constituent parts get their own marker (e.g. "A-(B+C)" plots an
+        # "A" point and a "B+C" point). point_row maps each point back to
+        # its originating filter row (shared wavelength/mag_obs/err);
+        # point_side is +1/-1 for which side of that row it represents.
+        point_row, point_side, point_label = [], [], []
+        for row in range(len(self.combo_labels)):
+            bm = self.blend_matrix[row]
+            pos_idx = np.where(bm > 0)[0]
+            neg_idx = np.where(bm < 0)[0]
+            point_row.append(row)
+            point_side.append(1)
+            point_label.append("+".join(self.star_names[i] for i in pos_idx))
+            if neg_idx.size > 0:
+                point_row.append(row)
+                point_side.append(-1)
+                point_label.append("+".join(self.star_names[i] for i in neg_idx))
+
+        self.point_row = np.array(point_row, dtype=int)
+        self.point_side = np.array(point_side, dtype=int)
+        self.point_labels = point_label
+        self.npoints = len(point_row)
+
+        # points sharing a star combination share a color/marker
+        self.unique_combos = list(dict.fromkeys(self.point_labels))
+        self.point_combo_idx = np.array(
+            [self.unique_combos.index(l) for l in self.point_labels], dtype=int
         )
 
         # load data
@@ -282,68 +308,74 @@ class Plot:
 
     def _calc_obs_flux_from_obs_mag(self):
         """
-        calculate observed flux from observed magnitudes; all wavelengths in angstroms
+        calculate observed flux from observed magnitudes, per PLOT POINT
+        (see point_row/point_side/point_labels built in __init__); all
+        wavelengths in angstroms.
 
         Blended rows convert directly through the filter's Vega zeropoint.
         Differential rows (mag = -2.5*log10(F_pos/F_neg)) have no absolute
-        flux of their own, so they are anchored to the model: the plotted
-        flux is F_neg(model, median draw) * 10**(-0.4*mag_obs), i.e. the
-        positive stars' flux implied by the observed magnitude difference.
+        flux of their own, so each side is anchored to the model's
+        prediction for the OTHER side: the pos-side point is
+        F_neg(model, median draw) * 10**(-0.4*mag_obs) (the positive
+        stars' flux implied by the observed magnitude difference), and the
+        neg-side point is F_pos(model, median draw) * 10**(+0.4*mag_obs)
+        (the same, solved for the negative side instead).
 
         Created Class Attributes
         -------
-            self.flux_obs           :  np.ndarray, shape (nfilters,)
-            self.f_limits_from_err  :  np.ndarray, shape (2, nfilters)
-            self.wave_filter        :  np.ndarray, shape (nfilters,)
-            self.wave_err           :  np.ndarray, shape (2, nfilters)
+            self.flux_obs           :  np.ndarray, shape (npoints,)
+            self.f_limits_from_err  :  np.ndarray, shape (2, npoints)
+            self.wave_filter        :  np.ndarray, shape (npoints,)
+            self.wave_err           :  np.ndarray, shape (2, npoints)
 
         """
-        f_obs = np.zeros(self.nfilters)
+        f_obs = np.zeros(self.npoints)
         # yerr == error from mags == error in flux
-        # shape (2, nfilters) --> 2 is from lower/upper bounds for error bars
-        f_limits_from_err = np.zeros((2, self.nfilters))
+        # shape (2, npoints) --> 2 is from lower/upper bounds for error bars
+        f_limits_from_err = np.zeros((2, self.npoints))
 
-        wave_filter = np.zeros(self.nfilters)
+        wave_filter = np.zeros(self.npoints)
         # xerr == error from filter bandwidth == error in wavelength
-        # shape (2, nfilters) --> 2 is from lower/upper bounds for error bars
-        wave_err = np.zeros((2, self.nfilters))
+        # shape (2, npoints) --> 2 is from lower/upper bounds for error bars
+        wave_err = np.zeros((2, self.npoints))
 
         # per-star predicted mags at the median draw, for anchoring
         # differential rows (available: model plot classes call
         # _calc_compiled_func before this method)
         mag_pred_med = np.median(self.mag_pred_draws, axis=0)  # (nstars, nfilters)
 
-        # iterate over filter ROWS (self.filters may repeat a filter, e.g.
-        # J of A+B and J of A-B; filter_params is keyed by unique name)
-        for i, filter in enumerate(self.filters):
+        for p in range(self.npoints):
+            row = self.point_row[p]
+            side = self.point_side[p]
+            filter = self.filters[row]
+            mag_obs = self.mag_obs[row]
+            mag_obs_err = self.mag_obs_err[row]
 
             # flux calculations
             zp = self.filter_params[filter]['zp']
 
-            neg_stars = np.where(self.blend_matrix[i] < 0)[0]
-            if neg_stars.size > 0:
-                # differential row: anchor on the model's negative-side flux
-                F_neg_model = np.sum(zp * 10 ** (-0.4 * mag_pred_med[neg_stars, i]))
-                scale = F_neg_model
+            other_stars = np.where(self.blend_matrix[row] == -side)[0]
+            if other_stars.size > 0:
+                # differential row: anchor this side on the model's flux
+                # for the OTHER side (whose sign is -side)
+                scale = np.sum(zp * 10 ** (-0.4 * mag_pred_med[other_stars, row]))
             else:
                 scale = zp
 
-            f =  10 ** (-0.4 * self.mag_obs[i])
-            f_lower_from_err = 10 ** (-0.4 * (self.mag_obs[i] + self.mag_obs_err[i]))
-            f_upper_from_err = 10 ** (-0.4 * (self.mag_obs[i] - self.mag_obs_err[i]))
+            coef = -0.4 * side
+            f = 10 ** (coef * mag_obs)
+            f_a = 10 ** (coef * (mag_obs + mag_obs_err))
+            f_b = 10 ** (coef * (mag_obs - mag_obs_err))
 
-            f_obs[i] = scale*f
-            f_limits_from_err[0, i] = scale*f_lower_from_err
-            f_limits_from_err[1, i] = scale*f_upper_from_err
+            f_obs[p] = scale * f
+            f_limits_from_err[0, p] = scale * min(f_a, f_b)
+            f_limits_from_err[1, p] = scale * max(f_a, f_b)
 
-            # wavelength calculations
+            # wavelength calculations (shared with the row's other side)
             wave_eff = self.filter_params[filter]['wave_eff']
-            wave_err_lower = wave_eff - self.filter_params[filter]['wave_min']
-            wave_err_upper = self.filter_params[filter]['wave_max'] - wave_eff
-
-            wave_filter[i] = wave_eff
-            wave_err[0, i] = wave_err_lower
-            wave_err[1, i] = wave_err_upper
+            wave_filter[p] = wave_eff
+            wave_err[0, p] = wave_eff - self.filter_params[filter]['wave_min']
+            wave_err[1, p] = self.filter_params[filter]['wave_max'] - wave_eff
 
         self.flux_obs = f_obs
         self.f_limits_from_err = f_limits_from_err

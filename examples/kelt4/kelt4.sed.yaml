@@ -74,26 +74,9 @@ filters:
     # full table with sources). mag = m_A - m_BC (pos: [A], neg: [B, C]).
     # WARNING: no uncertainty was published for any of these mag_A/mag_BC
     # values -- err below is a PLACEHOLDER; replace with real values.
-    # WARNING: the two 1972 V rows are suspiciously round (9.500/14.000)
-    # and disagree with the later, more precise-looking V rows by >2 mag
-    # (-4.5 vs ~-2.2 to -2.95) -- likely crude early visual/photographic
-    # estimates. Consider dropping or heavily down-weighting them.
-    - name: "Generic/Bessell.V"
-      mag: -4.500
-      err: 0.5
-      photType:
-        pos: [A]
-        neg: [B, C]
-      # 1972.230, source 1
-
-    - name: "Generic/Bessell.V"
-      mag: -4.500
-      err: 0.5
-      photType:
-        pos: [A]
-        neg: [B, C]
-      # 1972.249, source 1
-
+    # The 1972.230/1972.249 V rows (round 9.500/14.000, disagreeing with
+    # the later epochs by >2 mag -- crude early visual/photographic
+    # estimates) are dropped; see git history if they're needed again.
     - name: "Generic/Bessell.V"
       mag: -2.240
       err: 0.1

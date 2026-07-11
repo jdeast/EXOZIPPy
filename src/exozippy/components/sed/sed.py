@@ -741,7 +741,22 @@ class SED(Component):
         n_markers = len(plot_obj.markers)
         n_lines = len(plot_obj.linetypes)
 
-        # ---- model spectra: one line per star, plus the blended total ----
+        # ---- model spectra: one line per star, plus the blended total, ----
+        # ---- plus any other multi-star combination the data measure    ----
+        # ---- (e.g. "B+C" from an "A-(B+C)" differential row); the full  ----
+        # ---- nstars set is "Total" and isn't duplicated here.           ----
+        all_idx = frozenset(range(plot_obj.nstars))
+        sub_combos = []
+        seen_combos = set()
+        for row in range(plot_obj.nfilters):
+            bm = plot_obj.blend_matrix[row]
+            for idx in (np.where(bm > 0)[0], np.where(bm < 0)[0]):
+                combo = frozenset(idx)
+                if len(combo) >= 2 and combo != all_idx and combo not in seen_combos:
+                    seen_combos.add(combo)
+                    sub_combos.append(sorted(combo))
+        colors_sub = ["#6c757d", "#495057", "#adb5bd", "#ced4da"]
+
         alpha_spec = 0.7 if plot_obj.ndraws == 1 else 0.15
         x_spec = plot_obj.df_wave['wavelength_micron']
         wave_ang = plot_obj.df_wave['wavelength_angstrom']
@@ -759,9 +774,17 @@ class SED(Component):
                 total = np.sum(plot_obj.flux_model_draws[d], axis=0)
                 ax_top.plot(x_spec, np.log10(total*wave_ang),
                             color="#001219", lw=1.2, alpha=alpha_spec)
+            for sci, combo_idx in enumerate(sub_combos):
+                combo_flux = np.sum(plot_obj.flux_model_draws[d][combo_idx], axis=0)
+                ax_top.plot(x_spec, np.log10(combo_flux*wave_ang),
+                            ls=plot_obj.linetypes[sci % n_lines],
+                            color=colors_sub[sci % len(colors_sub)],
+                            lw=1.0, alpha=alpha_spec)
 
-        # ---- observed photometry: one point per filter row, colored ----
-        # ---- and markered by its star combination                    ----
+        # ---- observed photometry: one point per plot point (a blended  ----
+        # ---- row contributes one, a differential row contributes two,  ----
+        # ---- one per constituent side), colored/markered by its star   ----
+        # ---- combination                                               ----
         x = plot_obj.wave_filter*ANG_TO_MICRON_CONST
         xerr = plot_obj.wave_err*ANG_TO_MICRON_CONST
 
@@ -776,23 +799,34 @@ class SED(Component):
         combined_pred_med = np.median(plot_obj.combined_pred_draws, axis=0)
         alpha_res = 1.0 if plot_obj.nstars == 1 else 0.5
 
-        for row in range(plot_obj.nfilters):
-            ci = plot_obj.row_combo_idx[row]
+        for p in range(plot_obj.npoints):
+            ci = plot_obj.point_combo_idx[p]
             color = plot_obj.colors_obs[ci % n_colors]
             marker = plot_obj.markers[ci % n_markers]
 
             ax_top.errorbar(
-                x[row:row+1], y[row:row+1],
-                xerr=xerr[:, row:row+1], yerr=yerr[:, row:row+1], fmt='',
+                x[p:p+1], y[p:p+1],
+                xerr=xerr[:, p:p+1], yerr=yerr[:, p:p+1], fmt='',
                 color=color, capsize=3, linestyle='None',
                 zorder=3
             )
-            ax_top.scatter(x[row], y[row], color=color, marker=marker, zorder=3)
+            ax_top.scatter(x[p], y[p], color=color, marker=marker, zorder=3)
 
-            # residual of this row against its combined (blend/diff) prediction
+        # ---- residuals: one per filter ROW (the actual measurement),  ----
+        # ---- against its combined (blend/diff) prediction              ----
+        wave_row = np.array(
+            [plot_obj.filter_params[f]['wave_eff'] for f in plot_obj.filters]
+        ) * ANG_TO_MICRON_CONST
+        for row in range(plot_obj.nfilters):
+            # use the pos-side point's color/marker for this row's residual
+            p = np.where((plot_obj.point_row == row) & (plot_obj.point_side == 1))[0][0]
+            ci = plot_obj.point_combo_idx[p]
+            color = plot_obj.colors_obs[ci % n_colors]
+            marker = plot_obj.markers[ci % n_markers]
+
             residual = plot_obj.mag_obs[row] - combined_pred_med[row]
             ax_bot.errorbar(
-                x[row], residual, yerr=plot_obj.mag_obs_err[row], capsize=3,
+                wave_row[row], residual, yerr=plot_obj.mag_obs_err[row], capsize=3,
                 fmt=marker, color=color,
                 alpha=alpha_res
             )
@@ -838,6 +872,11 @@ class SED(Component):
                 labels.append(f"Star {plot_obj.star_names[nstar]}")
             legend_handles.append(Line2D([0], [0], color="#001219", lw=1.2))
             labels.append("Total")
+            for sci, combo_idx in enumerate(sub_combos):
+                legend_handles.append(Line2D(
+                    [0], [0], color=colors_sub[sci % len(colors_sub)],
+                    linestyle=plot_obj.linetypes[sci % n_lines], lw=1.0, alpha=0.7))
+                labels.append("+".join(plot_obj.star_names[i] for i in combo_idx))
             for ci, combo in enumerate(plot_obj.unique_combos):
                 legend_handles.append(Line2D(
                     [0], [0], color='none',
