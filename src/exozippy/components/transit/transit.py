@@ -38,6 +38,29 @@ class Transit(Component):
     def prefix(self):
         return "transit"
 
+    def sampler_requirements(self):
+        """Declare sampler constraints for limb-darkened transit models.
+
+        The quadratic limb-darkening solution vector (exoplanet_core's
+        ``quad_solution_vector`` Op) is only differentiable through
+        PyTensor's own gradient machinery (used by the C/numba-backed
+        'nuts' and 'nutpie' samplers). The installed exoplanet_core's
+        jax_support wires the PyTensor Op straight to the raw,
+        non-custom_jvp JAX FFI call, so any sampler that funcifies the
+        whole logp graph to JAX ('numpyro', 'blackjax') fails at HMC
+        init with "cannot be differentiated".
+        """
+        return {
+            'incompatible': {'numpyro', 'blackjax'},
+            'recommended': 'nuts',
+            'reason': (
+                "the transit component's limb-darkening op "
+                "(exoplanet_core quad_solution_vector) is not "
+                "differentiable through JAX with the installed "
+                "exoplanet_core build — use a PyTensor-backed sampler"
+            ),
+        }
+
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
         all_times, all_fluxes, all_errs, inst_indices, all_detrend = [], [], [], [], []

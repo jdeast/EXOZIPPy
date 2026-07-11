@@ -168,14 +168,13 @@ def make_bc_tables(
 
     alias_df = _load_alias_table()
 
-    # group by facility, keep the BC-table column names (MIST convention)
+    # group by facility, keep the BC-table column names (MIST convention).
+    # resolve_filter_name synthesizes a column name for filters with no
+    # alias-table entry, matching what build_bc_grid looks up later.
     by_facility: Dict[str, List[tuple[str, str]]] = {}
     for svo_id in svo_filter_ids:
         fac = facility_from_svo_name(svo_id)
         col = resolve_filter_name(svo_id, alias_df, alias="MIST")
-        if col == svo_id:
-            # not in the alias table; synthesize a column name
-            col = svo_id.split("/")[-1].replace(".", "_")
         by_facility.setdefault(fac, []).append((svo_id, col))
 
     written: List[Path] = []

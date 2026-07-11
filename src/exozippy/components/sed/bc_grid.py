@@ -66,40 +66,64 @@ _FILTERNAMES_ = "filternames.txt"
 
 
 def _load_alias_table(path: Path = current_dir) -> pd.DataFrame | None:
-    """Load the VOID↔MIST↔SVO name alias table, if present."""
+    """Load the VOID<->MIST<->SVO name alias table, if present."""
     _FILTERNAMES_TXT = path / "filters" / _FILTERNAMES_
     if not _FILTERNAMES_TXT.exists():
         return None
-    return pd.read_csv(
+    df = pd.read_csv(
         _FILTERNAMES_TXT, sep="\t", comment="#", skipinitialspace=True
     )
+    # Columns are hand-aligned with literal spaces for readability, which
+    # leaves stray leading/trailing whitespace in individual cells (e.g.
+    # "TESS/TESS.Red     "); strip it so downstream lookups/comparisons
+    # match cleanly.
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+    return df
 
 
-def resolve_filter_name(user_name: str, alias_df: pd.DataFrame | None, 
+def synthesize_mist_name(svo_id: str) -> str:
+    """Derive a MIST-style BC-column name from an SVO filter ID when the
+    alias table has no entry for it, e.g. "Keck/NIRC2.Kp" -> "NIRC2_Kp".
+
+    Used consistently by both the BC-table generator (make_bc.py, which
+    writes columns under this name) and the BC-grid loader (build_bc_grid
+    below, which looks columns up by this name) so an arbitrary SVO
+    filter with no alias-table row round-trips correctly.
+    """
+    return svo_id.split("/")[-1].replace(".", "_")
+
+
+def resolve_filter_name(user_name: str, alias_df: pd.DataFrame | None,
                         alias: Literal["MIST", "SVO"]) -> str:
     """
     Translate a user-facing filter label (e.g. "2MASS.J", "Gaia.G")
     into the corresponding MIST/SVO filter label.
 
-    Examples: 
+    Examples:
         "2MASS.J" --> "2MASS_J" | "2MASS/2MASS.J"
         "Gaia.G" --> "Gaia_G_DR2Rev" | "GAIA/GAIA2r.G"
 
-    If the alias table is missing or doesn't know the name, assume the
-    user has already provided the MIST/SVO column name and return it.
+    If the alias table is missing or doesn't know the name: for alias
+    'SVO', assume the user has already provided the SVO ID and return it
+    unchanged; for alias 'MIST', synthesize a column name (see
+    synthesize_mist_name) if the input looks like an SVO ID (has a "/"),
+    else assume it's already a bare column name and return it unchanged.
     """
+    def _mist_fallback():
+        return synthesize_mist_name(user_name) if "/" in user_name else user_name
+
     if alias_df is None:
-        return user_name
+        return _mist_fallback() if alias == "MIST" else user_name
     try:
         rename = alias_df[alias_df.eq(user_name).any(axis=1)][alias].values[0]
         if rename in ("Unsupported", None) or pd.isna(rename):
-            # No alias column — fall back to the user string so the
-            # caller gets a clear KeyError later instead of a silent
-            # mismatch.
-            return user_name
+            # No alias column — fall back so the caller gets a clear
+            # KeyError later instead of a silent mismatch.
+            return _mist_fallback() if alias == "MIST" else user_name
         return str(rename)
     except Exception:
-        return user_name
+        return _mist_fallback() if alias == "MIST" else user_name
 
 
 def facility_from_svo_name(svo_name: str) -> str:

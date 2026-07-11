@@ -1,0 +1,17 @@
+# Relative astrometry of KELT-4B with respect to KELT-4C.
+# For use with astrometryinstrument (mode: rel, star_ndx: <B>, planet_ndx: <C>,
+# sep_unit: mas). NOT YET wired into kelt4.yaml -- data staging only.
+#
+# Columns: time[BJD_TDB]  sep[mas]  err_sep[mas]  pa[deg]  err_pa[deg]
+#
+# pa is the position angle East of North (per astrometryinstrument convention).
+# time = J2000.0 + (decimal_year - 2000.0) * 365.25 (Julian-year epoch -> JD;
+# TT/TDB distinction is negligible at this precision).
+#
+# Only one epoch resolves B from C individually (2012.3464, high-resolution
+# AO); earlier epochs in the source table only resolved A from the BC
+# photocenter (see KELT-4_A-BC.rel.dat) -- a single epoch constrains the
+# B-C separation/PA at that time but not their relative orbital motion.
+#
+# epoch      time[BJD_TDB]  sep     err_sep  pa       err_pa   source
+2456054.523      49.14   0.39     325.230   0.13   # 2012.3464 source 5

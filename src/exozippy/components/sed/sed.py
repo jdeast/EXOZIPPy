@@ -713,6 +713,13 @@ class SED(Component):
         if self.nfilters == 0:
             logger.info("SED.plot: no catalog photometry rows; skipping SED plot.")
             return
+        if getattr(self, "_compiled_mag_predictors", None) is None:
+            logger.warning(
+                "SED.plot: plotting functions failed to compile "
+                "(see the earlier 'SED plotter compile failed' warning); "
+                "skipping SED plot."
+            )
+            return
 
         # retrieve model plotting class
         plot_class_path = Path(current_dir / "models" / system.sed.sedmodel / "plot.py")
