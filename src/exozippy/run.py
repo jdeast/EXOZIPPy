@@ -49,6 +49,7 @@ from .outputs.latex import build_latex_output, build_csv_output
 from .diagnostics import ModelAuditor
 from exozippy.system import System
 from exozippy.samplers.ptde import ptde_sample
+from exozippy.samplers.ptde_async import ptde_async_sample
 
 
 import pytensor
@@ -211,6 +212,28 @@ def run_fit(config):
                     eval_timeout=eval_timeout,
                     rung_thin_factor=rung_thin_factor,
                     rung_thin_start=rung_thin_start,
+                    collect_rung_timing=collect_rung_timing,
+                )
+            elif method == "ptde_async":
+                # EXPERIMENTAL (hpc_optimization.txt PROMPT 13): a separate,
+                # non-blocking PTDE dispatch loop -- see
+                # exozippy/samplers/ptde_async.py's module docstring for the
+                # statistical caveat around stale DE partner states before
+                # using this for a production posterior. rung_thin_factor/
+                # rung_thin_start are ptde-only (thinning addresses the
+                # blocking problem that async dispatch removes outright) and
+                # are not forwarded here.
+                idata = ptde_async_sample(
+                    model, system, draws, tune,
+                    n_temps=n_temps,
+                    T_max=T_max,
+                    n_chains=n_chains,
+                    cores=cores,
+                    plot_prefix=str(prefix),
+                    min_ess=min_ess,
+                    max_rhat=max_rhat,
+                    maxtime=maxtime,
+                    eval_timeout=eval_timeout,
                     collect_rung_timing=collect_rung_timing,
                 )
             elif method in ("numpyro", "blackjax"):
