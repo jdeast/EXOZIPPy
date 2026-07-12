@@ -30,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 Number = Union[int, float, np.floating]
 
+# Section C of build_pymc adds +0.5*raw**2 to exactly cancel the -0.5*raw**2
+# the built-in pm.Normal(0,1) prior contributes for every logit-transformed
+# raw element.  Both are real (not symbolically fused) floating-point terms,
+# so the cancellation is only exact to ~machine epsilon of the LARGER term:
+# once a runaway proposal pushes |raw| past this bound, squaring it loses so
+# many bits that the residual grows like raw**2 * 2**-52 -- and because
+# PTDE only accepts logp increases, that residual (positive by chance about
+# half the time) gets selected and reinforced, driving |raw| to 1e17+ and
+# the stored lp to 1e15..1e39 (observed in examples/DC2018_128 runaway PTDE
+# chains). Clipping keeps the cancellation exact within float64 precision
+# for any legitimate raw excursion and lets pm.Normal's own, unclipped
+# -0.5*raw**2 dominate beyond it -- an ordinary restoring force instead of a
+# numerical time bomb.
+_RAW_CANCELLATION_CLIP = 1.0e4
+
 
 # ----------------------------
 # Helper functions
@@ -325,6 +340,9 @@ class Parameter:
     latex_varname: str = field(default="", init=False)
     posterior: Any = None  # user stores idata posterior samples here if desired
     summary: Optional[PosteriorSummary] = field(default=None, init=False)
+    # one entry per posterior mode (same structure as summary), filled by
+    # compute_mode_summaries when a mode report exists
+    mode_summaries: Optional[list] = field(default=None, init=False)
     table_note: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -797,8 +815,11 @@ class Parameter:
             lq_safe = pt.clip(lq, -700.0, 700.0)
             log_jac = (-pt.softplus(lq_safe) - pt.softplus(-lq_safe)
                        - pt.maximum(pt.abs(lq) - 700.0, 0.0))
+            # raw_vector is clipped before squaring: see _RAW_CANCELLATION_CLIP.
+            raw_cancel_safe = pt.clip(raw_vector, -_RAW_CANCELLATION_CLIP,
+                                      _RAW_CANCELLATION_CLIP)
             correction = pt.where(logit_mask,
-                                  log_jac + 0.5 * pt.sqr(raw_vector),
+                                  log_jac + 0.5 * pt.sqr(raw_cancel_safe),
                                   pt.zeros_like(raw_vector))
             pm.Potential(f"logit_uniform_prior.{self.label}", pt.sum(correction))
 
@@ -1039,6 +1060,32 @@ class Parameter:
         val = self.summary.latex_value(sigfigs=sigfigs)
         return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}" + "\n"
 
+    def to_latex_mode_defs(self, sigfigs: int = 2) -> str:
+        """Per-mode \\providecommand defs, suffixed modeone, modetwo, ...
+
+        Macro names extend the unsuffixed ones (``\\<varname><idx><suffix>``)
+        so every mode's value can be cited in the same document.  Fixed
+        parameters have no per-mode defs (their unsuffixed def applies to
+        every mode).
+        """
+        if self.posterior is None or self.mode_summaries is None:
+            return ""
+        lines = []
+        for k, summary in enumerate(self.mode_summaries):
+            suffix = "mode" + _idx_to_words(k + 1)
+            if isinstance(summary, list):
+                for i, summ in enumerate(summary):
+                    val = summ.latex_value(sigfigs=sigfigs)
+                    lines.append(
+                        rf"\providecommand{{\{self.latex_varname}{_idx_to_words(i)}{suffix}}}"
+                        rf"{{\ensuremath{{{val}}}}}" + "\n")
+            else:
+                val = summary.latex_value(sigfigs=sigfigs)
+                lines.append(
+                    rf"\providecommand{{\{self.latex_varname}{suffix}}}"
+                    rf"{{\ensuremath{{{val}}}}}" + "\n")
+        return "".join(lines)
+
     def get_unit_str(self, index=0):
         u_list = np.atleast_1d(self.unit)
         u_obj = u_list[index] if index < len(u_list) else u_list[0]
@@ -1134,7 +1181,22 @@ class Parameter:
             return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
         return rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}" + "\n"
 
-    def to_table_line(self, sigfigs: int = 2, note_mark: Optional[str] = None) -> str:
+    def _value_cells(self, idx_str: str, mode_suffixes: Optional[list]) -> str:
+        """The Value column(s) of a table row.
+
+        With ``mode_suffixes`` (multimodal table), sampled parameters get one
+        cell per mode referencing the suffixed macros; fixed parameters span
+        all mode columns with their single unsuffixed macro.
+        """
+        base = "\\" + self.latex_varname + idx_str
+        if not mode_suffixes:
+            return base + r"\dotfill"
+        if self.posterior is None:
+            return rf"\multicolumn{{{len(mode_suffixes)}}}{{c}}{{{base}}}"
+        return " & ".join(base + sfx + r"\dotfill" for sfx in mode_suffixes)
+
+    def to_table_line(self, sigfigs: int = 2, note_mark: Optional[str] = None,
+                      mode_suffixes: Optional[list] = None) -> str:
         if self.latex is None:
             raise ValueError(f"{self.label}: latex symbol not set.")
         if self.description is None:
@@ -1160,27 +1222,28 @@ class Parameter:
                 symbol = self.latex
 
             if self.print_to_table:
-                val_txt = "\\" + self.latex_varname + idx_str
+                val_txt = self._value_cells(idx_str, mode_suffixes)
             else:
                 if self.summary is None:
                     self.compute_summary()
 
                 summ = self.summary[i] if isinstance(self.summary, list) else self.summary
-                val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}"
+                val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}" + r"\dotfill"
 
             prior_text = "\\" + self.latex_varname + "prior"
 
             lines.append(
                 rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
                 rf"{self.description}{unit_text}\dotfill & "
-                rf"{val_txt}\dotfill & "
+                rf"{val_txt} & "
                 rf"{prior_text} \\" + "\n"
             )
 
         return "".join(lines)
 
     def to_table_line_at(self, index: int, sigfigs: int = 2,
-                         note_mark: Optional[str] = None) -> str:
+                         note_mark: Optional[str] = None,
+                         mode_suffixes: Optional[list] = None) -> str:
         """Single table row for element ``index``, without an instance subscript.
 
         Used when the enclosing section header already identifies the instance.
@@ -1198,31 +1261,36 @@ class Parameter:
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
 
         if self.print_to_table:
-            val_txt = "\\" + self.latex_varname + idx_str
+            val_txt = self._value_cells(idx_str, mode_suffixes)
         else:
             if self.summary is None:
                 self.compute_summary()
             summ = self.summary[index] if isinstance(self.summary, list) else self.summary
-            val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}"
+            val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}" + r"\dotfill"
 
         prior_text = "\\" + self.latex_varname + "prior"
 
         return (
             rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
             rf"{self.description}{unit_text}\dotfill & "
-            rf"{val_txt}\dotfill & "
+            rf"{val_txt} & "
             rf"{prior_text} \\" + "\n"
         )
 
     # ---------
     # Posterior summary
     # ---------
-    def compute_summary(self, nsigma: float = 1.0) -> Any:
-        # arr from az.extract places the 'sample' dimension LAST.
-        # Posterior is stored in user units (from the user-unit trace Deterministic).
-        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
+    @staticmethod
+    def _summarize_array(arr: np.ndarray) -> Any:
+        """Median + 68% interval over the LAST axis (the samples).
 
+        Returns a PosteriorSummary, or a list of them for vector parameters.
+        """
         def get_stat(data):
+            if data.size == 0 or not np.isfinite(data).any():
+                return PosteriorSummary(median=float("nan"),
+                                        err_minus=float("nan"),
+                                        err_plus=float("nan"))
             med = float(np.nanquantile(data, 0.5))
             lo = float(np.nanquantile(data, SIGMA_1_LOW))
             hi = float(np.nanquantile(data, SIGMA_1_HIGH))
@@ -1231,13 +1299,40 @@ class Parameter:
         if arr.ndim > 1:
             # Flatten any extra vector dimensions, iterate over the first axis,
             # and compute statistics over the LAST axis (the samples)
-            arr_2d = arr.reshape(-1, arr.shape[-1])
-            self.summary = [get_stat(arr_2d[i, :]) for i in range(arr_2d.shape[0])]
+            n_elem = int(np.prod(arr.shape[:-1]))
+            arr_2d = arr.reshape(n_elem, arr.shape[-1])
+            summary = [get_stat(arr_2d[i, :]) for i in range(n_elem)]
 
             # If the "vector" only has 1 element, unwrap it so it formats as a clean scalar
-            if len(self.summary) == 1:
-                self.summary = self.summary[0]
-        else:
-            self.summary = get_stat(arr)
+            if len(summary) == 1:
+                summary = summary[0]
+            return summary
+        return get_stat(arr)
 
+    def compute_summary(self, nsigma: float = 1.0) -> Any:
+        # arr from az.extract places the 'sample' dimension LAST.
+        # Posterior is stored in user units (from the user-unit trace Deterministic).
+        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
+        self.summary = self._summarize_array(arr)
         return self.summary
+
+    def compute_mode_summaries(self, mode_labels, n_modes: int) -> Any:
+        """Per-mode posterior summaries.
+
+        ``mode_labels`` is an integer array aligned with the sample (last)
+        axis of ``self.posterior``; -1 marks invalid/unassigned draws.  The
+        result mirrors ``summary`` (PosteriorSummary or list of them), one
+        entry per mode.
+        """
+        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
+        labels = np.asarray(mode_labels)
+        if arr.ndim == 0 or arr.shape[-1] != labels.size:
+            # Constant over the trace (e.g. generate_posterior's fixed branch
+            # returns the bare value with no sample axis): identical in every
+            # mode.
+            self.mode_summaries = [self._summarize_array(arr)] * n_modes
+        else:
+            self.mode_summaries = [
+                self._summarize_array(arr[..., labels == k]) for k in range(n_modes)
+            ]
+        return self.mode_summaries

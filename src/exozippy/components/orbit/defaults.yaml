@@ -147,8 +147,8 @@ orbit:
     sigma: 1.0
     unit: ""
     internal_unit: ""
-    latex: "x_{\\Omega}"
-    description: "x-component of ascending node direction (N(0,1) prior -> uniform prior on bigomega)"
+    latex: "\\Omega_x"
+    description: "x-component of ascending node direction"
   ybigomega:
     lower: -100.0
     upper: 100.0
@@ -158,8 +158,8 @@ orbit:
     sigma: 1.0
     unit: ""
     internal_unit: ""
-    latex: "y_{\\Omega}"
-    description: "y-component of ascending node direction (N(0,1) prior -> uniform prior on bigomega)"
+    latex: "\\Omega_y"
+    description: "y-component of ascending node direction"
   bigomega:
     unit: "deg"
     internal_unit: "rad"

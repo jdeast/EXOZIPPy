@@ -140,3 +140,5 @@ Cross-component hooks when a `sed:` block exists: `mulensinstrument` ties each l
 ## Tests
 
 Tests follow AAA (Arrange / Act / Assert) with Given/When/Then docstrings. All tests that use `System` must call `system.prepare()` before `system.build_model()`. RA/Dec user params are in **degrees** (the default unit); `Parameter.__post_init__` converts to radians internally.
+
+The test suite takes ~10 minutes. Do not start it with a timeout. Start it and poll.

@@ -48,6 +48,11 @@ for _tvar in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 logger = logging.getLogger(__name__)
 
+# Shared with outputs.modes.identify_modes: |lp| above this is numerically
+# broken, not a real posterior mode (no realistic dataset's logp reaches
+# 1e12). Imported (not duplicated) so the two ceilings can't drift apart.
+from exozippy.outputs.modes import DEFAULT_LP_ABS_MAX as _DEFAULT_LP_ABS_MAX
+
 # Module-level logp function: set in parent process before Pool.  Fork
 # children inherit the compiled PyTensor function via copy-on-write without
 # pickling.  Proposals (dicts of numpy arrays) are the only IPC payload.
@@ -342,6 +347,7 @@ def ptde_sample(
     max_rhat=1.01,
     maxtime=None,
     eval_timeout=None,
+    lp_plausibility_ceiling=None,
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -399,6 +405,13 @@ def ptde_sample(
                <job_id>` / `kill -TERM <pid>`) trigger the same graceful
                stop-after-this-step behavior on demand, without waiting for
                maxtime.
+    lp_plausibility_ceiling : float | None  — |lp| threshold above which a
+               T=1 chain's logp is logged as a loud one-time warning, since
+               no realistic dataset's logp reaches this scale: it always
+               indicates a model bug (e.g. an unbounded/uncancelled logp
+               term), not physics. None -> outputs.modes.DEFAULT_LP_ABS_MAX
+               (the same constant identify_modes uses to reject runaway
+               draws post-hoc).
 
     Returns
     -------
@@ -406,6 +419,9 @@ def ptde_sample(
     """
     global _PTDE_LOGP_FN, _PTDE_COLLECT_TIMING
     _PTDE_COLLECT_TIMING = collect_rung_timing
+    if lp_plausibility_ceiling is None:
+        lp_plausibility_ceiling = _DEFAULT_LP_ABS_MAX
+    warned_implausible_lp = False
 
     rng = np.random.default_rng(seed)
     temperatures = _geometric_ladder(n_temps, T_max)
@@ -683,6 +699,28 @@ def ptde_sample(
                     populations[k][i] = props_flat[idx]
                     logps[k][i] = lp_new
                     n_accept[k] += 1
+                    # A T=1 chain's lp this large always indicates a model
+                    # bug (an unbounded/uncancelled logp term), never real
+                    # physics -- no finite dataset's logp reaches 1e12. PTDE
+                    # accepts on lp_new > lp_old, so such a bug is a ratchet:
+                    # once a chain's lp is inflated this way it can only
+                    # climb further, wasting the rest of the run (see
+                    # examples/DC2018_128, a real occurrence of exactly this
+                    # failure mode). Warn once so it's noticed immediately
+                    # rather than discovered post-hoc via identify_modes.
+                    if (k == 0 and not warned_implausible_lp
+                            and abs(lp_new) > lp_plausibility_ceiling):
+                        logger.warning(
+                            f"PTDE: T=1 chain {i} lp={lp_new:.3e} exceeds "
+                            f"the plausibility ceiling "
+                            f"(|lp| > {lp_plausibility_ceiling:g}); this "
+                            "almost always means a model bug (e.g. an "
+                            "unbounded logp term), not physics -- since "
+                            "PTDE only accepts lp increases, this chain "
+                            "will likely keep climbing for the rest of the "
+                            "run. See outputs.modes.identify_modes, which "
+                            "rejects draws on the same ceiling post-hoc.")
+                        warned_implausible_lp = True
 
             # 4. temperature swaps (adjacent rungs, random chain pair)
             if n_temps > 1 and (step + 1) % swap_interval == 0:

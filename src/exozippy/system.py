@@ -228,6 +228,28 @@ class System(Component):
         posterior = az.extract(idata, keep_dataset=True)
         param_lookup = self.get_parameter_lookup()
 
+        # Mode labels (outputs.modes.identify_modes) ride along in the
+        # posterior group; keep them sample-aligned with every Parameter's
+        # posterior so per-mode summaries can be computed downstream.
+        # Draws labeled -1 are invalid (runaway/stuck chains rejected by
+        # identify_modes) and must not contaminate any reported summary, so
+        # they are dropped from the distributed posterior entirely.
+        if "mode" in posterior:
+            labels = np.asarray(posterior["mode"].values, dtype=int)
+            if (labels < 0).any():
+                keep = labels >= 0
+                posterior = posterior.isel(sample=keep)
+                labels = labels[keep]
+                logger.info(
+                    f"distribute_posterior: dropped {int((~keep).sum())} "
+                    f"invalid/unassigned draws flagged by mode identification")
+            self.mode_labels = labels
+            self.n_modes = int(posterior["mode"].attrs.get(
+                "n_modes", labels.max() + 1))
+        else:
+            self.mode_labels = None
+            self.n_modes = 1
+
         # Dynamically discover all components (Stars, Planets, Orbits, Instruments, etc.)
         for attr_name, comp in self.__dict__.items():
             if isinstance(comp, Component) and comp is not self:

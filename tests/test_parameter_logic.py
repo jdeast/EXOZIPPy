@@ -106,6 +106,53 @@ def test_out_of_bounds_parameter_applies_logp_penalty():
         assert not any("low_bound" in n or "up_bound" in n for n in pot_names), \
             "No barrier potentials needed for logit param"
 
+
+def test_extreme_raw_never_produces_runaway_positive_logp():
+    """
+    Given a bounded (logit-transformed) Parameter,
+    When raw is pushed to astronomical magnitudes (|raw| ~ 1e2..1e20) -- the
+    regime a PTDE differential-evolution proposal can reach even though no
+    legitimate posterior mass lives there,
+    Then logp never explodes to a large positive value: it stays finite and
+    non-increasing (or goes to -inf) as |raw| grows past the point where the
+    physical value and Jacobian are already fully saturated.
+
+    Regression test for the DC2018_128 PTDE runaway (examples/DC2018_128):
+    the flat-prior correction potential used to add back an *unclipped*
+    +0.5*raw**2 to exactly cancel pm.Normal(0,1)'s own -0.5*raw**2 term. The
+    two were separate floating-point graphs, so beyond |raw| ~ 1e4 the
+    cancellation lost enough precision that the residual (noise growing like
+    raw**2 * 2**-52) could come out positive -- and since PTDE only accepts
+    logp increases, that noise got selected and reinforced, driving raw to
+    1e17+ and the reported logp to 1e15..1e39 (see
+    examples/DC2018_128/fitresults, chain 23).
+    """
+    # ARRANGE
+    with pm.Model() as model:
+        p = Parameter(label="bounded_param", initval=5.0, init_scale=1.0, upper=10.0, lower=-10.0)
+        p.build_pymc()
+        logp_fn = model.compile_logp()
+
+        def logp_at_raw(raw_val):
+            pt = {k: np.zeros_like(v) for k, v in model.initial_point().items()}
+            pt["bounded_param_raw"] = np.array([raw_val])
+            return float(np.asarray(logp_fn(pt)))
+
+        # ACT / ASSERT
+        prev = logp_at_raw(0.0)
+        for mag in (1e2, 1e3, 1e4, 1e6, 1e8, 1e12, 1e17, 1e20):
+            val = logp_at_raw(mag)
+            assert val < 1e6, (
+                f"logp exploded to a large positive value at raw={mag:g}: {val:.3e}"
+            )
+            assert np.isneginf(val) or val <= prev + 1e-6, (
+                f"logp increased ({prev:.3e} -> {val:.3e}) as |raw| grew to "
+                f"{mag:g}; expected a non-increasing restoring force"
+            )
+            if np.isfinite(val):
+                prev = val
+
+
 def test_auditor_handles_partially_frozen_vector_parameters():
     """
     Given a vectorized parameter where one element is sampled and another is frozen,

@@ -132,3 +132,8 @@ rvinstrument.HIRES.jitter_variance:
 #  init_scale: 10
 #  lower: -100
 #  upper: 100
+
+# we can't fit a jitter to one point
+astrometryinstrument.BC.jitter_variance:
+  mu: 0
+  sigma: 0

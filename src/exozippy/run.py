@@ -45,6 +45,7 @@ class DEMetropolis(pm.DEMetropolis):
 from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.latex import build_latex_output, build_csv_output
+from .outputs.modes import identify_modes
 from .diagnostics import ModelAuditor
 from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
@@ -329,6 +330,26 @@ def run_fit(config):
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
 
+    # Identify posterior modes and label every draw: idata gains an integer
+    # posterior['mode'] variable (-1 = invalid/unassigned) that
+    # distribute_posterior and the table builders below key off of.  Mode
+    # detection must never take down a finished fit's outputs, hence the
+    # broad catch.
+    mode_report = None
+    try:
+        mode_report = identify_modes(idata)
+        modes_path = Path(str(prefix) + "_modes.txt")
+        modes_path.write_text(mode_report.to_text(), encoding="utf-8")
+        if mode_report.n_modes > 1:
+            logger.info(
+                f"Posterior is multimodal: {mode_report.n_modes} modes, "
+                f"weights {[f'{w:.3f}' for w in mode_report.weights]} "
+                f"({'weights validated' if mode_report.weights_reliable else 'weights UNRELIABLE'}); "
+                f"see {modes_path}")
+    except Exception:
+        logger.warning("Mode identification failed; reporting the combined "
+                       "posterior only", exc_info=True)
+
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
 
@@ -371,8 +392,10 @@ def run_fit(config):
     build_latex_output(system,
                        var_filename=str(prefix) + '_definitions.tex',
                        template_filename=str(prefix) + '_template.tex',
-                       caption=r"Median and 68\% Confidence intervals for " + prefix.stem)
-    build_csv_output(system, csv_filename=str(prefix) + '_results.csv')
+                       caption=r"Median and 68\% Confidence intervals for " + prefix.stem,
+                       mode_report=mode_report)
+    build_csv_output(system, csv_filename=str(prefix) + '_results.csv',
+                     mode_report=mode_report)
 
     # Generate final plots
     draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
@@ -608,7 +631,8 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
 
 def make_corner(model, idata, filename, max_samples=1000):
     all_vars = list(idata["posterior"].data_vars)
-    physical_vars = [v for v in all_vars if "_raw" not in v and "_interval" not in v]
+    physical_vars = [v for v in all_vars
+                     if "_raw" not in v and "_interval" not in v and v != "mode"]
     var_specs = [(v, None) for v in physical_vars]
     samples, labels = collect_corner_samples(idata, var_specs)
     save_corner_plot(samples, labels, filename, max_samples=max_samples)
@@ -842,6 +866,11 @@ def get_draws(idata, n_draws=50, param_lookup=None):
     # 1. Flatten chains/draws into a single 'sample' dimension
     post = az.extract(idata, combined=True, keep_dataset=True)
 
+    # Never plot draws flagged invalid by mode identification (mode == -1:
+    # runaway/stuck-chain draws with broken lp).
+    if "mode" in post:
+        post = post.isel(sample=np.asarray(post["mode"].values, dtype=int) >= 0)
+
     total_available = post.sample.size
     n_to_extract = min(n_draws, total_available)
 
@@ -852,6 +881,8 @@ def get_draws(idata, n_draws=50, param_lookup=None):
     for idx in indices:
         point = {}
         for var in post.data_vars:
+            if var == "mode":
+                continue
             val = post[var].isel(sample=idx).values
             if param_lookup is not None and var in param_lookup and not var.endswith('_raw'):
                 factor = np.squeeze(

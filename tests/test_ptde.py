@@ -211,6 +211,34 @@ def test_ptde_collect_rung_timing_runs_end_to_end(caplog):
         assert f"rung {k}" in messages
 
 
+def test_ptde_warns_once_when_t1_lp_exceeds_plausibility_ceiling(caplog):
+    """
+    Given a plausibility ceiling set far below any lp this model can
+    legitimately reach,
+    When ptde_sample runs and a T=1 chain's accepted lp exceeds it,
+    Then a single loud warning is logged (not one per step) naming the
+    offending chain and lp -- this is the early-detection guard for the
+    DC2018_128-style runaway (examples/DC2018_128), where a buggy unbounded
+    logp term let a T=1 chain's lp climb to 1e15..1e39 unnoticed until
+    post-hoc mode identification discarded the run.
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("WARNING", logger="exozippy.samplers.ptde"):
+        ptde_sample(
+            model, system, draws=20, tune=20,
+            n_temps=2, T_max=2.0, n_chains=4, cores=1, seed=1,
+            log_interval=100, lp_plausibility_ceiling=0.1,
+        )
+    warnings = [r.message for r in caplog.records
+                if "plausibility ceiling" in r.message]
+    assert len(warnings) == 1, (
+        f"expected exactly one plausibility-ceiling warning, got "
+        f"{len(warnings)}: {warnings}"
+    )
+    assert "T=1 chain" in warnings[0]
+
+
 def test_ptde_posterior_mean_near_true_values():
     """
     Given a 2-D normal model with known mean (x=0, y=3),
