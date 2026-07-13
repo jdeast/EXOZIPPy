@@ -7,7 +7,14 @@ Bypasses pm.sample() to enable:
   - lp values stored during sampling (no post-hoc recomputation)
 
 Default geometric ladder: ntemps=8, T_max=200 (EXOFASTv2 parity).
-Hook for Robbins-Monro adaptive ladder via adapt_ladder=True (not yet implemented).
+Adaptive ladder via adapt_ladder=True re-spaces the rungs to equalize the
+communication barrier during tuning (Syed et al. 2022).
+
+Temperature swaps use the Deterministic Even-Odd (DEO) schedule by default
+(swap_schedule="deo"; Syed et al. 2022, "Non-reversible parallel tempering"),
+which turns round-trip transport across the ladder from O(n_temps^2) to
+O(n_temps). Pass swap_schedule="random" to restore the legacy random-pair
+schedule for A/B comparison.
 
 Fork-based parallelism: logp function is inherited by child processes via
 copy-on-write, avoiding the picklability constraint that blocks cloudpickle
@@ -248,6 +255,133 @@ def _pick_two(rng, n, exclude):
     return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
 
 
+# ---------------------------------------------------------------------------
+# Deterministic Even-Odd (DEO) swap schedule + round-trip diagnostics
+# (Syed et al. 2022, JRSS-B, "Non-reversible parallel tempering"; reference
+# implementation Pigeons.jl). The DEO schedule changes only WHICH adjacent
+# rung pairs are attempted on a given swap round, not the per-swap Metropolis
+# test, so parallel-tempering invariance is untouched. Alternating the pair
+# offset each round makes the temperature-index process non-reversible: a
+# configuration that just moved up the ladder tends to keep moving up rather
+# than immediately undoing the move, so round trips (cold -> hot -> cold, the
+# excursions that transport a chain out of one posterior mode and into
+# another) scale O(n_temps) instead of the O(n_temps^2) of random-pair swaps.
+# ---------------------------------------------------------------------------
+
+def _deo_pairs(round_idx, n_temps, active_rungs=None):
+    """Adjacent rung pairs attempted simultaneously in one DEO swap round.
+
+    Even rounds (round_idx even) attempt (0,1),(2,3),(4,5),...; odd rounds
+    attempt (1,2),(3,4),(5,6),.... The pairs within a round are disjoint (no
+    rung appears twice), so all can be attempted at once, and the alternating
+    offset is what makes the index process non-reversible.
+
+    active_rungs : iterable[int] | None -- when given, any pair touching a
+        rung not in this set (e.g. one thinned out this round in ptde.py) is
+        dropped, rather than reverting to a random pairing, which would break
+        the non-reversible index flow. None -> every pair is returned.
+    """
+    start = 0 if round_idx % 2 == 0 else 1
+    pairs = [(k, k + 1) for k in range(start, n_temps - 1, 2)]
+    if active_rungs is not None:
+        active = set(active_rungs)
+        pairs = [(a, b) for (a, b) in pairs if a in active and b in active]
+    return pairs
+
+
+def _deo_pair_sequence(n_temps):
+    """Deterministic cycling order of adjacent-pair lower indices for the
+    async sampler: all even pairs (0,1),(2,3),... exhausted first, then all
+    odd pairs (1,2),(3,4),..., then repeat. Async has no synchronized rounds,
+    so it fires one swap per `swap_interval` completed evaluations and walks
+    this fixed sequence instead of drawing a random rung pair -- same DEO
+    idea (deterministic, non-reversible pair selection) adapted to event time.
+    Returns the lower rung index k of each pair (the pair is (k, k+1)).
+    """
+    even = list(range(0, n_temps - 1, 2))
+    odd = list(range(1, n_temps - 1, 2))
+    return even + odd
+
+
+def _record_round_trips(direction, round_trips, n_temps):
+    """Update per-member direction tags at the extreme rungs and count
+    completed cold -> hot -> cold round trips.
+
+    direction : list[list[int]] -- direction[k][i] in {0, +1, -1} is the last
+        extreme rung the configuration NOW occupying slot (k, i) has visited
+        (+1 = cold end / heading up, -1 = hot end / heading down, 0 = neither
+        yet). Tags travel WITH the configuration through swaps: the caller
+        swaps direction[k][i] alongside the population state and its logp, so
+        a counted round trip means one configuration was carried the full
+        length of the ladder and back -- exactly the transport that moves a
+        chain between posterior modes.
+    round_trips : list[int] -- single-element mutable counter, incremented in
+        place. Idempotent: a cold slot already tagged +1 is not recounted, so
+        the synchronous sampler can call this once per DEO round and the async
+        sampler after every swap event without double-counting.
+
+    THE round-trip metric is the direct measure of whether the ladder is
+    actually transporting mass between modes; report it next to per-rung swap
+    acceptance.
+    """
+    if n_temps < 2:
+        return
+    hot = n_temps - 1
+    n_chains = len(direction[0])
+    for i in range(n_chains):
+        # Any configuration currently at the hottest rung is now "heading
+        # down" toward the cold end.
+        direction[hot][i] = -1
+    for i in range(n_chains):
+        # A configuration back at the coldest rung that last touched the hot
+        # end has completed a full cold -> hot -> cold round trip.
+        if direction[0][i] == -1:
+            round_trips[0] += 1
+        direction[0][i] = 1
+
+
+def _update_ladder_barrier(temperatures, swap_accept, swap_propose):
+    """Re-space the temperature ladder to equalize the communication barrier
+    (Syed et al. 2022). Returns a new temperature array.
+
+    The per-pair swap REJECTION rate r_k approximates the local communication
+    barrier between rungs k and k+1; the cumulative barrier up to rung k is
+    Lambda_k = sum_{j<k} r_j, and the total barrier is Lambda_{K-1}. An
+    optimally-tuned ladder carries an equal share of the barrier on every
+    rung, so we place the interior rungs at equal barrier fractions by
+    interpolating coldness beta = 1/T against the cumulative barrier. The two
+    endpoints (T_0 = 1 target, T_{K-1} = T_max) are pinned so the ladder still
+    spans the same temperature range (EXOFASTv2 parity at the ends).
+
+    Only valid to call DURING the tuning phase -- re-spacing the ladder after
+    tuning would break invariance, the same rule the DE gamma adaptation
+    follows.
+    """
+    n_temps = len(temperatures)
+    if n_temps < 3:
+        return np.asarray(temperatures, dtype=float)
+    r = 1.0 - swap_accept / np.maximum(swap_propose, 1)
+    r = np.clip(r, 0.0, 1.0)
+    # Cumulative barrier at each rung; Lambda[0] = 0, length n_temps.
+    Lambda = np.concatenate([[0.0], np.cumsum(r)])
+    total = float(Lambda[-1])
+    if total <= 0.0:
+        # Perfect mixing (or no swap data): nothing to equalize.
+        return np.asarray(temperatures, dtype=float)
+    # Lambda is monotonically non-decreasing in k (valid np.interp x); beta is
+    # monotonically decreasing in k. Guard against flat segments (r_k == 0)
+    # that would make Lambda non-strictly-increasing by nudging duplicates.
+    for k in range(1, n_temps):
+        if Lambda[k] <= Lambda[k - 1]:
+            Lambda[k] = Lambda[k - 1] + 1e-9
+    beta = 1.0 / np.asarray(temperatures, dtype=float)
+    targets = np.linspace(0.0, Lambda[-1], n_temps)
+    new_beta = np.interp(targets, Lambda, beta)
+    new_beta[0] = beta[0]      # pin target rung (T=1)
+    new_beta[-1] = beta[-1]    # pin hottest rung (T=T_max)
+    return 1.0 / new_beta
+
+
 def _active_rungs(step, n_temps, thin_start, thin_factor):
     """Rung indices that propose a DE move at this step.
 
@@ -334,7 +468,7 @@ def ptde_sample(
     target_accept=0.20,
     adapt_gamma=True,
     swap_interval=1,
-    # Reserved for future Robbins-Monro temperature adaptation:
+    swap_schedule="deo",
     target_swap_rate=None,
     adapt_ladder=False,
     rung_thin_factor=1,
@@ -370,8 +504,22 @@ def ptde_sample(
     target_accept : float  — T=1 acceptance rate target for gamma adaptation (default 0.20)
     adapt_gamma : bool     — scale gamma toward target_accept during tune (default True)
     swap_interval : int  — attempt temperature swaps every N steps
-    target_swap_rate, adapt_ladder  — reserved for Robbins-Monro (not yet
-               implemented; hook is here so the API won't need to change)
+    swap_schedule : {"deo", "random"}  — "deo" (default) uses the
+               Deterministic Even-Odd non-reversible schedule (Syed et al.
+               2022): even swap rounds attempt rung pairs (0,1),(2,3),...;
+               odd rounds (1,2),(3,4),.... Within an attempted pair, chain i
+               of the colder rung is paired with chain perm[i] of the hotter
+               rung under a fresh random permutation each round, so n_chains
+               swaps are attempted per pair (each pairwise swap satisfies
+               detailed balance at fixed pairing). "random" restores the
+               legacy one-random-chain-pair-per-adjacent-rung schedule for
+               A/B comparison.
+    target_swap_rate  — reserved (kept so the API won't need to change).
+    adapt_ladder : bool  — when True, re-space the ladder during tuning to
+               equalize the per-rung communication barrier (Syed et al. 2022);
+               adaptation stops when tuning ends (adapting afterward would
+               break invariance -- same rule the gamma adaptation follows).
+               Default False keeps the geometric ladder (EXOFASTv2 parity).
     rung_thin_factor : int  — update rungs >= rung_thin_start only every
                rung_thin_factor-th step (default 1 = no thinning, every rung
                proposes every step). Directly cuts the number of chances per
@@ -422,6 +570,10 @@ def ptde_sample(
     if lp_plausibility_ceiling is None:
         lp_plausibility_ceiling = _DEFAULT_LP_ABS_MAX
     warned_implausible_lp = False
+
+    if swap_schedule not in ("deo", "random"):
+        raise ValueError(
+            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}")
 
     rng = np.random.default_rng(seed)
     temperatures = _geometric_ladder(n_temps, T_max)
@@ -657,6 +809,14 @@ def ptde_sample(
         n_swap_accept = np.zeros(max(n_temps - 1, 1))
         n_swap_propose = np.zeros(max(n_temps - 1, 1))
 
+        # DEO schedule + round-trip diagnostics state. direction[k][i] tags the
+        # configuration in slot (k, i) with the last extreme rung it visited;
+        # tags travel with the state through swaps (see _record_round_trips).
+        swap_round = 0
+        n_swap_rounds = 0
+        round_trips = [0]
+        direction = [[0] * n_chains for _ in range(n_temps)]
+
         total_steps = tune + draws
         log_every = log_interval or max(1, total_steps // 20)
 
@@ -722,22 +882,67 @@ def ptde_sample(
                             "rejects draws on the same ceiling post-hoc.")
                         warned_implausible_lp = True
 
-            # 4. temperature swaps (adjacent rungs, random chain pair)
+            # 4. temperature swaps. DEO (deterministic even-odd) schedule by
+            #    default -- see _deo_pairs / _record_round_trips. Each pairwise
+            #    swap below is the exact same Metropolis test as the legacy
+            #    random schedule, so PT invariance is untouched; only WHICH
+            #    pairs (and how many) are attempted changes.
             if n_temps > 1 and (step + 1) % swap_interval == 0:
-                for k in range(n_temps - 1):
-                    i = int(rng.integers(n_chains))
-                    j = int(rng.integers(n_chains))
-                    n_swap_propose[k] += 1
-                    # Detailed balance: (logp_j - logp_i) * (1/T_k - 1/T_{k+1})
-                    # T_k < T_{k+1}  →  factor > 0  →  accept when logp_j > logp_i
-                    log_a = ((logps[k+1][j] - logps[k][i])
-                             * (1.0 / temperatures[k] - 1.0 / temperatures[k + 1]))
-                    if rng.random() < np.exp(min(0.0, log_a)):
-                        (populations[k][i], populations[k+1][j]) = (
-                            populations[k+1][j], populations[k][i])
-                        (logps[k][i], logps[k+1][j]) = (
-                            logps[k+1][j], logps[k][i])
-                        n_swap_accept[k] += 1
+                if swap_schedule == "deo":
+                    active = _active_rungs(
+                        step, n_temps, _rung_thin_start, _rung_thin_factor)
+                    deo_pairs = _deo_pairs(swap_round, n_temps, active)
+                    if _rung_thin_factor > 1 and len(deo_pairs) < len(
+                            _deo_pairs(swap_round, n_temps)):
+                        logger.debug(
+                            "PTDE DEO: some swap pairs skipped this round "
+                            "(rung thinned inactive)")
+                    # Fresh random chain pairing each round: rung-k chain i is
+                    # swapped with rung-(k+1) chain perm[i]. Any fixed or
+                    # randomized pairing is valid (each pairwise swap satisfies
+                    # detailed balance at fixed pairing); a random permutation
+                    # spreads swap attempts symmetrically over all n_chains.
+                    perm = rng.permutation(n_chains)
+                    for (k, kp1) in deo_pairs:
+                        for i in range(n_chains):
+                            j = int(perm[i])
+                            n_swap_propose[k] += 1
+                            # (logp_j - logp_i) * (1/T_k - 1/T_{k+1});
+                            # T_k < T_{k+1} -> factor > 0 -> accept lp increase.
+                            log_a = ((logps[kp1][j] - logps[k][i])
+                                     * (1.0 / temperatures[k]
+                                        - 1.0 / temperatures[kp1]))
+                            if rng.random() < np.exp(min(0.0, log_a)):
+                                (populations[k][i], populations[kp1][j]) = (
+                                    populations[kp1][j], populations[k][i])
+                                (logps[k][i], logps[kp1][j]) = (
+                                    logps[kp1][j], logps[k][i])
+                                (direction[k][i], direction[kp1][j]) = (
+                                    direction[kp1][j], direction[k][i])
+                                n_swap_accept[k] += 1
+                    swap_round += 1
+                else:
+                    # Legacy random schedule: one random chain pair per
+                    # adjacent rung. Kept for A/B comparison (swap_schedule=
+                    # "random"). Round-trip tags are still tracked so the
+                    # metric is reported the same way for both schedules.
+                    for k in range(n_temps - 1):
+                        i = int(rng.integers(n_chains))
+                        j = int(rng.integers(n_chains))
+                        n_swap_propose[k] += 1
+                        log_a = ((logps[k+1][j] - logps[k][i])
+                                 * (1.0 / temperatures[k]
+                                    - 1.0 / temperatures[k + 1]))
+                        if rng.random() < np.exp(min(0.0, log_a)):
+                            (populations[k][i], populations[k+1][j]) = (
+                                populations[k+1][j], populations[k][i])
+                            (logps[k][i], logps[k+1][j]) = (
+                                logps[k+1][j], logps[k][i])
+                            (direction[k][i], direction[k+1][j]) = (
+                                direction[k+1][j], direction[k][i])
+                            n_swap_accept[k] += 1
+                _record_round_trips(direction, round_trips, n_temps)
+                n_swap_rounds += 1
 
             _t_step = time.time()
             if logger.isEnabledFor(logging.DEBUG):
@@ -777,17 +982,37 @@ def ptde_sample(
                                         f"(T=1 accept={ar_T1:.3f}, target={target_accept:.2f})")
                             gamma = gamma_new
 
-                    # Reset window counters so next log period is a fresh measurement
+                # Communication-barrier ladder adaptation (Syed et al. 2022),
+                # gated to the tuning phase like the gamma adaptation above --
+                # re-spacing after tuning would break invariance. Uses this
+                # window's swap accept/propose counts, so it must run before
+                # the reset below. Independent of adapt_gamma.
+                if (phase == "tune" and adapt_ladder and n_temps > 2
+                        and n_swap_propose.sum() > 0):
+                    new_T = _update_ladder_barrier(
+                        temperatures, n_swap_accept, n_swap_propose)
+                    if not np.allclose(new_T, temperatures):
+                        logger.info(
+                            "PTDE ladder (barrier-equalized): "
+                            f"T=[{', '.join(f'{t:.1f}' for t in new_T)}]")
+                        temperatures = new_T
+
+                # Reset window counters during tune so each adaptation period
+                # is a fresh measurement (only matters while adapting).
+                if phase == "tune" and (adapt_gamma or adapt_ladder):
                     n_accept[:] = 0
                     n_propose[:] = 0
                     n_swap_accept[:] = 0
                     n_swap_propose[:] = 0
 
+                rt_rate = round_trips[0] / max(n_swap_rounds, 1)
                 logger.info(
                     f"PTDE {step+1}/{total_steps} ({phase})  "
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"γ={gamma:.4f}  "
-                    + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]"
+                    + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
+                       f"round_trips={round_trips[0]} "
+                       f"(rate={rt_rate:.3f}/round)"
                        if n_temps > 1 else ""))
 
             # 7. early-stop checks
@@ -870,9 +1095,12 @@ def ptde_sample(
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
+    rt_rate = round_trips[0] / max(n_swap_rounds, 1)
     logger.info(
         f"PTDE done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]"
+        + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
+           f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/round, "
+           f"schedule={swap_schedule})"
            if n_temps > 1 else "")
         + (f"  eval_timeouts={n_eval_timeouts[0]}" if n_eval_timeouts[0] else ""))
 
