@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from exozippy.components.mulensing.lens import Lens
 
@@ -128,12 +129,13 @@ def test_mmexofast_key_absent_is_a_noop():
 @pytest.mark.skipif(not MMX_PATH.exists(), reason="DC2018_128 fixture not present")
 def test_mmexofast_alpha_convention_is_identity_not_180_minus():
     """
-    Given the shipped, hand-verified examples/DC2018_128/DC2018_128.params.yaml
-    (whose lens.Lens.alpha initval was set by a human seeding from mmexofast.json
-    fit 0, and which examples/DC2018_128/compare_results.py compares directly
-    against MMEXOFAST/DC18 truth with no remapping),
-    Then that params.yaml alpha initval equals the raw MMEXOFAST json alpha
-    value verbatim -- confirming the IDENTITY convention (not the
+    Given the shipped examples/DC2018_128/DC2018_128.params.yaml (seeded from
+    mmexofast.json by scripts/mmexofast_to_params.py, whose lens.Lens.alpha
+    initval is list-valued -- one entry per MMEXOFAST solution, in file
+    order -- and which examples/DC2018_128/compare_results.py compares
+    directly against MMEXOFAST/DC18 truth with no remapping),
+    Then that params.yaml's seed-0 alpha initval equals the raw MMEXOFAST
+    fit-0 alpha value -- confirming the IDENTITY convention (not the
     alpha_MM = 180 - alpha_paper relation recorded for a different event,
     ob161003, in project memory).
     """
@@ -142,7 +144,13 @@ def test_mmexofast_alpha_convention_is_identity_not_180_minus():
     fit0_alpha = raw["fits"][0]["parameters"]["alpha"]
 
     params_path = MMX_PATH.parent / "DC2018_128.params.yaml"
-    text = params_path.read_text()
+    with open(params_path) as f:
+        params = yaml.safe_load(f)
 
-    # The params file pins alpha to the exact MMEXOFAST fit-0 value.
-    assert f"{fit0_alpha}" in text or "-52.15111097728343" in text
+    alpha_entry = params["lens.Lens.alpha"]
+    initval = alpha_entry["initval"] if isinstance(alpha_entry, dict) else alpha_entry
+    seed0_alpha = initval[0] if isinstance(initval, list) else initval
+
+    # The params file pins seed-0 alpha to the MMEXOFAST fit-0 value (to the
+    # precision scripts/mmexofast_to_params.py writes, 8 decimal places).
+    assert seed0_alpha == pytest.approx(fit0_alpha, abs=1e-6)

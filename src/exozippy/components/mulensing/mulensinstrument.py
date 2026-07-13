@@ -18,6 +18,20 @@ import pytensor.tensor as pt
 import pytensor
 import pymc as pm
 
+
+def _raw_initval(data, default=None):
+    """Read a raw ``user_params`` initval, collapsing a list (P4 multi-seed
+    sampling) to its first (seed 0) entry.  Only meaningful before
+    ConfigManager.finalize_user_params runs -- afterwards ``user_params``
+    already holds the resolved seed-0 scalar."""
+    if data is None:
+        return default
+    val = data.get("initval", default) if isinstance(data, dict) else data
+    if isinstance(val, (list, tuple)):
+        val = val[0] if val else default
+    return val
+
+
 class MulensInstrument(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -129,10 +143,7 @@ class MulensInstrument(Component):
         """
         cm = self.config_manager
         def _get(key, default=None):
-            data = cm.user_params.get(key)
-            if data is None:
-                return default
-            return data.get("initval", default) if isinstance(data, dict) else float(data)
+            return _raw_initval(cm.user_params.get(key), default)
 
         t0 = _get("lens.0.t_0")
         u0 = _get("lens.0.u_0")
@@ -274,10 +285,7 @@ class MulensInstrument(Component):
         n_src = getattr(self, "_n_sources", 1)
 
         def _get(key, default=None):
-            data = cm.user_params.get(key)
-            if data is None:
-                return default
-            return data.get("initval", default) if isinstance(data, dict) else float(data)
+            return _raw_initval(cm.user_params.get(key), default)
 
         def _get_flux(param):
             # user_params keys are normalized to index form by standardize_param_names

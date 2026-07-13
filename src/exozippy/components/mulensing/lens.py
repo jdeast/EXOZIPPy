@@ -217,6 +217,11 @@ class Lens(Component):
             val = entry.get('initval')
         else:
             val = entry
+        # List-valued initval (P4 multi-seed sampling): t0_par is just a
+        # numeric reference epoch, not a per-seed value, so use seed 0 -- the
+        # same convention the relaxation engine uses for bounds/scales.
+        if isinstance(val, (list, tuple)):
+            val = val[0]
         return float(val) if val is not None else 2450000.0
 
     @property
@@ -518,6 +523,11 @@ class Lens(Component):
                     or self.config_manager.user_params.get(f"lens.0.yalpha") or {})
         ca = ca_entry.get("initval")
         sa = sa_entry.get("initval")
+        # List-valued initval (P4 multi-seed sampling): use seed 0.
+        if isinstance(ca, (list, tuple)):
+            ca = ca[0] if ca else None
+        if isinstance(sa, (list, tuple)):
+            sa = sa[0] if sa else None
         if ca is not None and sa is not None:
             alpha_deg = float(np.arctan2(float(sa), float(ca)) * 180.0 / np.pi)
             self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
@@ -846,6 +856,8 @@ class Lens(Component):
             entry = cm.user_params.get(key)
             if entry is not None:
                 val = entry.get("initval") if isinstance(entry, dict) else entry
+                if isinstance(val, (list, tuple)):
+                    val = val[0] if val else None
                 if val is not None:
                     return float(val)
         return None

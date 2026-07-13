@@ -1,44 +1,49 @@
-# Seeded from MMEXOFAST solution 0 (0-indexed)
+# Seeded from MMEXOFAST solution(s) [0, 1] (0-indexed)
 # Source: examples/DC2018_128/mmexofast.json
 # n_solutions in file: 2
 #
 # MMEXOFAST uncertainties are mapped to init_scale, NOT sigma.
 # init_scale = sampling hint only (no logp penalty).
 # sigma = Gaussian prior (would double-count the data).
+#
+# initval is list-valued: one mutually-consistent start point per
+# solution above (P4 multi-seed sampling -- see config.py's
+# finalize_user_params). init_scale/bounds are NOT per-seed and
+# always come from the first (seed 0) solution.
 
 lens.Lens.t_0:
-    initval: 2458554.89424795
+    initval: [2458554.89424795, 2458554.87715006]
     init_scale: 0.02002712
 
 lens.Lens.u_0:
-    initval: 0.14297468
+    initval: [0.14297468, 0.13554066]
     init_scale: 0.00376723
 
 # t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
 # Provided here as an initval hint to seed the relaxation engine.
 lens.Lens.t_E:
-    initval: 18.17037538
+    initval: [18.17037538, 18.70647736]
     init_scale: 0.31212459
 
 lens.Lens.s:
-    initval: 0.97875222
+    initval: [0.97875222, 0.85373431]
     init_scale: 0.00068642
 
 # alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.
 lens.Lens.alpha:
-    initval: -52.15111097728343
-    init_scale: 0.5472813114829904
+    initval: [-52.15111098, -51.34370652]
+    init_scale: 0.54728131
 
 lens.Lens.rho:
-    initval: 5.38363705e-03
+    initval: [5.38363705e-03, 1.83885815e-07]
     init_scale: 8.23216699e-03
 
 # q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
 # this through the symbolic relation  q * M_primary = M_companion
 # to set the companion's mass initval automatically.
 lens.Lens.q:
-    initval: 1.10584968e-03
-    init_scale: 4.55919089e-05
+    initval: [1.10576828e-03, 1.06999723e-03]
+    init_scale: 1.24023651e-05
 
 star.Lens.ra:
     initval: 267.595
