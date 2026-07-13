@@ -66,10 +66,12 @@ from exozippy.samplers import ptde as _ptde
 from exozippy.samplers.ptde import (
     _check_convergence,
     _convergence_check_schedule,
+    _deo_pair_sequence,
     _eval_logp,
     _geometric_ladder,
     _make_starts,
     _pick_two,
+    _record_round_trips,
     _worker_init,
 )
 
@@ -92,6 +94,7 @@ def ptde_async_sample(
     adapt_gamma=True,
     gamma_adapt_window=None,
     swap_interval=None,
+    swap_schedule="deo",
     seed=None,
     log_interval=None,
     plot_prefix=None,
@@ -109,11 +112,18 @@ def ptde_async_sample(
     ptde_sample where the meaning is identical; a few differ because chains
     are no longer synchronized on a shared step counter:
 
-    swap_interval : int | None -- attempt one swap (random adjacent rung
-               pair, random chain in each) every `swap_interval` completed
-               evaluations (any rung). None -> n_chains, chosen so the
-               long-run ratio of evaluations-per-swap-attempt roughly
+    swap_interval : int | None -- attempt one swap every `swap_interval`
+               completed evaluations (any rung). None -> n_chains, chosen so
+               the long-run ratio of evaluations-per-swap-attempt roughly
                matches ptde.py's one-full-round-of-swaps-per-step cadence.
+    swap_schedule : {"deo", "random"} -- "deo" (default) walks the adjacent
+               rung pairs in a deterministic non-reversible cycling order
+               (even pairs (0,1),(2,3),... first, then odd pairs (1,2),(3,4),
+               ..., repeating; see ptde._deo_pair_sequence), the event-time
+               analog of the synchronous DEO schedule. "random" restores the
+               legacy random-adjacent-pair draw for A/B comparison. The chains
+               swapped within the chosen pair are random either way, and each
+               swap is the identical MH test, so invariance is untouched.
     gamma_adapt_window : int | None -- adapt gamma once per this many
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
@@ -123,6 +133,10 @@ def ptde_async_sample(
     -------
     arviz.InferenceData with posterior and sample_stats["lp"] from T=1 chains.
     """
+    if swap_schedule not in ("deo", "random"):
+        raise ValueError(
+            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}")
+
     _ptde._PTDE_COLLECT_TIMING = collect_rung_timing
 
     rng = np.random.default_rng(seed)
@@ -240,6 +254,17 @@ def ptde_async_sample(
     n_eval_timeouts = [0]
     rung_times = [[] for _ in range(n_temps)]
 
+    # DEO schedule + round-trip diagnostics. direction[k][i] tags the config
+    # in slot (k, i) with the last extreme rung it visited; tags travel with
+    # the state through swaps (see ptde._record_round_trips). _deo_seq is the
+    # deterministic cycling order of adjacent-pair lower indices; _deo_pos
+    # walks it one swap event at a time.
+    direction = [[0] * n_chains for _ in range(n_temps)]
+    round_trips = [0]
+    n_swap_rounds = [0]
+    _deo_seq = _deo_pair_sequence(n_temps)
+    _deo_pos = [0]
+
     gamma_box = [gamma]
     n_propose_T1_window = [0]
     n_accept_T1_window = [0]
@@ -305,7 +330,14 @@ def ptde_async_sample(
     def _attempt_swap():
         if n_temps <= 1:
             return
-        k = int(rng.integers(n_temps - 1))
+        if swap_schedule == "deo":
+            # Deterministic cycling over adjacent pairs (event-time DEO); only
+            # the pair-SELECTION order differs from the random schedule, the
+            # MH test below is identical, so invariance is untouched.
+            k = _deo_seq[_deo_pos[0] % len(_deo_seq)]
+            _deo_pos[0] += 1
+        else:
+            k = int(rng.integers(n_temps - 1))
         i = int(rng.integers(n_chains))
         j = int(rng.integers(n_chains))
         lp_i, lp_j = current_lp[k][i], current_lp[k + 1][j]
@@ -317,7 +349,14 @@ def ptde_async_sample(
             current_state[k][i], current_state[k + 1][j] = (
                 current_state[k + 1][j], current_state[k][i])
             current_lp[k][i], current_lp[k + 1][j] = lp_j, lp_i
+            direction[k][i], direction[k + 1][j] = (
+                direction[k + 1][j], direction[k][i])
             n_swap_accept[k] += 1
+        # Update round-trip tags after every swap event (idempotent): a config
+        # sitting at either extreme rung is tagged accordingly and a completed
+        # cold -> hot -> cold excursion is counted.
+        _record_round_trips(direction, round_trips, n_temps)
+        n_swap_rounds[0] += 1
 
     _do_convergence = (min_ess is not None or max_rhat is not None) and n_chains >= 2
     _check_gen = _convergence_check_schedule() if _do_convergence else None
@@ -463,6 +502,7 @@ def ptde_async_sample(
             if n_completed_total[0] % log_every_evals == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
                 sr = n_swap_accept / np.maximum(n_swap_propose, 1)
+                rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
                 logger.info(
                     f"PTDE-async: {n_completed_total[0]} evals  "
                     f"draws=[min={per_chain_draws.min()}, "
@@ -470,7 +510,9 @@ def ptde_async_sample(
                     f"max={per_chain_draws.max()}]/{draws}  "
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"gamma={gamma_box[0]:.4f}  "
-                    + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]"
+                    + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
+                       f"round_trips={round_trips[0]} "
+                       f"(rate={rt_rate:.3f}/swap)"
                        if n_temps > 1 else ""))
 
             _maybe_stop()
@@ -532,9 +574,12 @@ def ptde_async_sample(
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
+    rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
     logger.info(
         f"PTDE-async done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]"
+        + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
+           f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
+           f"schedule={swap_schedule})"
            if n_temps > 1 else "")
         + (f"  eval_timeouts={n_eval_timeouts[0]}" if n_eval_timeouts[0] else ""))
 

@@ -66,6 +66,7 @@ KNOWN_SAMPLER_KEYS = {
     "nthin", "check_curvatures", "profile", "min_ess", "max_rhat",
     "maxtime", "chain_method", "eval_timeout",
     "rung_thin_factor", "rung_thin_start", "collect_rung_timing",
+    "swap_schedule",
 }
 
 
@@ -115,6 +116,7 @@ def run_fit(config):
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = int(_rung_thin_start_raw) if _rung_thin_start_raw is not None else None
     collect_rung_timing = bool(sampler_cfg.get("collect_rung_timing", False))
+    swap_schedule   = sampler_cfg.get("swap_schedule", "deo")
     if profile: pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
@@ -214,6 +216,7 @@ def run_fit(config):
                     rung_thin_factor=rung_thin_factor,
                     rung_thin_start=rung_thin_start,
                     collect_rung_timing=collect_rung_timing,
+                    swap_schedule=swap_schedule,
                 )
             elif method == "ptde_async":
                 # EXPERIMENTAL (hpc_optimization.txt PROMPT 13): a separate,
@@ -236,6 +239,7 @@ def run_fit(config):
                     maxtime=maxtime,
                     eval_timeout=eval_timeout,
                     collect_rung_timing=collect_rung_timing,
+                    swap_schedule=swap_schedule,
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
