@@ -44,9 +44,8 @@ class DEMetropolis(pm.DEMetropolis):
 # local imports
 from .logger import setup_logging
 from .mkparam import mkprior
-from .outputs.latex import build_latex_output, build_csv_output
-from .outputs.modes import (identify_modes, check_invalid_frac,
-                            DEFAULT_MAX_INVALID_FRAC, mode_suffix)
+from .outputs.modes import mode_suffix, DEFAULT_MAX_INVALID_FRAC
+from .outputs.report_pipeline import build_mode_reports
 from .diagnostics import ModelAuditor
 from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
@@ -344,64 +343,20 @@ def run_fit(config):
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
 
-    # Identify posterior modes and label every draw: idata gains an integer
-    # posterior['mode'] variable (-1 = invalid/unassigned) that
-    # distribute_posterior and the table builders below key off of.  Mode
-    # detection must never take down a finished fit's outputs, hence the
-    # broad catch.
-    mode_report = None
-    modes_path = None
-    try:
-        mode_report = identify_modes(idata)
-        modes_path = Path(str(prefix) + "_modes.txt")
-        modes_path.write_text(mode_report.to_text(), encoding="utf-8")
-        if mode_report.n_modes > 1:
-            logger.info(
-                f"Posterior is multimodal: {mode_report.n_modes} modes, "
-                f"weights {[f'{w:.3f}' for w in mode_report.weights]} "
-                f"({'weights validated' if mode_report.weights_reliable else 'weights UNRELIABLE'}); "
-                f"see {modes_path}")
-    except Exception:
-        logger.warning("Mode identification failed; reporting the combined "
-                       "posterior only", exc_info=True)
-
-    # The trace and mode report are already written at this point, so
-    # evidence survives this raise; override via config
-    # `modes: {max_invalid_frac: ..., force: true}` for forensic
-    # re-processing of old/known-bad traces.
+    # Identify posterior modes, distribute the posterior onto the Parameter
+    # objects, and write the mode report + LaTeX/CSV tables. Shared with the
+    # exozippy-modes CLI (outputs/report_pipeline.py) so reprocessing a saved
+    # trace can never drift from what a live fit produces. A live fit must
+    # not silently emit final tables from a numerically broken run (hence
+    # raise_on_invalid=True, overridable via config
+    # `modes: {max_invalid_frac: ..., force: true}`), and may opt into
+    # per-mode evidence weighting via `modes: {weights: evidence}`.
     modes_cfg = config.get("modes", {}) or {}
-    check_invalid_frac(
-        mode_report,
+    mode_report = build_mode_reports(
+        system, idata, prefix, model=model, trace_path=trace_path,
         max_invalid_frac=modes_cfg.get("max_invalid_frac", DEFAULT_MAX_INVALID_FRAC),
-        force=modes_cfg.get("force", False),
-        trace_path=trace_path, modes_path=modes_path)
-
-    # Optional per-mode evidence weighting (fallback / cross-check path).
-    # Enabled by a single config knob: modes: {weights: evidence}.  On success
-    # it replaces the occupancy weights and provenance in place, so the LaTeX
-    # weight row and CSV weight column below pick the evidence weights up
-    # automatically.  It is self-diagnosing: a single refused mode makes it
-    # fall back to occupancy, and any failure must never take down outputs.
-    if (mode_report is not None and mode_report.n_modes > 1
-            and str(modes_cfg.get("weights", "")).lower() == "evidence"):
-        try:
-            from .outputs.evidence import (estimate_mode_evidences,
-                                           apply_evidence_weighting)
-            evidences = estimate_mode_evidences(model, idata, mode_report)
-            applied = apply_evidence_weighting(mode_report, evidences)
-            # Refresh the human-readable mode report with the new weights.
-            Path(str(prefix) + "_modes.txt").write_text(
-                mode_report.to_text(), encoding="utf-8")
-            logger.info("Evidence weighting %s: weights %s (%s)",
-                        "applied" if applied else "refused (kept occupancy)",
-                        [f"{w:.3f}" for w in mode_report.weights],
-                        mode_report.provenance)
-        except Exception:
-            logger.warning("Evidence weighting failed; keeping occupancy "
-                           "weights", exc_info=True)
-
-    # populate the parameters with the posteriors
-    system.distribute_posterior(idata)
+        force=modes_cfg.get("force", False), raise_on_invalid=True,
+        evidence_weights=str(modes_cfg.get("weights", "")).lower() == "evidence")
 
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
@@ -437,15 +392,6 @@ def run_fit(config):
     #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
     #)
     #plt.show()
-
-    # Generate latex table and machine-readable CSV
-    build_latex_output(system,
-                       var_filename=str(prefix) + '_definitions.tex',
-                       template_filename=str(prefix) + '_template.tex',
-                       caption=r"Median and 68\% Confidence intervals for " + prefix.stem,
-                       mode_report=mode_report)
-    build_csv_output(system, csv_filename=str(prefix) + '_results.csv',
-                     mode_report=mode_report)
 
     # Generate final plots
     draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
