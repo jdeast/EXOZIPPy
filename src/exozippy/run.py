@@ -44,8 +44,7 @@ class DEMetropolis(pm.DEMetropolis):
 # local imports
 from .logger import setup_logging
 from .mkparam import mkprior
-from .outputs.latex import build_latex_output, build_csv_output
-from .outputs.modes import identify_modes
+from .outputs.report_pipeline import build_mode_reports
 from .diagnostics import ModelAuditor
 from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
@@ -330,28 +329,11 @@ def run_fit(config):
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
 
-    # Identify posterior modes and label every draw: idata gains an integer
-    # posterior['mode'] variable (-1 = invalid/unassigned) that
-    # distribute_posterior and the table builders below key off of.  Mode
-    # detection must never take down a finished fit's outputs, hence the
-    # broad catch.
-    mode_report = None
-    try:
-        mode_report = identify_modes(idata)
-        modes_path = Path(str(prefix) + "_modes.txt")
-        modes_path.write_text(mode_report.to_text(), encoding="utf-8")
-        if mode_report.n_modes > 1:
-            logger.info(
-                f"Posterior is multimodal: {mode_report.n_modes} modes, "
-                f"weights {[f'{w:.3f}' for w in mode_report.weights]} "
-                f"({'weights validated' if mode_report.weights_reliable else 'weights UNRELIABLE'}); "
-                f"see {modes_path}")
-    except Exception:
-        logger.warning("Mode identification failed; reporting the combined "
-                       "posterior only", exc_info=True)
-
-    # populate the parameters with the posteriors
-    system.distribute_posterior(idata)
+    # Identify posterior modes, distribute the posterior onto the Parameter
+    # objects, and write the mode report + LaTeX/CSV tables. Shared with the
+    # exozippy-modes CLI (outputs/report_pipeline.py) so reprocessing a saved
+    # trace can never drift from what a live fit produces.
+    mode_report = build_mode_reports(system, idata, prefix)
 
     summary_path = Path(str(prefix) + "_summary.txt")
     summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
@@ -387,15 +369,6 @@ def run_fit(config):
     #    divergences_kwargs={'color': 'C3', 'alpha': 0.5, 'markersize': 5}  # C3 is usually red
     #)
     #plt.show()
-
-    # Generate latex table and machine-readable CSV
-    build_latex_output(system,
-                       var_filename=str(prefix) + '_definitions.tex',
-                       template_filename=str(prefix) + '_template.tex',
-                       caption=r"Median and 68\% Confidence intervals for " + prefix.stem,
-                       mode_report=mode_report)
-    build_csv_output(system, csv_filename=str(prefix) + '_results.csv',
-                     mode_report=mode_report)
 
     # Generate final plots
     draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
