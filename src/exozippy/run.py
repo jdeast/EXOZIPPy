@@ -368,12 +368,36 @@ def run_fit(config):
     # evidence survives this raise; override via config
     # `modes: {max_invalid_frac: ..., force: true}` for forensic
     # re-processing of old/known-bad traces.
-    modes_cfg = config.get("modes", {})
+    modes_cfg = config.get("modes", {}) or {}
     check_invalid_frac(
         mode_report,
         max_invalid_frac=modes_cfg.get("max_invalid_frac", DEFAULT_MAX_INVALID_FRAC),
         force=modes_cfg.get("force", False),
         trace_path=trace_path, modes_path=modes_path)
+
+    # Optional per-mode evidence weighting (fallback / cross-check path).
+    # Enabled by a single config knob: modes: {weights: evidence}.  On success
+    # it replaces the occupancy weights and provenance in place, so the LaTeX
+    # weight row and CSV weight column below pick the evidence weights up
+    # automatically.  It is self-diagnosing: a single refused mode makes it
+    # fall back to occupancy, and any failure must never take down outputs.
+    if (mode_report is not None and mode_report.n_modes > 1
+            and str(modes_cfg.get("weights", "")).lower() == "evidence"):
+        try:
+            from .outputs.evidence import (estimate_mode_evidences,
+                                           apply_evidence_weighting)
+            evidences = estimate_mode_evidences(model, idata, mode_report)
+            applied = apply_evidence_weighting(mode_report, evidences)
+            # Refresh the human-readable mode report with the new weights.
+            Path(str(prefix) + "_modes.txt").write_text(
+                mode_report.to_text(), encoding="utf-8")
+            logger.info("Evidence weighting %s: weights %s (%s)",
+                        "applied" if applied else "refused (kept occupancy)",
+                        [f"{w:.3f}" for w in mode_report.weights],
+                        mode_report.provenance)
+        except Exception:
+            logger.warning("Evidence weighting failed; keeping occupancy "
+                           "weights", exc_info=True)
 
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
