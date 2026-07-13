@@ -87,3 +87,10 @@ def calc_rho(radius, distance, theta_E):
 @register_physics
 def calc_alpha(xalpha, yalpha):
     return pt.arctan2(yalpha, xalpha)
+
+@register_physics
+def calc_s(log_s):
+    # Projected binary separation from the sampled log10(s).  Sampling log_s
+    # makes close/wide an exact reflection log_s -> -log_s (|J| = 1); see
+    # notes/multimode_implementation.txt P2.
+    return pt.power(10.0, log_s)

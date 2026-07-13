@@ -54,9 +54,14 @@ EXAMPLE_DIR = os.path.join(
 # chain 23, draw 46680 -- the first stored draw after the runaway (lp jumped
 # from ~2982 to ~5.05e7 in the trace; pre-fix, later draws in the same chain
 # reached lp ~1e39).
+# The separation coordinate is now sampled as log_s (P2, multimode plan): the
+# historical value was stored under lens.s_raw. Renaming the key preserves the
+# point -- this extreme raw value pins the logit at its upper bound, and old s
+# in [0.1, 10] and new log_s in [-1, 1] share the same physical endpoint
+# (10**1 = 10), so the physical separation is unchanged.
 RUNAWAY_RAW = {
     "band.u1_raw": [-37530.31612758304],
-    "lens.s_raw": [12868418.484993141],
+    "lens.log_s_raw": [12868418.484993141],
     "lens.t_0_raw": [597790902870.5624],
     "lens.u_0_raw": [-85147091.07538812],
     "lens.xalpha_raw": [35067.89879449546],
@@ -76,7 +81,9 @@ RUNAWAY_RAW = {
 # state (historical stored lp ~= 2982.18).
 GOOD_RAW = {
     "band.u1_raw": [6.124144468621876],
-    "lens.s_raw": [-14.73579507774429],
+    # log_s coordinate (was lens.s_raw pre-P2); extreme-negative raw pins the
+    # logit at the shared lower endpoint (10**-1 = 0.1).
+    "lens.log_s_raw": [-14.73579507774429],
     "lens.t_0_raw": [0.21660909850932655],
     "lens.u_0_raw": [-0.3258404381227836],
     "lens.xalpha_raw": [-4.220453654077744],

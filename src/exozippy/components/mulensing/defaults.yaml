@@ -158,21 +158,44 @@ lens:
       default:
         func_name: "calc_alpha"
         deps: [ "xalpha", "yalpha" ]
+  # log10 of the projected separation is the SAMPLED coordinate (s below is
+  # derived as 10**log_s).  Sampling in log_s makes the close/wide degeneracy
+  # an exact reflection log_s -> -log_s with |J| = 1, which the mode-jump
+  # proposals / folded likelihood (notes/multimode_implementation.txt) rely on,
+  # and matches MMEXOFAST's base-10 log_s sigma convention.  Base: log10.
+  log_s:
+    # log10 of the s bounds below: [0.1, 10] -> [-1, 1].  Symmetric about 0 so
+    # the close/wide reflection maps the domain onto itself.
+    lower: -1.0
+    upper: 1.0
+    initval: 0.0
+    # d(log10 s) = ds / (s * ln 10); the old s init_scale 0.05 at s = 1 gives
+    # 0.05 / ln(10) ~ 0.0217.
+    init_scale: 0.0217
+    unit: ""
+    internal_unit: ""
+    latex: "\\log{s}"
+    description: "log10 of projected binary separation (Einstein radii)"
   # might want to parameterize this like Yee's that increases sampling at s=1
   s:
-    # Bounds leave >~2x margin beyond every published solution (smallest
-    # known ~0.3, widest ~5.3) while keeping tempering chains out of VBM's
-    # expensive corners (see vbm_fix.txt section 6; the s=20 wall hosted the
-    # extreme-magnification eval_timeout excursions in DC2018_128).  Events
-    # genuinely needing s > 10 should override in their params file.
+    # Derived from log_s (s = 10**log_s).  The bounds here mirror log_s's
+    # [-1, 1] domain ([0.1, 10]) and leave >~2x margin beyond every published
+    # solution (smallest known ~0.3, widest ~5.3) while keeping tempering
+    # chains out of VBM's expensive corners (see vbm_fix.txt section 6; the
+    # s=20 wall hosted the extreme-magnification eval_timeout excursions in
+    # DC2018_128).  Events genuinely needing s > 10 should override log_s (or
+    # lens.s, auto-translated) in their params file.
     lower: 0.1
     upper: 10.0
-    initval: 1.0
     init_scale: 0.05
     unit: ""
     internal_unit: ""
     latex: "s"
     description: "Projected binary separation (Einstein radii)"
+    expressions:
+      default:
+        func_name: "calc_s"
+        deps: [ "log_s" ]
   xalpha:
     lower: -100.0
     upper: 100.0

@@ -158,6 +158,44 @@ class Lens(Component):
                 else:
                     up[new_key] = up.pop(key)
 
+    def _translate_s_bounds_to_log_s(self):
+        """Rewrite user-supplied lens.<j>.s lower/upper bounds onto log_s.
+
+        s is now a derived parameter (s = 10**log_s); the sampling bounds live
+        on log_s.  A user who constrains lens.s expects the sampler to respect
+        it, so translate lower/upper -> log10(bound) onto the log_s entry and
+        drop them from the s entry (initval/init_scale on s are left in place --
+        the relaxation engine translates those through the s <-> log_s
+        relation).  Keys are already standardized to lens.<j>.<param> form.
+        """
+        up = self.config_manager.user_params
+        for j in range(self.n_companions):
+            entry = up.get(f"lens.{j}.s")
+            if not isinstance(entry, dict):
+                continue
+            if "lower" not in entry and "upper" not in entry:
+                continue
+            log_key = f"lens.{j}.log_s"
+            log_entry = up.get(log_key)
+            if not isinstance(log_entry, dict):
+                log_entry = {}
+            for bound in ("lower", "upper"):
+                if bound not in entry:
+                    continue
+                val = float(entry.pop(bound))
+                if val <= 0.0:
+                    raise ValueError(
+                        f"lens.{j}.s {bound} bound must be positive (s > 0); "
+                        f"got {val}."
+                    )
+                log_entry[bound] = float(np.log10(val))
+            up[log_key] = log_entry
+            logger.info(
+                f"Translated lens.{j}.s bound(s) to log_s "
+                f"(log10): {log_key} = "
+                f"{{{', '.join(f'{b}: {log_entry[b]:.4f}' for b in ('lower', 'upper') if b in log_entry)}}}."
+            )
+
     def _source_instance_names(self):
         """Display names for per-source vector elements (source star names)."""
         system_config = getattr(self.config_manager, "system_config", None) or {}
@@ -262,6 +300,10 @@ class Lens(Component):
         """Stage 2: Declare the manifest."""
         self._validate_bodies(system)
 
+        # s is derived from the sampled log_s; move any user s bounds onto log_s
+        # before the manifest/relaxation engine run.
+        self._translate_s_bounds_to_log_s()
+
         # Per-source vector parameters: one element per source body.  Elements
         # are displayed and addressed by the source star's instance name
         # (lens.SourceB.t_0) or slot index (lens.1.t_0).
@@ -289,7 +331,10 @@ class Lens(Component):
         # than by component element count.
         if self.n_companions >= 1:
             companion_shape = (self.n_companions,)
-            self.manifest["s"] = {"shape": companion_shape}
+            # log_s is the sampled coordinate; s = 10**log_s is derived (the
+            # close/wide degeneracy is then an exact reflection log_s -> -log_s).
+            self.manifest["log_s"] = {"shape": companion_shape}
+            self.manifest["s"] = {"expr_key": "default", "shape": companion_shape}
             self.manifest["xalpha"] = {"shape": companion_shape}
             self.manifest["yalpha"] = {"shape": companion_shape}
             # alpha derived from xalpha/yalpha via arctan2; internal unit = rad, display = deg
@@ -344,6 +389,24 @@ class Lens(Component):
                     q_j = m_c / body_masses[0]
                     self.config_manager.add_hint(f"lens.{j}.q", q_j, rank=40)
                     self.config_manager.add_scale_hint(f"lens.{j}.q", 0.1 * q_j)
+
+            # The s <-> log_s relation is mapped only for companion slot 0, so
+            # for 3+ body lenses seed the remaining companions' log_s from any
+            # user s initval (same fallback rationale as q/mlens_total above).
+            up = self.config_manager.user_params
+            for j in range(1, self.n_companions):
+                entry = up.get(f"lens.{j}.s")
+                s_val = entry.get("initval") if isinstance(entry, dict) else entry
+                if s_val is None or float(s_val) <= 0.0:
+                    continue
+                self.config_manager.add_hint(
+                    f"lens.{j}.log_s", float(np.log10(float(s_val))), rank=40)
+                sc = entry.get("init_scale") if isinstance(entry, dict) else None
+                if sc is not None:
+                    # d(log10 s) = ds / (s ln 10)
+                    self.config_manager.add_scale_hint(
+                        f"lens.{j}.log_s",
+                        float(sc) / (float(s_val) * np.log(10.0)))
 
         if any(self.finite_source):
             self.manifest["rho"] = per_source("default")

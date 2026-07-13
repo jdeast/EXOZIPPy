@@ -19,6 +19,11 @@ pi_E_N, pi_E_E = sp.symbols('pi_E_N pi_E_E')
 rho, source_radius = sp.symbols('rho source_radius')
 q_lens, companion_mass = sp.symbols('q_lens companion_mass')
 alpha, xalpha, yalpha = sp.symbols('alpha xalpha yalpha')
+# Projected separation: log_s is sampled, s is derived (s = 10**log_s).  The
+# relation lets the relaxation engine translate a user-supplied lens.s initval
+# (and its init_scale, via the Jacobian) into a log_s start, exactly as
+# mass/logmass does in the star component.
+s, log_s = sp.symbols('s log_s', real=True)
 
 comp_key = "lens"
 
@@ -122,6 +127,16 @@ def get_symbol_map(lens_config_list):
             result["companion_mass"] = companion_mass_path
             result["primary_lens_mass"] = f"star.{l_idx}.mass"
 
+        # s/log_s exist only for binary (companion) lenses.  Map companion slot
+        # 0 (the single companion for a 2-body lens); like q_lens above, the
+        # s <-> log_s relation stays inert for PSPL where neither symbol is
+        # mapped.  For 3+ body lenses only slot 0 is covered by the relation;
+        # Lens.register_parameters seeds the remaining companions' log_s from
+        # user s hints (same fallback as the mlens_total/q seeding).
+        if is_binary_lens:
+            result["s"] = "lens.0.s"
+            result["log_s"] = "lens.0.log_s"
+
         maps.append(result)
 
     return maps
@@ -157,6 +172,11 @@ RELATIONS = [
 
     # Finite Source (R_sun to AU, then to mas)
     sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E),
+
+    # Projected separation reparameterization (base-10, mirrors mass/logmass).
+    # Only active for binary lenses (s/log_s mapped in get_symbol_map there);
+    # inert for PSPL.  Lets user lens.s initvals back-solve to a log_s start.
+    sp.Eq(s, 10 ** log_s),
 
     # Binary lens mass ratio: q = M_companion / M_primary
     # companion_mass/primary_lens_mass are only in the symbol map for binary
