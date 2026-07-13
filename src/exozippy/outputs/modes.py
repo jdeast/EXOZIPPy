@@ -73,6 +73,13 @@ class ModeInfo:
     delta_lp_max: float           # lp_max(best mode) - lp_max(this mode)
     per_chain_weight: np.ndarray  # occupancy fraction of each chain's valid draws
     center: dict = field(default_factory=dict)  # feature var -> center (raw units)
+    # Optional evidence-weighting fields (populated by
+    # outputs.evidence.apply_evidence_weighting when modes: {weights: evidence}
+    # is requested and every mode's bridge estimate is trustworthy).  weight is
+    # then the softmax evidence weight and weight_err its propagated 1-sigma.
+    weight_err: float = float("nan")  # 1-sigma on weight (evidence weighting)
+    lnZ: float = float("nan")         # local log-evidence (bridge sampling)
+    lnZ_err: float = float("nan")     # 1-sigma on lnZ
 
 
 @dataclass
