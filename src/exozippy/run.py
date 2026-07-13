@@ -45,7 +45,8 @@ class DEMetropolis(pm.DEMetropolis):
 from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.latex import build_latex_output, build_csv_output
-from .outputs.modes import identify_modes, check_invalid_frac, DEFAULT_MAX_INVALID_FRAC
+from .outputs.modes import (identify_modes, check_invalid_frac,
+                            DEFAULT_MAX_INVALID_FRAC, mode_suffix)
 from .diagnostics import ModelAuditor
 from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
@@ -450,6 +451,20 @@ def run_fit(config):
     draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
         comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+
+    # Multimodal posteriors: re-emit the same corner + component plots once
+    # per mode, restricted to that mode's draws (interim solution -- see
+    # notes/multimode_implementation.txt P7; a recolored/stratified single
+    # figure is deferred). Per-mode LaTeX columns and CSV rows are already
+    # produced above via mode_report=mode_report; this loop only covers the
+    # plot outputs, which have no such mechanism. Single-mode runs take this
+    # branch never, so they emit zero new files.
+    if mode_report is not None and mode_report.n_modes > 1:
+        try:
+            _emit_per_mode_outputs(system, model, idata, mode_report, prefix)
+        except Exception:
+            logger.warning("Per-mode output generation failed; the combined "
+                           "posterior outputs above are unaffected", exc_info=True)
 
     try:
         mkprior(config, trace_path=trace_path)
@@ -867,8 +882,56 @@ def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
                             figure_kwargs={"figsize": (12, 3 * n_rows)})
     fig = pc.viz["figure"].item()
     fig.suptitle(title, fontsize=14)
+    _shade_trace_axes_by_mode(fig, idata)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     return fig
+
+
+# Qualitative colormap for per-draw mode markers; wraps at 10 modes (a
+# sensible ceiling given identify_modes' max_modes default of 8).
+_MODE_CMAP = plt.get_cmap("tab10")
+_MODE_INVALID_COLOR = (0.6, 0.6, 0.6, 0.9)
+
+
+def _shade_trace_axes_by_mode(fig, idata):
+    """Overlay per-draw markers colored by mode label on each trace axis.
+
+    Makes mode-hopping (or its absence) visible directly in the chain trace
+    plot: draws from the same chain keep their line but gain a dot colored
+    by posterior['mode'] at that draw (gray for invalid/unassigned draws).
+    No-op when idata has no 'mode' variable (older trace files, or mode
+    identification failed/found only one mode) so unimodal runs render
+    exactly as before this feature was added.
+
+    Relies on _render_trace_page's fixed layout: compact=False with a dist
+    column then a trace column, one row per variable element, so trace axes
+    are every other axis (odd index) in fig.axes, and each trace axis's
+    per-chain Line2D objects are in chain order (arviz's default behavior).
+    """
+    if not hasattr(idata, "posterior") or "mode" not in idata.posterior:
+        return
+    mode_vals = np.asarray(idata.posterior["mode"].values)  # (chain, draw)
+    if mode_vals.size == 0 or mode_vals.max() < 1:
+        return  # unimodal (single label 0) or nothing valid: nothing to show
+    n_chain = mode_vals.shape[0]
+
+    for i, ax in enumerate(fig.axes):
+        if i % 2 == 0:
+            continue  # dist column; only shade the trace column
+        for c, line in enumerate(list(ax.lines)):
+            if c >= n_chain:
+                break
+            xd = np.asarray(line.get_xdata())
+            yd = np.asarray(line.get_ydata())
+            if xd.size == 0:
+                continue
+            idx = xd.astype(int)
+            idx = np.clip(idx, 0, mode_vals.shape[1] - 1)
+            labels = mode_vals[c, idx]
+            colors = [_MODE_CMAP(int(l) % 10) if l >= 0 else _MODE_INVALID_COLOR
+                     for l in labels]
+            ax.scatter(xd, yd, c=colors, s=8, zorder=5, linewidths=0)
+
 
 def _sanitize_netcdf_attrs(idata):
     """Flatten dict-valued attrs to JSON strings so xarray can serialize to netCDF.
@@ -904,21 +967,33 @@ def _convert_posterior_to_user_units(idata, param_lookup):
         idata.posterior[var_name] = idata.posterior[var_name] * factor
 
 
-def get_draws(idata, n_draws=50, param_lookup=None):
+def get_draws(idata, n_draws=50, param_lookup=None, mode=None):
     """
     Extracts a random subset of draws from the posterior for plotting.
 
     The trace is stored in user units.  Component physics functions expect
     internal units, so each variable is divided by its conversion factor
     before being returned when ``param_lookup`` is provided.
+
+    ``mode``: if given, restrict to draws whose ``posterior['mode']`` label
+    equals this integer (used by the per-mode output loop in run_fit to
+    build a mode-specific draw set). If omitted (default), every valid draw
+    (mode >= 0) is eligible, matching the combined-posterior behavior.
     """
     # 1. Flatten chains/draws into a single 'sample' dimension
     post = az.extract(idata, combined=True, keep_dataset=True)
 
     # Never plot draws flagged invalid by mode identification (mode == -1:
-    # runaway/stuck-chain draws with broken lp).
+    # runaway/stuck-chain draws with broken lp). With an explicit `mode`,
+    # restrict to exactly that mode's draws instead.
     if "mode" in post:
-        post = post.isel(sample=np.asarray(post["mode"].values, dtype=int) >= 0)
+        labels = np.asarray(post["mode"].values, dtype=int)
+        keep = (labels == mode) if mode is not None else (labels >= 0)
+        post = post.isel(sample=keep)
+    elif mode is not None:
+        raise ValueError("get_draws: mode=%r requested but idata has no "
+                         "posterior['mode'] variable (identify_modes was "
+                         "not run or failed)" % (mode,))
 
     total_available = post.sample.size
     n_to_extract = min(n_draws, total_available)
@@ -941,6 +1016,66 @@ def get_draws(idata, n_draws=50, param_lookup=None):
         draw_list.append(point)
 
     return draw_list
+
+
+def _idata_for_mode(idata, mode_k):
+    """Build a synthetic single-chain InferenceData holding only mode_k's draws.
+
+    ``make_corner`` (and anything else that reads idata.posterior directly,
+    as opposed to Parameter.posterior) needs a real InferenceData with
+    (chain, draw) dims to stack over; the mode label lives at the (chain,
+    draw) granularity of the original trace, so the cheapest way to hand it
+    a mode-restricted view is to flatten the selected draws into one
+    synthetic chain (chain identity doesn't matter for a corner plot).
+    """
+    post = az.extract(idata, combined=True, keep_dataset=True)
+    labels = np.asarray(post["mode"].values, dtype=int)
+    sub = post.isel(sample=(labels == mode_k))
+
+    data = {}
+    for var in sub.data_vars:
+        if var == "mode":
+            continue
+        arr = np.asarray(sub[var].values)          # dims: (*extra, sample)
+        arr = np.moveaxis(arr, -1, 0)               # -> (sample, *extra)
+        data[var] = arr[np.newaxis, ...]            # -> (1, sample, *extra)
+    return az.from_dict({"posterior": data})
+
+
+def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
+    """Re-emit the combined-posterior corner + component plots once per mode.
+
+    Interim (P7) multimodal reporting: loop the existing single-posterior
+    plot calls once per detected mode instead of building a new stratified
+    figure. Only called when mode_report.n_modes > 1 (see the guard at the
+    call site in run_fit); per-mode LaTeX columns and CSV rows already exist
+    via build_latex_output/build_csv_output's mode_report kwarg and are not
+    duplicated here.
+
+    Model plots (comp.plot) can be expensive (e.g. VBM microlensing
+    evaluations), so each mode's wall-clock cost is logged -- a slow
+    per-mode loop should be visible in logs, not silent.
+    """
+    prefix = str(prefix)
+    param_lookup = system.get_parameter_lookup()
+    for k, m in enumerate(mode_report.modes):
+        suffix = mode_suffix(k)
+        t0 = time.time()
+
+        idata_k = _idata_for_mode(idata, k)
+        make_corner(model, idata_k, f"{prefix}_corner_{suffix}.png")
+
+        # Same draw-count knob as the combined-posterior plots (get_draws'
+        # n_draws default) -- no extra stratification needed here since each
+        # mode draws from its own full, already-labeled set of samples.
+        draws_k = get_draws(idata, param_lookup=param_lookup, mode=k)
+        for comp in system.active_components.values():
+            comp.plot(system, draws_k, filename_prefix=f"{prefix}_mcmc_{suffix}")
+
+        logger.info(
+            f"Per-mode outputs for {suffix} (weight={m.weight:.3f}, "
+            f"n_draws={m.n_draws}) written in {time.time() - t0:.1f}s")
+
 
 def _initialize_internal_maps(self):
     """
