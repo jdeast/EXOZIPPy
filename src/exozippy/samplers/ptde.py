@@ -145,35 +145,71 @@ def _probe_scales(raw_start, logp_fn):
     return map_lp, scales
 
 
-def _make_starts(n_chains, raw_start, logp_fn, rng):
-    """Generate n_chains starting points near MAP using probe-based scaling.
+def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None):
+    """Generate n_chains starting points near one or more seeds (P4).
 
-    Mirrors EXOFASTv2: scatter chains by factor × scale where
+    `raw_starts` is a single raw-start dict (legacy) or a LIST of K raw-start
+    dicts (multi-seed sampling). Chains are assigned to seeds round-robin
+    (chain j -> seed j % K); the first chain of each seed group starts exactly
+    at that seed's solved point, the rest jitter around their seed's center.
+
+    Mirrors EXOFASTv2: scatter chains by factor x scale where
     factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
     threshold), and apply exponential decay only when proposals hit hard prior
     boundaries (lp=-inf).  Raises RuntimeError if a chain cannot be initialized
     within max_iter retries.
+
+    Returns (starts, chain_seed_index) where chain_seed_index[j] is the original
+    seed index that chain j was drawn from (for trace-attr provenance).
     """
-    map_lp, scales = _probe_scales(raw_start, logp_fn)
-    n_params = sum(v.size for v in raw_start.values())
+    if isinstance(raw_starts, dict):
+        raw_starts = [raw_starts]
+    K = len(raw_starts)
+    if seed_indices is None:
+        seed_indices = list(range(K))
+
+    # Probe scales once from seed 0 (the canonical MAP-ish start); the same
+    # per-parameter jitter scale is reused around every seed.
+    map_lp, scales = _probe_scales(raw_starts[0], logp_fn)
+    n_params = sum(v.size for v in raw_starts[0].values())
     factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
     max_iter = 1000
     logger.info(
         f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}"
+        + (f", {K} seeds (round-robin over {n_chains} chains)" if K > 1 else "")
     )
 
-    starts = [{k: v.copy() for k, v in raw_start.items()}]
-    for j in range(1, n_chains):
+    starts = []
+    chain_seed_index = []
+    seed_seen = set()
+    for j in range(n_chains):
+        s = j % K
+        center = raw_starts[s]
+        # First chain of each seed group starts exactly at the solved seed.
+        if s not in seed_seen:
+            lp0 = float(logp_fn(center))
+            if np.isfinite(lp0):
+                starts.append({k: v.copy() for k, v in center.items()})
+                chain_seed_index.append(seed_indices[s])
+                seed_seen.add(s)
+                logger.debug(f"PTDE init chain {j}: exact seed {seed_indices[s]} "
+                             f"(lp={lp0:.1f})")
+                continue
+            logger.warning(
+                f"PTDE init: seed {seed_indices[s]} exact start has non-finite "
+                f"lp; jittering to find a finite start.")
         for niter in range(max_iter):
             eff = factor / np.exp(niter / 1000.0)
             prop = {k: v + eff * scales[k] * rng.standard_normal(v.shape)
-                    for k, v in raw_start.items()}
+                    for k, v in center.items()}
             lp = float(logp_fn(prop))
             if np.isfinite(lp):
                 starts.append(prop)
+                chain_seed_index.append(seed_indices[s])
+                seed_seen.add(s)
                 logger.debug(
-                    f"PTDE init chain {j}: accepted after {niter} retries "
-                    f"(lp={lp:.1f}, Δlp={lp - map_lp:.1f})"
+                    f"PTDE init chain {j} (seed {seed_indices[s]}): accepted after "
+                    f"{niter} retries (lp={lp:.1f}, dlp={lp - map_lp:.1f})"
                 )
                 break
             if niter % 200 == 0 and niter > 0:
@@ -184,10 +220,10 @@ def _make_starts(n_chains, raw_start, logp_fn, rng):
         else:
             raise RuntimeError(
                 f"PTDE chain {j} initialization failed after {max_iter} retries. "
-                f"Check init_scale values in your params.yaml — a parameter may be "
+                f"Check init_scale values in your params.yaml -- a parameter may be "
                 f"starting outside its prior bounds."
             )
-    return starts
+    return starts, chain_seed_index
 
 
 def _worker_init():
@@ -464,6 +500,8 @@ def ptde_sample(
     n_chains=None,
     cores=None,
     initvals=None,
+    raw_starts=None,
+    seed_indices=None,
     gamma=None,
     target_accept=0.20,
     adapt_gamma=True,
@@ -640,8 +678,20 @@ def ptde_sample(
     if initvals is not None:
         assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
         t1_starts = initvals
+        chain_seed_index = [0] * n_chains
     else:
-        t1_starts = _make_starts(n_chains, raw_start, logp_fn, rng)
+        # Multi-seed starts (P4): round-robin the chain population across every
+        # solved seed. raw_starts/seed_indices come from run.py when available;
+        # else fall back to system.get_raw_starts, and further to a bare
+        # get_raw_start (single start) for minimal test/system stubs that don't
+        # implement get_raw_starts at all.
+        if raw_starts is None:
+            if hasattr(system, "get_raw_starts"):
+                raw_starts, seed_indices = system.get_raw_starts(model)
+            else:
+                raw_starts, seed_indices = [raw_start], [0]
+        t1_starts, chain_seed_index = _make_starts(
+            n_chains, raw_starts, logp_fn, rng, seed_indices)
 
     # ensemble start plots (T=1 starts only; raw→physical via the batched fn)
     if plot_prefix is not None:
@@ -1092,6 +1142,16 @@ def ptde_sample(
         "posterior": posterior_dict,
         "sample_stats": {"lp": stored_lp[:, :actual_draws]},
     })
+
+    # Multi-seed provenance (P4): record which solved seed each T=1 chain was
+    # started from.  With seeded starts, occupancy weights are initialization
+    # artifacts BY DESIGN unless chains mix, so downstream reporting must be
+    # able to say "chains 0-3 at seed 0, 4-7 at seed 1".
+    # TODO(P4): surface this in outputs/modes.py ModeReport once chains->modes
+    # attribution is wired; for now the per-chain attr is the source of truth.
+    idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
+    if len(set(chain_seed_index)) > 1:
+        logger.info(f"PTDE multi-seed provenance (chain -> seed): {list(chain_seed_index)}")
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)

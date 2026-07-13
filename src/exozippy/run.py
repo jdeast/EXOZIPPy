@@ -169,6 +169,11 @@ def run_fit(config):
         # start is always our initval.
         raw_start = system.get_raw_start(model)
 
+        # Multi-seed starts (P4): a list of raw start dicts (one per solved
+        # seed) plus their original seed indices. seed 0 == raw_start above;
+        # get_raw_starts returns just [raw_start], [0] for the ordinary case.
+        raw_starts, seed_indices = system.get_raw_starts(model)
+
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
@@ -208,6 +213,8 @@ def run_fit(config):
                     T_max=T_max,
                     n_chains=n_chains,
                     cores=cores,
+                    raw_starts=raw_starts,
+                    seed_indices=seed_indices,
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,
@@ -233,6 +240,8 @@ def run_fit(config):
                     T_max=T_max,
                     n_chains=n_chains,
                     cores=cores,
+                    raw_starts=raw_starts,
+                    seed_indices=seed_indices,
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,

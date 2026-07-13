@@ -13,7 +13,7 @@ import arviz as az
 
 # local imports
 from exozippy.components.component import Component
-from exozippy.components.parameter import Parameter
+from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.components.factory import discover_components
 from exozippy.graph import determine_pymc_build_order
@@ -180,6 +180,78 @@ class System(Component):
             else:
                 raw_start[key] = np.zeros_like(raw_start[key])
         return raw_start
+
+    def get_raw_starts(self, model):
+        """Multi-seed variant of get_raw_start (P4).
+
+        Returns (starts, seed_indices): a list of raw-space start dicts (one per
+        usable seed) and the parallel list of the original seed indices they
+        came from.  seed 0 is always the canonical single start (identical to
+        get_raw_start); additional seeds are built from the relaxation engine's
+        per-seed solutions (config_manager.seed_resolved) by re-mapping each
+        parameter's solved physical initval through its frozen forward transform
+        (Parameter.raw_from_initval), so bounds/scale stay fixed at seed 0 and
+        only the start position moves.
+
+        A seed whose solved start violates a hard bound is logged and skipped
+        entirely (a clipped start would sit in no posterior basin).  Falls back
+        to a single-element list when no multi-seed solutions exist.
+        """
+        base = self.get_raw_start(model)
+        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+        if not seed_resolved or len(seed_resolved) <= 1:
+            return [base], [0]
+
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        starts, seed_indices = [base], [0]   # seed 0 == the canonical base start
+
+        for k in range(1, len(seed_resolved)):
+            resolved = seed_resolved[k]
+            raw = {key: np.array(v, dtype=float, copy=True)
+                   for key, v in base.items()}
+            violated = False
+            for key in base:
+                name = key[:-len("_raw")] if key.endswith("_raw") else key
+                par = lookup.get(name)
+                if par is None:
+                    continue
+                iv = self._seed_initvals_for(par, resolved)
+                if iv is None:
+                    continue  # not seeded: keep the seed-0 raw start
+                try:
+                    raw_vec = par.raw_from_initval(iv)
+                except SeedBoundViolation as e:
+                    logger.warning(
+                        f"Multi-seed: seed {k} start violates a bound ({e}); "
+                        f"skipping this seed (a clipped start is in no basin).")
+                    violated = True
+                    break
+                if np.size(raw_vec) == np.size(base[key]):
+                    raw[key] = raw_vec.reshape(np.shape(base[key]))
+            if not violated:
+                starts.append(raw)
+                seed_indices.append(k)
+
+        logger.info(
+            f"Multi-seed starts: {len(starts)}/{len(seed_resolved)} seeds "
+            f"usable (seed indices {seed_indices}).")
+        return starts, seed_indices
+
+    def _seed_initvals_for(self, par, resolved):
+        """Internal-unit initval vector for one Parameter under one seed's solved
+        state, or None if that seed does not touch any of its elements."""
+        comp_type = par.label.split('.')[0]
+        param_name = par.label.split('.', 1)[1]
+        n_elements = int(np.prod(par.shape)) if par.shape not in ((), None) else 1
+        base_iv = to_vec(par.initval, n_elements, fill=np.nan)
+        vals = np.array(base_iv, dtype=float).reshape(-1).copy()
+        found = False
+        for i in range(n_elements):
+            path = f"{comp_type}.{i}.{param_name}"
+            if path in resolved:
+                vals[i] = resolved[path]
+                found = True
+        return vals if found else None
 
     def get_internal_point(self, model, raw_point):
         """Evaluates graph deterministics for plotting/physics without user-unit conversion."""

@@ -89,6 +89,8 @@ def ptde_async_sample(
     n_chains=None,
     cores=None,
     initvals=None,
+    raw_starts=None,
+    seed_indices=None,
     gamma=None,
     target_accept=0.20,
     adapt_gamma=True,
@@ -184,8 +186,18 @@ def ptde_async_sample(
     if initvals is not None:
         assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
         t1_starts = initvals
+        chain_seed_index = [0] * n_chains
     else:
-        t1_starts = _make_starts(n_chains, raw_start, logp_fn, rng)
+        # Multi-seed starts (P4): round-robin the chain population across seeds.
+        # Fall back to a single start for minimal system stubs that don't
+        # implement get_raw_starts.
+        if raw_starts is None:
+            if hasattr(system, "get_raw_starts"):
+                raw_starts, seed_indices = system.get_raw_starts(model)
+            else:
+                raw_starts, seed_indices = [raw_start], [0]
+        t1_starts, chain_seed_index = _make_starts(
+            n_chains, raw_starts, logp_fn, rng, seed_indices)
 
     if plot_prefix is not None:
         logger.info("Generating ensemble start plots...")
@@ -571,6 +583,13 @@ def ptde_async_sample(
         "posterior": posterior_dict,
         "sample_stats": {"lp": stored_lp[:, :actual_draws]},
     })
+
+    # Multi-seed provenance (P4): which solved seed each T=1 chain started from.
+    # TODO(P4): surface in outputs/modes.py ModeReport; per-chain attr for now.
+    idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
+    if len(set(chain_seed_index)) > 1:
+        logger.info(f"PTDE-async multi-seed provenance (chain -> seed): "
+                    f"{list(chain_seed_index)}")
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
