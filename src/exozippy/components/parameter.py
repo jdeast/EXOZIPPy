@@ -28,6 +28,12 @@ from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 logger = logging.getLogger(__name__)
 
+
+class SeedBoundViolation(Exception):
+    """Raised by Parameter.raw_from_initval when a seed's solved start falls
+    outside a parameter's hard bounds. Multi-seed sampling skips such seeds
+    rather than clipping them (a clipped start is in no posterior basin)."""
+
 Number = Union[int, float, np.floating]
 
 # Section C of build_pymc adds +0.5*raw**2 to exactly cancel the -0.5*raw**2
@@ -326,6 +332,11 @@ class Parameter:
     # Raw-space starting values for the sampled elements (set in build_pymc):
     # 0 for logit elements, (initval - mu)/sigma for Gaussian-path elements.
     raw_initval: Optional[np.ndarray] = None
+    # Frozen per-element forward transform (set in build_pymc); lets
+    # raw_from_initval map an alternate physical initval (a different
+    # multi-seed start) to raw space using this build's bounds/scale. See
+    # raw_from_initval for the dict schema.
+    _raw_transform: Optional[dict] = field(default=None, init=False)
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
@@ -529,6 +540,10 @@ class Parameter:
         # Logit transform: logit_q_init + init_scale_logit * raw → sigmoid → physical
         logit_q_inits = np.zeros(n_elements)
         init_scale_logits = np.zeros(n_elements)
+        # Per-element clip floor on q = (val-lower)/span; stored so
+        # raw_from_initval can re-derive a raw start for an alternate initval
+        # (multi-seed sampling) using the SAME transform as this build.
+        q_floors = np.zeros(n_elements)
 
         # Gaussian: val = gaussian_mus + gaussian_scales * raw
         gaussian_mus = np.copy(inits)
@@ -567,6 +582,7 @@ class Parameter:
                 # floor would be arbitrarily large for wide bounds. The 1e-12
                 # absolute floor keeps logit(q) within the ±30 sigmoid clip.
                 q_floor = min(max(1e-6 * whiten / span, 1e-12), 0.25)
+                q_floors[i] = q_floor
                 q_init = np.clip(q_raw, q_floor, 1.0 - q_floor)
                 if q_init != q_raw:
                     logger.warning(
@@ -616,6 +632,21 @@ class Parameter:
                                        / max(gaussian_scales[i], 1e-30))
             # Saved so run.py can override model.initial_point() with the correct raw start.
             self.raw_initval = raw_initvals
+            # Freeze the per-element forward transform so raw_from_initval can
+            # map an ALTERNATE physical initval (a different seed) to raw space
+            # using exactly the bounds/scale this build used. Only the start
+            # moves between seeds; the transform (and hence bounds) is fixed.
+            self._raw_transform = {
+                "sampled_idx": idx,
+                "use_logit": use_logit.copy(),
+                "lowers": lowers.copy(),
+                "uppers": uppers.copy(),
+                "logit_q_inits": logit_q_inits.copy(),
+                "init_scale_logits": init_scale_logits.copy(),
+                "q_floors": q_floors.copy(),
+                "gaussian_mus": gaussian_mus.copy(),
+                "gaussian_scales": gaussian_scales.copy(),
+            }
             par_raw = pm.Normal(f"{self.label}_raw",
                                 mu=0,
                                 sigma=1.0,
@@ -1003,6 +1034,53 @@ class Parameter:
         # Scalar fallback
         target = getattr(self.unit, 'unit', self.unit)
         return float(self.internal_unit.to(target))
+
+    def raw_from_initval(self, initval_internal):
+        """Map an alternate physical initval (internal units) to the raw N(0,1)
+        start for this parameter's sampled elements, using the frozen forward
+        transform from build_pymc.
+
+        Used by multi-seed sampling to build one raw start dict per seed while
+        keeping the bounds/scale fixed at seed 0.  Returns an array shaped like
+        self.raw_initval (one entry per sampled element).
+
+        Raises SeedBoundViolation if a logit element's value falls outside its
+        [lower, upper] bound -- a clipped start would sit in no basin, so the
+        caller must skip that seed loudly rather than silently move it.
+        """
+        tf = getattr(self, "_raw_transform", None)
+        if tf is None:
+            # No sampled elements (fully fixed/derived) -> empty raw start.
+            return np.zeros(0)
+        idx = tf["sampled_idx"]
+        n_elements = int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        v = to_vec(initval_internal, n_elements)
+        v = np.asarray(v, dtype=float).reshape(-1)
+        raw = np.zeros(len(idx))
+        for j, i in enumerate(idx):
+            if tf["use_logit"][i]:
+                lower, upper = tf["lowers"][i], tf["uppers"][i]
+                span = upper - lower
+                q = (v[i] - lower) / span
+                # Strictly outside [lower, upper] is a real violation. Exactly
+                # AT a bound (q==0 or q==1, e.g. an angle default of 0 sitting
+                # on its own lower bound) is not -- build_pymc nudges those
+                # inward via q_floor for every seed, including seed 0, so
+                # rejecting them here would inconsistently single out
+                # non-seed-0 starts for a non-problem.
+                if q < 0.0 or q > 1.0:
+                    raise SeedBoundViolation(
+                        f"{self.label}[{i}] seed initval {v[i]:.6g} is outside "
+                        f"bounds [{lower:.6g}, {upper:.6g}]")
+                qf = tf["q_floors"][i]
+                q = np.clip(q, qf, 1.0 - qf)
+                lq = np.log(q / (1.0 - q))
+                scale_logit = tf["init_scale_logits"][i]
+                raw[j] = (lq - tf["logit_q_inits"][i]) / max(scale_logit, 1e-30)
+            else:
+                raw[j] = ((v[i] - tf["gaussian_mus"][i])
+                          / max(tf["gaussian_scales"][i], 1e-30))
+        return raw
 
     # converts user units to internal units
     def to_internal(self, val=None):

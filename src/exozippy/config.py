@@ -184,6 +184,17 @@ class ConfigManager:
         # Storage for hints passed by components during Registration Sweep
         self.hints = {}
         self.hint_ranks = {}
+
+        # Multi-seed sampling (P4).  seed_resolved holds K fully-solved start
+        # points (list of {internal_path: internal_value} dicts) after
+        # finalize_user_params runs the relaxation engine once per seed; it
+        # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
+        # is a per-seed observable channel that components (e.g. the MMEXOFAST
+        # loader) push into; it feeds the relaxation engine at a rank between
+        # RANK_DERIVED_DATA and RANK_USER so an explicit user initval list wins.
+        self.seed_resolved = None
+        self.seed_hint_sets = []
+        self.seed_hint_rank = RANK_DERIVED_USER  # 80: below RANK_USER, above data
         self.scale_hints = {}   # path -> init_scale in internal units
         self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
@@ -334,11 +345,11 @@ class ConfigManager:
         self.user_params = self.standardize_param_names(self.raw_user_params, config)
         self.links = extract_links(self.user_params, config)
 
-    def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
-        """
-        API for components to register their data-driven guesses.
-        Converts human-readable paths to strict indices and scales to internal units.
-        """
+    def _translate_and_scale(self, path, value):
+        """Standardize a human-readable path to internal-index form and convert
+        its value to internal units.  Returns (translated_path, internal_value).
+        Shared by add_hint / add_scale_hint / add_seed_hints so they all agree
+        on nomenclature and unit handling."""
         translated_path = path
         parts = path.split('.')
 
@@ -363,9 +374,40 @@ class ConfigManager:
         else:
             internal_value = float(value)
 
-        # 3. Store the fully processed, ready-to-use hint
+        return translated_path, internal_value
+
+    def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
+        """
+        API for components to register their data-driven guesses.
+        Converts human-readable paths to strict indices and scales to internal units.
+        """
+        translated_path, internal_value = self._translate_and_scale(path, value)
+
+        # Store the fully processed, ready-to-use hint
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
+
+    def add_seed_hints(self, seed_dicts, rank=None):
+        """Register K per-seed observable sets for multi-seed sampling (P4).
+
+        `seed_dicts` is a list of length K; each entry maps a parameter path
+        (human-readable or index form) to a value in that parameter's user
+        unit.  These feed the relaxation engine as one complete start point per
+        seed (see finalize_user_params).  Rank sits between RANK_DERIVED_DATA
+        and RANK_USER by default so an explicit user initval list still wins;
+        the MMEXOFAST loader is the primary caller.  Paths absent from a given
+        seed fall back to the base (defaults/hints/user) solution for that seed.
+        """
+        processed = []
+        for d in seed_dicts:
+            pd = {}
+            for path, value in d.items():
+                tpath, ival = self._translate_and_scale(path, value)
+                pd[tpath] = ival
+            processed.append(pd)
+        self.seed_hint_sets = processed
+        if rank is not None:
+            self.seed_hint_rank = rank
 
     def add_scale_hint(self, path, scale):
         """
@@ -563,7 +605,13 @@ class ConfigManager:
 
                     for key in all_numeric:
                         if key in ov:
-                            apply_value(key, resolved[key], i, ov[key])
+                            v_ov = ov[key]
+                            # List-valued initvals are per-seed start points
+                            # (P4 multi-seed sampling); bounds/scales and the
+                            # canonical single start derive from seed 0.
+                            if isinstance(v_ov, (list, tuple)):
+                                v_ov = v_ov[0]
+                            apply_value(key, resolved[key], i, v_ov)
 
                     for str_key in ["unit", "latex", "description"]:
                         if str_key in ov:
@@ -717,6 +765,12 @@ class ConfigManager:
             if data is None:
                 continue
             val = data.get("initval") if isinstance(data, dict) else data
+            # A list-valued initval is a set of per-seed start points (P4
+            # multi-seed sampling).  The base flat_params below seeds the
+            # relaxation engine with seed 0; _build_seed_overrides re-injects
+            # each seed's element as a RANK_USER override in the K-solve loop.
+            if isinstance(val, (list, tuple)):
+                val = val[0]
             if val is not None:
                 parts = path.split('.')
                 translated_path = path
@@ -760,13 +814,43 @@ class ConfigManager:
                 # Push the user's value into the solver's initial state
                 data = self.user_params[path]
                 val = data.get("initval") if isinstance(data, dict) else data
+                if isinstance(val, (list, tuple)):
+                    val = val[0]  # seed 0; see per-seed handling below
                 if val is not None:
                     c_type = path.split('.')[0]
                     p_name = path.split('.')[-1]
                     factor = self.get_conversion_factor(c_type, p_name, full_path=path)
                     flat_params[self.master_symbol_map[path]] = float(val) * factor
 
-        resolved_flat = self.resolve_and_validate_parameters({str(k): v for k, v in flat_params.items()})
+        base_flat = {str(k): v for k, v in flat_params.items()}
+
+        # --- MULTI-SEED SOLVE (P4) ---
+        # Build K per-seed RANK_USER override sets (user initval lists win over
+        # MMEXOFAST-style seed hints; both fall back to the shared base_flat for
+        # any path they do not touch), then run the relaxation engine once per
+        # seed inside this single prepare() call so every seed shares one symbol
+        # environment (guards against the known cross-build nondeterminism).
+        # Bounds/scales are taken from seed 0 only -- seeds move the START, never
+        # the bounds -- so self.propagated_scales is restored to seed 0's after
+        # the loop.
+        K, seed_overrides = self._build_seed_overrides(name_to_index)
+
+        # Solve seed 0 LAST so the final self.propagated_scales and any
+        # init_scale synced back into self.user_params by _execute_solve both
+        # reflect seed 0 -- the seed whose bounds/scales the model actually
+        # uses.  Only start positions vary between seeds; bounds/scales do not.
+        seed_resolved = [None] * K
+        for k in list(range(1, K)) + [0]:
+            flat_k = dict(base_flat)
+            flat_k.update(seed_overrides[k])
+            seed_resolved[k] = self.resolve_and_validate_parameters(flat_k)
+
+        # seed 0 remains the canonical single start injected back into
+        # user_params below; the full K-set is stored for get_raw_starts.
+        resolved_flat = seed_resolved[0]
+        self.seed_resolved = seed_resolved if K > 1 else None
+        if K > 1:
+            logger.info(f"Multi-seed sampling: solved {K} seed start points.")
 
         logger.debug("Solver finished.")
 
@@ -838,6 +922,86 @@ class ConfigManager:
                 tf = self.get_conversion_factor(tparts[0], tparts[-1], full_path=target)
                 entry[fld] = val_int / tf
                 logger.debug(f"Link snapshot: {target}.{fld} = {entry[fld]:.6g} (user units)")
+
+    def _build_seed_overrides(self, name_to_index):
+        """Assemble the per-seed RANK_USER override sets for multi-seed sampling.
+
+        Two sources feed the seeds, in priority order:
+          1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
+             highest priority (an explicit user list always wins).
+          2. Component seed hints (config_manager.seed_hint_sets), e.g. the
+             MMEXOFAST loader -- lower priority.
+
+        Returns (K, overrides) where K is the seed count and overrides is a
+        length-K list of {internal_path_str: internal_value} dicts.  Every list
+        must have length K or 1 (length-1 broadcasts to all seeds).  When no
+        list initvals and no seed hints exist, K == 1 and overrides == [{}],
+        exactly reproducing the legacy single-solve behavior.
+        """
+        # 1. User initval lists -> {sym_path: [internal values]}
+        user_lists = {}
+        for path, data in self.user_params.items():
+            if not isinstance(data, dict):
+                continue
+            iv = data.get("initval")
+            if not isinstance(iv, (list, tuple)):
+                continue
+            sym_path = self._to_symbol_path(path, name_to_index)
+            if sym_path is None:
+                logger.warning(
+                    f"List initval on '{path}' is not a known parameter path; "
+                    f"multi-seed override ignored.")
+                continue
+            c_type, p_name = sym_path.split('.')[0], sym_path.split('.')[-1]
+            factor = self.get_conversion_factor(c_type, p_name, full_path=path)
+            user_lists[sym_path] = [float(x) * factor for x in iv]
+
+        mm_sets = self.seed_hint_sets or []
+
+        # 2. Determine K and validate list lengths.
+        Ku = max((len(v) for v in user_lists.values()), default=1)
+        Km = len(mm_sets)
+        K = max(Ku, Km, 1)
+
+        for p, v in user_lists.items():
+            if len(v) not in (1, Ku):
+                raise ValueError(
+                    f"Inconsistent seed count: initval list for '{p}' has "
+                    f"length {len(v)}, expected {Ku} or 1. All initval lists in "
+                    f"a params file must share one length K (or be length 1).")
+        if Ku > 1 and Km > 1 and Ku != Km:
+            raise ValueError(
+                f"Seed-count mismatch: {Ku} user initval seeds vs {Km} "
+                f"component seed hints. Provide matching counts (or length 1).")
+
+        # 3. Merge per seed (mm first, user lists override).
+        overrides = []
+        for k in range(K):
+            d = {}
+            if mm_sets:
+                src = mm_sets[k] if len(mm_sets) > 1 else mm_sets[0]
+                d.update(src)
+            for p, vals in user_lists.items():
+                d[p] = vals[k] if len(vals) > 1 else vals[0]
+            overrides.append(d)
+
+        return K, overrides
+
+    def _to_symbol_path(self, path, name_to_index):
+        """Translate a user_params key to the internal-index path string used by
+        the relaxation engine (e.g. 'lens.Lens.t_0' -> 'lens.0.t_0').  Returns
+        None if the path does not correspond to a registered symbol."""
+        translated = path
+        parts = path.split('.')
+        if len(parts) == 3:
+            comp_type, name, param = parts
+            if (comp_type, name) in name_to_index:
+                translated = f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
+        if translated in self.master_symbol_map:
+            return translated
+        if path in self.master_symbol_map:
+            return path
+        return None
 
     def prune_dependency_cycles(self, cycle_nodes):
         """

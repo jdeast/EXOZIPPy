@@ -258,9 +258,107 @@ class Lens(Component):
                 setattr(self, f"companion{j}_mass_map",
                         np.array([c_ndx], dtype=int))
 
+    def _load_mmexofast_seeds(self):
+        """Read an optional MMEXOFAST solutions file and push each fit as a
+        per-seed hint set for multi-seed sampling (P4).
+
+        MMEXOFAST emits multiple lightly-optimized solutions spanning the
+        standard microlensing degeneracies. Each fit's observable-space values
+        (t_0, u_0, t_E, s, q, alpha, rho) are seeded into the relaxation engine,
+        which back-solves the physical parameters (distances/masses/PMs) exactly
+        as a user typing them into params.yaml K times would. Enabled by a
+        `mmexofast: <file>` key on the lens config block (path relative to the
+        run cwd, same as the light-curve `file:` key).
+
+        Alpha convention: MMEXOFAST alpha maps to EXOZIPPy alpha by the IDENTITY
+        transform. Verified against examples/DC2018_128 -- the hand-tuned
+        DC2018_128.params.yaml seed (the reference compare_results.py compares
+        against) sets lens.Lens.alpha to the MMEXOFAST json alpha value verbatim
+        (-52.15111097728343 in both). The ob161003 `alpha_MM = 180 - alpha_paper`
+        note is a paper-vs-MM relation on a different event and does NOT apply.
+
+        s is seeded as log_s = log10(s) because the mulensing manifest samples
+        log_s (s = 10**log_s is derived); see components/mulensing/defaults.yaml.
+
+        Rank sits between RANK_DERIVED_DATA and RANK_USER (config.add_seed_hints
+        default) so an explicit user initval list still wins.
+        """
+        mmx_file = self.config[0].get("mmexofast") if self.config else None
+        if not mmx_file:
+            return
+
+        import json
+        try:
+            with open(mmx_file) as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read mmexofast file '{mmx_file}': {e}; "
+                           f"no seeds loaded.")
+            return
+
+        fits = data.get("fits", [])
+        if not fits:
+            logger.warning(f"mmexofast file '{mmx_file}' has no 'fits'; "
+                           f"no seeds loaded.")
+            return
+
+        want_rho = any(self.finite_source)
+        is_binary = self.n_companions >= 1
+        seed_sets = []
+        for fit in fits:
+            p = fit.get("parameters", {})
+            d = {}
+            for key, path in (("t_0", "lens.0.t_0"), ("u_0", "lens.0.u_0"),
+                              ("t_E", "lens.0.t_E")):
+                if key in p:
+                    d[path] = float(p[key])
+            if want_rho and "rho" in p:
+                d["lens.0.rho"] = float(p["rho"])
+            # s/q/alpha are companion (binary-lens) geometry only.
+            if is_binary:
+                if "s" in p and float(p["s"]) > 0:
+                    d["lens.0.log_s"] = float(np.log10(float(p["s"])))
+                if "alpha" in p:
+                    d["lens.0.alpha"] = float(p["alpha"])  # identity convention
+                if "q" in p:
+                    d["lens.0.q"] = float(p["q"])
+            seed_sets.append(d)
+
+        self.config_manager.add_seed_hints(seed_sets)
+        logger.info(f"MMEXOFAST: loaded {len(seed_sets)} seed solution(s) from "
+                    f"'{mmx_file}'.")
+
+        # Scale hints from fit 0's sigmas (bounds/scales resolve from seed 0
+        # only; other seeds move only the start). log_rho/log_s/log_q sigmas are
+        # in dex -> convert to a linear scale as sigma_x = x * ln(10) * sigma_logx
+        # (matches examples/DC2018_128/compare_results.py).
+        s0 = fits[0].get("sigmas", {})
+        p0 = fits[0].get("parameters", {})
+        ln10 = np.log(10.0)
+
+        def _sh(path, val):
+            if val is not None and np.isfinite(val) and val > 0:
+                self.config_manager.add_scale_hint(path, float(val))
+
+        _sh("lens.0.t_0", s0.get("t_0"))
+        _sh("lens.0.u_0", s0.get("u_0"))
+        _sh("lens.0.t_E", s0.get("t_E"))
+        if want_rho and "log_rho" in s0 and "rho" in p0:
+            _sh("lens.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
+        if is_binary:
+            if "log_s" in s0:
+                _sh("lens.0.log_s", float(s0["log_s"]))
+            if "alpha" in s0:
+                _sh("lens.0.alpha", float(s0["alpha"]))
+            if "log_q" in s0 and "q" in p0:
+                _sh("lens.0.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
+
     def register_parameters(self, system):
         """Stage 2: Declare the manifest."""
         self._validate_bodies(system)
+
+        # Optional multi-seed sampling from a MMEXOFAST solutions file (P4).
+        self._load_mmexofast_seeds()
 
         # Per-source vector parameters: one element per source body.  Elements
         # are displayed and addressed by the source star's instance name
