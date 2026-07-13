@@ -50,12 +50,47 @@ DEFAULT_LP_ABS_MAX = 1e12
 # runaways pinned at bounds (observed values: 1e3..1e27 vs bulk ~1e2).
 DEFAULT_Z_MAX = 50.0
 
+# With the runaway-lp cancellation bug fixed, ONLY a model or sampler bug
+# should produce invalid draws.  Above this fraction of the trace, run.py
+# refuses to emit final tables (evidence -- trace + mode report -- is written
+# first); below it, invalid draws still complain loudly but do not block.
+DEFAULT_MAX_INVALID_FRAC = 0.01
+
+_INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
+
 
 def _idx_to_words(n):
     words = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three',
              '4': 'four', '5': 'five', '6': 'six', '7': 'seven',
              '8': 'eight', '9': 'nine'}
     return "".join(words[char] for char in str(n))
+
+
+def check_invalid_frac(mode_report, max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
+                       force=False, trace_path=None, modes_path=None):
+    """Raise if ``mode_report``'s invalid-draw fraction exceeds the threshold.
+
+    A trace this numerically broken must not silently emit final tables.
+    Call this only after the trace and mode report have already been
+    written to disk, so the raise preserves that evidence for forensics.
+    ``force=True`` (config ``modes: {force: true}``) or a higher
+    ``max_invalid_frac`` re-enables processing of a known-bad trace.
+    """
+    if force or mode_report is None or not mode_report.n_invalid:
+        return
+    if mode_report.invalid_frac <= max_invalid_frac:
+        return
+    where = ""
+    if trace_path or modes_path:
+        where = f" The trace ({trace_path}) and mode report ({modes_path}) have already been written."
+    raise RuntimeError(
+        f"identify_modes: {mode_report.n_invalid} draws "
+        f"({mode_report.invalid_frac:.2%}) rejected as numerically invalid, "
+        f"exceeding max_invalid_frac={max_invalid_frac:.2%}. This indicates "
+        "a model or sampler bug -- investigate before trusting any output."
+        + where +
+        " Override with config `modes: {force: true}` (or raise "
+        "`modes.max_invalid_frac`) to re-process forensically.")
 
 
 def mode_suffix(k):
@@ -87,6 +122,8 @@ class ModeReport:
     n_transitions: int            # inter-mode label changes along chains
     feature_vars: List[str]
     notes: List[str] = field(default_factory=list)
+    invalid_reason_counts: dict = field(default_factory=dict)
+    invalid_per_chain: Optional[np.ndarray] = None
 
     @property
     def n_modes(self):
@@ -95,6 +132,11 @@ class ModeReport:
     @property
     def weights(self):
         return [m.weight for m in self.modes]
+
+    @property
+    def invalid_frac(self):
+        n_total = self.labels.size
+        return self.n_invalid / n_total if n_total else 0.0
 
     def attach(self, idata):
         """Store labels as posterior variable ``mode`` on the InferenceData."""
@@ -118,6 +160,14 @@ class ModeReport:
         lines.append(f"draws: {n_total} total, {self.n_valid} valid, "
                      f"{self.n_invalid} invalid (rejected), "
                      f"{self.n_unassigned} in minor/unassigned clusters")
+        if self.n_invalid:
+            lines.append("")
+            lines.append(
+                f"*** WARNING: {self.n_invalid} draws ({self.invalid_frac:.2%}) "
+                "rejected as numerically invalid -- this indicates a model "
+                "or sampler bug; investigate before trusting this report. "
+                f"reasons={self.invalid_reason_counts} ***")
+            lines.append("")
         lines.append(f"modes found: {self.n_modes}")
         lines.append(f"weight provenance: {self.provenance}")
         lines.append(f"inter-mode transitions (all chains): {self.n_transitions}")
@@ -369,19 +419,42 @@ def identify_modes(idata,
         lp_ok = np.ones(n_samples, dtype=bool)
 
     valid = finite & lp_ok
+
+    # Reason a draw was rejected, in priority order (a draw failing an
+    # earlier check is attributed to that check even if it would also fail
+    # a later one).
+    reasons = np.full(n_samples, "", dtype=object)
+    reasons[~finite] = "nonfinite-raw"
+    if has_lp:
+        reasons[(reasons == "") & ~np.isfinite(lp)] = "nonfinite-lp"
+        reasons[(reasons == "") & (np.abs(lp) > lp_abs_max)] = "lp-ceiling"
+
     if valid.any():
         med, mad = _robust_center_scale(X[valid])
         scale = np.where(mad > 0, mad, 1.0)
         z = np.abs((X - med) / scale)
         z_ok = np.nan_to_num(z, nan=np.inf).max(axis=1) <= z_max
         valid &= z_ok
+        reasons[(reasons == "") & ~z_ok] = "raw-z"
 
     n_invalid = int((~valid).sum())
+    invalid_reason_counts = {
+        r: int((reasons[~valid] == r).sum()) for r in _INVALID_REASONS
+        if (reasons[~valid] == r).any()}
+    invalid_per_chain = (~valid).reshape(n_chain, n_draw).sum(axis=1)
     if n_invalid:
-        notes.append(f"{n_invalid} draws rejected as invalid "
+        frac = n_invalid / n_samples
+        notes.append(f"{n_invalid} draws ({frac:.2%}) rejected as invalid "
                      f"(non-finite, |lp| > {lp_abs_max:g}, or raw-space "
                      f"robust z > {z_max:g}); these are runaway/stuck "
-                     f"draws, not posterior modes")
+                     f"draws, not posterior modes. ONLY a model or sampler "
+                     f"bug should produce these -- investigate.")
+        logger.warning(
+            "identify_modes: %d/%d draws (%.2f%%) rejected as numerically "
+            "invalid -- this should only happen due to a model or sampler "
+            "bug. reasons=%s, per-chain invalid counts=%s",
+            n_invalid, n_samples, 100 * frac, invalid_reason_counts,
+            invalid_per_chain.tolist())
     if not valid.any():
         raise ValueError("identify_modes: no valid draws in trace")
 
@@ -499,6 +572,8 @@ def identify_modes(idata,
         n_transitions=n_transitions,
         feature_vars=list(feature_vars),
         notes=notes,
+        invalid_reason_counts=invalid_reason_counts,
+        invalid_per_chain=invalid_per_chain,
     )
     if attach:
         report.attach(idata)

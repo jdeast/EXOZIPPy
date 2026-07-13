@@ -156,11 +156,15 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
 
         comp_label = getattr(comp, "label", comp.__class__.__name__)
 
-        # All \newcommand defs span every index — emit them once per parameter
+        # All \newcommand defs span every index — emit them once per parameter.
+        # When multimodal, the unsuffixed def is the pooled-across-modes
+        # value; suppress it for sampled parameters (fixed parameters have no
+        # per-mode variation, so their single def still applies to every mode).
         for p in printable:
             if multimodal:
                 _ensure_mode_summaries(system, p, mode_report)
-            all_defs.append(p.to_latex_def())
+            if not multimodal or p.posterior is None:
+                all_defs.append(p.to_latex_def())
             all_defs.append(p.to_latex_prior_def())
             if multimodal:
                 all_defs.append(p.to_latex_mode_defs())
@@ -205,9 +209,21 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
                       + weight_cells + r" &  \\" + "\n")
         all_table_lines.insert(0, weight_row)
 
-        provenance_note = ("Mode weights: " + mode_report.provenance + ".")
+        provenance_note = (
+            "Mode weights: " + mode_report.provenance + ". Combined "
+            "(pooled-across-modes) parameter values are suppressed above "
+            "because pooled values inherit the mode-weight provenance; see "
+            "the per-mode columns.")
         tablecomments = (provenance_note if not tablecomments
                          else tablecomments + " " + provenance_note)
+
+    if mode_report is not None and mode_report.n_invalid:
+        invalid_note = (
+            f"{mode_report.n_invalid} draws ({mode_report.invalid_frac:.2%}) "
+            "rejected as numerically invalid -- this indicates a model or "
+            "sampler bug; investigate before trusting this table.")
+        tablecomments = (invalid_note if not tablecomments
+                         else tablecomments + " " + invalid_note)
 
     with open(var_filename, 'w') as f:
         f.write(f"% ExoZIPPy Generated Variables - {system.name}\n")

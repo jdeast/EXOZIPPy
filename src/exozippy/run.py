@@ -45,7 +45,7 @@ class DEMetropolis(pm.DEMetropolis):
 from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.latex import build_latex_output, build_csv_output
-from .outputs.modes import identify_modes
+from .outputs.modes import identify_modes, check_invalid_frac, DEFAULT_MAX_INVALID_FRAC
 from .diagnostics import ModelAuditor
 from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
@@ -336,6 +336,7 @@ def run_fit(config):
     # detection must never take down a finished fit's outputs, hence the
     # broad catch.
     mode_report = None
+    modes_path = None
     try:
         mode_report = identify_modes(idata)
         modes_path = Path(str(prefix) + "_modes.txt")
@@ -349,6 +350,17 @@ def run_fit(config):
     except Exception:
         logger.warning("Mode identification failed; reporting the combined "
                        "posterior only", exc_info=True)
+
+    # The trace and mode report are already written at this point, so
+    # evidence survives this raise; override via config
+    # `modes: {max_invalid_frac: ..., force: true}` for forensic
+    # re-processing of old/known-bad traces.
+    modes_cfg = config.get("modes", {})
+    check_invalid_frac(
+        mode_report,
+        max_invalid_frac=modes_cfg.get("max_invalid_frac", DEFAULT_MAX_INVALID_FRAC),
+        force=modes_cfg.get("force", False),
+        trace_path=trace_path, modes_path=modes_path)
 
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)

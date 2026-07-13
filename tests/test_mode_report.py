@@ -16,8 +16,12 @@ import numpy as np
 import arviz as az
 import pytest
 
-from exozippy.outputs.modes import identify_modes, mode_suffix
+from exozippy.outputs.modes import (identify_modes, mode_suffix,
+                                    check_invalid_frac,
+                                    DEFAULT_MAX_INVALID_FRAC, ModeReport,
+                                    ModeInfo)
 from exozippy.components.parameter import Parameter
+from exozippy.outputs.latex import build_latex_output
 
 
 N_CHAIN, N_DRAW = 8, 1500
@@ -274,3 +278,232 @@ def test_table_line_one_value_cell_per_mode():
     assert f"\\{p.latex_varname}modetwo" in row_multi
     assert row_single.count("&") == 3  # param & desc & val & prior
     assert f"\\{p.latex_varname}modeone" not in row_single
+
+
+# ----------------------------------------------------------------------
+# PROMPT 1: loud invalid-draw reporting
+# ----------------------------------------------------------------------
+
+def test_invalid_draws_warn_loudly(caplog):
+    """
+    Given a trace with invalid draws spanning every rejection reason
+      (non-finite raw values, non-finite lp, lp over the ceiling),
+    When identify_modes runs,
+    Then it logs a warning naming the count and reason breakdown, and
+      ModeReport.to_text() carries a prominent WARNING banner.
+    """
+    rng = np.random.default_rng(21)
+    a = rng.normal(0, 1, N)
+    lp = rng.normal(1000, 3, N)
+    a[0:5] = np.nan                 # nonfinite-raw
+    lp[5:10] = np.nan               # nonfinite-lp
+    lp[10:15] = 1e20                # lp-ceiling
+    idata = _make_idata({"a_raw": a}, lp)
+
+    with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
+        rep = identify_modes(idata)
+
+    assert rep.n_invalid == 15
+    assert rep.invalid_reason_counts == {
+        "nonfinite-raw": 5, "nonfinite-lp": 5, "lp-ceiling": 5}
+    assert any("rejected as numerically invalid" in r.message
+              for r in caplog.records)
+
+    text = rep.to_text()
+    assert "WARNING" in text
+    assert "model or sampler bug" in text
+
+
+def test_no_warning_when_no_invalid_draws(caplog):
+    """
+    Given a clean trace with no invalid draws,
+    When identify_modes runs,
+    Then no invalid-draw warning is logged and to_text() has no banner.
+    """
+    rng = np.random.default_rng(23)
+    a = rng.normal(0, 1, N)
+    idata = _make_idata({"a_raw": a}, rng.normal(1000, 3, N))
+
+    with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
+        rep = identify_modes(idata)
+
+    assert rep.n_invalid == 0
+    assert not any("rejected as numerically invalid" in r.message
+                  for r in caplog.records)
+    assert "WARNING" not in rep.to_text()
+
+
+def _fake_report(n_invalid, n_total=1000):
+    labels = np.zeros(n_total, dtype=int)
+    return ModeReport(labels=labels, modes=[], n_valid=n_total - n_invalid,
+                      n_invalid=n_invalid, n_unassigned=0,
+                      provenance="unimodal", weights_reliable=True,
+                      n_transitions=0, feature_vars=[])
+
+
+def test_check_invalid_frac_raises_above_threshold():
+    """
+    Given a mode report whose invalid fraction exceeds max_invalid_frac,
+    When check_invalid_frac runs,
+    Then it raises, naming the threshold and the already-written paths.
+    """
+    rep = _fake_report(n_invalid=20, n_total=1000)  # 2%
+
+    with pytest.raises(RuntimeError, match="exceeding max_invalid_frac"):
+        check_invalid_frac(rep, max_invalid_frac=0.01,
+                           trace_path="foo_trace.nc", modes_path="foo_modes.txt")
+
+
+def test_check_invalid_frac_below_threshold_is_noop():
+    """
+    Given a mode report whose invalid fraction is below max_invalid_frac,
+    When check_invalid_frac runs,
+    Then it does not raise.
+    """
+    rep = _fake_report(n_invalid=1, n_total=1000)  # 0.1%
+    check_invalid_frac(rep, max_invalid_frac=DEFAULT_MAX_INVALID_FRAC)
+
+
+def test_check_invalid_frac_force_overrides():
+    """
+    Given a mode report whose invalid fraction exceeds the threshold,
+    When check_invalid_frac runs with force=True,
+    Then it does not raise, enabling forensic re-processing.
+    """
+    rep = _fake_report(n_invalid=20, n_total=1000)
+    check_invalid_frac(rep, max_invalid_frac=0.01, force=True)
+
+
+def test_check_invalid_frac_noop_when_no_invalid_draws():
+    """
+    Given a mode report with zero invalid draws,
+    When check_invalid_frac runs,
+    Then it never raises regardless of threshold.
+    """
+    rep = _fake_report(n_invalid=0, n_total=1000)
+    check_invalid_frac(rep, max_invalid_frac=0.0)
+
+
+# ----------------------------------------------------------------------
+# PROMPT 1: combined-def suppression in the multimodal LaTeX table
+# ----------------------------------------------------------------------
+
+class _FakeComp:
+    label = "star"
+
+
+def _fake_system(comp):
+    class _Sys:
+        name = "test"
+        def get_all_components(self):
+            return [comp]
+    return _Sys()
+
+
+def _two_mode_report(n_invalid=0):
+    modes = [
+        ModeInfo(index=0, weight=0.5, n_draws=50, lp_med=0.0, lp_max=0.0,
+                delta_lp_max=0.0, per_chain_weight=np.array([0.5])),
+        ModeInfo(index=1, weight=0.5, n_draws=50, lp_med=0.0, lp_max=0.0,
+                delta_lp_max=0.0, per_chain_weight=np.array([0.5])),
+    ]
+    return ModeReport(labels=np.zeros((1, 100), dtype=int), modes=modes,
+                      n_valid=100 - n_invalid, n_invalid=n_invalid,
+                      n_unassigned=0,
+                      provenance="occupancy (validated: ...)",
+                      weights_reliable=True, n_transitions=20,
+                      feature_vars=["a_raw"])
+
+
+def test_multimode_latex_suppresses_combined_defs(tmp_path):
+    """
+    Given a sampled parameter and a two-mode report,
+    When build_latex_output runs,
+    Then the unsuffixed (pooled-across-modes) macro def is absent, the
+      per-mode defs are present, and tablecomments explains the suppression.
+    """
+    post = np.array([1.0] * 50 + [3.0] * 50)
+    labels = np.array([0] * 50 + [1] * 50)
+    p = _sampled_param(post)
+    comp = _FakeComp()
+    comp.teff = p
+    sys_obj = _fake_system(comp)
+    sys_obj.mode_labels = labels
+
+    mode_report = _two_mode_report()
+
+    var_path = tmp_path / "vars.tex"
+    tmpl_path = tmp_path / "tmpl.tex"
+    build_latex_output(sys_obj, var_filename=str(var_path),
+                       template_filename=str(tmpl_path),
+                       mode_report=mode_report)
+
+    var_text = var_path.read_text()
+    assert f"\\providecommand{{\\{p.latex_varname}}}" not in var_text
+    assert f"\\{p.latex_varname}modeone" in var_text
+    assert f"\\{p.latex_varname}modetwo" in var_text
+    assert "suppressed" in tmpl_path.read_text()
+
+
+def test_single_mode_latex_output_unchanged(tmp_path):
+    """
+    Given a sampled parameter,
+    When build_latex_output runs with mode_report=None vs a unimodal
+      mode_report (n_modes == 1, no invalid draws),
+    Then the emitted variable definitions are byte-identical.
+    """
+    post = np.array([1.0] * 100)
+
+    def _sys_with_param():
+        comp = _FakeComp()
+        comp.teff = _sampled_param(post)
+        return _fake_system(comp)
+
+    var1, tmpl1 = tmp_path / "v1.tex", tmp_path / "t1.tex"
+    build_latex_output(_sys_with_param(), var_filename=str(var1),
+                       template_filename=str(tmpl1))
+
+    unimodal_report = ModeReport(
+        labels=np.zeros((1, 100), dtype=int),
+        modes=[ModeInfo(index=0, weight=1.0, n_draws=100, lp_med=0.0,
+                        lp_max=0.0, delta_lp_max=0.0,
+                        per_chain_weight=np.array([1.0]))],
+        n_valid=100, n_invalid=0, n_unassigned=0, provenance="unimodal",
+        weights_reliable=True, n_transitions=0, feature_vars=["a_raw"])
+
+    var2, tmpl2 = tmp_path / "v2.tex", tmp_path / "t2.tex"
+    build_latex_output(_sys_with_param(), var_filename=str(var2),
+                       template_filename=str(tmpl2),
+                       mode_report=unimodal_report)
+
+    assert var1.read_text() == var2.read_text()
+
+
+def test_latex_tablecomments_notes_invalid_draws(tmp_path):
+    """
+    Given a mode report with invalid draws,
+    When build_latex_output runs,
+    Then the table template's tablecomments names the invalid count and
+      warns to investigate before trusting the table.
+    """
+    post = np.array([1.0] * 100)
+    comp = _FakeComp()
+    comp.teff = _sampled_param(post)
+    sys_obj = _fake_system(comp)
+
+    mode_report = ModeReport(
+        labels=np.zeros((1, 100), dtype=int),
+        modes=[ModeInfo(index=0, weight=1.0, n_draws=95, lp_med=0.0,
+                        lp_max=0.0, delta_lp_max=0.0,
+                        per_chain_weight=np.array([1.0]))],
+        n_valid=95, n_invalid=5, n_unassigned=0, provenance="unimodal",
+        weights_reliable=True, n_transitions=0, feature_vars=["a_raw"])
+
+    tmpl_path = tmp_path / "t.tex"
+    build_latex_output(sys_obj, var_filename=str(tmp_path / "v.tex"),
+                       template_filename=str(tmpl_path),
+                       mode_report=mode_report)
+
+    text = tmpl_path.read_text()
+    assert "5 draws" in text
+    assert "model or sampler bug" in text
