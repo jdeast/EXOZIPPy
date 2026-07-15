@@ -864,7 +864,6 @@ class Lens(Component):
 
     def resolve_auto_vbbl(self, times_np, index=0):
         """Replace 'auto_vbbl' with a concrete method list for multi-body lenses.
-
         Historically this computed hexadecapole-vs-VBM brackets on a time
         grid, but MulensModel implements binary-lens hexadecapole as 13
         python-level VBM.BinaryMag0 calls per epoch while VBM's BinaryMag2
@@ -888,11 +887,11 @@ class Lens(Component):
 
         t_lo = float(np.min(times_np))
         t_hi = float(np.max(times_np))
-        method = "VBM" if self.finite_source[0] else "VBBL"
+        method = "VBM" # if self.finite_source[0] else "VBBL"
         self.mag_method[index] = [t_lo - 1.0, method, t_hi + 1.0]
-        logger.info(f"auto_vbbl: using {method} everywhere for source {index} "
-                    "(hexadecapole bracketing removed — VBM's internal C++ "
-                    "point-source test is faster; see hpc_optimization.txt P1)")
+        #logger.info(f"auto_vbbl: using {method} everywhere for source {index} "
+        #            "(hexadecapole bracketing removed — VBM's internal C++ "
+        #            "point-source test is faster; see hpc_optimization.txt P1)")
 
     def compile_plotters(self, model, system):
         pass
