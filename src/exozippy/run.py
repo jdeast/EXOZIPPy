@@ -51,6 +51,7 @@ from .corner_utils import collect_corner_samples, save_corner_plot
 from exozippy.system import System
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
+from exozippy.samplers import convergence
 
 
 import pytensor
@@ -343,6 +344,18 @@ def run_fit(config):
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
 
+    # Post-hoc burn-in + stuck-chain trimming (samplers/convergence.py). We
+    # keep the FULL, untrimmed trace on disk (idata.to_netcdf above / the
+    # loaded .nc) so any reanalysis can recompute this, but every downstream
+    # report -- mode ID, medians/CIs, corner, trace plots -- runs on the
+    # trimmed view so the initial transient never biases the science. This is
+    # the fix for the DC2018_128 pathology (notes/todo.txt): the reported
+    # summary previously discarded zero burn-in even though a likelihood-flat
+    # degenerate direction drifted for ~half the run.
+    idata, burn_diag = convergence.analyze_idata(
+        idata, min_ess=min_ess, max_rhat=max_rhat)
+    convergence.log_convergence(burn_diag, logger)
+
     # Identify posterior modes, distribute the posterior onto the Parameter
     # objects, and write the mode report + LaTeX/CSV tables. Shared with the
     # exozippy-modes CLI (outputs/report_pipeline.py) so reprocessing a saved
@@ -359,7 +372,7 @@ def run_fit(config):
         evidence_weights=str(modes_cfg.get("weights", "")).lower() == "evidence")
 
     summary_path = Path(str(prefix) + "_summary.txt")
-    summary_path.write_text(str(az.summary(idata)), encoding="utf-8")
+    summary_path.write_text(_format_summary(idata, burn_diag), encoding="utf-8")
 
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
     make_corner(model, idata, str(prefix) + "_corner.png")
@@ -638,6 +651,41 @@ def inspect_start(model, system, transformed_inits, phys_inits, phys_scales, cal
             f"The following parameters in the parameter.yaml file did not match any model parameter "
             f"and were not applied: {unused_yaml}\n"
             "This can be safely ignored if intentional, but check for typos.")
+
+def _format_summary(idata, diag):
+    """Build the *_summary.txt body: physical params only, worst Rhat first.
+
+    Drops the ``*_raw`` unconstrained duplicates (rank-identical to their
+    physical partners -- the confusing rows whose raw means blow up to ~1000
+    on a degenerate direction) and sorts by r_hat descending so any
+    convergence trouble sits at the top. A burn-in note and a loud NOT-
+    CONVERGED banner (when applicable) are prepended so the file is honest
+    about what was trimmed and whether thresholds were met.
+    """
+    post = idata.posterior
+    var_names = [v for v in post.data_vars
+                 if not v.endswith("_raw") and v != "mode"]
+    df = az.summary(idata, var_names=var_names)
+    if "r_hat" in df.columns:
+        df = df.sort_values("r_hat", ascending=False)
+
+    header = [
+        f"# burn-in discarded: {diag['burnin']} draws "
+        f"({100 * diag.get('burnin_frac', 0.0):.0f}% of {diag.get('n_draws', 0)}); "
+        f"chains kept: {diag.get('n_chains_used')}",
+    ]
+    if not diag.get("good_reliable", True):
+        header.append("# NOTE: <3 chains reached the good-likelihood region; "
+                      "all chains kept (possible stuck-chain contamination)")
+    if not diag.get("converged", False):
+        header.append(
+            f"# WARNING: convergence NOT reached -- max Rhat={diag['max_rhat']:.3f} "
+            f"({diag.get('worst_rhat_var')}), min ESS={diag['min_ess']:.0f} "
+            f"({diag.get('worst_ess_var')}); thresholds "
+            f"Rhat<={diag.get('max_rhat_threshold')}, "
+            f"ESS>={diag.get('min_ess_threshold')}")
+    return "\n".join(header) + "\n" + str(df) + "\n"
+
 
 def make_corner(model, idata, filename, max_samples=1000):
     all_vars = list(idata["posterior"].data_vars)

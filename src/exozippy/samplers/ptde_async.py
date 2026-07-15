@@ -400,7 +400,7 @@ def ptde_async_sample(
                 and int(per_chain_draws.min()) >= _next_check[0]):
             n_check = int(per_chain_draws.min())
             converged, rhat_val, ess_val = _check_convergence(
-                stored_raw, n_check, min_ess, max_rhat)
+                stored_raw, n_check, min_ess, max_rhat, stored_lp)
             logger.info(
                 f"PTDE-async convergence @ min {n_check} draws/chain: "
                 f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")

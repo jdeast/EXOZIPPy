@@ -8,6 +8,8 @@ import arviz as az
 import numpy as np
 import yaml
 
+from exozippy.samplers import convergence
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,9 +70,59 @@ def _next_versioned_path(param_path):
     return p.parent / f"{base}.{n + 1}{suffix}"
 
 
-def mkprior(config, base_dir=None, trace_path=None, output_path=None):
+def _sample_seed_draws(idata, n, exclude, rng_seed=0):
+    """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
+
+    Draws are taken from the GOOD chains and the POST-BURN-IN region only
+    (samplers.convergence.find_burnin drops the initial transient and any
+    stuck chain), so every seed is a real point in the equilibrated posterior
+    and the set spans the true covariance. Whole draws are returned (a chain
+    and draw index), never per-parameter marginals, so a downstream consumer
+    that reads all parameters at (chain, draw) gets one self-consistent point.
+
+    Returns (pairs, good_mask, burnin) where ``good_mask`` and ``burnin`` also
+    describe the pool used, so the caller can compute init_scale over exactly
+    the same post-burn-in good draws.
     """
-    Write a params.yaml seeded at the MAP of a previous trace.
+    post = idata["posterior"]
+    var_names = convergence.default_var_names(post)
+    arrays = {v: post[v].values for v in var_names}
+    lp = None
+    ss = idata.get("sample_stats") if hasattr(idata, "get") else None
+    if ss is not None and "lp" in ss.data_vars:
+        lp = ss["lp"].values
+
+    diag = convergence.find_burnin(arrays, lp=lp, var_names=var_names)
+    burnin, good_mask = diag["burnin"], diag["good_mask"]
+    good_chains = np.nonzero(good_mask)[0]
+    n_draws = int(post.sizes["draw"])
+
+    rng = np.random.default_rng(rng_seed)
+    draw_lo = min(burnin, max(0, n_draws - 1))
+    pairs, seen = [], {tuple(exclude)}
+    attempts = 0
+    while len(pairs) < n and attempts < 50 * max(n, 1):
+        attempts += 1
+        c = int(rng.choice(good_chains))
+        d = int(rng.integers(draw_lo, n_draws))
+        if (c, d) not in seen:
+            seen.add((c, d))
+            pairs.append((c, d))
+    return pairs, good_mask, burnin
+
+
+def mkprior(config, base_dir=None, trace_path=None, output_path=None,
+            n_seeds=None):
+    """
+    Write a params.yaml seeded from a previous trace.
+
+    With ``n_seeds == 1`` (default) every sampled parameter gets a scalar
+    ``initval`` at the trace MAP. With ``n_seeds > 1`` the ``initval`` becomes
+    a length-K list of mutually-consistent JOINT posterior draws (seed 0 = the
+    MAP; seeds 1..K-1 = random post-burn-in draws from the good chains), which
+    the next run consumes as P4 multi-seed starts so its walkers begin already
+    spread across the posterior covariance (notes/todo.txt #3). ``init_scale``
+    and bounds stay scalar (from seed 0), matching config._build_seed_overrides.
 
     Parameters
     ----------
@@ -83,6 +135,9 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
         Trace file; defaults to ``<prefix>_trace.nc``.
     output_path : str or Path, optional
         Output file; defaults to ``<prefix>_mkprior.params.yaml``.
+    n_seeds : int, optional
+        Number of multi-seed start points to emit. When None, read from
+        ``config['mkprior']['n_seeds']`` (default 1 = legacy scalar behavior).
 
     Returns
     -------
@@ -94,6 +149,10 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
         config = _load_yaml(str(config))
     else:
         base_dir = Path(base_dir or ".")
+
+    if n_seeds is None:
+        n_seeds = (config.get("mkprior") or {}).get("n_seeds", 1)
+    n_seeds = max(1, int(n_seeds))
 
     prefix = config.get("prefix", "fitresults/model")
     run_name = Path(prefix).stem  # e.g. "KELT-4A" from "fitresults/KELT-4A"
@@ -144,23 +203,51 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
     raw_var_names = {v[:-4] for v in posterior.data_vars if v.endswith("_raw")}
     sampled_vars = sorted(v for v in posterior.data_vars if v in raw_var_names)
 
+    # Multi-seed (P4): seed 0 is the MAP; seeds 1..K-1 are random post-burn-in
+    # draws from the good chains. All seeds are JOINT draws (a (chain, draw)
+    # pair each), so reading every parameter at those indices yields K
+    # mutually-consistent start points that span the posterior covariance.
+    seed_pairs = [(map_chain, map_draw)]
+    pool_mask, pool_burnin = None, 0
+    if n_seeds > 1:
+        extra, pool_mask, pool_burnin = _sample_seed_draws(
+            idata, n_seeds - 1, exclude=(map_chain, map_draw))
+        seed_pairs += extra
+        if len(seed_pairs) < n_seeds:
+            logger.warning(
+                "mkprior: requested %d seeds but only %d distinct draws were "
+                "available; emitting %d.", n_seeds, len(seed_pairs),
+                len(seed_pairs))
+    K = len(seed_pairs)
+    logger.info("mkprior: emitting %d seed(s) per parameter", K)
+
     output = {}
     consumed_existing = set()
 
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         da = posterior[var_name]
-        all_samples = da.values.reshape(-1, *da.shape[2:])
-        map_vals = np.atleast_1d(da.values[map_chain, map_draw])
-        std_vals = np.atleast_1d(np.std(all_samples, axis=0))
+        # init_scale is a scalar step hint from the equilibrated posterior: use
+        # the post-burn-in good draws when multi-seed (the transient inflates
+        # std), else all draws (legacy single-seed behavior, unchanged).
+        if pool_mask is not None:
+            pool = da.values[pool_mask][:, pool_burnin:].reshape(-1, *da.shape[2:])
+        else:
+            pool = da.values.reshape(-1, *da.shape[2:])
+        std_vals = np.atleast_1d(np.std(pool, axis=0))
+        # (K, n_elements) joint values across the seed draws.
+        seed_vals = np.stack(
+            [np.atleast_1d(da.values[c, d]) for (c, d) in seed_pairs])
 
         instance_names = _get_instance_names(config, comp_key)
 
-        for i, (mv, sv) in enumerate(zip(map_vals, std_vals)):
+        for i, sv in enumerate(std_vals):
+            mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
+            mv = mv_list[0]
             if instance_names:
                 name = instance_names[i] if i < len(instance_names) else str(i)
                 out_key = f"{comp_key}.{name}.{param}"
-            elif len(map_vals) == 1:
+            elif len(std_vals) == 1:
                 # Component uses a flat-dict config (no named instances).
                 # Write the 2-part key to match the trace variable name so the
                 # next run can find the entry without hitting a name-lookup crash.
@@ -177,11 +264,12 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
             if existing_key:
                 consumed_existing.add(existing_key)
 
-            # Always set initval to the MAP value so the next run starts there.
+            # Set initval to the seed value(s) so the next run starts there: a
+            # scalar for single-seed, a length-K list for multi-seed (P4).
             # Preserve mu/sigma/bounds from the existing entry unchanged — mu is
             # the prior center, not the starting point, so it must not move.
             entry = {
-                "initval": float(np.round(mv, 8)),
+                "initval": mv if K == 1 else mv_list,
                 "init_scale": float(np.round(sv, 8)),
             }
             if isinstance(existing_entry, dict):
@@ -214,16 +302,22 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             xs, ys = output[x_key].get("init_scale", 0.0), output[y_key].get("init_scale", 0.0)
-            angle_deg = float(np.degrees(np.arctan2(yv, xv)))
-            r_sq = xv**2 + yv**2
-            sigma_deg = float(np.degrees(
-                np.sqrt((yv / r_sq)**2 * xs**2 + (xv / r_sq)**2 * ys**2)
-            )) if r_sq > 0 else 0.0
+            # initval may be a scalar (single-seed) or a length-K list
+            # (multi-seed): convert every seed's (x, y) to its own angle.
+            xv_list = xv if isinstance(xv, list) else [xv]
+            yv_list = yv if isinstance(yv, list) else [yv]
+            angles = [float(np.round(np.degrees(np.arctan2(y, x)), 8))
+                      for x, y in zip(xv_list, yv_list)]
+            # init_scale is scalar (seed 0), so propagate from the seed-0 (x, y).
+            x0, y0, r_sq = xv_list[0], yv_list[0], xv_list[0]**2 + yv_list[0]**2
+            sigma_deg = float(np.round(np.degrees(
+                np.sqrt((y0 / r_sq)**2 * xs**2 + (x0 / r_sq)**2 * ys**2)
+            ), 8)) if r_sq > 0 else 0.0
             del output[x_key]
             del output[y_key]
             output[f"{prefix}.{angle_name}"] = {
-                "initval": float(np.round(angle_deg, 8)),
-                "init_scale": float(np.round(sigma_deg, 8)),
+                "initval": angles[0] if len(angles) == 1 else angles,
+                "init_scale": sigma_deg,
             }
 
     _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
@@ -256,6 +350,11 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None):
             f"# Generated by mkprior from {Path(str(trace_path)).name}"
             f"  (MAP lp={map_lp:.4f})\n"
         )
+        if K > 1:
+            f.write(
+                f"# Multi-seed: initval is a length-{K} list of joint posterior\n"
+                f"# draws (seed 0 = MAP; 1..{K - 1} = random post-burn-in draws\n"
+                f"# from the good chains). init_scale/bounds are scalar (seed 0).\n")
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 
     logger.info(f"mkprior: written {output_path}")

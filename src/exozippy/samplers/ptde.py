@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 # broken, not a real posterior mode (no realistic dataset's logp reaches
 # 1e12). Imported (not duplicated) so the two ceilings can't drift apart.
 from exozippy.outputs.modes import DEFAULT_LP_ABS_MAX as _DEFAULT_LP_ABS_MAX
+from exozippy.samplers import convergence
 
 # Module-level logp function: set in parent process before Pool.  Fork
 # children inherit the compiled PyTensor function via copy-on-write without
@@ -458,35 +459,28 @@ def _convergence_check_schedule(min_draws=100, growth=0.9):
         j += 1
 
 
-def _check_convergence(stored_raw, n_draws, min_ess, max_rhat):
-    """Compute R-hat and ESS on stored_raw[:, :n_draws].
+def _check_convergence(stored_raw, n_draws, min_ess, max_rhat, stored_lp=None):
+    """Live early-stop test on the first ``n_draws`` stored T=1 draws.
 
-    Returns (converged, max_rhat_val, min_ess_val).
-    None thresholds are treated as "no limit" for that statistic.
+    Judges convergence on the trace AFTER dropping stuck chains and trimming
+    a generous fixed burn-in (the last-half tail), so the transient can no
+    longer poison the Rhat/ESS the stop decision reads -- the reason a run
+    with a slow, likelihood-flat degenerate direction otherwise never
+    auto-stops. Rank Rhat/bulk-ESS are transform-invariant, so computing on
+    the raw draws matches the physical report. The precise (ESS-maximizing)
+    burn-in is found once at wrap-up by convergence.find_burnin; here we only
+    need the cheap pass/fail. See samplers/convergence.py.
+
+    Returns (converged, max_rhat_val, min_ess_val). None thresholds are
+    treated as "no limit" for that statistic.
     """
-    data = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
+    posterior = {key: arr[:, :n_draws] for key, arr in stored_raw.items()}
+    lp = stored_lp[:, :n_draws] if stored_lp is not None else None
     try:
-        idata_partial = az.from_dict({"posterior": data})
-        rhat_ds = az.rhat(idata_partial)
-        ess_ds = az.ess(idata_partial)
+        return convergence.converged_on_tail(
+            posterior, lp, min_ess, max_rhat)
     except Exception:
         return False, float("nan"), float("nan")
-
-    rhat_vals = [float(v.values.max()) for v in rhat_ds.data_vars.values()
-                 if v.values.size and not np.all(np.isnan(v.values))]
-    ess_vals = [float(v.values.min()) for v in ess_ds.data_vars.values()
-                if v.values.size and not np.all(np.isnan(v.values))]
-
-    if not rhat_vals or not ess_vals:
-        return False, float("nan"), float("nan")
-
-    max_rhat_val = max(rhat_vals)
-    min_ess_val = min(ess_vals)
-    converged = (
-        (max_rhat is None or max_rhat_val <= max_rhat)
-        and (min_ess is None or min_ess_val >= min_ess)
-    )
-    return converged, max_rhat_val, min_ess_val
 
 
 def ptde_sample(
@@ -1086,7 +1080,7 @@ def ptde_sample(
                     and _next_check[0] is not None
                     and actual_draws >= _next_check[0]):
                 converged, rhat_val, ess_val = _check_convergence(
-                    stored_raw, actual_draws, min_ess, max_rhat)
+                    stored_raw, actual_draws, min_ess, max_rhat, stored_lp)
                 logger.info(
                     f"PTDE convergence @ {actual_draws} draws: "
                     f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")
