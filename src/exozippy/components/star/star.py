@@ -5,8 +5,6 @@ class Star(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Stellar Parameters"
-        self.mannmass = [c.get("mannmass", False) for c in self.config]
-        self.mannrad = [c.get("mannrad", False) for c in self.config]
         self.mist = [c.get("mist", True) for c in self.config]
         self.parsec = [c.get("parsec", False) for c in self.config]
 
@@ -70,8 +68,13 @@ class Star(Component):
                 "initfeh": {"mask": mask}
             })
 
+        # The Mann relations key on absolute Ks, so they need the distance
+        # modulus. The apparent/absolute Ks themselves live on the mann
+        # component, which derives them from its own non-centered latent --
+        # a free star.appks would be an unconstrained nuisance whenever the
+        # Ks comes from the SED.
         if in_system('mann'):
-            self.manifest.update({"distance": None, "appks": None, "absks": "default"})
+            self.manifest.update({"distance": None})
 
         # Absolute astrometry (gaia/abs modes) constrains the reference
         # position and proper motion; rel-mode data are differential and

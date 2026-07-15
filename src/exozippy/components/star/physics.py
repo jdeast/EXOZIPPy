@@ -13,7 +13,7 @@ def calc_density(mass, radius):
     return DENSITY_CONST * mass / (radius * pt.sqr(radius))
 
 @register_physics
-def calc_logg(logmass, radius):
+def calc_logg_from_logmass(logmass, radius):
     """
     Calculates surface gravity (logg) from mass and radius.
     logmass: log_10 of stellar mass, in solar masses

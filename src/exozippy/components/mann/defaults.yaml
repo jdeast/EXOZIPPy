@@ -1,0 +1,22 @@
+mann:
+  # Non-centered latent for the star's apparent Ks.  The Ks actually fed to
+  # the relations is
+  #     appks = ks_source + ks_err * ks_offset
+  # where ks_source is either the SED-predicted synthetic Ks or a directly
+  # observed value (see mann.py).  Sampling the dimensionless offset instead
+  # of appks itself keeps the stiff direction axis-aligned: appks is never a
+  # free parameter sitting a fixed distance from ks_source, so there is no
+  # (appks - ks_source) difference direction for the diagonal mass matrix to
+  # choke on.  The posterior is identical to EXOFASTv2's free appks plus a
+  # ((appks - synk)/0.02)^2 penalty.
+  ks_offset:
+    initval: 0.0
+    init_scale: 1.0
+    mu: 0.0
+    sigma: 1.0
+    lower: -10.0
+    upper: 10.0
+    unit: ""
+    internal_unit: ""
+    latex: "\\delta_{K_s}"
+    description: "Ks offset from its source, in units of the Ks uncertainty"

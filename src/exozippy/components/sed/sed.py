@@ -37,7 +37,7 @@ from .bc_grid import (
     _load_alias_table,
     _collect_facility_files,
 )
-from ..star.physics import calc_logg, calc_luminosity
+from ..star.physics import calc_logg_from_logmass, calc_luminosity
 
 # plotting imports
 import matplotlib.pyplot as plt
@@ -528,7 +528,7 @@ class SED(Component):
         distance = star.distance.value     # pc
 
         # Reconstruct loggsed from logmass + radiussed (NOT radius).
-        loggsed = calc_logg(logmass, radiussed)
+        loggsed = calc_logg_from_logmass(logmass, radiussed)
 
         # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
         coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
@@ -672,7 +672,7 @@ class SED(Component):
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
         m_star_node = self._predicted_appmag_node(system)[:, :self.nfilters]
-        loggsed_node = calc_logg(star.logmass.value, star.radiussed.value)
+        loggsed_node = calc_logg_from_logmass(star.logmass.value, star.radiussed.value)
 
         try:
             self._compiled_mag_predictors = pytensor.function(

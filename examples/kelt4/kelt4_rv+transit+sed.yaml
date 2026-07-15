@@ -1,0 +1,94 @@
+run:
+  name: "kelt4"
+
+prefix: "fitresults/KELT-4A_rv+transit+sed"
+logger_level: INFO   # DEBUG, INFO, or WARNING
+
+# the order of the components here is the order they are output in the table
+
+star:
+  - name: "A"
+    mist: False
+  - name: "B"
+    mist: False
+  - name: "C"
+    mist: False
+
+sed:
+  file: "kelt4.sed.yaml"
+
+# KELT-4B and C are in no orbit and have no resolved mass/radius measurement,
+# so without an empirical relation their mass/radius/teff are constrained only
+# by the blended photometry -- they wander over their whole priors (logmass
+# roamed ~11 decades), which both wrecks the sampler geometry and pushes logg
+# off the NextGen BC grid.  The Mann+ relations pin them from the SED's
+# synthetic Ks.  ks: synthetic is required here rather than an observed Ks:
+# the only Ks photometry (2MASS) is a blend of all three stars, but the SED
+# model knows each star's individual Ks.
+mann:
+  - star: "B"
+    ks: synthetic
+    constrain: [mass, radius]
+  - star: "C"
+    ks: synthetic
+    constrain: [mass, radius]
+
+# KELT-4A is well inside the Torres+2010 calibration (>~0.6 solMass), so its
+# mass/radius come from the relation rather than the hand-entered Eastman+2015
+# prior that used to sit in the params file.  Torres and Mann are complements:
+# Mann covers 0.075-0.7 solMass, Torres above ~0.6.
+torres:
+  - star: "A"
+    constrain: [mass, radius]
+
+planet:
+  - name: "b"
+
+# Hierarchical triple + planet: b orbits A, B orbits C, and the B+C pair
+# orbits A(+b).  primary/companion entries name stars/planets (or
+# "star.X"/"planet.X" paths); a multi-body group is treated as a point
+# mass at its barycenter.  Each orbit derives m_primary/m_companion/
+# m_total/arsun/K from the same star.mass/planet.mass nodes, so the three
+# orbits are automatically mass-consistent.
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+transit:
+  - name: "TESS_S48"
+    file: "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat"
+    band: "TESS"
+    exptime: 2.0 # exposure time in minutes
+    ninterp: 1.0 # number of model points to compute for each data point to account for long cadence smearing. Defaults to 1 point/3 minutes
+#    fitspline: False
+#    splinespace: 0.75
+
+band:
+  - name: "TESS"
+    filter: "TESS"
+
+rvinstrument:
+  - name: "EXPERT"
+    file: "KELT-4b.EXPERT.rv"
+  - name: "FIES"
+    file: "KELT-4b.FIES.rv"
+  - name: "HIRES"
+    file: "KELT-4b.HIRES.rv"
+  - name: "TRES"
+    file: "KELT-4b.TRES.rv"
+
+parameter_file: "kelt4_rv+transit+sed.params.yaml"
+#parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
+
+sampler:
+  method: nuts         # numpyro/blackjax can't differentiate the transit limb-darkening op; use nuts, nutpie, or ptde
+  tune: 2000
+  draws: 4000
+#  chains: 4
+#  cores: 4
+  init: adapt_diag
+  target_accept: 0.95
+  check_curvatures: False
+  recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling
+  profile: False
