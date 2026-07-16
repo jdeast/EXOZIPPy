@@ -226,6 +226,26 @@ class SED(Component):
         return "sed"
 
     @classmethod
+    def get_utilities(cls):
+        from ...utilities.registry import (
+            UtilitySpec, argparse_subprocess_runner)
+        from ...utilities import mkticsed
+
+        return [
+            UtilitySpec(
+                name="mkticsed",
+                label="Build SED + priors from TIC/Gaia",
+                description=(
+                    "Query TICv8.2 and associated catalogs to write an "
+                    "EXOZIPPy SED file and stellar priors params.yaml."),
+                component_keys=["sed"],
+                available=True,
+                build_parser=mkticsed.build_parser,
+                run=argparse_subprocess_runner("exozippy.utilities.mkticsed"),
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {

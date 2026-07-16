@@ -71,6 +71,22 @@ class Component(ABC):
         """
         return []
 
+    @classmethod
+    def get_utilities(cls):
+        """Declare the user-facing utility programs this component surfaces.
+
+        A "utility" is a helper CLI that logically belongs to this component
+        (downloading light curves, building an SED file, converting an
+        external fit to a params file, ...). Returns a list of
+        ``exozippy.utilities.registry.UtilitySpec``; the introspection layer
+        (and a GUI) discover them generically, so no component names are ever
+        hardcoded outside component-owned code.
+
+        The base implementation returns an empty list; components with
+        utilities override this. Mirrors ``config_schema()``.
+        """
+        return []
+
     def load_data(self, system):
         """
         Stage 1a: Data Ingestion.

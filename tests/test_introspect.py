@@ -140,6 +140,43 @@ def test_config_schema_entries_have_the_declared_shape():
                 assert isinstance(entry["accepts"], str)
 
 
+def test_component_schema_exposes_utilities():
+    """
+    Given the transit component,
+    When its schema is built,
+    Then a JSON-serializable 'utilities' list surfaces getdata and bls.
+    """
+    # Act
+    schema = introspect.component_schema("transit")
+    utilities = schema["utilities"]
+
+    # Assert
+    assert json.loads(json.dumps(utilities)) == utilities
+    by_name = {u["name"]: u for u in utilities}
+    assert "getdata" in by_name
+    assert by_name["getdata"]["available"] is True
+    # Arguments carry the JSON argument schema for form rendering.
+    assert any(a["name"] == "id" for a in by_name["getdata"]["arguments"])
+    assert by_name["bls"]["available"] is False
+
+
+def test_every_component_utility_list_is_json_serializable():
+    """
+    Given every discoverable component,
+    When its schema's utilities list is inspected,
+    Then each entry has the declared shape and survives json.dumps.
+    """
+    # Act / Assert
+    for yaml_key in introspect.list_components():
+        utilities = introspect.component_schema(yaml_key)["utilities"]
+        assert json.loads(json.dumps(utilities)) == utilities
+        for entry in utilities:
+            assert set(entry) >= {
+                "name", "label", "description", "available", "arguments"}
+            assert isinstance(entry["available"], bool)
+            assert isinstance(entry["arguments"], list)
+
+
 def test_base_component_config_schema_is_empty():
     """
     Given the base Component class,

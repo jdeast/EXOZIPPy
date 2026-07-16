@@ -180,6 +180,7 @@ def component_schema(yaml_key):
         "doc": _first_paragraph(cls.__doc__),
         "parameters": parameters,
         "config": list(cls.config_schema()),
+        "utilities": [spec.to_schema() for spec in cls.get_utilities()],
     }
 
 

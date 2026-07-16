@@ -229,6 +229,27 @@ class Lens(Component):
         return "lens"
 
     @classmethod
+    def get_utilities(cls):
+        from ...utilities.registry import (
+            UtilitySpec, argparse_subprocess_runner)
+        from ...utilities import mmexofast_to_params
+
+        return [
+            UtilitySpec(
+                name="mmexofast_to_params",
+                label="MMEXOFAST -> params.yaml",
+                description=(
+                    "Convert an MMEXOFAST fit-results JSON into an EXOZIPPy "
+                    "params.yaml seeding the lens parameters."),
+                component_keys=["lens"],
+                available=True,
+                build_parser=mmexofast_to_params.build_parser,
+                run=argparse_subprocess_runner(
+                    "exozippy.utilities.mmexofast_to_params"),
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {

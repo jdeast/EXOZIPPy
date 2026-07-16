@@ -31,6 +31,22 @@ class RVInstrument(Component):
         return "rvinstrument"
 
     @classmethod
+    def get_utilities(cls):
+        from ...utilities.registry import UtilitySpec
+
+        return [
+            UtilitySpec(
+                name="lomb_scargle",
+                label="Lomb-Scargle periodogram",
+                description=(
+                    "Lomb-Scargle radial-velocity periodogram (not yet "
+                    "implemented)."),
+                component_keys=["rvinstrument"],
+                available=False,
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {

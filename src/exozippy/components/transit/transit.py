@@ -39,6 +39,35 @@ class Transit(Component):
         return "transit"
 
     @classmethod
+    def get_utilities(cls):
+        from ...utilities.registry import (
+            UtilitySpec, argparse_subprocess_runner)
+        from ...utilities import getdata
+
+        return [
+            UtilitySpec(
+                name="getdata",
+                label="Download TESS/Kepler light curves",
+                description=(
+                    "Fetch TESS/Kepler light curves via lightkurve and write "
+                    "them in EXOFASTv2/EXOZIPPy format."),
+                component_keys=["transit"],
+                available=True,
+                build_parser=getdata.build_parser,
+                run=argparse_subprocess_runner("exozippy.utilities.getdata"),
+            ),
+            UtilitySpec(
+                name="bls",
+                label="BLS period search",
+                description=(
+                    "Box Least Squares transit-period search (not yet "
+                    "implemented)."),
+                component_keys=["transit"],
+                available=False,
+            ),
+        ]
+
+    @classmethod
     def config_schema(cls):
         return [
             {
