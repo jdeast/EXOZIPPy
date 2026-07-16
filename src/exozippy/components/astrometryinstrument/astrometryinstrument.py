@@ -152,6 +152,104 @@ class AstrometryInstrument(Component):
     def prefix(self):
         return "astrometryinstrument"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "file",
+                "kind": "datafile",
+                "accepts": "*.dat",
+                "required": True,
+                "doc": (
+                    "Whitespace-delimited astrometry data. Column layout "
+                    "depends on mode (gaia/abs absolute positions vs rel "
+                    "relative separations)."
+                ),
+            },
+            {
+                "key": "mode",
+                "kind": "option",
+                "accepts": ["gaia", "abs", "rel"],
+                "required": False,
+                "doc": (
+                    "Astrometry data mode: 'gaia'/'abs' absolute positions "
+                    "or 'rel' relative separations. Default 'gaia'."
+                ),
+            },
+            {
+                "key": "observer_location",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Observer location. Defaults to 'gaia' in gaia mode, "
+                    "else 'earth'."
+                ),
+            },
+            {
+                "key": "star_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": "Index or name of the target star. Default 0.",
+            },
+            {
+                "key": "orbit",
+                "kind": "ref",
+                "accepts": ["orbit"],
+                "required": False,
+                "doc": (
+                    "rel mode: name of the orbit modeled relative to the "
+                    "primary group (the companion group is modeled relative "
+                    "to the primary)."
+                ),
+            },
+            {
+                "key": "planet_ndx",
+                "kind": "ref",
+                "accepts": ["planet"],
+                "required": False,
+                "doc": (
+                    "Legacy rel-mode orbit reference by planet index; "
+                    "prefer the 'orbit' key."
+                ),
+            },
+            {
+                "key": "band",
+                "kind": "ref",
+                "accepts": ["band"],
+                "required": False,
+                "doc": (
+                    "Band used to derive the SED-weighted photocenter flux "
+                    "fraction (with companion_star_ndx)."
+                ),
+            },
+            {
+                "key": "companion_star_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": (
+                    "Index or name of the companion star for the SED-derived "
+                    "photocenter flux fraction (with band)."
+                ),
+            },
+            {
+                "key": "sep_unit",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Astropy unit string for rel-mode separations. Default 'mas'.",
+            },
+            {
+                "key": "epoch",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Reference epoch for the astrometric positions.",
+            },
+        ]
+
     # ------------------------------------------------------------------
     # Stage 1a
     # ------------------------------------------------------------------

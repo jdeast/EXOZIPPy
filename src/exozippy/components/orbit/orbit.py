@@ -44,6 +44,55 @@ class Orbit(Component):
     def prefix(self):
         return "orbit"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "primary",
+                "kind": "ref",
+                "accepts": ["star", "planet"],
+                "required": False,
+                "doc": (
+                    "Body group forming the primary of this two-body "
+                    "Keplerian arc: a list of star/planet instance names or "
+                    "star.X/planet.X paths (a multi-body group is treated as "
+                    "a point mass at its barycenter). Omit both primary and "
+                    "companion to use the legacy implicit host/planet "
+                    "topology."
+                ),
+            },
+            {
+                "key": "companion",
+                "kind": "ref",
+                "accepts": ["star", "planet"],
+                "required": False,
+                "doc": (
+                    "Body group forming the companion of this two-body "
+                    "Keplerian arc (see primary)."
+                ),
+            },
+            {
+                "key": "i180",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Reflect the inclination about 90 deg (retrograde branch "
+                    "of the transit/RV inclination degeneracy). Default false."
+                ),
+            },
+            {
+                "key": "fitvcve",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Parametrize eccentricity via V_c/V_e instead of "
+                    "sqrt(e)cos(omega)/sqrt(e)sin(omega). Default false."
+                ),
+            },
+        ]
+
     # ------------------------------------------------------------------
     # Body groups
     # ------------------------------------------------------------------

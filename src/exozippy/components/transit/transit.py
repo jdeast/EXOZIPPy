@@ -38,6 +38,42 @@ class Transit(Component):
     def prefix(self):
         return "transit"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "file",
+                "kind": "datafile",
+                "accepts": "*.dat",
+                "required": True,
+                "doc": (
+                    "Whitespace-delimited light curve; columns are time, "
+                    "flux, flux_err, then optional detrend columns. Comment "
+                    "lines start with '#'."
+                ),
+            },
+            {
+                "key": "band",
+                "kind": "ref",
+                "accepts": ["band"],
+                "required": True,
+                "doc": (
+                    "Name of the band: block carrying this light curve's "
+                    "filter identity and limb darkening."
+                ),
+            },
+            {
+                "key": "filter",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Deprecated and ignored; reference a band: block "
+                    "instead (bands carry the filter identity)."
+                ),
+            },
+        ]
+
     def sampler_requirements(self):
         """Declare sampler constraints for limb-darkened transit models.
 
