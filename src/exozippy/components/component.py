@@ -336,6 +336,76 @@ class Component(ABC):
         """
         pass
 
+    def plot_data(self, system, point=None):
+        """
+        Stage: GUI plot description (the data behind plot()).
+
+        Return a list of exozippy.plotspec.PlotSpec objects -- the arrays
+        and labels a browser GUI needs to draw pan/zoomable charts and
+        re-render model curves when parameter sliders move. This is the
+        data-only counterpart to plot(), which renders matplotlib figures.
+
+        Semantics
+        ---------
+        point is None
+            Return data-only specs (observations, no model curves). These
+            are usable right after load_data()/prepare(), BEFORE any PyMC
+            model or compiled plotter exists -- a raw file preview.
+        point is a start/posterior point dict
+            Include model traces evaluated at that point, reusing the
+            functions compiled by compile_plotters() (no physics is
+            duplicated here). Requires build_model() to have run.
+
+        The default returns []; components that own observational data
+        override it. See plotspec.PlotSpec for the payload contract.
+        """
+        return []
+
+    def _point_to_plot_params(self, point, system):
+        """
+        Marshal a point dict into the positional argument list the
+        compiled plotter functions expect (one entry per
+        system.plot_params, scalars squeezed, vectors kept 1-D).
+
+        This is the single source of truth shared by the matplotlib
+        plot() path and the GUI plot_data() path, so both feed the
+        compiled functions the exact same values.
+        """
+        values = []
+        for p in system.plot_params:
+            val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
+            if getattr(p.value, "ndim", 0) == 0:
+                values.append(float(np.squeeze(val)))
+            else:
+                values.append(np.atleast_1d(val))
+        return values
+
+    def _model_trace_param_deps(self, node, system):
+        """
+        Sampled-parameter labels (a subset of system.plot_params) that a
+        symbolic model-trace node depends on, found by walking the
+        pytensor graph. Used to populate PlotSpec.param_deps so a GUI can
+        highlight the charts a moved slider affects. Returns [] when the
+        node or plot_params are unavailable (e.g. data-only mode).
+        """
+        if node is None or not hasattr(system, "plot_params"):
+            return []
+        try:
+            # Moved from pytensor.graph.basic in newer pytensor releases.
+            from pytensor.graph.traversal import ancestors
+        except ImportError:
+            try:
+                from pytensor.graph.basic import ancestors
+            except Exception:
+                return []
+        wanted = {id(p.value): p.label for p in system.plot_params}
+        deps = []
+        for anc in ancestors([node]):
+            label = wanted.get(id(anc))
+            if label is not None and label not in deps:
+                deps.append(label)
+        return deps
+
     def plot_corner(self, idata, filename_prefix="debug"):
         """Optional: draw a component-specific posterior corner plot.
 

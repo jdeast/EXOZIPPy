@@ -126,6 +126,10 @@ The registry is a **flat namespace keyed by bare function name** -- there is no 
 4. Every sampled (non-derived, non-fixed) parameter **must** have `lower`, `upper`, and `init_scale` in `defaults.yaml`.
 5. Add the YAML key to example configs to test.
 
+### Plotting for the GUI (`plot_data`)
+
+`Component.plot()` renders matplotlib figures for the CLI; the browser GUI instead consumes `Component.plot_data(system, point=None) -> list[PlotSpec]` (see `src/exozippy/plotspec.py`), which returns the arrays and labels (not rendered figures) so it can draw interactive charts and re-render model curves when sliders move. Override it in components that own observational data: with `point=None` return data-only specs (usable after `load_data()`, before `build_model()`); with a point, add model traces evaluated at that point by reusing the functions from `compile_plotters()` -- do not duplicate physics. Extract the shared array preparation out of `plot()` so both paths draw identical data, set each spec's `param_deps` (use `_model_trace_param_deps(node, system)`), and keep the model traces' symbolic nodes on the `Trace.node` field for later compiled re-evaluation.
+
 ### Parameter naming convention
 
 User-facing paths always use three dot-separated parts: `<component>.<instance_name>.<param>` (e.g., `star.Lens.distance`). Internally, instance names are standardized to indices (`star.0.distance`). `ConfigManager.resolve()` checks all three forms (`comp.param`, `comp.0.param`, `comp.Name.param`).

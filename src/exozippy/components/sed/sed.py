@@ -714,6 +714,12 @@ class SED(Component):
         m_star_node = self._predicted_appmag_node(system)[:, :self.nfilters]
         loggsed_node = calc_logg_from_logmass(star.logmass.value, star.radiussed.value)
 
+        # Retain a symbolic model node so plot_data can derive param_deps
+        # (graph walk) and hand G5 the tensors behind the model traces.
+        self._sed_mag_node = m_star_node
+        self._sed_combined_node = (
+            self._combined_appmag_node(system) if self.nfilters > 0 else m_star_node)
+
         try:
             self._compiled_mag_predictors = pytensor.function(
                 inputs=param_symbols,
@@ -742,6 +748,25 @@ class SED(Component):
             self._compiled_combined_mag = None
 
     # ------------------------------------------------------------------
+    # Shared data preparation. Both the matplotlib plot() path and the
+    # GUI plot_data() path build the model plot object here, so the two
+    # paths always operate on identical arrays (see plotspec.PlotSpec).
+    # ------------------------------------------------------------------
+    def _make_plot_obj(self, system, points):
+        """
+        Instantiate the SED-model plot class (e.g. NextGenPlot), which
+        interpolates the model spectra, computes model flux at Earth, and
+        converts observed magnitudes to flux for the given draws.
+        """
+        plot_class_path = Path(current_dir / "models" / system.sed.sedmodel / "plot.py")
+        parsed_ast = ast.parse(plot_class_path.read_text())
+        plot_cls_str = [node.name for node in parsed_ast.body if isinstance(node, ast.ClassDef)][0]
+        mod_name = f"exozippy.components.sed.models.{system.sed.sedmodel}.plot"
+        module = importlib.import_module(mod_name)
+        plot_cls = getattr(module, plot_cls_str)
+        return plot_cls(system, points)
+
+    # ------------------------------------------------------------------
     # 7) plot — observed mag vs predicted mag per filter, per SED.
     # ------------------------------------------------------------------
     def plot(self, system, points, filename_prefix="debug"):
@@ -761,14 +786,8 @@ class SED(Component):
             )
             return
 
-        # retrieve model plotting class
-        plot_class_path = Path(current_dir / "models" / system.sed.sedmodel / "plot.py")
-        parsed_ast = ast.parse(plot_class_path.read_text())
-        plot_cls_str = [node.name for node in parsed_ast.body if isinstance(node, ast.ClassDef)][0]
-        mod_name = f"exozippy.components.sed.models.{system.sed.sedmodel}.plot"
-        module = importlib.import_module(mod_name)
-        plot_cls = getattr(module, plot_cls_str)
-        plot_obj = plot_cls(system, points)
+        # retrieve model plotting class and build the shared data object
+        plot_obj = self._make_plot_obj(system, points)
 
         fig, (ax_top, ax_bot) = plt.subplots(
             2, 1, figsize=(max(6, 0.6 * plot_obj.nfilters + 2), 6),
@@ -958,4 +977,84 @@ class SED(Component):
         plt.tight_layout()
         pdf_path = f"{filename_prefix}_SED.pdf"
         plt.savefig(pdf_path)
-        plt.close(fig) 
+        plt.close(fig)
+
+    def _filter_wave_eff_micron(self):
+        """Effective wavelength (micron) of each .sed filter row."""
+        from .filters import filter as VOID
+        alias_df = _load_alias_table()
+        waves = []
+        for f in self.filters:
+            svo = resolve_filter_name(f, alias_df, "SVO")
+            waves.append(VOID.Filter(svo).WavelengthEff)   # angstrom
+        return np.asarray(waves, dtype=float) * ANG_TO_MICRON_CONST
+
+    def plot_data(self, system, point=None):
+        """
+        GUI plot spec for the SED: observed photometry vs wavelength plus
+        (with a point) the model spectra. point=None returns a data-only
+        preview (observed magnitude vs effective wavelength) without
+        loading the model spectra or requiring build_model(). See
+        Component.plot_data and plotspec.PlotSpec.
+        """
+        from exozippy.plotspec import PlotSpec, Trace
+
+        if self.nfilters == 0:
+            # No catalog photometry rows -- the SED only serves
+            # cross-component flux predictions; nothing to chart.
+            return []
+
+        # ---- Data-only preview: observed mag vs effective wavelength --
+        if point is None:
+            wave = self._filter_wave_eff_micron()
+            traces = [Trace(name="observed", role="data", kind="scatter",
+                            x=wave, y=self.mag, yerr=self.err)]
+            return [PlotSpec(
+                id=f"{self.prefix}.photometry",
+                component={"yaml_key": self.prefix, "instance": None},
+                title="SED Photometry (observed)",
+                xlabel="Wavelength [micron]", ylabel="Apparent Magnitude",
+                traces=traces, param_deps=[],
+                meta={"x_log": True, "y_inverted": True})]
+
+        # ---- Model mode: model spectra + observed flux points ---------
+        if getattr(self, "_compiled_mag_predictors", None) is None:
+            logger.warning("SED.plot_data: plotters failed to compile; "
+                           "returning data-only spec.")
+            return self.plot_data(system, point=None)
+
+        plot_obj = self._make_plot_obj(system, [point])
+        wave_micron = np.asarray(plot_obj.df_wave['wavelength_micron'], dtype=float)
+        deps = self._model_trace_param_deps(
+            getattr(self, "_sed_combined_node", None), system)
+
+        traces = []
+        # per-star model spectra (flux at Earth), from the shared helper
+        for nstar in range(plot_obj.nstars):
+            traces.append(Trace(
+                name=f"Star {plot_obj.star_names[nstar]}", role="model", kind="line",
+                x=wave_micron, y=plot_obj.flux_model_draws[0][nstar],
+                node=getattr(self, "_sed_mag_node", None)))
+        if plot_obj.nstars > 1:
+            traces.append(Trace(
+                name="Total", role="model", kind="line",
+                x=wave_micron, y=np.sum(plot_obj.flux_model_draws[0], axis=0),
+                node=getattr(self, "_sed_mag_node", None)))
+
+        # observed photometry points (one per plot point; angstrom -> micron)
+        wave_obs = plot_obj.wave_filter * ANG_TO_MICRON_CONST
+        f_obs = plot_obj.flux_obs
+        yerr = np.vstack([f_obs - plot_obj.f_limits_from_err[0],
+                          plot_obj.f_limits_from_err[1] - f_obs])
+        traces.append(Trace(
+            name="observed", role="data", kind="scatter",
+            x=wave_obs, y=f_obs, yerr=yerr))
+
+        return [PlotSpec(
+            id=f"{self.prefix}.sed",
+            component={"yaml_key": self.prefix, "instance": None},
+            title="Spectral Energy Distribution",
+            xlabel="Wavelength [micron]",
+            ylabel="Flux at Earth [erg/s/cm2/A]",
+            traces=traces, param_deps=deps,
+            meta={"x_log": True, "y_log": True})]
