@@ -333,8 +333,7 @@ def ptde_async_sample(
     def _recycle_pool(reason):
         nonlocal pool
         logger.warning(f"PTDE-async: recycling worker pool ({reason})")
-        pool.terminate()
-        pool.join()
+        _ptde._shutdown_pool(pool)
         pool = None
         gc.collect()
         pool = mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
@@ -543,8 +542,13 @@ def ptde_async_sample(
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
         if pool is not None:
-            pool.close()
-            pool.join()
+            # terminate() (not close()) at shutdown: close() waits for any
+            # in-flight eval to finish, so a worker still stuck on a slow
+            # proposal when the run stops (convergence/maxtime/interrupt)
+            # would hang here. Stored draws are already saved; discard the
+            # in-flight result. _shutdown_pool SIGKILLs a worker that is
+            # wedged past the grace period so join() cannot block forever.
+            _ptde._shutdown_pool(pool)
 
     actual_draws = int(per_chain_draws.min())
     if actual_draws == 0:
