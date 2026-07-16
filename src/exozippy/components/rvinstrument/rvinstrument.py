@@ -30,6 +30,42 @@ class RVInstrument(Component):
     def prefix(self):
         return "rvinstrument"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "file",
+                "kind": "datafile",
+                "accepts": "*.rv",
+                "required": True,
+                "doc": (
+                    "Whitespace-delimited radial-velocity data; columns are "
+                    "time, RV, RV_err, then optional detrend columns. Comment "
+                    "lines start with '#'."
+                ),
+            },
+            {
+                "key": "star_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": (
+                    "Index or name of the observed star (default 0). The RV "
+                    "model sums orbit.K over every orbit containing this star."
+                ),
+            },
+            {
+                "key": "unit",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Astropy unit string for the RV/error columns. Default "
+                    "'m/s'."
+                ),
+            },
+        ]
+
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
         all_times, all_rvs, all_errs, inst_indices, all_detrend = [], [], [], [], []

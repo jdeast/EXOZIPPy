@@ -33,6 +33,39 @@ class Band(Component):
     def prefix(self):
         return "band"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "filter",
+                "kind": "option",
+                "accepts": None,
+                "required": True,
+                "doc": (
+                    "Filter/bandpass name; resolved through the SED filter "
+                    "alias table (components/sed/filters/filternames.txt) "
+                    "into a canonical name at load time."
+                ),
+            },
+            {
+                "key": "star_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": (
+                    "Index or name of the star whose limb darkening this "
+                    "band models. Default 0."
+                ),
+            },
+            {
+                "key": "ld_law",
+                "kind": "option",
+                "accepts": ["quadratic", "linear"],
+                "required": False,
+                "doc": "Limb-darkening law. Default 'quadratic'.",
+            },
+        ]
+
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
         self.star_indices = [c.get("star_ndx", 0) for c in self.config]

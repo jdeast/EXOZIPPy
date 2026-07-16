@@ -225,6 +225,46 @@ class SED(Component):
     def prefix(self):
         return "sed"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "file",
+                "kind": "datafile",
+                "accepts": "*.sed",
+                "required": True,
+                "doc": (
+                    "SED photometry file (YAML content): declares 'model', "
+                    "'nstars', and a 'filters' list of per-band rows "
+                    "(bandname, magnitude, errors, photType blend spec)."
+                ),
+            },
+            {
+                "key": "bc_root",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Directory holding the bolometric-correction tables. "
+                    "Defaults to the packaged BC root."
+                ),
+            },
+            {
+                "key": "teffsedfloor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Systematic effective-temperature error floor. Default 0.020.",
+            },
+            {
+                "key": "fbolsedfloor",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Systematic bolometric-flux error floor. Default 0.024.",
+            },
+        ]
+
     # ------------------------------------------------------------------
     # 1) register_parameters — declare the manifest for stage 2.
     # ------------------------------------------------------------------

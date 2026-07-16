@@ -228,6 +228,72 @@ class Lens(Component):
     def prefix(self):
         return "lens"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "lens_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": "Index or name of the lens star. Default 0.",
+            },
+            {
+                "key": "source_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": "Index or name of the source star. Default 1.",
+            },
+            {
+                "key": "mmexofast",
+                "kind": "datafile",
+                "accepts": "*.json",
+                "required": False,
+                "doc": (
+                    "MMEXOFAST fit-results JSON providing seed initvals and "
+                    "scales for the microlensing parameters."
+                ),
+            },
+            {
+                "key": "mag_method",
+                "kind": "option",
+                "accepts": ["point_source", "auto_vbbl"],
+                "required": False,
+                "doc": (
+                    "Magnification method. Defaults to 'auto_vbbl' for "
+                    "finite-source or multi-body lenses, else 'point_source'."
+                ),
+            },
+            {
+                "key": "backend",
+                "kind": "option",
+                "accepts": ["vbm_direct", "mulensmodel"],
+                "required": False,
+                "doc": (
+                    "Magnification engine for the multi-lens Op path. "
+                    "Default 'vbm_direct'."
+                ),
+            },
+            {
+                "key": "finite_source",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": "Model finite-source effects. Default false.",
+            },
+            {
+                "key": "use_op",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Force the MulensModel Op even for point-source PSPL "
+                    "(default false uses the NUTS-friendly symbolic path)."
+                ),
+            },
+        ]
+
     def _primary_lens(self, event_idx):
         """Return (comp_type, star_ndx) for the primary lens of event i."""
         return self.lens_bodies[event_idx][0]

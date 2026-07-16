@@ -42,6 +42,66 @@ class MulensInstrument(Component):
     def prefix(self):
         return "mulensinstrument"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "file",
+                "kind": "datafile",
+                "accepts": "*.dat",
+                "required": True,
+                "doc": (
+                    "Whitespace-delimited microlensing light curve; columns "
+                    "are time, flux-or-magnitude, error (see data_format)."
+                ),
+            },
+            {
+                "key": "data_format",
+                "kind": "option",
+                "accepts": ["magnitude", "flux"],
+                "required": False,
+                "doc": "Photometry format of the data file. Default 'magnitude'.",
+            },
+            {
+                "key": "observer_location",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Observer location for parallax: 'earth' or an "
+                    "ephemeris name for a space-based observatory. Default "
+                    "'earth'."
+                ),
+            },
+            {
+                "key": "band",
+                "kind": "ref",
+                "accepts": ["band"],
+                "required": False,
+                "doc": "Name of the band: block associated with this light curve.",
+            },
+            {
+                "key": "sed_constrain_blend",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "When an SED is present, also tie f_blend to the "
+                    "SED-predicted flux. Default false."
+                ),
+            },
+            {
+                "key": "sed_blend_sigma",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Gaussian width (mag) of the SED f_blend constraint when "
+                    "sed_constrain_blend is set. Default 0.2."
+                ),
+            },
+        ]
+
     def load_data(self, system):
         """Stage 1a: Load photometry and pre-calculate observer positions.
 

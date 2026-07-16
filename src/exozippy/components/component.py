@@ -46,6 +46,31 @@ class Component(ABC):
         """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
 
+    @classmethod
+    def config_schema(cls):
+        """Describe component-LEVEL config keys that are not parameters.
+
+        These are the keys a user may set on a component's YAML block that
+        are not sampled/derived parameters: data-file references, references
+        to other components (bands, orbits, star indices), and free-form
+        options. They are consumed by the introspection layer (see
+        ``exozippy.introspect``) to drive documentation and a GUI without
+        building a System.
+
+        Returns a JSON-serializable list of dicts, each with keys:
+          key      : the YAML key name
+          kind     : "datafile" | "ref" | "option"
+          accepts  : for "ref", the list of component yaml_keys it may point
+                     at; for "datafile", a glob pattern (string); for
+                     "option", a list of allowed values or None (free-form)
+          required : bool, whether the key must be present
+          doc      : human-readable description
+
+        The base implementation returns an empty schema; components with
+        such keys override this.
+        """
+        return []
+
     def load_data(self, system):
         """
         Stage 1a: Data Ingestion.
