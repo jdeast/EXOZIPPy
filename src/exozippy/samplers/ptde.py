@@ -26,6 +26,7 @@ import gc
 import logging
 import os
 import signal
+import threading
 import time
 
 import numpy as np
@@ -332,6 +333,48 @@ def _worker_init():
     (BrokenProcessPool) instead of letting it finish and wrap up cleanly."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _shutdown_pool(pool, grace=1.0):
+    """terminate() a Pool, escalating to SIGKILL for workers that outlive the
+    grace period.
+
+    _worker_init has the workers ignore SIGTERM (so a batch scheduler signalling
+    the whole process group cannot break the parent mid-step). But pool.terminate()
+    kills workers *by sending SIGTERM*, then joins them -- so a worker stuck in a
+    pathological logp evaluation ignores the terminate and the join blocks forever.
+    That is the "recycling worker pool" hang: a timed-out worker is exactly the
+    one that can never be reaped this way.
+
+    The SIGKILL is issued from a watchdog thread rather than up front, because it
+    must land only AFTER terminate() is past its _help_stuff_finish step. That
+    step drains inqueue while holding inqueue._rlock; a worker blocked in
+    inqueue.get() holds that same lock, so SIGKILLing it before terminate()
+    reaches _help_stuff_finish wedges the lock and deadlocks terminate() even
+    earlier. Waiting `grace` seconds lets a well-behaved terminate() finish
+    untouched (the escalation never fires), and only forces the issue when a
+    worker is genuinely wedged.
+    """
+    done = threading.Event()
+
+    def _reaper():
+        if done.wait(grace):
+            return  # terminate()/join() completed cleanly; no escalation needed
+        for p in pool._pool:
+            if p.exitcode is None:
+                try:
+                    os.kill(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+    watchdog = threading.Thread(target=_reaper, daemon=True)
+    watchdog.start()
+    try:
+        pool.terminate()
+        pool.join()
+    finally:
+        done.set()
+        watchdog.join()
 
 
 def _map_logp(pool, proposals):
@@ -910,8 +953,7 @@ def ptde_sample(
                     f"PTDE: recycling worker pool after {len(timed_out)} "
                     f"timeout(s) at {step_label} — a hung worker never "
                     f"rejoins the pool on its own.")
-                pool.terminate()
-                pool.join()
+                _shutdown_pool(pool)
                 # Terminated Pools sit in reference cycles (handler threads,
                 # worker sentinels, queue pipes) that only the cyclic GC
                 # frees; without an explicit collect each recycle leaks

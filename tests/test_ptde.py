@@ -1,5 +1,7 @@
 """Tests for the PTDE (Parallel Tempering + Differential Evolution) sampler."""
 import multiprocessing as mp
+import threading
+import time
 
 import arviz as az
 import numpy as np
@@ -18,8 +20,17 @@ from exozippy.samplers.ptde import (
     _probe_scales,
     _probe_step_1d,
     _PROBE_FLAT_SCALE,
+    _shutdown_pool,
+    _worker_init,
     ptde_sample,
 )
+
+
+def _hang_forever(_):
+    """Stands in for a logp call that enters an unbreakable loop for some
+    pathological proposal (module-level so fork workers inherit it)."""
+    while True:
+        time.sleep(0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -548,3 +559,46 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     # ASSERT
     assert len(starts) == 6
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
+
+
+def test_shutdown_pool_kills_workers_that_ignore_sigterm():
+    """
+    Given a fork Pool whose workers ignore SIGTERM (as _worker_init sets up)
+      and a worker wedged in an unbreakable logp loop,
+    When the pool is recycled via _shutdown_pool,
+    Then it returns promptly by escalating to SIGKILL rather than blocking
+      forever in join() -- the "recycling worker pool" hang.
+
+    Regression: pool.terminate() reaps workers by sending SIGTERM, which these
+    workers ignore, so the plain terminate()/join() the recycle path used hung
+    on the very worker a timeout was trying to clear.
+    """
+    # ARRANGE: pool with a genuinely stuck, SIGTERM-ignoring worker
+    pool = mp.get_context("fork").Pool(2, initializer=_worker_init)
+    pool.apply_async(_hang_forever, (1,))
+    time.sleep(0.5)  # let the worker enter the loop
+
+    # ACT: run in a watchdog thread so a regression FAILS instead of hanging
+    #      the whole suite; grace is 1.0s so allow generous headroom.
+    done = threading.Event()
+
+    def _run():
+        _shutdown_pool(pool)
+        done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t0 = time.time()
+    t.start()
+    finished = done.wait(timeout=15.0)
+    elapsed = time.time() - t0
+
+    # ASSERT
+    assert finished, "_shutdown_pool did not return -- the recycle hang regressed"
+    assert elapsed < 10.0, f"_shutdown_pool took {elapsed:.1f}s, expected ~1s"
+
+    # a fresh pool is usable after the recycle
+    pool2 = mp.get_context("fork").Pool(2, initializer=_worker_init)
+    try:
+        assert pool2.apply_async(abs, (-3,)).get(timeout=10) == 3
+    finally:
+        _shutdown_pool(pool2)
