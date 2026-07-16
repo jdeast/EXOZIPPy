@@ -316,6 +316,10 @@ def test_transit_data_only_without_model(transit_built):
 # sed
 # ---------------------------------------------------------------------------
 
+# The model-trace path loads the NextGen spectra table, whose per-row
+# json.loads parse takes minutes and is not cached between runs -- it can
+# exceed the 300s global pytest timeout on a cold or slow filesystem.
+@pytest.mark.timeout(1200)
 def test_sed_plot_data_returns_serializable_specs(sed_built):
     """
     Given a prepared+built rv+transit+sed kelt4 system and a start point,
