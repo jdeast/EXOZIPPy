@@ -100,7 +100,37 @@ class MulensInstrument(Component):
                     "sed_constrain_blend is set. Default 0.2."
                 ),
             },
+            {
+                "key": "reference",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Flag exactly one instrument with 'reference: true' to peg "
+                    "every plotted data set and model curve onto its f_source/"
+                    "f_blend flux system. Defaults to the first instrument."
+                ),
+            },
         ]
+
+    def _reference_index(self):
+        """Index of the instrument whose flux system anchors the plot.
+
+        Honors a per-instrument 'reference: true' flag; falls back to the
+        first instrument when none (or an out-of-range name) is set. Warns if
+        more than one instrument is flagged and uses the first flagged one.
+        """
+        flagged = [i for i in range(self.n_elements)
+                   if self.config[i].get("reference", False)]
+        if not flagged:
+            return 0
+        if len(flagged) > 1:
+            names = ", ".join(self.names[i] for i in flagged)
+            logger.warning(
+                f"Multiple mulensinstrument entries flagged reference ({names}); "
+                f"using '{self.names[flagged[0]]}'."
+            )
+        return flagged[0]
 
     def load_data(self, system):
         """Stage 1a: Load photometry and pre-calculate observer positions.
@@ -735,6 +765,15 @@ class MulensInstrument(Component):
             on_unused_input='ignore'
         )
 
+        # Full per-instrument f_source / f_blend vectors at a given point, used
+        # by plot() to rescale every data set onto the reference instrument's
+        # flux system (peg all data + model to data set 0).
+        self._compiled_flux = pytensor.function(
+            inputs=param_symbols,
+            outputs=[self.f_source.value, self.f_blend.value],
+            on_unused_input='ignore'
+        )
+
     def plot(self, system, points, filename_prefix="debug"):
         if isinstance(points, dict): points = [points]
         if len(points) == 0: return
@@ -791,23 +830,48 @@ class MulensInstrument(Component):
                 for p in system.plot_params
             ]
 
-        # Per-instrument baseline magnitude from the f_total of the plotted
-        # point (first point when several are drawn), so the data land on the
-        # same Δmag scale as the self-normalized model curves.  Normalizing by
-        # the stage-1 fs_init estimate instead would shift the data by any
-        # error in that estimate, faking a constant model-data offset.
+        # Peg everything to the reference data set's flux system (the first
+        # instrument by default, or one flagged 'reference: true').  Each
+        # instrument fits its own f_source/f_blend, so a raw delta-mag per
+        # instrument puts data on N scales.  Instead we recover each point's
+        # magnification with that instrument's own (f_source_i, f_blend_i) and
+        # re-inject it into the reference system (f_source_ref, f_blend_ref):
+        #   A_obs = (F_i - f_blend_i) / f_source_i
+        #   F_aln = f_source_ref * A_obs + f_blend_ref
+        # so all data lands on the reference delta-mag scale, matching the model
+        # (also drawn in the reference system).  Errors are propagated through
+        # the same affine flux transform (asymmetric in magnitudes).  Using the
+        # plotted point's fitted fluxes (first point when several are drawn)
+        # keeps the alignment tied to the model rather than a stage-1 estimate.
+        ref_idx = self._reference_index()
         ref_values = _point_values(points[0])
-        mag_baseline = np.array([
-            -2.5 * np.log10(max(float(self._compiled_f_total(i, *ref_values)), 1e-30))
-            for i in range(self.n_elements)
-        ])
+        fs_vec, fb_vec = self._compiled_flux(*ref_values)
+        fs_vec = np.atleast_1d(np.asarray(fs_vec, dtype=np.float64))
+        fb_vec = np.atleast_1d(np.asarray(fb_vec, dtype=np.float64))
+        fs_ref = max(float(fs_vec[ref_idx]), 1e-30)
+        fb_ref = float(fb_vec[ref_idx])
+        baseline_ref = -2.5 * np.log10(max(fs_ref + fb_ref, 1e-30))
+
+        def _align_mag(mag_arr, i):
+            """Map instrument-i magnitudes onto the reference flux system."""
+            fs_i = max(float(fs_vec[i]), 1e-30)
+            fb_i = float(fb_vec[i])
+            F = 10.0 ** (-0.4 * mag_arr)
+            A_obs = (F - fb_i) / fs_i
+            F_aln = np.maximum(fs_ref * A_obs + fb_ref, 1e-30)
+            return -2.5 * np.log10(F_aln) - baseline_ref
 
         def draw(ax):
             for i in range(self.n_elements):
                 mask = (self.inst_map == i)
-                delta_mag = self.mag[mask] - mag_baseline[i]
+                mag_i = self.mag[mask]
+                err_i = self.err[mask]
+                delta_mag = _align_mag(mag_i, i)
+                # Brighter (mag - err) -> smaller aligned mag (lower error bar).
+                lo = delta_mag - _align_mag(mag_i - err_i, i)
+                hi = _align_mag(mag_i + err_i, i) - delta_mag
                 ax.errorbar(
-                    self.time[mask], delta_mag, yerr=self.err[mask],
+                    self.time[mask], delta_mag, yerr=np.vstack([lo, hi]),
                     fmt='.', color=inst_color[i], alpha=0.6, zorder=1, label=self.names[i]
                 )
             for obs_loc in unique_observers:
@@ -816,7 +880,9 @@ class MulensInstrument(Component):
                 for point in points:
                     param_values = _point_values(point)
                     try:
-                        y_model = self._compiled_delta_mag(t_model, obs_pretty, i, *param_values)
+                        # ref_idx: reference flux system, this observer's
+                        # magnification (parallax between sites is preserved).
+                        y_model = self._compiled_delta_mag(t_model, obs_pretty, ref_idx, *param_values)
                         alpha = 0.8 if len(points) == 1 else 0.1
                         ax.plot(t_model, y_model, '-', color=inst_color[i], lw=1.5, alpha=alpha, zorder=2)
                     except Exception as e:
