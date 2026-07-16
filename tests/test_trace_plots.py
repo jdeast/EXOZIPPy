@@ -136,3 +136,102 @@ def test_render_trace_page_no_mode_var_unchanged(small_idata):
         assert all(len(ax.collections) == 0 for ax in fig.axes)
     finally:
         plt.close(fig)
+
+
+@pytest.fixture
+def many_chain_idata():
+    """70 chains x 4000 draws -- the shape a production PTDE run produces."""
+    rng = np.random.default_rng(7)
+    return az.from_dict({
+        "posterior": {
+            "a": rng.normal(size=(70, 4000)),
+            "b": rng.normal(size=(70, 4000)),
+        },
+        "sample_stats": {"lp": rng.normal(size=(70, 4000))},
+    })
+
+
+def test_thinning_keeps_draws_per_chain_not_total(many_chain_idata, tmp_path):
+    """
+    Given a many-chain posterior far larger than the plotting budget,
+    When save_multipage_trace thins it,
+    Then each chain keeps draws_per_chain points rather than
+      max_samples/n_chains (~28 for 70 chains), which starved every chain
+      regardless of how long it actually sampled.
+    """
+    # ARRANGE
+    captured = {}
+    import exozippy.run as run_mod
+    real = run_mod._render_trace_page
+
+    def spy(idata, *a, **kw):
+        captured.setdefault("draws", idata.posterior.draw.size)
+        return real(idata, *a, **kw)
+
+    run_mod._render_trace_page = spy
+    try:
+        # ACT
+        save_multipage_trace(many_chain_idata, ["a", "b"],
+                             str(tmp_path / "t.pdf"), draws_per_chain=100)
+    finally:
+        run_mod._render_trace_page = real
+
+    # ASSERT
+    assert captured["draws"] == 100
+
+
+def test_thinning_preserves_true_draw_numbers(many_chain_idata, tmp_path):
+    """
+    Given a posterior thinned for plotting by save_multipage_trace,
+    When the thinned data reaches the page renderer,
+    Then its `draw` coordinate still holds true (unthinned) draw numbers, so
+      the trace x axis spans the real run -- round-tripping through
+      az.from_dict dropped the coordinate and relabelled the axis 0..n_thinned.
+    """
+    # ARRANGE
+    captured = {}
+    import exozippy.run as run_mod
+    real = run_mod._render_trace_page
+
+    def spy(idata, *a, **kw):
+        captured.setdefault("draw_coord",
+                            np.asarray(idata.posterior.draw.values))
+        return real(idata, *a, **kw)
+
+    run_mod._render_trace_page = spy
+    try:
+        # ACT
+        save_multipage_trace(many_chain_idata, ["a"], str(tmp_path / "t.pdf"),
+                             draws_per_chain=100)
+    finally:
+        run_mod._render_trace_page = real
+
+    # ASSERT: last thinned point carries its original draw number, not its
+    # position along the thinned axis.
+    coord = captured["draw_coord"]
+    assert coord.max() > 3000
+    assert coord[1] > 1
+
+
+def test_dist_column_is_density_not_ecdf(many_chain_idata):
+    """
+    Given few draws per chain after thinning,
+    When one trace page is rendered,
+    Then the dist column shows a density, not an ECDF -- arviz's default
+      kind="auto" switches to an ECDF below 100 draws per chain, drawing a
+      cumulative curve that plateaus at 1.0 and reads as a clipped posterior.
+    """
+    # ARRANGE: 50 draws/chain, below arviz's auto-ECDF threshold
+    thinned = many_chain_idata.isel(draw=slice(None, 50))
+
+    # ACT
+    fig = _render_trace_page(thinned, ["a"], n_rows=1, title="t")
+
+    try:
+        # ASSERT: a CDF is monotonically non-decreasing and tops out at 1.0
+        ys = [np.asarray(l.get_ydata()) for l in fig.axes[0].lines
+              if len(l.get_ydata()) > 2]
+        assert ys, "dist column drew nothing"
+        assert not all(np.all(np.diff(y) >= -1e-12) for y in ys)
+    finally:
+        plt.close(fig)

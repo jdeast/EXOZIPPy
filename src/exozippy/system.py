@@ -181,6 +181,93 @@ class System(Component):
                 raw_start[key] = np.zeros_like(raw_start[key])
         return raw_start
 
+    def jitter_raw_start(self, center, raw_scales, factor, rng):
+        """One over-dispersed start, drawn in PHYSICAL space, returned as raw.
+
+        Jittering directly in raw space -- center + factor*scale*N(0,1) -- looks
+        natural but saturates the logit transform.  A raw element reaches its
+        bound through `lower + span*sigmoid(lq)`, so what governs saturation is
+        the jitter's width in lq (= factor * scale * init_scale_logit), not its
+        width in raw.  Once that approaches ~3 the sigmoid folds both tails onto
+        the bounds instead of spreading across them: measured on a [0,1]
+        parameter, pileup within 1% of a bound goes 0.0000 -> 0.105 -> 0.276 as
+        sigma/span goes 0.1 -> 0.3 -> 1.0, and a parameter whose logp is flat out
+        to its bounds starts 31.5% of its chains within 1% of a bound where
+        uniform wants 2.0%.  The flat case cannot be fixed by correcting the
+        scale: its jitter width in lq is factor * 1.41 regardless of init_scale.
+
+        Drawing in physical space from a Gaussian TRUNCATED to [lower, upper]
+        reproduces what rejecting out-of-bounds draws would give, in closed form
+        and with no rejection loop, and self-adapts across the whole range:
+          - scale << span: truncation never bites -> plain factor-x
+            over-dispersed Gaussian, unchanged.
+          - scale ~ span:  truncated Gaussian, no pileup.
+          - flat:          a Gaussian far wider than the interval, truncated,
+                           IS uniform -- which is max entropy on a bounded
+                           range, so over-dispersion correctly runs out there
+                           rather than folding onto the bounds.
+        Pileup never exceeds uniform's at any scale (worst measured 0.0196 vs
+        uniform's 0.0200) because a truncated normal's density is monotone
+        toward each bound.
+
+        `raw_scales` holds the probe's per-element 0.5-nat step (ptde._probe_scales)
+        in raw units; it is converted to a physical half-width through this
+        parameter's own transform.  The probe scale is used rather than
+        init_scale because it measures the ACTUAL local posterior width
+        including the likelihood -- for a flat parameter it lands at 0.304*span
+        independent of init_scale, which is exactly what makes the flat case
+        come out uniform.
+
+        Elements without a finite [lower, upper] pair are not logit-transformed
+        (their raw -> physical map is linear and unbounded), so they keep plain
+        Gaussian jitter; build_pymc's soft barriers handle any one-sided bound.
+        """
+        from scipy.stats import truncnorm
+
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        out = {}
+        for key, cval in center.items():
+            name = key[:-len("_raw")] if key.endswith("_raw") else key
+            par = lookup.get(name)
+            tf = getattr(par, "_raw_transform", None) if par is not None else None
+            shape = np.shape(cval)
+            c = np.asarray(cval, dtype=float).reshape(-1)
+            sc = np.asarray(raw_scales[key], dtype=float).reshape(-1)
+
+            if tf is None or len(tf["sampled_idx"]) != c.size:
+                # No frozen transform (or a shape we cannot line up): fall back
+                # to the historical raw-space jitter.
+                out[key] = np.asarray(cval, dtype=float) + (
+                    factor * np.asarray(raw_scales[key], dtype=float)
+                    * rng.standard_normal(shape))
+                continue
+
+            idx = tf["sampled_idx"]
+            # Physical center, and the physical half-width spanned by one probe
+            # scale either side of it -- measured through the real transform
+            # rather than linearized, since the point is that it is nonlinear.
+            p0 = par.phys_from_raw(c)
+            p_hi = par.phys_from_raw(c + sc)
+            p_lo = par.phys_from_raw(c - sc)
+
+            new_phys = np.array(p0, dtype=float, copy=True)
+            for j, i in enumerate(idx):
+                half = 0.5 * abs(p_hi[i] - p_lo[i])
+                s = factor * half
+                if not np.isfinite(s) or s <= 0:
+                    continue          # degenerate scale: start at the seed
+                if not tf["use_logit"][i]:
+                    new_phys[i] = p0[i] + s * rng.standard_normal()
+                    continue
+                lower, upper = tf["lowers"][i], tf["uppers"][i]
+                a, b = (lower - p0[i]) / s, (upper - p0[i]) / s
+                new_phys[i] = truncnorm.rvs(a, b, loc=p0[i], scale=s,
+                                            random_state=rng)
+
+            raw_vec = par.raw_from_initval(new_phys)
+            out[key] = np.asarray(raw_vec, dtype=float).reshape(shape)
+        return out
+
     def get_raw_starts(self, model):
         """Multi-seed variant of get_raw_start (P4).
 

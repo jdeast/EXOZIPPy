@@ -197,7 +197,7 @@ def ptde_async_sample(
             else:
                 raw_starts, seed_indices = [raw_start], [0]
         t1_starts, chain_seed_index = _make_starts(
-            n_chains, raw_starts, logp_fn, rng, seed_indices)
+            n_chains, raw_starts, logp_fn, rng, seed_indices, system=system)
 
     if plot_prefix is not None:
         logger.info("Generating ensemble start plots...")

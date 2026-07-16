@@ -104,49 +104,134 @@ def _geometric_ladder(n_temps, T_max):
     return T_max ** (np.arange(n_temps) / (n_temps - 1))
 
 
-def _probe_scales(raw_start, logp_fn):
-    """Adaptive probe: find per-element proposal scales where one step costs ~0.5 nats.
+# _probe_scales step search.  target = 0.5 nats (dlogp=0.5 <-> dchi2=1, the
+# EXOFASTv2 convention); for a locally Gaussian posterior that step IS the
+# 1-sigma width along the element, which is what _make_starts wants in order to
+# disperse chains across the posterior rather than on top of each other.
+_PROBE_TARGET_DELTA = 0.5
+_PROBE_MAX_STEP = 1.0e3     # raw units; beyond this a direction is "flat"
+_PROBE_MIN_STEP = 1.0e-8    # raw units; floor on a returned step
+_PROBE_RTOL = 0.05          # accept a step whose drop is within 5% of target
+_PROBE_MAX_BISECT = 40
+_PROBE_FLAT_SCALE = 1.0     # fallback when neither direction reaches target;
+                            # raw variables are N(0,1) by construction, so 1.0
+                            # is the natural unit for a direction logp ignores.
 
-    Matches EXOFASTv2's exofast_getmcmcscale: bisects probe magnitude (both signs)
-    until Δlogp ≈ 0.5 (= Δχ²=1).  Falls back to 0.1 when no signal is found,
-    avoiding the old fixed-probe default of 1.0 that sent proposals outside tight
-    priors and caused ~1000 retries per chain.
+
+def _probe_step_1d(eval_delta, sign):
+    """Step magnitude in one direction whose logp drop reaches the target.
+
+    `eval_delta(step)` returns logp(start) - logp(start + step), so it is 0 at
+    step=0 and grows as the step walks logp downhill.  Returns None when the
+    direction is flat out to _PROBE_MAX_STEP.
+
+    Brackets by geometric growth, then bisects.  delta may start NEGATIVE --
+    raw_start is initval, not the MAP, so one direction is typically uphill --
+    and growing through the turnover still lands on the step where logp has
+    fallen `target` below the START, which is the quantity being asked for.
+    """
+    target = _PROBE_TARGET_DELTA
+
+    # BRACKET: lo always has delta < target (delta(0) == 0); hi is the first
+    # step at/above target, or non-finite (a hard prior wall counts as "past").
+    lo, hi = 0.0, None
+    step = 1.0
+    while step <= _PROBE_MAX_STEP:
+        d = eval_delta(sign * step)
+        if (not np.isfinite(d)) or d >= target:
+            hi = step
+            break
+        lo = step
+        step *= 2.0
+    if hi is None:
+        return None
+
+    # BISECT.
+    for _ in range(_PROBE_MAX_BISECT):
+        mid = 0.5 * (lo + hi)
+        d = eval_delta(sign * mid)
+        if np.isfinite(d) and abs(d - target) <= _PROBE_RTOL * target:
+            return mid
+        if (not np.isfinite(d)) or d > target:
+            hi = mid
+        else:
+            lo = mid
+        if (hi - lo) < _PROBE_MIN_STEP:
+            break
+    return max(0.5 * (lo + hi), _PROBE_MIN_STEP)
+
+
+def _probe_scales(raw_start, logp_fn):
+    """Adaptive probe: per-element proposal scale whose step costs ~0.5 nats.
+
+    Follows EXOFASTv2's exofast_getmcmcscale in searching each sign
+    independently for the step where logp falls _PROBE_TARGET_DELTA below the
+    start, but takes the NEARER of the two contours rather than their average
+    (a single direction is used when the other is flat; _PROBE_FLAT_SCALE when
+    both are).  EXOFASTv2 averages because it probes from an AMOEBA best fit,
+    where the two directions are near-symmetric.  Our seeds are not at the
+    mode -- an mkprior seed for examples/ogle0383 probes from ~41 nats below
+    the MAP -- and off the mode the two directions are wildly asymmetric: the
+    uphill one only turns over on the far side of the mode, so averaging it in
+    inflates the scale (u1_raw: 1.2 nearer contour, ~5.7 far side, 3.4
+    averaged).  Chains then jitter past the logit transform's saturation walls
+    and start pinned at the bounds, which is the pathology this scale exists to
+    avoid.  The nearer contour is a well-defined local width, is exactly sigma
+    at a mode (where both contours coincide), and only ever errs tight -- which
+    _make_starts' `factor` multiplier and DE's own ensemble expansion absorb.
+
+    The step is found by bracket + bisect.  An earlier version instead walked a
+    fixed probe ladder [0.003 ... 2.0], took the FIRST magnitude registering any
+    drop at all, and extrapolated with a quadratic assumption,
+    scale = |dp| * sqrt(target/delta).  That assumption only holds AT a maximum.
+    raw_start is initval, not the MAP, so logp is generally LINEAR in a probe
+    around it -- doubling the probe doubles the drop (measured ratio 2.00, not
+    the 4.0 a quadratic implies) -- and for a linear response the formula
+    collapses to sqrt(0.5*|dp|/g), which never converges on the true step; it
+    just tracks the smallest rung of the ladder.  On examples/ogle0383 that
+    returned 0.048 where the true 0.5-nat step is 0.566, under-dispersing every
+    chain by 12-18x and leaving the ensemble still equilibrating well into the
+    recorded draws.
     """
     map_lp = float(logp_fn(raw_start))
-    target_delta = 0.5   # nats; Δlogp=0.5 ↔ Δχ²=1 (EXOFASTv2 convention)
+
+    def _delta_at(key, i, step):
+        probe = {k: v.copy() for k, v in raw_start.items()}
+        probe[key].flat[i] += step
+        return map_lp - float(logp_fn(probe))
 
     scales = {}
     tight = []
+    flat = []
     for key, val in raw_start.items():
         n = val.size
-        s = np.full(n, 0.1)   # conservative fallback (old default 1.0 → many retries)
+        s = np.full(n, _PROBE_FLAT_SCALE)
         for i in range(n):
-            found = False
-            for probe_mag in [0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 2.0]:
-                if found:
-                    break
-                for sign in (1.0, -1.0):
-                    dp = sign * probe_mag
-                    probe = {k: v.copy() for k, v in raw_start.items()}
-                    probe[key] = probe[key].copy()
-                    probe[key].flat[i] += dp
-                    plp = float(logp_fn(probe))
-                    delta = map_lp - plp
-                    if delta > 0 and np.isfinite(delta):
-                        # Quadratic approx: scale² × (delta/dp²) = target_delta
-                        s.flat[i] = min(1.0, abs(dp) * np.sqrt(target_delta / delta))
-                        found = True
-                        break
+            def eval_delta(step, key=key, i=i):
+                return _delta_at(key, i, step)
+
+            steps = [_probe_step_1d(eval_delta, sign) for sign in (1.0, -1.0)]
+            steps = [x for x in steps if x is not None]
+            if steps:
+                s.flat[i] = min(float(np.min(steps)), _PROBE_MAX_STEP)
+            else:
+                flat.append(f"{key}[{i}]")
             if s.flat[i] < 0.5:
                 tight.append(f"{key}[{i}]: scale={s.flat[i]:.3g}")
         scales[key] = s.reshape(val.shape)
 
     if tight:
         logger.info("PTDE probe: tightly-constrained params: " + "; ".join(tight))
+    if flat:
+        logger.info(
+            f"PTDE probe: logp flat to within {_PROBE_TARGET_DELTA} nats out to "
+            f"+/-{_PROBE_MAX_STEP:g} for: " + "; ".join(flat)
+            + f" -- using scale={_PROBE_FLAT_SCALE}")
     return map_lp, scales
 
 
-def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None):
+def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None,
+                 system=None):
     """Generate n_chains starting points near one or more seeds (P4).
 
     `raw_starts` is a single raw-start dict (legacy) or a LIST of K raw-start
@@ -159,6 +244,14 @@ def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None):
     threshold), and apply exponential decay only when proposals hit hard prior
     boundaries (lp=-inf).  Raises RuntimeError if a chain cannot be initialized
     within max_iter retries.
+
+    The scatter is delegated to `system.jitter_raw_start` when the system
+    provides it, which draws in physical space from a Gaussian truncated to
+    each parameter's bounds.  Scattering in raw space instead saturates the
+    logit transform and starts a large fraction of chains pinned at the bounds
+    (31.5% within 1% of a bound for a parameter whose logp is flat out to them,
+    against uniform's 2.0%); see System.jitter_raw_start.  Systems without that
+    method (minimal test stubs) fall back to the historical raw-space jitter.
 
     Returns (starts, chain_seed_index) where chain_seed_index[j] is the original
     seed index that chain j was drawn from (for trace-attr provenance).
@@ -175,8 +268,10 @@ def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None):
     n_params = sum(v.size for v in raw_starts[0].values())
     factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
     max_iter = 1000
+    _jitter = getattr(system, "jitter_raw_start", None) if system is not None else None
     logger.info(
-        f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}"
+        f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}, "
+        f"jitter={'physical (truncated)' if _jitter else 'raw (fallback)'}"
         + (f", {K} seeds (round-robin over {n_chains} chains)" if K > 1 else "")
     )
 
@@ -201,8 +296,11 @@ def _make_starts(n_chains, raw_starts, logp_fn, rng, seed_indices=None):
                 f"lp; jittering to find a finite start.")
         for niter in range(max_iter):
             eff = factor / np.exp(niter / 1000.0)
-            prop = {k: v + eff * scales[k] * rng.standard_normal(v.shape)
-                    for k, v in center.items()}
+            if _jitter is not None:
+                prop = _jitter(center, scales, eff, rng)
+            else:
+                prop = {k: v + eff * scales[k] * rng.standard_normal(v.shape)
+                        for k, v in center.items()}
             lp = float(logp_fn(prop))
             if np.isfinite(lp):
                 starts.append(prop)
@@ -685,7 +783,7 @@ def ptde_sample(
             else:
                 raw_starts, seed_indices = [raw_start], [0]
         t1_starts, chain_seed_index = _make_starts(
-            n_chains, raw_starts, logp_fn, rng, seed_indices)
+            n_chains, raw_starts, logp_fn, rng, seed_indices, system=system)
 
     # ensemble start plots (T=1 starts only; raw→physical via the batched fn)
     if plot_prefix is not None:
