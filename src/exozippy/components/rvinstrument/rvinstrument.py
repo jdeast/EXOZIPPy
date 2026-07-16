@@ -187,11 +187,20 @@ class RVInstrument(Component):
 
             # The matrix of shape (N_times, N_member_orbits)
             rv_matrix_node = orbits.get_radial_velocity(t_input, K_vec, omap)
+            rv_full_node = pt.sum(rv_matrix_node, axis=1)
+
+            # Retain the symbolic nodes and their time input so plot_data
+            # can (a) derive param_deps by walking the graph and (b) hand
+            # G5 the symbolic tensors behind the model traces for its own
+            # compiled re-evaluation. Not needed by the CLI plot() path.
+            self._rv_t_input = t_input
+            self._rv_matrix_node = rv_matrix_node
+            self._rv_full_node = rv_full_node
 
             # Save them to SELF, not the system!
             self._compiled_full_rv = pytensor.function(
                 inputs=[t_input] + param_symbols,
-                outputs=pt.sum(rv_matrix_node, axis=1),
+                outputs=rv_full_node,
                 on_unused_input='ignore'
             )
 
@@ -200,6 +209,70 @@ class RVInstrument(Component):
                 outputs=rv_matrix_node,
                 on_unused_input='ignore'
             )
+
+    # ------------------------------------------------------------------
+    # Shared data preparation. Both the matplotlib plot() path and the
+    # GUI plot_data() path go through these helpers, so the two paths
+    # always draw the exact same arrays (see plotspec.PlotSpec).
+    # ------------------------------------------------------------------
+    def _rv_factor(self):
+        """Internal-units -> user-units (m/s) conversion for RV values.
+
+        Uses the gamma Parameter's factor once the model is built; falls
+        back to the raw solRad/d -> m/s conversion so plot_data works in
+        data-only mode (point=None), before any Parameter exists.
+        """
+        gamma = getattr(self, "gamma", None)
+        if gamma is not None and hasattr(gamma, "_get_conversion_factors"):
+            return gamma._get_conversion_factors()[0]
+        return (u.solRad / u.d).to(u.m / u.s)
+
+    def _unphased_grid(self):
+        """Smooth 64-bit time grid spanning the data (for model curves)."""
+        return np.linspace(self.time.min(), self.time.max(), 2000).astype(np.float64)
+
+    def _eval_unphased_model(self, system, point):
+        """Summed RV model on the pretty grid, returned in m/s."""
+        t_pretty = self._unphased_grid()
+        param_values = self._point_to_plot_params(point, system)
+        y_model = self._compiled_full_rv(t_pretty, *param_values)
+        if y_model.ndim > 1:
+            y_model = np.squeeze(y_model)
+        return t_pretty, y_model * self._rv_factor()
+
+    def _instrument_gamma(self, point, i):
+        """The reference-point gamma for instrument i, in internal units."""
+        gamma_vals = np.atleast_1d(point.get(self.gamma.label, 0.0))
+        return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
+
+    def _phased_arrays(self, system, point, col, o_idx):
+        """
+        Phase grid, isolated model curve, and the per-observation
+        background (all other member orbits' signal) for one member
+        orbit -- shared by plot_phased() and plot_data().
+        """
+        factor = self._rv_factor()
+        P_ref = float(np.atleast_1d(point.get(system.orbit.period.label))[o_idx])
+        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[o_idx])
+
+        t_model = np.linspace(tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000).astype(np.float64)
+        phase_model = np.mod((t_model - tc_ref) / P_ref + 0.25, 1.0)
+        sort_m = np.argsort(phase_model)
+
+        param_values = self._point_to_plot_params(point, system)
+        rv_matrix = self._compiled_rv_matrix(t_model, *param_values)
+        y_orbit = rv_matrix[:, col]
+
+        data_rv_matrix = self._compiled_rv_matrix(self.time, *param_values)
+        other_mask = np.ones(len(self._plot_orbit_map), dtype=bool)
+        other_mask[col] = False
+        other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
+
+        return {
+            "P_ref": P_ref, "tc_ref": tc_ref, "factor": factor,
+            "phase_model": phase_model[sort_m], "y_model": y_orbit[sort_m] * factor,
+            "other_signals": other_signals,
+        }
 
     def plot(self, system, points, filename_prefix="debug"):
         self.plot_unphased(system, points, filename_prefix=filename_prefix)
@@ -217,38 +290,19 @@ class RVInstrument(Component):
             logger.warning("No points provided for plotting.")
             return
 
-        t_min, t_max = self.time.min(), self.time.max()
-        # Create a smooth time grid (64-bit for the C-compiled function)
-        t_pretty = np.linspace(t_min, t_max, 2000).astype(np.float64)
-
         plt.figure(figsize=(12, 6))
 
-        factor = self.gamma._get_conversion_factors()[0]
+        factor = self._rv_factor()
 
         # 1. Plot the Model Ensemble (The Spaghetti)
         for idx, point in enumerate(points):
-            param_values = []
-            for p in system.plot_params:
-                # Grab the physical value from the point
-                val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
-
-                # Match the exact dimensions PyTensor expects
-                if getattr(p.value, "ndim", 0) == 0:
-                    param_values.append(float(np.squeeze(val)))
-                else:
-                    param_values.append(np.atleast_1d(val))
-
             try:
-                # Evaluate the compiled graph (Summed RV across all planets)
-                y_model = self._compiled_full_rv(t_pretty, *param_values)
-
-                # Squeeze to ensure it's (2000,) for matplotlib
-                if y_model.ndim > 1:
-                    y_model = np.squeeze(y_model)
+                # Shared prep: summed RV across all orbits, already in m/s
+                t_pretty, y_model = self._eval_unphased_model(system, point)
 
                 # Transparency: Solid for one point, faint for spaghetti
                 alpha = 0.8 if len(points) == 1 else 0.1
-                plt.plot(t_pretty, y_model*factor, 'r-', lw=1.5, alpha=alpha, zorder=2)
+                plt.plot(t_pretty, y_model, 'r-', lw=1.5, alpha=alpha, zorder=2)
             except Exception as e:
                 logger.warning(f"Failed to evaluate model for draw {idx}: {e}")
                 continue
@@ -260,8 +314,7 @@ class RVInstrument(Component):
             mask = (self.inst_map == i)
 
             # Extract Gamma for this specific instrument
-            gamma_vals = np.atleast_1d(ref_point.get(self.gamma.label, 0.0))
-            g = gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
+            g = self._instrument_gamma(ref_point, i)
 
             plt.errorbar(self.time[mask], (self.rv[mask] - g)*factor,
                          yerr=self.err[mask]*factor, fmt='o', label=self.names[i],
@@ -285,8 +338,6 @@ class RVInstrument(Component):
         """
         if isinstance(points, dict): points = [points]
 
-        # _compiled_rv_matrix returns (N_times, N_member_orbits)
-        compiled_matrix = self._compiled_rv_matrix
         omap = self._plot_orbit_map
 
         # Iterate over the member orbits (columns of the compiled matrix)
@@ -296,64 +347,25 @@ class RVInstrument(Component):
             # 1. Setup Phase Grid using the reference point (first draw)
             ref_point = points[0]
 
-            # Accessing the vectorized period and tc for this orbit index
-            P_vals = np.atleast_1d(ref_point.get(system.orbit.period.label))
-            tc_vals = np.atleast_1d(ref_point.get(system.orbit.tc.label))
-
-            P_ref = float(P_vals[o_idx])
-            tc_ref = float(tc_vals[o_idx])
-
-            #P_ref = float(np.atleast_1d(ref_point[system.orbits.period.label])[p_idx])
-            #tc_ref = float(np.atleast_1d(ref_point[system.orbits.tc.label])[p_idx])
-
-            t_model = np.linspace(tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000).astype(np.float64)
-            # Map time to [0, 1] phase, centering conjunction at 0.25
-            phase_model = np.mod((t_model - tc_ref) / P_ref + 0.25, 1.0)
-            sort_m = np.argsort(phase_model)
-
-            factor = self.gamma._get_conversion_factors()[0]
+            # Shared prep (phase grid, isolated model, per-obs background)
+            prep = self._phased_arrays(system, ref_point, col, o_idx)
+            P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
+            factor = prep["factor"]
 
             # 2. Plot Model Spaghetti
             for idx, point in enumerate(points):
-                param_values = []
-                for p in system.plot_params:
-                    val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
-                    if getattr(p.value, "ndim", 0) == 0:
-                        param_values.append(float(np.squeeze(val)))
-                    else:
-                        param_values.append(np.atleast_1d(val))
-
-                # Get the (N_times, N_member_orbits) matrix
-                rv_matrix = compiled_matrix(t_model, *param_values)
-                y_orbit = rv_matrix[:, col]
-
+                p_prep = prep if point is ref_point else self._phased_arrays(system, point, col, o_idx)
                 alpha = 0.8 if len(points) == 1 else 0.1
-                plt.plot(phase_model[sort_m], y_orbit[sort_m]*factor, 'r-', alpha=alpha, lw=1, zorder=2)
+                plt.plot(p_prep["phase_model"], p_prep["y_model"], 'r-', alpha=alpha, lw=1, zorder=2)
 
             # 3. Plot Phased Data (Isolating the planet)
-            clean_params = []
-            for p in system.plot_params:
-                val = np.asarray(ref_point.get(p.label, p.initval), dtype=np.float64)
-                if getattr(p.value, "ndim", 0) == 0:
-                    clean_params.append(float(np.squeeze(val)))
-                else:
-                    clean_params.append(np.atleast_1d(val))
-
-            # Get signals of ALL member orbits at observation times
-            data_rv_matrix = compiled_matrix(self.time, *clean_params)
-
-            # Mask out the target orbit to get the "background" RV
-            other_mask = np.ones(len(omap), dtype=bool)
-            other_mask[col] = False
-            other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
+            other_signals = prep["other_signals"]
 
             for i in range(self.n_elements):
                 mask = (self.inst_map == i)
 
                 # Subtract Gamma and other planet signals
-                gamma_vals = np.atleast_1d(ref_point.get(self.gamma.label, 0.0))
-                g = gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
-
+                g = self._instrument_gamma(ref_point, i)
                 cleaned_rv = self.rv[mask] - g - other_signals[mask]
 
                 # Phase the actual data points
@@ -372,3 +384,73 @@ class RVInstrument(Component):
             pdf_path = f"{filename_prefix}_RV_phased_{system.orbit.names[o_idx]}.pdf"
             plt.savefig(pdf_path)
             plt.close()
+
+    def plot_data(self, system, point=None):
+        """
+        GUI plot specs for the RV instrument: one unphased RV-vs-time
+        chart plus one phased chart per member orbit. With point=None only
+        the observed data traces are returned (raw preview, no model);
+        with a point, model curves are added via the shared prep helpers.
+        See Component.plot_data and plotspec.PlotSpec.
+        """
+        from exozippy.plotspec import PlotSpec, Trace
+
+        factor = self._rv_factor()
+        specs = []
+
+        # ---- Unphased: RV vs time -------------------------------------
+        traces = []
+        model_deps = []
+        if point is not None:
+            t_pretty, y_model = self._eval_unphased_model(system, point)
+            deps = self._model_trace_param_deps(getattr(self, "_rv_full_node", None), system)
+            model_deps = deps
+            traces.append(Trace(name="model", role="model", kind="line",
+                                x=t_pretty, y=y_model,
+                                node=getattr(self, "_rv_full_node", None)))
+        for i in range(self.n_elements):
+            mask = (self.inst_map == i)
+            # gamma offset only when a point supplies it; raw data otherwise
+            g = self._instrument_gamma(point, i) if point is not None else 0.0
+            traces.append(Trace(
+                name=self.names[i], role="data", kind="scatter",
+                x=self.time[mask], y=(self.rv[mask] - g) * factor,
+                yerr=self.err[mask] * factor))
+        specs.append(PlotSpec(
+            id=f"{self.prefix}.unphased",
+            component={"yaml_key": self.prefix, "instance": None},
+            title=f"Unphased RV: {getattr(system, 'name', '')}",
+            xlabel="Time [BJD]", ylabel="Relative RV [m/s]",
+            traces=traces, param_deps=model_deps,
+            meta={"phase_folded": False}))
+
+        # ---- Phased: one chart per member orbit (needs a model) -------
+        omap = getattr(self, "_plot_orbit_map", None)
+        if point is not None and omap is not None:
+            deps = self._model_trace_param_deps(getattr(self, "_rv_matrix_node", None), system)
+            for col, o_idx in enumerate(omap):
+                prep = self._phased_arrays(system, point, col, o_idx)
+                P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
+                otraces = [Trace(name="model", role="model", kind="line",
+                                 x=prep["phase_model"], y=prep["y_model"],
+                                 node=getattr(self, "_rv_matrix_node", None))]
+                for i in range(self.n_elements):
+                    mask = (self.inst_map == i)
+                    g = self._instrument_gamma(point, i)
+                    cleaned = (self.rv[mask] - g - prep["other_signals"][mask]) * factor
+                    data_phases = np.mod((self.time[mask] - tc_ref) / P_ref + 0.25, 1.0)
+                    otraces.append(Trace(
+                        name=self.names[i], role="data", kind="scatter",
+                        x=data_phases, y=cleaned, yerr=self.err[mask] * factor))
+                oname = system.orbit.names[o_idx]
+                specs.append(PlotSpec(
+                    id=f"{self.prefix}.phased.{oname}",
+                    component={"yaml_key": self.prefix, "instance": None},
+                    title=f"Phased RV: {oname}",
+                    xlabel=f"Phase (P = {P_ref:.5f} d, Tc at 0.25)",
+                    ylabel="Isolated RV [m/s]",
+                    traces=otraces, param_deps=deps,
+                    meta={"phase_folded": True, "orbit": oname,
+                          "period": P_ref, "tc": tc_ref}))
+
+        return specs
