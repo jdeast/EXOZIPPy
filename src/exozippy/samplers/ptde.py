@@ -459,6 +459,22 @@ def _convergence_check_schedule(min_draws=100, growth=0.9):
         j += 1
 
 
+def _safe_progress(progress_callback, state):
+    """Invoke an optional GUI progress hook without ever letting it break the run.
+
+    The callback (see exozippy.gui.status.GuiReporter.progress_callback) writes
+    monitoring artifacts to disk; a filesystem hiccup there must never abort
+    sampling, so any exception is logged and swallowed.
+    """
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(state)
+    except Exception:
+        logger.warning("PTDE: progress_callback raised; continuing sampling",
+                       exc_info=True)
+
+
 def _check_convergence(stored_raw, n_draws, min_ess, max_rhat, stored_lp=None):
     """Live early-stop test on the first ``n_draws`` stored T=1 draws.
 
@@ -514,6 +530,7 @@ def ptde_sample(
     maxtime=None,
     eval_timeout=None,
     lp_plausibility_ceiling=None,
+    progress_callback=None,
 ):
     """
     Parallel Tempering + Differential Evolution sampler.
@@ -592,6 +609,13 @@ def ptde_sample(
                term), not physics. None -> outputs.modes.DEFAULT_LP_ABS_MAX
                (the same constant identify_modes uses to reject runaway
                draws post-hoc).
+    progress_callback : callable | None  — optional GUI progress hook invoked
+               at each geometric convergence check (bounded overhead) with a
+               state dict {n_draws, n_chains, max_rhat, min_ess, elapsed_s,
+               stop_reason?} plus, for snapshot writers, stored_raw/stored_lp/
+               raw_var_names referencing the live T=1 draw buffers. Exceptions
+               raised by the callback are logged and swallowed (see
+               _safe_progress), so a monitoring failure never aborts the fit.
 
     Returns
     -------
@@ -1084,6 +1108,20 @@ def ptde_sample(
                 logger.info(
                     f"PTDE convergence @ {actual_draws} draws: "
                     f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")
+                # GUI progress hook: fires at each geometric check, so overhead
+                # stays bounded. Passes the live T=1 draw buffers by reference
+                # so a snapshot writer can downsample them itself.
+                _safe_progress(progress_callback, {
+                    "n_draws": actual_draws,
+                    "n_chains": n_chains,
+                    "max_rhat": rhat_val,
+                    "min_ess": ess_val,
+                    "elapsed_s": time.time() - start_time,
+                    "stop_reason": "converged" if converged else None,
+                    "stored_raw": stored_raw,
+                    "stored_lp": stored_lp,
+                    "raw_var_names": model_keys,
+                })
                 _next_check[0] = next(_check_gen, None)
                 if converged:
                     logger.info("PTDE: convergence criterion met, wrapping up")

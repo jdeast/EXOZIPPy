@@ -72,6 +72,7 @@ from exozippy.samplers.ptde import (
     _make_starts,
     _pick_two,
     _record_round_trips,
+    _safe_progress,
     _worker_init,
 )
 
@@ -105,6 +106,7 @@ def ptde_async_sample(
     maxtime=None,
     eval_timeout=None,
     collect_rung_timing=False,
+    progress_callback=None,
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -130,6 +132,11 @@ def ptde_async_sample(
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
                roughly 20 adaptations over tune, matching ptde.py's cadence.
+    progress_callback : callable | None -- optional GUI progress hook; see
+               exozippy.samplers.ptde.ptde_sample for the state-dict contract.
+               Invoked at each geometric convergence check; exceptions are
+               logged and swallowed (_safe_progress) so it can never abort the
+               fit.
 
     Returns
     -------
@@ -404,6 +411,19 @@ def ptde_async_sample(
             logger.info(
                 f"PTDE-async convergence @ min {n_check} draws/chain: "
                 f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")
+            # GUI progress hook (bounded: fires once per geometric check).
+            # Passes the live T=1 draw buffers by reference for snapshotting.
+            _safe_progress(progress_callback, {
+                "n_draws": n_check,
+                "n_chains": n_chains,
+                "max_rhat": rhat_val,
+                "min_ess": ess_val,
+                "elapsed_s": time.time() - start_time,
+                "stop_reason": "converged" if converged else None,
+                "stored_raw": stored_raw,
+                "stored_lp": stored_lp,
+                "raw_var_names": model_keys,
+            })
             _next_check[0] = next(_check_gen, None)
             if converged:
                 stopping[0] = True

@@ -72,6 +72,36 @@ KNOWN_SAMPLER_KEYS = {
 
 
 def run_fit(config):
+    """The main library entry point to run an orbital fit.
+
+    Thin wrapper around ``_run_fit`` that guarantees the GUI status file (when
+    enabled via config["gui"]["snapshot"] or EXOZIPPY_GUI_SNAPSHOT=1) is left
+    on a terminal phase on EVERY exit path -- a normal completion writes
+    "done", a Ctrl+C / SIGTERM graceful abort writes "stopped", any other
+    exception writes "error". A monitoring GUI therefore never sees the file
+    stranded on a non-terminal phase after the process is gone. The reporter
+    is a no-op when the flag is off, so ordinary non-GUI runs write nothing
+    extra.
+    """
+    from exozippy.gui.status import GuiReporter
+    gui = GuiReporter.from_config(config)
+    gui.phase("preparing")
+    try:
+        result = _run_fit(config, gui)
+    except KeyboardInterrupt:
+        # PTDE/NUTS raise KeyboardInterrupt for a during-tune or second-signal
+        # abort; a graceful during-draws stop instead returns partial draws and
+        # completes normally (-> "done" below).
+        gui.terminal("stopped")
+        raise
+    except BaseException:
+        gui.terminal("error")
+        raise
+    gui.terminal("done")
+    return result
+
+
+def _run_fit(config, gui):
     """
     The main library entry point to run an orbital fit.
     """
@@ -132,6 +162,7 @@ def run_fit(config):
     # 3. Build the stellar system into a PyMC Graph
     system = System(config)
     system.prepare() # this triggers I/O
+    gui.phase("compiling")   # build_model + get_mcmc_init compile the graph
     model = system.build_model()
 
     # Aggregate sampler requirements from all active components.
@@ -196,6 +227,7 @@ def run_fit(config):
             idata = az.from_netcdf(trace_path)
         else:
             # do the sampling and save the results
+            gui.phase("sampling")
             nuts_scales = np.array(nuts_scales).flatten()
             if method in ("numpyro", "blackjax", "nutpie"):
                 try:
@@ -225,6 +257,7 @@ def run_fit(config):
                     rung_thin_start=rung_thin_start,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
+                    progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
                 # EXPERIMENTAL (hpc_optimization.txt PROMPT 13): a separate,
@@ -250,6 +283,7 @@ def run_fit(config):
                     eval_timeout=eval_timeout,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
+                    progress_callback=gui.progress_callback,
                 )
             elif method in ("numpyro", "blackjax"):
                 import jax
@@ -343,6 +377,9 @@ def run_fit(config):
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
         #loglike = pm.compute_log_likelihood(idata)
+
+    # Sampling is done; the rest is post-processing + report/plot output.
+    gui.phase("writing")
 
     # Post-hoc burn-in + stuck-chain trimming (samplers/convergence.py). We
     # keep the FULL, untrimmed trace on disk (idata.to_netcdf above / the
