@@ -200,6 +200,22 @@ class ConfigManager:
         self.dependencies = {}
         self.symbolic_blacklist = set()
 
+        # Structured diagnostics collected by the relaxation engine (e.g.
+        # over-constrained contradictions).  Each entry is a dict
+        # {severity, message, param_paths}.  Consumed by the solve/validate
+        # API (solve_api.py) without parsing log text.  Populated only when
+        # the engine detects a contradiction; empty for a clean solve.
+        self.diagnostics = []
+
+        # Snapshots of the last relaxation solve (seed 0, which is solved
+        # last in finalize_user_params).  Exposed via export_solution() so a
+        # caller can report each parameter's solved value, scale, and
+        # provenance without rebuilding the PyMC model.
+        self._last_provenance = {}        # internal_path -> rank
+        self._last_scale_provenance = {}  # internal_path -> rank
+        self._last_resolved = {}          # internal_path -> internal value
+        self._last_solved_by = {}         # internal_path -> relation string
+
         components_dir = Path(__file__).parent / "components"
 
         for py_file in components_dir.rglob("symbolic_physics.py"):
@@ -749,6 +765,11 @@ class ConfigManager:
         """
         Called by the System object AFTER all components have registered their hints.
         """
+        # Reset structured diagnostics for this solve.  resolve_and_validate
+        # runs once per seed and appends contradictions here; _record_diagnostic
+        # dedupes so repeated seeds do not multiply identical entries.
+        self.diagnostics = []
+
         flat_params = {}
         name_to_index = {}
 
@@ -1073,11 +1094,162 @@ class ConfigManager:
                 f"Check 'defaults.yaml' or provide an 'init_scale' in your config file."
             )
 
+    def _record_diagnostic(self, severity, message, param_paths):
+        """Append a structured diagnostic (deduped) for the solve/validate API.
+
+        severity is one of "error" | "warning" | "info"; param_paths is a list
+        of the parameter paths involved.  Duplicate entries (same severity,
+        message, and paths) -- e.g. the same contradiction seen once per seed
+        -- collapse to a single record.
+        """
+        entry = {
+            "severity": severity,
+            "message": message,
+            "param_paths": list(param_paths),
+        }
+        if entry not in self.diagnostics:
+            self.diagnostics.append(entry)
+
+    def _provenance_label(self, rank):
+        """Map a numeric provenance rank to a coarse source label."""
+        if rank is None:
+            return "default"
+        if rank >= RANK_USER:
+            return "user"
+        # Microlensing distance hint (rank 30) and data-derived estimates
+        # (RANK_DERIVED_DATA = 60) both come from the data channel.
+        if rank == RANK_DERIVED_DATA or rank == 30:
+            return "data"
+        if rank > RANK_DEFAULT:
+            return "solved"
+        return "default"
+
+    def export_solution(self):
+        """Export the resolved parameter solution as JSON-friendly dicts.
+
+        Returns a dict with:
+          - "parameters": {user_path: {value, unit, internal_unit, lower,
+            upper, init_scale, sigma, mu, fixed, derived, provenance}} where
+            provenance is {rank, label, relation}.  All numeric fields are in
+            the parameter's user unit (as reported by resolve()).
+          - "seeds": a list of {user_path: value} start points, present only
+            when multi-seed sampling produced more than one seed.
+
+        Reads only in-memory state left behind by finalize_user_params; it does
+        NOT build the PyMC model.  Must be called after System.prepare().
+
+        Note: the relaxation engine has a known cross-build nondeterminism (two
+        identical prepares may pick different derived bounds), so the exported
+        bounds/values for solved quantities are one valid solution, not a
+        canonical one.  See the solve_api module docstring.
+        """
+        def _clean(x):
+            if x is None:
+                return None
+            try:
+                xf = float(x)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(xf):
+                return None
+            return xf
+
+        # Build an index -> name map per component for readable paths.
+        idx_to_name = {}
+        for comp_key, entries in (self.system_config or {}).items():
+            if isinstance(entries, list):
+                for i, c in enumerate(entries):
+                    if isinstance(c, dict) and "name" in c:
+                        idx_to_name[(comp_key, str(i))] = str(c["name"])
+
+        def _display_path(internal_path):
+            parts = internal_path.split('.')
+            if len(parts) == 3 and (parts[0], parts[1]) in idx_to_name:
+                return f"{parts[0]}.{idx_to_name[(parts[0], parts[1])]}.{parts[2]}"
+            return internal_path
+
+        parameters = {}
+        for internal_path in self.master_symbol_map:
+            parts = internal_path.split('.')
+            c_type = parts[0]
+            p_name = parts[-1]
+            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            cfg = self.resolve(c_type, p_name, element=el)
+
+            def _first(key):
+                arr = cfg.get(key)
+                if arr is None:
+                    return None
+                try:
+                    return _clean(np.atleast_1d(arr)[0])
+                except (IndexError, TypeError):
+                    return _clean(arr)
+
+            sigma = _first("sigma")
+            # Prefer the engine's solved value (index-form paths that match the
+            # symbol map exactly, in internal units) over resolve()'s initval:
+            # finalize injects derived initvals under the name-form path, which
+            # a nameless resolve() call cannot see.
+            if internal_path in self._last_resolved:
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=internal_path) or 1.0
+                value = _clean(self._last_resolved[internal_path] / factor)
+            else:
+                value = _first("initval")
+            derived = bool(cfg.get("expressions"))
+            # A parameter is fixed when it has a hardcoded value or sigma == 0.
+            fixed = (cfg.get("value") is not None) or (sigma is not None and sigma == 0)
+
+            rank = self._last_provenance.get(internal_path)
+            relation = self._last_solved_by.get(internal_path)
+            label = self._provenance_label(rank)
+
+            parameters[_display_path(internal_path)] = {
+                "value": value,
+                "unit": cfg.get("unit"),
+                "internal_unit": cfg.get("internal_unit"),
+                "lower": _first("lower"),
+                "upper": _first("upper"),
+                "init_scale": _first("init_scale"),
+                "sigma": sigma,
+                "mu": _first("mu"),
+                "fixed": bool(fixed),
+                "derived": derived,
+                "provenance": {
+                    "rank": rank,
+                    "label": label,
+                    "relation": relation if label == "solved" else None,
+                },
+            }
+
+        result = {"parameters": parameters}
+
+        # Multi-seed start points, converted to user units and readable paths.
+        if self.seed_resolved and len(self.seed_resolved) > 1:
+            seeds = []
+            for seed in self.seed_resolved:
+                seed_out = {}
+                for internal_path, internal_val in seed.items():
+                    parts = internal_path.split('.')
+                    c_type = parts[0]
+                    p_name = parts[-1]
+                    factor = self.get_conversion_factor(
+                        c_type, p_name, full_path=internal_path) or 1.0
+                    seed_out[_display_path(internal_path)] = _clean(
+                        internal_val / factor)
+                seeds.append(seed_out)
+            result["seeds"] = seeds
+
+        return result
+
     def resolve_and_validate_parameters(self, user_provided_params, tolerance=1e-3):
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
         provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
         resolved_scales = {}
         scale_provenance = {}
+        # Per-solve record of which relation last set each variable (seed 0's
+        # values win because it is solved last).  Reset each call.
+        self._last_solved_by = {}
 
         # 1. Initialize Default Armor (Rank 20)
         def to_scalar(val):
@@ -1319,6 +1491,13 @@ class ConfigManager:
         # (hints and user init_scale still win; see resolve()).
         self.propagated_scales = dict(resolved_scales)
 
+        # Snapshot provenance/scales/values for export_solution().  In the
+        # multi-seed loop seed 0 is solved last, so these end up reflecting the
+        # canonical seed-0 solution whose bounds/scales the model uses.
+        self._last_provenance = dict(provenance)
+        self._last_scale_provenance = dict(scale_provenance)
+        self._last_resolved = dict(resolved)
+
         return resolved
 
     def _run_standalone_solvers(self, resolved, provenance, tolerance,
@@ -1353,6 +1532,7 @@ class ConfigManager:
                     continue
                 resolved[path] = val
                 provenance[path] = RANK_DERIVED_MIXED
+                self._last_solved_by[path] = f"{lookup_key} (standalone solver)"
                 logger.debug(f"Updated {path} = {val:.4g} (standalone solver)")
 
     def _apply_directed_links(self, directed_links, resolved, provenance,
@@ -1487,6 +1667,13 @@ class ConfigManager:
                 f"Over-constrained: all variables in '{eq}' have user rank "
                 f"but equation is violated (error={error:.4g}). "
                 f"Leaving all user values unchanged.")
+            self._record_diagnostic(
+                "error",
+                f"Over-constrained relation '{eq.lhs} = {eq.rhs}' is violated "
+                f"(relative error {error:.4g}): every parameter it links was "
+                f"set explicitly, so no value can be adjusted to satisfy it.",
+                symbols_in_eq,
+            )
             return False
 
         return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
@@ -1512,6 +1699,7 @@ class ConfigManager:
                     return False
                 resolved[target_str] = valid_val
                 provenance[target_str] = new_rank
+                self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
                 logger.debug(f"Updated {target_str} = {valid_val:.4g} (custom solver)")
                 return True
             except Exception as e:
@@ -1667,6 +1855,7 @@ class ConfigManager:
 
             resolved[target_str] = valid_val
             provenance[target_str] = new_rank
+            self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
             logger.debug(f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})")
 
             # 6. Independent Scale Propagation via Jacobian
