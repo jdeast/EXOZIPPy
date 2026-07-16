@@ -803,18 +803,26 @@ def _chunk_by_rows(idata, var_names, rows_per_page):
 
 
 def save_multipage_trace(idata, var_names, filename, rows_per_page=4,
-                         max_samples=2000, model=None):
-    n_chains, n_draws = idata.posterior.chain.size, idata.posterior.draw.size
+                         draws_per_chain=100, model=None):
+    n_draws = idata.posterior.draw.size
 
-    # Thin to cap matplotlib memory and render time
-    total_samples = n_chains * n_draws
-    if total_samples > max_samples:
-        thin_factor = max(1, total_samples // max_samples)
-        sl = slice(None, None, thin_factor)
-        thin_kwargs = {"posterior": idata.posterior.isel(draw=sl)}
-        if hasattr(idata, "sample_stats"):
-            thin_kwargs["sample_stats"] = idata.sample_stats.isel(draw=sl)
-        idata = az.from_dict(thin_kwargs)
+    # Thin to cap matplotlib memory and render time.  The target is per-CHAIN.
+    # Deriving thin_factor from the TOTAL sample count (n_chains * n_draws) but
+    # applying it to the draw axis alone left every chain with only
+    # max_samples/n_chains points -- ~28 for a 70-chain run, no matter how long
+    # it actually sampled.  That is too few to read anything off the trace
+    # column, and it silently pushed arviz's kind="auto" under its
+    # 100-draws-per-chain threshold, so the dist column rendered ECDFs (which
+    # saturate at 1.0 and look like the posterior is clipped) instead of
+    # densities.
+    #
+    # isel on the InferenceData -- not az.from_dict, which expects dicts of
+    # arrays rather than Datasets -- thins every group carrying a draw dim and
+    # preserves the original `draw` coordinate, so the trace x axis stays in
+    # true, unthinned draw numbers.
+    if n_draws > draws_per_chain:
+        thin_factor = max(1, n_draws // draws_per_chain)
+        idata = idata.isel(draw=slice(None, None, thin_factor))
 
     # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
     # the fix that computes and persists it right after pm.sample().
@@ -870,9 +878,15 @@ def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
     dist + trace two-column layout; plain plot_trace now renders only the
     trace lines.  compact=False keeps one row per vector element, matching
     the rows_per_page pagination math.
+
+    kind is pinned to "kde" rather than left to default.  The default is
+    rcParams["plot.density_kind"] = "auto", which silently switches to an ECDF
+    whenever a chain carries fewer than 100 draws -- the dist column then plots
+    a cumulative curve that plateaus at 1.0, which reads as a posterior clipped
+    at its maximum.  A density is always what this column is meant to show.
     """
     pc = az.plot_trace_dist(idata, var_names=var_names, group=group,
-                            compact=False,
+                            compact=False, kind="kde",
                             figure_kwargs={"figsize": (12, 3 * n_rows)})
     fig = pc.viz["figure"].item()
     fig.suptitle(title, fontsize=14)
@@ -908,6 +922,10 @@ def _shade_trace_axes_by_mode(fig, idata):
     if mode_vals.size == 0 or mode_vals.max() < 1:
         return  # unimodal (single label 0) or nothing valid: nothing to show
     n_chain = mode_vals.shape[0]
+    # x values are true (unthinned) draw numbers taken from the preserved
+    # `draw` coordinate, so they index mode_vals only after being mapped back
+    # to positions along the thinned axis.
+    draw_coord = np.asarray(idata.posterior["draw"].values)
 
     for i, ax in enumerate(fig.axes):
         if i % 2 == 0:
@@ -919,7 +937,7 @@ def _shade_trace_axes_by_mode(fig, idata):
             yd = np.asarray(line.get_ydata())
             if xd.size == 0:
                 continue
-            idx = xd.astype(int)
+            idx = np.searchsorted(draw_coord, xd)
             idx = np.clip(idx, 0, mode_vals.shape[1] - 1)
             labels = mode_vals[c, idx]
             colors = [_MODE_CMAP(int(l) % 10) if l >= 0 else _MODE_INVALID_COLOR

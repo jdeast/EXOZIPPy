@@ -1082,6 +1082,36 @@ class Parameter:
                           / max(tf["gaussian_scales"][i], 1e-30))
         return raw
 
+    def phys_from_raw(self, raw_vec):
+        """Map raw N(0,1) coordinates to physical values (internal units).
+
+        The inverse of raw_from_initval, using the same frozen forward
+        transform from build_pymc (including the +/-30 sigmoid clip), so a
+        value produced here maps back through raw_from_initval consistently.
+
+        Takes one entry per SAMPLED element (shaped like self.raw_initval) and
+        returns a FULL-length element vector, which is what raw_from_initval
+        expects back.  Non-sampled entries are placeholders: raw_from_initval
+        only reads the sampled ones.
+        """
+        tf = getattr(self, "_raw_transform", None)
+        if tf is None:
+            return np.zeros(0)
+        idx = tf["sampled_idx"]
+        n_elements = int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        raw = np.asarray(raw_vec, dtype=float).reshape(-1)
+        out = np.zeros(n_elements)
+        for j, i in enumerate(idx):
+            if tf["use_logit"][i]:
+                lq = (tf["logit_q_inits"][i]
+                      + tf["init_scale_logits"][i] * raw[j])
+                q = 1.0 / (1.0 + np.exp(-np.clip(lq, -30.0, 30.0)))
+                out[i] = tf["lowers"][i] + (tf["uppers"][i] - tf["lowers"][i]) * q
+            else:
+                out[i] = (tf["gaussian_mus"][i]
+                          + tf["gaussian_scales"][i] * raw[j])
+        return out
+
     # converts user units to internal units
     def to_internal(self, val=None):
         target = val if val is not None else self.value

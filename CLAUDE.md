@@ -21,6 +21,11 @@ cd examples/ob140939   && poetry run exozippy ob140939.yaml
 
 # Dump the full repo for AI review (see scripts/dump_code.py for flags)
 poetry run python scripts/dump_code.py
+
+# pytest Timeout inside pytensor cmodule.py, blaming an innocent test: the
+# compile cache grew until refresh(), which opens every entry, neared the 300s
+# cap. Its tmp*/ dirs ARE the cached modules -- prune by age, never rm them.
+poetry run pytensor-cache cleanup
 ```
 
 `system.prepare()` must be called before `system.build_model()` in any script or test.
