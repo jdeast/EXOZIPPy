@@ -36,6 +36,7 @@ mulensinstrument:
     zero_point: ""
     observer_location: "earth" # earth, spitzer, kepler, roman, lat/lon, or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
+    reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"
     file: "n20140605.L.Spitzer.OB140939.dat"
     zero_point: ""

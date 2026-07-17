@@ -9,11 +9,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 poetry install
 poetry update          # after git pull
 
-# Run all tests
+# Run all tests (runs in parallel by default: -n 6 --dist loadfile, set in
+# pyproject.toml addopts). --dist loadfile pins each file to one worker so
+# module/session-scoped fixtures are shared, not rebuilt per worker.
 poetry run pytest
 
-# Run a single test
-poetry run pytest tests/test_config_healing.py::test_name -x
+# Run a single test -- add -n0 to disable the parallel workers (faster startup
+# and readable output for one test); the default -n6 otherwise spawns 6 workers.
+poetry run pytest tests/test_config_healing.py::test_name -n0 -x
 
 # Run the fitter on an example
 cd examples/kelt4rvonly && poetry run exozippy kelt4.yaml
@@ -129,6 +132,10 @@ The registry is a **flat namespace keyed by bare function name** -- there is no 
 ### Plotting for the GUI (`plot_data`)
 
 `Component.plot()` renders matplotlib figures for the CLI; the browser GUI instead consumes `Component.plot_data(system, point=None) -> list[PlotSpec]` (see `src/exozippy/plotspec.py`), which returns the arrays and labels (not rendered figures) so it can draw interactive charts and re-render model curves when sliders move. Override it in components that own observational data: with `point=None` return data-only specs (usable after `load_data()`, before `build_model()`); with a point, add model traces evaluated at that point by reusing the functions from `compile_plotters()` -- do not duplicate physics. Extract the shared array preparation out of `plot()` so both paths draw identical data, set each spec's `param_deps` (use `_model_trace_param_deps(node, system)`), and keep the model traces' symbolic nodes on the `Trace.node` field for later compiled re-evaluation.
+
+### The GUI (`src/exozippy/gui/`)
+
+The optional browser GUI (`exozippy-gui` console script, `gui` extra) is a component-agnostic FastAPI + React wrapper around the backend contracts (`introspect`, `utilities/registry`, `solve_api`, `plotspec`, `evaluator`, `gui/runner`). Its full architecture -- server modules, the HTTP/WebSocket API, the frontend tabs, the Solve-then-live-sliders interaction, and the invariants (component-agnostic, ruamel round-trip, process isolation, local-only) -- is documented in `src/exozippy/gui/gui.md`. Read that before adding a tab, endpoint, or utility to the GUI, or before changing how the GUI consumes a component.
 
 ### Parameter naming convention
 

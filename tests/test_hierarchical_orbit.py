@@ -177,10 +177,36 @@ def test_m_total_custom_solver_sums_member_masses():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def hier_system():
-    """Prepared + built KELT-4-like hierarchical system (no data)."""
+def hier_system(tmp_path_factory):
+    """Prepared + built KELT-4-like hierarchical system carrying BOTH RV and
+    rel-astrometry data.
+
+    The mass/scale, RV-membership, and rel-astrometry tests all read this one
+    build instead of each constructing its own near-identical System (three
+    prepare()+build() passes collapsed into one). Adding data does not change
+    the orbit mass/scale nodes those tests inspect, and rel (not abs/gaia)
+    astrometry adds no star ra/dec, so every original assertion still holds.
+    """
+    data_dir = tmp_path_factory.mktemp("hier_data")
+    rv_file = data_dir / "fake.rv"
+    rng = np.random.default_rng(42)
+    t = np.linspace(TC - 20.0, TC + 20.0, 12)
+    np.savetxt(rv_file, np.column_stack(
+        [t, rng.normal(0, 5, t.size), np.full(t.size, 3.0)]))
+
+    f_bc = data_dir / "bc.rel"
+    f_abc = data_dir / "abc.rel"
+    _write_rel_file(f_bc, 50.0)
+    _write_rel_file(f_abc, 1500.0)
+
+    config = _hier_config()
+    config["rvinstrument"] = [{"name": "FAKE", "file": str(rv_file)}]
+    config["astrometryinstrument"] = [
+        {"name": "BCrel", "file": str(f_bc), "mode": "rel", "orbit": "BC"},
+        {"name": "ABCrel", "file": str(f_abc), "mode": "rel", "orbit": "A-BC"},
+    ]
     with pytensor.config.change_flags(mode="FAST_COMPILE"):
-        system = System(_hier_config(), user_params=_hier_params())
+        system = System(config, user_params=_hier_params())
         system.prepare()
         model = system.build_model()
     return system, model
@@ -241,25 +267,14 @@ def test_star_membership_roles():
     assert orb.star_membership(2) == [(1, "primary"), (2, "companion")]
 
 
-def test_rv_terms_include_stellar_companion_orbit(tmp_path):
+def test_rv_terms_include_stellar_companion_orbit(hier_system):
     """
     Given RVs of star A in the hierarchical system,
     When the RV model terms are assembled,
     Then they cover exactly the orbits with A in the primary group (b and
     A-BC) with the primary-reflex K, and the model logp is finite.
     """
-    rv_file = tmp_path / "fake.rv"
-    rng = np.random.default_rng(42)
-    t = np.linspace(TC - 20.0, TC + 20.0, 12)
-    np.savetxt(rv_file, np.column_stack(
-        [t, rng.normal(0, 5, t.size), np.full(t.size, 3.0)]))
-
-    config = _hier_config()
-    config["rvinstrument"] = [{"name": "FAKE", "file": str(rv_file)}]
-    with pytensor.config.change_flags(mode="FAST_COMPILE"):
-        system = System(config, user_params=_hier_params())
-        system.prepare()
-        model = system.build_model()
+    system, model = hier_system
 
     K_vec, omap = system.rvinstrument._orbit_rv_terms(system, 0)
     assert list(omap) == [0, 2]
@@ -282,28 +297,14 @@ def _write_rel_file(path, sep_mas):
     np.savetxt(path, rows)
 
 
-def test_rel_astrometry_traces_named_orbit(tmp_path):
+def test_rel_astrometry_traces_named_orbit(hier_system):
     """
     Given rel-mode astrometry blocks naming the BC and A-BC orbits,
     When the system is built,
     Then each dataset resolves to its orbit index, the A-BC dataset picks
     up the nested BC photocenter sub-orbit, and the model logp is finite.
     """
-    f_bc = tmp_path / "bc.rel"
-    f_abc = tmp_path / "abc.rel"
-    _write_rel_file(f_bc, 50.0)
-    _write_rel_file(f_abc, 1500.0)
-
-    config = _hier_config()
-    config["astrometryinstrument"] = [
-        {"name": "BCrel", "file": str(f_bc), "mode": "rel", "orbit": "BC"},
-        {"name": "ABCrel", "file": str(f_abc), "mode": "rel",
-         "orbit": "A-BC"},
-    ]
-    with pytensor.config.change_flags(mode="FAST_COMPILE"):
-        system = System(config, user_params=_hier_params())
-        system.prepare()
-        model = system.build_model()
+    system, model = hier_system
 
     astrom = system.astrometryinstrument
     assert astrom.rel_orbit == [1, 2]

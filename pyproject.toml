@@ -81,6 +81,7 @@ ipykernel = ">=7.2.0,<8.0.0"
 scipy-stubs = ">=1.17.1.5,<2.0.0.0"
 pandas-stubs = "=3.0.3.260530,<4.0.0.0"
 pytest-timeout = "^2.4.0"
+pytest-xdist = ">=3.0"
 
 [tool.poetry.extras]
 microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
@@ -98,6 +99,13 @@ exozippy-gui = "exozippy.gui.app:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["exozippy", "src"]
+# Run in parallel by default. --dist loadfile keeps every test in a file on the
+# same worker so module/session-scoped fixtures (many System builds) are shared,
+# not rebuilt per worker. -n is capped at 6 (not "auto") because each worker
+# peaks ~1-2 GB building a System and compiling graphs; 36 workers would OOM.
+# Override for single-test debugging with `-n0`, e.g.
+#   poetry run pytest tests/test_foo.py::test_bar -n0 -x
+addopts = "-n 6 --dist loadfile"
 markers = [
     "slow: tests that build a full System + compile PyTensor graphs (~30s+ each); skip with -m 'not slow'",
 ]

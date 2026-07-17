@@ -48,10 +48,20 @@ def _build(s_entry):
     return system, model
 
 
-def test_log_s_is_sampled_and_s_is_derived():
+# The default (s=0.98, init_scale=0.01) build is shared by the two tests that
+# only inspect it, so the System is built + compiled once instead of twice.
+_DEFAULT_S_ENTRY = {"initval": 0.98, "init_scale": 0.01}
+
+
+@pytest.fixture(scope="module")
+def default_s_system():
+    return _build(_DEFAULT_S_ENTRY)
+
+
+def test_log_s_is_sampled_and_s_is_derived(default_s_system):
     """Given a binary lens, when the model is built, then log_s is a sampled
     free RV, s is not sampled, and s == 10**log_s at the start point."""
-    system, model = _build({"initval": 0.98, "init_scale": 0.01})
+    system, model = default_s_system
 
     free_names = [v.name for v in model.free_RVs]
     assert "lens.log_s_raw" in free_names
@@ -73,12 +83,12 @@ def test_log_s_is_sampled_and_s_is_derived():
     np.testing.assert_allclose(s_val, 10.0 ** log_s_val, rtol=1e-6)
 
 
-def test_user_s_initval_seeds_log_s_start():
+def test_user_s_initval_seeds_log_s_start(default_s_system):
     """Given a params entry setting lens.s initval and init_scale, when the
     relaxation engine runs, then log_s is seeded with log10(s) and its
     init_scale is the Jacobian-propagated ds/(s ln10)."""
-    s0, scale0 = 0.98, 0.01
-    system, _ = _build({"initval": s0, "init_scale": scale0})
+    s0, scale0 = _DEFAULT_S_ENTRY["initval"], _DEFAULT_S_ENTRY["init_scale"]
+    system, _ = default_s_system
 
     np.testing.assert_allclose(system.lens.s.initval, [s0], rtol=1e-9)
     np.testing.assert_allclose(

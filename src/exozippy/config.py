@@ -1408,7 +1408,8 @@ class ConfigManager:
                     continue
                 try:
                     with _sympy_time_limit(2):
-                        sols = sp.solve(eq, sp.Symbol(target_str))
+                        sols = sp.solve(eq, sp.Symbol(target_str),
+                                        simplify=False, check=False)
                         if not sols:
                             continue
                         sol = sols[0]
@@ -1460,7 +1461,8 @@ class ConfigManager:
                     continue
                 try:
                     with _sympy_time_limit(2):
-                        sols = sp.solve(eq, sp.Symbol(derived_str))
+                        sols = sp.solve(eq, sp.Symbol(derived_str),
+                                        simplify=False, check=False)
                         if not sols:
                             continue
                         sol = sols[0]
@@ -1749,7 +1751,16 @@ class ConfigManager:
 
         try:
             target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
-            solutions = sp.solve(eq, target_sym, dict=False)
+            # simplify=False + check=False: sp.solve's default post-simplify and
+            # its checksol() verification pass together dominate prepare()
+            # (sympy.simplify + sympy.checksol) and are redundant here -- every
+            # candidate solution is evaluated numerically, bounds-checked, and
+            # (for multiple roots) scored against the other relations below, so
+            # the code already does its own root validation. simplify only
+            # changes the expression's form (identical numeric value); check
+            # only pre-filters roots the numeric bounds/scoring pass re-filters.
+            solutions = sp.solve(eq, target_sym, dict=False,
+                                 simplify=False, check=False)
             elapsed = time.time() - start_time
             logger.debug(f"sp.solve finished in {elapsed:.4f}s for {target_str}")
         except TimeoutError:
