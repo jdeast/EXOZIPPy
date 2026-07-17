@@ -3,18 +3,40 @@ import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import LogTerminal from "./components/LogTerminal";
 import WelcomeTab from "./components/WelcomeTab";
+import RunTab from "./components/RunTab";
+import ToolsTab from "./components/ToolsTab";
 import { api, type ProjectListing, type FileEntry } from "./api";
 
 // Application shell: top bar + left sidebar + center tabbed workspace + bottom
 // log terminal. G7 ships one tab (Welcome); later prompts register Config,
 // Data, Tune, Run, Canvas, and Results tabs into the same workspace.
+
+// Shared context each tab's render receives, so a tab can read the open project
+// and attach the bottom terminal to a log file it cares about.
+interface TabContext {
+  listing: ProjectListing | null;
+  setLogFile: (file: string | null) => void;
+}
+
 interface Tab {
   id: string;
   label: string;
-  render: () => JSX.Element;
+  render: (ctx: TabContext) => JSX.Element;
 }
 
-const TABS: Tab[] = [{ id: "welcome", label: "Welcome", render: () => <WelcomeTab /> }];
+const TABS: Tab[] = [
+  { id: "welcome", label: "Welcome", render: () => <WelcomeTab /> },
+  {
+    id: "run",
+    label: "Run",
+    render: (ctx) => <RunTab listing={ctx.listing} setLogFile={ctx.setLogFile} />,
+  },
+  {
+    id: "tools",
+    label: "Tools",
+    render: (ctx) => <ToolsTab listing={ctx.listing} setLogFile={ctx.setLogFile} />,
+  },
+];
 
 export default function App() {
   const [listing, setListing] = useState<ProjectListing | null>(null);
@@ -68,7 +90,7 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <div className="tab-content">{current.render()}</div>
+          <div className="tab-content">{current.render({ listing, setLogFile })}</div>
         </main>
       </div>
       <LogTerminal file={logFile} />
