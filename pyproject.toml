@@ -34,7 +34,13 @@ corner = ">=2.2.3,<3.0.0"
 mulensmodel = ">=3.9.0,<4.0.0"
 jplephem = ">=2.24,<3.0"
 lightkurve = ">=2.6.0,<3.0.0"
-exoplanet-core = { git = "https://github.com/exoplanet-dev/exoplanet-core.git", extras = ["pymc"] }
+# PyPI prerelease: 0.4.0rc1 ships cp312/cp313/cp314 wheels (manylinux_2_28 ->
+# glibc 2.28/el8, macos arm64, win_amd64), so no git clone or C++ compiler is
+# needed. pip skips prereleases by default, but a specifier that names the rc
+# (>=0.4.0rc1) permits it per PEP 440 -- no --pre flag required.
+# allow-prereleases is for Poetry's own resolver. Intel macOS has no wheel and
+# falls back to an sdist build. Was a git HEAD dep until the rc was published.
+exoplanet-core = { version = ">=0.4.0rc1,<0.5.0", extras = ["pymc"], allow-prereleases = true }
 click = ">=8.3.3,<9.0.0"
 h5py = ">=3.16.0,<4.0.0"
 numba = ">=0.65.1,<0.66.0"
@@ -55,6 +61,22 @@ uvicorn = { version = ">=0.30.0,<1.0.0", extras = ["standard"], optional = true 
 websockets = { version = ">=13.0,<16.0", optional = true }
 pywebview = { version = ">=5.0,<6.0", optional = true }
 ruamel-yaml = { version = ">=0.18.0,<1.0.0", optional = true }
+
+# pywebview ships NO GUI backend on Linux -- it only declares one behind its own
+# extras (pywebview[qt] / [gtk]), so `exozippy-gui` without --browser died with
+# "No module named 'qtpy'". pywebview probes GTK first, then Qt; GTK needs
+# PyGObject built against the system gobject-introspection, which is not
+# pip-installable in a venv on older distros, so we supply the Qt backend.
+# Windows (EdgeChromium/pythonnet) and macOS (Cocoa/pyobjc) get their backends
+# from pywebview itself -- hence the linux-only marker.
+#
+# The <6.10 cap is a glibc floor, NOT a bug workaround: PyQt6 6.10+ publishes
+# only manylinux_2_34 wheels, and RHEL/Rocky/Alma 8 ship glibc 2.28. Without the
+# cap pip falls back to a source build and fails for want of qmake. 6.9.x is the
+# last series with manylinux_2_28 wheels. Raise it only once el8 is unsupported.
+qtpy = { version = ">=2.4,<3.0", optional = true, markers = "sys_platform == 'linux'" }
+pyqt6 = { version = ">=6.7,<6.10", optional = true, markers = "sys_platform == 'linux'" }
+pyqt6-webengine = { version = ">=6.7,<6.10", optional = true, markers = "sys_platform == 'linux'" }
 
 # jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend (exoplanet-dev/exoplanet-core#143);
 # the prior <0.5.0 cap was a workaround for a pytensor 2.35-2.38 Kepler JAX dispatch bug that
@@ -85,7 +107,7 @@ pytest-xdist = ">=3.0"
 
 [tool.poetry.extras]
 microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
-gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml"]
+gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0"]
