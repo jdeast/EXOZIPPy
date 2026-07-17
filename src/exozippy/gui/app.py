@@ -18,17 +18,29 @@ Endpoints (Phase 2, G7):
     POST /api/project/open    -- validate a dir, list its yaml + data files
     WS   /api/logs?file=...   -- tail a log file, following rotation/truncation
     GET  /                    -- the prebuilt React bundle (static/)
+
+Run controls (G11):
+    POST /api/run             -- launch a fit as a subprocess (one per project)
+    GET  /api/run/status      -- poll the active run's phase + progress state
+    POST /api/run/stop        -- graceful SIGINT stop (force=true escalates)
+    GET  /api/run/plots       -- list start/progress plot images on disk
+    GET  /api/run/image?path= -- serve a plot image from the run's output dir
+    POST /api/utilities/run   -- run a component utility headless (G2 registry)
 """
 
 import argparse
 import asyncio
+import glob
+import json
 import os
+import shutil
 import socket
 import sys
 import threading
 import uuid
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 # The built frontend bundle lives here (committed to the wheel). It may be
 # absent in a source checkout that has not run `npm run build` yet; we degrade
@@ -182,6 +194,108 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
             fh.close()
 
 
+# --- run controls (G11) -------------------------------------------------------
+
+# Image extensions worth surfacing as inline thumbnails in the plot galleries.
+# Anything else a component writes (e.g. a multi-page .pdf) is still on disk but
+# is not offered to the browser as an <img>.
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".svg", ".gif")
+
+
+def _prefix_path(handle):
+    """Absolute output prefix of a run (handle.prefix resolved against its cwd)."""
+    return os.path.join(handle.cwd, handle.prefix)
+
+
+def _results_dir(handle):
+    """Directory the run writes its outputs into (the dir of its prefix)."""
+    return os.path.dirname(_prefix_path(handle)) or handle.cwd
+
+
+def _log_path(handle):
+    """The <prefix>.log file the fit's logger writes (see exozippy/logger.py)."""
+    return _prefix_path(handle) + ".log"
+
+
+def _read_snapshot_meta(handle):
+    """Latest partial.json snapshot metadata for the run, or None if absent."""
+    path = os.path.join(handle.snapshot_dir, "partial.json")
+    try:
+        with open(path, "r") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def run_status_payload(handle):
+    """Assemble the JSON status document the Run tab polls.
+
+    Augments RunHandle.status() with the paths a browser needs -- the log file
+    to auto-attach the terminal to, the results directory to link, and the
+    latest downsampled-snapshot metadata (n_draws/max_rhat/min_ess/updated_at)
+    for the progress strip and rhat sparkline.
+    """
+    status = handle.status()
+    return {
+        "active": True,
+        "phase": status.get("phase"),
+        "state": status.get("state", {}),
+        "alive": status.get("alive"),
+        "pid": status.get("pid"),
+        "returncode": status.get("returncode"),
+        "error": status.get("error"),
+        "prefix": handle.prefix,
+        "config_path": handle.config_path,
+        "cwd": handle.cwd,
+        "log_path": _log_path(handle),
+        "results_dir": _results_dir(handle),
+        "snapshot": _read_snapshot_meta(handle),
+    }
+
+
+def _list_prefix_images(handle, pattern):
+    """Sorted absolute image paths matching <prefix><pattern> (e.g. '_start*')."""
+    out = []
+    for path in sorted(glob.glob(_prefix_path(handle) + pattern)):
+        if os.path.splitext(path)[1].lower() in _IMAGE_EXTS and os.path.isfile(path):
+            out.append(path)
+    return out
+
+
+def _snapshot_run_inputs(handle, params_path=None):
+    """Copy the exact config/params used into the output dir for reproducibility.
+
+    Writes '<stem>.used<ext>' beside the run's outputs so a finished fit always
+    carries a frozen copy of what produced it, even if the source yaml is later
+    edited. Copying onto the source path is skipped. Best-effort: an I/O error
+    never blocks the run. Returns the list of copies made.
+    """
+    results_dir = _results_dir(handle)
+    try:
+        os.makedirs(results_dir, exist_ok=True)
+    except OSError:
+        return []
+
+    src_config = handle.config_path
+    if not os.path.isabs(src_config):
+        src_config = os.path.join(handle.cwd, src_config)
+
+    copied = []
+    for src in (src_config, params_path):
+        if not src or not os.path.isfile(src):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(src))
+        dst = os.path.join(results_dir, f"{stem}.used{ext}")
+        if os.path.abspath(src) == os.path.abspath(dst):
+            continue
+        try:
+            shutil.copy2(src, dst)
+            copied.append(dst)
+        except OSError:
+            pass
+    return copied
+
+
 # --- app factory --------------------------------------------------------------
 
 def create_app(project_dir=None):
@@ -195,7 +309,7 @@ def create_app(project_dir=None):
     from concurrent.futures import ThreadPoolExecutor
 
     from fastapi import FastAPI, WebSocket
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 
@@ -211,6 +325,10 @@ def create_app(project_dir=None):
     state = {"doc": None}
     validate_jobs = {}
     validate_pool = ThreadPoolExecutor(max_workers=1)
+
+    # One active run per project (a queue lands in G14). The handle lives on the
+    # app instance so each create_app() -- including per-test apps -- is isolated.
+    run_state = {"handle": None}
 
     class OpenProjectRequest(BaseModel):
         path: str
@@ -228,6 +346,19 @@ def create_app(project_dir=None):
         if doc is None:
             raise ValueError("no document is open; POST /api/doc/open first")
         return doc
+
+    class RunRequest(BaseModel):
+        config: str
+        params: Optional[str] = None
+        project_dir: Optional[str] = None
+
+    class StopRequest(BaseModel):
+        force: bool = False
+
+    class UtilityRunRequest(BaseModel):
+        name: str
+        args: dict = {}
+        cwd: Optional[str] = None
 
     @app.get("/api/health")
     def health():
@@ -372,6 +503,100 @@ def create_app(project_dir=None):
         if job is None:
             return JSONResponse({"error": "no such job"}, status_code=404)
         return JSONResponse({"job_id": job_id, **job})
+
+    # --- run controls (G11) -------------------------------------------------
+    #
+    # These endpoints are plain `def` (not `async def`), so FastAPI runs each in
+    # a worker thread: a blocking start_run / stop / run_utility never stalls the
+    # event loop that is also serving the log-tail WebSocket.
+
+    @app.post("/api/run")
+    def run_start(req: RunRequest):
+        from ..gui import runner
+
+        handle = run_state.get("handle")
+        if handle is not None and handle.is_alive():
+            return JSONResponse(
+                {"error": "A run is already active for this project."},
+                status_code=409)
+
+        cwd = req.project_dir or initial_project or os.getcwd()
+        try:
+            new_handle = runner.start_run(req.config, cwd=cwd)
+        except Exception as exc:  # start_run failures surface as a 400
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        params_path = req.params
+        if params_path and not os.path.isabs(params_path):
+            params_path = os.path.join(cwd, params_path)
+        _snapshot_run_inputs(new_handle, params_path)
+
+        run_state["handle"] = new_handle
+        return JSONResponse(run_status_payload(new_handle))
+
+    @app.get("/api/run/status")
+    def run_status():
+        handle = run_state.get("handle")
+        if handle is None:
+            return {"active": False, "phase": "idle"}
+        return JSONResponse(run_status_payload(handle))
+
+    @app.post("/api/run/stop")
+    def run_stop(req: StopRequest):
+        handle = run_state.get("handle")
+        if handle is None:
+            return JSONResponse({"error": "No active run."}, status_code=400)
+        handle.stop(force=req.force)
+        return JSONResponse(run_status_payload(handle))
+
+    @app.get("/api/run/plots")
+    def run_plots():
+        handle = run_state.get("handle")
+        if handle is None:
+            return {"start": [], "progress": []}
+        return {
+            "start": _list_prefix_images(handle, "_start*"),
+            "progress": _list_prefix_images(handle, "_mcmc*"),
+        }
+
+    @app.get("/api/run/image")
+    def run_image(path: str):
+        # Serve a plot image, but only from inside the run's own tree -- never an
+        # arbitrary path the query string asks for.
+        handle = run_state.get("handle")
+        if handle is None:
+            return JSONResponse({"error": "No active run."}, status_code=400)
+        resolved = os.path.realpath(path)
+        root = os.path.realpath(handle.cwd)
+        try:
+            inside = os.path.commonpath([resolved, root]) == root
+        except ValueError:
+            inside = False
+        if not inside or not os.path.isfile(resolved):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        return FileResponse(resolved)
+
+    @app.post("/api/utilities/run")
+    def utilities_run(req: UtilityRunRequest):
+        from ..utilities.registry import run_utility
+
+        cwd = req.cwd or initial_project or os.getcwd()
+        try:
+            result = run_utility(req.name, req.args, cwd)
+        except (KeyError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        # Persist the captured output so the terminal panel can tail it (the
+        # utility already ran to completion; this is a static file to attach to).
+        if "output" in result:
+            log_path = os.path.join(cwd, f".exozippy_util_{req.name}.log")
+            try:
+                with open(log_path, "w") as fh:
+                    fh.write(result.get("output") or "")
+                result["log_path"] = log_path
+            except OSError:
+                pass
+        return JSONResponse(result)
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):
