@@ -32,6 +32,13 @@ Run controls (G11):
     GET  /api/run/plots       -- list start/progress plot images on disk
     GET  /api/run/image?path= -- serve a plot image from the run's output dir
     POST /api/utilities/run   -- run a component utility headless (G2 registry)
+
+Tune tab (G10):
+    POST /api/tune/solve      -- solve + compile the evaluator in a worker proc
+    GET  /api/tune/status     -- poll the solve phase (solving/compiling/live)
+    GET  /api/tune/result     -- solved parameters + base PlotSpecs
+    POST /api/tune/eval       -- move one parameter, get updated model curves
+    GET  /api/tune/hash       -- structural hash of the open doc (staleness)
 """
 
 import argparse
@@ -340,6 +347,11 @@ def create_app(project_dir=None):
     # re-preview of an unchanged file is instant (G9).
     preview_cache = {}
 
+    # One Tune-tab solve/evaluator session per project (G10). Held on the app
+    # instance so the dedicated worker process survives across requests.
+    tune_state = {"session": None}
+    tune_pool = ThreadPoolExecutor(max_workers=1)
+
     class OpenProjectRequest(BaseModel):
         path: str
 
@@ -376,6 +388,17 @@ def create_app(project_dir=None):
     class PreviewRequest(BaseModel):
         comp_type: str
         name: Optional[str] = None
+
+    class TuneSolveRequest(BaseModel):
+        # All optional: when omitted, the currently-open document supplies the
+        # config, params, and working directory.
+        config: Optional[dict] = None
+        params: Optional[dict] = None
+        workdir: Optional[str] = None
+
+    class TuneEvalRequest(BaseModel):
+        path: str
+        value: float
 
     @app.get("/api/health")
     def health():
@@ -719,6 +742,93 @@ def create_app(project_dir=None):
             except OSError:
                 pass
         return JSONResponse(result)
+
+    # --- Tune tab: solve + live evaluator (G10) -----------------------------
+    #
+    # The heavy solve + pytensor compile runs in a dedicated worker PROCESS
+    # (see gui/tune.py); these endpoints only broker it. Solve is kicked off on
+    # a worker thread so the request returns immediately and the frontend polls
+    # /api/tune/status through the solving -> compiling -> live phases.
+
+    def _tune_session():
+        from .tune import TuneSession
+
+        session = tune_state.get("session")
+        if session is None:
+            session = TuneSession()
+            tune_state["session"] = session
+        return session
+
+    def _tune_solve_inputs(req):
+        """Resolve (config, params, workdir) from the request or the open doc."""
+        config = req.config
+        params = req.params
+        workdir = req.workdir
+        if config is None:
+            from .document import _jsonable
+
+            doc = _require_doc()
+            config = _jsonable(doc.config)
+            if params is None:
+                params = _jsonable(doc.params)
+            if workdir is None and doc.config_path is not None:
+                workdir = str(doc.config_path.parent)
+        return config, params or {}, workdir
+
+    @app.post("/api/tune/solve")
+    def tune_solve(req: TuneSolveRequest):
+        try:
+            config, params, workdir = _tune_solve_inputs(req)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        session = _tune_session()
+        session.phase = "solving"
+        session.error = None
+        tune_pool.submit(session.solve, config, params, workdir)
+        return JSONResponse(session.status())
+
+    @app.get("/api/tune/status")
+    def tune_status():
+        session = tune_state.get("session")
+        if session is None:
+            return {"phase": "idle", "error": None,
+                    "structural_hash": None, "has_result": False}
+        return JSONResponse(session.status())
+
+    @app.get("/api/tune/result")
+    def tune_result():
+        session = tune_state.get("session")
+        if session is None or session.result is None:
+            return JSONResponse({"error": "no solve result yet"}, status_code=409)
+        return JSONResponse(session.result)
+
+    @app.post("/api/tune/eval")
+    def tune_eval(req: TuneEvalRequest):
+        session = tune_state.get("session")
+        if session is None:
+            return JSONResponse({"error": "no session; Solve first"},
+                                status_code=409)
+        try:
+            return JSONResponse(session.eval(req.path, req.value))
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.get("/api/tune/hash")
+    def tune_hash():
+        """Structural hash of the open document -- compare to the live hash to
+        detect staleness after a bound/prior/fixed edit."""
+        from ..evaluator import structural_hash
+        from .document import _jsonable
+
+        try:
+            doc = _require_doc()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        h = structural_hash(_jsonable(doc.config), _jsonable(doc.params))
+        session = tune_state.get("session")
+        live = session.structural_hash if session else None
+        return {"structural_hash": h, "live_hash": live,
+                "stale": live is not None and h != live}
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):

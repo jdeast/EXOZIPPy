@@ -2,6 +2,9 @@
 // origin so the same bundle works served by FastAPI (production) or behind the
 // Vite dev proxy.
 
+import type { PlotSpec } from "./plotspec";
+export type { PlotSpec } from "./plotspec";
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -162,6 +165,56 @@ export interface PreviewResult {
   error?: string;
 }
 
+// --- Tune tab: solve + live evaluator (G10) ---------------------------------
+
+export interface Provenance {
+  rank: number | null;
+  label: "user" | "data" | "solved" | "default";
+  relation: string | null;
+}
+
+export interface TuneParam {
+  value: number | null;
+  unit: string | null;
+  internal_unit?: string | null;
+  lower: number | null;
+  upper: number | null;
+  init_scale: number | null;
+  sigma: number | null;
+  mu: number | null;
+  fixed: boolean;
+  derived: boolean;
+  provenance: Provenance;
+}
+
+export interface TuneStatus {
+  phase: "idle" | "solving" | "compiling" | "live" | "error";
+  error: string | null;
+  structural_hash: string | null;
+  has_result: boolean;
+}
+
+export interface TuneResult {
+  parameters: Record<string, TuneParam>;
+  seeds: Array<Record<string, number>> | null;
+  plots: PlotSpec[];
+}
+
+// One eval response: updated model-trace y-arrays per plot, OR a signal that a
+// full re-solve is required (linked/dynamic bounds, fixed/derived element).
+export interface TuneEvalResult {
+  plots?: Record<string, Record<string, (number | null)[]>>;
+  needs_resolve?: boolean;
+  out_of_bounds?: boolean;
+  reason?: string;
+}
+
+export interface TuneHash {
+  structural_hash: string;
+  live_hash: string | null;
+  stale: boolean;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`${url}: ${resp.status} ${resp.statusText}`);
@@ -218,6 +271,14 @@ export const api = {
     getJson<{ associations: AssociationMap }>("/api/files/associations"),
   preview: (comp_type: string, name?: string | null) =>
     postJson<PreviewResult>("/api/preview", { comp_type, name: name ?? null }),
+
+  // --- Tune tab (G10) ---
+  tuneSolve: () => postJson<TuneStatus>("/api/tune/solve", {}),
+  tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
+  tuneResult: () => getJson<TuneResult>("/api/tune/result"),
+  tuneEval: (path: string, value: number) =>
+    postJson<TuneEvalResult>("/api/tune/eval", { path, value }),
+  tuneHash: () => getJson<TuneHash>("/api/tune/hash"),
 };
 
 /** URL that serves a plot image from the active run's output directory. */
