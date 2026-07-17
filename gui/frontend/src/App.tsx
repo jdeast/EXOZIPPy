@@ -3,18 +3,26 @@ import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import LogTerminal from "./components/LogTerminal";
 import WelcomeTab from "./components/WelcomeTab";
+import ConfigTab from "./components/ConfigTab";
 import { api, type ProjectListing, type FileEntry } from "./api";
 
 // Application shell: top bar + left sidebar + center tabbed workspace + bottom
-// log terminal. G7 ships one tab (Welcome); later prompts register Config,
+// log terminal. G7 shipped Welcome; G8 adds Config. Later prompts register
 // Data, Tune, Run, Canvas, and Results tabs into the same workspace.
 interface Tab {
   id: string;
   label: string;
-  render: () => JSX.Element;
+  render: (ctx: TabContext) => JSX.Element;
 }
 
-const TABS: Tab[] = [{ id: "welcome", label: "Welcome", render: () => <WelcomeTab /> }];
+interface TabContext {
+  configPath: string | null;
+}
+
+const TABS: Tab[] = [
+  { id: "welcome", label: "Welcome", render: () => <WelcomeTab /> },
+  { id: "config", label: "Config", render: (ctx) => <ConfigTab configPath={ctx.configPath} /> },
+];
 
 export default function App() {
   const [listing, setListing] = useState<ProjectListing | null>(null);
@@ -45,6 +53,8 @@ export default function App() {
 
   const projectName = listing ? listing.dir.split("/").pop() || listing.dir : null;
   const current = TABS.find((t) => t.id === activeTab) || TABS[0];
+  // The Config tab edits the first config file the project exposes.
+  const configPath = listing && listing.configs.length ? listing.configs[0].path : null;
 
   return (
     <div className="app">
@@ -68,7 +78,7 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <div className="tab-content">{current.render()}</div>
+          <div className="tab-content">{current.render({ configPath })}</div>
         </main>
       </div>
       <LogTerminal file={logFile} />

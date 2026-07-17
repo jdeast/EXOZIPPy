@@ -115,3 +115,112 @@ def test_project_open_endpoint_bad_dir(client):
     resp = client.post("/api/project/open", json={"path": "/no/such/dir/here"})
     assert resp.status_code == 400
     assert "error" in resp.json()
+
+
+# --- config document endpoints (G8) ------------------------------------------
+
+import shutil
+import time
+from pathlib import Path
+
+EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "kelt4"
+
+
+@pytest.fixture
+def rvonly_project(tmp_path):
+    """A working copy of the cheap RV-only KELT-4 example."""
+    for name in (
+        "kelt4_rvonly.yaml",
+        "kelt4.params.yaml",
+        "KELT-4b.HIRES.rv",
+        "KELT-4b.TRES.rv",
+    ):
+        shutil.copy(EXAMPLE_DIR / name, tmp_path / name)
+    return tmp_path
+
+
+def test_doc_get_without_open_is_404(client):
+    """Given no open document, When GET /api/doc, Then it returns 404."""
+    resp = client.get("/api/doc")
+    assert resp.status_code == 404
+
+
+def test_doc_open_command_undo_save_flow(client, rvonly_project):
+    """Given an opened document, When a command runs, undoes, and saves, Then
+    the endpoints report dirty state and the file changes on save."""
+    config_path = str(rvonly_project / "kelt4_rvonly.yaml")
+
+    # open
+    resp = client.post("/api/doc/open", json={"config_path": config_path})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dirty"] is False
+    assert body["config"]["star"][0]["name"] == "A"
+
+    # command: set a param field
+    resp = client.post(
+        "/api/doc/command",
+        json={"op": "set_param_field",
+              "args": {"path": "star.A.teff", "field": "initval", "value": 6300}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dirty"] is True
+    assert body["undo_depth"] == 1
+    assert body["params"]["star.A.teff"]["initval"] == 6300
+
+    # undo
+    resp = client.post("/api/doc/undo")
+    assert resp.json()["undo_depth"] == 0
+    assert resp.json()["redo_depth"] == 1
+
+    # redo then save
+    client.post("/api/doc/redo")
+    params_file = rvonly_project / "kelt4.params.yaml"
+    resp = client.post("/api/doc/save")
+    assert resp.status_code == 200
+    assert resp.json()["dirty"] is False
+    assert "6300" in params_file.read_text()
+
+
+def test_doc_command_bad_op_is_400(client, rvonly_project):
+    """Given an open doc, When an unknown command op is posted, Then 400."""
+    client.post(
+        "/api/doc/open",
+        json={"config_path": str(rvonly_project / "kelt4_rvonly.yaml")},
+    )
+    resp = client.post("/api/doc/command", json={"op": "nonsense", "args": {}})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_doc_validate_job_lifecycle(client, rvonly_project):
+    """Given an open doc, When validation is requested, Then a job id is
+    returned and polling eventually reports a terminal status with a
+    diagnostics list."""
+    client.post(
+        "/api/doc/open",
+        json={"config_path": str(rvonly_project / "kelt4_rvonly.yaml")},
+    )
+    resp = client.post("/api/doc/validate")
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    assert resp.json()["status"] == "running"
+
+    # unknown job -> 404
+    assert client.get("/api/doc/validate/deadbeef").status_code == 404
+
+    # poll to completion (validation runs the relaxation engine off-thread)
+    deadline = time.time() + 120
+    status = "running"
+    diagnostics = None
+    while time.time() < deadline:
+        poll = client.get(f"/api/doc/validate/{job_id}").json()
+        status = poll["status"]
+        diagnostics = poll["diagnostics"]
+        if status != "running":
+            break
+        time.sleep(0.5)
+
+    assert status in ("done", "error")
+    assert isinstance(diagnostics, list)

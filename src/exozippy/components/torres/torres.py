@@ -55,6 +55,31 @@ class Torres(Component):
     def prefix(self):
         return "torres"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "star",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": True,
+                "doc": (
+                    "Name (or index) of the star this Torres relation "
+                    "constrains. One Torres instance per star."
+                ),
+            },
+            {
+                "key": "constrain",
+                "kind": "option",
+                "accepts": ["mass", "radius"],
+                "required": False,
+                "doc": (
+                    "Which stellar quantities to constrain from "
+                    "teff/logg/feh (a list; default both mass and radius)."
+                ),
+            },
+        ]
+
     def load_data(self, system):
         """Stage 1a: resolve the target stars and parse the per-instance config."""
         star_names = list(system.star.names)

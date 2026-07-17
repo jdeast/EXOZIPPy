@@ -26,6 +26,7 @@ import os
 import socket
 import sys
 import threading
+import uuid
 import webbrowser
 from pathlib import Path
 
@@ -191,17 +192,42 @@ def create_app(project_dir=None):
     """
     _require_fastapi()
 
+    from concurrent.futures import ThreadPoolExecutor
+
     from fastapi import FastAPI, WebSocket
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 
+    from .document import ProjectDocument, command_from_json
+
     app = FastAPI(title="EXOZIPPy", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
     initial_project = str(Path(project_dir).resolve()) if project_dir else None
 
+    # The single document the GUI is editing. Held in server state so undo/redo
+    # stacks survive across requests. A worker pool runs the (seconds-long)
+    # relaxation-engine validation off the event loop.
+    state = {"doc": None}
+    validate_jobs = {}
+    validate_pool = ThreadPoolExecutor(max_workers=1)
+
     class OpenProjectRequest(BaseModel):
         path: str
+
+    class OpenDocRequest(BaseModel):
+        config_path: str
+        params_path: str | None = None
+
+    class CommandRequest(BaseModel):
+        op: str
+        args: dict = {}
+
+    def _require_doc():
+        doc = state["doc"]
+        if doc is None:
+            raise ValueError("no document is open; POST /api/doc/open first")
+        return doc
 
     @app.get("/api/health")
     def health():
@@ -231,6 +257,121 @@ def create_app(project_dir=None):
             return JSONResponse(open_project(req.path))
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # --- config document editing (G8) ----------------------------------------
+
+    @app.post("/api/doc/open")
+    def doc_open(req: OpenDocRequest):
+        try:
+            doc = ProjectDocument.open(req.config_path, params_path=req.params_path)
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        state["doc"] = doc
+        payload = doc.to_json()
+        payload["recovery"] = doc.autosave_recovery()
+        return JSONResponse(payload)
+
+    @app.get("/api/doc")
+    def doc_get():
+        try:
+            return JSONResponse(_require_doc().to_json())
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    @app.post("/api/doc/command")
+    def doc_command(req: CommandRequest):
+        try:
+            doc = _require_doc()
+            command = command_from_json({"op": req.op, "args": req.args})
+            doc.execute(command)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(doc.to_json())
+
+    @app.post("/api/doc/undo")
+    def doc_undo():
+        try:
+            doc = _require_doc()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        doc.undo()
+        return JSONResponse(doc.to_json())
+
+    @app.post("/api/doc/redo")
+    def doc_redo():
+        try:
+            doc = _require_doc()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        doc.redo()
+        return JSONResponse(doc.to_json())
+
+    @app.post("/api/doc/save")
+    def doc_save():
+        try:
+            doc = _require_doc()
+            doc.save()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(doc.to_json())
+
+    @app.post("/api/doc/autosave")
+    def doc_autosave():
+        try:
+            doc = _require_doc()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        written = doc.autosave()
+        return JSONResponse({"written": [str(p) for p in written]})
+
+    def _run_validation(job_id, config, user_params, workdir):
+        from ..solve_api import validate
+
+        try:
+            diagnostics = validate(config, user_params=user_params, workdir=workdir)
+            validate_jobs[job_id] = {"status": "done", "diagnostics": diagnostics}
+        except Exception as exc:  # pragma: no cover - defensive
+            validate_jobs[job_id] = {
+                "status": "error",
+                "diagnostics": [
+                    {"severity": "error",
+                     "message": f"{type(exc).__name__}: {exc}",
+                     "param_paths": []}
+                ],
+            }
+
+    @app.post("/api/doc/validate")
+    def doc_validate():
+        """Kick off a background validation and return a job id to poll.
+
+        Validation runs the relaxation engine (seconds), so it must not block
+        the event loop; it runs in a worker thread. Poll GET
+        /api/doc/validate/{job_id}.
+        """
+        try:
+            doc = _require_doc()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        from .document import _jsonable
+
+        config = _jsonable(doc.config)
+        user_params = _jsonable(doc.params)
+        workdir = str(doc.config_path.parent) if doc.config_path else None
+        job_id = uuid.uuid4().hex
+        validate_jobs[job_id] = {"status": "running", "diagnostics": []}
+        validate_pool.submit(
+            _run_validation, job_id, config, user_params, workdir
+        )
+        return JSONResponse({"job_id": job_id, "status": "running"})
+
+    @app.get("/api/doc/validate/{job_id}")
+    def doc_validate_poll(job_id: str):
+        job = validate_jobs.get(job_id)
+        if job is None:
+            return JSONResponse({"error": "no such job"}, status_code=404)
+        return JSONResponse({"job_id": job_id, **job})
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):

@@ -59,6 +59,49 @@ class Mann(Component):
     def prefix(self):
         return "mann"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "star",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": True,
+                "doc": (
+                    "Name (or index) of the star this Mann relation "
+                    "constrains. One Mann instance per star."
+                ),
+            },
+            {
+                "key": "constrain",
+                "kind": "option",
+                "accepts": ["mass", "radius"],
+                "required": False,
+                "doc": (
+                    "Which stellar quantities to constrain from absolute Ks "
+                    "(a list; default both mass and radius)."
+                ),
+            },
+            {
+                "key": "ks",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "'synthetic' to take the star's Ks from the SED model, or "
+                    "a number for a directly observed apparent Ks (with "
+                    "'ks_err')."
+                ),
+            },
+            {
+                "key": "ks_err",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": "Uncertainty on an observed apparent Ks. Default 0.02.",
+            },
+        ]
+
     def load_data(self, system):
         """Stage 1a: resolve the target stars and parse the per-instance config."""
         star_names = list(system.star.names)

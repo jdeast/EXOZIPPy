@@ -21,6 +21,39 @@ export interface GuiConfig {
   initial_project: string | null;
 }
 
+// A single config-editing document (system config + params files).
+export interface DocState {
+  config: Record<string, any>;
+  params: Record<string, any>;
+  config_path: string | null;
+  params_path: string | null;
+  dirty: boolean;
+  undo_depth: number;
+  redo_depth: number;
+  undo_label: string | null;
+  redo_label: string | null;
+  recovery?: Array<{ file: string; autosave: string }>;
+}
+
+export interface Diagnostic {
+  severity: string;
+  message: string;
+  param_paths: string[];
+}
+
+export interface ValidateJob {
+  job_id: string;
+  status: string;
+  diagnostics: Diagnostic[];
+}
+
+// A command applied to the document. `op` names the edit; `args` are its
+// parameters. The server is the single authority on which ops exist.
+export interface DocCommand {
+  op: string;
+  args: Record<string, unknown>;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`${url}: ${resp.status} ${resp.statusText}`);
@@ -45,6 +78,19 @@ export const api = {
   utilities: () => getJson<Record<string, unknown>>("/api/utilities"),
   openProject: (path: string) =>
     postJson<ProjectListing>("/api/project/open", { path }),
+
+  // --- config document (G8) ---
+  docOpen: (config_path: string, params_path?: string | null) =>
+    postJson<DocState>("/api/doc/open", { config_path, params_path }),
+  doc: () => getJson<DocState>("/api/doc"),
+  docCommand: (cmd: DocCommand) => postJson<DocState>("/api/doc/command", cmd),
+  docUndo: () => postJson<DocState>("/api/doc/undo", {}),
+  docRedo: () => postJson<DocState>("/api/doc/redo", {}),
+  docSave: () => postJson<DocState>("/api/doc/save", {}),
+  docValidateStart: () =>
+    postJson<ValidateJob>("/api/doc/validate", {}),
+  docValidatePoll: (jobId: string) =>
+    getJson<ValidateJob>(`/api/doc/validate/${jobId}`),
 };
 
 /** Open the log-tail WebSocket for a given file path on the server. */
