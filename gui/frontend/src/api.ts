@@ -121,6 +121,47 @@ export interface UtilityResult {
   log_path?: string;
 }
 
+// --- data file manager (G9) -------------------------------------------------
+
+export interface DirEntry {
+  name: string;
+  path: string;
+  size: number | null;
+  is_dir: boolean;
+}
+
+export interface DirListing {
+  dir: string;
+  parent: string | null;
+  entries: DirEntry[];
+}
+
+// One schema-declared (instance, datafile-key) pair a file may associate with.
+export interface EligiblePair {
+  comp_type: string;
+  name: string;
+  key: string;
+  glob: string;
+  doc: string;
+}
+
+// A current association: which instance/key references a file (chip data).
+export interface AssociationRef {
+  comp_type: string;
+  name: string;
+  key: string;
+  path: string;
+}
+
+// Map of file basename -> the instances that reference it.
+export type AssociationMap = Record<string, AssociationRef[]>;
+
+// The preview endpoint returns PlotSpec JSON, or a readable error message.
+export interface PreviewResult {
+  specs?: import("./plotspec").PlotSpec[];
+  error?: string;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`${url}: ${resp.status} ${resp.statusText}`);
@@ -167,6 +208,16 @@ export const api = {
   runPlots: () => getJson<RunPlots>("/api/run/plots"),
   runUtility: (name: string, args: Record<string, unknown>, cwd: string) =>
     postJson<UtilityResult>("/api/utilities/run", { name, args, cwd }),
+
+  // --- data file manager (G9) ---
+  files: (dir?: string | null) =>
+    getJson<DirListing>(`/api/files${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
+  filesEligible: (filename: string) =>
+    postJson<{ eligible: EligiblePair[] }>("/api/files/eligible", { filename }),
+  filesAssociations: () =>
+    getJson<{ associations: AssociationMap }>("/api/files/associations"),
+  preview: (comp_type: string, name?: string | null) =>
+    postJson<PreviewResult>("/api/preview", { comp_type, name: name ?? null }),
 };
 
 /** URL that serves a plot image from the active run's output directory. */

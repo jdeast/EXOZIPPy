@@ -17,7 +17,8 @@ export interface Trace {
 
 export interface PlotSpec {
   id: string;
-  component: string; // "<yaml_key>.<instance>"
+  // Emitted by plotspec.py as {yaml_key, instance}; older specs used a string.
+  component: { yaml_key: string; instance: string | null } | string;
   title: string;
   xlabel: string;
   ylabel: string;

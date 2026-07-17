@@ -4,6 +4,7 @@ import Sidebar from "./components/Sidebar";
 import LogTerminal from "./components/LogTerminal";
 import WelcomeTab from "./components/WelcomeTab";
 import ConfigTab from "./components/ConfigTab";
+import DataTab from "./components/DataTab";
 import RunTab from "./components/RunTab";
 import ToolsTab from "./components/ToolsTab";
 import { api, type ProjectListing, type FileEntry } from "./api";
@@ -30,6 +31,11 @@ interface Tab {
 const TABS: Tab[] = [
   { id: "welcome", label: "Welcome", render: () => <WelcomeTab /> },
   { id: "config", label: "Config", render: (ctx) => <ConfigTab configPath={ctx.configPath} /> },
+  {
+    id: "data",
+    label: "Data",
+    render: (ctx) => <DataTab listing={ctx.listing} configPath={ctx.configPath} />,
+  },
   {
     id: "run",
     label: "Run",

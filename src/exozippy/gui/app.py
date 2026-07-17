@@ -19,6 +19,12 @@ Endpoints (Phase 2, G7):
     WS   /api/logs?file=...   -- tail a log file, following rotation/truncation
     GET  /                    -- the prebuilt React bundle (static/)
 
+Data file manager (G9):
+    GET  /api/files?dir=...       -- browse the project tree for data files
+    POST /api/files/eligible      -- schema-driven association menu for a file
+    GET  /api/files/associations  -- current file -> instance associations
+    POST /api/preview             -- data-only PlotSpecs (worker subprocess)
+
 Run controls (G11):
     POST /api/run             -- launch a fit as a subprocess (one per project)
     GET  /api/run/status      -- poll the active run's phase + progress state
@@ -330,6 +336,10 @@ def create_app(project_dir=None):
     # app instance so each create_app() -- including per-test apps -- is isolated.
     run_state = {"handle": None}
 
+    # Data-tab preview cache, keyed by (comp_type, data-file mtimes) so a
+    # re-preview of an unchanged file is instant (G9).
+    preview_cache = {}
+
     class OpenProjectRequest(BaseModel):
         path: str
 
@@ -359,6 +369,13 @@ def create_app(project_dir=None):
         name: str
         args: dict = {}
         cwd: Optional[str] = None
+
+    class EligibleRequest(BaseModel):
+        filename: str
+
+    class PreviewRequest(BaseModel):
+        comp_type: str
+        name: Optional[str] = None
 
     @app.get("/api/health")
     def health():
@@ -503,6 +520,111 @@ def create_app(project_dir=None):
         if job is None:
             return JSONResponse({"error": "no such job"}, status_code=404)
         return JSONResponse({"job_id": job_id, **job})
+
+    # --- data file manager (G9) ---------------------------------------------
+    #
+    # A schema-driven file browser + association + raw-data preview. Nothing
+    # here names a component: eligibility and associations flow entirely from
+    # the datafile globs declared in the config schema, and preview reuses each
+    # component's own plot_data(point=None).
+
+    @app.get("/api/files")
+    def files_list(dir: Optional[str] = None):
+        """List a directory for the Data tab file browser (rooted at project)."""
+        from . import datafiles
+
+        root = initial_project
+        if dir is None:
+            dir = (
+                str(state["doc"].config_path.parent)
+                if state["doc"] is not None and state["doc"].config_path
+                else (root or os.getcwd())
+            )
+        try:
+            return JSONResponse(datafiles.list_directory(dir, root=root))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    @app.post("/api/files/eligible")
+    def files_eligible(req: EligibleRequest):
+        """Schema-driven association menu: instance/key pairs for a filename."""
+        from ..introspect import full_schema
+        from . import datafiles
+
+        config = state["doc"].config if state["doc"] is not None else {}
+        eligible = datafiles.eligible_associations(
+            req.filename, config, full_schema()
+        )
+        return JSONResponse({"eligible": eligible})
+
+    @app.get("/api/files/associations")
+    def files_associations():
+        """Current file -> instance associations (chips), from the open doc."""
+        from ..introspect import full_schema
+        from . import datafiles
+
+        if state["doc"] is None:
+            return JSONResponse({"associations": {}})
+        assoc = datafiles.current_associations(state["doc"].config, full_schema())
+        return JSONResponse({"associations": assoc})
+
+    def _preview_cache_key(doc, comp_type):
+        """Cache key = comp_type plus the mtimes of that component's data files.
+
+        Component-agnostic: it discovers the data-file values via the schema's
+        datafile keys, so the cache invalidates whenever any associated file on
+        the component changes on disk (spec: cache per file mtime + instance).
+        """
+        from ..introspect import full_schema
+        from . import datafiles
+
+        workdir = str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        assoc = datafiles.current_associations(doc.config, full_schema())
+        mtimes = []
+        for _base, refs in assoc.items():
+            for ref in refs:
+                if ref["comp_type"] != comp_type:
+                    continue
+                path = ref["path"]
+                if not os.path.isabs(path):
+                    path = os.path.join(workdir, path)
+                try:
+                    mtimes.append((ref["path"], os.path.getmtime(path)))
+                except OSError:
+                    mtimes.append((ref["path"], None))
+        return (comp_type, tuple(sorted(mtimes)))
+
+    @app.post("/api/preview")
+    def preview(req: PreviewRequest):
+        """Build data-only PlotSpecs for a component in a worker subprocess.
+
+        Runs a lightweight prepare() off-process with a timeout, so a bad data
+        file surfaces as a readable error instead of hanging the server.
+        """
+        from .document import _jsonable
+        from .preview import run_preview
+
+        doc = state["doc"]
+        if doc is None:
+            return JSONResponse(
+                {"error": "no document is open; POST /api/doc/open first"},
+                status_code=400,
+            )
+
+        key = _preview_cache_key(doc, req.comp_type)
+        if key in preview_cache:
+            return JSONResponse(preview_cache[key])
+
+        config = _jsonable(doc.config)
+        params = _jsonable(doc.params)
+        workdir = str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        result = run_preview(config, params, workdir, req.comp_type)
+
+        # Only cache successful builds; an error should be re-attempted after a
+        # fix, and errors are cheap to reproduce anyway.
+        if "specs" in result:
+            preview_cache[key] = result
+        return JSONResponse(result)
 
     # --- run controls (G11) -------------------------------------------------
     #
