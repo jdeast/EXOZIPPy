@@ -134,15 +134,19 @@ def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
     """
     Given a compiled RV-only evaluator,
     When eval_plots is called at the base point,
-    Then every model-trace array is finite and non-empty.
+    Then at least one plot carries model traces, and every emitted trace is
+    finite and non-empty. Plots whose display is not an affine map of the node
+    output (phase-folded curves, SED spectra) correctly emit no live trace --
+    they stay at their solved value until a re-Solve rather than showing a
+    wrong-shaped array -- so not every plot need emit one.
     """
     system, model, ev, base_raw, _ = rvonly_evaluator
 
     out = ev.eval_plots(base_raw)
 
     assert len(out) >= 1
+    assert any(len(traces) >= 1 for traces in out.values())
     for plot_id, traces in out.items():
-        assert len(traces) >= 1
         for name, y in traces.items():
             arr = np.atleast_1d(np.asarray(y))
             assert arr.size >= 1

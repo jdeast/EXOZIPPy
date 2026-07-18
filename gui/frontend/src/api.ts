@@ -265,6 +265,10 @@ export const api = {
   // --- data file manager (G9) ---
   files: (dir?: string | null) =>
     getJson<DirListing>(`/api/files${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
+  // Unconfined directory browse for the sidebar project picker (navigates up
+  // freely, unlike files() which is sandboxed to the open project).
+  browse: (dir?: string | null) =>
+    getJson<DirListing>(`/api/browse${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
   filesEligible: (filename: string) =>
     postJson<{ eligible: EligiblePair[] }>("/api/files/eligible", { filename }),
   filesAssociations: () =>
@@ -273,6 +277,7 @@ export const api = {
     postJson<PreviewResult>("/api/preview", { comp_type, name: name ?? null }),
 
   // --- Tune tab (G10) ---
+  tunePrewarm: () => postJson<{ ok: boolean }>("/api/tune/prewarm", {}),
   tuneSolve: () => postJson<TuneStatus>("/api/tune/solve", {}),
   tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
   tuneResult: () => getJson<TuneResult>("/api/tune/result"),

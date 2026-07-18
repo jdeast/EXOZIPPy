@@ -1173,6 +1173,15 @@ class ConfigManager:
             parts = internal_path.split('.')
             c_type = parts[0]
             p_name = parts[-1]
+            # Skip instance-less (2-part) symbol entries for components that are
+            # instanced as a list. These are abstract relaxation-engine symbols
+            # (e.g. a bare "star.feh" that SED physics references) with no owning
+            # instance; the real parameters are the per-instance "star.A.feh".
+            # Exporting them surfaced orphaned "star" rows in the GUI tree that
+            # correspond to no actual star.
+            if len(parts) == 2 and isinstance(
+                    (self.system_config or {}).get(c_type), list):
+                continue
             el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
             cfg = self.resolve(c_type, p_name, element=el)
 

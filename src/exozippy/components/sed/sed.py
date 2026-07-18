@@ -1048,33 +1048,54 @@ class SED(Component):
         deps = self._model_trace_param_deps(
             getattr(self, "_sed_combined_node", None), system)
 
+        # Plot log10(lambda * F_lambda) on a LINEAR axis -- the same quantity and
+        # units the matplotlib SED plot() uses (the standard SED representation).
+        # Doing the log10 here, rather than shipping raw flux (~1e-13) to a log
+        # axis, keeps the JSON payload at normal scale: raw flux at that magnitude
+        # would round to 0.0 in the serializer and collapse the curve to a flat
+        # line. log10 of a non-positive value -> non-finite -> serialized as None
+        # (a gap), the right behaviour for a missing point.
+        def _log10(a):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return np.log10(np.asarray(a, dtype=float))
+
+        wave_ang = np.asarray(plot_obj.df_wave['wavelength_angstrom'], dtype=float)
+
         traces = []
-        # per-star model spectra (flux at Earth), from the shared helper
+        # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
             traces.append(Trace(
                 name=f"Star {plot_obj.star_names[nstar]}", role="model", kind="line",
-                x=wave_micron, y=plot_obj.flux_model_draws[0][nstar],
+                x=wave_micron, y=_log10(plot_obj.flux_model_draws[0][nstar] * wave_ang),
                 node=getattr(self, "_sed_mag_node", None)))
         if plot_obj.nstars > 1:
             traces.append(Trace(
                 name="Total", role="model", kind="line",
-                x=wave_micron, y=np.sum(plot_obj.flux_model_draws[0], axis=0),
+                x=wave_micron,
+                y=_log10(np.sum(plot_obj.flux_model_draws[0], axis=0) * wave_ang),
                 node=getattr(self, "_sed_mag_node", None)))
 
-        # observed photometry points (one per plot point; angstrom -> micron)
+        # observed photometry points (one per plot point; angstrom -> micron).
+        # Error bars are asymmetric in log space; the flux limits carry the +/-.
         wave_obs = plot_obj.wave_filter * ANG_TO_MICRON_CONST
-        f_obs = plot_obj.flux_obs
-        yerr = np.vstack([f_obs - plot_obj.f_limits_from_err[0],
-                          plot_obj.f_limits_from_err[1] - f_obs])
+        log_yobs = _log10(plot_obj.flux_obs * plot_obj.wave_filter)
+        y_lim = _log10(plot_obj.f_limits_from_err * plot_obj.wave_filter)
+        yerr = np.vstack([log_yobs - y_lim[0], y_lim[1] - log_yobs])
         traces.append(Trace(
             name="observed", role="data", kind="scatter",
-            x=wave_obs, y=f_obs, yerr=yerr))
+            x=wave_obs, y=log_yobs, yerr=yerr))
+
+        # Focus the y-axis on the observed data (same window matplotlib uses):
+        # the model spectra tail off to ~1e-78 at the far UV/IR edges, so letting
+        # the axis autorange to those would squash the interesting region.
+        plot_obj._get_ylim()
 
         return [PlotSpec(
             id=f"{self.prefix}.sed",
             component={"yaml_key": self.prefix, "instance": None},
             title="Spectral Energy Distribution",
             xlabel="Wavelength [micron]",
-            ylabel="Flux at Earth [erg/s/cm2/A]",
+            ylabel="log10(lambda F_lambda [erg/s/cm2])",
             traces=traces, param_deps=deps,
-            meta={"x_log": True, "y_log": True})]
+            meta={"x_log": True,
+                  "y_range": [float(plot_obj.y_lower), float(plot_obj.y_upper)]})]

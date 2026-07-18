@@ -50,6 +50,11 @@ body {
 }
 .wordmark {
   height: 28px;
+  /* The wordmark art is dark on transparent, so it vanishes against the dark
+     top bar -- sit it on a white plate with a little padding. */
+  background: #fff;
+  padding: 3px 6px;
+  border-radius: 4px;
 }
 .topbar-center {
   text-align: center;
@@ -950,6 +955,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
 /* --- Tune tab (G10) -------------------------------------------------------- */
 .tune-tab {
   display: flex;
@@ -1256,4 +1262,113 @@ button {
   gap: 6px;
   margin-top: 14px;
   font-size: 12px;
+}
+
+/* --- Folder picker (Browse...) + sidebar Browse button --------------------- */
+.sidebar-browse {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.folderpicker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.folderpicker {
+  width: 560px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.folderpicker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.folderpicker-path {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folderpicker-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+}
+.folderpicker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.folderpicker-row {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.folderpicker-row:hover {
+  background: var(--bg-3);
+}
+.folderpicker-actions {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+}
+.folderpicker-open {
+  background: var(--accent);
+  color: #0d1117;
+}
+.kind-dir {
+  background: var(--accent);
+}
+
+/* --- Welcome tab component previews ---------------------------------------- */
+.welcome-previews {
+  padding: 12px 16px;
+}
+.welcome-previews-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.link-button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+.welcome-preview {
+  margin-bottom: 20px;
+}
+.welcome-preview h3 {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 6px;
 }

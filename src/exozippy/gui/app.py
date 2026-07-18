@@ -52,8 +52,11 @@ import sys
 import threading
 import uuid
 import webbrowser
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 # The built frontend bundle lives here (committed to the wheel). It may be
 # absent in a source checkout that has not run `npm run build` yet; we degrade
@@ -87,10 +90,60 @@ def _require_fastapi():
 
 # --- project directory listing ------------------------------------------------
 
+@lru_cache(maxsize=1)
+def _config_top_keys():
+    """Top-level YAML keys that mark a file as a system config.
+
+    A system config's blocks are component yaml_keys (star, orbit, sed, ...)
+    plus the global bookkeeping keys run.py understands (run, prefix, sampler,
+    ...). We ask the introspection layer for the real, component-agnostic set so
+    no component name is hardcoded; discovery imports the component stack, so it
+    is cached and done at most once per process. The literal fallbacks cover the
+    case where introspection is unavailable in a lightweight context.
+    """
+    keys = {"run", "prefix", "logger_level", "sampler", "parameter_file"}
+    try:
+        from ..introspect import list_components, _global_schema
+        keys.update(list_components().keys())
+        keys.update(_global_schema().keys())
+    except Exception:  # pragma: no cover - defensive; fall back to literals
+        pass
+    return keys
+
+
 def _classify_yaml(path):
-    """Return 'params' for a parameter-override file, else 'config'."""
+    """Classify a YAML file by its content: 'params', 'config', or 'other'.
+
+    Filename conventions alone are unreliable (kelt4.params.3.yaml is a params
+    file that does not end in .params.yaml), so content is the primary signal
+    and the .params.yaml suffix is honored as a secondary one:
+
+      * every top-level key is a dotted parameter path (comp.instance.param)
+        -> 'params'  (content-decisive; catches oddly-named params files)
+      * filename ends with .params.yaml/.yml  -> 'params'  (the user's naming
+        convention, honored for params whose values we don't introspect)
+      * at least one top-level key is a known component/global block  -> 'config'
+      * anything else (a component's own input file like kelt4.sed.yaml, or
+        arbitrary YAML)  -> 'other'
+
+    Unreadable/invalid YAML falls back to the suffix convention so a broken file
+    still lands somewhere sensible.
+    """
     name = path.name.lower()
-    return "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+    try:
+        with open(path, "r") as fh:
+            data = yaml.safe_load(fh)
+    except Exception:
+        return "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+
+    keys = [k for k in data if isinstance(k, str)] if isinstance(data, dict) else []
+    if keys and all("." in k for k in keys):
+        return "params"
+    if name.endswith(_PARAMS_SUFFIXES):
+        return "params"
+    if _config_top_keys().intersection(keys):
+        return "config"
+    return "other"
 
 
 def open_project(path):
@@ -127,7 +180,7 @@ def open_project(path):
         if suffix in (".yaml", ".yml"):
             kind = _classify_yaml(child)
             entry["kind"] = kind
-            (params if kind == "params" else configs).append(entry)
+            {"params": params, "config": configs}.get(kind, other).append(entry)
         elif suffix in _DATA_EXTS:
             entry["kind"] = "data"
             data_files.append(entry)
@@ -568,6 +621,27 @@ def create_app(project_dir=None):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    @app.get("/api/browse")
+    def browse_dirs(dir: Optional[str] = None):
+        """List a directory for the sidebar project picker (no root confine).
+
+        Unlike /api/files (which is sandboxed to the open project so the Data
+        tab cannot wander off), this powers the "Browse..." dialog whose whole
+        job is to reach a *different* project, so it navigates up freely. It
+        starts at the current project's parent, or the user's home.
+        """
+        from . import datafiles
+
+        if dir is None:
+            if initial_project:
+                dir = str(Path(initial_project).expanduser().resolve().parent)
+            else:
+                dir = os.path.expanduser("~")
+        try:
+            return JSONResponse(datafiles.list_directory(dir, root=None))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
     @app.post("/api/files/eligible")
     def files_eligible(req: EligibleRequest):
         """Schema-driven association menu: instance/key pairs for a filename."""
@@ -787,6 +861,17 @@ def create_app(project_dir=None):
         tune_pool.submit(session.solve, config, params, workdir)
         return JSONResponse(session.status())
 
+    @app.post("/api/tune/prewarm")
+    def tune_prewarm():
+        """Start the evaluator worker (heavy imports) ahead of the first Solve.
+
+        Fire-and-forget: the Tune tab calls this on open so the ~10s import cost
+        is paid while the user reads the tab, not on the Solve click.
+        """
+        session = _tune_session()
+        tune_pool.submit(session.prewarm)
+        return JSONResponse({"ok": True})
+
     @app.get("/api/tune/status")
     def tune_status():
         session = tune_state.get("session")
@@ -958,10 +1043,25 @@ def main(argv=None):
 
     if not args.browser:
         try:
+            if sys.platform.startswith("linux"):
+                # Force Mesa software rendering so QtWebEngine does not probe the
+                # GPU DRI driver. Over X-forwarding / headless displays that probe
+                # fails and spams "libGL error: ... failed to load driver: nouveau"
+                # before falling back to software anyway; setdefault lets a user
+                # who has working GL override it. WebGL is off regardless (plots
+                # use SVG), so software GL costs nothing here.
+                os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+
             import webview  # pywebview
 
+            # On Linux force the Qt backend (the extra we ship). Left to probe,
+            # pywebview tries GTK first and prints a noisy "No module named 'gi'"
+            # ImportError before silently falling back to Qt; naming the backend
+            # skips the GTK attempt entirely. macOS/Windows keep their native
+            # default (Cocoa / EdgeChromium).
+            gui_backend = "qt" if sys.platform.startswith("linux") else None
             webview.create_window("EXOZIPPy", url, width=1400, height=900)
-            webview.start()
+            webview.start(gui=gui_backend)
             return 0
         except Exception as exc:  # pragma: no cover - env-dependent
             print(

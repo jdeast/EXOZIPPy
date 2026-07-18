@@ -273,7 +273,15 @@ class Evaluator:
         arr = np.asarray(node_out, dtype=float)
         if mt.affine is not None:
             a, b = mt.affine
-            return a * arr + b
+            arr = a * arr + b
+        # The node output may carry an extra leading axis (e.g. a (1, N) draw
+        # dimension) while the plotted y is 1-D. The affine was fit on ravelled
+        # arrays, so shape is safe to normalise here; without this the emitted
+        # array is nested [[...]] and the chart blanks. Only reshape when the
+        # element count matches the base trace (raw_ok traces always do).
+        base_shape = np.asarray(mt.base_y).shape
+        if arr.size == int(np.prod(base_shape)) and arr.shape != base_shape:
+            arr = arr.reshape(base_shape)
         return arr
 
     # -- public API -------------------------------------------------------
@@ -295,6 +303,14 @@ class Evaluator:
                 results = [results]
             plot_out: Dict[str, np.ndarray] = {}
             for mt, node_out in zip(traces, results):
+                # Only emit traces whose node output maps to the plotted y via a
+                # validated affine (RV scale, transit baseline). For SED spectra
+                # and phase-folded traces the node output is a different quantity
+                # / shape than the display (raw_ok is False): emitting it would
+                # replace the curve with a wrong-length array and blank the plot,
+                # so leave those traces at their solved value until a re-Solve.
+                if not mt.raw_ok:
+                    continue
                 plot_out[mt.name] = self._apply_display(mt, node_out)
             out[plot_id] = plot_out
         return out
