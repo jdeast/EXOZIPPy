@@ -26,8 +26,11 @@ from typing import Any, Optional
 import numpy as np
 
 # Default number of decimal places kept when serializing float arrays.
-# Six places is ample for time (BJD), flux, RV and magnitude payloads
-# while trimming the JSON size relative to full float64 repr.
+# Six places is ample for time (BJD), RV and magnitude payloads while trimming
+# the JSON size relative to full float64 repr. Values that span many orders of
+# magnitude (e.g. SED flux at Earth ~1e-13, which would round to 0.0 here) are
+# plotted in log10 space by the component, so they too arrive as normal-scale
+# numbers -- no special-casing needed in this serializer.
 _FLOAT_ROUND = 6
 
 

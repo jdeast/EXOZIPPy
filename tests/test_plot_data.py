@@ -338,10 +338,14 @@ def test_sed_plot_data_returns_serializable_specs(sed_built):
     for t in model_traces:
         assert np.all(np.isfinite(t.y))
 
-    # model spectra match the shared _make_plot_obj helper
+    # model spectra match the shared _make_plot_obj helper. The GUI spec plots
+    # log10(lambda * F_lambda) (the standard SED representation, matching the
+    # matplotlib plot() path) rather than raw flux, so compare in that space.
     plot_obj = system.sed._make_plot_obj(system, [point])
+    wave_ang = np.asarray(plot_obj.df_wave["wavelength_angstrom"], dtype=float)
     star0 = [t for t in model_traces if t.name.endswith(str(plot_obj.star_names[0]))][0]
-    np.testing.assert_allclose(star0.y, plot_obj.flux_model_draws[0][0])
+    np.testing.assert_allclose(
+        star0.y, np.log10(plot_obj.flux_model_draws[0][0] * wave_ang))
 
 
 def test_sed_data_only_without_build_model():

@@ -21,6 +21,7 @@ interface TabContext {
   listing: ProjectListing | null;
   setLogFile: (file: string | null) => void;
   configPath: string | null;
+  setActiveTab: (id: string) => void;
 }
 
 interface Tab {
@@ -30,7 +31,13 @@ interface Tab {
 }
 
 const TABS: Tab[] = [
-  { id: "welcome", label: "Welcome", render: () => <WelcomeTab /> },
+  {
+    id: "welcome",
+    label: "Welcome",
+    render: (ctx) => (
+      <WelcomeTab configPath={ctx.configPath} setActiveTab={ctx.setActiveTab} />
+    ),
+  },
   { id: "config", label: "Config", render: (ctx) => <ConfigTab configPath={ctx.configPath} /> },
   { id: "tune", label: "Tune", render: (ctx) => <TuneTab configPath={ctx.configPath} /> },
   {
@@ -55,12 +62,16 @@ export default function App() {
   const [projectError, setProjectError] = useState<string | null>(null);
   const [logFile, setLogFile] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>(TABS[0].id);
+  // The config file the Config tab edits. null -> fall back to the project's
+  // first config; a sidebar click on a config file sets it explicitly.
+  const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
 
   const openProject = async (path: string) => {
     try {
       setProjectError(null);
       const result = await api.openProject(path);
       setListing(result);
+      setSelectedConfig(null); // let the new project pick its own default config
     } catch (e) {
       setProjectError(String(e instanceof Error ? e.message : e));
       setListing(null);
@@ -75,12 +86,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onSelectFile = (entry: FileEntry) => setLogFile(entry.path);
+  // Clicking a config file opens it in the Config tab (and switches to it);
+  // any other file is tailed in the bottom log terminal.
+  const onSelectFile = (entry: FileEntry) => {
+    if (entry.kind === "config") {
+      setSelectedConfig(entry.path);
+      setActiveTab("config");
+    } else {
+      setLogFile(entry.path);
+    }
+  };
 
   const projectName = listing ? listing.dir.split("/").pop() || listing.dir : null;
   const current = TABS.find((t) => t.id === activeTab) || TABS[0];
-  // The Config tab edits the first config file the project exposes.
-  const configPath = listing && listing.configs.length ? listing.configs[0].path : null;
+  // The Config tab edits the clicked config, else the project's first config.
+  const configPath =
+    selectedConfig ??
+    (listing && listing.configs.length ? listing.configs[0].path : null);
 
   return (
     <div className="app">
@@ -105,7 +127,7 @@ export default function App() {
             ))}
           </nav>
           <div className="tab-content">
-            {current.render({ configPath, listing, setLogFile })}
+            {current.render({ configPath, listing, setLogFile, setActiveTab })}
           </div>
         </main>
       </div>

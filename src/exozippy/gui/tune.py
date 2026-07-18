@@ -26,9 +26,12 @@ This module is component-AGNOSTIC and imports nothing from FastAPI, so
 
 from __future__ import annotations
 
+import gc
 import logging
 import multiprocessing
 import os
+import signal
+import sys
 import threading
 from typing import Callable, Optional
 
@@ -64,6 +67,17 @@ def _do_solve(state, msg, resp_q):
     if workdir:
         os.chdir(workdir)
     try:
+        # Release the previous solve's System/model/evaluator BEFORE building the
+        # new one. This worker process is reused across solves (to keep the heavy
+        # imports and compile cache warm), so without this the old objects -- a
+        # full System with SED spectral grids plus compiled pytensor functions --
+        # stay alive through the entire next build, roughly doubling peak memory
+        # and accumulating across re-Solves until the machine runs out of RAM and
+        # thrashes. Dropping the references and collecting caps us at one System.
+        state.pop("ev", None)
+        state.pop("raw", None)
+        gc.collect()
+
         system = System(config, user_params=params)
         system.prepare()
         export = system.config_manager.export_solution()
@@ -117,8 +131,36 @@ def _do_eval(state, msg):
     return {"plots": plots}
 
 
+def _install_parent_death_signal():
+    """On Linux, ask the kernel to SIGKILL this child when its parent dies.
+
+    The worker holds ~800 MB (a full System + compiled pytensor + SED grids).
+    ``daemon=True`` reaps it on a clean parent exit, but NOT when the server is
+    hard-killed (SIGKILL / crash): the child is reparented to init and keeps its
+    memory forever. Enough of those orphans accumulate to swap-thrash the whole
+    machine. PR_SET_PDEATHSIG (prctl option 1) makes the kernel send us SIGKILL
+    the moment the parent dies, however it dies. Best-effort and Linux-only;
+    also handle the race where the parent already died before we armed it.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+        # Race: if the parent exited between spawn and prctl, we were already
+        # reparented to init (pid 1) and the death signal will never fire.
+        if os.getppid() == 1:
+            os._exit(0)
+    except Exception:  # noqa: BLE001 - best effort; never block the worker
+        logger.debug("PR_SET_PDEATHSIG unavailable", exc_info=True)
+
+
 def _worker_main(req_q, resp_q):
     """Entry point of the evaluator subprocess: a serve loop over the queues."""
+    _install_parent_death_signal()
     state: dict = {}
     while True:
         msg = req_q.get()
@@ -165,6 +207,9 @@ class EvaluatorWorker:
             target=_worker_main, args=(self._req_q, self._resp_q), daemon=True
         )
         self._proc.start()
+
+    def is_alive(self):
+        return self._proc is not None and self._proc.is_alive()
 
     def solve(self, config, params, workdir, on_progress=None):
         """Run a full solve; block for the result, forwarding progress states."""
@@ -224,20 +269,51 @@ class TuneSession:
         self.structural_hash: Optional[str] = None
         self.result: Optional[dict] = None   # {parameters, seeds, plots}
 
-    def solve(self, config, params, workdir):
-        """Blocking solve (call from a background thread). Sets phase/result."""
+    def _ensure_worker(self):
+        """Return a live worker subprocess, (re)spawning only if needed.
+
+        Reusing a warm worker across solves is the main speed lever: a spawn
+        re-imports pytensor/pymc/exozippy (~10s) and cold-starts the pytensor
+        compile cache, so paying that once instead of on every re-Solve makes
+        repeated tuning dramatically faster. ``_do_solve`` rebuilds the System /
+        model / evaluator from scratch each call, so a reused worker holds no
+        stale state, and the child's serve loop survives a solve error, so an
+        errored worker is still safe to reuse.
+        """
         factory = self._worker_factory or EvaluatorWorker
-        self.phase = "solving"
-        self.error = None
-        try:
-            if self._worker is not None:
+        worker = self._worker
+        if worker is None or not getattr(worker, "is_alive", lambda: True)():
+            if worker is not None:
                 try:
-                    self._worker.close()
+                    worker.close()
                 except Exception:  # pragma: no cover
                     pass
             worker = factory()
             worker.start()
             self._worker = worker
+        return worker
+
+    def prewarm(self):
+        """Start the worker subprocess (heavy imports) before the first Solve.
+
+        Called when the Tune tab opens so the import cost overlaps with the user
+        reading the tab instead of landing entirely on the first Solve click.
+        """
+        with self._lock:
+            try:
+                self._ensure_worker()
+            except Exception:  # noqa: BLE001 - best effort, non-fatal
+                logger.exception("tune prewarm failed")
+
+    def solve(self, config, params, workdir):
+        """Blocking solve (call from a background thread). Sets phase/result."""
+        self.phase = "solving"
+        self.error = None
+        try:
+            # Brief lock only around (re)spawn, not the seconds-long solve, so a
+            # concurrent prewarm can't double-spawn but eval is never blocked.
+            with self._lock:
+                worker = self._ensure_worker()
 
             def _progress(state):
                 self.phase = state

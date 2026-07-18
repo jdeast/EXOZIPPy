@@ -77,10 +77,6 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     }
   }, [configPath]);
 
-  useEffect(() => {
-    ensureDoc();
-  }, [ensureDoc]);
-
   // Poll solve status until it leaves the transient phases.
   const startPolling = useCallback(() => {
     if (pollTimer.current) window.clearInterval(pollTimer.current);
@@ -113,6 +109,71 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     },
     []
   );
+
+  // Restore from the server-side session on (re)mount. The solve runs in a
+  // background thread on the server; its phase/result/hash outlive this
+  // component, so switching tabs mid-solve must NOT lose it. We pick an
+  // in-flight solve back up, re-hydrate a finished one, or (when idle) prewarm
+  // the evaluator worker so the eventual first Solve is faster.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await ensureDoc();
+      let st: TuneStatus;
+      try {
+        st = await api.tuneStatus();
+      } catch {
+        return; // no session -> idle
+      }
+      if (cancelled) return;
+      setStatus(st);
+      if (st.phase === "solving" || st.phase === "compiling") {
+        startPolling(); // keep watching the background solve
+      } else if (st.phase === "live" && st.has_result) {
+        const res = await api.tuneResult();
+        if (cancelled) return;
+        setResult(res);
+        setSpecs(res.plots);
+        // A structural edit made elsewhere while we were away may have
+        // invalidated the live evaluator; surface the re-Solve banner.
+        try {
+          const h = await api.tuneHash();
+          if (!cancelled && h.stale) {
+            setStale(true);
+            setStaleReason("Config changed -- re-Solve to refresh.");
+          }
+        } catch {
+          /* no doc open: leave as-is */
+        }
+      } else if (st.phase === "error") {
+        setError(st.error || "solve failed");
+      } else {
+        // idle: warm the worker subprocess now so the first Solve is faster.
+        api.tunePrewarm().catch(() => {});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ensureDoc, startPolling]);
+
+  // Once a solve populates parameters, auto-select the first slider-tunable one
+  // so the detail panel shows a working slider immediately -- otherwise the
+  // right pane just says "Select a parameter" and it is not obvious that
+  // clicking a row in the tree is how you tune.
+  useEffect(() => {
+    if (!result || selected) return;
+    const first = Object.entries(result.parameters).find(
+      ([, p]) =>
+        !p.derived &&
+        !p.fixed &&
+        p.lower != null &&
+        p.upper != null &&
+        p.upper > p.lower
+    );
+    if (first) setSelected(first[0]);
+  }, [result, selected]);
 
   const solve = useCallback(async () => {
     setError(null);
@@ -673,7 +734,10 @@ function ProvenanceLegend() {
 function formatValue(v: number | null): string {
   if (v == null || !Number.isFinite(v)) return "--";
   const a = Math.abs(v);
-  if (a !== 0 && (a < 1e-3 || a >= 1e5)) return v.toExponential(3);
+  if (a !== 0 && a < 1e-3) return v.toExponential(3);
+  // Large values are typically times (BJD ~2.46e6); keep 6 decimals rather than
+  // collapsing to sci-notation, which drops the sub-day (tc) precision.
+  if (a >= 1e5) return v.toFixed(6);
   return String(Number(v.toPrecision(6)));
 }
 

@@ -37,8 +37,10 @@ def test_open_project_lists_and_classifies(tmp_path):
     """Given a dir of files, When open_project runs, Then files are classified."""
     from exozippy.gui.app import open_project
 
-    (tmp_path / "system.yaml").write_text("a: 1\n")
-    (tmp_path / "system.params.yaml").write_text("b: 2\n")
+    # A config is recognized by content (a known component/global block, here
+    # the global 'prefix'); a params file by its all-dotted keys or its name.
+    (tmp_path / "system.yaml").write_text("prefix: out\n")
+    (tmp_path / "system.params.yaml").write_text("star.0.mass: {initval: 1}\n")
     (tmp_path / "lc.rv").write_text("0 1 2\n")
     (tmp_path / "notes.md").write_text("hi\n")
     (tmp_path / ".hidden.yaml").write_text("skip: me\n")
@@ -53,6 +55,28 @@ def test_open_project_lists_and_classifies(tmp_path):
     import json
 
     json.dumps(result)
+
+
+def test_open_project_classifies_by_content_not_only_name(tmp_path):
+    """Given YAMLs whose names mislead, When open_project runs, Then content wins.
+
+    A params override whose name does not end in .params.yaml (all-dotted keys)
+    is still 'params'; a YAML that is neither a config nor params (a component's
+    own input file) is 'other', not a spurious config.
+    """
+    from exozippy.gui.app import open_project
+
+    (tmp_path / "real.yaml").write_text("prefix: out\nstar: {}\n")
+    # Misnamed params file: dotted keys, but not the *.params.yaml convention.
+    (tmp_path / "overrides.3.yaml").write_text("orbit.b.cosi: {initval: 0}\n")
+    # A component input file: a mapping, but no config/global blocks.
+    (tmp_path / "star_input.yaml").write_text("model: NextGen\nnstars: 3\n")
+
+    result = open_project(str(tmp_path))
+
+    assert [f["name"] for f in result["configs"]] == ["real.yaml"]
+    assert [f["name"] for f in result["params"]] == ["overrides.3.yaml"]
+    assert "star_input.yaml" in [f["name"] for f in result["other"]]
 
 
 def test_open_project_rejects_missing_dir(tmp_path):
@@ -104,7 +128,7 @@ def test_utilities_endpoint(client):
 
 def test_project_open_endpoint(client, tmp_path):
     """Given a real dir, When POST /api/project/open, Then it lists files."""
-    (tmp_path / "cfg.yaml").write_text("x: 1\n")
+    (tmp_path / "cfg.yaml").write_text("prefix: out\n")
     resp = client.post("/api/project/open", json={"path": str(tmp_path)})
     assert resp.status_code == 200
     assert resp.json()["configs"][0]["name"] == "cfg.yaml"
