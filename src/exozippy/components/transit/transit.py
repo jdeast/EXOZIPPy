@@ -132,6 +132,13 @@ class Transit(Component):
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+        # Fixed instrument properties (not fitted parameters), read straight
+        # off the config like self.files/self.band_names: exptime is the
+        # exposure duration in minutes, ninterp the number of sub-samples
+        # used to smear the model over that exposure (EXOFASTv2 parity).
+        self.exptime_min = [float(c.get("exptime", 0.0)) for c in self.config]
+        self.ninterp = [int(c.get("ninterp", 1)) for c in self.config]
+
         for i, file in enumerate(self.files):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
             n_obs = len(df)
@@ -154,6 +161,8 @@ class Transit(Component):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.n_total_obs = len(self.time)
 
+        self._build_oversample_grid()
+
         # Block Diagonal Matrix
         self.n_detrend_per_inst = [d.shape[1] for d in all_detrend]
         self.total_detrend_cols = sum(self.n_detrend_per_inst)
@@ -164,6 +173,48 @@ class Transit(Component):
             n_r, n_c = d_block.shape
             if n_c > 0: self.detrend_matrix[r:r + n_r, c:c + n_c] = d_block
             r, c = r + n_r, c + n_c
+
+    def _build_oversample_grid(self):
+        """
+        Build the (N_obs, max_ninterp) sub-exposure time grid and matching
+        per-observation averaging weights used to smear the model over each
+        instrument's exposure time (EXOFASTv2 exofast_chi2v2.pro parity:
+        a 2D time grid collapsed with total(modelflux, 2) / ninterp).
+
+        exptime/ninterp are per-instrument, but self.time is concatenated
+        across instruments, so instruments may disagree on both. Rather than
+        assuming a single ninterp for the whole component, every instrument
+        gets its own sub-sampling: observations are padded out to the
+        largest ninterp among the active instruments, and the padding
+        columns carry weight 0 (they duplicate that observation's own
+        timestamp, so they are finite but inert) so the weighted sum still
+        averages over only that observation's own instrument's ninterp.
+        """
+        exptime_days = np.asarray(self.exptime_min, dtype=float) / 1440.0
+        ninterp_per_inst = np.asarray(self.ninterp, dtype=int)
+        self.max_ninterp = int(ninterp_per_inst.max()) if len(ninterp_per_inst) else 1
+
+        if self.max_ninterp <= 1:
+            self.oversample_time = self.time[:, None]
+            self.oversample_weights = np.ones((self.n_total_obs, 1))
+            return
+
+        ninterp_obs = ninterp_per_inst[self.inst_map]  # (N_obs,)
+        exptime_obs = exptime_days[self.inst_map]  # (N_obs,)
+
+        k = self.max_ninterp
+        j = np.arange(k)
+        valid = j[None, :] < ninterp_obs[:, None]  # (N_obs, k)
+
+        # Evenly spaced sub-times from -exptime/2 to +exptime/2; a lone
+        # sample (ninterp==1) sits at the timestamp itself (frac 0).
+        denom = np.maximum(ninterp_obs[:, None] - 1, 1)
+        frac = j[None, :] / denom - 0.5
+        frac = np.where(ninterp_obs[:, None] == 1, 0.0, frac)
+        frac = np.where(valid, frac, 0.0)  # padding collapses onto the timestamp
+
+        self.oversample_time = self.time[:, None] + frac * exptime_obs[:, None]
+        self.oversample_weights = np.where(valid, 1.0 / ninterp_obs[:, None], 0.0)
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -297,18 +348,29 @@ class Transit(Component):
         pm.Deterministic(f"{self.prefix}.taus", dur_taus)
 
         # 2. Orbital Geometry Broadcast
-        t_grid = time[:, None]  # (N_obs, 1)
-        tp = orbits.tp.value[planets.orbit_map][None, :]  # (1, N_planets)
-        n = orbits.n.value[planets.orbit_map][None, :]
-        ecc = ecc_p[None, :]
-        cosw = orbits.cosw.value[planets.orbit_map][None, :]
-        sinw = orbits.sinw.value[planets.orbit_map][None, :]
-        inc = inc_p[None, :]
+        # t_grid carries a sub-exposure axis (N_obs, max_ninterp): each
+        # observation's own instrument contributes ninterp evenly-spaced
+        # sub-times spanning its own exptime (see _build_oversample_grid);
+        # observations from a shorter-ninterp instrument are padded with
+        # inert (weight-0) columns so mixed-ninterp instruments don't need
+        # a shared/uniform ninterp. With ninterp==1 everywhere this is
+        # exactly time[:, None] and reduces to the original computation.
+        time_grid = pm.Data("transit_time_grid", self.oversample_time)  # (N_obs, K)
+        oversample_weights = pm.Data(
+            "transit_oversample_weights", self.oversample_weights)  # (N_obs, K)
+
+        t_grid = time_grid[:, :, None]  # (N_obs, K, 1)
+        tp = orbits.tp.value[planets.orbit_map][None, None, :]  # (1, 1, N_planets)
+        n = orbits.n.value[planets.orbit_map][None, None, :]
+        ecc = ecc_p[None, None, :]
+        cosw = orbits.cosw.value[planets.orbit_map][None, None, :]
+        sinw = orbits.sinw.value[planets.orbit_map][None, None, :]
+        inc = inc_p[None, None, :]
 
         M = (t_grid - tp) * n
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
-        a_rstar = planets.ar.value[None, :]
+        a_rstar = planets.ar.value[None, None, :]
         p_ratio = planets.p.value[None, :]
 
         r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
@@ -318,6 +380,7 @@ class Transit(Component):
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
 
+        # (N_obs, K, N_planets)
         b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
         Z = r_norm * sin_wf * sin_i
 
@@ -353,21 +416,22 @@ class Transit(Component):
 
         # 4. Exoplanet-core Transit Model
         for p_idx in range(planets.n_elements):
-            b_p = b[:, p_idx]  # (N_obs,) sky-plane separation in units of R_*
-            Z_p = Z[:, p_idx]  # (N_obs,) line-of-sight coord (+ = planet in front of star)
+            b_p = b[:, :, p_idx]  # (N_obs, K) sky-plane separation in units of R_*
+            Z_p = Z[:, :, p_idx]  # (N_obs, K) line-of-sight coord (+ = planet in front of star)
             r_p = planets.p.value[p_idx]  # scalar R_p/R_*
 
-            # quad_solution_vector(b, r) -> (N_obs, 3) solution vector s.
-            # Broadcast scalar r_p to (N_obs,) following the ops.kepler() pattern.
+            # quad_solution_vector(b, r) -> (N_obs, K, 3) solution vector s.
+            # Broadcast scalar r_p to (N_obs, K) following the ops.kepler() pattern.
             sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
 
             # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
             # Verified against brute-force disk integration: lc = dot(s, c) / dot(s_off, c)
+            # c0/c1/c2/ld_norm are (N_obs,); broadcast against the sub-exposure axis.
             flux_frac = (
-                sol[:, 0] * c0 +
-                sol[:, 1] * c1 +
-                sol[:, 2] * c2
-            ) / ld_norm
+                sol[:, :, 0] * c0[:, None] +
+                sol[:, :, 1] * c1[:, None] +
+                sol[:, :, 2] * c2[:, None]
+            ) / ld_norm[:, None]  # (N_obs, K)
 
             # Fraction of stellar flux blocked (0 off-disk, ≈ r² at disk centre)
             blocked = 1.0 - flux_frac
@@ -375,12 +439,26 @@ class Transit(Component):
             # Primary transit only; secondary eclipse (planet behind star) has Z < 0
             blocked = pt.where(Z_p > 0.0, blocked, 0.0)
             if dil_obs is not None:
-                blocked = blocked * dil_obs
-            lc_model = lc_model - blocked
+                blocked = blocked * dil_obs[:, None]
+
+            # Collapse the sub-exposure axis: a weighted mean over each
+            # observation's own ninterp sub-samples (weights sum to 1 per
+            # row; padding columns carry weight 0). With ninterp==1 this is
+            # a no-op identity (single column, weight 1).
+            blocked_avg = pt.sum(blocked * oversample_weights, axis=1)  # (N_obs,)
+            lc_model = lc_model - blocked_avg
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
+
+        # Full per-observation model prediction (baseline + detrend +
+        # exposure-averaged transit decrement). Kept as a plain attribute,
+        # not a Deterministic: at (N_obs,) this would add N_obs * draws *
+        # chains floats to every trace (tens of thousands x the size of the
+        # other diagnostics here, which are all (N_planets,)). Tests compile
+        # a one-off pytensor.function from this node directly instead.
+        self._model_flux_node = lc_model
 
         # 5. Likelihood
         sigma = pt.sqrt(pt.sqr(err) + self.jitter_variance.value[self.inst_map_tensor])
