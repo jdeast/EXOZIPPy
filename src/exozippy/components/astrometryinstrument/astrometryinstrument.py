@@ -86,7 +86,7 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
-from exozippy.components.component import Component
+from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.ephemeris import get_observer_position
 from . import physics
@@ -98,11 +98,10 @@ DAYS_PER_YEAR = 365.25
 VALID_MODES = ("gaia", "abs", "rel")
 
 
-class AstrometryInstrument(Component):
+class AstrometryInstrument(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Astrometry Parameters"
-        self.files = [c.get("file") for c in self.config]
         self.modes = [c.get("mode", "gaia") for c in self.config]
         for m in self.modes:
             if m not in VALID_MODES:
@@ -248,6 +247,7 @@ class AstrometryInstrument(Component):
                 "required": False,
                 "doc": "Reference epoch for the astrometric positions.",
             },
+            cls._plot_style_config_schema(),
         ]
 
     # ------------------------------------------------------------------
@@ -317,7 +317,7 @@ class AstrometryInstrument(Component):
                             + Y * np.sin(ra_ref) * np.sin(dec_ref)
                             - Z * np.cos(dec_ref))
 
-            self.jittervar_lower[i] = -0.95 * min_err ** 2
+            self.jittervar_lower[i] = self._jitter_floor([min_err])
             self.n_total_obs += len(t)
             self.datasets.append(d)
 
@@ -343,11 +343,8 @@ class AstrometryInstrument(Component):
     # Stage 2
     # ------------------------------------------------------------------
     def register_parameters(self, system):
-        self.manifest = {
-            "jitter_variance": {"lower": self.jittervar_lower},
-            "jitter": "default",
-            "fluxfrac": None,
-        }
+        self.manifest = {"fluxfrac": None}
+        self._register_noise(self.manifest, self.jittervar_lower)
 
         # SED-derived fluxfrac: instruments with band + companion_star_ndx
         # in a system with a sed: block get their photocenter flux

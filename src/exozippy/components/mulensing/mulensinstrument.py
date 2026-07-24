@@ -11,7 +11,7 @@ import pytensor.tensor as pt
 from scipy.optimize import nnls
 
 import astropy.units as u
-from exozippy.components.component import Component
+from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 import pytensor.tensor as pt
@@ -32,11 +32,13 @@ def _raw_initval(data, default=None):
     return val
 
 
-class MulensInstrument(Component):
+class MulensInstrument(Instrument):
+    # Multiplicative per-instrument error scale (not additive jitter).
+    noise_model = "err_scale"
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
-        self.files = [c.get("file") for c in self.config]
 
     @property
     def prefix(self):
@@ -111,6 +113,7 @@ class MulensInstrument(Component):
                     "f_blend flux system. Defaults to the first instrument."
                 ),
             },
+            cls._plot_style_config_schema(),
         ]
 
     def _reference_index(self):
@@ -525,8 +528,9 @@ class MulensInstrument(Component):
             "q_source": None,
             "f_source": "default",
             "f_blend": "default",
-            "err_scale": None,
         }
+        # Multiplicative per-instrument error scale (shared base helper).
+        self._register_noise(self.manifest)
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).
@@ -603,7 +607,6 @@ class MulensInstrument(Component):
         #    f_s,2 = f_s·q_F/(1+q_F) (q_F per instrument — sources differ in color)
         fs = self.f_source.value[self.inst_map_tensor]
         fb = self.f_blend.value[self.inst_map_tensor]
-        k_scale = self.err_scale.value[self.inst_map_tensor]
 
         if n_src == 1:
             model_flux = fs * A_per_source[0] + fb
@@ -618,8 +621,8 @@ class MulensInstrument(Component):
         safe_flux = pt.maximum(model_flux, 1e-12)
         model_mag = -2.5 * pt.log10(safe_flux)
 
-        # 4. Error scaling & Likelihood
-        sigma = obs_err * k_scale
+        # 4. Error scaling & Likelihood (shared base helper: err * err_scale)
+        sigma = self.total_sigma(obs_err)
 
         pm.Normal(
             f"{self.prefix}.model",

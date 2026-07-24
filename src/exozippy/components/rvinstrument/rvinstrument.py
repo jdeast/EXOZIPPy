@@ -10,21 +10,19 @@ import matplotlib.pyplot as plt
 import pymc as pm
 import pytensor.tensor as pt
 import pytensor
-from exozippy.components.component import Component
+from exozippy.components.instrument import Instrument
 from . import physics
 
-class RVInstrument(Component):
+class RVInstrument(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
-        self.files = [c.get("file") for c in self.config]
         self.units = [c.get("unit", u.m / u.s) for c in self.config]
         # Which star the RVs are of; its Doppler signal is the sum over
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
         self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
         self.total_detrend_cols = 0
-        self.n_total_obs = 0
 
     @property
     def prefix(self):
@@ -80,6 +78,7 @@ class RVInstrument(Component):
                     "'m/s'."
                 ),
             },
+            cls._plot_style_config_schema(),
         ]
 
     def load_data(self, system):
@@ -99,7 +98,8 @@ class RVInstrument(Component):
 
             m_s_factor = self.units[i].to(u.m / u.s)
             self.gamma_init[i] = np.mean(df.iloc[:, 1].values) * m_s_factor
-            self.jittervar_lower[i] = -0.95 * (np.min(df.iloc[:, 2].values) * m_s_factor) ** 2
+            self.jittervar_lower[i] = self._jitter_floor(
+                df.iloc[:, 2].values, factor=m_s_factor)
 
             if df.shape[1] > 3:
                 all_detrend.append(df.iloc[:, 3:].values.astype(float))
@@ -116,16 +116,9 @@ class RVInstrument(Component):
         self.n_total_obs = len(self.time)
         self.k_init = ((u.solRad / u.d).to(u.m / u.s)) * np.sqrt(2.0) * np.std(self.rv)
 
-        # Block Diagonal Matrix
-        self.n_detrend_per_inst = [d.shape[1] for d in all_detrend]
-        self.total_detrend_cols = sum(self.n_detrend_per_inst)
-        self.detrend_matrix = np.zeros((self.n_total_obs, self.total_detrend_cols))
-
-        r, c = 0, 0
-        for d_block in all_detrend:
-            n_r, n_c = d_block.shape
-            if n_c > 0: self.detrend_matrix[r:r + n_r, c:c + n_c] = d_block
-            r, c = r + n_r, c + n_c
+        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
+        self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
+            self._build_block_detrend(all_detrend, self.n_total_obs)
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -134,11 +127,8 @@ class RVInstrument(Component):
             val = gamma_arr[i].item() if hasattr(gamma_arr[i], 'item') else float(gamma_arr[i])
             self.config_manager.add_hint(f"{self.prefix}.{i}.gamma", val)
 
-        self.manifest = {
-            "gamma": "default",
-            "jitter_variance": {"lower": self.jittervar_lower},
-            "jitter": "default"
-        }
+        self.manifest = {"gamma": "default"}
+        self._register_noise(self.manifest, self.jittervar_lower)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
@@ -199,8 +189,8 @@ class RVInstrument(Component):
             rv_model += pt.dot(detrend, self.detrend_coeffs.value)
 
         # 2. Define the Likelihood (The Normal Distribution)
-        # Total variance = data_error^2 + jitter^2
-        sigma = pt.sqrt(pt.sqr(err) + self.jitter_variance.value[self.inst_map_tensor])
+        # Total variance = data_error^2 + jitter^2 (shared base helper)
+        sigma = self.total_sigma(err)
 
         pm.Normal(
             f"{self.prefix}.model",
@@ -467,7 +457,8 @@ class RVInstrument(Component):
             traces.append(Trace(
                 name=self.names[i], role="data", kind="scatter",
                 x=self.time[mask], y=(self.rv[mask] - g) * factor,
-                yerr=self.err[mask] * factor))
+                yerr=self.err[mask] * factor,
+                style=self._data_trace_style(i)))
         specs.append(PlotSpec(
             id=f"{self.prefix}.unphased",
             component={"yaml_key": self.prefix, "instance": None},
@@ -493,7 +484,8 @@ class RVInstrument(Component):
                     data_phases = np.mod((self.time[mask] - tc_ref) / P_ref + 0.25, 1.0)
                     otraces.append(Trace(
                         name=self.names[i], role="data", kind="scatter",
-                        x=data_phases, y=cleaned, yerr=self.err[mask] * factor))
+                        x=data_phases, y=cleaned, yerr=self.err[mask] * factor,
+                        style=self._data_trace_style(i)))
                 oname = system.orbit.names[o_idx]
                 specs.append(PlotSpec(
                     id=f"{self.prefix}.phased.{oname}",
