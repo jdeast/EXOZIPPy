@@ -364,11 +364,13 @@ def _snapshot_run_inputs(handle, params_path=None):
 
 # --- app factory --------------------------------------------------------------
 
-def create_app(project_dir=None):
+def create_app(project_dir=None, initial_config=None):
     """Build and return the FastAPI application.
 
     Requires the 'gui' extra. ``project_dir`` seeds the initial project the
-    frontend opens; it is served to the client via GET /api/config.
+    frontend opens; ``initial_config`` optionally names a specific config file
+    within it to pre-select in the Config tab. Both are served to the client
+    via GET /api/config.
     """
     _require_fastapi()
 
@@ -384,6 +386,7 @@ def create_app(project_dir=None):
     app = FastAPI(title="EXOZIPPy", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
     initial_project = str(Path(project_dir).resolve()) if project_dir else None
+    initial_config = str(Path(initial_config).resolve()) if initial_config else None
 
     # The single document the GUI is editing. Held in server state so undo/redo
     # stacks survive across requests. A worker pool runs the (seconds-long)
@@ -459,8 +462,8 @@ def create_app(project_dir=None):
 
     @app.get("/api/config")
     def gui_config():
-        """Client bootstrap: which project (if any) to open on load."""
-        return {"initial_project": initial_project}
+        """Client bootstrap: which project (and config, if any) to open on load."""
+        return {"initial_project": initial_project, "initial_config": initial_config}
 
     @app.get("/api/schema")
     def schema():
@@ -984,6 +987,27 @@ def _wait_until_up(host, port, timeout=15.0):
     return False
 
 
+def resolve_project_arg(project_arg, cwd=None):
+    """Resolve the ``exozippy-gui [project]`` positional arg to (dir, config).
+
+    ``project_arg`` may be None (default: ``cwd``, or ``os.getcwd()`` if that
+    is also None), a project directory, or a specific config file (relative
+    or absolute) -- e.g. ``kelt4.yaml``. A file resolves to its parent dir plus
+    that file as the config to pre-select; a directory resolves to itself with
+    no config pre-selected. Raises ValueError if a given path does not exist.
+    """
+    if not project_arg:
+        return (cwd or os.getcwd()), None
+
+    target = Path(project_arg).expanduser()
+    if not target.exists():
+        raise ValueError(f"no such path: {target}")
+    target = target.resolve()
+    if target.is_file():
+        return str(target.parent), str(target)
+    return str(target), None
+
+
 def main(argv=None):
     """Entry point for the ``exozippy-gui`` console script."""
     parser = argparse.ArgumentParser(
@@ -992,7 +1016,10 @@ def main(argv=None):
     )
     parser.add_argument(
         "project", nargs="?", default=None,
-        help="Project directory to open on launch (default: none).",
+        help=(
+            "Project directory or config file to open on launch, relative or "
+            "absolute (e.g. 'kelt4.yaml'). Default: the current directory."
+        ),
     )
     parser.add_argument(
         "--browser", action="store_true",
@@ -1017,7 +1044,12 @@ def main(argv=None):
     except RuntimeError as exc:
         parser.exit(status=1, message=f"{exc}\n")
 
-    app = create_app(project_dir=args.project)
+    try:
+        project_dir, initial_config = resolve_project_arg(args.project)
+    except ValueError as exc:
+        parser.exit(status=1, message=f"error: {exc}\n")
+
+    app = create_app(project_dir=project_dir, initial_config=initial_config)
     host = args.host
     port = args.port or _find_free_port(host)
     url = f"http://{host}:{port}/"

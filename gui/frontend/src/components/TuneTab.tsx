@@ -201,9 +201,10 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     }
   }, []);
 
-  // Live eval: patch the affected model traces into the current specs.
+  // Live eval: patch the affected model traces (both x and y -- a phased
+  // curve's x-grid moves too when period/tc is tuned) into the current specs.
   const applyEval = useCallback(
-    (updated: Record<string, Record<string, (number | null)[]>>) => {
+    (updated: Record<string, Record<string, { x: (number | null)[]; y: (number | null)[] }>>) => {
       setSpecs((prev) =>
         prev.map((s) => {
           const upd = updated[s.id];
@@ -212,7 +213,7 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
             ...s,
             traces: s.traces.map((t) =>
               t.role === "model" && upd[t.name] !== undefined
-                ? { ...t, y: upd[t.name] as number[] }
+                ? { ...t, x: upd[t.name].x as number[], y: upd[t.name].y as number[] }
                 : t
             ),
           };
@@ -524,11 +525,37 @@ function DetailPanel({
   const lower = param.lower;
   const upper = param.upper;
   const sampled = !param.derived && !param.fixed;
-  const hasBounds = lower != null && upper != null && upper > lower;
-  const logScale = hasBounds && lower! > 0 && upper! > 0 &&
-    Math.log10(upper! / lower!) > 3;
+
+  // Default slider window: +/-10*init_scale around the last solved value --
+  // NOT the full prior range, which for a wide uniform bound would make one
+  // slider tick a huge, useless jump. Falls back to the full [lower, upper]
+  // range when init_scale isn't available. The window auto-expands to keep
+  // the live value inside it (see the drag handlers below, which let the
+  // user keep moving the value past the nominal rail by continuing to drag).
+  const initScale = param.init_scale != null && param.init_scale > 0 ? param.init_scale : null;
+  const solvedValue = param.value ?? 0;
+  const windowHalf = initScale != null ? 10 * initScale : null;
+  const baseLo = windowHalf != null
+    ? (lower != null ? Math.max(lower, solvedValue - windowHalf) : solvedValue - windowHalf)
+    : lower;
+  const baseHi = windowHalf != null
+    ? (upper != null ? Math.min(upper, solvedValue + windowHalf) : solvedValue + windowHalf)
+    : upper;
+  const hasBounds = baseLo != null && baseHi != null && baseHi > baseLo;
+  const winLo = hasBounds ? Math.min(baseLo!, value) : value - 1;
+  const winHi = hasBounds ? Math.max(baseHi!, value) : value + 1;
+  const logScale = hasBounds && winLo > 0 && winHi > 0 &&
+    Math.log10(winHi / winLo) > 3;
+  const stepSize = initScale != null ? 0.3 * initScale : undefined;
 
   const canLiveEdit = live && !stale && sampled && hasBounds;
+
+  const clampToHardBounds = (v: number) => {
+    let out = v;
+    if (lower != null) out = Math.max(lower, out);
+    if (upper != null) out = Math.min(upper, out);
+    return out;
+  };
 
   // Debounced live eval on slider/number change (~50 ms).
   const liveEval = useCallback(
@@ -559,7 +586,39 @@ function DetailPanel({
     [onCommand, path]
   );
 
-  const sliderPos = hasBounds ? toSlider(value, lower!, upper!, logScale) : 0.5;
+  // Pointer-driven drag: the anchor window is snapshotted at drag start and
+  // stays fixed for the whole gesture, so continuing to drag past the rail's
+  // visual edge keeps extending the value smoothly (unclamped fraction t)
+  // instead of getting stuck once the native [0, 1000] track saturates.
+  const dragRef = useRef<{
+    startX: number; startT: number; lo: number; hi: number; log: boolean; width: number;
+  } | null>(null);
+
+  const beginDrag = (clientX: number, rectLeft: number, width: number) => {
+    const w = Math.max(1, width);
+    const clickT = (clientX - rectLeft) / w;
+    const v = clampToHardBounds(fromSlider(clickT, winLo, winHi, logScale));
+    setValue(v);
+    liveEval(v);
+    dragRef.current = { startX: clientX, startT: clickT, lo: winLo, hi: winHi, log: logScale, width: w };
+  };
+
+  const moveDrag = (clientX: number) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const t = drag.startT + (clientX - drag.startX) / drag.width; // unclamped
+    const v = clampToHardBounds(fromSlider(t, drag.lo, drag.hi, drag.log));
+    setValue(v);
+    liveEval(v);
+  };
+
+  const endDrag = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    commit(value);
+  };
+
+  const sliderPos = hasBounds ? toSlider(value, winLo, winHi, logScale) : 0.5;
   const kind = priorKind(param);
 
   return (
@@ -590,20 +649,35 @@ function DetailPanel({
           min={0}
           max={1000}
           step={1}
-          value={Math.round(sliderPos * 1000)}
+          value={Math.round(Math.max(0, Math.min(1, sliderPos)) * 1000)}
           disabled={!canLiveEdit}
+          onPointerDown={(e) => {
+            if (!canLiveEdit) return;
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            const rect = e.currentTarget.getBoundingClientRect();
+            beginDrag(e.clientX, rect.left, rect.width);
+          }}
+          onPointerMove={(e) => moveDrag(e.clientX)}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
           onChange={(e) => {
+            // Keyboard (arrow/Home/End) fallback -- pointer drags are handled
+            // above and don't go through this (the native track stays clamped
+            // to [0, 1000], but dragRef's frozen window lets the value itself
+            // keep moving past it).
+            if (dragRef.current) return;
             const t = Number(e.target.value) / 1000;
-            const v = fromSlider(t, lower!, upper!, logScale);
+            const v = clampToHardBounds(fromSlider(t, winLo, winHi, logScale));
             setValue(v);
             liveEval(v);
           }}
-          onPointerUp={() => commit(value)}
         />
         <input
           type="number"
           className="detail-value-input"
           value={Number.isFinite(value) ? value : ""}
+          step={stepSize}
           disabled={!sampled}
           onChange={(e) => {
             const v = Number(e.target.value);

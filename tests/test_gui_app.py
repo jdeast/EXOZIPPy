@@ -87,6 +87,64 @@ def test_open_project_rejects_missing_dir(tmp_path):
         open_project(str(tmp_path / "nope"))
 
 
+# --- CLI arg resolution (`exozippy-gui [project]`) ----------------------------
+
+def test_resolve_project_arg_defaults_to_cwd(tmp_path):
+    """Given no positional arg, When resolved, Then it falls back to cwd."""
+    from exozippy.gui.app import resolve_project_arg
+
+    project_dir, initial_config = resolve_project_arg(None, cwd=str(tmp_path))
+
+    assert project_dir == str(tmp_path)
+    assert initial_config is None
+
+
+def test_resolve_project_arg_directory(tmp_path):
+    """Given a directory arg, When resolved, Then it opens as the project with no config."""
+    from exozippy.gui.app import resolve_project_arg
+
+    project_dir, initial_config = resolve_project_arg(str(tmp_path))
+
+    assert project_dir == str(tmp_path)
+    assert initial_config is None
+
+
+def test_resolve_project_arg_config_file(tmp_path):
+    """Given a config file arg (e.g. 'kelt4.yaml'), When resolved, Then the
+    parent dir becomes the project and the file is the config to pre-select.
+    """
+    from exozippy.gui.app import resolve_project_arg
+
+    config = tmp_path / "kelt4.yaml"
+    config.write_text("prefix: out\n")
+
+    project_dir, initial_config = resolve_project_arg(str(config))
+
+    assert project_dir == str(tmp_path)
+    assert initial_config == str(config)
+
+
+def test_resolve_project_arg_relative_path(tmp_path, monkeypatch):
+    """Given a relative config path, When resolved, Then it resolves against cwd."""
+    from exozippy.gui.app import resolve_project_arg
+
+    (tmp_path / "kelt4.yaml").write_text("prefix: out\n")
+    monkeypatch.chdir(tmp_path)
+
+    project_dir, initial_config = resolve_project_arg("kelt4.yaml")
+
+    assert project_dir == str(tmp_path)
+    assert initial_config == str(tmp_path / "kelt4.yaml")
+
+
+def test_resolve_project_arg_missing_path_raises(tmp_path):
+    """Given a path that does not exist, When resolved, Then it raises ValueError."""
+    from exozippy.gui.app import resolve_project_arg
+
+    with pytest.raises(ValueError):
+        resolve_project_arg(str(tmp_path / "nope.yaml"))
+
+
 # --- endpoint tests (require the 'gui' extra) --------------------------------
 
 @pytest.fixture
@@ -104,6 +162,35 @@ def test_health_endpoint(client):
     resp = client.get("/api/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_config_endpoint_reports_initial_project_and_config(tmp_path):
+    """Given create_app(project_dir=..., initial_config=...), When GET
+    /api/config, Then the client bootstrap payload carries both, resolved.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from exozippy.gui.app import create_app
+
+    config = tmp_path / "kelt4.yaml"
+    config.write_text("prefix: out\n")
+
+    app = create_app(project_dir=str(tmp_path), initial_config=str(config))
+    resp = TestClient(app).get("/api/config")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "initial_project": str(tmp_path.resolve()),
+        "initial_config": str(config.resolve()),
+    }
+
+
+def test_config_endpoint_defaults_to_none(client):
+    """Given create_app() with no args, When GET /api/config, Then both are null."""
+    resp = client.get("/api/config")
+    assert resp.status_code == 200
+    assert resp.json() == {"initial_project": None, "initial_config": None}
 
 
 def test_schema_endpoint_lists_components(client):

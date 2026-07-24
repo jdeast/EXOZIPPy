@@ -22,6 +22,7 @@ export interface ProjectListing {
 
 export interface GuiConfig {
   initial_project: string | null;
+  initial_config: string | null;
 }
 
 // A single config-editing document (system config + params files).
@@ -200,10 +201,12 @@ export interface TuneResult {
   plots: PlotSpec[];
 }
 
-// One eval response: updated model-trace y-arrays per plot, OR a signal that a
-// full re-solve is required (linked/dynamic bounds, fixed/derived element).
+// One eval response: updated model-trace x/y-arrays per plot (a component's
+// plot_data recomputed at the new point -- both axes can move, e.g. a phased
+// curve's x-grid when period is tuned), OR a signal that a full re-solve is
+// required (linked/dynamic bounds, fixed/derived element).
 export interface TuneEvalResult {
-  plots?: Record<string, Record<string, (number | null)[]>>;
+  plots?: Record<string, Record<string, { x: (number | null)[]; y: (number | null)[] }>>;
   needs_resolve?: boolean;
   out_of_bounds?: boolean;
   reason?: string;

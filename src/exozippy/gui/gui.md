@@ -12,9 +12,14 @@ can extend it without re-reading every file.
 ## Running it
 
 - Entry point: `exozippy-gui` (console script -> `exozippy.gui.app:main`).
-  Optional args: `[project_dir]`, `--browser` (open a browser tab instead of a
-  native window), `--no-window` (serve only, for tests), `--host`, `--port`
-  (default: an OS-assigned free port).
+  Optional positional arg `[project]`: a project directory, or a specific
+  config file relative/absolute (e.g. `exozippy-gui kelt4.yaml`) -- resolved
+  by `resolve_project_arg()` into `(project_dir, initial_config)`, where a
+  file's parent dir becomes the project and the file is pre-selected in the
+  Config tab. Defaults to the current directory when omitted. Other flags:
+  `--browser` (open a browser tab instead of a native window), `--no-window`
+  (serve only, for tests), `--host`, `--port` (default: an OS-assigned free
+  port).
 - Dependencies are the optional `gui` extra: `pip install exozippy[gui]`
   (developers: `poetry install -E gui`). The plain CLI and `import exozippy`
   must keep working WITHOUT the extra -- every GUI import is guarded, and there
@@ -90,7 +95,9 @@ All under `/api`, JSON in/out, served on 127.0.0.1 only.
 
 Core (G7):
 - `GET /api/health` -- liveness.
-- `GET /api/config` -- client bootstrap (which project to auto-open).
+- `GET /api/config` -- client bootstrap: `{initial_project, initial_config}`,
+  which project to auto-open and (optionally) which config file within it to
+  pre-select in the Config tab.
 - `GET /api/schema` -- `introspect.full_schema()`.
 - `GET /api/utilities` -- utility argument schemas (G2 registry).
 - `POST /api/project/open` `{path}` -- classify a dir's yaml/data files.
@@ -141,8 +148,19 @@ Hybrid model. Press **Solve** -> the server runs `solve()` (relaxation engine,
 seconds) then `compile_evaluator()` (pytensor compile, seconds) in the tune
 worker process; the panel fills with values + provenance and plots render at
 the solved start point, and the app enters LIVE mode. Slider drags then call
-`POST /api/tune/eval` (debounced ~50 ms) -> `Evaluator.set_value` +
-`eval_plots` -> updated model traces patched into the charts in milliseconds.
+`POST /api/tune/eval` (debounced ~50 ms) -> `Evaluator.set_value` (inverts the
+slider's user-unit value into a new raw point) + `eval_plots` -> updated model
+traces patched into the charts in milliseconds. `eval_plots` re-renders by
+calling each affected component's own `plot_data(system, point)` again at the
+new point -- the SAME code that built the base specs and that the CLI's
+matplotlib `plot()` reuses -- rather than a second, parallel plotting
+implementation; the only optimization is a single cached raw->internal-point
+pytensor function (`Evaluator.internal_point`, built once per Solve) plus an
+optional `changed_label` filter that skips components the moved parameter's
+`param_deps` don't cover. This is what makes phase-folded curves (sorted/
+column-selected from a multi-orbit node) and SED spectra (NumPy spectral-
+library interpolation) update live along with everything else -- an earlier
+affine-calibrated-pytensor fast path could not recover either.
 Any structural change (bound/prior/fixed edit, add/remove component) flips the
 `structural_hash`; the UI shows a "Config changed -- re-Solve" banner and
 freezes the live plots until the next Solve. Slider/bound/prior edits are still

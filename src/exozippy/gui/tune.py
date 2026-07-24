@@ -116,6 +116,7 @@ def _do_eval(state, msg):
 
     raw = state["raw"]
     try:
+        label = ev.label_for_path(msg["path"])
         new_raw = ev.set_value(msg["path"], float(msg["value"]), raw)
     except NeedsResolve as exc:
         return {"needs_resolve": True, "reason": str(exc)}
@@ -123,9 +124,10 @@ def _do_eval(state, msg):
         return {"out_of_bounds": True, "reason": str(exc)}
 
     state["raw"] = new_raw
-    out = ev.eval_plots(new_raw)
+    out = ev.eval_plots(new_raw, changed_label=label)
     plots = {
-        pid: {name: _round_list(y) for name, y in traces.items()}
+        pid: {name: {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
+              for name, xy in traces.items()}
         for pid, traces in out.items()
     }
     return {"plots": plots}

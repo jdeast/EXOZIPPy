@@ -78,10 +78,19 @@ export default function App() {
     }
   };
 
-  // On load, auto-open the project the server was launched with, if any.
+  // On load, auto-open the project the server was launched with, if any. If
+  // it was launched with a specific config file (`exozippy-gui kelt4.yaml`),
+  // pre-select that file in the Config tab once the listing is in, and jump
+  // straight to it -- otherwise leave the Welcome tab as the default landing.
   useEffect(() => {
-    api.config().then((cfg) => {
-      if (cfg.initial_project) openProject(cfg.initial_project);
+    api.config().then(async (cfg) => {
+      if (cfg.initial_project) {
+        await openProject(cfg.initial_project);
+        if (cfg.initial_config) {
+          setSelectedConfig(cfg.initial_config);
+          setActiveTab("config");
+        }
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

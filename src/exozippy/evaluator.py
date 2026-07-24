@@ -11,12 +11,22 @@ invalidates the compiled graph and forces another "Solve".
 This module supplies the millisecond half of that loop:
 
   * ``compile_evaluator(system, model) -> Evaluator`` captures the base
-    PlotSpecs (G4) and their retained symbolic nodes.
+    PlotSpecs (G4) and remembers which component built each one.
   * ``Evaluator.eval_plots(raw_point)`` returns, per plot, the updated
-    model-trace y-arrays, using pytensor functions compiled directly
-    from the retained nodes -- taking the model's raw free variables as
-    inputs, compiled lazily per plot and cached, with compile times
-    logged.
+    model-trace arrays by calling each owning component's own
+    ``plot_data(system, point)`` again at the new point -- the SAME code
+    that built the base specs and that the CLI's matplotlib ``plot()``
+    reuses (see CLAUDE.md's "Plotting for the GUI" section) -- rather than
+    a second, parallel implementation. There is exactly one place that
+    knows how to draw a phased light curve or an SED spectrum; a slider
+    move can never drift from what a re-Solve (or the saved PDF) would
+    show. The only optimization is a single cached raw-point ->
+    internal-point pytensor function, built once, which replaces
+    ``System.get_internal_point``'s per-call recompile; from there,
+    plot_data's own array prep is plain NumPy over already-compiled
+    pytensor outputs (compile_plotters), so it is cheap to call again.
+    An optional ``changed_label`` skips components whose base specs
+    declare no dependency on the moved parameter.
   * ``Evaluator.set_value(path, value_user, raw_point)`` maps a slider
     value (user units, physical parameter) back to a raw point by
     inverting the Parameter's logit/linear transform.  Parameters with
@@ -30,7 +40,7 @@ This module supplies the millisecond half of that loop:
 
 Only model-role traces are evaluated; data traces never change with a
 slider.  See exozippy.plotspec for the PlotSpec/Trace contract and
-Component.plot_data for how the nodes are produced and retained.
+Component.plot_data for how a component draws itself at an arbitrary point.
 """
 
 from __future__ import annotations
@@ -38,19 +48,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pytensor
-from pytensor.compile import Function
-from pytensor.compile.sharedvalue import SharedVariable
-from pytensor.graph.basic import Constant
-
-try:  # moved between pytensor releases
-    from pytensor.graph.traversal import ancestors
-except ImportError:  # pragma: no cover - version fallback
-    from pytensor.graph.basic import ancestors
 
 from exozippy.components.parameter import SeedBoundViolation
 
@@ -185,38 +186,19 @@ def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
 # Evaluator
 # ---------------------------------------------------------------------------
 
-class _ModelTrace:
-    """Bookkeeping for one model-role Trace: its owning plot, the symbolic
-    node, the extra (non-free-variable) inputs that must be frozen, and the
-    affine map from node output to the plotted (display-unit) y-array."""
-
-    __slots__ = ("plot_id", "name", "node", "givens", "affine", "raw_ok",
-                 "base_x", "base_y")
-
-    def __init__(self, plot_id, name, node, base_x, base_y):
-        self.plot_id = plot_id
-        self.name = name
-        self.node = node
-        self.base_x = base_x
-        self.base_y = base_y
-        self.givens: List[Tuple[Any, np.ndarray]] = []
-        self.affine: Optional[Tuple[float, float]] = None
-        self.raw_ok = False   # True once affine/raw output validated at base
-
-
 class Evaluator:
-    """Millisecond forward evaluator for GUI slider updates.
+    """Millisecond-scale forward evaluator for GUI slider updates.
 
-    Construct via :func:`compile_evaluator`.  Holds the base PlotSpecs and,
-    per plot, a lazily-compiled pytensor function mapping the model's raw
-    free variables to that plot's model-trace node outputs.  Extra inputs
-    (time grids, instrument indices) are frozen to the values used to build
-    the base traces; display-unit conversion is recovered as a per-trace
-    affine fit so ``eval_plots`` returns arrays directly comparable to the
-    base PlotSpec y-values.
+    Construct via :func:`compile_evaluator`.  Holds the base PlotSpecs, which
+    component built each one, and a single cached pytensor function mapping
+    the model's raw free variables to the full internal point (free RVs +
+    deterministics).  A slider move calls :meth:`set_value` to invert a
+    user-unit value into a new raw point, then :meth:`eval_plots` to re-render
+    the model curves at that point -- by calling each affected component's own
+    ``plot_data(system, point)`` again, not a separate compiled graph.
     """
 
-    def __init__(self, system, model, specs, base_raw_point, model_traces,
+    def __init__(self, system, model, specs, spec_owner, base_raw_point,
                  free_rvs):
         self.system = system
         self.model = model
@@ -224,96 +206,95 @@ class Evaluator:
         self.base_raw_point = base_raw_point
         self._free_rvs = free_rvs
         self._free_names = [v.name for v in free_rvs]
-        # model traces grouped by plot id, in plot/trace order
-        self._traces_by_plot: Dict[str, List[_ModelTrace]] = {}
-        for mt in model_traces:
-            self._traces_by_plot.setdefault(mt.plot_id, []).append(mt)
-        # lazily-compiled per-plot functions: plot_id -> (Function, [traces])
-        self._fn_cache: Dict[str, Tuple[Function, List[_ModelTrace]]] = {}
-        # parameter lookup for set_value
         self._param_lookup = system.get_parameter_lookup()
 
-    # -- compilation ------------------------------------------------------
+        # One-time compile of a fast raw -> internal-point function, reused on
+        # every slider move so live eval never pays System.get_internal_point's
+        # per-call pytensor.function() compile cost.
+        det_outputs = list(model.deterministics)
+        internal_outputs = list(free_rvs) + det_outputs
+        self._internal_names = [v.name for v in internal_outputs]
+        self._internal_fn = pytensor.function(
+            inputs=list(free_rvs), outputs=internal_outputs,
+            on_unused_input="ignore",
+        )
+
+        # Which component built each base PlotSpec, and the sampled-parameter
+        # labels its model traces depend on (PlotSpec.param_deps) -- so a
+        # slider move only calls plot_data() on components it can affect.
+        self._spec_owner = spec_owner
+        self._comps_by_id: Dict[int, Any] = {}
+        self._comp_deps: Dict[int, set] = {}
+        for spec in specs:
+            comp = spec_owner.get(spec.id)
+            if comp is None:
+                continue
+            cid = id(comp)
+            self._comps_by_id[cid] = comp
+            self._comp_deps.setdefault(cid, set()).update(spec.param_deps)
+
+    # -- public API -------------------------------------------------------
 
     def _inputs_for(self, raw_point) -> List[np.ndarray]:
         """Positional input values in model.free_RVs order."""
         return [np.asarray(raw_point[name]) for name in self._free_names]
 
-    def _compile_plot(self, plot_id) -> Tuple[Function, List[_ModelTrace]]:
-        """Compile (once) the pytensor function for a plot's model traces."""
-        if plot_id in self._fn_cache:
-            return self._fn_cache[plot_id]
+    def internal_point(self, raw_point) -> Dict[str, np.ndarray]:
+        """Fast raw -> internal-point map (free RVs + deterministics).
 
-        traces = self._traces_by_plot.get(plot_id, [])
-        outputs = [mt.node for mt in traces]
-        givens: List[Tuple[Any, np.ndarray]] = []
-        seen = set()
-        for mt in traces:
-            for var, val in mt.givens:
-                if id(var) not in seen:
-                    seen.add(id(var))
-                    givens.append((var, val))
-
-        t0 = time.perf_counter()
-        fn = pytensor.function(
-            inputs=list(self._free_rvs),
-            outputs=outputs,
-            givens=givens,
-            on_unused_input="ignore",
-        )
-        dt = time.perf_counter() - t0
-        logger.info("Evaluator: compiled plot '%s' (%d model trace(s)) in "
-                    "%.3f s", plot_id, len(traces), dt)
-
-        self._fn_cache[plot_id] = (fn, traces)
-        return fn, traces
-
-    def _apply_display(self, mt: _ModelTrace, node_out: np.ndarray) -> np.ndarray:
-        """Map a node output to display units for the given trace."""
-        arr = np.asarray(node_out, dtype=float)
-        if mt.affine is not None:
-            a, b = mt.affine
-            arr = a * arr + b
-        # The node output may carry an extra leading axis (e.g. a (1, N) draw
-        # dimension) while the plotted y is 1-D. The affine was fit on ravelled
-        # arrays, so shape is safe to normalise here; without this the emitted
-        # array is nested [[...]] and the chart blanks. Only reshape when the
-        # element count matches the base trace (raw_ok traces always do).
-        base_shape = np.asarray(mt.base_y).shape
-        if arr.size == int(np.prod(base_shape)) and arr.shape != base_shape:
-            arr = arr.reshape(base_shape)
-        return arr
-
-    # -- public API -------------------------------------------------------
-
-    def eval_plots(self, raw_point) -> Dict[str, Dict[str, np.ndarray]]:
-        """Evaluate every plot's model traces at ``raw_point``.
-
-        Returns ``{plot_id: {trace_name: y_array}}`` with the updated
-        model-trace y-arrays (data traces are omitted -- they never change).
-        Functions are compiled on first touch and cached, so repeated calls
-        are millisecond-scale.
+        Equivalent to ``system.get_internal_point(model, raw_point)`` but
+        reuses a function compiled once at construction, instead of
+        recompiling on every call -- the difference between millisecond and
+        multi-second per slider move.
         """
-        inputs = self._inputs_for(raw_point)
-        out: Dict[str, Dict[str, np.ndarray]] = {}
-        for plot_id in self._traces_by_plot:
-            fn, traces = self._compile_plot(plot_id)
-            results = fn(*inputs)
-            if not isinstance(results, (list, tuple)):
-                results = [results]
-            plot_out: Dict[str, np.ndarray] = {}
-            for mt, node_out in zip(traces, results):
-                # Only emit traces whose node output maps to the plotted y via a
-                # validated affine (RV scale, transit baseline). For SED spectra
-                # and phase-folded traces the node output is a different quantity
-                # / shape than the display (raw_ok is False): emitting it would
-                # replace the curve with a wrong-length array and blank the plot,
-                # so leave those traces at their solved value until a re-Solve.
-                if not mt.raw_ok:
-                    continue
-                plot_out[mt.name] = self._apply_display(mt, node_out)
-            out[plot_id] = plot_out
+        values = self._internal_fn(*self._inputs_for(raw_point))
+        return dict(zip(self._internal_names, values))
+
+    def eval_plots(self, raw_point,
+                    changed_label: Optional[str] = None
+                    ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
+        """Re-render every plot's model traces at ``raw_point``.
+
+        Returns ``{plot_id: {trace_name: {"x": array, "y": array}}}`` (data
+        traces are omitted -- they never change with a slider). Each
+        component's own ``plot_data(system, point)`` is called fresh, so the
+        result is always an exact recompute -- not an approximation -- even
+        for phase-folded curves (re-sorted/re-selected from a multi-column
+        node) and SED spectra (NumPy spectral-library interpolation), both of
+        which defeated the previous affine-calibrated pytensor fast path.
+
+        ``changed_label`` (a ``system.plot_params`` label, e.g.
+        ``"star.radiussed"``), if given, skips components whose base specs
+        declare no dependency on it -- the moved parameter cannot affect
+        their traces, so there's nothing to recompute. Omit it to force a
+        full recompute of every plot.
+        """
+        internal_point = self.internal_point(raw_point)
+        out: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+        for cid, comp in self._comps_by_id.items():
+            deps = self._comp_deps.get(cid, set())
+            if changed_label is not None and changed_label not in deps:
+                continue
+            try:
+                comp_specs = comp.plot_data(self.system, internal_point)
+            except Exception as exc:  # noqa: BLE001 - keep sliders usable
+                logger.warning(
+                    "Evaluator: plot_data failed for %s during live eval: %s",
+                    getattr(comp, "prefix", comp), exc)
+                continue
+            for spec in comp_specs:
+                traces = {tr.name: {"x": tr.x, "y": tr.y}
+                          for tr in spec.traces if tr.role == "model"}
+                if traces:
+                    out[spec.id] = traces
         return out
+
+    def label_for_path(self, path: str) -> str:
+        """The ``system.plot_params`` label (e.g. ``"star.radiussed"``) a GUI
+        path (``comp.instance.param``) resolves to -- what ``eval_plots``'s
+        ``changed_label`` filter expects."""
+        par, _ = self._resolve_param(path)
+        return par.label
 
     def _resolve_param(self, path: str):
         """Return (Parameter, element_index) for a user-facing path.
@@ -421,112 +402,12 @@ class Evaluator:
 # Construction
 # ---------------------------------------------------------------------------
 
-def _is_extra_input(var, free_set) -> bool:
-    """A graph root that must be supplied a value: not a free variable, not a
-    constant, not a shared variable (RNGs etc.), not owned by another node."""
-    if var.owner is not None:
-        return False
-    if isinstance(var, (Constant, SharedVariable)):
-        return False
-    if var in free_set:
-        return False
-    return True
-
-
-def _node_extra_inputs(node, free_set) -> list:
-    """The extra input variables of a node (in graph order, de-duplicated)."""
-    out, seen = [], set()
-    for anc in ancestors([node]):
-        if _is_extra_input(anc, free_set) and id(anc) not in seen:
-            seen.add(id(anc))
-            out.append(anc)
-    return out
-
-
-class _CallRecorder:
-    """Wraps a compiled pytensor Function to record, per call, the concrete
-    value passed for each of its input variables.  Used to capture the
-    grid/index arguments the base plot_data() call fed the retained nodes,
-    without reimplementing any component-specific grid logic."""
-
-    def __init__(self):
-        # list of {input_variable: value} observations, one per recorded call
-        self.observations: List[Dict[Any, Any]] = []
-        self._patched: List[Tuple[Any, str, Function]] = []
-
-    def wrap(self, owner, attr, fn: Function):
-        recorder = self
-        maker_vars = [inp.variable for inp in fn.maker.inputs]
-
-        def wrapper(*args, **kwargs):
-            if not kwargs:
-                obs = {}
-                for var, val in zip(maker_vars, args):
-                    obs[var] = np.asarray(val) if np.ndim(val) else val
-                recorder.observations.append(obs)
-            return fn(*args, **kwargs)
-
-        setattr(owner, attr, wrapper)
-        self._patched.append((owner, attr, fn))
-
-    def restore(self):
-        for owner, attr, fn in self._patched:
-            setattr(owner, attr, fn)
-        self._patched = []
-
-
-def _match_observation(extra_inputs, base_x, base_y, observations):
-    """Choose the givens for a trace's extra inputs from recorded calls.
-
-    Prefers a call whose vector input exactly equals the trace's x-array
-    (the unphased case, where the plotted x IS the time grid), then a call
-    whose vector input length matches the trace, then the first candidate.
-    Returns a list of (variable, value) pairs, or None if no candidate
-    supplies every extra input.
-    """
-    if not extra_inputs:
-        return []
-    want = set(id(v) for v in extra_inputs)
-    candidates = [obs for obs in observations
-                  if want <= set(id(k) for k in obs)]
-    if not candidates:
-        return None
-
-    x = np.asarray(base_x, dtype=float) if base_x is not None else None
-    y_len = len(np.atleast_1d(base_y)) if base_y is not None else None
-
-    def score(obs):
-        s = 0
-        for v in extra_inputs:
-            val = obs[v]
-            arr = np.atleast_1d(np.asarray(val))
-            if x is not None and arr.shape == x.shape and np.allclose(arr, x):
-                s += 100                      # exact grid match (unphased)
-            elif y_len is not None and arr.ndim == 1 and arr.size == y_len:
-                s += 10                       # length match
-        return s
-
-    best = max(candidates, key=score)
-    # Cast each frozen value to its input variable's dtype (e.g. an int32
-    # instrument index recorded from a Python int / int64 array).
-    out = []
-    for v in extra_inputs:
-        val = np.asarray(best[v])
-        dtype = getattr(v, "dtype", None)
-        if dtype is not None:
-            val = val.astype(dtype)
-        out.append((v, val))
-    return out
-
-
 def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
     """Build an :class:`Evaluator` for a prepared+built system.
 
     Captures the base PlotSpecs (via each component's ``plot_data`` at the
-    base point) and, for every model-role trace carrying a symbolic node,
-    records the concrete extra-input (grid/index) values it used and an
-    affine map from node output to the plotted display units.  The pytensor
-    functions themselves are compiled lazily, per plot, on first eval.
+    base point) and remembers which component built each one, so a later
+    slider move can call the right component's ``plot_data`` again.
 
     Parameters
     ----------
@@ -540,81 +421,23 @@ def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
         base_raw_point = system.get_raw_start(model)
 
     free_rvs = list(model.free_RVs)
-    free_set = set(free_rvs)
 
-    # Internal (physical) point that plot_data expects.
+    # Internal (physical) point that plot_data expects. This one-time call
+    # may recompile (System.get_internal_point does not cache); the Evaluator
+    # itself compiles and caches its own fast version for every later eval.
     base_internal = system.get_internal_point(model, base_raw_point)
 
-    # Record the grid/index arguments the base plot_data() feeds the nodes.
-    recorder = _CallRecorder()
-    for comp in system.active_components.values():
-        for attr, val in list(vars(comp).items()):
-            if isinstance(val, Function):
-                recorder.wrap(comp, attr, val)
-
     specs = []
-    try:
-        for comp in system.active_components.values():
-            try:
-                comp_specs = comp.plot_data(system, base_internal)
-            except Exception as e:  # noqa: BLE001 - a component may lack data
-                logger.warning("Evaluator: plot_data failed for %s: %s",
-                               getattr(comp, "prefix", comp), e)
-                continue
-            specs.extend(comp_specs)
-    finally:
-        recorder.restore()
+    spec_owner: Dict[str, Any] = {}
+    for comp in system.active_components.values():
+        try:
+            comp_specs = comp.plot_data(system, base_internal)
+        except Exception as e:  # noqa: BLE001 - a component may lack data
+            logger.warning("Evaluator: plot_data failed for %s: %s",
+                            getattr(comp, "prefix", comp), e)
+            continue
+        for spec in comp_specs:
+            spec_owner[spec.id] = comp
+        specs.extend(comp_specs)
 
-    # Build one _ModelTrace per model-role trace that carries a node.
-    model_traces: List[_ModelTrace] = []
-    for spec in specs:
-        for tr in spec.traces:
-            if tr.role != "model" or tr.node is None:
-                continue
-            mt = _ModelTrace(spec.id, tr.name, tr.node, tr.x, tr.y)
-            extra = _node_extra_inputs(tr.node, free_set)
-            givens = _match_observation(extra, tr.x, tr.y,
-                                        recorder.observations)
-            if givens is None:
-                logger.warning(
-                    "Evaluator: could not resolve extra inputs for trace "
-                    "'%s' of plot '%s'; skipping.", tr.name, spec.id)
-                continue
-            mt.givens = givens
-            model_traces.append(mt)
-
-    ev = Evaluator(system, model, specs, base_raw_point, model_traces, free_rvs)
-
-    # Calibrate each trace's display transform against the base plotted y.
-    _calibrate(ev, base_raw_point)
-    return ev
-
-
-def _calibrate(ev: Evaluator, base_raw_point) -> None:
-    """Fit the per-trace affine map (node output -> display y) at the base
-    point.  A true affine relation (RV: pure scale; transit: baseline
-    offset) is recovered exactly; when the node output shape does not match
-    the plotted y (e.g. SED spectra, phased matrices) the node output is
-    returned as-is (``affine`` stays None)."""
-    inputs = ev._inputs_for(base_raw_point)
-    for plot_id in list(ev._traces_by_plot):
-        fn, traces = ev._compile_plot(plot_id)
-        results = fn(*inputs)
-        if not isinstance(results, (list, tuple)):
-            results = [results]
-        for mt, node_out in zip(traces, results):
-            node_arr = np.asarray(node_out, dtype=float).ravel()
-            y = np.asarray(mt.base_y, dtype=float).ravel()
-            if (node_arr.shape == y.shape and node_arr.size >= 2
-                    and np.all(np.isfinite(node_arr)) and np.all(np.isfinite(y))
-                    and np.nanstd(node_arr) > 0):
-                a, b = np.polyfit(node_arr, y, 1)
-                recon = a * node_arr + b
-                if np.max(np.abs(recon - y)) <= 1e-6 * (np.max(np.abs(y)) + 1.0):
-                    mt.affine = (float(a), float(b))
-                    mt.raw_ok = True
-                    continue
-            # Fall back to raw node output (documented deviation for SED /
-            # phased traces where display y is not affine in the node).
-            mt.affine = None
-            mt.raw_ok = False
+    return Evaluator(system, model, specs, spec_owner, base_raw_point, free_rvs)

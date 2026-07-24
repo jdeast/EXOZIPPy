@@ -4,14 +4,23 @@ Tests for the GUI compiled forward evaluator (prompt G5).
 The evaluator (src/exozippy/evaluator.py) is the millisecond half of the
 GUI's hybrid loop: after a "Solve" builds the model, dragging a slider
 calls set_value() to rebuild a raw point and eval_plots() to re-render the
-model curves, using pytensor functions compiled directly from the symbolic
-nodes G4 retained on each model Trace.
+model curves. eval_plots recomputes each affected component's own
+plot_data(system, point) at the new point -- the same code that built the
+base PlotSpecs and that the CLI's matplotlib plot() reuses -- rather than a
+separate compiled-graph implementation; the only optimization is a single
+cached raw-point -> internal-point pytensor function (Evaluator.internal_point),
+built once, in place of System.get_internal_point's per-call recompile.
 
 These tests exercise, on the tracked kelt4 RV-only config and a minimal
 inline transit config (mirroring tests/test_plot_data.py's fixtures):
-  * eval_plots returns finite model-trace y-arrays;
-  * moving the planet period by 1% (via its sampled logP) changes the RV
-    model curves, and restoring the value reproduces them exactly;
+  * eval_plots returns finite model-trace x/y-arrays for both the unphased
+    AND the phased plot -- the phased plot is the regression case: its node
+    output is sorted-by-phase and column-selected from a multi-orbit matrix,
+    which defeated the old affine-calibration fast path and left it frozen
+    at the solved value until a re-Solve;
+  * moving the planet period by 1% (via its sampled logP) changes both the
+    unphased and phased RV model curves, and restoring the value reproduces
+    them exactly;
   * set_value round-trips a slider value to float64 precision;
   * 100 warm eval_plots calls average well under 50 ms;
   * structural_hash changes on a bound change, is stable across reordered
@@ -113,7 +122,11 @@ def transit_evaluator():
 # ---------------------------------------------------------------------------
 
 def _unphased_id(ev):
-    return [pid for pid in ev._traces_by_plot if "unphased" in pid][0]
+    return [s.id for s in ev.specs if "unphased" in s.id][0]
+
+
+def _phased_id(ev):
+    return [s.id for s in ev.specs if "phased" in s.id][0]
 
 
 def _period_and_logP(system, model, raw):
@@ -134,11 +147,12 @@ def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
     """
     Given a compiled RV-only evaluator,
     When eval_plots is called at the base point,
-    Then at least one plot carries model traces, and every emitted trace is
-    finite and non-empty. Plots whose display is not an affine map of the node
-    output (phase-folded curves, SED spectra) correctly emit no live trace --
-    they stay at their solved value until a re-Solve rather than showing a
-    wrong-shaped array -- so not every plot need emit one.
+    Then at least one plot carries model traces, and every emitted trace's x
+    and y arrays are finite and non-empty -- including the phased plot, whose
+    node output is sorted-by-phase and column-selected from a multi-orbit
+    matrix and so cannot be recovered by an affine fit of the raw pytensor
+    output (see the module docstring); eval_plots must recompute it exactly
+    via plot_data rather than leaving it stale.
     """
     system, model, ev, base_raw, _ = rvonly_evaluator
 
@@ -146,43 +160,72 @@ def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
 
     assert len(out) >= 1
     assert any(len(traces) >= 1 for traces in out.values())
+    assert _phased_id(ev) in out
     for plot_id, traces in out.items():
-        for name, y in traces.items():
-            arr = np.atleast_1d(np.asarray(y))
-            assert arr.size >= 1
-            assert np.all(np.isfinite(arr))
+        for name, xy in traces.items():
+            for axis in ("x", "y"):
+                arr = np.atleast_1d(np.asarray(xy[axis]))
+                assert arr.size >= 1
+                assert np.all(np.isfinite(arr))
 
 
 @pytest.mark.timeout(900)
 def test_period_shift_changes_and_restores_rv_curves(rvonly_evaluator):
     """
-    Given a compiled RV-only evaluator and its base RV model curve,
+    Given a compiled RV-only evaluator and its base RV model curves,
     When the planet period is moved +1% (via its sampled logP) and then
         restored,
-    Then the RV model curve changes (finite, different) under the shift and
-        is reproduced exactly once the value is restored.
+    Then BOTH the unphased and the phased RV model curves change (finite,
+        different) under the shift and are reproduced exactly once the value
+        is restored. The phased curve is the regression case for the
+        plot_data-based redesign (see module docstring).
     """
     system, model, ev, base_raw, _ = rvonly_evaluator
     uid = _unphased_id(ev)
+    pid = _phased_id(ev)
 
     base = ev.eval_plots(base_raw)
-    y0 = np.asarray(base[uid]["model"])
+    y0 = np.asarray(base[uid]["model"]["y"])
+    py0 = np.asarray(base[pid]["model"]["y"])
 
     period0, logP0 = _period_and_logP(system, model, base_raw)
     shifted_raw = ev.set_value("orbit.b.logP", np.log10(period0 * 1.01), base_raw)
     period1, _ = _period_and_logP(system, model, shifted_raw)
-    y1 = np.asarray(ev.eval_plots(shifted_raw)[uid]["model"])
+    shifted = ev.eval_plots(shifted_raw)
+    y1 = np.asarray(shifted[uid]["model"]["y"])
+    py1 = np.asarray(shifted[pid]["model"]["y"])
 
     restored_raw = ev.set_value("orbit.b.logP", logP0, shifted_raw)
-    y2 = np.asarray(ev.eval_plots(restored_raw)[uid]["model"])
+    restored = ev.eval_plots(restored_raw)
+    y2 = np.asarray(restored[uid]["model"]["y"])
+    py2 = np.asarray(restored[pid]["model"]["y"])
 
     # the period actually moved by ~1%
     assert period1 == pytest.approx(period0 * 1.01, rel=1e-6)
-    # the curve changed and stayed finite
-    assert np.all(np.isfinite(y1))
+    # both curves changed and stayed finite
+    assert np.all(np.isfinite(y1)) and np.all(np.isfinite(py1))
     assert not np.allclose(y0, y1)
-    # restoring reproduces the original curve
+    assert not np.allclose(py0, py1)
+    # restoring reproduces the original curves
     np.testing.assert_allclose(y2, y0, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(py2, py0, rtol=0, atol=1e-9)
+
+
+@pytest.mark.timeout(900)
+def test_changed_label_filter_skips_unrelated_components(rvonly_evaluator):
+    """
+    Given a compiled RV-only evaluator,
+    When eval_plots is called with changed_label naming the tuned parameter,
+    Then it still recomputes the plots that depend on it (no silent gap
+        relative to an unfiltered call).
+    """
+    system, model, ev, base_raw, _ = rvonly_evaluator
+    uid = _unphased_id(ev)
+
+    label = ev.label_for_path("orbit.b.logP")
+    filtered = ev.eval_plots(base_raw, changed_label=label)
+
+    assert uid in filtered
 
 
 @pytest.mark.timeout(900)
@@ -199,8 +242,9 @@ def test_second_eval_at_same_point_is_identical(rvonly_evaluator):
 
     for pid in a:
         for name in a[pid]:
-            np.testing.assert_array_equal(np.asarray(a[pid][name]),
-                                          np.asarray(b[pid][name]))
+            for axis in ("x", "y"):
+                np.testing.assert_array_equal(np.asarray(a[pid][name][axis]),
+                                              np.asarray(b[pid][name][axis]))
 
 
 # ---------------------------------------------------------------------------
@@ -289,31 +333,41 @@ def test_transit_eval_and_radius_shift(transit_evaluator):
     """
     Given a compiled transit-only evaluator,
     When the planet radius is increased 5% and then restored,
-    Then the transit model curve deepens (finite, different) and is
-        reproduced exactly on restore.
+    Then BOTH the unphased and the phased transit model curves deepen
+        (finite, different) and are reproduced exactly on restore. The
+        phased curve is transit's version of the same regression covered
+        for RV above (sorted-by-phase, column-selected node output).
     """
     system, model, ev, base_raw = transit_evaluator
     uid = _unphased_id(ev)
+    pid = _phased_id(ev)
     pr = system.planet.radius
 
     base = ev.eval_plots(base_raw)
-    y0 = np.asarray(base[uid]["model"])
-    assert np.all(np.isfinite(y0))
+    y0 = np.asarray(base[uid]["model"]["y"])
+    py0 = np.asarray(base[pid]["model"]["y"])
+    assert np.all(np.isfinite(y0)) and np.all(np.isfinite(py0))
 
     cur = float(pr.phys_from_raw(np.asarray(base_raw[pr.label + "_raw"]))[0])
     factor = float(np.atleast_1d(pr._get_conversion_factors())[0])
     cur_user = cur * factor
 
     shifted = ev.set_value("planet.b.radius", cur_user * 1.05, base_raw)
-    y1 = np.asarray(ev.eval_plots(shifted)[uid]["model"])
+    shifted_out = ev.eval_plots(shifted)
+    y1 = np.asarray(shifted_out[uid]["model"]["y"])
+    py1 = np.asarray(shifted_out[pid]["model"]["y"])
     restored = ev.set_value("planet.b.radius", cur_user, shifted)
-    y2 = np.asarray(ev.eval_plots(restored)[uid]["model"])
+    restored_out = ev.eval_plots(restored)
+    y2 = np.asarray(restored_out[uid]["model"]["y"])
+    py2 = np.asarray(restored_out[pid]["model"]["y"])
 
-    assert np.all(np.isfinite(y1))
+    assert np.all(np.isfinite(y1)) and np.all(np.isfinite(py1))
+    assert not np.allclose(py0, py1)
     assert not np.allclose(y0, y1)
     # a bigger planet blocks more light -> deeper transit (smaller minimum)
     assert (1.0 - y1.min()) > (1.0 - y0.min())
     np.testing.assert_allclose(y2, y0, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(py2, py0, rtol=0, atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
