@@ -95,6 +95,13 @@ class Trace:
     node : object, optional
         The symbolic pytensor node behind a model curve, kept for G5's
         compiled re-evaluation.  Not serialized by ``to_json``.
+    style : dict, optional
+        Style identity + optional overrides for this series: ``series_index``
+        (drives categorical color), and optional ``color`` / ``marker`` user
+        overrides (see ``Instrument._data_trace_style`` and
+        ``notes/gui_todo.txt``).  ``role`` still implies everything derivable
+        (data = markers, model = line); this carries only identity/overrides.
+        Serialized by ``to_json`` when present.
     """
 
     name: str
@@ -104,6 +111,7 @@ class Trace:
     y: Any
     yerr: Optional[Any] = None
     node: Any = field(default=None, repr=False, compare=False)
+    style: Optional[dict] = None
 
     def to_json(self) -> dict:
         d = {
@@ -115,6 +123,8 @@ class Trace:
         }
         if self.yerr is not None:
             d["yerr"] = _array_to_list(self.yerr)
+        if self.style is not None:
+            d["style"] = _jsonify(self.style)
         return d
 
 

@@ -35,8 +35,12 @@ def discover_components():
 
             # 5. Register any Component subclasses found
             for name, obj in inspect.getmembers(module, inspect.isclass):
-                # Ensure it's a Component subclass, but NOT the base Component itself
-                if issubclass(obj, Component) and obj is not Component:
+                # Ensure it's a Component subclass, but NOT the base Component
+                # itself and NOT an abstract intermediate base (e.g. the shared
+                # Instrument base, which leaves Component's abstract methods
+                # unimplemented so it is never instantiated as a component).
+                if (issubclass(obj, Component) and obj is not Component
+                        and not inspect.isabstract(obj)):
                     key = getattr(obj, "yaml_key", name.lower())
                     registry[key] = obj
 

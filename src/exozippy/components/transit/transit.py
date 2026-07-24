@@ -9,15 +9,14 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
-from exozippy.components.component import Component
+from exozippy.components.instrument import Instrument
 from . import physics
 
 
-class Transit(Component):
+class Transit(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
-        self.files = [c.get("file") for c in self.config]
         # Filter identity and limb darkening live on the Band component;
         # each instrument references a band block by name.
         self.band_names = [c.get("band") for c in self.config]
@@ -29,7 +28,6 @@ class Transit(Component):
                 "limb darkening)."
             )
         self.total_detrend_cols = 0
-        self.n_total_obs = 0
         # SED depth-dilution node, built once by build_likelihood and
         # reused by compile_plotters.
         self._dilution_node = None
@@ -101,6 +99,7 @@ class Transit(Component):
                     "instead (bands carry the filter identity)."
                 ),
             },
+            cls._plot_style_config_schema(),
         ]
 
     def sampler_requirements(self):
@@ -141,7 +140,7 @@ class Transit(Component):
             inst_indices.append(np.full(n_obs, i))
 
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
-            self.jittervar_lower[i] = -0.95 * (np.min(df.iloc[:, 2].values) ** 2)
+            self.jittervar_lower[i] = self._jitter_floor(df.iloc[:, 2].values)
 
             if df.shape[1] > 3:
                 all_detrend.append(df.iloc[:, 3:].values.astype(float))
@@ -154,24 +153,14 @@ class Transit(Component):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.n_total_obs = len(self.time)
 
-        # Block Diagonal Matrix
-        self.n_detrend_per_inst = [d.shape[1] for d in all_detrend]
-        self.total_detrend_cols = sum(self.n_detrend_per_inst)
-        self.detrend_matrix = np.zeros((self.n_total_obs, self.total_detrend_cols))
-
-        r, c = 0, 0
-        for d_block in all_detrend:
-            n_r, n_c = d_block.shape
-            if n_c > 0: self.detrend_matrix[r:r + n_r, c:c + n_c] = d_block
-            r, c = r + n_r, c + n_c
+        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
+        self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
+            self._build_block_detrend(all_detrend, self.n_total_obs)
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
-        self.manifest = {
-            "baseline": {"initval": self.baseline_init},
-            "jitter_variance": {"lower": self.jittervar_lower},
-            "jitter": "default",
-        }
+        self.manifest = {"baseline": {"initval": self.baseline_init}}
+        self._register_noise(self.manifest, self.jittervar_lower)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
@@ -382,8 +371,8 @@ class Transit(Component):
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
 
-        # 5. Likelihood
-        sigma = pt.sqrt(pt.sqr(err) + self.jitter_variance.value[self.inst_map_tensor])
+        # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance))
+        sigma = self.total_sigma(err)
         pm.Normal("transit_likelihood", mu=lc_model, sigma=sigma, observed=flux)
 
     def compile_plotters(self, model, system):
@@ -635,7 +624,8 @@ class Transit(Component):
                                     node=getattr(self, "_lc_full_node", None)))
             traces.append(Trace(
                 name=self.names[i], role="data", kind="scatter",
-                x=self.time[mask], y=self.flux[mask], yerr=self.err[mask]))
+                x=self.time[mask], y=self.flux[mask], yerr=self.err[mask],
+                style=self._data_trace_style(i)))
             specs.append(PlotSpec(
                 id=f"{self.prefix}.unphased.{self.names[i]}",
                 component={"yaml_key": self.prefix, "instance": self.names[i]},
@@ -656,7 +646,8 @@ class Transit(Component):
                               x=prep["x_model"], y=prep["y_model"],
                               node=getattr(self, "_lc_matrix_node", None)),
                         Trace(name=self.names[i], role="data", kind="scatter",
-                              x=prep["x_data"], y=prep["y_data"], yerr=self.err[mask]),
+                              x=prep["x_data"], y=prep["y_data"], yerr=self.err[mask],
+                              style=self._data_trace_style(i)),
                     ]
                     pname = planets.names[p_idx]
                     specs.append(PlotSpec(

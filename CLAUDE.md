@@ -89,7 +89,9 @@ Each component lives in `src/exozippy/components/<name>/` and contains:
 - `symbolic_physics.py` — SymPy `RELATIONS` (equations) and `get_symbol_map()` (maps abstract symbols → indexed YAML paths); must set `comp_key = "<yaml_key>"` to match the YAML block name
 - `physics.py` — PyTensor/numpy implementations decorated with `@register_physics`; function name must match `func_name` in `defaults.yaml`
 
-The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scanning subdirectories; the YAML key used to instantiate a component is the lowercase class name (or `yaml_key` class attribute if set). No registration step is required for new components.
+The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scanning subdirectories; the YAML key used to instantiate a component is the lowercase class name (or `yaml_key` class attribute if set). No registration step is required for new components. Abstract intermediate bases are skipped (`inspect.isabstract`), so a shared base can leave `Component`'s abstract methods unimplemented and never be instantiated.
+
+The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrometryinstrument`) subclass `Instrument(Component)` (`components/instrument.py`), which owns their shared scaffolding.
 
 ### Parameter system (`parameter.py`)
 
