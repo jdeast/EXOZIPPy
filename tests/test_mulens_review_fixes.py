@@ -298,6 +298,12 @@ def test_log_f_total_bootstrap_yields_to_user_params():
     inst.config_manager = _RecordingConfigManager()
     inst.fs_init = [0.6038]
     inst.q_source_init = [0.65]
+    # __init__ is bypassed above, so stand in for the state
+    # register_parameters reads from it: the base's GP config (no file sets
+    # gp:, so it registers nothing) and the detrend column count (no extra
+    # data columns here).
+    inst._load_gp_config()
+    inst.total_detrend_cols = 0
 
     # Act
     inst.register_parameters(_DummySystem())

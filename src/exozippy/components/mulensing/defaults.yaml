@@ -219,6 +219,34 @@ lens:
     latex: "y_{\\alpha}"
     description: "y-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
 mulensinstrument:
+  # Optional detrending coefficients, one per extra data column per
+  # instrument, applied to the model magnitude (see rvinstrument/transit for
+  # the same block-diagonal scheme).
+  detrend_coeffs:
+    initval: 0.0
+    init_scale: 0.01
+    lower: -1.0e6
+    upper: 1.0e6
+    unit: "mag"
+    internal_unit: "mag"
+    latex: "c"
+    description: "Detrending Coefficients"
+  # Optional GP amplitudes, in magnitudes (the observable this component
+  # models).  The rest of the GP blueprint is in components/defaults.yaml.
+  gp_rot_sigma:
+    lower: 0.0
+    upper: 5.0
+    initval: 0.02
+    init_scale: 0.01
+    unit: "mag"
+    internal_unit: "mag"
+  gp_sho_sigma:
+    lower: 0.0
+    upper: 5.0
+    initval: 0.02
+    init_scale: 0.01
+    unit: "mag"
+    internal_unit: "mag"
   log_f_total:
     initval: -6
     init_scale: 3e-4

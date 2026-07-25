@@ -82,7 +82,7 @@ parameter_file: "kelt4_rv+transit+sed.params.yaml"
 #parameter_file: "kelt4.params.2.yaml" # automatically generated from a previous run and starts at the MAP
 
 sampler:
-  method: nuts         # numpyro/blackjax can't differentiate the transit limb-darkening op; use nuts, nutpie, or ptde
+  method: numpyro # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
   tune: 2000
   draws: 4000
 #  chains: 4

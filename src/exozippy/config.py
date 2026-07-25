@@ -561,14 +561,24 @@ class ConfigManager:
 
         resolved["auto_estimated"] = False
         if internal_overrides:
-            resolved["auto_estimated"] = True
             for key in all_numeric:
                 if key in internal_overrides:
                     val = internal_overrides[key]
                     for i in range(n_elements):
                         v = val[i] if isinstance(val, (list, np.ndarray)) else val
-                        v_scaled = float(v) * unit_scaling
-                        apply_value(key, resolved[key], i, v_scaled)
+                        if v is None:
+                            continue
+                        v = float(v)
+                        # NaN means "leave this element alone".  Component-supplied
+                        # overrides are frequently per-element and sparse (e.g.
+                        # Instrument._register_gp pins only the files that did not
+                        # opt into a GP term); NaN lets one array express that
+                        # without inventing a value for the others.  +/-inf is a
+                        # legitimate bound and is NOT skipped.
+                        if np.isnan(v):
+                            continue
+                        resolved["auto_estimated"] = True
+                        apply_value(key, resolved[key], i, v * unit_scaling)
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units

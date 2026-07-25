@@ -27,6 +27,23 @@ transit:
         deps: [ "jitter_variance" ]
   # Limb darkening lives on the Band component (band: reference per
   # instrument); see components/band/defaults.yaml.
+  # Optional GP amplitudes, in relative flux (the light curve is normalized to
+  # ~1, so an amplitude above 1 is not physical).  The rest of the GP
+  # blueprint is in components/defaults.yaml.
+  gp_rot_sigma:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.001
+    init_scale: 0.001
+    unit: ""
+    internal_unit: ""
+  gp_sho_sigma:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.001
+    init_scale: 0.001
+    unit: ""
+    internal_unit: ""
   detrend_coeffs:
     initval: 0.0
     init_scale: 1.0

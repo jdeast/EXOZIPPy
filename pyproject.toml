@@ -30,17 +30,28 @@ pyyaml = ">=6.0.3,<7.0.0"
 matplotlib = ">=3.10.9,<4.0.0"
 astropy = ">=7.2.0,<8.0.0"
 celerite = ">=0.4.3,<0.5.0"
+# celerite2's PyMC backend supplies the optional per-file Gaussian-process
+# noise terms (the `gp:` key on any instrument data file; see
+# components/gp.py).  It registers a JAX conversion for its PyTensor ops
+# (@jax_funcify.register(_CeleriteOp)), so the JAX samplers work too and a GP
+# imposes no sampler constraint. Imported lazily, so a fit with no `gp:` key
+# never loads it.
+celerite2 = ">=0.3.3,<0.4.0"
 corner = ">=2.2.3,<3.0.0"
 mulensmodel = ">=3.9.0,<4.0.0"
 jplephem = ">=2.24,<3.0"
 lightkurve = ">=2.6.0,<3.0.0"
-# PyPI prerelease: 0.4.0rc1 ships cp312/cp313/cp314 wheels (manylinux_2_28 ->
-# glibc 2.28/el8, macos arm64, win_amd64), so no git clone or C++ compiler is
-# needed. pip skips prereleases by default, but a specifier that names the rc
-# (>=0.4.0rc1) permits it per PEP 440 -- no --pre flag required.
-# allow-prereleases is for Poetry's own resolver. Intel macOS has no wheel and
-# falls back to an sdist build. Was a git HEAD dep until the rc was published.
-exoplanet-core = { version = ">=0.4.0rc1,<0.5.0", extras = ["pymc"], allow-prereleases = true }
+# 0.4.0 ships cp312/cp313/cp314 wheels (manylinux_2_28 -> glibc 2.28/el8,
+# macos arm64, win_amd64), so no git clone or C++ compiler is needed. Intel
+# macOS has no wheel and falls back to an sdist build. This was a git HEAD dep,
+# then a prerelease pin, until 0.4.0 was published.
+#
+# The 0.4.0 FLOOR is load-bearing, not cosmetic: through 0.4.0rc1 the JAX
+# conversion of the limb-darkening Op had no differentiation rule, so
+# nuts_sampler="numpyro" / "blackjax" died at HMC init on any transit model
+# (exoplanet-dev/exoplanet-core#144). Lowering this floor silently breaks the
+# JAX samplers again.
+exoplanet-core = { version = ">=0.4.0,<0.5.0", extras = ["pymc"] }
 click = ">=8.3.3,<9.0.0"
 h5py = ">=3.16.0,<4.0.0"
 numba = ">=0.65.1,<0.66.0"

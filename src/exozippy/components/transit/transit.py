@@ -100,30 +100,8 @@ class Transit(Instrument):
                 ),
             },
             cls._plot_style_config_schema(),
+            cls._gp_config_schema(),
         ]
-
-    def sampler_requirements(self):
-        """Declare sampler constraints for limb-darkened transit models.
-
-        The quadratic limb-darkening solution vector (exoplanet_core's
-        ``quad_solution_vector`` Op) is only differentiable through
-        PyTensor's own gradient machinery (used by the C/numba-backed
-        'nuts' and 'nutpie' samplers). The installed exoplanet_core's
-        jax_support wires the PyTensor Op straight to the raw,
-        non-custom_jvp JAX FFI call, so any sampler that funcifies the
-        whole logp graph to JAX ('numpyro', 'blackjax') fails at HMC
-        init with "cannot be differentiated".
-        """
-        return {
-            'incompatible': {'numpyro', 'blackjax'},
-            'recommended': 'nuts',
-            'reason': (
-                "the transit component's limb-darkening op "
-                "(exoplanet_core quad_solution_vector) is not "
-                "differentiable through JAX with the installed "
-                "exoplanet_core build — use a PyTensor-backed sampler"
-            ),
-        }
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
@@ -133,6 +111,9 @@ class Transit(Instrument):
 
         for i, file in enumerate(self.files):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            # One sort per file, before anything is derived from it: keeps the
+            # flux, errors and detrend columns aligned by construction.
+            df = self._sort_by_time(df)
             n_obs = len(df)
             all_times.append(df.iloc[:, 0].values)
             all_fluxes.append(df.iloc[:, 1].values)
@@ -157,10 +138,15 @@ class Transit(Instrument):
         self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
             self._build_block_detrend(all_detrend, self.n_total_obs)
 
+        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
+        # Errors are already in the amplitude parameter's unit (relative flux).
+        self._prepare_gp(self.time, self.err, self.inst_map)
+
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
         self.manifest = {"baseline": {"initval": self.baseline_init}}
         self._register_noise(self.manifest, self.jittervar_lower)
+        self._register_gp(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
@@ -371,9 +357,13 @@ class Transit(Instrument):
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
 
-        # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance))
+        # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance)).
+        # add_observation_likelihood is the plain Normal unless a light curve
+        # asked for a GP, in which case that curve gets a celerite2 marginal
+        # likelihood around this same transit model.
         sigma = self.total_sigma(err)
-        pm.Normal("transit_likelihood", mu=lc_model, sigma=sigma, observed=flux)
+        self.add_observation_likelihood(
+            "transit_likelihood", mu=lc_model, sigma=sigma, observed=flux)
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions for generating plotting lightcurves."""
@@ -463,6 +453,9 @@ class Transit(Instrument):
                 on_unused_input='ignore'
             )
 
+        # Per-file GP conditional-mean evaluators (no-op without a gp: key).
+        self._compile_gp_plotters(system)
+
     # ------------------------------------------------------------------
     # Shared data preparation. The matplotlib plot() path and the GUI
     # plot_data() path both go through these helpers, so the two paths
@@ -474,13 +467,20 @@ class Transit(Instrument):
         return float(base_vals[i])
 
     def _eval_unphased_lc(self, system, point, i):
-        """Full model light curve (baseline + decrement) for instrument i."""
+        """Full model light curve for instrument i: baseline + transit + GP.
+
+        The unphased panel shows the model the likelihood actually fits, so
+        any GP this light curve requested is included; the phased panels take
+        it back out of the data instead (see _phased_lc_arrays). The GP term
+        is zero for a light curve without a gp: key.
+        """
         mask = (self.inst_map == i)
         t_data = self.time[mask]
         t_pretty = np.linspace(t_data.min(), t_data.max(), 2000).astype(np.float64)
         param_values = self._point_to_plot_params(point, system)
         y_decrement = self._compiled_full_lc(t_pretty, i, *param_values)
-        return t_pretty, self._baseline_for(point, i) + y_decrement
+        y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
+        return t_pretty, self._baseline_for(point, i) + y_decrement + y_gp
 
     def _phased_lc_arrays(self, system, point, p_idx, i):
         """
@@ -508,7 +508,10 @@ class Transit(Instrument):
         other_decrements = np.sum(data_lc_matrix[:, other_mask], axis=1)
 
         baseline = self._baseline_for(point, i)
-        cleaned_flux = self.flux[mask] - baseline - other_decrements
+        # Remove the correlated component along with the other planets', so
+        # the phased panel is not smeared by it. Zero without a gp: key.
+        gp_signal = self.gp_mean_at_data(system, point)[mask]
+        cleaned_flux = self.flux[mask] - baseline - other_decrements - gp_signal
         data_phases = ((self.time[mask] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {

@@ -81,6 +81,10 @@ pm.sample(...)
 
 Components push hints via `config_manager.add_hint(path, value, rank)` during stage 1–2. The hint system is the correct way for components to propose data-driven initial guesses; they are layered in after defaults but before the solver runs.
 
+Manifest entries take an `"overrides"` dict (`{field: value_or_per_element_list}`, forwarded to `resolve(internal_overrides=...)`) for component-computed per-element **defaults**. Unlike the manifest's other options, which are merged *over* the resolved config and so beat the user's params file, these are layered *under* it — use them whenever the user must still be able to override. `NaN` in a per-element list means "leave this element alone"; `±inf` is a real bound and is applied.
+
+`src/exozippy/components/defaults.yaml` (no component key, straight parameter names) holds root-level defaults shared by several components; `resolve()` layers the component's own block over it. Today it carries only the GP blueprint.
+
 ### Component structure
 
 Each component lives in `src/exozippy/components/<name>/` and contains:
@@ -92,6 +96,26 @@ Each component lives in `src/exozippy/components/<name>/` and contains:
 The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scanning subdirectories; the YAML key used to instantiate a component is the lowercase class name (or `yaml_key` class attribute if set). No registration step is required for new components. Abstract intermediate bases are skipped (`inspect.isabstract`), so a shared base can leave `Component`'s abstract methods unimplemented and never be instantiated.
 
 The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrometryinstrument`) subclass `Instrument(Component)` (`components/instrument.py`), which owns their shared scaffolding.
+
+`Instrument._sort_by_time(df)` sorts each data file ascending by time at read time, before any column is split out or anything is derived from the times — so the observable, errors, detrend columns and per-epoch side arrays (mulens observer positions, astrometry parallax factors) stay aligned by construction. **Per file, never globally**: the concatenated arrays must stay contiguous per instrument or `_build_block_detrend`'s block-diagonal row ranges and mulens's row-aligned `observer_pos` both break silently.
+
+Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude space there). `astrometryinstrument` has none — its 2-observable modes would need per-channel coefficients.
+
+### Gaussian-process noise (`components/gp.py`)
+
+Optional, per data file, off by default. A file gets correlated noise by naming a celerite2 kernel on its config entry — `gp: rotation` (`RotationTerm`, spot modulation), `gp: sho` (`SHOTerm`, granulation/generic red noise), or `gp: [rotation, sho]` for their sum. Absent or `gp: none` keeps the independent-Gaussian likelihood, byte for byte.
+
+`Instrument` owns the lifecycle in three hooks the wired children call: `_prepare_gp(time, err, inst_map, user_factor)` at the end of `load_data`, `_register_gp(manifest)` in `register_parameters`, and `add_observation_likelihood(name, mu, sigma, observed)` in place of the final `pm.Normal`. `components/gp.py` owns the `gp:` vocabulary, the per-term parameter tables, and the kernel constructors, so a new kernel is a table entry there plus a `defaults.yaml` block.
+
+Design points worth not rediscovering:
+- **celerite2 requires ascending times and does not check.** `_prepare_gp` records one sort permutation per GP file; the times, `mu`, `sigma` and data all go through it in `add_observation_likelihood`. `tests/test_gp.py` pins order-invariance.
+- Hyperparameters are **full-length (`n_elements`) vectors**, so a user path resolves by instrument name the same way every other instrument parameter does (`standardize_param_names` rewrites names to *global* indices, so a compacted GP-only vector would mis-address). Files that did not opt in are pinned fixed via the `"overrides"` channel — free to the sampler, still user-overridable.
+- Quality factors are sampled as `gp_*_log_q*` (base 10, like `log_s` in mulensing); amplitudes and periods are sampled linearly in the data's own units so literature priors go in as written. The linear `Q0`/`dQ`/`Q` are `pm.Deterministic`s. SHO is a stochastically-driven damped **simple harmonic oscillator** (not shot noise); `Q > 1/2` underdamped, `< 1/2` overdamped, and the kernel switches formula at `Q = 1/2` (a logp kink, though both branches are `maximum(..., eps)`-guarded so gradients stay finite).
+- The **amplitude seed is `median(err)`**, the white-noise level. Anything derived from the observations (their scatter, or the point-to-point scatter of sparsely sampled RVs) measures the signal the physical model is supposed to explain, and seeding there invites the GP to eat it.
+- `astrometryinstrument` sets `supports_gp = False`: two observables per epoch (dE/dN or sep/PA) in different units cannot share one amplitude, so a `gp:` key there raises instead of being ignored.
+- **Transit imposes no sampler constraint.** It used to exclude `numpyro`/`blackjax`: exoplanet-core through 0.4.0rc1 wired the limb-darkening Op's JAX conversion to the raw FFI call, so the funcified logp evaluated but `jax.grad` of it raised and the JAX samplers died at HMC init. Fixed in exoplanet-core 0.4.0rc2 (exoplanet-dev/exoplanet-core#144), which is the floor in `pyproject.toml` — **do not lower it**, or the JAX samplers silently break again. The only exoplanet-core ops used are `kepler` and `quad_solution_vector`, both now JAX-differentiable.
+- **A GP imposes no sampler constraint** — celerite2 registers a JAX conversion for its PyTensor ops (`@jax_funcify.register(_CeleriteOp)`), so `numpyro` works (verified end to end on 1/2/4 chains). Do not copy transit's numpyro exclusion here by analogy: that one is about exoplanet_core's LD op, which genuinely has no differentiable JAX path.
+- **Plots**: `_compile_gp_plotters(system)` (called from each child's `compile_plotters`) compiles two per-file evaluators of the *pure* GP conditional mean (`include_mean=False`, so celerite2 subtracts the physical model it conditioned on): `gp_mean_at_data(system, point)` returns an `(n_total_obs,)` vector, zero for non-GP files, and `gp_mean_on_grid(system, point, i, t_grid)` evaluates file `i` on a sorted grid. Convention: **unphased panels show the GP** (it is part of the model the likelihood fits), **phased panels remove it from the data** (otherwise the fold smears). RV draws one extra physical+GP curve per GP instrument, spanning only that instrument's own data range; transit's unphased curve is already per-instrument so the GP goes straight in; mulens adds the GP in the instrument's own magnitudes *before* `_align_mag` maps it to the reference flux system, since that map is nonlinear in magnitude. Both evaluators are re-run per posterior draw, so the spaghetti shows the GP's uncertainty too.
 
 ### Parameter system (`parameter.py`)
 

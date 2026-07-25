@@ -72,6 +72,24 @@ class Component(ABC):
         return []
 
     @classmethod
+    def shared_parameter_names(cls):
+        """Names of root-level parameters this component may register.
+
+        Most parameters are declared in the component's own ``defaults.yaml``
+        block and need no announcement.  A few live at the root level of
+        ``components/defaults.yaml`` because several components share the
+        blueprint (Instrument's optional GP hyperparameters are the current
+        case), and a component's own block then overrides only what differs.
+        Static consumers -- ``introspect``, and through it the GUI -- cannot
+        infer those from the component's block alone, so this classmethod
+        names them.
+
+        The base implementation returns an empty list; mirrors
+        ``config_schema()`` and ``get_utilities()``.
+        """
+        return []
+
+    @classmethod
     def get_utilities(cls):
         """Declare the user-facing utility programs this component surfaces.
 
@@ -151,9 +169,20 @@ class Component(ABC):
         shape = tuple(options.pop("shape", None) or (self.n_elements,))
         names = options.pop("names", None) or getattr(self, 'names', None)
 
+        # Component-computed per-element defaults ("overrides") are layered in
+        # BELOW the user's params file, unlike the remaining manifest options,
+        # which are merged over the resolved config and so win outright.  Use
+        # this whenever a component derives a value from its own configuration
+        # or data but the user must still be able to override it (see
+        # Instrument._register_gp, which pins the GP hyperparameters of files
+        # that did not request a GP).  Per-element arrays may carry NaN for
+        # "leave this element alone".
+        overrides = options.pop("overrides", None)
+
         # 1. Grab configuration properties agnostically
         cfg = self.config_manager.resolve(
-            self.prefix, param_name, shape=shape, names=names
+            self.prefix, param_name, shape=shape, names=names,
+            internal_overrides=overrides
         )
 
         expr_key = options.pop("expr_key", None)

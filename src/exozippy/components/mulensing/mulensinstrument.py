@@ -39,6 +39,7 @@ class MulensInstrument(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
+        self.total_detrend_cols = 0
 
     @property
     def prefix(self):
@@ -54,7 +55,10 @@ class MulensInstrument(Instrument):
                 "required": True,
                 "doc": (
                     "Whitespace-delimited microlensing light curve; columns "
-                    "are time, flux-or-magnitude, error (see data_format)."
+                    "are time, flux-or-magnitude, error (see data_format), "
+                    "then optional detrend columns. Each extra column gets "
+                    "its own coefficient for this instrument, applied to the "
+                    "model magnitude. Comment lines start with '#'."
                 ),
             },
             {
@@ -114,6 +118,7 @@ class MulensInstrument(Instrument):
                 ),
             },
             cls._plot_style_config_schema(),
+            cls._gp_config_schema(),
         ]
 
     def _reference_index(self):
@@ -143,6 +148,7 @@ class MulensInstrument(Instrument):
         throughout.
         """
         all_times, all_mags, all_errs, inst_indices = [], [], [], []
+        all_detrend = []
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []      # per-instrument f_s2/f_s1 (binary source)
@@ -177,6 +183,9 @@ class MulensInstrument(Instrument):
 
         for i, file in enumerate(self.files):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            # Sort before the observer positions are computed from t, so the
+            # ephemeris rows stay aligned with the photometry.
+            df = self._sort_by_time(df)
             t, m, e = df.iloc[:, 0].values, df.iloc[:, 1].values, df.iloc[:, 2].values
 
             if self.config[i].get("data_format", "magnitude") == "flux":
@@ -213,6 +222,17 @@ class MulensInstrument(Instrument):
             inst_indices.append(np.full(len(t), i))
             self._raw_time_list.append(t)
 
+            # Optional detrending against extra data columns (columns 4+ of
+            # the file), exactly as rvinstrument/transit do: one coefficient
+            # per column per instrument, kept from mixing across instruments
+            # by the block-diagonal design matrix built below.  Applied to
+            # the model MAGNITUDE, so a column is a magnitude-space trend
+            # (airmass, seeing, ...), independent of the file's data_format.
+            if df.shape[1] > 3:
+                all_detrend.append(df.iloc[:, 3:].values.astype(float))
+            else:
+                all_detrend.append(np.empty((len(t), 0)))
+
         self.inst_ref_pos = np.array(self.inst_ref_pos)   # (n_inst, 3) absolute AU
         self.time     = np.concatenate(all_times).astype(float)
         self.mag      = np.concatenate(all_mags).astype(float)
@@ -220,6 +240,15 @@ class MulensInstrument(Instrument):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations
         self.observer_pos_abs = np.vstack(all_obspos_abs).astype(float)  # absolute barycentric (for get_magnification_op)
+        self.n_total_obs = len(self.time)
+
+        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
+        self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
+            self._build_block_detrend(all_detrend, self.n_total_obs)
+
+        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
+        # Errors are already in the amplitude parameter's unit (mag).
+        self._prepare_gp(self.time, self.err, self.inst_map)
 
     def _check_data_format(self, t, m, e, xyz_delta, ra_rad, dec_rad,
                            label, data_format="magnitude"):
@@ -531,6 +560,10 @@ class MulensInstrument(Instrument):
         }
         # Multiplicative per-instrument error scale (shared base helper).
         self._register_noise(self.manifest)
+        self._register_gp(self.manifest)
+
+        if self.total_detrend_cols > 0:
+            self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).
@@ -621,15 +654,20 @@ class MulensInstrument(Instrument):
         safe_flux = pt.maximum(model_flux, 1e-12)
         model_mag = -2.5 * pt.log10(safe_flux)
 
-        # 4. Error scaling & Likelihood (shared base helper: err * err_scale)
+        # Optional detrending against extra data columns, in magnitude space
+        # (block-diagonal, so coefficients never mix across instruments).
+        if self.total_detrend_cols > 0:
+            detrend = pm.Data("mu_detrend", self.detrend_matrix)
+            model_mag = model_mag + pt.dot(detrend, self.detrend_coeffs.value)
+
+        # 4. Error scaling & Likelihood (shared base helper: err * err_scale).
+        # The shared dispatcher is the plain Normal unless a light curve asked
+        # for a GP, in which case that curve gets a celerite2 marginal
+        # likelihood around this same magnification model.
         sigma = self.total_sigma(obs_err)
 
-        pm.Normal(
-            f"{self.prefix}.model",
-            mu=model_mag,
-            sigma=sigma,
-            observed=obs_mag
-        )
+        self.add_observation_likelihood(
+            f"{self.prefix}.model", mu=model_mag, sigma=sigma, observed=obs_mag)
 
         # 5. SED-based source flux constraint (issue #18)
         if hasattr(system, "sed"):
@@ -777,6 +815,9 @@ class MulensInstrument(Instrument):
             on_unused_input='ignore'
         )
 
+        # Per-file GP conditional-mean evaluators (no-op without a gp: key).
+        self._compile_gp_plotters(system)
+
     def plot(self, system, points, filename_prefix="debug"):
         if isinstance(points, dict): points = [points]
         if len(points) == 0: return
@@ -824,6 +865,8 @@ class MulensInstrument(Instrument):
             obs_loc: self.get_observer_position(t_model, observer_location=obs_loc)
             for obs_loc in unique_observers
         }
+        inst_obs_loc = {i: self.config[i].get("observer_location", "earth")
+                        for i in range(self.n_elements)}
 
         def _point_values(point):
             return [
@@ -890,6 +933,31 @@ class MulensInstrument(Instrument):
                         ax.plot(t_model, y_model, '-', color=inst_color[i], lw=1.5, alpha=alpha, zorder=2)
                     except Exception as e:
                         logger.warning(f"Model eval failed for observer '{obs_loc}': {e}")
+
+            # One "physical + GP" curve per light curve that requested a GP.
+            # The GP is additive in that instrument's own magnitudes, so it is
+            # added there and the sum is then mapped onto the reference flux
+            # system -- adding it to an already-aligned curve would be wrong,
+            # since _align_mag is nonlinear in magnitude.
+            for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
+                obs_pretty = obs_model_pos.get(inst_obs_loc[i])
+                if obs_pretty is None:
+                    continue
+                fs_i = max(float(fs_vec[i]), 1e-30)
+                baseline_i = -2.5 * np.log10(max(fs_i + float(fb_vec[i]), 1e-30))
+                for point in points:
+                    param_values = _point_values(point)
+                    try:
+                        delta_i = self._compiled_delta_mag(
+                            t_model, obs_pretty, i, *param_values)
+                        gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                        y_gp = _align_mag(delta_i + baseline_i + gp_i, i)
+                        alpha = 0.8 if len(points) == 1 else 0.1
+                        ax.plot(t_model, y_gp, '-', color=inst_color[i], lw=1.0,
+                                alpha=alpha, zorder=3)
+                    except Exception as e:
+                        logger.warning(
+                            f"GP model eval failed for '{self.names[i]}': {e}")
             ax.set_xlabel("Time [BJD]")
             ax.set_ylabel("mag − mag$_0$")
             ax.invert_yaxis()
