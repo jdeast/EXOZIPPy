@@ -5,6 +5,7 @@ generator, or scripting helper can use to learn "what components exist and
 what can be configured on them" WITHOUT building a System or having any data
 files on disk.
 """
+
 import json
 
 import pytest
@@ -172,7 +173,12 @@ def test_every_component_utility_list_is_json_serializable():
         assert json.loads(json.dumps(utilities)) == utilities
         for entry in utilities:
             assert set(entry) >= {
-                "name", "label", "description", "available", "arguments"}
+                "name",
+                "label",
+                "description",
+                "available",
+                "arguments",
+            }
             assert isinstance(entry["available"], bool)
             assert isinstance(entry["arguments"], list)
 

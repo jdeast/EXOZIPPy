@@ -87,17 +87,18 @@ def test_band_map_points_each_instrument_at_its_band(tmp_path_factory):
     d = tmp_path_factory.mktemp("transit_two_bands")
     lc1 = _write_lc(d / "lc1.dat")
     lc2 = _write_lc(d / "lc2.dat")
-    config = _config([lc1, lc2], bands=("TESS", "V"),
-                     transit_bands=["V", "TESS"])
+    config = _config(
+        [lc1, lc2], bands=("TESS", "V"), transit_bands=["V", "TESS"]
+    )
     system = System(config, user_params=_params())
     system.prepare()
 
     tr = system.transit
     band_names = list(system.band.names)
     np.testing.assert_array_equal(
-        tr.band_map, [band_names.index("V"), band_names.index("TESS")])
-    np.testing.assert_array_equal(
-        tr.obs_band_map, tr.band_map[tr.inst_map])
+        tr.band_map, [band_names.index("V"), band_names.index("TESS")]
+    )
+    np.testing.assert_array_equal(tr.obs_band_map, tr.band_map[tr.inst_map])
 
 
 def test_missing_band_reference_raises(tmp_path_factory):
@@ -143,8 +144,9 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
         "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b"}],
-        "band": [{"name": "V", "filter": "V", "ld_law": "quadratic",
-                  "star_ndx": 0}],
+        "band": [
+            {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
+        ],
         "transit": [{"name": "inst0", "file": lc, "band": "V"}],
         "sed": {"file": str(sed_file)},
     }
@@ -154,8 +156,10 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
         params[f"star.{s}.mass"] = {"initval": 1.0, "sigma": 0.05}
         params[f"star.{s}.teff"] = {"initval": 5800, "sigma": 100}
         params[f"star.{s}.feh"] = {"initval": 0.0, "sigma": 0.08}
-    params.pop("star.0.radius"); params.pop("star.0.mass")
-    params.pop("star.0.teff"); params.pop("star.0.feh")
+    params.pop("star.0.radius")
+    params.pop("star.0.mass")
+    params.pop("star.0.teff")
+    params.pop("star.0.feh")
 
     system = System(config, user_params=params)
     system.prepare()
@@ -168,11 +172,18 @@ def test_sed_deblending_dilutes_transit_depth(tmp_path_factory):
     assert np.isfinite(logp)
 
     import pytensor
+
     dil_fn = pytensor.function(
-        [], model.named_vars["transit.dilution"],
-        givens=[(rv, np.asarray(ip[rv.name]))
-                for rv in model.free_RVs if rv.name in ip],
-        on_unused_input="ignore", mode="FAST_COMPILE")
+        [],
+        model.named_vars["transit.dilution"],
+        givens=[
+            (rv, np.asarray(ip[rv.name]))
+            for rv in model.free_RVs
+            if rv.name in ip
+        ],
+        on_unused_input="ignore",
+        mode="FAST_COMPILE",
+    )
     dil = dil_fn()
     assert dil.shape == (1,)
     assert dil[0] == pytest.approx(0.5, abs=1e-6)

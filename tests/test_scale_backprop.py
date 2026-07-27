@@ -8,12 +8,13 @@ informs the proposal scales on the sampled parents (logmass, …).
 
 Uses ConfigManager directly to avoid loading data files.
 """
+
 import logging
+
 import numpy as np
 import pytest
 
-from exozippy.config import ConfigManager, RANK_USER, RANK_DERIVED_USER
-
+from exozippy.config import RANK_DERIVED_USER, RANK_USER, ConfigManager
 
 # Minimal star config — no data files needed.
 # star symbolic_physics.py has mass = 10^logmass, which gives us a clean
@@ -31,6 +32,7 @@ def _make_cm(extra_user_params):
 # Back-propagation through logmass → mass
 # ---------------------------------------------------------------------------
 
+
 def test_mass_init_scale_propagates_to_logmass():
     """
     Given the user specifies init_scale on 'star.Lens.mass' (a derived parameter),
@@ -41,17 +43,24 @@ def test_mass_init_scale_propagates_to_logmass():
     Jacobian: dmass/dlogmass = mass * ln10
     Inverse:  sigma_logmass = sigma_mass / (mass * ln10)
     """
-    logmass_initval = -0.3   # mass ≈ 0.5 M_sun
-    mass_initval = 10 ** logmass_initval
+    logmass_initval = -0.3  # mass ≈ 0.5 M_sun
+    mass_initval = 10**logmass_initval
     sigma_mass = 0.05
 
-    cm = _make_cm({
-        "star.Lens.logmass": {"initval": logmass_initval},
-        "star.Lens.mass":    {"initval": mass_initval, "init_scale": sigma_mass},
-    })
+    cm = _make_cm(
+        {
+            "star.Lens.logmass": {"initval": logmass_initval},
+            "star.Lens.mass": {
+                "initval": mass_initval,
+                "init_scale": sigma_mass,
+            },
+        }
+    )
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
-    assert logmass_scale is not None, "logmass should have a back-propagated scale"
+    assert (
+        logmass_scale is not None
+    ), "logmass should have a back-propagated scale"
 
     expected = sigma_mass / (mass_initval * np.log(10))
     assert logmass_scale == pytest.approx(expected, rel=0.05), (
@@ -68,15 +77,17 @@ def test_user_specified_parent_scale_beats_backprop():
     Then logmass keeps the user's explicitly-specified scale (RANK_USER beats
       the back-propagated RANK_DERIVED_USER).
     """
-    cm = _make_cm({
-        "star.Lens.mass":    {"initval": 0.5, "init_scale": 0.05},
-        "star.Lens.logmass": {"initval": -0.3, "init_scale": 999.0},
-    })
+    cm = _make_cm(
+        {
+            "star.Lens.mass": {"initval": 0.5, "init_scale": 0.05},
+            "star.Lens.logmass": {"initval": -0.3, "init_scale": 999.0},
+        }
+    )
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
-    assert logmass_scale == pytest.approx(999.0, rel=0.01), (
-        "User-specified logmass init_scale should override back-propagated scale"
-    )
+    assert logmass_scale == pytest.approx(
+        999.0, rel=0.01
+    ), "User-specified logmass init_scale should override back-propagated scale"
 
 
 def test_backprop_overrides_default_scale():
@@ -89,16 +100,21 @@ def test_backprop_overrides_default_scale():
     mass_initval = 0.5
     expected = sigma_mass / (mass_initval * np.log(10))
 
-    cm = _make_cm({
-        "star.Lens.mass":    {"initval": mass_initval, "init_scale": sigma_mass},
-        "star.Lens.logmass": {"initval": np.log10(mass_initval)},
-    })
+    cm = _make_cm(
+        {
+            "star.Lens.mass": {
+                "initval": mass_initval,
+                "init_scale": sigma_mass,
+            },
+            "star.Lens.logmass": {"initval": np.log10(mass_initval)},
+        }
+    )
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
     assert logmass_scale is not None
-    assert logmass_scale == pytest.approx(expected, rel=0.05), (
-        "Back-propagated scale should replace the default logmass scale"
-    )
+    assert logmass_scale == pytest.approx(
+        expected, rel=0.05
+    ), "Back-propagated scale should replace the default logmass scale"
 
 
 def test_derived_param_scale_not_warned(caplog):
@@ -114,6 +130,11 @@ def test_derived_param_scale_not_warned(caplog):
     with caplog.at_level(logging.WARNING):
         cm_under_test.finalize_user_params()
 
-    ignored = [r for r in caplog.records
-               if r.levelno == logging.WARNING and "ignored" in r.message]
-    assert not ignored, f"Unexpected 'ignored' warnings: {[r.message for r in ignored]}"
+    ignored = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "ignored" in r.message
+    ]
+    assert (
+        not ignored
+    ), f"Unexpected 'ignored' warnings: {[r.message for r in ignored]}"

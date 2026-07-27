@@ -7,8 +7,9 @@ import xarray as xr
 from exozippy.mkparam import mkprior
 
 
-def _make_idata(var_values: dict, lp: float = -10.0, tmpdir=None,
-                derived_vars=None):
+def _make_idata(
+    var_values: dict, lp: float = -10.0, tmpdir=None, derived_vars=None
+):
     """Build a minimal ArviZ InferenceData with one chain, one draw.
 
     For every variable that does not end in ``_raw`` and is not listed in
@@ -28,9 +29,11 @@ def _make_idata(var_values: dict, lp: float = -10.0, tmpdir=None,
     full_values = dict(var_values)
     for name in list(var_values):
         raw_name = name + "_raw"
-        if (not name.endswith("_raw")
-                and name not in derived
-                and raw_name not in var_values):
+        if (
+            not name.endswith("_raw")
+            and name not in derived
+            and raw_name not in var_values
+        ):
             full_values[raw_name] = var_values[name] * 0.1
 
     data_vars = {}
@@ -42,7 +45,9 @@ def _make_idata(var_values: dict, lp: float = -10.0, tmpdir=None,
     posterior_ds = xr.Dataset(data_vars)
     sample_stats_ds = xr.Dataset({"lp": lp_arr})
 
-    idata = az.from_dict({"posterior": posterior_ds, "sample_stats": sample_stats_ds})
+    idata = az.from_dict(
+        {"posterior": posterior_ds, "sample_stats": sample_stats_ds}
+    )
 
     trace_path = tmpdir / "trace.nc"
     idata.to_netcdf(str(trace_path))
@@ -67,10 +72,15 @@ def test_no_prior_writes_initval(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     import yaml
+
     result = yaml.safe_load(open(out))
     entry = result["star.Host.mass"]
 
@@ -88,9 +98,7 @@ def test_with_explicit_mu_preserved(tmp_path):
     """
     import yaml
 
-    existing_params = {
-        "star.Host.teff": {"mu": 5800.0, "sigma": 100.0}
-    }
+    existing_params = {"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}}
     param_file = tmp_path / "star.params.yaml"
     with open(param_file, "w") as f:
         yaml.dump(existing_params, f)
@@ -102,14 +110,22 @@ def test_with_explicit_mu_preserved(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
     entry = result["star.Host.teff"]
 
-    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6), "initval must be MAP"
-    assert entry["mu"] == pytest.approx(5800.0, abs=1e-6), "mu must stay at original prior center"
+    assert entry["initval"] == pytest.approx(
+        5750.0, abs=1e-6
+    ), "initval must be MAP"
+    assert entry["mu"] == pytest.approx(
+        5800.0, abs=1e-6
+    ), "mu must stay at original prior center"
     assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
 
 
@@ -122,9 +138,7 @@ def test_initval_sigma_promotes_mu(tmp_path):
     """
     import yaml
 
-    existing_params = {
-        "star.Host.teff": {"initval": 6207.0, "sigma": 100.0}
-    }
+    existing_params = {"star.Host.teff": {"initval": 6207.0, "sigma": 100.0}}
     param_file = tmp_path / "star.params.yaml"
     with open(param_file, "w") as f:
         yaml.dump(existing_params, f)
@@ -136,14 +150,22 @@ def test_initval_sigma_promotes_mu(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
     entry = result["star.Host.teff"]
 
-    assert entry["initval"] == pytest.approx(6193.0, abs=1e-6), "initval must be MAP"
-    assert entry["mu"] == pytest.approx(6207.0, abs=1e-6), "original initval promoted to mu"
+    assert entry["initval"] == pytest.approx(
+        6193.0, abs=1e-6
+    ), "initval must be MAP"
+    assert entry["mu"] == pytest.approx(
+        6207.0, abs=1e-6
+    ), "original initval promoted to mu"
     assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
 
 
@@ -156,9 +178,7 @@ def test_fixed_sigma_zero_no_mu_promotion(tmp_path):
     """
     import yaml
 
-    existing_params = {
-        "star.Host.radius": {"initval": 1.0, "sigma": 0.0}
-    }
+    existing_params = {"star.Host.radius": {"initval": 1.0, "sigma": 0.0}}
     param_file = tmp_path / "star.params.yaml"
     with open(param_file, "w") as f:
         yaml.dump(existing_params, f)
@@ -170,13 +190,19 @@ def test_fixed_sigma_zero_no_mu_promotion(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
     entry = result["star.Host.radius"]
 
-    assert entry["initval"] == pytest.approx(1.05, abs=1e-6), "initval must be MAP"
+    assert entry["initval"] == pytest.approx(
+        1.05, abs=1e-6
+    ), "initval must be MAP"
     assert "mu" not in entry, "sigma=0 is fixed, not a prior — must not add mu"
     assert entry["sigma"] == pytest.approx(0.0)
 
@@ -192,7 +218,7 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
 
     existing_params = {
         "lens.Lens.t_0": {"initval": 2456836.22},
-        "lens.Lens.u_0": {"mu": 0.5},        # mu without sigma — not a prior
+        "lens.Lens.u_0": {"mu": 0.5},  # mu without sigma — not a prior
         "star.Lens.ra": {"initval": 266.8, "sigma": 0.0},
     }
     param_file = tmp_path / "ob.params.yaml"
@@ -207,13 +233,23 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
         "star": [{"name": "Lens"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
-    assert "lens.Lens.t_0" not in result, "initval-only non-sampled entry should be dropped"
-    assert "lens.Lens.u_0" not in result, "mu-only entry (no sigma) should be dropped"
-    assert "star.Lens.ra" in result, "entry with sigma constraint should be kept"
+    assert (
+        "lens.Lens.t_0" not in result
+    ), "initval-only non-sampled entry should be dropped"
+    assert (
+        "lens.Lens.u_0" not in result
+    ), "mu-only entry (no sigma) should be dropped"
+    assert (
+        "star.Lens.ra" in result
+    ), "entry with sigma constraint should be kept"
 
 
 def test_non_sampled_with_upper_limit_is_kept(tmp_path):
@@ -239,14 +275,22 @@ def test_non_sampled_with_upper_limit_is_kept(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
     assert "mulensinstrument.Spitzer.err_scale" in result
-    assert result["mulensinstrument.Spitzer.err_scale"]["upper"] == pytest.approx(1.1)
+    assert result["mulensinstrument.Spitzer.err_scale"][
+        "upper"
+    ] == pytest.approx(1.1)
     assert "mulensinstrument.OGLE.err_scale" in result
-    assert result["mulensinstrument.OGLE.err_scale"]["lower"] == pytest.approx(0.5)
+    assert result["mulensinstrument.OGLE.err_scale"]["lower"] == pytest.approx(
+        0.5
+    )
 
 
 def test_output_filename_uses_dots(tmp_path):
@@ -291,7 +335,7 @@ def test_derived_parameter_excluded_from_output(tmp_path):
     trace = _make_idata(
         {
             "orbit.logP": 0.47,
-            "orbit.period": 2.989,    # derived Deterministic — no _raw companion
+            "orbit.period": 2.989,  # derived Deterministic — no _raw companion
         },
         tmpdir=tmp_path,
         derived_vars={"orbit.period"},
@@ -302,8 +346,12 @@ def test_derived_parameter_excluded_from_output(tmp_path):
         "orbit": [{"name": "b"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace,
-                  output_path=tmp_path / "out.yaml")
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
 
     result = yaml.safe_load(open(out))
 
@@ -314,7 +362,9 @@ def test_derived_parameter_excluded_from_output(tmp_path):
     )
     # Internal _raw variables must never appear in the output
     for key in result:
-        assert not key.endswith("_raw"), f"Raw variable leaked into output: {key}"
+        assert not key.endswith(
+            "_raw"
+        ), f"Raw variable leaked into output: {key}"
 
 
 def test_output_filename_increments(tmp_path):
@@ -365,10 +415,12 @@ def test_flat_dict_component_writes_two_part_key(tmp_path):
         written = yaml.safe_load(f)
 
     # mkprior must write 'sed.errscale' (2-part) NOT 'sed.0.errscale' (3-part)
-    assert "sed.errscale" in written, f"Expected 'sed.errscale' in output; got keys: {list(written)}"
-    assert not any(k.startswith("sed.0.") for k in written), (
-        f"3-part indexed key found in output: {[k for k in written if k.startswith('sed.0.')]}"
-    )
+    assert (
+        "sed.errscale" in written
+    ), f"Expected 'sed.errscale' in output; got keys: {list(written)}"
+    assert not any(
+        k.startswith("sed.0.") for k in written
+    ), f"3-part indexed key found in output: {[k for k in written if k.startswith('sed.0.')]}"
 
 
 def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
@@ -403,8 +455,12 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
         written = yaml.safe_load(f)
 
     # Find the parallax entry (may appear under star.parallax or star.A.parallax)
-    parallax_entry = written.get("star.parallax") or written.get("star.A.parallax")
-    assert parallax_entry is not None, f"parallax key missing from output: {list(written)}"
+    parallax_entry = written.get("star.parallax") or written.get(
+        "star.A.parallax"
+    )
+    assert (
+        parallax_entry is not None
+    ), f"parallax key missing from output: {list(written)}"
     assert "mu" in parallax_entry, (
         f"parallax entry has no 'mu' — prior center would drift on successive runs. "
         f"Got: {parallax_entry}"

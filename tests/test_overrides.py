@@ -1,13 +1,15 @@
-import numpy as np
-import pytest
-import pymc as pm
 from unittest.mock import patch
-from exozippy.config import ConfigManager
+
+import numpy as np
+import pymc as pm
+import pytest
+
+from conftest import MockSystem
+from exozippy.components.parameter import Parameter
 from exozippy.components.rvinstrument.rvinstrument import RVInstrument
 from exozippy.components.star.star import Star
-from exozippy.components.parameter import Parameter
+from exozippy.config import ConfigManager
 from exozippy.system import System
-from conftest import MockSystem
 
 
 def test_instrument_name_override_resolves_correctly():
@@ -21,7 +23,7 @@ def test_instrument_name_override_resolves_correctly():
     system = System(config, {})
 
     # Check that the registry was built correctly
-    inst = system.active_components['rvinstrument']
+    inst = system.active_components["rvinstrument"]
     assert len(inst.config) == 2
     assert inst.config[0]["name"] == "HIRES"
 
@@ -34,7 +36,15 @@ def test_gaussian_prior_scale_override_applies_correctly():
     """
     # ARRANGE
     label = "star.A.radius_test3"
-    user_params = {label: {"initval": 1.0, "sigma": 0.05, "init_scale": 0.00085, "lower": 0.0, "upper": 10.0}}
+    user_params = {
+        label: {
+            "initval": 1.0,
+            "sigma": 0.05,
+            "init_scale": 0.00085,
+            "lower": 0.0,
+            "upper": 10.0,
+        }
+    }
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
@@ -60,7 +70,9 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
     mock_logp.return_value = ({}, {})
 
     label = "star.A.mass_test4"
-    user_params = {label: {"initval": 1.0, "sigm": 0.05, "lower": 0.0, "upper": 10.0}}  # Misspelled 'sigm'
+    user_params = {
+        label: {"initval": 1.0, "sigm": 0.05, "lower": 0.0, "upper": 10.0}
+    }  # Misspelled 'sigm'
     system = MockSystem(user_params)
     star = Star([{"name": "A"}], system.config_manager)
     system.star = star
@@ -70,8 +82,10 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
         star.add_parameter(model=model, param_name="mass_test4", system=None)
 
     # ACT
-    from exozippy.run import inspect_start
     import logging
+
+    from exozippy.run import inspect_start
+
     with caplog.at_level(logging.WARNING):
         inspect_start(model, system, {}, {}, {}, calc_curvature=False)
 
@@ -80,7 +94,9 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
 
 
 @patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
-def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, caplog):
+def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
+    mock_logp, caplog
+):
     """
     Given a YAML configuration containing a completely unrecognized top-level parameter,
     When the ModelAuditor inspects the starting state,
@@ -88,6 +104,7 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, cap
     """
     # ARRANGE
     from exozippy.run import inspect_start
+
     mock_logp.return_value = ({}, {})
 
     user_params = {"star.A.radiuss": 1.0}  # Misspelled 'radiuss'
@@ -101,6 +118,7 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(mock_logp, cap
 
     # ACT
     import logging
+
     with caplog.at_level(logging.WARNING):
         inspect_start(model, system, {}, {}, {}, calc_curvature=False)
 
@@ -115,27 +133,46 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
     Then the system should accept tightening bounds but reject expanding bounds.
     """
     scenarios = [
-        {"user": -10.0, "internal": 0.0, "expected": 0.0, "type": "lower", "other_type": "upper", "other_val": 10.0},
-        {"user": 0.5, "internal": 0.0, "expected": 0.5, "type": "lower", "other_type": "upper", "other_val": 10.0},
-        {"user": 20.0, "internal": 10.0, "expected": 10.0, "type": "upper", "other_type": "lower", "other_val": 0.0},
+        {
+            "user": -10.0,
+            "internal": 0.0,
+            "expected": 0.0,
+            "type": "lower",
+            "other_type": "upper",
+            "other_val": 10.0,
+        },
+        {
+            "user": 0.5,
+            "internal": 0.0,
+            "expected": 0.5,
+            "type": "lower",
+            "other_type": "upper",
+            "other_val": 10.0,
+        },
+        {
+            "user": 20.0,
+            "internal": 10.0,
+            "expected": 10.0,
+            "type": "upper",
+            "other_type": "lower",
+            "other_val": 0.0,
+        },
     ]
 
     for s in scenarios:
         # ARRANGE
         label = f"star.A.mass_{s['type']}"
         user_params = {
-            label: {
-                s['type']: s['user'],
-                s['other_type']: s['other_val']
-            }
+            label: {s["type"]: s["user"], s["other_type"]: s["other_val"]}
         }
 
         # Inject the internal defaults directly into the base dictionary
         cm = ConfigManager(user_params)
         cm.base_defaults[f"mass_{s['type']}"] = {
-            s['type']: s['internal'],
-            s['other_type']: s['other_val'],
-            "unit": "", "internal_unit": ""
+            s["type"]: s["internal"],
+            s["other_type"]: s["other_val"],
+            "unit": "",
+            "internal_unit": "",
         }
 
         star = Star([{"name": "A"}], cm)
@@ -143,13 +180,15 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
 
         # ACT
         with pm.Model(name=f"model_{label.replace('.', '_')}") as model:
-            star.manifest = {label.split('.')[-1]: {}}
-            star.add_parameter(model=model, param_name=label.split('.')[-1], system=None)
-            p = getattr(star, label.split('.')[-1])
-            val = p.lower[0] if s['type'] == 'lower' else p.upper[0]
+            star.manifest = {label.split(".")[-1]: {}}
+            star.add_parameter(
+                model=model, param_name=label.split(".")[-1], system=None
+            )
+            p = getattr(star, label.split(".")[-1])
+            val = p.lower[0] if s["type"] == "lower" else p.upper[0]
 
         # ASSERT
-        assert np.isclose(val, s['expected'])
+        assert np.isclose(val, s["expected"])
 
 
 def test_defining_mu_and_sigma_creates_valid_gaussian_prior():
@@ -160,7 +199,9 @@ def test_defining_mu_and_sigma_creates_valid_gaussian_prior():
     """
     # ARRANGE
     label = "star.A.mass_sampled"
-    user_params = {label: {"mu": 1.1, "sigma": 0.1, "lower": 0.0, "upper": 10.0}}
+    user_params = {
+        label: {"mu": 1.1, "sigma": 0.1, "lower": 0.0, "upper": 10.0}
+    }
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
@@ -188,14 +229,12 @@ def test_derived_parameter_correctly_registers_gaussian_potential():
     config_manager = ConfigManager(user_params)
 
     # ACT
-    resolved = config_manager.resolve("orbit", "period", shape=(1,), names=["b"])
+    resolved = config_manager.resolve(
+        "orbit", "period", shape=(1,), names=["b"]
+    )
     resolved.pop("expressions", None)
 
-    p = Parameter(
-        label="orbit.period",
-        is_derived=True,
-        **resolved
-    )
+    p = Parameter(label="orbit.period", is_derived=True, **resolved)
 
     # ASSERT
     assert p.mu is not None and p.mu[0] == 10.0
@@ -209,7 +248,15 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     """
     # ARRANGE
     label = "star.A.radius_custom"
-    user_params = {label: {"mu": 1.0, "sigma": 0.05, "init_scale": 0.001, "lower": 0.0, "upper": 10.0}}
+    user_params = {
+        label: {
+            "mu": 1.0,
+            "sigma": 0.05,
+            "init_scale": 0.001,
+            "lower": 0.0,
+            "upper": 10.0,
+        }
+    }
     config_manager = ConfigManager(user_params)
 
     star = Star([{"name": "A"}], config_manager)
@@ -217,7 +264,9 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     # ACT
     with pm.Model(name="model_custom_scale") as model:
         star.manifest = {"radius_custom": {}}
-        star.add_parameter(model=model, param_name="radius_custom", system=None)
+        star.add_parameter(
+            model=model, param_name="radius_custom", system=None
+        )
 
     # ASSERT
     p = star.radius_custom
@@ -234,7 +283,7 @@ def test_vectorized_overrides_apply_to_correct_indices():
     # ARRANGE
     user_params = {
         "star.B.mass": {"initval": 0.85, "sigma": 0.02},
-        "star.A.mass": {"initval": 1.0}
+        "star.A.mass": {"initval": 1.0},
     }
     config_manager = ConfigManager(user_params)
     star = Star([{"name": "A"}, {"name": "B"}], config_manager)
@@ -262,18 +311,23 @@ def test_config_manager_resolves_vectors_with_mixed_overrides():
     # ARRANGE
     user_params = {
         "orbit.b.logP": {"initval": 1.2, "sigma": 0.05},
-        "orbit.c.logP": {"initval": 3.4}
+        "orbit.c.logP": {"initval": 3.4},
     }
     cm = ConfigManager(user_params)
 
     # ACT
-    resolved = cm.resolve("orbit", "logP", shape=(2,), internal_overrides={"initval": [0.0, 0.0], "init_scale": 1.0},
-                          names=["b", "c"])
+    resolved = cm.resolve(
+        "orbit",
+        "logP",
+        shape=(2,),
+        internal_overrides={"initval": [0.0, 0.0], "init_scale": 1.0},
+        names=["b", "c"],
+    )
 
     # ASSERT
-    assert np.allclose(resolved['initval'], [1.2, 3.4])
-    assert np.allclose(resolved['init_scale'], [0.05, 1.0])
-    assert resolved['mu'] is None
+    assert np.allclose(resolved["initval"], [1.2, 3.4])
+    assert np.allclose(resolved["init_scale"], [0.05, 1.0])
+    assert resolved["mu"] is None
 
 
 def test_direct_component_resolution_prevents_nan_initialization():
@@ -287,7 +341,7 @@ def test_direct_component_resolution_prevents_nan_initialization():
 
     # ACT
     logP_cfg = cm.resolve("orbit", "logP", shape=(2,), names=["b", "c"])
-    logP_init = logP_cfg['initval']
+    logP_init = logP_cfg["initval"]
 
     # ASSERT
     assert logP_init[0] is not None
@@ -303,7 +357,7 @@ def test_system_initialization_safely_resolves_global_defaults():
     # ARRANGE
     user_params = {
         "star.0.mass": {"initval": 0.98},
-        "orbit.0.logP": {"initval": 2.0}
+        "orbit.0.logP": {"initval": 2.0},
     }
     cm = ConfigManager(user_params)
 
@@ -322,12 +376,20 @@ def test_config_overrides_apply_identically_via_name_or_index():
     Then both methods should inject the exact same properties.
     """
     # ARRANGE
-    cfg_by_index = ConfigManager({"star.0.mass": {"initval": 1.23, "sigma": 0.05}})
-    cfg_by_name = ConfigManager({"star.A.mass": {"initval": 1.23, "sigma": 0.05}})
+    cfg_by_index = ConfigManager(
+        {"star.0.mass": {"initval": 1.23, "sigma": 0.05}}
+    )
+    cfg_by_name = ConfigManager(
+        {"star.A.mass": {"initval": 1.23, "sigma": 0.05}}
+    )
 
     # ACT
-    resolved_index = cfg_by_index.resolve("star", "mass", shape=(1,), names=["A"])
-    resolved_name = cfg_by_name.resolve("star", "mass", shape=(1,), names=["A"])
+    resolved_index = cfg_by_index.resolve(
+        "star", "mass", shape=(1,), names=["A"]
+    )
+    resolved_name = cfg_by_name.resolve(
+        "star", "mass", shape=(1,), names=["A"]
+    )
 
     # ASSERT
     assert np.isclose(resolved_index["initval"][0], 1.23)
@@ -346,9 +408,7 @@ def test_user_unit_override_translates_to_internal_and_back():
     Then the internal value should be properly converted, and from_internal should return the exact Earth mass value.
     """
     # ARRANGE
-    user_params = {
-        "planet.b.mass": {"initval": 1.0, "unit": "earthMass"}
-    }
+    user_params = {"planet.b.mass": {"initval": 1.0, "unit": "earthMass"}}
     cm = ConfigManager(user_params)
 
     # ACT
@@ -401,12 +461,17 @@ def test_config_manager_scales_arbitrary_units_generically():
     cm.base_defaults["arm_length"] = {
         "unit": "m",
         "initval": 1000.0,
-        "internal_unit": "m"
+        "internal_unit": "m",
     }
 
     # ACT
-    resolved = cm.resolve("star", "arm_length", shape=(1,),
-                          internal_overrides={"initval": [5000.0]}, names=["A"])
+    resolved = cm.resolve(
+        "star",
+        "arm_length",
+        shape=(1,),
+        internal_overrides={"initval": [5000.0]},
+        names=["A"],
+    )
 
     # ASSERT
     assert np.isclose(resolved["initval"][0], 5.0)

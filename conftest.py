@@ -18,6 +18,7 @@ and Python -- so single-threaded BLAS costs no measurable wall time.
 ``setdefault`` so an explicit override in the environment still wins (e.g. a
 developer profiling BLAS scaling can export their own values).
 """
+
 import os
 
 for _var in (

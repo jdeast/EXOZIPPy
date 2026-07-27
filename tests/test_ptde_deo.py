@@ -9,6 +9,7 @@ the ONLY mechanism that transports a chain between modes, so the DEO
 schedule's O(n_temps) vs random-pair O(n_temps^2) round-trip scaling is
 directly observable.
 """
+
 import io
 import logging
 import re
@@ -27,13 +28,14 @@ from exozippy.samplers.ptde import (
 )
 from exozippy.samplers.ptde_async import ptde_async_sample
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class _MinimalSystem:
     """Minimal system stub: supplies raw_start from the model."""
+
     active_components = {}
 
     def get_raw_start(self, model):
@@ -72,23 +74,37 @@ def _run_and_capture(sched, seed, **kw):
     logger.setLevel(logging.INFO)
     try:
         idata = ptde_sample(
-            _bimodal_model(), _MinimalSystem(), draws=400, tune=300,
-            n_temps=8, T_max=100.0, n_chains=8, cores=1, seed=seed,
-            log_interval=100000, swap_schedule=sched,
-            min_ess=None, max_rhat=None, **kw)
+            _bimodal_model(),
+            _MinimalSystem(),
+            draws=400,
+            tune=300,
+            n_temps=8,
+            T_max=100.0,
+            n_chains=8,
+            cores=1,
+            seed=seed,
+            log_interval=100000,
+            swap_schedule=sched,
+            min_ess=None,
+            max_rhat=None,
+            **kw,
+        )
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prev_level)
     txt = buf.getvalue()
     rt = int(re.search(r"round_trips=(\d+)", txt).group(1))
-    swaps = [float(v) for v in
-             re.search(r"swap=\[([^\]]+)\]", txt).group(1).split(",")]
+    swaps = [
+        float(v)
+        for v in re.search(r"swap=\[([^\]]+)\]", txt).group(1).split(",")
+    ]
     return idata, rt, np.array(swaps)
 
 
 # ---------------------------------------------------------------------------
 # (a) Schedule generator: even/odd alternation, correct pairs, thinned skip
 # ---------------------------------------------------------------------------
+
 
 def test_deo_pairs_even_round_starts_at_zero():
     """
@@ -170,6 +186,7 @@ def test_deo_pair_sequence_even_pairs_before_odd():
 # Round-trip diagnostics helper
 # ---------------------------------------------------------------------------
 
+
 def test_record_round_trips_tags_extreme_rungs():
     """
     Given a fresh direction array (all neutral) on a 3-rung ladder,
@@ -194,7 +211,7 @@ def test_record_round_trips_counts_full_cold_hot_cold_excursion():
     """
     direction = [[0], [0], [0]]
     round_trips = [0]
-    _record_round_trips(direction, round_trips, n_temps=3)   # cold=+1, hot=-1
+    _record_round_trips(direction, round_trips, n_temps=3)  # cold=+1, hot=-1
     # Swap: move the hot-tagged config into the cold slot (as an accepted swap
     # would, carrying its direction tag with it).
     direction[0][0], direction[2][0] = direction[2][0], direction[0][0]
@@ -221,6 +238,7 @@ def test_record_round_trips_is_idempotent():
 # (b) Invariance smoke test: DEO and random agree on moments; DEO wins on RT
 # ---------------------------------------------------------------------------
 
+
 def test_deo_and_random_agree_on_bimodal_moments():
     """
     Given a symmetric 1-D bimodal target (modes at x = +/- 4),
@@ -241,7 +259,9 @@ def test_deo_and_random_agree_on_bimodal_moments():
     assert abs(float(x_deo.std()) - float(x_rnd.std())) < 1.0
     # DEO mixes well enough to populate both modes roughly evenly.
     frac_pos = float((x_deo > 0).mean())
-    assert 0.3 < frac_pos < 0.7, f"DEO mode balance off: frac_pos={frac_pos:.2f}"
+    assert (
+        0.3 < frac_pos < 0.7
+    ), f"DEO mode balance off: frac_pos={frac_pos:.2f}"
 
 
 def test_deo_achieves_higher_round_trip_rate_than_random():
@@ -258,12 +278,14 @@ def test_deo_achieves_higher_round_trip_rate_than_random():
     assert rt_deo > 0
     assert rt_deo > 3 * rt_rnd, (
         f"expected DEO round trips ({rt_deo}) to far exceed random "
-        f"({rt_rnd}) on an 8-rung ladder")
+        f"({rt_rnd}) on an 8-rung ladder"
+    )
 
 
 # ---------------------------------------------------------------------------
 # (c) Ladder adaptation: communication-barrier equalization
 # ---------------------------------------------------------------------------
+
 
 def test_update_ladder_barrier_equalizes_uneven_barrier():
     """
@@ -274,7 +296,7 @@ def test_update_ladder_barrier_equalizes_uneven_barrier():
       across the interior rungs, and the two endpoints (T=1, T=T_max) stay
       pinned (EXOFASTv2 parity at the ends).
     """
-    T = 200.0 ** (np.arange(8) / 7)          # geometric, 8 rungs
+    T = 200.0 ** (np.arange(8) / 7)  # geometric, 8 rungs
     propose = np.full(7, 100.0)
     reject = np.array([0.02, 0.02, 0.6, 0.6, 0.02, 0.02, 0.02])
     accept = propose * (1.0 - reject)
@@ -284,7 +306,7 @@ def test_update_ladder_barrier_equalizes_uneven_barrier():
     # Endpoints pinned.
     assert np.isclose(new_T[0], 1.0)
     assert np.isclose(new_T[-1], 200.0)
-    assert np.all(np.diff(new_T) > 0)        # still strictly increasing
+    assert np.all(np.diff(new_T) > 0)  # still strictly increasing
 
     # Re-derive the barrier carried by each NEW interval by interpolating the
     # cumulative barrier Lambda(beta) at the new coldnesses.
@@ -306,7 +328,7 @@ def test_update_ladder_barrier_noop_on_perfect_mixing():
     """
     T = 200.0 ** (np.arange(8) / 7)
     propose = np.full(7, 100.0)
-    accept = propose.copy()                  # 100% acceptance -> zero barrier
+    accept = propose.copy()  # 100% acceptance -> zero barrier
     new_T = _update_ladder_barrier(T, accept, propose)
     assert np.allclose(new_T, T)
 
@@ -330,6 +352,7 @@ def test_adapt_ladder_runs_end_to_end_and_recovers_moments():
 # swap_schedule validation + async wiring
 # ---------------------------------------------------------------------------
 
+
 def test_invalid_swap_schedule_raises():
     """
     Given an unrecognized swap_schedule,
@@ -337,9 +360,17 @@ def test_invalid_swap_schedule_raises():
     Then it raises ValueError before doing any sampling.
     """
     with pytest.raises(ValueError, match="swap_schedule"):
-        ptde_sample(_bimodal_model(), _MinimalSystem(), draws=5, tune=5,
-                    n_temps=2, T_max=2.0, cores=1, seed=0,
-                    swap_schedule="bogus")
+        ptde_sample(
+            _bimodal_model(),
+            _MinimalSystem(),
+            draws=5,
+            tune=5,
+            n_temps=2,
+            T_max=2.0,
+            cores=1,
+            seed=0,
+            swap_schedule="bogus",
+        )
 
 
 @pytest.mark.parametrize("sched", ["deo", "random"])
@@ -351,10 +382,20 @@ def test_ptde_async_runs_under_both_schedules(sched):
       the async event-time DEO cycling must not deadlock or break output.
     """
     idata = ptde_async_sample(
-        _bimodal_model(), _MinimalSystem(), draws=40, tune=40,
-        n_temps=4, T_max=20.0, n_chains=4, cores=1, seed=3,
-        log_interval=100000, swap_schedule=sched,
-        min_ess=None, max_rhat=None)
+        _bimodal_model(),
+        _MinimalSystem(),
+        draws=40,
+        tune=40,
+        n_temps=4,
+        T_max=20.0,
+        n_chains=4,
+        cores=1,
+        seed=3,
+        log_interval=100000,
+        swap_schedule=sched,
+        min_ess=None,
+        max_rhat=None,
+    )
     assert idata.posterior.sizes["draw"] == 40
     assert idata.posterior.sizes["chain"] == 4
 
@@ -366,6 +407,14 @@ def test_ptde_async_invalid_swap_schedule_raises():
     Then it raises ValueError before doing any sampling.
     """
     with pytest.raises(ValueError, match="swap_schedule"):
-        ptde_async_sample(_bimodal_model(), _MinimalSystem(), draws=5, tune=5,
-                          n_temps=2, T_max=2.0, cores=1, seed=0,
-                          swap_schedule="bogus")
+        ptde_async_sample(
+            _bimodal_model(),
+            _MinimalSystem(),
+            draws=5,
+            tune=5,
+            n_temps=2,
+            T_max=2.0,
+            cores=1,
+            seed=0,
+            swap_schedule="bogus",
+        )

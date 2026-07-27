@@ -21,6 +21,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "kelt4"
 
 # --- schema-driven eligibility (no component names hardcoded) ----------------
 
+
 def _fake_schema():
     """A schema with a made-up component declaring a custom datafile glob."""
     return {
@@ -111,8 +112,12 @@ def test_current_associations_maps_basename_to_instances():
 
     assert assoc == {
         "run3.widget": [
-            {"comp_type": "gadget", "name": "g1", "key": "trace",
-             "path": "data/run3.widget"}
+            {
+                "comp_type": "gadget",
+                "name": "g1",
+                "key": "trace",
+                "path": "data/run3.widget",
+            }
         ]
     }
 
@@ -137,6 +142,7 @@ def test_list_directory_lists_files_and_dirs(tmp_path):
 
 
 # --- endpoint tests (require the 'gui' extra) --------------------------------
+
 
 @pytest.fixture
 def client():
@@ -170,7 +176,9 @@ def test_files_eligible_endpoint_is_schema_driven(client, rvonly_project):
     config_path = str(rvonly_project / "kelt4_rvonly.yaml")
     client.post("/api/doc/open", json={"config_path": config_path})
 
-    resp = client.post("/api/files/eligible", json={"filename": "KELT-4b.HIRES.rv"})
+    resp = client.post(
+        "/api/files/eligible", json={"filename": "KELT-4b.HIRES.rv"}
+    )
 
     assert resp.status_code == 200
     eligible = resp.json()["eligible"]
@@ -181,7 +189,9 @@ def test_files_eligible_endpoint_is_schema_driven(client, rvonly_project):
     assert all(e["key"] == "file" for e in eligible)
 
 
-def test_files_eligible_endpoint_rejects_wrong_extension(client, rvonly_project):
+def test_files_eligible_endpoint_rejects_wrong_extension(
+    client, rvonly_project
+):
     """
     Given the opened RV-only project,
     When an .sed file is checked for eligibility,
@@ -190,7 +200,9 @@ def test_files_eligible_endpoint_rejects_wrong_extension(client, rvonly_project)
     config_path = str(rvonly_project / "kelt4_rvonly.yaml")
     client.post("/api/doc/open", json={"config_path": config_path})
 
-    resp = client.post("/api/files/eligible", json={"filename": "kelt4.sed.yaml"})
+    resp = client.post(
+        "/api/files/eligible", json={"filename": "kelt4.sed.yaml"}
+    )
 
     assert resp.status_code == 200
     assert resp.json()["eligible"] == []

@@ -19,7 +19,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Seed a params.yaml from the MAP of a previous trace."
     )
-    parser.add_argument("config", help="System config YAML (e.g. ob140939.yaml)")
+    parser.add_argument(
+        "config", help="System config YAML (e.g. ob140939.yaml)"
+    )
     parser.add_argument(
         "--trace", help="Trace file (default: <prefix>_trace.nc)", default=None
     )

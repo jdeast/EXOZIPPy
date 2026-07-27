@@ -59,16 +59,16 @@ IAD_CACHE = "HIP1349.iad.txt"
 OUTFILE = "HIP1349.Hipparcos.astrom"
 
 # Catalog reference solution (IAD header, J1991.25)
-RA0 = 4.22329974        # deg
-DEC0 = -52.65159230     # deg
-PLX = 43.45             # mas
-PMRA = 314.94           # mas/yr
-PMDEC = 182.50          # mas/yr
+RA0 = 4.22329974  # deg
+DEC0 = -52.65159230  # deg
+PLX = 43.45  # mas
+PMRA = 314.94  # mas/yr
+PMDEC = 182.50  # mas/yr
 
 # DMSA/O photocenter orbit (ESA 1997)
-PORB = 411.449          # d
-TP = 2448245.6103       # JD
-A0 = 19.94              # mas
+PORB = 411.449  # d
+TP = 2448245.6103  # JD
+A0 = 19.94  # mas
 ECC = 0.5671
 OMEGA = np.radians(4.68)
 INC = np.radians(80.48)
@@ -79,10 +79,14 @@ RAD2MAS = 180.0 / np.pi * 3600e3
 
 
 def fetch_iad():
-    url = ("https://hipparcos-tools.cosmos.esa.int/cgi-bin/"
-           f"HIPcatalogueSearch.pl?hipiId={HIP}")
+    url = (
+        "https://hipparcos-tools.cosmos.esa.int/cgi-bin/"
+        f"HIPcatalogueSearch.pl?hipiId={HIP}"
+    )
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    body = urllib.request.urlopen(req, timeout=60).read().decode(errors="replace")
+    body = (
+        urllib.request.urlopen(req, timeout=60).read().decode(errors="replace")
+    )
     with open(IAD_CACHE, "w") as f:
         f.write(body)
     return body
@@ -91,9 +95,12 @@ def fetch_iad():
 def parse_iad(body):
     rows = []
     for line in body.splitlines():
-        m = re.match(r"^\s*(\d+)\|([FN])\|"
-                     r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|"
-                     r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|", line)
+        m = re.match(
+            r"^\s*(\d+)\|([FN])\|"
+            r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|"
+            r"([-\d. ]+)\|([-\d. ]+)\|([-\d. ]+)\|",
+            line,
+        )
         if m:
             orbit, cons = int(m.group(1)), m.group(2)
             vals = [float(v) for v in m.groups()[2:9]]
@@ -117,8 +124,12 @@ def orbit_EN(t):
     r = A0 * (1 - ECC**2) / (1 + ECC * cosf)
     coswf = np.cos(OMEGA) * cosf - np.sin(OMEGA) * sinf
     sinwf = np.sin(OMEGA) * cosf + np.cos(OMEGA) * sinf
-    dN = r * (np.cos(BIGOMEGA) * coswf - np.sin(BIGOMEGA) * sinwf * np.cos(INC))
-    dE = r * (np.sin(BIGOMEGA) * coswf + np.cos(BIGOMEGA) * sinwf * np.cos(INC))
+    dN = r * (
+        np.cos(BIGOMEGA) * coswf - np.sin(BIGOMEGA) * sinwf * np.cos(INC)
+    )
+    dE = r * (
+        np.sin(BIGOMEGA) * coswf + np.cos(BIGOMEGA) * sinwf * np.cos(INC)
+    )
     return dE, dN
 
 
@@ -132,13 +143,13 @@ def main():
     print(f"{len(rows)} abscissa records (FAST + NDAC)")
 
     orbitno = np.array([r[0] for r in rows])
-    sinpsi = np.array([r[2] for r in rows])   # IA3
-    cospsi = np.array([r[3] for r in rows])   # IA4
-    pfal = np.array([r[4] for r in rows])     # IA5
-    dmu_a = np.array([r[5] for r in rows])    # IA6
-    dmu_d = np.array([r[6] for r in rows])    # IA7
-    resid = np.array([r[7] for r in rows])    # IA8 [mas]
-    err = np.array([r[8] for r in rows])      # IA9 [mas]
+    sinpsi = np.array([r[2] for r in rows])  # IA3
+    cospsi = np.array([r[3] for r in rows])  # IA4
+    pfal = np.array([r[4] for r in rows])  # IA5
+    dmu_a = np.array([r[5] for r in rows])  # IA6
+    dmu_d = np.array([r[6] for r in rows])  # IA7
+    resid = np.array([r[7] for r in rows])  # IA8 [mas]
+    err = np.array([r[8] for r in rows])  # IA9 [mas]
 
     # Epoch from the proper-motion partials; use the better-conditioned ratio
     dt_a = np.where(np.abs(sinpsi) > 1e-3, dmu_a / sinpsi, np.nan)
@@ -154,18 +165,22 @@ def main():
     # Validate our parallax factors against the consortium's IA5
     # (Hipparcos is within ~3e-4 AU of the geocenter: 'earth' is fine)
     from exozippy.ephemeris import get_observer_position
+
     xyz = get_observer_position(t, "earth")
     ra_r, dec_r = np.radians(RA0), np.radians(DEC0)
     P_E = xyz[:, 0] * np.sin(ra_r) - xyz[:, 1] * np.cos(ra_r)
-    P_N = (xyz[:, 0] * np.cos(ra_r) * np.sin(dec_r)
-           + xyz[:, 1] * np.sin(ra_r) * np.sin(dec_r)
-           - xyz[:, 2] * np.cos(dec_r))
+    P_N = (
+        xyz[:, 0] * np.cos(ra_r) * np.sin(dec_r)
+        + xyz[:, 1] * np.sin(ra_r) * np.sin(dec_r)
+        - xyz[:, 2] * np.cos(dec_r)
+    )
     pfal_ours = P_E * sinpsi + P_N * cospsi
     max_diff = np.max(np.abs(pfal_ours - pfal))
     print(f"AL parallax factor: max |ours - IAD| = {max_diff:.4f}")
     if max_diff > 0.02:
-        raise SystemExit("Parallax factor mismatch with the IAD -- "
-                         "check conventions!")
+        raise SystemExit(
+            "Parallax factor mismatch with the IAD -- " "check conventions!"
+        )
 
     # Convention check: the raw residuals (wrt the 5-parameter reference
     # solution) must be explained by the published DMSA/O orbit projected
@@ -174,35 +189,46 @@ def main():
     orb_al = dE_orb * sinpsi + dN_orb * cospsi
     chi2_raw = np.mean((resid / err) ** 2)
     chi2_orb = np.mean(((resid - orb_al) / err) ** 2)
-    print(f"chi2/N of residuals: {chi2_raw:.2f} raw, "
-          f"{chi2_orb:.2f} after subtracting the DMSA/O orbit")
+    print(
+        f"chi2/N of residuals: {chi2_raw:.2f} raw, "
+        f"{chi2_orb:.2f} after subtracting the DMSA/O orbit"
+    )
     if chi2_orb > 3.0:
-        raise SystemExit("DMSA/O orbit does not explain the residuals -- "
-                         "check conventions!")
+        raise SystemExit(
+            "DMSA/O orbit does not explain the residuals -- "
+            "check conventions!"
+        )
 
     # Reconstruct the full abscissa relative to the J1991.25 catalog
     # position (5-parameter model + residual; the orbit stays in the data)
-    w = (resid
-         + PLX * pfal
-         + (PMRA * dt_yr) * sinpsi + (PMDEC * dt_yr) * cospsi)
+    w = resid + PLX * pfal + (PMRA * dt_yr) * sinpsi + (PMDEC * dt_yr) * cospsi
 
     psi_deg = np.degrees(np.arctan2(sinpsi, cospsi))
-    np.savetxt(OUTFILE, np.column_stack([t, w, err, psi_deg]),
-               header=("Hipparcos epoch astrometry of HIP 1349, "
-                       "reconstructed from the 1997 IAD "
-                       "(see get_hipparcos_iad.py)\n"
-                       "BJD_TDB  w[mas]  err[mas]  scan_PA[deg]"),
-               fmt="%.6f %.4f %.3f %.6f")
+    np.savetxt(
+        OUTFILE,
+        np.column_stack([t, w, err, psi_deg]),
+        header=(
+            "Hipparcos epoch astrometry of HIP 1349, "
+            "reconstructed from the 1997 IAD "
+            "(see get_hipparcos_iad.py)\n"
+            "BJD_TDB  w[mas]  err[mas]  scan_PA[deg]"
+        ),
+        fmt="%.6f %.4f %.3f %.6f",
+    )
     print(f"wrote {OUTFILE}")
 
     # convenience values for the params file
-    E_c = 2 * np.arctan2(np.sqrt(1 - ECC) * (1 - np.sin(OMEGA)),
-                         np.sqrt(1 + ECC) * np.cos(OMEGA))
+    E_c = 2 * np.arctan2(
+        np.sqrt(1 - ECC) * (1 - np.sin(OMEGA)),
+        np.sqrt(1 + ECC) * np.cos(OMEGA),
+    )
     M_c = E_c - ECC * np.sin(E_c)
     print(f"tc = {TP + M_c * PORB / (2 * np.pi):.4f}")
-    print(f"secosw = {np.sqrt(ECC) * np.cos(OMEGA):.5f}, "
-          f"sesinw = {np.sqrt(ECC) * np.sin(OMEGA):.5f}, "
-          f"cosi = {np.cos(INC):.5f}, bigomega = {np.degrees(BIGOMEGA)}")
+    print(
+        f"secosw = {np.sqrt(ECC) * np.cos(OMEGA):.5f}, "
+        f"sesinw = {np.sqrt(ECC) * np.sin(OMEGA):.5f}, "
+        f"cosi = {np.cos(INC):.5f}, bigomega = {np.degrees(BIGOMEGA)}"
+    )
 
 
 if __name__ == "__main__":

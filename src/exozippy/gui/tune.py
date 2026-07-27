@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 # Worker child: holds the System / model / Evaluator in memory
 # ---------------------------------------------------------------------------
 
+
 def _round_list(arr):
     """Convert a numpy array to a JSON-safe list (non-finite -> None)."""
     from exozippy.plotspec import _array_to_list
@@ -126,8 +127,10 @@ def _do_eval(state, msg):
     state["raw"] = new_raw
     out = ev.eval_plots(new_raw, changed_label=label)
     plots = {
-        pid: {name: {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
-              for name, xy in traces.items()}
+        pid: {
+            name: {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
+            for name, xy in traces.items()
+        }
         for pid, traces in out.items()
     }
     return {"plots": plots}
@@ -187,6 +190,7 @@ def _worker_main(req_q, resp_q):
 # Parent-side handle to the worker process
 # ---------------------------------------------------------------------------
 
+
 class EvaluatorWorker:
     """Owns the evaluator subprocess and its request/response queues.
 
@@ -216,8 +220,12 @@ class EvaluatorWorker:
     def solve(self, config, params, workdir, on_progress=None):
         """Run a full solve; block for the result, forwarding progress states."""
         self._req_q.put(
-            {"op": "solve", "config": config, "params": params,
-             "workdir": workdir}
+            {
+                "op": "solve",
+                "config": config,
+                "params": params,
+                "workdir": workdir,
+            }
         )
         return self._await(on_progress)
 
@@ -254,6 +262,7 @@ class EvaluatorWorker:
 # Server-side session (one per open project)
 # ---------------------------------------------------------------------------
 
+
 class TuneSession:
     """Tracks the Tune tab's solve state and brokers eval calls.
 
@@ -266,10 +275,10 @@ class TuneSession:
         self._worker_factory = worker_factory
         self._worker = None
         self._lock = threading.Lock()
-        self.phase = "idle"          # idle|solving|compiling|live|error
+        self.phase = "idle"  # idle|solving|compiling|live|error
         self.error: Optional[str] = None
         self.structural_hash: Optional[str] = None
-        self.result: Optional[dict] = None   # {parameters, seeds, plots}
+        self.result: Optional[dict] = None  # {parameters, seeds, plots}
 
     def _ensure_worker(self):
         """Return a live worker subprocess, (re)spawning only if needed.
@@ -328,7 +337,9 @@ class TuneSession:
             }
             self.structural_hash = res["structural_hash"]
             self.phase = "live"
-        except Exception as exc:  # noqa: BLE001 - surfaced to the status endpoint
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - surfaced to the status endpoint
             logger.exception("tune solve failed")
             self.error = f"{type(exc).__name__}: {exc}"
             self.phase = "error"

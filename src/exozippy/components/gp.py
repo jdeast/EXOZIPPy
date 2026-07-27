@@ -71,8 +71,13 @@ _TERM_OFF = {"none", "off", "false", "no", ""}
 # are bare parameter names; the owning component supplies the prefix, so a
 # user writes e.g. ``rvinstrument.HARPS.gp_rot_period``.
 GP_TERM_PARAMS = {
-    "rotation": ("gp_rot_sigma", "gp_rot_period", "gp_rot_log_q0",
-                 "gp_rot_log_dq", "gp_rot_f"),
+    "rotation": (
+        "gp_rot_sigma",
+        "gp_rot_period",
+        "gp_rot_log_q0",
+        "gp_rot_log_dq",
+        "gp_rot_f",
+    ),
     "sho": ("gp_sho_sigma", "gp_sho_rho", "gp_sho_log_q"),
 }
 
@@ -120,14 +125,16 @@ def parse_gp_spec(value, context=""):
                 continue
             raise ValueError(
                 f"[{context}] gp: true is ambiguous -- name the term(s) "
-                f"explicitly, e.g. gp: rotation or gp: [rotation, sho].")
+                f"explicitly, e.g. gp: rotation or gp: [rotation, sho]."
+            )
         key = str(item).strip().lower()
         if key in _TERM_OFF:
             continue
         if key not in _TERM_ALIASES:
             raise ValueError(
                 f"[{context}] unknown GP term '{item}'. Supported terms: "
-                f"{', '.join(GP_TERMS)} (or 'none' to disable).")
+                f"{', '.join(GP_TERMS)} (or 'none' to disable)."
+            )
         found.add(_TERM_ALIASES[key])
 
     return tuple(t for t in GP_TERMS if t in found)
@@ -186,11 +193,16 @@ def build_term(kind, params):
     terms = _celerite_terms()
     if kind == "rotation":
         return terms.RotationTerm(
-            sigma=params["sigma"], period=params["period"],
-            Q0=params["Q0"], dQ=params["dQ"], f=params["f"])
+            sigma=params["sigma"],
+            period=params["period"],
+            Q0=params["Q0"],
+            dQ=params["dQ"],
+            f=params["f"],
+        )
     if kind == "sho":
         return terms.SHOTerm(
-            sigma=params["sigma"], rho=params["rho"], Q=params["Q"])
+            sigma=params["sigma"], rho=params["rho"], Q=params["Q"]
+        )
     raise ValueError(f"Unknown GP term '{kind}'; expected one of {GP_TERMS}.")
 
 
@@ -236,5 +248,6 @@ def check_sorted(t, context=""):
         raise ValueError(
             f"[{context}] GP times must be sorted ascending; got an unsorted "
             f"array. This is an internal error -- Instrument._prepare_gp is "
-            f"responsible for the sort.")
+            f"responsible for the sort."
+        )
     return t

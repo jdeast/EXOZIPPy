@@ -37,6 +37,7 @@ building this test. See test_good_draw_logp_is_ordinary's docstring.
 
 Marked 'slow' (builds a full System + compiles PyTensor graphs).
 """
+
 import os
 import shutil
 
@@ -49,7 +50,8 @@ from exozippy.system import System
 pytestmark = pytest.mark.slow
 
 EXAMPLE_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "examples", "DC2018_128")
+    os.path.dirname(__file__), "..", "examples", "DC2018_128"
+)
 
 # chain 23, draw 46680 -- the first stored draw after the runaway (lp jumped
 # from ~2982 to ~5.05e7 in the trace; pre-fix, later draws in the same chain
@@ -72,8 +74,8 @@ RUNAWAY_RAW = {
     "planet.mass_raw": [195576323.76112023],
     "star.distance_raw": [-5303.75771384, -8672.6901092],
     "star.logmass_raw": [3950.28058978, -76714.41614803],
-    "star.pm_dec_raw": [3.12510181e+05, 1.57096079e+08],
-    "star.pm_ra_raw": [-3.34082488e+08, -4.12501179e+07],
+    "star.pm_dec_raw": [3.12510181e05, 1.57096079e08],
+    "star.pm_ra_raw": [-3.34082488e08, -4.12501179e07],
     "star.rv_raw": [2201.98526294, -691.32034664],
 }
 
@@ -105,7 +107,8 @@ def dc2018_128_logp(tmp_path_factory):
     """Build the DC2018_128 model once; return (compile_logp fn, model)."""
     work_dir = tmp_path_factory.mktemp("dc2018_128_work") / "DC2018_128"
     shutil.copytree(
-        EXAMPLE_DIR, work_dir,
+        EXAMPLE_DIR,
+        work_dir,
         ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
 

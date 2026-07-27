@@ -16,8 +16,8 @@ import pytensor.tensor as pt
 from ...physics_registry import register_physics
 
 # Torres+2010 Table 4.  Both dot into [1, X, X^2, X^3, logg^2, logg^3, feh].
-_A_COEFF = (1.5689, 1.3787, 0.4243, 1.139, -0.14250, 0.01969, 0.10100)   # log M
-_B_COEFF = (2.4427, 0.6679, 0.1771, 0.705, -0.21415, 0.02306, 0.04173)   # log R
+_A_COEFF = (1.5689, 1.3787, 0.4243, 1.139, -0.14250, 0.01969, 0.10100)  # log M
+_B_COEFF = (2.4427, 0.6679, 0.1771, 0.705, -0.21415, 0.02306, 0.04173)  # log R
 
 # Scatter of the relations, in dex.  EXOFASTv2 hardcodes these as
 # ulogm/urstar in exofast_chi2v2.pro; they are exposed as optional
@@ -37,9 +37,9 @@ def _terms(teff, logg, feh):
         1.0,
         x,
         pt.sqr(x),
-        x ** 3,
+        x**3,
         pt.sqr(logg),
-        logg ** 3,
+        logg**3,
         feh,
     )
 

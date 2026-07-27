@@ -11,9 +11,14 @@ import os
 # copy-on-write, multiplying the per-process cost by the core count on top.
 # Setting these after numpy et al. are already imported is a no-op -- the
 # native thread pool is already sized by then -- so this must run first.
-for _tvar in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-              "MKL_NUM_THREADS", "BLAS_NUM_THREADS",
-              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+for _tvar in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "BLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
     os.environ.setdefault(_tvar, "1")
 
 import pytensor
@@ -34,7 +39,4 @@ if pytensor.config.linker == "auto":
 from ._version import __version__
 from .system import System
 
-__all__ = [
-    "__version__",
-    "System"
-]
+__all__ = ["__version__", "System"]

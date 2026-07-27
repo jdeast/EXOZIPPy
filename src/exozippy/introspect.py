@@ -174,7 +174,7 @@ def _merged_param_block(cls, yaml_key):
         if name not in shared and name not in merged:
             continue
         entry = dict(shared.get(name, {}))
-        entry.update(block.get(name, {}))   # the component's own block wins
+        entry.update(block.get(name, {}))  # the component's own block wins
         merged[name] = entry
     return merged
 
@@ -234,6 +234,7 @@ def _global_schema():
     # the heavy sampling stack is unavailable.
     try:
         from .run import KNOWN_SAMPLER_KEYS
+
         sampler_keys = sorted(KNOWN_SAMPLER_KEYS)
     except Exception:  # pragma: no cover - defensive fallback
         sampler_keys = []

@@ -70,8 +70,16 @@ _PARAMS_SUFFIXES = (".params.yaml", ".params.yml")
 # in later prompts). Kept generic -- the datafile schema (G1) is the real
 # authority; this is only a listing convenience.
 _DATA_EXTS = (
-    ".sed", ".rv", ".tran", ".dat", ".txt", ".csv", ".eph",
-    ".priors", ".fits", ".json",
+    ".sed",
+    ".rv",
+    ".tran",
+    ".dat",
+    ".txt",
+    ".csv",
+    ".eph",
+    ".priors",
+    ".fits",
+    ".json",
 )
 
 
@@ -90,6 +98,7 @@ def _require_fastapi():
 
 # --- project directory listing ------------------------------------------------
 
+
 @lru_cache(maxsize=1)
 def _config_top_keys():
     """Top-level YAML keys that mark a file as a system config.
@@ -103,7 +112,8 @@ def _config_top_keys():
     """
     keys = {"run", "prefix", "logger_level", "sampler", "parameter_file"}
     try:
-        from ..introspect import list_components, _global_schema
+        from ..introspect import _global_schema, list_components
+
         keys.update(list_components().keys())
         keys.update(_global_schema().keys())
     except Exception:  # pragma: no cover - defensive; fall back to literals
@@ -136,7 +146,11 @@ def _classify_yaml(path):
     except Exception:
         return "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
 
-    keys = [k for k in data if isinstance(k, str)] if isinstance(data, dict) else []
+    keys = (
+        [k for k in data if isinstance(k, str)]
+        if isinstance(data, dict)
+        else []
+    )
     if keys and all("." in k for k in keys):
         return "params"
     if name.endswith(_PARAMS_SUFFIXES):
@@ -180,7 +194,9 @@ def open_project(path):
         if suffix in (".yaml", ".yml"):
             kind = _classify_yaml(child)
             entry["kind"] = kind
-            {"params": params, "config": configs}.get(kind, other).append(entry)
+            {"params": params, "config": configs}.get(kind, other).append(
+                entry
+            )
         elif suffix in _DATA_EXTS:
             entry["kind"] = "data"
             data_files.append(entry)
@@ -198,6 +214,7 @@ def open_project(path):
 
 
 # --- log tailing --------------------------------------------------------------
+
 
 def _read_last_lines(path, n):
     """Return the last ``n`` lines of a text file (best-effort, tolerant)."""
@@ -231,9 +248,7 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
                 st = path.stat()
                 # (Re)open on first sight, rotation (new inode), or truncation.
                 reopen = (
-                    fh is None
-                    or inode != st.st_ino
-                    or fh.tell() > st.st_size
+                    fh is None or inode != st.st_ino or fh.tell() > st.st_size
                 )
                 if reopen:
                     if fh is not None:
@@ -323,7 +338,9 @@ def _list_prefix_images(handle, pattern):
     """Sorted absolute image paths matching <prefix><pattern> (e.g. '_start*')."""
     out = []
     for path in sorted(glob.glob(_prefix_path(handle) + pattern)):
-        if os.path.splitext(path)[1].lower() in _IMAGE_EXTS and os.path.isfile(path):
+        if os.path.splitext(path)[1].lower() in _IMAGE_EXTS and os.path.isfile(
+            path
+        ):
             out.append(path)
     return out
 
@@ -364,6 +381,7 @@ def _snapshot_run_inputs(handle, params_path=None):
 
 # --- app factory --------------------------------------------------------------
 
+
 def create_app(project_dir=None, initial_config=None):
     """Build and return the FastAPI application.
 
@@ -383,10 +401,14 @@ def create_app(project_dir=None, initial_config=None):
 
     from .document import ProjectDocument, command_from_json
 
-    app = FastAPI(title="EXOZIPPy", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app = FastAPI(
+        title="EXOZIPPy", docs_url="/api/docs", openapi_url="/api/openapi.json"
+    )
 
     initial_project = str(Path(project_dir).resolve()) if project_dir else None
-    initial_config = str(Path(initial_config).resolve()) if initial_config else None
+    initial_config = (
+        str(Path(initial_config).resolve()) if initial_config else None
+    )
 
     # The single document the GUI is editing. Held in server state so undo/redo
     # stacks survive across requests. A worker pool runs the (seconds-long)
@@ -463,20 +485,27 @@ def create_app(project_dir=None, initial_config=None):
     @app.get("/api/config")
     def gui_config():
         """Client bootstrap: which project (and config, if any) to open on load."""
-        return {"initial_project": initial_project, "initial_config": initial_config}
+        return {
+            "initial_project": initial_project,
+            "initial_config": initial_config,
+        }
 
     @app.get("/api/schema")
     def schema():
         # Imported lazily: introspection pulls the full component stack, which
         # is heavy; keep it off the import path of a bare `exozippy-gui --help`.
         from ..introspect import full_schema
+
         return JSONResponse(full_schema())
 
     @app.get("/api/utilities")
     def utilities():
         from ..utilities.registry import all_utilities
+
         specs = all_utilities()
-        return JSONResponse({name: spec.to_schema() for name, spec in specs.items()})
+        return JSONResponse(
+            {name: spec.to_schema() for name, spec in specs.items()}
+        )
 
     @app.post("/api/project/open")
     def project_open(req: OpenProjectRequest):
@@ -490,7 +519,9 @@ def create_app(project_dir=None, initial_config=None):
     @app.post("/api/doc/open")
     def doc_open(req: OpenDocRequest):
         try:
-            doc = ProjectDocument.open(req.config_path, params_path=req.params_path)
+            doc = ProjectDocument.open(
+                req.config_path, params_path=req.params_path
+            )
         except (OSError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         state["doc"] = doc
@@ -557,15 +588,22 @@ def create_app(project_dir=None, initial_config=None):
         from ..solve_api import validate
 
         try:
-            diagnostics = validate(config, user_params=user_params, workdir=workdir)
-            validate_jobs[job_id] = {"status": "done", "diagnostics": diagnostics}
+            diagnostics = validate(
+                config, user_params=user_params, workdir=workdir
+            )
+            validate_jobs[job_id] = {
+                "status": "done",
+                "diagnostics": diagnostics,
+            }
         except Exception as exc:  # pragma: no cover - defensive
             validate_jobs[job_id] = {
                 "status": "error",
                 "diagnostics": [
-                    {"severity": "error",
-                     "message": f"{type(exc).__name__}: {exc}",
-                     "param_paths": []}
+                    {
+                        "severity": "error",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "param_paths": [],
+                    }
                 ],
             }
 
@@ -665,7 +703,9 @@ def create_app(project_dir=None, initial_config=None):
 
         if state["doc"] is None:
             return JSONResponse({"associations": {}})
-        assoc = datafiles.current_associations(state["doc"].config, full_schema())
+        assoc = datafiles.current_associations(
+            state["doc"].config, full_schema()
+        )
         return JSONResponse({"associations": assoc})
 
     def _preview_cache_key(doc, comp_type):
@@ -678,7 +718,9 @@ def create_app(project_dir=None, initial_config=None):
         from ..introspect import full_schema
         from . import datafiles
 
-        workdir = str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        workdir = (
+            str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        )
         assoc = datafiles.current_associations(doc.config, full_schema())
         mtimes = []
         for _base, refs in assoc.items():
@@ -717,7 +759,9 @@ def create_app(project_dir=None, initial_config=None):
 
         config = _jsonable(doc.config)
         params = _jsonable(doc.params)
-        workdir = str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        workdir = (
+            str(doc.config_path.parent) if doc.config_path else os.getcwd()
+        )
         result = run_preview(config, params, workdir, req.comp_type)
 
         # Only cache successful builds; an error should be re-attempted after a
@@ -740,7 +784,8 @@ def create_app(project_dir=None, initial_config=None):
         if handle is not None and handle.is_alive():
             return JSONResponse(
                 {"error": "A run is already active for this project."},
-                status_code=409)
+                status_code=409,
+            )
 
         cwd = req.project_dir or initial_project or os.getcwd()
         try:
@@ -879,23 +924,30 @@ def create_app(project_dir=None, initial_config=None):
     def tune_status():
         session = tune_state.get("session")
         if session is None:
-            return {"phase": "idle", "error": None,
-                    "structural_hash": None, "has_result": False}
+            return {
+                "phase": "idle",
+                "error": None,
+                "structural_hash": None,
+                "has_result": False,
+            }
         return JSONResponse(session.status())
 
     @app.get("/api/tune/result")
     def tune_result():
         session = tune_state.get("session")
         if session is None or session.result is None:
-            return JSONResponse({"error": "no solve result yet"}, status_code=409)
+            return JSONResponse(
+                {"error": "no solve result yet"}, status_code=409
+            )
         return JSONResponse(session.result)
 
     @app.post("/api/tune/eval")
     def tune_eval(req: TuneEvalRequest):
         session = tune_state.get("session")
         if session is None:
-            return JSONResponse({"error": "no session; Solve first"},
-                                status_code=409)
+            return JSONResponse(
+                {"error": "no session; Solve first"}, status_code=409
+            )
         try:
             return JSONResponse(session.eval(req.path, req.value))
         except RuntimeError as exc:
@@ -915,8 +967,11 @@ def create_app(project_dir=None, initial_config=None):
         h = structural_hash(_jsonable(doc.config), _jsonable(doc.params))
         session = tune_state.get("session")
         live = session.structural_hash if session else None
-        return {"structural_hash": h, "live_hash": live,
-                "stale": live is not None and h != live}
+        return {
+            "structural_hash": h,
+            "live_hash": live,
+            "stale": live is not None and h != live,
+        }
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):
@@ -932,8 +987,13 @@ def create_app(project_dir=None, initial_config=None):
     # not been built yet, serve a placeholder so the API is still usable.
     index_html = STATIC_DIR / "index.html"
     if index_html.exists():
-        app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+        app.mount(
+            "/",
+            StaticFiles(directory=str(STATIC_DIR), html=True),
+            name="static",
+        )
     else:
+
         @app.get("/", response_class=HTMLResponse)
         def placeholder():
             return _PLACEHOLDER_HTML
@@ -958,6 +1018,7 @@ npm run build</pre>
 
 
 # --- server + native window ---------------------------------------------------
+
 
 def _find_free_port(host="127.0.0.1"):
     """Bind to port 0 to let the OS pick a free port, then release it."""
@@ -1015,26 +1076,33 @@ def main(argv=None):
         description="Launch the EXOZIPPy graphical interface (local only).",
     )
     parser.add_argument(
-        "project", nargs="?", default=None,
+        "project",
+        nargs="?",
+        default=None,
         help=(
             "Project directory or config file to open on launch, relative or "
             "absolute (e.g. 'kelt4.yaml'). Default: the current directory."
         ),
     )
     parser.add_argument(
-        "--browser", action="store_true",
+        "--browser",
+        action="store_true",
         help="Open a browser tab instead of a native pywebview window.",
     )
     parser.add_argument(
-        "--host", default="127.0.0.1",
+        "--host",
+        default="127.0.0.1",
         help="Host to bind (default 127.0.0.1; the GUI is local-only).",
     )
     parser.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="Port to bind (default: an OS-assigned free port).",
     )
     parser.add_argument(
-        "--no-window", action="store_true",
+        "--no-window",
+        action="store_true",
         help="Serve the API/UI but do not open any window (for testing).",
     )
     args = parser.parse_args(argv)
@@ -1055,7 +1123,9 @@ def main(argv=None):
     url = f"http://{host}:{port}/"
 
     server_thread = threading.Thread(
-        target=_serve, args=(app, host, port), daemon=True,
+        target=_serve,
+        args=(app, host, port),
+        daemon=True,
     )
     server_thread.start()
 

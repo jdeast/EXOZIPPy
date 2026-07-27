@@ -5,6 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+
 from ..star.physics import calc_absmag
 from . import physics
 
@@ -183,9 +184,11 @@ class Mann(Component):
             uf = bool(c.get("feh", True))
             self.use_feh.append(uf)
             self.mstar_floor.append(
-                float(c.get("mstar_floor", physics.MSTAR_FLOOR[uf])))
+                float(c.get("mstar_floor", physics.MSTAR_FLOOR[uf]))
+            )
             self.rstar_floor.append(
-                float(c.get("rstar_floor", physics.RSTAR_FLOOR[uf])))
+                float(c.get("rstar_floor", physics.RSTAR_FLOOR[uf]))
+            )
 
     def build_maps(self):
         """Stage 1b: index array linking each instance to its star."""
@@ -237,7 +240,8 @@ class Mann(Component):
 
             mass = self._initval(system.star.mass, si)
             if mass is not None and not (
-                    physics.MSTAR_RANGE[0] <= mass <= physics.MSTAR_RANGE[1]):
+                physics.MSTAR_RANGE[0] <= mass <= physics.MSTAR_RANGE[1]
+            ):
                 logger.warning(
                     f"mann '{nm}': star '{star_name}' starts at "
                     f"{mass:.3f} solMass, outside the Mann+2019 calibration "
@@ -247,7 +251,8 @@ class Mann(Component):
 
             feh = self._initval(system.star.feh, si)
             if feh is not None and not (
-                    physics.FEH_RANGE[0] <= feh <= physics.FEH_RANGE[1]):
+                physics.FEH_RANGE[0] <= feh <= physics.FEH_RANGE[1]
+            ):
                 logger.warning(
                     f"mann '{nm}': star '{star_name}' starts at [Fe/H] = "
                     f"{feh:.3f}, outside the Mann+ calibration range "
@@ -259,8 +264,11 @@ class Mann(Component):
         src = []
         for i in range(self.n_elements):
             if self.ks_synthetic[i]:
-                src.append(system.sed.predict_star_appmag(
-                    self.star_indices[i], KS_FILTER, system))
+                src.append(
+                    system.sed.predict_star_appmag(
+                        self.star_indices[i], KS_FILTER, system
+                    )
+                )
             else:
                 # Explicit float64: pytensor autocasts a bare Python float to
                 # the smallest dtype that holds it, so a round magnitude would
@@ -307,9 +315,11 @@ class Mann(Component):
         # the relation's fractional scatter about its *prediction*, matching
         # EXOFASTv2's sigma_mstar = mstar*mstar_floor.
         self._add_penalty(
-            "mass", star.mass.value[smap], mass_pred, self.mstar_floor)
+            "mass", star.mass.value[smap], mass_pred, self.mstar_floor
+        )
         self._add_penalty(
-            "radius", star.radius.value[smap], radius_pred, self.rstar_floor)
+            "radius", star.radius.value[smap], radius_pred, self.rstar_floor
+        )
 
     def _add_penalty(self, which, observed, predicted, floors):
         """Gaussian potential tying a star parameter to a relation prediction.
@@ -325,9 +335,12 @@ class Mann(Component):
         mask = np.array([which in c for c in self.constrain], dtype=bool)
         if not mask.any():
             return
-        sigma = predicted * pt.as_tensor_variable(np.asarray(floors, dtype=float))
-        logp = (-0.5 * pt.sqr((observed - predicted) / sigma)
-                - pt.log(pt.abs(sigma)))
+        sigma = predicted * pt.as_tensor_variable(
+            np.asarray(floors, dtype=float)
+        )
+        logp = -0.5 * pt.sqr((observed - predicted) / sigma) - pt.log(
+            pt.abs(sigma)
+        )
         pm.Potential(
             f"{self.prefix}.{which}_prior",
             pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),

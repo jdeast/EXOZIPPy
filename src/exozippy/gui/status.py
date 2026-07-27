@@ -40,8 +40,14 @@ TERMINAL_PHASES = frozenset({"done", "stopped", "error"})
 # Summary keys guaranteed in the state dict handed to progress_callback. Extra
 # keys (stored_raw / stored_lp / raw_var_names) may also be present to feed the
 # snapshot writer; they are stripped out of the JSON status document.
-_SUMMARY_KEYS = ("n_draws", "n_chains", "max_rhat", "min_ess",
-                 "elapsed_s", "stop_reason")
+_SUMMARY_KEYS = (
+    "n_draws",
+    "n_chains",
+    "max_rhat",
+    "min_ess",
+    "elapsed_s",
+    "stop_reason",
+)
 
 MAX_SNAPSHOT_DRAWS = 200
 """Per-chain draw cap for the downsampled snapshot npz."""
@@ -77,7 +83,9 @@ def _atomic_write_bytes(path, data):
     """Write bytes to `path` atomically (temp file in the same dir + os.replace)."""
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    tmp = os.path.join(directory, f".{os.path.basename(path)}.tmp.{os.getpid()}")
+    tmp = os.path.join(
+        directory, f".{os.path.basename(path)}.tmp.{os.getpid()}"
+    )
     with open(tmp, "wb") as fh:
         fh.write(data)
         fh.flush()
@@ -123,8 +131,8 @@ class GuiReporter:
             "updated_at": time.time(),
         }
         _atomic_write_text(
-            self.status_path,
-            json.dumps(doc, default=_json_default, indent=2))
+            self.status_path, json.dumps(doc, default=_json_default, indent=2)
+        )
 
     def phase(self, phase, state=None):
         """Write status.json at a phase transition.
@@ -142,8 +150,11 @@ class GuiReporter:
         try:
             self._write_status(phase, state)
         except Exception:
-            logger.warning("GuiReporter: failed to write status file %s",
-                           self.status_path, exc_info=True)
+            logger.warning(
+                "GuiReporter: failed to write status file %s",
+                self.status_path,
+                exc_info=True,
+            )
 
     def terminal(self, phase):
         """Force a terminal phase (done/stopped/error), reusing the last state.
@@ -152,7 +163,9 @@ class GuiReporter:
         file stuck on a non-terminal phase after the process is gone.
         """
         if phase not in TERMINAL_PHASES:
-            raise ValueError(f"terminal phase must be one of {sorted(TERMINAL_PHASES)}")
+            raise ValueError(
+                f"terminal phase must be one of {sorted(TERMINAL_PHASES)}"
+            )
         self.phase(phase, self._last_state)
 
     # -- progress callback (passed to the samplers) -----------------------
@@ -170,8 +183,9 @@ class GuiReporter:
         try:
             self._write_snapshot(state)
         except Exception:
-            logger.warning("GuiReporter: failed to write snapshot",
-                           exc_info=True)
+            logger.warning(
+                "GuiReporter: failed to write snapshot", exc_info=True
+            )
 
     def _write_snapshot(self, state):
         raw = state.get("stored_raw")
@@ -221,7 +235,8 @@ class GuiReporter:
         }
         _atomic_write_text(
             os.path.join(self.snapshot_dir, "partial.json"),
-            json.dumps(meta, default=_json_default, indent=2))
+            json.dumps(meta, default=_json_default, indent=2),
+        )
 
         cost = time.time() - t0
         if cost > SNAPSHOT_BUDGET_S:
@@ -229,7 +244,9 @@ class GuiReporter:
             logger.warning(
                 "GuiReporter: snapshot write took %.1fs (> %.0fs budget); "
                 "skipping further snapshots for the rest of this run.",
-                cost, SNAPSHOT_BUDGET_S)
+                cost,
+                SNAPSHOT_BUDGET_S,
+            )
 
 
 def _to_float(x):

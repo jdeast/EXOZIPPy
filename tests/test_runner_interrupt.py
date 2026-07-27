@@ -2,13 +2,10 @@
 `--dist loadfile` scheduler runs it on a separate worker from the other slow
 subprocess-runner tests. Shared helpers/fixture imported from test_runner.
 """
+
 import os
 
 import pytest
-
-from exozippy.gui import TERMINAL_PHASES
-from exozippy.gui import runner
-
 from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
     REACH_SAMPLING_TIMEOUT,
     _poll_until,
@@ -16,10 +13,14 @@ from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
     kelt4_workdir,
 )
 
+from exozippy.gui import TERMINAL_PHASES, runner
+
 
 @pytest.mark.slow
 @pytest.mark.timeout(900)
-def test_interrupt_during_prepare_leaves_terminal_phase(kelt4_workdir, tmp_path):
+def test_interrupt_during_prepare_leaves_terminal_phase(
+    kelt4_workdir, tmp_path
+):
     """
     Given a fit interrupted almost immediately (before/around prepare),
     When it is stopped and exits,
@@ -34,8 +35,10 @@ def test_interrupt_during_prepare_leaves_terminal_phase(kelt4_workdir, tmp_path)
         # then interrupt -- this is the prepare/compile window, well before
         # any draws are stored.
         appeared = _poll_until(
-            lambda: os.path.exists(handle.status_path) or not handle.is_alive(),
-            timeout=REACH_SAMPLING_TIMEOUT)
+            lambda: os.path.exists(handle.status_path)
+            or not handle.is_alive(),
+            timeout=REACH_SAMPLING_TIMEOUT,
+        )
         assert appeared, "run never wrote an initial status or exited"
 
         handle.stop(force=True)
@@ -47,12 +50,12 @@ def test_interrupt_during_prepare_leaves_terminal_phase(kelt4_workdir, tmp_path)
             handle.wait(timeout=60.0)
 
     final = handle.status()
-    assert final["phase"] in TERMINAL_PHASES, \
-        f"status left on non-terminal phase: {final}"
+    assert (
+        final["phase"] in TERMINAL_PHASES
+    ), f"status left on non-terminal phase: {final}"
 
     # list_runs finds the run and reports the same terminal phase.
     summaries = runner.list_runs(tmp_path)
-    matching = [s for s in summaries
-                if s["status_path"] == handle.status_path]
+    matching = [s for s in summaries if s["status_path"] == handle.status_path]
     assert matching, "list_runs did not find the run"
     assert matching[0]["phase"] in TERMINAL_PHASES

@@ -3,12 +3,14 @@
 Plain classes (not fixtures) — imported explicitly by test files that need them.
 Pytest adds the tests/ directory to sys.path, so ``from conftest import ...`` works.
 """
-from exozippy.config import ConfigManager
+
 from exozippy.components.parameter import Parameter
+from exozippy.config import ConfigManager
 
 
 class _DummyConfigManager:
     """Minimal ConfigManager stub for tests that only need a no-op hint interface."""
+
     user_params = {}
 
     def add_hint(self, *args, **kwargs):
@@ -20,12 +22,14 @@ class _DummyConfigManager:
 
 class _DummyComponent:
     """Stub component whose only observable property is n_elements."""
+
     def __init__(self, n_elements):
         self.n_elements = n_elements
 
 
 class _DummySystem:
     """Empty system namespace for tests that attach attributes manually."""
+
     pass
 
 
@@ -48,4 +52,6 @@ class MockSystem:
     def get_all_parameters(self):
         if self.star is None:
             return []
-        return [v for v in self.star.__dict__.values() if isinstance(v, Parameter)]
+        return [
+            v for v in self.star.__dict__.values() if isinstance(v, Parameter)
+        ]

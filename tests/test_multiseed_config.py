@@ -7,6 +7,7 @@ prepare() call (sharing one symbol environment -- see the module docstring
 in config.py's finalize_user_params and the project's known relaxation-engine
 cross-build nondeterminism note). Bounds/scales resolve once, from seed 0.
 """
+
 import numpy as np
 import pytest
 
@@ -35,8 +36,8 @@ def test_list_initval_produces_k_solved_seeds_with_shared_bounds():
     # Each seed's solved logmass must back out to the corresponding mass value.
     logmass_0 = cm.seed_resolved[0]["star.0.logmass"]
     logmass_1 = cm.seed_resolved[1]["star.0.logmass"]
-    assert np.isclose(10 ** logmass_0, 0.3, rtol=1e-3)
-    assert np.isclose(10 ** logmass_1, 0.7, rtol=1e-3)
+    assert np.isclose(10**logmass_0, 0.3, rtol=1e-3)
+    assert np.isclose(10**logmass_1, 0.7, rtol=1e-3)
     assert not np.isclose(logmass_0, logmass_1)
 
     # Seed 0 remains the canonical single start injected into user_params.
@@ -66,7 +67,9 @@ def test_length_one_list_broadcasts_and_is_equivalent_to_scalar():
     cm.finalize_user_params()
 
     assert cm.seed_resolved is None
-    assert np.isclose(cm.user_params["star.0.mass"]["initval"], 0.42, rtol=1e-3)
+    assert np.isclose(
+        cm.user_params["star.0.mass"]["initval"], 0.42, rtol=1e-3
+    )
 
 
 def test_no_list_initvals_leaves_seed_resolved_none():
@@ -122,5 +125,5 @@ def test_seed_hints_and_user_list_both_present_prefer_user_list():
     assert cm.seed_resolved is not None
     logmass_0 = cm.seed_resolved[0]["star.0.logmass"]
     logmass_1 = cm.seed_resolved[1]["star.0.logmass"]
-    assert np.isclose(10 ** logmass_0, 0.3, rtol=1e-3)
-    assert np.isclose(10 ** logmass_1, 0.7, rtol=1e-3)
+    assert np.isclose(10**logmass_0, 0.3, rtol=1e-3)
+    assert np.isclose(10**logmass_1, 0.7, rtol=1e-3)

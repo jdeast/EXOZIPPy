@@ -44,9 +44,9 @@ NOT implemented here: they are lower priority than the bridge path and are
 "logged but never trusted alone".  See estimate_mode_evidences docstring.
 """
 
-from dataclasses import dataclass
 import logging
 import multiprocessing as mp
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -69,6 +69,7 @@ class EvidenceResult:
     and its (relative-MSE-derived) error bar.  ``refused`` is True when the
     diagnostics could not support a confident answer; ``reason`` says why.
     """
+
     mode: int
     lnZ: float
     lnZ_err: float
@@ -82,6 +83,7 @@ class EvidenceResult:
 # ----------------------------------------------------------------------
 # pure bridge-sampling core (no model/PyMC dependency -- unit testable)
 # ----------------------------------------------------------------------
+
 
 def _logmeanexp(a):
     a = np.asarray(a, dtype=float)
@@ -154,7 +156,7 @@ def bridge_lnZ(l1, l2, maxiter=1000, tol=1e-10):
     converged = False
     for _ in range(maxiter):
         # log(num_j) over proposal draws l2; log(den_i) over posterior draws l1
-        log_num = (l2 - np.logaddexp(log_s1 + l2, log_s2 + lr))
+        log_num = l2 - np.logaddexp(log_s1 + l2, log_s2 + lr)
         log_den = -np.logaddexp(log_s1 + l1, log_s2 + lr)
         lr_new = _logmeanexp(log_num) - _logmeanexp(log_den)
         if not np.isfinite(lr_new):
@@ -185,6 +187,7 @@ def bridge_lnZ(l1, l2, maxiter=1000, tol=1e-10):
 # ----------------------------------------------------------------------
 # proposal fitting + multivariate-normal density
 # ----------------------------------------------------------------------
+
 
 def _fit_gaussian(X, shrink_floor=1e-6):
     """Regularized mean/covariance of raw draws X (n, d).
@@ -240,7 +243,7 @@ def _sample_gaussian(mu, S, n, rng):
 # Module-level so forked children inherit the compiled logp via copy-on-write
 # without pickling it (only numpy point arrays cross IPC).
 _EV_LP_FN = None
-_EV_LAYOUT = None   # list of (value_name, start, size, shape)
+_EV_LAYOUT = None  # list of (value_name, start, size, shape)
 
 
 def _ev_eval_block(args):
@@ -251,8 +254,10 @@ def _ev_eval_block(args):
         row = block[i]
         point = {}
         for vname, start, size, shape in _EV_LAYOUT:
-            seg = row[start:start + size]
-            point[vname] = seg.reshape(shape) if len(shape) else np.atleast_1d(seg)
+            seg = row[start : start + size]
+            point[vname] = (
+                seg.reshape(shape) if len(shape) else np.atleast_1d(seg)
+            )
         try:
             out[i] = float(_EV_LP_FN(point))
         except Exception:
@@ -290,7 +295,7 @@ def _posterior_matrix(idata, layout, D):
     X = np.empty((N, D), dtype=float)
     for rv_name, _vname, start, size, _shape in layout:
         arr = np.asarray(post[rv_name].values, dtype=float).reshape(N, size)
-        X[:, start:start + size] = arr
+        X[:, start : start + size] = arr
     return X
 
 
@@ -308,8 +313,10 @@ def _batch_logp(model, layout, points):
         logp_fn = model.compile_logp(jacobian=True)
 
     # layout for the evaluator uses (value_name, start, size, shape)
-    eval_layout = [(vname, start, size, shape)
-                   for _rv, vname, start, size, shape in layout]
+    eval_layout = [
+        (vname, start, size, shape)
+        for _rv, vname, start, size, shape in layout
+    ]
 
     global _EV_LP_FN, _EV_LAYOUT
     _EV_LP_FN = logp_fn
@@ -330,13 +337,14 @@ def _batch_logp(model, layout, points):
     out = np.full(M, np.nan)
     with ctx.Pool(n_workers) as pool:
         for offset, vals in pool.map(_ev_eval_block, args):
-            out[offset:offset + vals.size] = vals
+            out[offset : offset + vals.size] = vals
     return out
 
 
 # ----------------------------------------------------------------------
 # public entry point
 # ----------------------------------------------------------------------
+
 
 def _get_labels(idata, mode_report):
     """Per-draw mode labels, preferring the attached posterior variable."""
@@ -347,11 +355,15 @@ def _get_labels(idata, mode_report):
     return np.asarray(mode_report.labels, dtype=int).reshape(-1)
 
 
-def estimate_mode_evidences(model, idata, mode_report,
-                            n_proposal=None,
-                            max_posterior_draws=4000,
-                            re2_max=DEFAULT_RE2_MAX,
-                            seed=20260712):
+def estimate_mode_evidences(
+    model,
+    idata,
+    mode_report,
+    n_proposal=None,
+    max_posterior_draws=4000,
+    re2_max=DEFAULT_RE2_MAX,
+    seed=20260712,
+):
     """Estimate each mode's local evidence by warp bridge sampling.
 
     Parameters
@@ -384,11 +396,16 @@ def estimate_mode_evidences(model, idata, mode_report,
 
     layout, D = _build_layout(model, idata)
     if D == 0:
-        logger.warning("estimate_mode_evidences: no free RVs match the "
-                       "posterior; refusing all modes")
+        logger.warning(
+            "estimate_mode_evidences: no free RVs match the "
+            "posterior; refusing all modes"
+        )
         for k in range(mode_report.n_modes):
-            results.append(EvidenceResult(k, np.nan, np.inf, np.inf, 0, 0,
-                                          True, "no usable free RVs"))
+            results.append(
+                EvidenceResult(
+                    k, np.nan, np.inf, np.inf, 0, 0, True, "no usable free RVs"
+                )
+            )
         return results
 
     Xall = _posterior_matrix(idata, layout, D)
@@ -396,7 +413,7 @@ def estimate_mode_evidences(model, idata, mode_report,
 
     # Fit proposals and stage every point that needs a logp evaluation, so all
     # modes' posterior + proposal points share a single fork-parallel logp pass.
-    stage = []            # (mode, kind, X1, Y, mu, S)
+    stage = []  # (mode, kind, X1, Y, mu, S)
     all_points = []
     for k in range(mode_report.n_modes):
         sel = labels == k
@@ -424,14 +441,23 @@ def estimate_mode_evidences(model, idata, mode_report,
     cursor = 0
     for k, kind, X1, Y, mu, S in stage:
         if kind is None:
-            results.append(EvidenceResult(
-                k, np.nan, np.inf, np.inf, int(X1.shape[0]), 0, True,
-                "too few draws to fit a proposal"))
+            results.append(
+                EvidenceResult(
+                    k,
+                    np.nan,
+                    np.inf,
+                    np.inf,
+                    int(X1.shape[0]),
+                    0,
+                    True,
+                    "too few draws to fit a proposal",
+                )
+            )
             continue
         n1, n2 = X1.shape[0], Y.shape[0]
-        logp1 = logp_all[cursor:cursor + n1]
+        logp1 = logp_all[cursor : cursor + n1]
         cursor += n1
-        logp2 = logp_all[cursor:cursor + n2]
+        logp2 = logp_all[cursor : cursor + n2]
         cursor += n2
 
         logq1 = _mvn_logpdf(X1, mu, S)
@@ -447,16 +473,24 @@ def estimate_mode_evidences(model, idata, mode_report,
             refused, reason = True, "bridge iteration did not converge"
         elif not np.isfinite(re2) or re2 > re2_max:
             refused = True
-            reason = (f"relative-MSE diagnostic re2={re2:.3g} exceeds "
-                      f"{re2_max:g} (proposal poorly supports the target -- "
-                      f"likely a bound pileup); lnZ error bar ~{lnZ_err:.2g} nat")
-        results.append(EvidenceResult(
-            k, lnZ, lnZ_err, re2, n1, n2, refused, reason))
+            reason = (
+                f"relative-MSE diagnostic re2={re2:.3g} exceeds "
+                f"{re2_max:g} (proposal poorly supports the target -- "
+                f"likely a bound pileup); lnZ error bar ~{lnZ_err:.2g} nat"
+            )
+        results.append(
+            EvidenceResult(k, lnZ, lnZ_err, re2, n1, n2, refused, reason)
+        )
         if refused:
             logger.warning("evidence: mode %d refused (%s)", k + 1, reason)
         else:
-            logger.info("evidence: mode %d lnZ=%.3f +/- %.3f (re2=%.3g)",
-                        k + 1, lnZ, lnZ_err, re2)
+            logger.info(
+                "evidence: mode %d lnZ=%.3f +/- %.3f (re2=%.3g)",
+                k + 1,
+                lnZ,
+                lnZ_err,
+                re2,
+            )
     return results
 
 
@@ -492,14 +526,21 @@ def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
     refused = [r for r in results if r.refused]
     if refused:
         ids = ", ".join(str(r.mode + 1) for r in refused)
-        note = (f"evidence weighting refused for mode(s) {ids}; kept occupancy "
-                f"weights. First reason: {refused[0].reason}")
+        note = (
+            f"evidence weighting refused for mode(s) {ids}; kept occupancy "
+            f"weights. First reason: {refused[0].reason}"
+        )
         mode_report.notes.append(note)
         mode_report.provenance = (
-            "occupancy (evidence weighting refused: " + refused[0].reason +
-            "; see notes)")
-        logger.warning("evidence weighting refused for mode(s) %s; "
-                       "falling back to occupancy", ids)
+            "occupancy (evidence weighting refused: "
+            + refused[0].reason
+            + "; see notes)"
+        )
+        logger.warning(
+            "evidence weighting refused for mode(s) %s; "
+            "falling back to occupancy",
+            ids,
+        )
         return False
 
     lnZ = np.array([r.lnZ for r in results], dtype=float)
@@ -516,12 +557,17 @@ def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
     mode_report.provenance = (
         f"evidence (bridge sampling: max relative MSE {max_re2:.2g}, "
         f"N_post>={n_post}, N_prop>={n_prop}; lnZ error bars propagated to "
-        f"weight uncertainties)")
+        f"weight uncertainties)"
+    )
     mode_report.weights_reliable = True
     mode_report.notes.append(
         "mode weights are bridge-sampling evidence weights: "
-        + "; ".join(f"mode {r.mode + 1} lnZ={r.lnZ:.2f}+/-{r.lnZ_err:.2f}"
-                    for r in results))
-    logger.info("evidence weighting applied: weights=%s",
-                [f"{x:.3f}" for x in w])
+        + "; ".join(
+            f"mode {r.mode + 1} lnZ={r.lnZ:.2f}+/-{r.lnZ_err:.2f}"
+            for r in results
+        )
+    )
+    logger.info(
+        "evidence weighting applied: weights=%s", [f"{x:.3f}" for x in w]
+    )
     return True

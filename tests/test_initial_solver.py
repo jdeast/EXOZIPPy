@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
+
 from exozippy.components.planet.symbolic_physics import solve_companion_mass
+
 
 def test_earth_mass():
     # Inputs
@@ -17,6 +19,7 @@ def test_earth_mass():
     # Assert tolerance of 1%
     assert result == pytest.approx(expected_mass, rel=1e-2)
     print(f"Test Passed: Companion mass = {result:.4e} M_sol")
+
 
 @pytest.mark.parametrize("omega_deg", [12.8, 95.0, 170.0, -120.0, -30.0])
 def test_ecc_omega_initvals_seed_correct_secosw_branch(omega_deg):

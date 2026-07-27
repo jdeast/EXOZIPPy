@@ -49,15 +49,16 @@ interrupt fires first; at that point output is truncated to
 min(per_chain_draws) across chains (the simplest correct option per
 hpc_optimization.txt PROMPT 13 item 4).
 """
+
 import gc
 import logging
+import multiprocessing as mp
 import queue
 import signal
 import time
 
-import numpy as np
 import arviz as az
-import multiprocessing as mp
+import numpy as np
 import pytensor
 import pytensor.tensor as pt
 from pytensor.graph.replace import vectorize_graph
@@ -144,7 +145,8 @@ def ptde_async_sample(
     """
     if swap_schedule not in ("deo", "random"):
         raise ValueError(
-            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}")
+            f"swap_schedule must be 'deo' or 'random', got {swap_schedule!r}"
+        )
 
     _ptde._PTDE_COLLECT_TIMING = collect_rung_timing
 
@@ -167,14 +169,18 @@ def ptde_async_sample(
         on_unused_input="ignore",
     )
     _batched_inputs = [
-        pt.tensor(name=f"batched_{v.name}", dtype=v.type.dtype,
-                  shape=(None,) + v.type.shape)
+        pt.tensor(
+            name=f"batched_{v.name}",
+            dtype=v.type.dtype,
+            shape=(None,) + v.type.shape,
+        )
         for v in model.free_RVs
     ]
     raw_to_phys_batched = pytensor.function(
         inputs=_batched_inputs,
-        outputs=vectorize_graph(output_vars,
-                                 replace=dict(zip(model.free_RVs, _batched_inputs))),
+        outputs=vectorize_graph(
+            output_vars, replace=dict(zip(model.free_RVs, _batched_inputs))
+        ),
         on_unused_input="ignore",
     )
     raw_var_names = [v.name for v in model.free_RVs]
@@ -188,7 +194,9 @@ def ptde_async_sample(
         n_chains = 2 * n_params
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * n_params)
-    logger.info(f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}")
+    logger.info(
+        f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}"
+    )
 
     if initvals is not None:
         assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
@@ -204,25 +212,38 @@ def ptde_async_sample(
             else:
                 raw_starts, seed_indices = [raw_start], [0]
         t1_starts, chain_seed_index = _make_starts(
-            n_chains, raw_starts, logp_fn, rng, seed_indices, system=system)
+            n_chains, raw_starts, logp_fn, rng, seed_indices, system=system
+        )
 
     if plot_prefix is not None:
         logger.info("Generating ensemble start plots...")
         batched_vals = raw_to_phys_batched(
-            *[np.stack([s[k] for s in t1_starts], axis=0) for k in raw_var_names])
+            *[
+                np.stack([s[k] for s in t1_starts], axis=0)
+                for k in raw_var_names
+            ]
+        )
         internal_starts = [
-            {name: np.asarray(val)[i] for name, val in zip(out_var_names, batched_vals)}
+            {
+                name: np.asarray(val)[i]
+                for name, val in zip(out_var_names, batched_vals)
+            }
             for i in range(len(t1_starts))
         ]
         for comp in system.active_components.values():
-            comp.plot(system, internal_starts,
-                      filename_prefix=plot_prefix + "_start_ensemble")
+            comp.plot(
+                system,
+                internal_starts,
+                filename_prefix=plot_prefix + "_start_ensemble",
+            )
 
     # Per-(rung, chain) slot state. current_lp[k][i] is None until that
     # slot's first evaluation completes -- doubles as "still initializing".
     current_state = [
-        [{key: v.copy() for key, v in t1_starts[i % n_chains].items()}
-         for i in range(n_chains)]
+        [
+            {key: v.copy() for key, v in t1_starts[i % n_chains].items()}
+            for i in range(n_chains)
+        ]
         for _ in range(n_temps)
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
@@ -239,30 +260,44 @@ def ptde_async_sample(
     if cores > phys_cores:
         logger.warning(
             f"PTDE-async: cores={cores} exceeds physical core count ({phys_cores}); "
-            f"over-subscription will slow sampling via context switching.")
+            f"over-subscription will slow sampling via context switching."
+        )
     logger.info(
         f"PTDE-async: {n_temps} rungs x {n_chains} chains = {total_proposals} slots, "
         f"{actual_cores} cores  "
-        f"T=[{', '.join(f'{t:.1f}' for t in temperatures)}]")
-    pool = (mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
-            if actual_cores > 1 else None)
+        f"T=[{', '.join(f'{t:.1f}' for t in temperatures)}]"
+    )
+    pool = (
+        mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
+        if actual_cores > 1
+        else None
+    )
 
     if eval_timeout is not None and pool is None:
         logger.warning(
             f"PTDE-async: eval_timeout={eval_timeout:.0f}s has no effect with a "
             f"single core (cores={actual_cores}) — there is no worker process to "
-            f"enforce a wall-clock timeout against a hung logp call.")
+            f"enforce a wall-clock timeout against a hung logp call."
+        )
 
-    swap_interval = max(1, int(swap_interval)) if swap_interval else max(1, n_chains)
-    gamma_adapt_window = (int(gamma_adapt_window) if gamma_adapt_window
-                           else max(n_chains, (tune * n_chains) // 20))
-    log_every_evals = log_interval or max(n_slots, (n_slots * (tune + draws)) // 20)
+    swap_interval = (
+        max(1, int(swap_interval)) if swap_interval else max(1, n_chains)
+    )
+    gamma_adapt_window = (
+        int(gamma_adapt_window)
+        if gamma_adapt_window
+        else max(n_chains, (tune * n_chains) // 20)
+    )
+    log_every_evals = log_interval or max(
+        n_slots, (n_slots * (tune + draws)) // 20
+    )
 
     # storage: raw values from T=1 chains only; each chain records exactly
     # `draws` samples (its own post-tune iterations), so no dynamic growth
     # is needed -- capacity is a hard per-chain cap by construction.
-    stored_raw = {k: np.zeros((n_chains, draws) + raw_start[k].shape)
-                  for k in model_keys}
+    stored_raw = {
+        k: np.zeros((n_chains, draws) + raw_start[k].shape) for k in model_keys
+    }
     stored_lp = np.zeros((n_chains, draws))
     per_chain_draws = np.zeros(n_chains, dtype=int)
 
@@ -298,13 +333,14 @@ def ptde_async_sample(
         stop_requested[0] = True
         logger.info(
             f"PTDE-async: stop requested ({signal.Signals(sig).name}) — finishing "
-            "in-flight evaluations (send the signal again to abort immediately)")
+            "in-flight evaluations (send the signal again to abort immediately)"
+        )
 
     old_sigint = signal.signal(signal.SIGINT, _stop_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
 
     result_q = queue.Queue()
-    submitted_at = {}     # (k, i) -> submission time, only while in flight
+    submitted_at = {}  # (k, i) -> submission time, only while in flight
     in_flight_props = {}  # (k, i) -> proposal dict, only while in flight
     in_flight = [0]
 
@@ -314,8 +350,11 @@ def ptde_async_sample(
             return {key: v.copy() for key, v in current_state[k][i].items()}
         j1, j2 = _pick_two(rng, n_chains, i)
         pop_k = current_state[k]
-        return {key: pop_k[i][key] + gamma_box[0] * (pop_k[j1][key] - pop_k[j2][key])
-                for key in model_keys}
+        return {
+            key: pop_k[i][key]
+            + gamma_box[0] * (pop_k[j1][key] - pop_k[j2][key])
+            for key in model_keys
+        }
 
     def _submit(k, i):
         prop = _build_proposal(k, i)
@@ -331,11 +370,15 @@ def ptde_async_sample(
             result_q.put((k, i, prop, result))
 
         def _ecb(exc, k=k, i=i, prop=prop):
-            logger.error(f"PTDE-async: worker exception at rung {k} chain {i}: {exc}")
+            logger.error(
+                f"PTDE-async: worker exception at rung {k} chain {i}: {exc}"
+            )
             failure = (-np.inf, 0.0) if _ptde._PTDE_COLLECT_TIMING else -np.inf
             result_q.put((k, i, prop, failure))
 
-        pool.apply_async(_eval_logp, (prop,), callback=_cb, error_callback=_ecb)
+        pool.apply_async(
+            _eval_logp, (prop,), callback=_cb, error_callback=_ecb
+        )
 
     def _recycle_pool(reason):
         nonlocal pool
@@ -343,7 +386,9 @@ def ptde_async_sample(
         _ptde._shutdown_pool(pool)
         pool = None
         gc.collect()
-        pool = mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
+        pool = mp.get_context("fork").Pool(
+            actual_cores, initializer=_worker_init
+        )
 
     def _attempt_swap():
         if n_temps <= 1:
@@ -360,15 +405,21 @@ def ptde_async_sample(
         j = int(rng.integers(n_chains))
         lp_i, lp_j = current_lp[k][i], current_lp[k + 1][j]
         if lp_i is None or lp_j is None:
-            return   # one side hasn't completed its first evaluation yet
+            return  # one side hasn't completed its first evaluation yet
         n_swap_propose[k] += 1
-        log_a = (lp_j - lp_i) * (1.0 / temperatures[k] - 1.0 / temperatures[k + 1])
+        log_a = (lp_j - lp_i) * (
+            1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
+        )
         if rng.random() < np.exp(min(0.0, log_a)):
             current_state[k][i], current_state[k + 1][j] = (
-                current_state[k + 1][j], current_state[k][i])
+                current_state[k + 1][j],
+                current_state[k][i],
+            )
             current_lp[k][i], current_lp[k + 1][j] = lp_j, lp_i
             direction[k][i], direction[k + 1][j] = (
-                direction[k + 1][j], direction[k][i])
+                direction[k + 1][j],
+                direction[k][i],
+            )
             n_swap_accept[k] += 1
         # Update round-trip tags after every swap event (idempotent): a config
         # sitting at either extreme rung is tagged accordingly and a completed
@@ -376,16 +427,18 @@ def ptde_async_sample(
         _record_round_trips(direction, round_trips, n_temps)
         n_swap_rounds[0] += 1
 
-    _do_convergence = (min_ess is not None or max_rhat is not None) and n_chains >= 2
+    _do_convergence = (
+        min_ess is not None or max_rhat is not None
+    ) and n_chains >= 2
     _check_gen = _convergence_check_schedule() if _do_convergence else None
     _next_check = [next(_check_gen)] if _check_gen else [None]
 
     stopping = [False]
-    stop_reason = [None]     # human-readable, for logging
-    stop_category = [None]   # one of "no_draws_ok", "no_draws_abort" -- used
-                              # below to decide whether an empty run should
-                              # raise KeyboardInterrupt (user/time abort) or
-                              # just fall through to the "no draws" RuntimeError.
+    stop_reason = [None]  # human-readable, for logging
+    stop_category = [None]  # one of "no_draws_ok", "no_draws_abort" -- used
+    # below to decide whether an empty run should
+    # raise KeyboardInterrupt (user/time abort) or
+    # just fall through to the "no draws" RuntimeError.
 
     def _maybe_stop():
         if stopping[0]:
@@ -402,34 +455,44 @@ def ptde_async_sample(
             stopping[0] = True
             stop_reason[0] = "draws target reached"
             stop_category[0] = "complete"
-        elif (_do_convergence and _next_check[0] is not None
-                and int(per_chain_draws.min()) >= _next_check[0]):
+        elif (
+            _do_convergence
+            and _next_check[0] is not None
+            and int(per_chain_draws.min()) >= _next_check[0]
+        ):
             n_check = int(per_chain_draws.min())
             converged, rhat_val, ess_val = _check_convergence(
-                stored_raw, n_check, min_ess, max_rhat, stored_lp)
+                stored_raw, n_check, min_ess, max_rhat, stored_lp
+            )
             logger.info(
                 f"PTDE-async convergence @ min {n_check} draws/chain: "
-                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}")
+                f"max_rhat={rhat_val:.4f}  min_ess={ess_val:.1f}"
+            )
             # GUI progress hook (bounded: fires once per geometric check).
             # Passes the live T=1 draw buffers by reference for snapshotting.
-            _safe_progress(progress_callback, {
-                "n_draws": n_check,
-                "n_chains": n_chains,
-                "max_rhat": rhat_val,
-                "min_ess": ess_val,
-                "elapsed_s": time.time() - start_time,
-                "stop_reason": "converged" if converged else None,
-                "stored_raw": stored_raw,
-                "stored_lp": stored_lp,
-                "raw_var_names": model_keys,
-            })
+            _safe_progress(
+                progress_callback,
+                {
+                    "n_draws": n_check,
+                    "n_chains": n_chains,
+                    "max_rhat": rhat_val,
+                    "min_ess": ess_val,
+                    "elapsed_s": time.time() - start_time,
+                    "stop_reason": "converged" if converged else None,
+                    "stored_raw": stored_raw,
+                    "stored_lp": stored_lp,
+                    "raw_var_names": model_keys,
+                },
+            )
             _next_check[0] = next(_check_gen, None)
             if converged:
                 stopping[0] = True
                 stop_reason[0] = "convergence criterion met"
                 stop_category[0] = "complete"
 
-    poll_timeout = max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
+    poll_timeout = (
+        max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
+    )
 
     try:
         for k, i in slot_list:
@@ -446,31 +509,39 @@ def ptde_async_sample(
                 # OTHER legitimately-still-running slot is also abandoned
                 # and immediately resubmitted with a fresh proposal.
                 now = time.time()
-                stale = [slot for slot, t0 in submitted_at.items()
-                         if now - t0 > eval_timeout]
+                stale = [
+                    slot
+                    for slot, t0 in submitted_at.items()
+                    if now - t0 > eval_timeout
+                ]
                 if stale:
                     n_eval_timeouts[0] += len(stale)
-                    for (sk, si) in stale:
+                    for sk, si in stale:
                         stale_prop = in_flight_props.get((sk, si))
                         raw_vals = [stale_prop[name] for name in raw_var_names]
                         phys_vals = raw_to_phys(*raw_vals)
-                        phys_params = {name: np.asarray(val).tolist()
-                                       for name, val in zip(out_var_names, phys_vals)}
-                        raw_params = {name: np.asarray(val).tolist()
-                                      for name, val in stale_prop.items()}
+                        phys_params = {
+                            name: np.asarray(val).tolist()
+                            for name, val in zip(out_var_names, phys_vals)
+                        }
+                        raw_params = {
+                            name: np.asarray(val).tolist()
+                            for name, val in stale_prop.items()
+                        }
                         logger.error(
                             f"PTDE-async: logp call exceeded "
                             f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
                             f"chain {si} — rejecting this proposal.\n"
                             f"  physical params: {phys_params}\n"
-                            f"  raw params: {raw_params}")
+                            f"  raw params: {raw_params}"
+                        )
                     lost_slots = list(submitted_at.keys())
                     submitted_at.clear()
                     in_flight_props.clear()
                     in_flight[0] -= len(lost_slots)
                     _recycle_pool(f"{len(stale)} timeout(s)")
                     if not stopping[0]:
-                        for (sk, si) in lost_slots:
+                        for sk, si in lost_slots:
                             _submit(sk, si)
                 continue
 
@@ -491,8 +562,9 @@ def ptde_async_sample(
             else:
                 T = temperatures[k]
                 n_propose[k] += 1
-                accepted = (np.isfinite(lp) and rng.random()
-                            < np.exp(min(0.0, (lp - current_lp[k][i]) / T)))
+                accepted = np.isfinite(lp) and rng.random() < np.exp(
+                    min(0.0, (lp - current_lp[k][i]) / T)
+                )
                 if k == 0 and iter_count[k][i] < tune:
                     n_propose_T1_window[0] += 1
                     if accepted:
@@ -504,7 +576,11 @@ def ptde_async_sample(
                 iter_count[k][i] += 1
 
                 # store T=1 post-tune draws (each chain caps at `draws`)
-                if k == 0 and iter_count[k][i] > tune and per_chain_draws[i] < draws:
+                if (
+                    k == 0
+                    and iter_count[k][i] > tune
+                    and per_chain_draws[i] < draws
+                ):
                     d = per_chain_draws[i]
                     for key in model_keys:
                         stored_raw[key][i, d] = current_state[k][i][key]
@@ -516,16 +592,22 @@ def ptde_async_sample(
             if n_completed_total[0] % swap_interval == 0:
                 _attempt_swap()
 
-            if (adapt_gamma and n_propose_T1_window[0] >= gamma_adapt_window):
+            if adapt_gamma and n_propose_T1_window[0] >= gamma_adapt_window:
                 ar_T1 = n_accept_T1_window[0] / max(n_propose_T1_window[0], 1)
                 if ar_T1 > 0:
                     scale = (ar_T1 / target_accept) ** 0.5
-                    gamma_new = float(np.clip(gamma_box[0] * scale,
-                                               gamma_box[0] * 0.1, gamma_box[0] * 10.0))
+                    gamma_new = float(
+                        np.clip(
+                            gamma_box[0] * scale,
+                            gamma_box[0] * 0.1,
+                            gamma_box[0] * 10.0,
+                        )
+                    )
                     if abs(gamma_new - gamma_box[0]) / gamma_box[0] > 0.01:
                         logger.info(
                             f"PTDE-async gamma: {gamma_box[0]:.4f} -> {gamma_new:.4f} "
-                            f"(T=1 accept={ar_T1:.3f}, target={target_accept:.2f})")
+                            f"(T=1 accept={ar_T1:.3f}, target={target_accept:.2f})"
+                        )
                         gamma_box[0] = gamma_new
                 n_propose_T1_window[0] = 0
                 n_accept_T1_window[0] = 0
@@ -541,10 +623,14 @@ def ptde_async_sample(
                     f"max={per_chain_draws.max()}]/{draws}  "
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"gamma={gamma_box[0]:.4f}  "
-                    + (f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
-                       f"round_trips={round_trips[0]} "
-                       f"(rate={rt_rate:.3f}/swap)"
-                       if n_temps > 1 else ""))
+                    + (
+                        f"swap=[{', '.join(f'{r:.2f}' for r in sr)}]  "
+                        f"round_trips={round_trips[0]} "
+                        f"(rate={rt_rate:.3f}/swap)"
+                        if n_temps > 1
+                        else ""
+                    )
+                )
 
             _maybe_stop()
             if not stopping[0]:
@@ -555,7 +641,8 @@ def ptde_async_sample(
         if stop_category[0] == "abort" and int(per_chain_draws.min()) == 0:
             logger.warning(
                 f"PTDE-async: stopped ({stop_reason[0]}) before any chain "
-                "recorded a draw — nothing to save")
+                "recorded a draw — nothing to save"
+            )
             raise KeyboardInterrupt
 
     finally:
@@ -572,26 +659,34 @@ def ptde_async_sample(
 
     actual_draws = int(per_chain_draws.min())
     if actual_draws == 0:
-        raise RuntimeError("PTDE-async: sampling stopped — no draws were collected")
+        raise RuntimeError(
+            "PTDE-async: sampling stopped — no draws were collected"
+        )
     if actual_draws < draws:
         logger.info(
             f"PTDE-async: early stop ({stop_reason[0]}) — "
             f"{actual_draws}/{draws} draws/chain collected "
-            f"(some chains ran ahead: max={per_chain_draws.max()})")
+            f"(some chains ran ahead: max={per_chain_draws.max()})"
+        )
 
     logger.info(
-        f"PTDE-async: converting {n_chains} x {actual_draws} draws to physical space...")
+        f"PTDE-async: converting {n_chains} x {actual_draws} draws to physical space..."
+    )
 
     n_total = n_chains * actual_draws
-    flat_raw = {k: stored_raw[k][:, :actual_draws].reshape(
-                    (n_total,) + raw_start[k].shape)
-                for k in raw_var_names}
+    flat_raw = {
+        k: stored_raw[k][:, :actual_draws].reshape(
+            (n_total,) + raw_start[k].shape
+        )
+        for k in raw_var_names
+    }
     chunk_size = 20000
     out_chunks = {name: [] for name in out_var_names}
     for start in range(0, n_total, chunk_size):
         end = min(start + chunk_size, n_total)
         chunk_out = raw_to_phys_batched(
-            *[flat_raw[k][start:end] for k in raw_var_names])
+            *[flat_raw[k][start:end] for k in raw_var_names]
+        )
         for name, val in zip(out_var_names, chunk_out):
             out_chunks[name].append(np.asarray(val, dtype=float))
 
@@ -603,28 +698,40 @@ def ptde_async_sample(
             arr = arr.squeeze(-1)
         posterior_dict[name] = arr
 
-    idata = az.from_dict({
-        "posterior": posterior_dict,
-        "sample_stats": {"lp": stored_lp[:, :actual_draws]},
-    })
+    idata = az.from_dict(
+        {
+            "posterior": posterior_dict,
+            "sample_stats": {"lp": stored_lp[:, :actual_draws]},
+        }
+    )
 
     # Multi-seed provenance (P4): which solved seed each T=1 chain started from.
     # TODO(P4): surface in outputs/modes.py ModeReport; per-chain attr for now.
     idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
     if len(set(chain_seed_index)) > 1:
-        logger.info(f"PTDE-async multi-seed provenance (chain -> seed): "
-                    f"{list(chain_seed_index)}")
+        logger.info(
+            f"PTDE-async multi-seed provenance (chain -> seed): "
+            f"{list(chain_seed_index)}"
+        )
 
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
     rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
     logger.info(
         f"PTDE-async done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
-           f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
-           f"schedule={swap_schedule})"
-           if n_temps > 1 else "")
-        + (f"  eval_timeouts={n_eval_timeouts[0]}" if n_eval_timeouts[0] else ""))
+        + (
+            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
+            f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
+            f"schedule={swap_schedule})"
+            if n_temps > 1
+            else ""
+        )
+        + (
+            f"  eval_timeouts={n_eval_timeouts[0]}"
+            if n_eval_timeouts[0]
+            else ""
+        )
+    )
 
     if collect_rung_timing:
         logger.info("PTDE-async per-rung logp timing (seconds):")
@@ -639,6 +746,7 @@ def ptde_async_sample(
                 f"  rung {k} (T={temperatures[k]:.1f}): n={len(arr)}  "
                 f"median={np.median(arr):.3f}  mean={arr.mean():.3f}  "
                 f"p90={np.percentile(arr, 90):.3f}  max={arr.max():.3f}  "
-                f"n_slow(>0.1s)={n_slow}")
+                f"n_slow(>0.1s)={n_slow}"
+            )
 
     return idata

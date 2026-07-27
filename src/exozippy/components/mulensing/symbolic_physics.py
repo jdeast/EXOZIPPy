@@ -1,29 +1,32 @@
 import sympy as sp
+
 from ...constants import KAPPA, RSUN_TO_AU
 
 # 1. Define all possible symbols
 # These MUST match the strings produced by ConfigManager.finalize_user_params
-t_0, u_0, t_E = sp.symbols('t_0 u_0 t_E')
-theta_E, mu_rel_mag = sp.symbols('theta_E mu_rel_mag')
-pi_rel = sp.symbols('pi_rel')
+t_0, u_0, t_E = sp.symbols("t_0 u_0 t_E")
+theta_E, mu_rel_mag = sp.symbols("theta_E mu_rel_mag")
+pi_rel = sp.symbols("pi_rel")
 # lens_mass_total drives theta_E/t_E/rho/pi_E (community convention: binary-lens
 # parameters are referenced to the TOTAL lens mass).  For single lenses it maps
 # directly to the primary star's mass; for binaries it maps to lens.0.mlens_total
 # and the mass-sum relation below ties it to the per-body masses.
-lens_mass_total, primary_lens_mass = sp.symbols('lens_mass_total primary_lens_mass')
-lens_distance, source_distance = sp.symbols('lens_distance source_distance')
-mu_ra_rel, mu_dec_rel = sp.symbols('mu_ra_rel mu_dec_rel')
-lens_pm_ra, source_pm_ra = sp.symbols('lens_pm_ra source_pm_ra')
-lens_pm_dec, source_pm_dec = sp.symbols('lens_pm_dec source_pm_dec')
-pi_E_N, pi_E_E = sp.symbols('pi_E_N pi_E_E')
-rho, source_radius = sp.symbols('rho source_radius')
-q_lens, companion_mass = sp.symbols('q_lens companion_mass')
-alpha, xalpha, yalpha = sp.symbols('alpha xalpha yalpha')
+lens_mass_total, primary_lens_mass = sp.symbols(
+    "lens_mass_total primary_lens_mass"
+)
+lens_distance, source_distance = sp.symbols("lens_distance source_distance")
+mu_ra_rel, mu_dec_rel = sp.symbols("mu_ra_rel mu_dec_rel")
+lens_pm_ra, source_pm_ra = sp.symbols("lens_pm_ra source_pm_ra")
+lens_pm_dec, source_pm_dec = sp.symbols("lens_pm_dec source_pm_dec")
+pi_E_N, pi_E_E = sp.symbols("pi_E_N pi_E_E")
+rho, source_radius = sp.symbols("rho source_radius")
+q_lens, companion_mass = sp.symbols("q_lens companion_mass")
+alpha, xalpha, yalpha = sp.symbols("alpha xalpha yalpha")
 # Projected separation: log_s is sampled, s is derived (s = 10**log_s).  The
 # relation lets the relaxation engine translate a user-supplied lens.s initval
 # (and its init_scale, via the Jacobian) into a log_s start, exactly as
 # mass/logmass does in the star component.
-s, log_s = sp.symbols('s log_s', real=True)
+s, log_s = sp.symbols("s log_s", real=True)
 
 comp_key = "lens"
 
@@ -91,29 +94,24 @@ def get_symbol_map(lens_config_list):
             "u_0": f"lens.{j}.u_0",
             "t_E": f"lens.{j}.t_E",
             "rho": f"lens.{j}.rho",
-
             "theta_E": f"lens.{j}.theta_E",
             "pi_rel": f"lens.{j}.pi_rel",
             "pi_E_N": f"lens.{j}.pi_E_N",
             "pi_E_E": f"lens.{j}.pi_E_E",
-
             "mu_rel_mag": f"lens.{j}.mu_rel_mag",
             "mu_ra_rel": f"lens.{j}.mu_ra_rel",
             "mu_dec_rel": f"lens.{j}.mu_dec_rel",
-
             # Shared per-companion geometry (companion slot 0)
             "q_lens": "lens.0.q",
             "alpha": "lens.0.alpha",
             "xalpha": "lens.0.xalpha",
             "yalpha": "lens.0.yalpha",
-
             "lens_mass_total": lens_mass_total_path,
             "lens_distance": f"star.{l_idx}.distance",
             "lens_pm_ra": f"star.{l_idx}.pm_ra",
             "lens_pm_dec": f"star.{l_idx}.pm_dec",
             "lens_ra": f"star.{l_idx}.ra",
             "lens_dec": f"star.{l_idx}.dec",
-
             "source_mass": f"{s_comp}.{s_idx}.mass",
             "source_radius": f"{s_comp}.{s_idx}.radius",
             "source_distance": f"{s_comp}.{s_idx}.distance",
@@ -141,54 +139,47 @@ def get_symbol_map(lens_config_list):
 
     return maps
 
+
 RELATIONS = [
     # Einstein Radius (total lens mass)
-    sp.Eq(theta_E ** 2, KAPPA * lens_mass_total * pi_rel),
-
+    sp.Eq(theta_E**2, KAPPA * lens_mass_total * pi_rel),
     # Relative Parallax (dist in pc -> pi in mas)
     sp.Eq(pi_rel, (1000 / lens_distance) - (1000 / source_distance)),
-
     # Einstein Time (mu in mas/yr -> t_E in days)
     sp.Eq(t_E, theta_E / (mu_rel_mag / 365.25)),
-
     # Relative Motion Magnitude
-    sp.Eq(mu_rel_mag ** 2, mu_ra_rel ** 2 + mu_dec_rel ** 2),
-
+    sp.Eq(mu_rel_mag**2, mu_ra_rel**2 + mu_dec_rel**2),
     # Proper Motion Vector Components
     sp.Eq(mu_ra_rel, lens_pm_ra - source_pm_ra),
     sp.Eq(mu_dec_rel, lens_pm_dec - source_pm_dec),
-
     # Parallax Vector Components
     sp.Eq(pi_E_N, (pi_rel / theta_E) * (mu_dec_rel / mu_rel_mag)),
     sp.Eq(pi_E_E, (pi_rel / theta_E) * (mu_ra_rel / mu_rel_mag)),
-
     # Derived shortcut: pi_rel = kappa * mass * |pi_E|^2
     # (obtained by eliminating theta_E from the Einstein-radius and pi_E-magnitude
     # equations: |pi_E|^2 = (pi_rel/theta_E)^2 and theta_E^2 = kappa*mass*pi_rel).
     # This gives the solver a direct rank-100 path when mass and pi_E are both
     # user-supplied, bypassing the distance hint and avoiding sign ambiguity in
     # the quadratic for mu_ra_rel / mu_dec_rel.
-    sp.Eq(pi_rel, KAPPA * lens_mass_total * (pi_E_N ** 2 + pi_E_E ** 2)),
-
+    sp.Eq(pi_rel, KAPPA * lens_mass_total * (pi_E_N**2 + pi_E_E**2)),
     # Finite Source (R_sun to AU, then to mas)
-    sp.Eq(rho, ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E),
-
+    sp.Eq(
+        rho,
+        ((source_radius * RSUN_TO_AU / source_distance) * 1000.0) / theta_E,
+    ),
     # Projected separation reparameterization (base-10, mirrors mass/logmass).
     # Only active for binary lenses (s/log_s mapped in get_symbol_map there);
     # inert for PSPL.  Lets user lens.s initvals back-solve to a log_s start.
-    sp.Eq(s, 10 ** log_s),
-
+    sp.Eq(s, 10**log_s),
     # Binary lens mass ratio: q = M_companion / M_primary
     # companion_mass/primary_lens_mass are only in the symbol map for binary
     # events, so these relations are automatically inert for PSPL (relaxation
     # engine skips equations with unregistered symbols).  Propagates:
     # user-supplied q → companion mass initval, or known masses → q.
     sp.Eq(q_lens * primary_lens_mass, companion_mass),
-
     # Total lens mass = sum of body masses (binary only; inert for PSPL where
     # lens_mass_total maps directly onto the primary star's mass).
     sp.Eq(lens_mass_total, primary_lens_mass + companion_mass),
-
     # Source trajectory angle: alpha (radians, internal) → xalpha, yalpha.
     # xalpha = r·cos(alpha), yalpha = r·sin(alpha), where r is a free positive
     # scale sampled from the N(0,1) prior — only the direction arctan2(y,x) matters.

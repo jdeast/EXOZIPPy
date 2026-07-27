@@ -6,25 +6,25 @@ Unit tests for the SED component:
 """
 
 import warnings
-import numpy as np
-import pytest
-import pytensor.tensor as pt
-import pytensor
 
+import numpy as np
+import pytensor
+import pytensor.tensor as pt
+import pytest
+
+import exozippy.components.sed.physics  # registers calc_absbolmag etc.
 from exozippy.components.sed.bc_grid import (
-    _parse_feh_from_filename,
-    _read_single_bc_file,
-    _range_indices,
-    peek_grid_axes,
-    build_bc_grid,
-    slice_bc,
-    resolve_filter_name,
-    RegularGridInterpolator,
     DEFAULT_BC_ROOT,
+    RegularGridInterpolator,
+    _parse_feh_from_filename,
+    _range_indices,
+    _read_single_bc_file,
+    build_bc_grid,
+    peek_grid_axes,
+    resolve_filter_name,
+    slice_bc,
 )
 from exozippy.physics_registry import PHYSICS_REGISTRY
-import exozippy.components.sed.physics  # registers calc_absbolmag etc.
-
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -34,6 +34,7 @@ _BC_ROOT = DEFAULT_BC_ROOT
 _SOLAR_FEH_2MASS_NEXTGEN = (
     _BC_ROOT / "NextGen" / "BCs" / "2MASS" / "feh+0.0_afe+0.0.2MASS"
 )
+
 
 # A minimal grid_dict mirroring what build_bc_grid / slice_bc expect.
 def _make_grid_dict(axes):
@@ -123,9 +124,9 @@ def test_read_single_bc_file_teff_column_is_linear_not_log():
     df, _ = _read_single_bc_file(_SOLAR_FEH_2MASS_NEXTGEN)
 
     # ASSERT
-    assert (df["teff"] > 100).all(), (
-        "teff column contains values <= 100; looks like lgTef was not exponentiated"
-    )
+    assert (
+        df["teff"] > 100
+    ).all(), "teff column contains values <= 100; looks like lgTef was not exponentiated"
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +205,7 @@ def test_range_indices_returns_bracketing_points_when_bounds_fall_between_grid()
     idx = _range_indices(pts, 1.2, 3.7)
 
     # ASSERT
-    assert idx[0] == 1   # brackets 1.2 from below
+    assert idx[0] == 1  # brackets 1.2 from below
     assert idx[-1] == 4  # brackets 3.7 from above
 
 
@@ -317,10 +318,19 @@ def test_build_bc_grid_returns_dict_with_required_keys():
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
 
     # ACT
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
 
     # ASSERT
-    for key in ("teff_pts", "logg_pts", "feh_pts", "av_pts", "bc_values", "filter_order"):
+    for key in (
+        "teff_pts",
+        "logg_pts",
+        "feh_pts",
+        "av_pts",
+        "bc_values",
+        "filter_order",
+    ):
         assert key in grid, f"Missing key: {key}"
 
 
@@ -335,7 +345,9 @@ def test_build_bc_grid_bc_values_shape_matches_axes_and_filters():
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
 
     # ACT
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
 
     # ASSERT
     expected_shape = (
@@ -359,12 +371,14 @@ def test_build_bc_grid_contains_no_nan_values():
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
 
     # ACT
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
 
     # ASSERT
-    assert not np.any(np.isnan(grid["bc_values"])), (
-        "bc_values contains NaN entries; grid may not be fully populated"
-    )
+    assert not np.any(
+        np.isnan(grid["bc_values"])
+    ), "bc_values contains NaN entries; grid may not be fully populated"
 
 
 def test_build_bc_grid_filter_order_matches_mist_names():
@@ -377,7 +391,9 @@ def test_build_bc_grid_filter_order_matches_mist_names():
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
 
     # ACT
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
 
     # ASSERT
     assert grid["filter_order"] == ["2MASS_J", "2MASS_H", "2MASS_Ks"]
@@ -394,7 +410,9 @@ def test_build_bc_grid_raises_for_nonexistent_facility():
 
     # ACT & ASSERT
     with pytest.raises((FileNotFoundError, NotImplementedError, KeyError)):
-        build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+        build_bc_grid(
+            user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -411,16 +429,22 @@ def test_slice_bc_reduces_axis_length_when_range_is_tighter_than_full_grid():
     """
     # ARRANGE
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
-    axes = {k: grid[k] for k in ("teff", "logg", "feh", "av")} if "teff" in grid else {
-        "teff": grid["teff_pts"],
-        "logg": grid["logg_pts"],
-        "feh":  grid["feh_pts"],
-        "av":   grid["av_pts"],
-    }
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
+    axes = (
+        {k: grid[k] for k in ("teff", "logg", "feh", "av")}
+        if "teff" in grid
+        else {
+            "teff": grid["teff_pts"],
+            "logg": grid["logg_pts"],
+            "feh": grid["feh_pts"],
+            "av": grid["av_pts"],
+        }
+    )
     grid_dict = _make_grid_dict(axes)
 
-    teff_lo = float(grid["teff_pts"][2])   # a few steps in from the edge
+    teff_lo = float(grid["teff_pts"][2])  # a few steps in from the edge
     teff_hi = float(grid["teff_pts"][-3])
 
     # ACT
@@ -442,19 +466,22 @@ def test_slice_bc_preserves_filter_axis_length():
     """
     # ARRANGE
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
     axes = {
         "teff": grid["teff_pts"],
         "logg": grid["logg_pts"],
-        "feh":  grid["feh_pts"],
-        "av":   grid["av_pts"],
+        "feh": grid["feh_pts"],
+        "av": grid["av_pts"],
     }
     grid_dict = _make_grid_dict(axes)
 
     # ACT
     sliced, _ = slice_bc(
-        grid_dict, grid["bc_values"],
-        teff=(float(grid["teff_pts"][5]), float(grid["teff_pts"][15]))
+        grid_dict,
+        grid["bc_values"],
+        teff=(float(grid["teff_pts"][5]), float(grid["teff_pts"][15])),
     )
 
     # ASSERT
@@ -469,12 +496,14 @@ def test_slice_bc_raises_for_unknown_parameter_name():
     """
     # ARRANGE
     filters = ["2MASS.J"]
-    grid = build_bc_grid(user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT)
+    grid = build_bc_grid(
+        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+    )
     axes = {
         "teff": grid["teff_pts"],
         "logg": grid["logg_pts"],
-        "feh":  grid["feh_pts"],
-        "av":   grid["av_pts"],
+        "feh": grid["feh_pts"],
+        "av": grid["av_pts"],
     }
     grid_dict = _make_grid_dict(axes)
 
@@ -542,13 +571,17 @@ def test_regular_grid_interpolator_2d_recovers_bilinear_surface():
     T, G = np.meshgrid(teff_pts, logg_pts, indexing="ij")
     values = (T + G).astype(float)
 
-    interp = RegularGridInterpolator(points=[teff_pts, logg_pts], values=values)
+    interp = RegularGridInterpolator(
+        points=[teff_pts, logg_pts], values=values
+    )
 
-    test_coords = np.array([
-        [3500.0, 3.75],
-        [5000.0, 4.5],
-        [4500.0, 4.25],
-    ])
+    test_coords = np.array(
+        [
+            [3500.0, 3.75],
+            [5000.0, 4.5],
+            [4500.0, 4.25],
+        ]
+    )
     coord_tensor = pt.as_tensor_variable(test_coords)
 
     # ACT
@@ -577,7 +610,9 @@ def test_regular_grid_interpolator_with_trailing_filter_axis():
         for j in range(3):
             values[i, j, :] = [float(i), float(j), float(i + j)]
 
-    interp = RegularGridInterpolator(points=[teff_pts, logg_pts], values=values)
+    interp = RegularGridInterpolator(
+        points=[teff_pts, logg_pts], values=values
+    )
 
     # Query at node (1, 1) -> teff=6000, logg=4.5 -> expected [1, 1, 2]
     coord = pt.as_tensor_variable([[6000.0, 4.5]])
@@ -682,7 +717,9 @@ def test_calc_bc_is_inverse_of_calc_absmag_from_bc():
 
     # ACT
     BC = calc_bc(Mbol, M_filter).eval()
-    M_recovered = calc_absmag_from_bc(pt.as_tensor_variable(Mbol.eval()), pt.as_tensor_variable(BC)).eval()
+    M_recovered = calc_absmag_from_bc(
+        pt.as_tensor_variable(Mbol.eval()), pt.as_tensor_variable(BC)
+    ).eval()
 
     # ASSERT
     np.testing.assert_allclose(BC, 4.74 - 3.24, atol=1e-6)
@@ -747,13 +784,13 @@ def minimal_sed_file(tmp_path):
 
 def _make_sed(minimal_sed_file):
     """Instantiate a SED component around a minimal config."""
-    from exozippy.config import ConfigManager
     from exozippy.components.sed.sed import SED
+    from exozippy.config import ConfigManager
 
     user_params = {
-        "star.teffsed":  {"initval": 5778.0},
-        "star.feh":      {"initval":  0.0},
-        "star.av":       {"initval":  0.0},
+        "star.teffsed": {"initval": 5778.0},
+        "star.feh": {"initval": 0.0},
+        "star.av": {"initval": 0.0},
     }
     cm = ConfigManager(user_params)
     config = {"file": minimal_sed_file, "bc_root": str(_BC_ROOT)}
@@ -776,9 +813,9 @@ def test_sed_init_injects_grid_bounds_into_config_manager(minimal_sed_file):
     for key in ("star.teffsed", "star.feh", "star.av"):
         assert key in cm.user_params, f"config_manager missing key: {key}"
         entry = cm.user_params[key]
-        assert "lower" in entry and "upper" in entry, (
-            f"{key} entry is missing 'lower' / 'upper': {entry}"
-        )
+        assert (
+            "lower" in entry and "upper" in entry
+        ), f"{key} entry is missing 'lower' / 'upper': {entry}"
 
     # ASSERT — teff bounds are physically sane
     teff_entry = cm.user_params["star.teffsed"]
@@ -822,8 +859,8 @@ def test_sed_load_data_raises_when_sed_file_is_none(minimal_sed_file):
     Then a ValueError should be raised indicating the missing key.
     """
     # ARRANGE
-    from exozippy.config import ConfigManager
     from exozippy.components.sed.sed import SED
+    from exozippy.config import ConfigManager
 
     cm = ConfigManager({})
     # Patch the sedfile away after construction so __init__ doesn't
@@ -852,7 +889,9 @@ def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
         sed.add_parameter(model, "errscale", system=None)
 
     # ASSERT
-    assert hasattr(sed, "errscale"), "SED missing self.errscale after add_parameter"
+    assert hasattr(
+        sed, "errscale"
+    ), "SED missing self.errscale after add_parameter"
     assert sed.errscale is not None
 
 
@@ -907,9 +946,9 @@ def test_load_data_builds_blend_matrix_from_photType(multistar_sed_file):
 
     # ASSERT
     assert sed.blend_matrix.shape == (3, 2)
-    assert sed.blend_matrix[0].tolist() == [1, 1]      # Lens+Source blend
-    assert sed.blend_matrix[1].tolist() == [-1, 1]     # Source - Lens
-    assert sed.blend_matrix[2].tolist() == [1, 1]      # default: all stars
+    assert sed.blend_matrix[0].tolist() == [1, 1]  # Lens+Source blend
+    assert sed.blend_matrix[1].tolist() == [-1, 1]  # Source - Lens
+    assert sed.blend_matrix[2].tolist() == [1, 1]  # default: all stars
     assert sed.combo_labels == ["Lens+Source", "Source-Lens", "Lens+Source"]
     # one observation per row, not per star
     assert sed.mag.shape == (3,)
@@ -978,7 +1017,9 @@ def test_load_data_rejects_invalid_photType(tmp_path, phot_yaml, match):
         sed.load_data(_stub_system(star_names=("A", "B")))
 
 
-def test_combined_appmag_matches_hand_computed_blend_and_diff(multistar_sed_file):
+def test_combined_appmag_matches_hand_computed_blend_and_diff(
+    multistar_sed_file,
+):
     """
     Given per-star predicted magnitudes m = [[10, 12, 14], [11, 12, 15]]
     and the multistar blend matrix (blend, diff, default-blend rows),
@@ -990,8 +1031,7 @@ def test_combined_appmag_matches_hand_computed_blend_and_diff(multistar_sed_file
     sed, _ = _make_sed(multistar_sed_file)
     sed.load_data(_stub_system(star_names=("Lens", "Source")))
 
-    m_star = np.array([[10.0, 12.0, 14.0],
-                       [11.0, 12.0, 15.0]])
+    m_star = np.array([[10.0, 12.0, 14.0], [11.0, 12.0, 15.0]])
     sed._m_pred_matrix = pt.as_tensor_variable(m_star)
 
     # ACT
@@ -1000,11 +1040,13 @@ def test_combined_appmag_matches_hand_computed_blend_and_diff(multistar_sed_file
     # ASSERT
     F = 10 ** (-0.4 * m_star)
     expected_blend_J = -2.5 * np.log10(F[0, 0] + F[1, 0])
-    expected_diff_H = m_star[1, 1] - m_star[0, 1]   # -2.5*log10(F_S/F_L)
+    expected_diff_H = m_star[1, 1] - m_star[0, 1]  # -2.5*log10(F_S/F_L)
     expected_blend_K = -2.5 * np.log10(F[0, 2] + F[1, 2])
     np.testing.assert_allclose(
-        combined, [expected_blend_J, expected_diff_H, expected_blend_K],
-        rtol=1e-10)
+        combined,
+        [expected_blend_J, expected_diff_H, expected_blend_K],
+        rtol=1e-10,
+    )
 
 
 def test_predict_star_and_blend_appmag_use_filter_columns(multistar_sed_file):
@@ -1019,8 +1061,7 @@ def test_predict_star_and_blend_appmag_use_filter_columns(multistar_sed_file):
     sed, _ = _make_sed(multistar_sed_file)
     sed.load_data(_stub_system(star_names=("Lens", "Source")))
 
-    m_star = np.array([[10.0, 12.0, 14.0],
-                       [11.0, 12.0, 15.0]])
+    m_star = np.array([[10.0, 12.0, 14.0], [11.0, 12.0, 15.0]])
     sed._m_pred_matrix = pt.as_tensor_variable(m_star)
 
     # ACT

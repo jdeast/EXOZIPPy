@@ -12,17 +12,20 @@ Parameter.compute_mode_summaries and the latex/csv builders consume the
 labels to produce per-mode summaries and one table column per mode.
 """
 
-import numpy as np
 import arviz as az
+import numpy as np
 import pytest
 
-from exozippy.outputs.modes import (identify_modes, mode_suffix,
-                                    check_invalid_frac,
-                                    DEFAULT_MAX_INVALID_FRAC, ModeReport,
-                                    ModeInfo)
 from exozippy.components.parameter import Parameter
 from exozippy.outputs.latex import build_latex_output
-
+from exozippy.outputs.modes import (
+    DEFAULT_MAX_INVALID_FRAC,
+    ModeInfo,
+    ModeReport,
+    check_invalid_frac,
+    identify_modes,
+    mode_suffix,
+)
 
 N_CHAIN, N_DRAW = 8, 1500
 N = N_CHAIN * N_DRAW
@@ -30,11 +33,15 @@ N = N_CHAIN * N_DRAW
 
 def _make_idata(posterior, lp):
     """Build a minimal InferenceData from flat (N,) arrays."""
-    return az.from_dict({
-        "posterior": {k: np.asarray(v).reshape(N_CHAIN, N_DRAW)
-                      for k, v in posterior.items()},
-        "sample_stats": {"lp": np.asarray(lp).reshape(N_CHAIN, N_DRAW)},
-    })
+    return az.from_dict(
+        {
+            "posterior": {
+                k: np.asarray(v).reshape(N_CHAIN, N_DRAW)
+                for k, v in posterior.items()
+            },
+            "sample_stats": {"lp": np.asarray(lp).reshape(N_CHAIN, N_DRAW)},
+        }
+    )
 
 
 def _two_mode_idata(rng, w2=0.3, sep=8.0, garbage=0):
@@ -56,6 +63,7 @@ def _two_mode_idata(rng, w2=0.3, sep=8.0, garbage=0):
 # ----------------------------------------------------------------------
 # identify_modes core behavior
 # ----------------------------------------------------------------------
+
 
 def test_two_modes_weights_and_labels_recovered():
     """
@@ -89,8 +97,10 @@ def test_single_curved_mode_not_split():
     """
     rng = np.random.default_rng(7)
     t = rng.normal(0, 1.5, N)
-    idata = _make_idata({"a_raw": t, "b_raw": t ** 2 + rng.normal(0, 0.3, N)},
-                        rng.normal(0, 1, N))
+    idata = _make_idata(
+        {"a_raw": t, "b_raw": t**2 + rng.normal(0, 0.3, N)},
+        rng.normal(0, 1, N),
+    )
 
     rep = identify_modes(idata)
 
@@ -182,8 +192,9 @@ def test_fallback_to_physical_vars_without_raw():
     """
     rng = np.random.default_rng(9)
     labels = (rng.random(N) < 0.5).astype(int)
-    idata = _make_idata({"x": rng.normal(0, 1, N) + 12 * labels},
-                        rng.normal(0, 1, N))
+    idata = _make_idata(
+        {"x": rng.normal(0, 1, N) + 12 * labels}, rng.normal(0, 1, N)
+    )
 
     rep = identify_modes(idata)
 
@@ -195,10 +206,17 @@ def test_fallback_to_physical_vars_without_raw():
 # Parameter per-mode summaries
 # ----------------------------------------------------------------------
 
+
 def _sampled_param(posterior):
-    p = Parameter(label="star.teff", latex=r"T_{\rm eff}",
-                  description="Effective temperature", initval=5000.0,
-                  lower=3000.0, upper=7000.0, init_scale=100.0)
+    p = Parameter(
+        label="star.teff",
+        latex=r"T_{\rm eff}",
+        description="Effective temperature",
+        initval=5000.0,
+        lower=3000.0,
+        upper=7000.0,
+        init_scale=100.0,
+    )
     p.posterior = posterior
     return p
 
@@ -237,7 +255,9 @@ def test_parameter_mode_summaries_vector_and_empty_mode():
 
     assert isinstance(summaries[0], list) and len(summaries[0]) == 2
     assert summaries[0][1].median == pytest.approx(10.5)
-    empty = summaries[1] if not isinstance(summaries[1], list) else summaries[1][0]
+    empty = (
+        summaries[1] if not isinstance(summaries[1], list) else summaries[1][0]
+    )
     assert np.isnan(empty.median)
 
 
@@ -273,7 +293,7 @@ def test_table_line_one_value_cell_per_mode():
     row_multi = p.to_table_line(mode_suffixes=["modeone", "modetwo"])
     row_single = p.to_table_line()
 
-    assert row_multi.count("&") == 4   # param & desc & val1 & val2 & prior
+    assert row_multi.count("&") == 4  # param & desc & val1 & val2 & prior
     assert f"\\{p.latex_varname}modeone" in row_multi
     assert f"\\{p.latex_varname}modetwo" in row_multi
     assert row_single.count("&") == 3  # param & desc & val & prior
@@ -283,6 +303,7 @@ def test_table_line_one_value_cell_per_mode():
 # ----------------------------------------------------------------------
 # PROMPT 1: loud invalid-draw reporting
 # ----------------------------------------------------------------------
+
 
 def test_invalid_draws_warn_loudly(caplog):
     """
@@ -295,9 +316,9 @@ def test_invalid_draws_warn_loudly(caplog):
     rng = np.random.default_rng(21)
     a = rng.normal(0, 1, N)
     lp = rng.normal(1000, 3, N)
-    a[0:5] = np.nan                 # nonfinite-raw
-    lp[5:10] = np.nan               # nonfinite-lp
-    lp[10:15] = 1e20                # lp-ceiling
+    a[0:5] = np.nan  # nonfinite-raw
+    lp[5:10] = np.nan  # nonfinite-lp
+    lp[10:15] = 1e20  # lp-ceiling
     idata = _make_idata({"a_raw": a}, lp)
 
     with caplog.at_level("WARNING", logger="exozippy.outputs.modes"):
@@ -305,9 +326,13 @@ def test_invalid_draws_warn_loudly(caplog):
 
     assert rep.n_invalid == 15
     assert rep.invalid_reason_counts == {
-        "nonfinite-raw": 5, "nonfinite-lp": 5, "lp-ceiling": 5}
-    assert any("rejected as numerically invalid" in r.message
-              for r in caplog.records)
+        "nonfinite-raw": 5,
+        "nonfinite-lp": 5,
+        "lp-ceiling": 5,
+    }
+    assert any(
+        "rejected as numerically invalid" in r.message for r in caplog.records
+    )
 
     text = rep.to_text()
     assert "WARNING" in text
@@ -328,17 +353,25 @@ def test_no_warning_when_no_invalid_draws(caplog):
         rep = identify_modes(idata)
 
     assert rep.n_invalid == 0
-    assert not any("rejected as numerically invalid" in r.message
-                  for r in caplog.records)
+    assert not any(
+        "rejected as numerically invalid" in r.message for r in caplog.records
+    )
     assert "WARNING" not in rep.to_text()
 
 
 def _fake_report(n_invalid, n_total=1000):
     labels = np.zeros(n_total, dtype=int)
-    return ModeReport(labels=labels, modes=[], n_valid=n_total - n_invalid,
-                      n_invalid=n_invalid, n_unassigned=0,
-                      provenance="unimodal", weights_reliable=True,
-                      n_transitions=0, feature_vars=[])
+    return ModeReport(
+        labels=labels,
+        modes=[],
+        n_valid=n_total - n_invalid,
+        n_invalid=n_invalid,
+        n_unassigned=0,
+        provenance="unimodal",
+        weights_reliable=True,
+        n_transitions=0,
+        feature_vars=[],
+    )
 
 
 def test_check_invalid_frac_raises_above_threshold():
@@ -350,8 +383,12 @@ def test_check_invalid_frac_raises_above_threshold():
     rep = _fake_report(n_invalid=20, n_total=1000)  # 2%
 
     with pytest.raises(RuntimeError, match="exceeding max_invalid_frac"):
-        check_invalid_frac(rep, max_invalid_frac=0.01,
-                           trace_path="foo_trace.nc", modes_path="foo_modes.txt")
+        check_invalid_frac(
+            rep,
+            max_invalid_frac=0.01,
+            trace_path="foo_trace.nc",
+            modes_path="foo_modes.txt",
+        )
 
 
 def test_check_invalid_frac_below_threshold_is_noop():
@@ -388,6 +425,7 @@ def test_check_invalid_frac_noop_when_no_invalid_draws():
 # PROMPT 1: combined-def suppression in the multimodal LaTeX table
 # ----------------------------------------------------------------------
 
+
 class _FakeComp:
     label = "star"
 
@@ -395,24 +433,45 @@ class _FakeComp:
 def _fake_system(comp):
     class _Sys:
         name = "test"
+
         def get_all_components(self):
             return [comp]
+
     return _Sys()
 
 
 def _two_mode_report(n_invalid=0):
     modes = [
-        ModeInfo(index=0, weight=0.5, n_draws=50, lp_med=0.0, lp_max=0.0,
-                delta_lp_max=0.0, per_chain_weight=np.array([0.5])),
-        ModeInfo(index=1, weight=0.5, n_draws=50, lp_med=0.0, lp_max=0.0,
-                delta_lp_max=0.0, per_chain_weight=np.array([0.5])),
+        ModeInfo(
+            index=0,
+            weight=0.5,
+            n_draws=50,
+            lp_med=0.0,
+            lp_max=0.0,
+            delta_lp_max=0.0,
+            per_chain_weight=np.array([0.5]),
+        ),
+        ModeInfo(
+            index=1,
+            weight=0.5,
+            n_draws=50,
+            lp_med=0.0,
+            lp_max=0.0,
+            delta_lp_max=0.0,
+            per_chain_weight=np.array([0.5]),
+        ),
     ]
-    return ModeReport(labels=np.zeros((1, 100), dtype=int), modes=modes,
-                      n_valid=100 - n_invalid, n_invalid=n_invalid,
-                      n_unassigned=0,
-                      provenance="occupancy (validated: ...)",
-                      weights_reliable=True, n_transitions=20,
-                      feature_vars=["a_raw"])
+    return ModeReport(
+        labels=np.zeros((1, 100), dtype=int),
+        modes=modes,
+        n_valid=100 - n_invalid,
+        n_invalid=n_invalid,
+        n_unassigned=0,
+        provenance="occupancy (validated: ...)",
+        weights_reliable=True,
+        n_transitions=20,
+        feature_vars=["a_raw"],
+    )
 
 
 def test_multimode_latex_suppresses_combined_defs(tmp_path):
@@ -434,9 +493,12 @@ def test_multimode_latex_suppresses_combined_defs(tmp_path):
 
     var_path = tmp_path / "vars.tex"
     tmpl_path = tmp_path / "tmpl.tex"
-    build_latex_output(sys_obj, var_filename=str(var_path),
-                       template_filename=str(tmpl_path),
-                       mode_report=mode_report)
+    build_latex_output(
+        sys_obj,
+        var_filename=str(var_path),
+        template_filename=str(tmpl_path),
+        mode_report=mode_report,
+    )
 
     var_text = var_path.read_text()
     assert f"\\providecommand{{\\{p.latex_varname}}}" not in var_text
@@ -460,21 +522,39 @@ def test_single_mode_latex_output_unchanged(tmp_path):
         return _fake_system(comp)
 
     var1, tmpl1 = tmp_path / "v1.tex", tmp_path / "t1.tex"
-    build_latex_output(_sys_with_param(), var_filename=str(var1),
-                       template_filename=str(tmpl1))
+    build_latex_output(
+        _sys_with_param(), var_filename=str(var1), template_filename=str(tmpl1)
+    )
 
     unimodal_report = ModeReport(
         labels=np.zeros((1, 100), dtype=int),
-        modes=[ModeInfo(index=0, weight=1.0, n_draws=100, lp_med=0.0,
-                        lp_max=0.0, delta_lp_max=0.0,
-                        per_chain_weight=np.array([1.0]))],
-        n_valid=100, n_invalid=0, n_unassigned=0, provenance="unimodal",
-        weights_reliable=True, n_transitions=0, feature_vars=["a_raw"])
+        modes=[
+            ModeInfo(
+                index=0,
+                weight=1.0,
+                n_draws=100,
+                lp_med=0.0,
+                lp_max=0.0,
+                delta_lp_max=0.0,
+                per_chain_weight=np.array([1.0]),
+            )
+        ],
+        n_valid=100,
+        n_invalid=0,
+        n_unassigned=0,
+        provenance="unimodal",
+        weights_reliable=True,
+        n_transitions=0,
+        feature_vars=["a_raw"],
+    )
 
     var2, tmpl2 = tmp_path / "v2.tex", tmp_path / "t2.tex"
-    build_latex_output(_sys_with_param(), var_filename=str(var2),
-                       template_filename=str(tmpl2),
-                       mode_report=unimodal_report)
+    build_latex_output(
+        _sys_with_param(),
+        var_filename=str(var2),
+        template_filename=str(tmpl2),
+        mode_report=unimodal_report,
+    )
 
     assert var1.read_text() == var2.read_text()
 
@@ -493,16 +573,33 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
 
     mode_report = ModeReport(
         labels=np.zeros((1, 100), dtype=int),
-        modes=[ModeInfo(index=0, weight=1.0, n_draws=95, lp_med=0.0,
-                        lp_max=0.0, delta_lp_max=0.0,
-                        per_chain_weight=np.array([1.0]))],
-        n_valid=95, n_invalid=5, n_unassigned=0, provenance="unimodal",
-        weights_reliable=True, n_transitions=0, feature_vars=["a_raw"])
+        modes=[
+            ModeInfo(
+                index=0,
+                weight=1.0,
+                n_draws=95,
+                lp_med=0.0,
+                lp_max=0.0,
+                delta_lp_max=0.0,
+                per_chain_weight=np.array([1.0]),
+            )
+        ],
+        n_valid=95,
+        n_invalid=5,
+        n_unassigned=0,
+        provenance="unimodal",
+        weights_reliable=True,
+        n_transitions=0,
+        feature_vars=["a_raw"],
+    )
 
     tmpl_path = tmp_path / "t.tex"
-    build_latex_output(sys_obj, var_filename=str(tmp_path / "v.tex"),
-                       template_filename=str(tmpl_path),
-                       mode_report=mode_report)
+    build_latex_output(
+        sys_obj,
+        var_filename=str(tmp_path / "v.tex"),
+        template_filename=str(tmpl_path),
+        mode_report=mode_report,
+    )
 
     text = tmpl_path.read_text()
     assert "5 draws" in text

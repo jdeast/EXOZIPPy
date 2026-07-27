@@ -1,9 +1,12 @@
 import logging
+
 import numpy as np
-import pytensor.tensor as pt
 import pymc as pm
+import pytensor.tensor as pt
+
 from exozippy.components.component import Component
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
+
 from . import physics
 
 logger = logging.getLogger(__name__)
@@ -36,17 +39,23 @@ class Planet(Component):
         }
 
         if has_orbit:
-            self.manifest.update({
-                "p": "default",
-                "arsun": "default",
-                "ar": "default",
-                "b": "default",
-                "K": "default",
-                "max_ecc": "default",
-            })
+            self.manifest.update(
+                {
+                    "p": "default",
+                    "arsun": "default",
+                    "ar": "default",
+                    "b": "default",
+                    "K": "default",
+                    "max_ecc": "default",
+                }
+            )
 
         # Data-driven estimate: Initialize 'K' directly from the RV data variance
-        rv_comps = [c for c in system.active_components.values() if hasattr(c, 'k_init')]
+        rv_comps = [
+            c
+            for c in system.active_components.values()
+            if hasattr(c, "k_init")
+        ]
         if rv_comps and has_orbit:
             k_ms_guess = rv_comps[0].k_init / np.sqrt(self.n_elements)
             for i in range(self.n_elements):
@@ -60,19 +69,26 @@ class Planet(Component):
         # inside an unselected jnp.where branch of pytensor's softplus): any
         # system with m_total > 1.42 Msun silently froze every numpyro chain
         # at its starting point.  See potentials.py.
-        pm.Potential(f"{self.prefix}.m_pos_constraint",
-                     soft_lower_bound(self.m_total.value, 0.0, scale=0.88))
+        pm.Potential(
+            f"{self.prefix}.m_pos_constraint",
+            soft_lower_bound(self.m_total.value, 0.0, scale=0.88),
+        )
 
         if "orbit" not in system.active_components:
             return
 
         orbits = system.orbit
-        pm.Potential(f"{self.prefix}.e_collision_bound",
-                     soft_upper_bound(orbits.ecc.value[self.orbit_map],
-                                      self.max_ecc.value, scale=0.88))
+        pm.Potential(
+            f"{self.prefix}.e_collision_bound",
+            soft_upper_bound(
+                orbits.ecc.value[self.orbit_map],
+                self.max_ecc.value,
+                scale=0.88,
+            ),
+        )
 
-
-        if self.n_elements < 2: return
+        if self.n_elements < 2:
+            return
 
         logger.warning("Planet collision penalty is untested.")
 
@@ -87,16 +103,20 @@ class Planet(Component):
 
             # Get the symbolic apastron (furthest point) of the inner planet
             # Q = a * (1 + e)
-            inner_apastron = inner.orbit.a.value * (1.0 + inner.orbit.ecc.value)
+            inner_apastron = inner.orbit.a.value * (
+                1.0 + inner.orbit.ecc.value
+            )
 
             # Get the symbolic periastron (closest point) of the outer planet
             # q = a * (1 - e)
-            outer_periastron = outer.orbit.a_val * (1.0 - outer.orbit.ecc.value)
+            outer_periastron = outer.orbit.a_val * (
+                1.0 - outer.orbit.ecc.value
+            )
 
             # Potential: If they cross, log-probability goes to -inf
             pm.Potential(
                 f"crossing_penalty_{inner.name}_{outer.name}",
-                pt.switch(outer_periastron > inner_apastron, 0.0, -np.inf)
+                pt.switch(outer_periastron > inner_apastron, 0.0, -np.inf),
             )
 
     def plot(self, system, points, filename_prefix="debug"):

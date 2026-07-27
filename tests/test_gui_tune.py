@@ -61,8 +61,20 @@ _STUB_PLOT = {
     "xlabel": "BJD",
     "ylabel": "RV (m/s)",
     "traces": [
-        {"name": "data", "role": "data", "kind": "scatter", "x": [1, 2], "y": [3, 4]},
-        {"name": "model", "role": "model", "kind": "line", "x": [1, 2], "y": [3.0, 4.0]},
+        {
+            "name": "data",
+            "role": "data",
+            "kind": "scatter",
+            "x": [1, 2],
+            "y": [3, 4],
+        },
+        {
+            "name": "model",
+            "role": "model",
+            "kind": "line",
+            "x": [1, 2],
+            "y": [3.0, 4.0],
+        },
     ],
     "param_deps": ["orbit.logP"],
     "meta": {},
@@ -91,7 +103,11 @@ class _StubWorker:
                     "mu": None,
                     "fixed": False,
                     "derived": False,
-                    "provenance": {"rank": 100, "label": "user", "relation": None},
+                    "provenance": {
+                        "rank": 100,
+                        "label": "user",
+                        "relation": None,
+                    },
                 },
             },
             "seeds": None,
@@ -129,7 +145,11 @@ def test_tune_eval_round_trip_with_stubbed_worker(client, monkeypatch):
 
     resp = client.post(
         "/api/tune/solve",
-        json={"config": {"star": [{"name": "A"}]}, "params": {}, "workdir": None},
+        json={
+            "config": {"star": [{"name": "A"}]},
+            "params": {},
+            "workdir": None,
+        },
     )
     assert resp.status_code == 200
     assert resp.json()["phase"] in ("solving", "compiling", "live")
@@ -142,7 +162,9 @@ def test_tune_eval_round_trip_with_stubbed_worker(client, monkeypatch):
     assert "orbit.b.logP" in result["parameters"]
     assert result["plots"][0]["id"] == "rv.unphased"
 
-    ev = client.post("/api/tune/eval", json={"path": "orbit.b.logP", "value": 0.6})
+    ev = client.post(
+        "/api/tune/eval", json={"path": "orbit.b.logP", "value": 0.6}
+    )
     assert ev.status_code == 200
     body = ev.json()
     assert body["plots"]["rv.unphased"]["model"] == [0.6, 1.2]
@@ -154,7 +176,9 @@ def test_tune_eval_before_solve_is_409(client):
     When /api/tune/eval is posted,
     Then the server refuses with 409 (nothing is live to evaluate).
     """
-    resp = client.post("/api/tune/eval", json={"path": "orbit.b.logP", "value": 0.6})
+    resp = client.post(
+        "/api/tune/eval", json={"path": "orbit.b.logP", "value": 0.6}
+    )
     assert resp.status_code == 409
     assert "error" in resp.json()
 
@@ -178,8 +202,10 @@ def test_tune_hash_reports_staleness(client, monkeypatch, rvonly_project):
     # asserting a structural edit keeps it stale.
     client.post(
         "/api/doc/command",
-        json={"op": "set_param_field",
-              "args": {"path": "orbit.b.logP", "field": "lower", "value": 0.2}},
+        json={
+            "op": "set_param_field",
+            "args": {"path": "orbit.b.logP", "field": "lower", "value": 0.2},
+        },
     )
     resp = client.get("/api/tune/hash").json()
     assert resp["live_hash"] == "deadbeef"
@@ -202,8 +228,10 @@ def test_slider_edit_params_roundtrip_and_prepare(client, rvonly_project):
     # A slider release commits one undoable RANK_USER initval override.
     resp = client.post(
         "/api/doc/command",
-        json={"op": "set_param_field",
-              "args": {"path": "star.A.teff", "field": "initval", "value": 6250}},
+        json={
+            "op": "set_param_field",
+            "args": {"path": "star.A.teff", "field": "initval", "value": 6250},
+        },
     )
     assert resp.status_code == 200
     client.post("/api/doc/save")

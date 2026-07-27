@@ -9,6 +9,7 @@ Reference topology (KELT-4-like): stars A, B, C and planet b, with
   orbit A-BC : the B+C pair orbits A(+b)
 """
 
+import astropy.units as u
 import numpy as np
 import pymc as pm
 import pytensor
@@ -19,21 +20,21 @@ from exozippy.config import ConfigManager
 from exozippy.constants import KEPLER_CONST
 from exozippy.system import System
 
-import astropy.units as u
-
 MJUP_PER_MSUN = (1.0 * u.solMass).to(u.jupiterMass).value
 
 M_A, M_B, M_C = 1.2, 0.8, 0.7
-M_b = 0.1                      # 0.1 Msun "planet" so mass sums are visible
+M_b = 0.1  # 0.1 Msun "planet" so mass sums are visible
 LOGP = [1.0, 4.0, 6.0]
 TC = 2456000.0
 
 
 def _hier_config():
     return {
-        "star": [{"name": "A", "mist": False},
-                 {"name": "B", "mist": False},
-                 {"name": "C", "mist": False}],
+        "star": [
+            {"name": "A", "mist": False},
+            {"name": "B", "mist": False},
+            {"name": "C", "mist": False},
+        ],
         "planet": [{"name": "b"}],
         "orbit": [
             {"name": "b", "primary": ["A"], "companion": ["b"]},
@@ -67,6 +68,7 @@ def _eval_at_start(system, model, tensors):
 # ---------------------------------------------------------------------------
 # Body-group parsing
 # ---------------------------------------------------------------------------
+
 
 def test_parse_body_ref_names_paths_and_ambiguity():
     """
@@ -111,8 +113,10 @@ def test_parse_orbit_bodies_implicit_legacy_topology():
     """
     cfg = {
         "star": [{"name": "S1"}, {"name": "S2"}],
-        "planet": [{"name": "p1", "orbit_ndx": 0},
-                   {"name": "p2", "orbit_ndx": 1, "star_ndx": 1}],
+        "planet": [
+            {"name": "p1", "orbit_ndx": 0},
+            {"name": "p2", "orbit_ndx": 1, "star_ndx": 1},
+        ],
         "orbit": [{"name": "o1"}, {"name": "o2"}],
     }
     prim, comp = parse_orbit_bodies(cfg["orbit"], cfg)
@@ -128,8 +132,9 @@ def test_parse_orbit_bodies_rejects_bad_groups():
     """
     cfg = _hier_config()
     with pytest.raises(ValueError, match="both the primary and companion"):
-        parse_orbit_bodies([{"name": "x", "primary": ["A"],
-                             "companion": ["A"]}], cfg)
+        parse_orbit_bodies(
+            [{"name": "x", "primary": ["A"], "companion": ["A"]}], cfg
+        )
     with pytest.raises(ValueError, match="give both"):
         parse_orbit_bodies([{"name": "x", "primary": ["A"]}], cfg)
     with pytest.raises(ValueError, match="not a supported key"):
@@ -139,6 +144,7 @@ def test_parse_orbit_bodies_rejects_bad_groups():
 # ---------------------------------------------------------------------------
 # Symbol-map regression: Kepler symbols must be per-instance
 # ---------------------------------------------------------------------------
+
 
 def test_kepler_relation_symbols_are_instance_scoped():
     """
@@ -165,8 +171,9 @@ def test_m_total_custom_solver_sums_member_masses():
     """
     system = System(_hier_config(), user_params=_hier_params())
     system.prepare()
-    cfg = system.config_manager.resolve("orbit", "m_total", shape=(3,),
-                                        names=system.orbit.names)
+    cfg = system.config_manager.resolve(
+        "orbit", "m_total", shape=(3,), names=system.orbit.names
+    )
     m_tot = np.atleast_1d(cfg["initval"]).astype(float)
     expected = [M_A + M_b, M_C + M_B, M_A + M_b + M_B + M_C]
     np.testing.assert_allclose(m_tot, expected, rtol=1e-3)
@@ -175,6 +182,7 @@ def test_m_total_custom_solver_sums_member_masses():
 # ---------------------------------------------------------------------------
 # Model-level: per-orbit mass/scale parameters
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def hier_system(tmp_path_factory):
@@ -191,8 +199,10 @@ def hier_system(tmp_path_factory):
     rv_file = data_dir / "fake.rv"
     rng = np.random.default_rng(42)
     t = np.linspace(TC - 20.0, TC + 20.0, 12)
-    np.savetxt(rv_file, np.column_stack(
-        [t, rng.normal(0, 5, t.size), np.full(t.size, 3.0)]))
+    np.savetxt(
+        rv_file,
+        np.column_stack([t, rng.normal(0, 5, t.size), np.full(t.size, 3.0)]),
+    )
 
     f_bc = data_dir / "bc.rel"
     f_abc = data_dir / "abc.rel"
@@ -221,8 +231,10 @@ def test_orbit_group_masses_match_body_sums(hier_system):
     system, model = hier_system
     orb = system.orbit
     m_p, m_c, m_t = _eval_at_start(
-        system, model, [orb.m_primary.value, orb.m_companion.value,
-                        orb.m_total.value])
+        system,
+        model,
+        [orb.m_primary.value, orb.m_companion.value, orb.m_total.value],
+    )
     np.testing.assert_allclose(m_p, [M_A, M_C, M_A + M_b], rtol=1e-4)
     np.testing.assert_allclose(m_c, [M_b, M_B, M_B + M_C], rtol=1e-4)
     np.testing.assert_allclose(m_t, m_p + m_c, rtol=1e-12)
@@ -238,20 +250,32 @@ def test_orbit_scale_follows_keplers_third_law(hier_system):
     system, model = hier_system
     orb = system.orbit
     m_t, arsun, K, period, sini, ecc = _eval_at_start(
-        system, model, [orb.m_total.value, orb.arsun.value, orb.K.value,
-                        orb.period.value, orb.sini.value, orb.ecc.value])
+        system,
+        model,
+        [
+            orb.m_total.value,
+            orb.arsun.value,
+            orb.K.value,
+            orb.period.value,
+            orb.sini.value,
+            orb.ecc.value,
+        ],
+    )
     np.testing.assert_allclose(period, 10.0 ** np.array(LOGP), rtol=1e-6)
     np.testing.assert_allclose(
-        arsun, KEPLER_CONST * m_t ** (1 / 3) * period ** (2 / 3), rtol=1e-6)
+        arsun, KEPLER_CONST * m_t ** (1 / 3) * period ** (2 / 3), rtol=1e-6
+    )
     m_c = np.array([M_b, M_B, M_B + M_C])
-    K_expected = (2 * np.pi * arsun * sini * (m_c / m_t)
-                  / (period * np.sqrt(1 - ecc ** 2)))
+    K_expected = (
+        2 * np.pi * arsun * sini * (m_c / m_t) / (period * np.sqrt(1 - ecc**2))
+    )
     np.testing.assert_allclose(K, K_expected, rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------
 # Membership: which orbits move which star
 # ---------------------------------------------------------------------------
+
 
 def test_star_membership_roles():
     """
@@ -261,6 +285,7 @@ def test_star_membership_roles():
     """
     cm = ConfigManager(_hier_params(), system_config=_hier_config())
     from exozippy.components.orbit.orbit import Orbit
+
     orb = Orbit(_hier_config()["orbit"], cm)
     assert orb.star_membership(0) == [(0, "primary"), (2, "primary")]
     assert orb.star_membership(1) == [(1, "companion"), (2, "companion")]
@@ -279,8 +304,9 @@ def test_rv_terms_include_stellar_companion_orbit(hier_system):
     K_vec, omap = system.rvinstrument._orbit_rv_terms(system, 0)
     assert list(omap) == [0, 2]
 
-    K_terms, K_all = _eval_at_start(system, model,
-                                    [K_vec, system.orbit.K.value])
+    K_terms, K_all = _eval_at_start(
+        system, model, [K_vec, system.orbit.K.value]
+    )
     np.testing.assert_allclose(K_terms, K_all[[0, 2]], rtol=1e-10)
 
     logp = model.compile_logp()(system.get_raw_start(model))
@@ -291,9 +317,14 @@ def test_rv_terms_include_stellar_companion_orbit(hier_system):
 # Relative astrometry referencing an orbit by name
 # ---------------------------------------------------------------------------
 
+
 def _write_rel_file(path, sep_mas):
-    rows = np.array([[TC + 10.0, sep_mas, sep_mas * 0.01, 45.0, 1.0],
-                     [TC + 400.0, sep_mas, sep_mas * 0.01, 46.0, 1.0]])
+    rows = np.array(
+        [
+            [TC + 10.0, sep_mas, sep_mas * 0.01, 45.0, 1.0],
+            [TC + 400.0, sep_mas, sep_mas * 0.01, 46.0, 1.0],
+        ]
+    )
     np.savetxt(path, rows)
 
 
@@ -332,6 +363,7 @@ def test_rel_astrometry_unknown_orbit_raises(tmp_path):
     _write_rel_file(f, 10.0)
     config = _hier_config()
     config["astrometryinstrument"] = [
-        {"name": "bad", "file": str(f), "mode": "rel", "orbit": "nope"}]
+        {"name": "bad", "file": str(f), "mode": "rel", "orbit": "nope"}
+    ]
     with pytest.raises(ValueError, match="unknown orbit"):
         System(config, user_params=_hier_params())

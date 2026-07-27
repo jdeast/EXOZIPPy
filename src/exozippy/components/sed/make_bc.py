@@ -45,11 +45,11 @@ import pandas as pd
 
 from .bc_grid import (
     DEFAULT_BC_ROOT,
-    peek_grid_axes,
-    resolve_filter_name,
-    facility_from_svo_name,
     _load_alias_table,
     _read_single_bc_file,
+    facility_from_svo_name,
+    peek_grid_axes,
+    resolve_filter_name,
 )
 from .filters.filter import Filter
 
@@ -60,10 +60,10 @@ try:
 except NameError:
     current_dir = Path.cwd()
 
-SIGMA_SB = 5.670374419e-5        # erg s^-1 cm^-2 K^-4
-L0 = 3.0128e35                   # IAU 2015 resolution B2, erg/s
+SIGMA_SB = 5.670374419e-5  # erg s^-1 cm^-2 K^-4
+L0 = 3.0128e35  # IAU 2015 resolution B2, erg/s
 PC_CM = 3.0856775814913673e18
-F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)   # erg s^-1 cm^-2
+F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)  # erg s^-1 cm^-2
 V_BAND_MICRON = 0.55
 
 # Alpha-abundance fallback order when a grid point has no alpha=0
@@ -146,7 +146,10 @@ def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
                 continue
             logger.warning(
                 "Cached %s is %d bytes, expected %d -- it is truncated or "
-                "stale. Re-downloading.", dest, actual, meta["size"],
+                "stale. Re-downloading.",
+                dest,
+                actual,
+                meta["size"],
             )
             dest.unlink()
 
@@ -172,13 +175,15 @@ def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
                     f"The file on Zenodo may have been replaced, or the "
                     f"download was corrupted."
                 )
-            part.replace(dest)          # atomic within the same directory
+            part.replace(dest)  # atomic within the same directory
         finally:
             part.unlink(missing_ok=True)
         logger.info(f"Saved {filename} to {dest}")
 
 
-def _load_spectra(model: str, bc_root: Path) -> tuple[pd.DataFrame, np.ndarray]:
+def _load_spectra(
+    model: str, bc_root: Path
+) -> tuple[pd.DataFrame, np.ndarray]:
     """
     Load the model spectra table and its wavelength grid (Angstrom).
     The flux column is kept as JSON strings; _select_spectrum parses
@@ -195,12 +200,16 @@ def _unit_optical_depth(wave_ang: np.ndarray) -> np.ndarray:
     """Optical depth per magnitude of Av on the spectra wavelength grid."""
     ext = pd.read_csv(
         current_dir / "models" / "extinction_law.ascii",
-        names=["wavelength", "extinction"], delimiter=" ",
-        index_col=False, skipinitialspace=True,
+        names=["wavelength", "extinction"],
+        delimiter=" ",
+        index_col=False,
+        skipinitialspace=True,
     )
     from scipy import interpolate
+
     f = interpolate.interp1d(
-        ext["wavelength"], ext["extinction"], fill_value="extrapolate")
+        ext["wavelength"], ext["extinction"], fill_value="extrapolate"
+    )
     wave_micron = wave_ang * 1e-4
     return (f(wave_micron) / f(V_BAND_MICRON)) / 1.086
 
@@ -209,8 +218,10 @@ def _select_spectrum(df_spec, teff, logg, feh):
     """Spectrum at a grid node, with the alpha fallback order."""
     for alpha in ALPHA_FALLBACK:
         rows = df_spec[
-            (df_spec.teff == teff) & (df_spec.logg == logg)
-            & (df_spec.feh == feh) & (df_spec.alpha == alpha)
+            (df_spec.teff == teff)
+            & (df_spec.logg == logg)
+            & (df_spec.feh == feh)
+            & (df_spec.alpha == alpha)
         ]
         if len(rows) > 0:
             flux = rows.iloc[0].flux
@@ -222,10 +233,13 @@ def _select_spectrum(df_spec, teff, logg, feh):
 
 def _vega_zeropoint(filt: Filter) -> float:
     """Vega F_lambda zeropoint: specified when quoted, else calculated."""
-    zp = getattr(filt, "Zp_Spec_Fl_Vega", None) or getattr(filt, "Zp_Calc_Fl_Vega", None)
+    zp = getattr(filt, "Zp_Spec_Fl_Vega", None) or getattr(
+        filt, "Zp_Calc_Fl_Vega", None
+    )
     if zp is None:
         raise ValueError(
-            f"No Vega F_lambda zeropoint available for {filt.filterID}.")
+            f"No Vega F_lambda zeropoint available for {filt.filterID}."
+        )
     return float(zp)
 
 
@@ -276,8 +290,8 @@ def make_bc_tables(
             wf, tf = filt.ProcessedFilterCurve
             S.append(np.interp(wave_ang, wf, tf, left=0.0, right=0.0))
             zps.append(_vega_zeropoint(filt))
-        S = np.array(S)                     # (n_filt, n_wave)
-        zps = np.array(zps)                 # (n_filt,)
+        S = np.array(S)  # (n_filt, n_wave)
+        zps = np.array(zps)  # (n_filt,)
         # photon-weighted band normalization: int(S lambda dlam)
         S_norm = np.trapezoid(S * wave_ang, wave_ang, axis=1)
 
@@ -288,7 +302,7 @@ def make_bc_tables(
         for feh in feh_pts:
             recs = []
             for teff in teff_pts:
-                mbol_term = SIGMA_SB * teff ** 4 / F0_10PC
+                mbol_term = SIGMA_SB * teff**4 / F0_10PC
                 for logg in logg_pts:
                     spec = _select_spectrum(df_spec, teff, logg, feh)
                     if spec is None:
@@ -297,16 +311,24 @@ def make_bc_tables(
                             f"logg={logg}, feh={feh} (any alpha)."
                         )
                     # (n_av, n_filt) band-averaged flux densities
-                    fmean = np.trapezoid(
-                        (atten * spec)[:, None, :] * (S * wave_ang)[None, :, :],
-                        wave_ang, axis=2,
-                    ) / S_norm[None, :]
+                    fmean = (
+                        np.trapezoid(
+                            (atten * spec)[:, None, :]
+                            * (S * wave_ang)[None, :, :],
+                            wave_ang,
+                            axis=2,
+                        )
+                        / S_norm[None, :]
+                    )
                     # BC = M_bol - M_X ; the (R/d)^2 factor cancels
                     bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
                     for i_av, av in enumerate(av_pts):
-                        recs.append((float(teff), float(logg), float(av),
-                                     *bc[i_av]))
-            df_new = pd.DataFrame(recs, columns=["teff", "logg", "Av"] + new_cols)
+                        recs.append(
+                            (float(teff), float(logg), float(av), *bc[i_av])
+                        )
+            df_new = pd.DataFrame(
+                recs, columns=["teff", "logg", "Av"] + new_cols
+            )
 
             fname = f"feh{feh:+.1f}_afe+0.0.{fac}"
             path = out_dir / fname
@@ -321,7 +343,8 @@ def make_bc_tables(
                 if keep_old_cols:
                     df_new = df_new.merge(
                         df_old[["teff", "logg", "Av"] + keep_old_cols],
-                        on=["teff", "logg", "Av"], how="left",
+                        on=["teff", "logg", "Av"],
+                        how="left",
                     )
                     if df_new[keep_old_cols].isna().any().any():
                         raise ValueError(
@@ -336,8 +359,10 @@ def make_bc_tables(
                 f.write(f"# {model}\n")
                 f.write(f"# {fac} (Vega)\n")
                 f.write("#  filters spectra  num Av  num Rv version\n")
-                f.write(f"#       {len(out_cols):2d}   {n_spectra:4d}     "
-                        f"{len(av_pts):3d}       1       1\n")
+                f.write(
+                    f"#       {len(out_cols):2d}   {n_spectra:4d}     "
+                    f"{len(av_pts):3d}       1       1\n"
+                )
                 f.write(f"# lgTef  logg  Fe_H a_Fe   Av   Rv{col_hdr}\n")
                 # plain arrays: itertuples would mangle column names that
                 # start with a digit (e.g. 2MASS_J)
@@ -345,9 +370,11 @@ def make_bc_tables(
                 vals = df_new[out_cols].values
                 for (teff_r, logg_r, av_r), bcs in zip(keys, vals):
                     bc_str = "".join(f"{b:21.4f}" for b in bcs)
-                    f.write(f"{np.log10(teff_r):.5f} {logg_r:5.2f} "
-                            f"{feh:5.2f} {0.0:4.1f} "
-                            f"{av_r:4.2f} {3.10:4.2f}{bc_str}\n")
+                    f.write(
+                        f"{np.log10(teff_r):.5f} {logg_r:5.2f} "
+                        f"{feh:5.2f} {0.0:4.1f} "
+                        f"{av_r:4.2f} {3.10:4.2f}{bc_str}\n"
+                    )
             written.append(path)
             logger.info(f"Wrote {path}")
 

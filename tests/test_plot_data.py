@@ -35,6 +35,7 @@ _KELT4_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def rvonly_prepared():
     """kelt4 RV-only system, prepared but NOT built (data-only regime)."""
@@ -66,7 +67,9 @@ def rvonly_built():
         system.prepare()
         model = system.build_model()
         with model:
-            point = system.get_internal_point(model, system.get_raw_start(model))
+            point = system.get_internal_point(
+                model, system.get_raw_start(model)
+            )
     finally:
         os.chdir(cwd)
     return system, model, point
@@ -85,11 +88,15 @@ def transit_built():
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [{"name": "TESS", "filter": "TESS"}],
-        "transit": [{
-            "name": "TESS_S48",
-            "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
-            "band": "TESS", "exptime": 2.0, "ninterp": 1.0,
-        }],
+        "transit": [
+            {
+                "name": "TESS_S48",
+                "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
+                "band": "TESS",
+                "exptime": 2.0,
+                "ninterp": 1.0,
+            }
+        ],
     }
     user_params = {
         "star.0.radius": {"initval": 1.610, "sigma": 0.05},
@@ -108,7 +115,9 @@ def transit_built():
         system.prepare()
         model = system.build_model()
         with model:
-            point = system.get_internal_point(model, system.get_raw_start(model))
+            point = system.get_internal_point(
+                model, system.get_raw_start(model)
+            )
     finally:
         os.chdir(cwd)
     return system, model, point
@@ -120,9 +129,11 @@ def transit_built():
 # kelt4_sed.params.yaml.
 _SED_CONFIG = {
     "run": {"name": "kelt4"},
-    "star": [{"name": "A", "mist": False},
-             {"name": "B", "mist": False},
-             {"name": "C", "mist": False}],
+    "star": [
+        {"name": "A", "mist": False},
+        {"name": "B", "mist": False},
+        {"name": "C", "mist": False},
+    ],
     "sed": {"file": "kelt4.sed.yaml"},
 }
 _SED_PARAMS = {
@@ -163,7 +174,9 @@ def sed_built():
         except Exception as e:  # noqa: BLE001 - network/data availability
             pytest.skip(f"SED example data unavailable: {e}")
         with model:
-            point = system.get_internal_point(model, system.get_raw_start(model))
+            point = system.get_internal_point(
+                model, system.get_raw_start(model)
+            )
     finally:
         os.chdir(cwd)
     return system, model, point
@@ -172,6 +185,7 @@ def sed_built():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _assert_json_roundtrip(specs):
     for spec in specs:
@@ -188,6 +202,7 @@ def _model_traces(specs):
 # ---------------------------------------------------------------------------
 # rvinstrument
 # ---------------------------------------------------------------------------
+
 
 def test_rvinstrument_plot_data_returns_serializable_specs(rvonly_built):
     """
@@ -259,6 +274,7 @@ def test_rvinstrument_data_only_without_build_model(rvonly_prepared):
 # transit
 # ---------------------------------------------------------------------------
 
+
 def test_transit_plot_data_returns_serializable_specs(transit_built):
     """
     Given a prepared+built transit kelt4 system and a start point,
@@ -316,6 +332,7 @@ def test_transit_data_only_without_model(transit_built):
 # sed
 # ---------------------------------------------------------------------------
 
+
 # The model-trace path loads the NextGen spectra table, whose per-row
 # json.loads parse takes minutes and is not cached between runs -- it can
 # exceed the 300s global pytest timeout on a cold or slow filesystem.
@@ -343,9 +360,12 @@ def test_sed_plot_data_returns_serializable_specs(sed_built):
     # matplotlib plot() path) rather than raw flux, so compare in that space.
     plot_obj = system.sed._make_plot_obj(system, [point])
     wave_ang = np.asarray(plot_obj.df_wave["wavelength_angstrom"], dtype=float)
-    star0 = [t for t in model_traces if t.name.endswith(str(plot_obj.star_names[0]))][0]
+    star0 = [
+        t for t in model_traces if t.name.endswith(str(plot_obj.star_names[0]))
+    ][0]
     np.testing.assert_allclose(
-        star0.y, np.log10(plot_obj.flux_model_draws[0][0] * wave_ang))
+        star0.y, np.log10(plot_obj.flux_model_draws[0][0] * wave_ang)
+    )
 
 
 def test_sed_data_only_without_build_model():
@@ -377,6 +397,7 @@ def test_sed_data_only_without_build_model():
 # ---------------------------------------------------------------------------
 # Regression: legacy plot() still renders at the start point
 # ---------------------------------------------------------------------------
+
 
 def test_legacy_plot_still_renders_at_start(rvonly_built, tmp_path):
     """

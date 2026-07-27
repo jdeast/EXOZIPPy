@@ -31,9 +31,9 @@ InferenceData object carries the full multimodal solution and every
 downstream consumer (distribute_posterior, tables, plots) can filter on it.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
-import logging
 
 import numpy as np
 
@@ -60,14 +60,28 @@ _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
 
 
 def _idx_to_words(n):
-    words = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three',
-             '4': 'four', '5': 'five', '6': 'six', '7': 'seven',
-             '8': 'eight', '9': 'nine'}
+    words = {
+        "0": "zero",
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine",
+    }
     return "".join(words[char] for char in str(n))
 
 
-def check_invalid_frac(mode_report, max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
-                       force=False, trace_path=None, modes_path=None):
+def check_invalid_frac(
+    mode_report,
+    max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
+    force=False,
+    trace_path=None,
+    modes_path=None,
+):
     """Raise if ``mode_report``'s invalid-draw fraction exceeds the threshold.
 
     A trace this numerically broken must not silently emit final tables.
@@ -88,9 +102,10 @@ def check_invalid_frac(mode_report, max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
         f"({mode_report.invalid_frac:.2%}) rejected as numerically invalid, "
         f"exceeding max_invalid_frac={max_invalid_frac:.2%}. This indicates "
         "a model or sampler bug -- investigate before trusting any output."
-        + where +
-        " Override with config `modes: {force: true}` (or raise "
-        "`modes.max_invalid_frac`) to re-process forensically.")
+        + where
+        + " Override with config `modes: {force: true}` (or raise "
+        "`modes.max_invalid_frac`) to re-process forensically."
+    )
 
 
 def mode_suffix(k):
@@ -100,33 +115,37 @@ def mode_suffix(k):
 
 @dataclass
 class ModeInfo:
-    index: int                    # 0-based, ordered by weight (descending)
-    weight: float                 # fraction of valid assigned draws
+    index: int  # 0-based, ordered by weight (descending)
+    weight: float  # fraction of valid assigned draws
     n_draws: int
     lp_med: float
     lp_max: float
-    delta_lp_max: float           # lp_max(best mode) - lp_max(this mode)
-    per_chain_weight: np.ndarray  # occupancy fraction of each chain's valid draws
-    center: dict = field(default_factory=dict)  # feature var -> center (raw units)
+    delta_lp_max: float  # lp_max(best mode) - lp_max(this mode)
+    per_chain_weight: (
+        np.ndarray
+    )  # occupancy fraction of each chain's valid draws
+    center: dict = field(
+        default_factory=dict
+    )  # feature var -> center (raw units)
     # Optional evidence-weighting fields (populated by
     # outputs.evidence.apply_evidence_weighting when modes: {weights: evidence}
     # is requested and every mode's bridge estimate is trustworthy).  weight is
     # then the softmax evidence weight and weight_err its propagated 1-sigma.
     weight_err: float = float("nan")  # 1-sigma on weight (evidence weighting)
-    lnZ: float = float("nan")         # local log-evidence (bridge sampling)
-    lnZ_err: float = float("nan")     # 1-sigma on lnZ
+    lnZ: float = float("nan")  # local log-evidence (bridge sampling)
+    lnZ_err: float = float("nan")  # 1-sigma on lnZ
 
 
 @dataclass
 class ModeReport:
-    labels: np.ndarray            # (chain, draw) int; -1 = invalid/unassigned
+    labels: np.ndarray  # (chain, draw) int; -1 = invalid/unassigned
     modes: List[ModeInfo]
     n_valid: int
     n_invalid: int
-    n_unassigned: int             # valid draws in dropped minor clusters
+    n_unassigned: int  # valid draws in dropped minor clusters
     provenance: str
     weights_reliable: bool
-    n_transitions: int            # inter-mode label changes along chains
+    n_transitions: int  # inter-mode label changes along chains
     feature_vars: List[str]
     notes: List[str] = field(default_factory=list)
     invalid_reason_counts: dict = field(default_factory=dict)
@@ -148,10 +167,13 @@ class ModeReport:
     def attach(self, idata):
         """Store labels as posterior variable ``mode`` on the InferenceData."""
         import xarray as xr
+
         post = idata.posterior
         da = xr.DataArray(
-            self.labels.astype(np.int16), dims=("chain", "draw"),
-            coords={"chain": post.chain, "draw": post.draw})
+            self.labels.astype(np.int16),
+            dims=("chain", "draw"),
+            coords={"chain": post.chain, "draw": post.draw},
+        )
         da.attrs["n_modes"] = self.n_modes
         da.attrs["weights"] = [float(w) for w in self.weights]
         da.attrs["provenance"] = self.provenance
@@ -164,32 +186,41 @@ class ModeReport:
         lines.append("Posterior mode report")
         lines.append("=====================")
         n_total = self.labels.size
-        lines.append(f"draws: {n_total} total, {self.n_valid} valid, "
-                     f"{self.n_invalid} invalid (rejected), "
-                     f"{self.n_unassigned} in minor/unassigned clusters")
+        lines.append(
+            f"draws: {n_total} total, {self.n_valid} valid, "
+            f"{self.n_invalid} invalid (rejected), "
+            f"{self.n_unassigned} in minor/unassigned clusters"
+        )
         if self.n_invalid:
             lines.append("")
             lines.append(
                 f"*** WARNING: {self.n_invalid} draws ({self.invalid_frac:.2%}) "
                 "rejected as numerically invalid -- this indicates a model "
                 "or sampler bug; investigate before trusting this report. "
-                f"reasons={self.invalid_reason_counts} ***")
+                f"reasons={self.invalid_reason_counts} ***"
+            )
             lines.append("")
         lines.append(f"modes found: {self.n_modes}")
         lines.append(f"weight provenance: {self.provenance}")
-        lines.append(f"inter-mode transitions (all chains): {self.n_transitions}")
+        lines.append(
+            f"inter-mode transitions (all chains): {self.n_transitions}"
+        )
         for m in self.modes:
             lines.append("")
             lines.append(f"mode {m.index + 1}:")
             lines.append(f"  weight   = {m.weight:.4f}")
             lines.append(f"  n_draws  = {m.n_draws}")
-            lines.append(f"  lp med/max = {m.lp_med:.2f} / {m.lp_max:.2f}"
-                         f"  (delta lp_max vs best = {m.delta_lp_max:.2f})")
+            lines.append(
+                f"  lp med/max = {m.lp_med:.2f} / {m.lp_max:.2f}"
+                f"  (delta lp_max vs best = {m.delta_lp_max:.2f})"
+            )
             occ = np.asarray(m.per_chain_weight)
-            lines.append(f"  chains containing this mode: "
-                         f"{int((occ > 0).sum())}/{occ.size}"
-                         f"  (per-chain occupancy min/med/max = "
-                         f"{occ.min():.2f}/{np.median(occ):.2f}/{occ.max():.2f})")
+            lines.append(
+                f"  chains containing this mode: "
+                f"{int((occ > 0).sum())}/{occ.size}"
+                f"  (per-chain occupancy min/med/max = "
+                f"{occ.min():.2f}/{np.median(occ):.2f}/{occ.max():.2f})"
+            )
         if self.notes:
             lines.append("")
             lines.append("notes:")
@@ -201,6 +232,7 @@ class ModeReport:
 # ----------------------------
 # internals
 # ----------------------------
+
 
 def _feature_matrix(post, feature_vars):
     """Stack the requested posterior variables into (n_samples, n_dims).
@@ -242,7 +274,8 @@ def _kmeans_bic(X, max_modes, seed):
         else:
             try:
                 centers, labels = kmeans2(
-                    X, k, minit="++", seed=rng.integers(2**31), iter=30)
+                    X, k, minit="++", seed=rng.integers(2**31), iter=30
+                )
             except Exception:
                 continue
             # kmeans2 can return empty clusters; drop them
@@ -304,7 +337,7 @@ def _dip_merge(X, labels, centers, merge_ratio):
                 continue
             u = u / sep
 
-            t_all = (X - centers[i]) @ u / sep    # 0 at c_i, 1 at c_j
+            t_all = (X - centers[i]) @ u / sep  # 0 at c_i, 1 at c_j
             mi, mj = labels == i, labels == j
 
             # criterion 1: projected spreads overlap the separation
@@ -340,8 +373,9 @@ def _dip_merge(X, labels, centers, merge_ratio):
     for old in range(k):
         new_labels[labels == old] = roots[find(old)]
     n_new = len(roots)
-    new_centers = np.vstack([X[new_labels == c].mean(axis=0)
-                             for c in range(n_new)])
+    new_centers = np.vstack(
+        [X[new_labels == c].mean(axis=0) for c in range(n_new)]
+    )
     return new_labels, new_centers, n_new != k
 
 
@@ -359,16 +393,19 @@ def _count_transitions(labels_2d):
 # public entry point
 # ----------------------------
 
-def identify_modes(idata,
-                   feature_vars: Optional[List[str]] = None,
-                   min_weight: float = 0.005,
-                   max_modes: int = 8,
-                   z_max: float = DEFAULT_Z_MAX,
-                   lp_abs_max: float = DEFAULT_LP_ABS_MAX,
-                   merge_ratio: float = 0.5,
-                   subsample: int = 20000,
-                   seed: int = 20260711,
-                   attach: bool = True) -> ModeReport:
+
+def identify_modes(
+    idata,
+    feature_vars: Optional[List[str]] = None,
+    min_weight: float = 0.005,
+    max_modes: int = 8,
+    z_max: float = DEFAULT_Z_MAX,
+    lp_abs_max: float = DEFAULT_LP_ABS_MAX,
+    merge_ratio: float = 0.5,
+    subsample: int = 20000,
+    seed: int = 20260711,
+    attach: bool = True,
+) -> ModeReport:
     """Identify posterior modes in a trace and label every draw.
 
     Parameters
@@ -396,14 +433,19 @@ def identify_modes(idata,
     notes = []
 
     if feature_vars is None:
-        feature_vars = sorted(v for v in post.data_vars
-                              if str(v).endswith("_raw"))
+        feature_vars = sorted(
+            v for v in post.data_vars if str(v).endswith("_raw")
+        )
         if not feature_vars:
             feature_vars = sorted(
-                v for v in post.data_vars
-                if np.issubdtype(post[v].dtype, np.floating))
-            notes.append("no *_raw variables in trace; clustered on "
-                         "physical variables instead")
+                v
+                for v in post.data_vars
+                if np.issubdtype(post[v].dtype, np.floating)
+            )
+            notes.append(
+                "no *_raw variables in trace; clustered on "
+                "physical variables instead"
+            )
     X, dim_names = _feature_matrix(post, feature_vars)
     n_chain = post.sizes["chain"]
     n_draw = post.sizes["draw"]
@@ -411,12 +453,15 @@ def identify_modes(idata,
 
     has_lp = hasattr(idata, "sample_stats") and "lp" in idata.sample_stats
     if has_lp:
-        lp = np.asarray(idata.sample_stats["lp"].values,
-                        dtype=float).reshape(n_samples)
+        lp = np.asarray(idata.sample_stats["lp"].values, dtype=float).reshape(
+            n_samples
+        )
     else:
         lp = np.full(n_samples, np.nan)
-        notes.append("sample_stats['lp'] missing; lp-based diagnostics "
-                     "and filters skipped")
+        notes.append(
+            "sample_stats['lp'] missing; lp-based diagnostics "
+            "and filters skipped"
+        )
 
     # ---- invalid-draw filter -------------------------------------------
     finite = np.isfinite(X).all(axis=1)
@@ -446,22 +491,30 @@ def identify_modes(idata,
 
     n_invalid = int((~valid).sum())
     invalid_reason_counts = {
-        r: int((reasons[~valid] == r).sum()) for r in _INVALID_REASONS
-        if (reasons[~valid] == r).any()}
+        r: int((reasons[~valid] == r).sum())
+        for r in _INVALID_REASONS
+        if (reasons[~valid] == r).any()
+    }
     invalid_per_chain = (~valid).reshape(n_chain, n_draw).sum(axis=1)
     if n_invalid:
         frac = n_invalid / n_samples
-        notes.append(f"{n_invalid} draws ({frac:.2%}) rejected as invalid "
-                     f"(non-finite, |lp| > {lp_abs_max:g}, or raw-space "
-                     f"robust z > {z_max:g}); these are runaway/stuck "
-                     f"draws, not posterior modes. ONLY a model or sampler "
-                     f"bug should produce these -- investigate.")
+        notes.append(
+            f"{n_invalid} draws ({frac:.2%}) rejected as invalid "
+            f"(non-finite, |lp| > {lp_abs_max:g}, or raw-space "
+            f"robust z > {z_max:g}); these are runaway/stuck "
+            f"draws, not posterior modes. ONLY a model or sampler "
+            f"bug should produce these -- investigate."
+        )
         logger.warning(
             "identify_modes: %d/%d draws (%.2f%%) rejected as numerically "
             "invalid -- this should only happen due to a model or sampler "
             "bug. reasons=%s, per-chain invalid counts=%s",
-            n_invalid, n_samples, 100 * frac, invalid_reason_counts,
-            invalid_per_chain.tolist())
+            n_invalid,
+            n_samples,
+            100 * frac,
+            invalid_reason_counts,
+            invalid_per_chain.tolist(),
+        )
     if not valid.any():
         raise ValueError("identify_modes: no valid draws in trace")
 
@@ -484,7 +537,8 @@ def identify_modes(idata,
     merged = True
     while merged and centers.shape[0] > 1:
         fit_labels, centers, merged = _dip_merge(
-            Xs[idx_fit], fit_labels, centers, merge_ratio)
+            Xs[idx_fit], fit_labels, centers, merge_ratio
+        )
 
     # assign every valid draw to nearest surviving center
     d2 = ((Xs[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
@@ -497,9 +551,11 @@ def identify_modes(idata,
     major = np.where(weights >= min_weight)[0]
     n_unassigned = int(counts[weights < min_weight].sum())
     if n_unassigned:
-        notes.append(f"{k - major.size} minor cluster(s) below "
-                     f"min_weight={min_weight} ({n_unassigned} draws) "
-                     f"left unassigned")
+        notes.append(
+            f"{k - major.size} minor cluster(s) below "
+            f"min_weight={min_weight} ({n_unassigned} draws) "
+            f"left unassigned"
+        )
     order = major[np.argsort(weights[major])[::-1]]
 
     labels_full = np.full(n_samples, -1, dtype=int)
@@ -527,23 +583,27 @@ def identify_modes(idata,
         sel = labels_full == m
         lp_m = lp[sel]
         lp_m = lp_m[np.isfinite(lp_m)]
-        per_chain = np.array([
-            (row == m).sum() / max((row >= 0).sum(), 1)
-            for row in labels_2d])
+        per_chain = np.array(
+            [(row == m).sum() / max((row >= 0).sum(), 1) for row in labels_2d]
+        )
         center_raw = {}
         sel_v = labels_valid == order[m]
         for jn, name in enumerate(dim_names):
             center_raw[name] = float(np.median(Xv[sel_v, jn]))
-        modes.append(ModeInfo(
-            index=m,
-            weight=float(w_assigned[m]),
-            n_draws=int(sel.sum()),
-            lp_med=float(np.median(lp_m)) if lp_m.size else np.nan,
-            lp_max=float(lp_m.max()) if lp_m.size else np.nan,
-            delta_lp_max=float(best_lp - lp_m.max()) if lp_m.size else np.nan,
-            per_chain_weight=per_chain,
-            center=center_raw,
-        ))
+        modes.append(
+            ModeInfo(
+                index=m,
+                weight=float(w_assigned[m]),
+                n_draws=int(sel.sum()),
+                lp_med=float(np.median(lp_m)) if lp_m.size else np.nan,
+                lp_max=float(lp_m.max()) if lp_m.size else np.nan,
+                delta_lp_max=(
+                    float(best_lp - lp_m.max()) if lp_m.size else np.nan
+                ),
+                per_chain_weight=per_chain,
+                center=center_raw,
+            )
+        )
 
     # ---- mixing diagnostics / weight provenance --------------------------
     n_transitions = _count_transitions(labels_2d)
@@ -553,20 +613,27 @@ def identify_modes(idata,
     else:
         chains_visiting_all = all(
             all((row == m).any() for m in range(n_modes))
-            for row in labels_2d if (row >= 0).any())
+            for row in labels_2d
+            if (row >= 0).any()
+        )
         enough_transitions = n_transitions >= 10 * (n_modes - 1)
         reliable = chains_visiting_all and enough_transitions
         if reliable:
-            provenance = (f"occupancy (validated: {n_transitions} inter-mode "
-                          f"transitions; every chain visits every mode)")
+            provenance = (
+                f"occupancy (validated: {n_transitions} inter-mode "
+                f"transitions; every chain visits every mode)"
+            )
         else:
             provenance = (
                 "occupancy (UNRELIABLE: chains do not mix between modes -- "
                 "weights reflect initialization, not posterior mass; use "
-                "per-mode evidence weighting or a folded likelihood)")
-            notes.append("relative mode weights are NOT trustworthy: "
-                         f"{n_transitions} inter-mode transitions; "
-                         "see provenance")
+                "per-mode evidence weighting or a folded likelihood)"
+            )
+            notes.append(
+                "relative mode weights are NOT trustworthy: "
+                f"{n_transitions} inter-mode transitions; "
+                "see provenance"
+            )
 
     report = ModeReport(
         labels=labels_2d,
@@ -584,8 +651,10 @@ def identify_modes(idata,
     )
     if attach:
         report.attach(idata)
-    logger.info("identify_modes: %d mode(s), weights=%s, %s",
-                report.n_modes,
-                [f"{w:.3f}" for w in report.weights],
-                provenance)
+    logger.info(
+        "identify_modes: %d mode(s), weights=%s, %s",
+        report.n_modes,
+        [f"{w:.3f}" for w in report.weights],
+        provenance,
+    )
     return report

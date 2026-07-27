@@ -63,7 +63,9 @@ def main():
 
     try:
         result = _build_preview(request)
-    except Exception as exc:  # noqa: BLE001 - any load_data/prepare error is the feature
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - any load_data/prepare error is the feature
         result = {
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),

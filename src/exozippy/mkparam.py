@@ -61,8 +61,10 @@ def _next_versioned_path(param_path):
     p = Path(param_path)
     suffix = p.suffix  # ".yaml"
     # Strip the last extension to expose possible version number
-    stem = p.name[: p.name.rfind(suffix)]  # e.g. "foo.params" or "foo.params.2"
-    m = re.search(r'^(.*?)\.(\d+)$', stem)
+    stem = p.name[
+        : p.name.rfind(suffix)
+    ]  # e.g. "foo.params" or "foo.params.2"
+    m = re.search(r"^(.*?)\.(\d+)$", stem)
     if m:
         base, n = m.group(1), int(m.group(2))
     else:
@@ -111,8 +113,9 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     return pairs, good_mask, burnin
 
 
-def mkprior(config, base_dir=None, trace_path=None, output_path=None,
-            n_seeds=None):
+def mkprior(
+    config, base_dir=None, trace_path=None, output_path=None, n_seeds=None
+):
     """
     Write a params.yaml seeded from a previous trace.
 
@@ -187,13 +190,21 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
         map_chain = map_idx // n_draws
         map_draw = map_idx % n_draws
         map_lp = float(flat_lp[map_idx])
-        logger.info(f"mkprior: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}")
+        logger.info(
+            f"mkprior: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
+        )
     else:
         # No lp → use last draw of chain 0 as a self-consistent fallback.
         # Per-parameter medians would be inconsistent (the joint point may not
         # exist in the posterior); any real draw is always self-consistent.
-        logger.warning("mkprior: lp not in trace — using last draw of chain 0 as fallback")
-        map_chain, map_draw, map_lp = 0, idata.posterior.sizes["draw"] - 1, float("nan")
+        logger.warning(
+            "mkprior: lp not in trace — using last draw of chain 0 as fallback"
+        )
+        map_chain, map_draw, map_lp = (
+            0,
+            idata.posterior.sizes["draw"] - 1,
+            float("nan"),
+        )
 
     posterior = idata["posterior"]
     # Only include physically sampled variables (those with a _raw counterpart).
@@ -211,13 +222,17 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
     pool_mask, pool_burnin = None, 0
     if n_seeds > 1:
         extra, pool_mask, pool_burnin = _sample_seed_draws(
-            idata, n_seeds - 1, exclude=(map_chain, map_draw))
+            idata, n_seeds - 1, exclude=(map_chain, map_draw)
+        )
         seed_pairs += extra
         if len(seed_pairs) < n_seeds:
             logger.warning(
                 "mkprior: requested %d seeds but only %d distinct draws were "
-                "available; emitting %d.", n_seeds, len(seed_pairs),
-                len(seed_pairs))
+                "available; emitting %d.",
+                n_seeds,
+                len(seed_pairs),
+                len(seed_pairs),
+            )
     K = len(seed_pairs)
     logger.info("mkprior: emitting %d seed(s) per parameter", K)
 
@@ -231,13 +246,16 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
         # the post-burn-in good draws when multi-seed (the transient inflates
         # std), else all draws (legacy single-seed behavior, unchanged).
         if pool_mask is not None:
-            pool = da.values[pool_mask][:, pool_burnin:].reshape(-1, *da.shape[2:])
+            pool = da.values[pool_mask][:, pool_burnin:].reshape(
+                -1, *da.shape[2:]
+            )
         else:
             pool = da.values.reshape(-1, *da.shape[2:])
         std_vals = np.atleast_1d(np.std(pool, axis=0))
         # (K, n_elements) joint values across the seed draws.
         seed_vals = np.stack(
-            [np.atleast_1d(da.values[c, d]) for (c, d) in seed_pairs])
+            [np.atleast_1d(da.values[c, d]) for (c, d) in seed_pairs]
+        )
 
         instance_names = _get_instance_names(config, comp_key)
 
@@ -281,9 +299,12 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
                 # Promote it to mu so the prior doesn't shift as initval
                 # moves to the MAP on successive mkparam runs.
                 existing_sigma = existing_entry.get("sigma")
-                if (existing_sigma is not None and float(existing_sigma) != 0
-                        and "mu" not in existing_entry
-                        and "initval" in existing_entry):
+                if (
+                    existing_sigma is not None
+                    and float(existing_sigma) != 0
+                    and "mu" not in existing_entry
+                    and "initval" in existing_entry
+                ):
                     entry["mu"] = existing_entry["initval"]
 
             output[out_key] = entry
@@ -294,25 +315,55 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
     # their individual values are not meaningful cosine/sine values and must
     # not be written to params.yaml as-is.  The relaxation engine derives the
     # pair from the angle via cos/sin, so writing the angle is correct.
-    for x_name, y_name, angle_name in [("xalpha", "yalpha", "alpha"),
-                                       ("xbigomega", "ybigomega", "bigomega")]:
-        _x_keys = {k[:-len(f".{x_name}")]: k for k in list(output) if k.endswith(f".{x_name}")}
-        _y_keys = {k[:-len(f".{y_name}")]: k for k in list(output) if k.endswith(f".{y_name}")}
+    for x_name, y_name, angle_name in [
+        ("xalpha", "yalpha", "alpha"),
+        ("xbigomega", "ybigomega", "bigomega"),
+    ]:
+        _x_keys = {
+            k[: -len(f".{x_name}")]: k
+            for k in list(output)
+            if k.endswith(f".{x_name}")
+        }
+        _y_keys = {
+            k[: -len(f".{y_name}")]: k
+            for k in list(output)
+            if k.endswith(f".{y_name}")
+        }
         for prefix in set(_x_keys) & set(_y_keys):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
-            xs, ys = output[x_key].get("init_scale", 0.0), output[y_key].get("init_scale", 0.0)
+            xs, ys = output[x_key].get("init_scale", 0.0), output[y_key].get(
+                "init_scale", 0.0
+            )
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.
             xv_list = xv if isinstance(xv, list) else [xv]
             yv_list = yv if isinstance(yv, list) else [yv]
-            angles = [float(np.round(np.degrees(np.arctan2(y, x)), 8))
-                      for x, y in zip(xv_list, yv_list)]
+            angles = [
+                float(np.round(np.degrees(np.arctan2(y, x)), 8))
+                for x, y in zip(xv_list, yv_list)
+            ]
             # init_scale is scalar (seed 0), so propagate from the seed-0 (x, y).
-            x0, y0, r_sq = xv_list[0], yv_list[0], xv_list[0]**2 + yv_list[0]**2
-            sigma_deg = float(np.round(np.degrees(
-                np.sqrt((y0 / r_sq)**2 * xs**2 + (x0 / r_sq)**2 * ys**2)
-            ), 8)) if r_sq > 0 else 0.0
+            x0, y0, r_sq = (
+                xv_list[0],
+                yv_list[0],
+                xv_list[0] ** 2 + yv_list[0] ** 2,
+            )
+            sigma_deg = (
+                float(
+                    np.round(
+                        np.degrees(
+                            np.sqrt(
+                                (y0 / r_sq) ** 2 * xs**2
+                                + (x0 / r_sq) ** 2 * ys**2
+                            )
+                        ),
+                        8,
+                    )
+                )
+                if r_sq > 0
+                else 0.0
+            )
             del output[x_key]
             del output[y_key]
             output[f"{prefix}.{angle_name}"] = {
@@ -337,9 +388,12 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
             # is ever edited.  Same logic as for sampled parameters above.
             if isinstance(val, dict):
                 sigma = val.get("sigma")
-                if (sigma is not None and float(sigma) != 0
-                        and "mu" not in val
-                        and "initval" in val):
+                if (
+                    sigma is not None
+                    and float(sigma) != 0
+                    and "mu" not in val
+                    and "initval" in val
+                ):
                     val = dict(val)
                     val["mu"] = val["initval"]
             output[_normalize_key(key, config)] = val
@@ -354,7 +408,8 @@ def mkprior(config, base_dir=None, trace_path=None, output_path=None,
             f.write(
                 f"# Multi-seed: initval is a length-{K} list of joint posterior\n"
                 f"# draws (seed 0 = MAP; 1..{K - 1} = random post-burn-in draws\n"
-                f"# from the good chains). init_scale/bounds are scalar (seed 0).\n")
+                f"# from the good chains). init_scale/bounds are scalar (seed 0).\n"
+            )
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 
     logger.info(f"mkprior: written {output_path}")

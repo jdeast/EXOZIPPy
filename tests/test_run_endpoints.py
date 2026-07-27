@@ -32,6 +32,7 @@ POLL_INTERVAL = 0.5
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def client():
     pytest.importorskip("fastapi")
@@ -111,7 +112,8 @@ def kelt4_workdir(tmp_path):
     """A throwaway copy of the kelt4 example directory (data + params)."""
     work_dir = tmp_path / "kelt4"
     shutil.copytree(
-        EXAMPLE_DIR, work_dir,
+        EXAMPLE_DIR,
+        work_dir,
         ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
     return work_dir
@@ -120,6 +122,7 @@ def kelt4_workdir(tmp_path):
 # ---------------------------------------------------------------------------
 # Fast endpoint tests (fake handle -- no subprocess)
 # ---------------------------------------------------------------------------
+
 
 def test_status_idle_when_no_run(client):
     """
@@ -144,8 +147,9 @@ def test_run_start_status_stop_roundtrip(client, monkeypatch, tmp_path):
     fake = _FakeHandle(tmp_path)
     monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
 
-    started = client.post("/api/run", json={"config": "cfg.yaml",
-                                            "project_dir": str(tmp_path)})
+    started = client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
     assert started.status_code == 200
     body = started.json()
     assert body["active"] is True
@@ -175,12 +179,14 @@ def test_run_guard_rail_only_one_active(client, monkeypatch, tmp_path):
     fake = _FakeHandle(tmp_path)
     monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
 
-    first = client.post("/api/run", json={"config": "cfg.yaml",
-                                          "project_dir": str(tmp_path)})
+    first = client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
     assert first.status_code == 200
 
-    second = client.post("/api/run", json={"config": "cfg.yaml",
-                                           "project_dir": str(tmp_path)})
+    second = client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
     assert second.status_code == 409
     assert "error" in second.json()
 
@@ -197,8 +203,9 @@ def test_run_snapshots_config_into_output_dir(client, monkeypatch, tmp_path):
     fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
     monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
 
-    client.post("/api/run", json={"config": "cfg.yaml",
-                                  "project_dir": str(tmp_path)})
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
 
     assert (tmp_path / "out" / "cfg.used.yaml").is_file()
 
@@ -213,8 +220,9 @@ def test_run_image_rejects_outside_tree(client, monkeypatch, tmp_path):
 
     fake = _FakeHandle(tmp_path)
     monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
-    client.post("/api/run", json={"config": "cfg.yaml",
-                                  "project_dir": str(tmp_path)})
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
 
     resp = client.get("/api/run/image", params={"path": "/etc/passwd"})
     assert resp.status_code == 403
@@ -233,8 +241,9 @@ def test_run_image_serves_file_inside_tree(client, monkeypatch, tmp_path):
     img.write_bytes(b"\x89PNG\r\n\x1a\n fake png bytes")
     fake = _FakeHandle(tmp_path)
     monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
-    client.post("/api/run", json={"config": "cfg.yaml",
-                                  "project_dir": str(tmp_path)})
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
 
     resp = client.get("/api/run/image", params={"path": str(img)})
     assert resp.status_code == 200
@@ -257,9 +266,10 @@ def test_utilities_run_unknown_name_is_400(client, tmp_path):
     When POST /api/utilities/run,
     Then it returns 400 with an error.
     """
-    resp = client.post("/api/utilities/run",
-                       json={"name": "nope-not-real", "args": {},
-                             "cwd": str(tmp_path)})
+    resp = client.post(
+        "/api/utilities/run",
+        json={"name": "nope-not-real", "args": {}, "cwd": str(tmp_path)},
+    )
     assert resp.status_code == 400
     assert "error" in resp.json()
 
@@ -295,6 +305,7 @@ def test_utilities_schema_form_roundtrip(client):
 # Slow end-to-end lifecycle through the endpoints
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.slow
 @pytest.mark.timeout(900)
 def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
@@ -312,26 +323,34 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
     config_name = _write_ptde_config(kelt4_workdir, out_prefix)
 
     client = TestClient(create_app())
-    started = client.post("/api/run", json={"config": config_name,
-                                            "project_dir": str(kelt4_workdir)})
+    started = client.post(
+        "/api/run",
+        json={"config": config_name, "project_dir": str(kelt4_workdir)},
+    )
     assert started.status_code == 200
 
     try:
+
         def _sampling_with_progress():
             st = client.get("/api/run/status").json()
             if not st.get("alive") and st.get("phase") not in ("sampling",):
                 return True
-            return (st.get("phase") == "sampling"
-                    and st.get("state", {}).get("n_draws", 0) >= 100)
+            return (
+                st.get("phase") == "sampling"
+                and st.get("state", {}).get("n_draws", 0) >= 100
+            )
 
-        assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), \
-            "run never reported n_draws>=100 during sampling"
+        assert _poll_until(
+            _sampling_with_progress, REACH_SAMPLING_TIMEOUT
+        ), "run never reported n_draws>=100 during sampling"
 
         status = client.get("/api/run/status").json()
         assert status["phase"] == "sampling", f"unexpected phase {status}"
 
         # A frozen copy of the config was stashed for reproducibility.
-        assert (out_prefix.parent / (Path(config_name).stem + ".used.yaml")).is_file()
+        assert (
+            out_prefix.parent / (Path(config_name).stem + ".used.yaml")
+        ).is_file()
 
         stopped = client.post("/api/run/stop", json={"force": False})
         assert stopped.status_code == 200
@@ -347,4 +366,7 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
     finally:
         client.post("/api/run/stop", json={"force": True})
 
-    assert final_phase in {"stopped", "done"}, f"non-terminal end: {final_phase}"
+    assert final_phase in {
+        "stopped",
+        "done",
+    }, f"non-terminal end: {final_phase}"

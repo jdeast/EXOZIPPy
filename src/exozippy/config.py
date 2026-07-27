@@ -1,24 +1,28 @@
 # src/exozippy/config.py
-import logging
-import numpy as np
-import yaml
 import copy
-from pathlib import Path
-import sympy as sp
-import astropy.units as u
 import importlib
+import logging
 import signal
 import time
+from pathlib import Path
+
+import astropy.units as u
+import numpy as np
+import sympy as sp
+import yaml
 
 logger = logging.getLogger(__name__)
 import re
 
 from exozippy.linking import extract_links
 
-class SymbolicTimeout(Exception): pass
+
+class SymbolicTimeout(Exception):
+    pass
 
 
 import contextlib
+
 
 @contextlib.contextmanager
 def _sympy_time_limit(seconds=2):
@@ -35,9 +39,11 @@ def _sympy_time_limit(seconds=2):
     _xla_gc_callback" -- after which the guarded solve ran unbounded), the
     next alarm gets another chance to land in interpretable bytecode.
     """
+
     def handler(signum, frame):
         signal.alarm(1)
         raise SymbolicTimeout()
+
     old_handler = signal.signal(signal.SIGALRM, handler)
     signal.alarm(seconds)
     try:
@@ -46,10 +52,11 @@ def _sympy_time_limit(seconds=2):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
+
 # Instance names appear as the middle part of dotted parameter paths
 # (star.MyName.teff), so they must be safe to split on "." and must not
 # collide with the internal index notation (star.0.teff).
-_VALID_INSTANCE_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
+_VALID_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def validate_instance_names(system_config):
@@ -73,7 +80,7 @@ def validate_instance_names(system_config):
             if not isinstance(name, str):
                 raise ValueError(
                     f"Invalid name {name!r} for {where}: names must be strings. "
-                    f"Quote it in your config YAML (name: \"{name}\")."
+                    f'Quote it in your config YAML (name: "{name}").'
                 )
             if not _VALID_INSTANCE_NAME.match(name):
                 raise ValueError(
@@ -87,8 +94,9 @@ def validate_instance_names(system_config):
                     f"Invalid name '{name}' for {where}: purely numeric names "
                     f"collide with the internal index notation "
                     f"({comp_key}.0, {comp_key}.1, ...). Add a non-digit "
-                    f"character (e.g. name: \"{comp_key}_{name}\")."
+                    f'character (e.g. name: "{comp_key}_{name}").'
                 )
+
 
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
@@ -96,6 +104,7 @@ RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
 RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
+
 
 class ProvenanceState:
     def __init__(self):
@@ -108,6 +117,7 @@ class ProvenanceState:
             self.ranks[path] = rank
             return True
         return False
+
 
 """ 
 This class is the reconciliation engine to determine the sole source of truth 
@@ -136,8 +146,16 @@ The logic of the config manager is independent of any specific components.
 """
 
 
-def _meaningful_change(new_val, old_val, new_rank, old_rank, tolerance,
-                       resolved, provenance, target_str):
+def _meaningful_change(
+    new_val,
+    old_val,
+    new_rank,
+    old_rank,
+    tolerance,
+    resolved,
+    provenance,
+    target_str,
+):
     """Return True iff _execute_solve should apply this update and signal progress.
 
     Propagates a rank improvement silently (updates provenance but returns False)
@@ -147,10 +165,10 @@ def _meaningful_change(new_val, old_val, new_rank, old_rank, tolerance,
     same variable.
     """
     if old_val is None:
-        return True   # Condition A: variable was previously unknown — always an update
+        return True  # Condition A: variable was previously unknown — always an update
     ref = max(abs(new_val), abs(old_val), 1e-9)
     if abs(new_val - old_val) / ref >= tolerance:
-        return True   # value changed meaningfully
+        return True  # value changed meaningfully
     # Value unchanged; propagate rank silently if it improved
     if new_rank > old_rank:
         provenance[target_str] = new_rank
@@ -171,7 +189,9 @@ class ConfigManager:
         # If config is provided, validate names then standardize right away
         if system_config is not None:
             validate_instance_names(system_config)
-            self.user_params = self.standardize_param_names(user_params, system_config)
+            self.user_params = self.standardize_param_names(
+                user_params, system_config
+            )
             self.links = extract_links(self.user_params, system_config)
         else:
             self.user_params = user_params
@@ -194,9 +214,13 @@ class ConfigManager:
         # RANK_DERIVED_DATA and RANK_USER so an explicit user initval list wins.
         self.seed_resolved = None
         self.seed_hint_sets = []
-        self.seed_hint_rank = RANK_DERIVED_USER  # 80: below RANK_USER, above data
-        self.scale_hints = {}   # path -> init_scale in internal units
-        self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
+        self.seed_hint_rank = (
+            RANK_DERIVED_USER  # 80: below RANK_USER, above data
+        )
+        self.scale_hints = {}  # path -> init_scale in internal units
+        self.propagated_scales = (
+            {}
+        )  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
         self.symbolic_blacklist = set()
 
@@ -211,18 +235,21 @@ class ConfigManager:
         # last in finalize_user_params).  Exposed via export_solution() so a
         # caller can report each parameter's solved value, scale, and
         # provenance without rebuilding the PyMC model.
-        self._last_provenance = {}        # internal_path -> rank
+        self._last_provenance = {}  # internal_path -> rank
         self._last_scale_provenance = {}  # internal_path -> rank
-        self._last_resolved = {}          # internal_path -> internal value
-        self._last_solved_by = {}         # internal_path -> relation string
+        self._last_resolved = {}  # internal_path -> internal value
+        self._last_solved_by = {}  # internal_path -> relation string
 
         components_dir = Path(__file__).parent / "components"
 
         for py_file in components_dir.rglob("symbolic_physics.py"):
-            module_name = f"exozippy.components.{py_file.parent.name}.symbolic_physics"
+            module_name = (
+                f"exozippy.components.{py_file.parent.name}.symbolic_physics"
+            )
 
             spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec is None: continue
+            if spec is None:
+                continue
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
@@ -231,7 +258,10 @@ class ConfigManager:
 
             yaml_key = getattr(module, "comp_key", py_file.parent.name)
 
-            if hasattr(module, "get_symbol_map") and yaml_key in self.system_config:
+            if (
+                hasattr(module, "get_symbol_map")
+                and yaml_key in self.system_config
+            ):
                 comp_section = self.system_config[yaml_key]
 
                 if not isinstance(comp_section, list):
@@ -255,10 +285,14 @@ class ConfigManager:
                             if "." in str(path):
                                 instance_map[sym_name] = path
                             else:
-                                instance_map[sym_name] = f"{yaml_key}.{i}.{path}"
+                                instance_map[sym_name] = (
+                                    f"{yaml_key}.{i}.{path}"
+                                )
 
                         for _, full_path in instance_map.items():
-                            self.master_symbol_map[full_path] = sp.Symbol(full_path)
+                            self.master_symbol_map[full_path] = sp.Symbol(
+                                full_path
+                            )
 
                         # Extract the exact SymPy objects (with all their assumptions) from the equations
                         module_symbols = set()
@@ -287,7 +321,9 @@ class ConfigManager:
         for rel in self.all_relations:
             logger.debug(f"Relation: {rel}")
 
-    def register_custom_solver(self, target_str, solver_func, standalone=False):
+    def register_custom_solver(
+        self, target_str, solver_func, standalone=False
+    ):
         """
         Register a shortcut solver for 'comp.param' targets.
 
@@ -318,13 +354,14 @@ class ConfigManager:
         """
         subs = {}
         for dep in plink.dep_paths:
-            parts = dep.split('.')
+            parts = dep.split(".")
             f = self.get_conversion_factor(parts[0], parts[-1], full_path=dep)
             if f != 1.0:
                 subs[sp.Symbol(dep)] = sp.Symbol(dep) / f
-        tparts = plink.target_path.split('.')
-        tf = self.get_conversion_factor(tparts[0], tparts[-1],
-                                        full_path=plink.target_path)
+        tparts = plink.target_path.split(".")
+        tf = self.get_conversion_factor(
+            tparts[0], tparts[-1], full_path=plink.target_path
+        )
         expr = plink.expr.subs(subs) if subs else plink.expr
         return tf * expr if tf != 1.0 else expr
 
@@ -336,8 +373,12 @@ class ConfigManager:
         """
         out = {}
         for target, fields in self.links.items():
-            parts = target.split('.')
-            if len(parts) == 3 and parts[0] == comp_type and parts[2] == param_name:
+            parts = target.split(".")
+            if (
+                len(parts) == 3
+                and parts[0] == comp_type
+                and parts[2] == param_name
+            ):
                 for fld, plink in fields.items():
                     out.setdefault(fld, {})[int(parts[1])] = plink
         return out
@@ -358,7 +399,9 @@ class ConfigManager:
         """Call this during Stage 1/Pre-flight when the System config is loaded."""
         self.system_config = config
         # Modernize the names to strict index format before running any staging logic
-        self.user_params = self.standardize_param_names(self.raw_user_params, config)
+        self.user_params = self.standardize_param_names(
+            self.raw_user_params, config
+        )
         self.links = extract_links(self.user_params, config)
 
     def _translate_and_scale(self, path, value):
@@ -367,21 +410,26 @@ class ConfigManager:
         Shared by add_hint / add_scale_hint / add_seed_hints so they all agree
         on nomenclature and unit handling."""
         translated_path = path
-        parts = path.split('.')
+        parts = path.split(".")
 
         # 1. Standardize the Nomenclature
         if len(parts) == 3:
             comp_type, name, param = parts
             try:
                 # Resolve human name (e.g., 'LENS') to internal index (e.g., '0')
-                idx = next(i for i, c in enumerate(self.system_config.get(comp_type, []))
-                           if str(c.get("name")) == str(name) or str(i) == str(name))
+                idx = next(
+                    i
+                    for i, c in enumerate(
+                        self.system_config.get(comp_type, [])
+                    )
+                    if str(c.get("name")) == str(name) or str(i) == str(name)
+                )
                 translated_path = f"{comp_type}.{idx}.{param}"
             except StopIteration:
                 pass
 
         # 2. Scale to Internal Units
-        final_parts = translated_path.split('.')
+        final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             # Use the original path to check if the user provided an explicit unit in yaml
@@ -397,7 +445,9 @@ class ConfigManager:
         API for components to register their data-driven guesses.
         Converts human-readable paths to strict indices and scales to internal units.
         """
-        translated_path, internal_value = self._translate_and_scale(path, value)
+        translated_path, internal_value = self._translate_and_scale(
+            path, value
+        )
 
         # Store the fully processed, ready-to-use hint
         self.hints[translated_path] = internal_value
@@ -435,17 +485,22 @@ class ConfigManager:
         stellar defaults (e.g. bulge distances need ~500 pc, not 0.1 pc).
         """
         translated_path = path
-        parts = path.split('.')
+        parts = path.split(".")
         if len(parts) == 3:
             comp_type, name, param = parts
             try:
-                idx = next(i for i, c in enumerate(self.system_config.get(comp_type, []))
-                           if str(c.get("name")) == str(name) or str(i) == str(name))
+                idx = next(
+                    i
+                    for i, c in enumerate(
+                        self.system_config.get(comp_type, [])
+                    )
+                    if str(c.get("name")) == str(name) or str(i) == str(name)
+                )
                 translated_path = f"{comp_type}.{idx}.{param}"
             except StopIteration:
                 pass
 
-        final_parts = translated_path.split('.')
+        final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             factor = self.get_conversion_factor(c_type, p_name, full_path=path)
@@ -462,8 +517,15 @@ class ConfigManager:
             else:
                 base[k] = v
 
-    def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None,
-                element=None):
+    def resolve(
+        self,
+        component_type,
+        param_name,
+        shape=(),
+        internal_overrides=None,
+        names=None,
+        element=None,
+    ):
         # `element` targets a single specific instance when resolving with
         # shape=(): the per-element user-param keys are built with that index
         # instead of the local loop index.  Without it, resolving star.1.age
@@ -501,7 +563,10 @@ class ConfigManager:
 
         keys_to_check_global = []
         for i in range(n_elements):
-            keys = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
+            keys = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
             keys_to_check_global.extend(keys)
@@ -539,12 +604,15 @@ class ConfigManager:
         for key in all_numeric:
             val = base.get(key)
             if val is not None:
-                resolved[key] = np.full(n_elements, float(val) * unit_scaling, dtype=float)
+                resolved[key] = np.full(
+                    n_elements, float(val) * unit_scaling, dtype=float
+                )
             else:
                 resolved[key] = None
 
         def apply_value(key, current_arr, idx, new_val):
-            if new_val is None: return current_arr
+            if new_val is None:
+                return current_arr
             if current_arr is None:
                 current_arr = np.full(n_elements, np.nan, dtype=float)
                 resolved[key] = current_arr
@@ -565,7 +633,11 @@ class ConfigManager:
                 if key in internal_overrides:
                     val = internal_overrides[key]
                     for i in range(n_elements):
-                        v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                        v = (
+                            val[i]
+                            if isinstance(val, (list, np.ndarray))
+                            else val
+                        )
                         if v is None:
                             continue
                         v = float(v)
@@ -585,45 +657,69 @@ class ConfigManager:
         # before passing to Parameter, which will re-apply the same factor.
         # This is distinct from unit_scaling (base→user), which only applies to
         # default values read from defaults.yaml.
-        internal_factor = self.get_conversion_factor(component_type, param_name) or 1.0
+        internal_factor = (
+            self.get_conversion_factor(component_type, param_name) or 1.0
+        )
 
         # Apply Jacobian-propagated scales (lowest priority after defaults,
         # overridden by scale hints and user params below).
         if self.propagated_scales:
             for i in range(n_elements):
-                prop_keys = [f"{component_type}.{param_name}",
-                             f"{component_type}.{_eff_idx(i)}.{param_name}"]
+                prop_keys = [
+                    f"{component_type}.{param_name}",
+                    f"{component_type}.{_eff_idx(i)}.{param_name}",
+                ]
                 if names and i < len(names):
-                    prop_keys.append(f"{component_type}.{names[i]}.{param_name}")
+                    prop_keys.append(
+                        f"{component_type}.{names[i]}.{param_name}"
+                    )
                 for k in prop_keys:
                     if k in self.propagated_scales:
-                        apply_value("init_scale", resolved["init_scale"], i,
-                                    self.propagated_scales[k] / internal_factor)
+                        apply_value(
+                            "init_scale",
+                            resolved["init_scale"],
+                            i,
+                            self.propagated_scales[k] / internal_factor,
+                        )
                         break
 
         # Apply scale hints: context-appropriate init_scales from components
         # (e.g. bulge distances). They override defaults.yaml but yield to the
         # user's explicit init_scale below.
         for i in range(n_elements):
-            scale_keys = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
+            scale_keys = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
                 scale_keys.append(f"{component_type}.{names[i]}.{param_name}")
             for k in scale_keys:
                 if k in self.scale_hints:
-                    apply_value("init_scale", resolved["init_scale"], i,
-                                self.scale_hints[k] / internal_factor)
+                    apply_value(
+                        "init_scale",
+                        resolved["init_scale"],
+                        i,
+                        self.scale_hints[k] / internal_factor,
+                    )
                     break
 
         for i in range(n_elements):
-            keys_to_check = [f"{component_type}.{param_name}", f"{component_type}.{_eff_idx(i)}.{param_name}"]
+            keys_to_check = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
-                keys_to_check.append(f"{component_type}.{names[i]}.{param_name}")
+                keys_to_check.append(
+                    f"{component_type}.{names[i]}.{param_name}"
+                )
 
             for k in keys_to_check:
                 if k in self.user_params:
                     ov = self.user_params[k]
-                    if ov is None: continue
-                    if not isinstance(ov, dict): ov = {"initval": ov}
+                    if ov is None:
+                        continue
+                    if not isinstance(ov, dict):
+                        ov = {"initval": ov}
 
                     resolved["user_modified"] = True
                     if any(pk in ov for pk in physics_keys):
@@ -643,7 +739,9 @@ class ConfigManager:
                         if str_key in ov:
                             if n_elements > 1:
                                 if not isinstance(resolved[str_key], list):
-                                    resolved[str_key] = [resolved[str_key]] * n_elements
+                                    resolved[str_key] = [
+                                        resolved[str_key]
+                                    ] * n_elements
                                 resolved[str_key][i] = ov[str_key]
                             else:
                                 resolved[str_key] = ov[str_key]
@@ -652,21 +750,38 @@ class ConfigManager:
                         if bool_key in ov:
                             resolved[bool_key] = ov[bool_key]
 
-                    if "sigma" in ov and "init_scale" not in ov and resolved["sigma"] is not None:
-                        apply_value("init_scale", resolved.get("init_scale"), i, ov["sigma"])
+                    if (
+                        "sigma" in ov
+                        and "init_scale" not in ov
+                        and resolved["sigma"] is not None
+                    ):
+                        apply_value(
+                            "init_scale",
+                            resolved.get("init_scale"),
+                            i,
+                            ov["sigma"],
+                        )
 
                     # If user gave mu but not initval, start the chain at mu rather
                     # than the defaults.yaml value — the user's prior center is always
                     # a better starting point than an arbitrary global default.
                     if "mu" in ov and "initval" not in ov:
-                        apply_value("initval", resolved["initval"], i, ov["mu"])
+                        apply_value(
+                            "initval", resolved["initval"], i, ov["mu"]
+                        )
 
         return resolved
 
-    def get_conversion_factor(self, component_type, param_name, full_path=None):
+    def get_conversion_factor(
+        self, component_type, param_name, full_path=None
+    ):
         u_str = None
         # 1. Check if the user explicitly provided a unit in their config
-        if full_path and full_path in self.user_params and isinstance(self.user_params[full_path], dict):
+        if (
+            full_path
+            and full_path in self.user_params
+            and isinstance(self.user_params[full_path], dict)
+        ):
             u_str = self.user_params[full_path].get("unit")
 
         # 2. Fallback to defaults
@@ -677,10 +792,12 @@ class ConfigManager:
 
         i_str = param_cfg.get("internal_unit", "")
 
-        if not u_str or not i_str: return 1.0
+        if not u_str or not i_str:
+            return 1.0
 
         try:
-            if "dex" in u_str or "dex" in i_str: return 1.0
+            if "dex" in u_str or "dex" in i_str:
+                return 1.0
             # Returns the multiplier to convert FROM user TO internal
             return u.Unit(u_str).to(u.Unit(i_str))
         except Exception:
@@ -728,17 +845,22 @@ class ConfigManager:
 
             comp_list = config[comp_type]
             if not isinstance(comp_list, list):
-                standardized[key] = val  # flat-dict component 3-part key: keep as-is
+                standardized[key] = (
+                    val  # flat-dict component 3-part key: keep as-is
+                )
                 continue
 
             try:
                 idx = next(
-                    i for i, c in enumerate(comp_list)
+                    i
+                    for i, c in enumerate(comp_list)
                     if isinstance(c, dict) and c.get("name") == comp_name
                 )
                 standardized[f"{comp_type}.{idx}.{param_name}"] = val
             except StopIteration:
-                standardized[key] = val  # numeric index or unknown name: keep as-is
+                standardized[key] = (
+                    val  # numeric index or unknown name: keep as-is
+                )
 
         # Pass 2: expand 2-part keys for list components.
         # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
@@ -751,7 +873,9 @@ class ConfigManager:
             comp_list = config.get(comp_type)
 
             if not isinstance(comp_list, list):
-                standardized[key] = val  # flat-dict or unknown component: keep as-is
+                standardized[key] = (
+                    val  # flat-dict or unknown component: keep as-is
+                )
                 continue
 
             for i in range(len(comp_list)):
@@ -803,7 +927,7 @@ class ConfigManager:
             if isinstance(val, (list, tuple)):
                 val = val[0]
             if val is not None:
-                parts = path.split('.')
+                parts = path.split(".")
                 translated_path = path
 
                 if len(parts) == 3:
@@ -814,15 +938,21 @@ class ConfigManager:
 
                 sym = self.master_symbol_map.get(translated_path)
                 if sym:
-                    c_type = translated_path.split('.')[0]
-                    p_name = translated_path.split('.')[-1]
-                    factor = self.get_conversion_factor(c_type, p_name, full_path=path)
+                    c_type = translated_path.split(".")[0]
+                    p_name = translated_path.split(".")[-1]
+                    factor = self.get_conversion_factor(
+                        c_type, p_name, full_path=path
+                    )
                     internal_val = float(val) * factor
-                    logger.debug(f"Mapped: {path} -> {translated_path} -> {sym} = {internal_val} (internal)")
+                    logger.debug(
+                        f"Mapped: {path} -> {translated_path} -> {sym} = {internal_val} (internal)"
+                    )
                     flat_params[sym] = internal_val
                 else:
                     if "." in path:
-                        logger.debug(f"Unmapped: {path} (tried translated: {translated_path})")
+                        logger.debug(
+                            f"Unmapped: {path} (tried translated: {translated_path})"
+                        )
 
         # --- REGISTER LINK TARGETS AND DEPENDENCIES AS SYMBOLS ---
         # A link target/dep may not appear in any component's symbol map
@@ -848,10 +978,14 @@ class ConfigManager:
                 if isinstance(val, (list, tuple)):
                     val = val[0]  # seed 0; see per-seed handling below
                 if val is not None:
-                    c_type = path.split('.')[0]
-                    p_name = path.split('.')[-1]
-                    factor = self.get_conversion_factor(c_type, p_name, full_path=path)
-                    flat_params[self.master_symbol_map[path]] = float(val) * factor
+                    c_type = path.split(".")[0]
+                    p_name = path.split(".")[-1]
+                    factor = self.get_conversion_factor(
+                        c_type, p_name, full_path=path
+                    )
+                    flat_params[self.master_symbol_map[path]] = (
+                        float(val) * factor
+                    )
 
         base_flat = {str(k): v for k, v in flat_params.items()}
 
@@ -888,7 +1022,7 @@ class ConfigManager:
         # 4. INJECT BACK SAFELY
         for sym_node, val in resolved_flat.items():
             path = str(sym_node)
-            parts = path.split('.')
+            parts = path.split(".")
             final_path = path
 
             if len(parts) == 3:
@@ -897,7 +1031,9 @@ class ConfigManager:
                     if c_type == comp_type and str(i) == str(idx):
                         final_path = f"{comp_type}.{c_name}.{param}"
                         break
-                factor = self.get_conversion_factor(comp_type, param, full_path=final_path)
+                factor = self.get_conversion_factor(
+                    comp_type, param, full_path=final_path
+                )
                 user_val = val / factor
             else:
                 user_val = val
@@ -907,12 +1043,17 @@ class ConfigManager:
             # Check both so we don't create a spurious duplicate entry.
             existing_key = None
             for try_key in (final_path, path):
-                if try_key in self.user_params and isinstance(self.user_params[try_key], dict):
+                if try_key in self.user_params and isinstance(
+                    self.user_params[try_key], dict
+                ):
                     existing_key = try_key
                     break
 
             if existing_key is None:
-                self.user_params[final_path] = {"initval": user_val, "derived": True}
+                self.user_params[final_path] = {
+                    "initval": user_val,
+                    "derived": True,
+                }
             else:
                 existing = self.user_params[existing_key]
                 # Don't clobber a user-specified Gaussian prior: if the user gave
@@ -940,19 +1081,29 @@ class ConfigManager:
                     logger.warning(
                         f"Link '{target}.{fld} = {plink.expr_str}' could not be "
                         f"snapshot: unresolved dependencies "
-                        f"{[d for d in plink.dep_paths if d not in resolved_flat]}.")
+                        f"{[d for d in plink.dep_paths if d not in resolved_flat]}."
+                    )
                     continue
                 try:
-                    val_int = float(self._link_internal_expr(plink).evalf(subs=resolved_flat))
+                    val_int = float(
+                        self._link_internal_expr(plink).evalf(
+                            subs=resolved_flat
+                        )
+                    )
                 except Exception as e:
                     logger.warning(
                         f"Link '{target}.{fld} = {plink.expr_str}' snapshot "
-                        f"evaluation failed: {e}")
+                        f"evaluation failed: {e}"
+                    )
                     continue
-                tparts = target.split('.')
-                tf = self.get_conversion_factor(tparts[0], tparts[-1], full_path=target)
+                tparts = target.split(".")
+                tf = self.get_conversion_factor(
+                    tparts[0], tparts[-1], full_path=target
+                )
                 entry[fld] = val_int / tf
-                logger.debug(f"Link snapshot: {target}.{fld} = {entry[fld]:.6g} (user units)")
+                logger.debug(
+                    f"Link snapshot: {target}.{fld} = {entry[fld]:.6g} (user units)"
+                )
 
     def _build_seed_overrides(self, name_to_index):
         """Assemble the per-seed RANK_USER override sets for multi-seed sampling.
@@ -981,9 +1132,10 @@ class ConfigManager:
             if sym_path is None:
                 logger.warning(
                     f"List initval on '{path}' is not a known parameter path; "
-                    f"multi-seed override ignored.")
+                    f"multi-seed override ignored."
+                )
                 continue
-            c_type, p_name = sym_path.split('.')[0], sym_path.split('.')[-1]
+            c_type, p_name = sym_path.split(".")[0], sym_path.split(".")[-1]
             factor = self.get_conversion_factor(c_type, p_name, full_path=path)
             user_lists[sym_path] = [float(x) * factor for x in iv]
 
@@ -999,11 +1151,13 @@ class ConfigManager:
                 raise ValueError(
                     f"Inconsistent seed count: initval list for '{p}' has "
                     f"length {len(v)}, expected {Ku} or 1. All initval lists in "
-                    f"a params file must share one length K (or be length 1).")
+                    f"a params file must share one length K (or be length 1)."
+                )
         if Ku > 1 and Km > 1 and Ku != Km:
             raise ValueError(
                 f"Seed-count mismatch: {Ku} user initval seeds vs {Km} "
-                f"component seed hints. Provide matching counts (or length 1).")
+                f"component seed hints. Provide matching counts (or length 1)."
+            )
 
         # 3. Merge per seed (mm first, user lists override).
         overrides = []
@@ -1023,11 +1177,13 @@ class ConfigManager:
         the relaxation engine (e.g. 'lens.Lens.t_0' -> 'lens.0.t_0').  Returns
         None if the path does not correspond to a registered symbol."""
         translated = path
-        parts = path.split('.')
+        parts = path.split(".")
         if len(parts) == 3:
             comp_type, name, param = parts
             if (comp_type, name) in name_to_index:
-                translated = f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
+                translated = (
+                    f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
+                )
         if translated in self.master_symbol_map:
             return translated
         if path in self.master_symbol_map:
@@ -1055,18 +1211,24 @@ class ConfigManager:
 
         # 1. Identify which paths the user explicitly provided an init_scale for
         user_scale_paths = []
-        standardized_user_params = self.standardize_param_names(self.raw_user_params, self.system_config)
+        standardized_user_params = self.standardize_param_names(
+            self.raw_user_params, self.system_config
+        )
         for k, v in standardized_user_params.items():
             if isinstance(v, dict) and "init_scale" in v:
                 user_scale_paths.append(k)
 
         # 2. Audit all parameters in the symbol map
         for path_str in self.master_symbol_map.keys():
-            parts = path_str.split('.')
+            parts = path_str.split(".")
             comp_type = parts[0]
             param_name = parts[-1]
 
-            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            el = (
+                int(parts[1])
+                if len(parts) == 3 and parts[1].isdigit()
+                else None
+            )
             cfg = self.resolve(comp_type, param_name, element=el)
 
             # --- Replicate Parameter.is_sampled logic ---
@@ -1081,16 +1243,24 @@ class ConfigManager:
 
             # Check for a valid scale
             scale_val = cfg.get("init_scale")
-            has_scale = scale_val is not None and not np.any(np.isnan(np.atleast_1d(scale_val)))
+            has_scale = scale_val is not None and not np.any(
+                np.isnan(np.atleast_1d(scale_val))
+            )
 
             # Issue targeted warnings based on exactly why the scale is being ignored
             if path_str in user_scale_paths:
                 if is_derived:
-                    logger.debug(f"init_scale for '{path_str}' will be back-propagated to sampled parents.")
+                    logger.debug(
+                        f"init_scale for '{path_str}' will be back-propagated to sampled parents."
+                    )
                 elif is_fixed:
-                    logger.warning(f"init_scale for '{path_str}' ignored — it is FIXED; the sampler will not step here.")
+                    logger.warning(
+                        f"init_scale for '{path_str}' ignored — it is FIXED; the sampler will not step here."
+                    )
                 elif not is_config_present:
-                    logger.warning(f"init_scale for '{path_str}' ignored — it is an internal AUXILIARY variable.")
+                    logger.warning(
+                        f"init_scale for '{path_str}' ignored — it is an internal AUXILIARY variable."
+                    )
 
             # We ONLY halt if it is a truly sampled parameter missing its scale
             if is_sampled and not has_scale:
@@ -1153,6 +1323,7 @@ class ConfigManager:
         bounds/values for solved quantities are one valid solution, not a
         canonical one.  See the solve_api module docstring.
         """
+
         def _clean(x):
             if x is None:
                 return None
@@ -1173,14 +1344,14 @@ class ConfigManager:
                         idx_to_name[(comp_key, str(i))] = str(c["name"])
 
         def _display_path(internal_path):
-            parts = internal_path.split('.')
+            parts = internal_path.split(".")
             if len(parts) == 3 and (parts[0], parts[1]) in idx_to_name:
                 return f"{parts[0]}.{idx_to_name[(parts[0], parts[1])]}.{parts[2]}"
             return internal_path
 
         parameters = {}
         for internal_path in self.master_symbol_map:
-            parts = internal_path.split('.')
+            parts = internal_path.split(".")
             c_type = parts[0]
             p_name = parts[-1]
             # Skip instance-less (2-part) symbol entries for components that are
@@ -1190,9 +1361,14 @@ class ConfigManager:
             # Exporting them surfaced orphaned "star" rows in the GUI tree that
             # correspond to no actual star.
             if len(parts) == 2 and isinstance(
-                    (self.system_config or {}).get(c_type), list):
+                (self.system_config or {}).get(c_type), list
+            ):
                 continue
-            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            el = (
+                int(parts[1])
+                if len(parts) == 3 and parts[1].isdigit()
+                else None
+            )
             cfg = self.resolve(c_type, p_name, element=el)
 
             def _first(key):
@@ -1210,14 +1386,20 @@ class ConfigManager:
             # finalize injects derived initvals under the name-form path, which
             # a nameless resolve() call cannot see.
             if internal_path in self._last_resolved:
-                factor = self.get_conversion_factor(
-                    c_type, p_name, full_path=internal_path) or 1.0
+                factor = (
+                    self.get_conversion_factor(
+                        c_type, p_name, full_path=internal_path
+                    )
+                    or 1.0
+                )
                 value = _clean(self._last_resolved[internal_path] / factor)
             else:
                 value = _first("initval")
             derived = bool(cfg.get("expressions"))
             # A parameter is fixed when it has a hardcoded value or sigma == 0.
-            fixed = (cfg.get("value") is not None) or (sigma is not None and sigma == 0)
+            fixed = (cfg.get("value") is not None) or (
+                sigma is not None and sigma == 0
+            )
 
             rank = self._last_provenance.get(internal_path)
             relation = self._last_solved_by.get(internal_path)
@@ -1249,19 +1431,26 @@ class ConfigManager:
             for seed in self.seed_resolved:
                 seed_out = {}
                 for internal_path, internal_val in seed.items():
-                    parts = internal_path.split('.')
+                    parts = internal_path.split(".")
                     c_type = parts[0]
                     p_name = parts[-1]
-                    factor = self.get_conversion_factor(
-                        c_type, p_name, full_path=internal_path) or 1.0
+                    factor = (
+                        self.get_conversion_factor(
+                            c_type, p_name, full_path=internal_path
+                        )
+                        or 1.0
+                    )
                     seed_out[_display_path(internal_path)] = _clean(
-                        internal_val / factor)
+                        internal_val / factor
+                    )
                 seeds.append(seed_out)
             result["seeds"] = seeds
 
         return result
 
-    def resolve_and_validate_parameters(self, user_provided_params, tolerance=1e-3):
+    def resolve_and_validate_parameters(
+        self, user_provided_params, tolerance=1e-3
+    ):
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
         provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
         resolved_scales = {}
@@ -1272,34 +1461,46 @@ class ConfigManager:
 
         # 1. Initialize Default Armor (Rank 20)
         def to_scalar(val):
-            return val.item() if hasattr(val, 'item') else float(val)
+            return val.item() if hasattr(val, "item") else float(val)
 
         for path_str, sym in self.master_symbol_map.items():
-            parts = path_str.split('.')
+            parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
-            el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+            el = (
+                int(parts[1])
+                if len(parts) == 3 and parts[1].isdigit()
+                else None
+            )
             cfg = self.resolve(c_type, p_name, element=el)
 
             # Read rank directly from base_defaults (not from resolve() return dict)
-            param_rank = (self.base_defaults.get(c_type, {}).get(p_name, {}).get('rank')
-                          or self.base_defaults.get(p_name, {}).get('rank')
-                          or RANK_DEFAULT)
+            param_rank = (
+                self.base_defaults.get(c_type, {}).get(p_name, {}).get("rank")
+                or self.base_defaults.get(p_name, {}).get("rank")
+                or RANK_DEFAULT
+            )
 
-            if path_str not in resolved and cfg.get('initval') is not None:
+            if path_str not in resolved and cfg.get("initval") is not None:
                 factor = self.get_conversion_factor(c_type, p_name)
-                resolved[path_str] = to_scalar(cfg['initval']) * factor
+                resolved[path_str] = to_scalar(cfg["initval"]) * factor
                 provenance[path_str] = param_rank
 
-            if cfg.get('init_scale') is not None:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = to_scalar(cfg['init_scale']) * factor
+            if cfg.get("init_scale") is not None:
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved_scales[path_str] = (
+                    to_scalar(cfg["init_scale"]) * factor
+                )
                 scale_provenance[path_str] = param_rank
 
         # 1.5 LAYER IN COMPONENT HINTS
         for path_str, val in self.hints.items():
             if provenance.get(path_str, 0) < RANK_USER:
                 resolved[path_str] = val
-                provenance[path_str] = self.hint_ranks.get(path_str, RANK_DERIVED_DATA)
+                provenance[path_str] = self.hint_ranks.get(
+                    path_str, RANK_DERIVED_DATA
+                )
 
         # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
         # The initialization loop above calls resolve() without an index, so a hint
@@ -1321,15 +1522,23 @@ class ConfigManager:
             up = self.user_params.get(path_str)
             if not isinstance(up, dict):
                 continue
-            parts = path_str.split('.')
+            parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
-            if 'init_scale' in up:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = float(up['init_scale']) * factor
+            if "init_scale" in up:
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved_scales[path_str] = float(up["init_scale"]) * factor
                 scale_provenance[path_str] = RANK_USER
-            elif 'sigma' in up and up.get('sigma') is not None and float(up['sigma']) > 0:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = float(up['sigma']) * factor
+            elif (
+                "sigma" in up
+                and up.get("sigma") is not None
+                and float(up["sigma"]) > 0
+            ):
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved_scales[path_str] = float(up["sigma"]) * factor
                 scale_provenance[path_str] = RANK_USER
 
         # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, RANK_USER)
@@ -1342,30 +1551,54 @@ class ConfigManager:
             for link_field, plink in link_fields.items():
                 if link_field in ("initval", "mu"):
                     directed_links.append(
-                        (link_target, link_field, plink, self._link_internal_expr(plink)))
+                        (
+                            link_target,
+                            link_field,
+                            plink,
+                            self._link_internal_expr(plink),
+                        )
+                    )
 
         # 2. The Relaxation Engine
-        logger.info("Solving for starting values/scales of sampled parameters given user/data/default initialization....")
+        logger.info(
+            "Solving for starting values/scales of sampled parameters given user/data/default initialization...."
+        )
         iteration = 0
         max_iter = 100  # Failsafe
         _CYCLE_HIST = 6  # how many recent values to keep per variable
         value_history = {}  # {var_name: [recent rounded values]}
-        pinned_vars = set()  # variables locked out of further updates due to cycle
+        pinned_vars = (
+            set()
+        )  # variables locked out of further updates due to cycle
 
         while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
 
-            self._apply_directed_links(directed_links, resolved, provenance,
-                                       resolved_scales, scale_provenance,
-                                       tolerance, pinned_vars)
+            self._apply_directed_links(
+                directed_links,
+                resolved,
+                provenance,
+                resolved_scales,
+                scale_provenance,
+                tolerance,
+                pinned_vars,
+            )
 
-            self._run_standalone_solvers(resolved, provenance, tolerance,
-                                         pinned_vars)
+            self._run_standalone_solvers(
+                resolved, provenance, tolerance, pinned_vars
+            )
 
             for eq in self.all_relations:
-                self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
-                                     pinned_vars)
+                self._relax_equation(
+                    eq,
+                    resolved,
+                    provenance,
+                    resolved_scales,
+                    scale_provenance,
+                    tolerance,
+                    pinned_vars,
+                )
 
             # Convergence check: compare end-of-iteration state to start-of-iteration.
             # This correctly handles intra-iteration oscillation (two equations fighting
@@ -1398,7 +1631,12 @@ class ConfigManager:
             for k, hist in value_history.items():
                 if k in pinned_vars:
                     continue
-                if len(hist) >= 4 and hist[-1] == hist[-3] and hist[-2] == hist[-4] and hist[-1] != hist[-2]:
+                if (
+                    len(hist) >= 4
+                    and hist[-1] == hist[-3]
+                    and hist[-2] == hist[-4]
+                    and hist[-1] != hist[-2]
+                ):
                     logger.warning(
                         f"Cycle: '{k}' oscillates between {hist[-2]:.6g} and {hist[-1]:.6g} — "
                         f"pinned to {hist[-1]:.6g} (conflicting equal-rank constraints)."
@@ -1406,7 +1644,9 @@ class ConfigManager:
                     pinned_vars.add(k)
 
         if iteration == max_iter:
-            logger.warning("Relaxation engine reached max iterations — check for unstable circular dependencies.")
+            logger.warning(
+                "Relaxation engine reached max iterations — check for unstable circular dependencies."
+            )
 
         logger.info(f"Done solving after {iteration} iterations.")
 
@@ -1427,8 +1667,12 @@ class ConfigManager:
                     continue
                 try:
                     with _sympy_time_limit(2):
-                        sols = sp.solve(eq, sp.Symbol(target_str),
-                                        simplify=False, check=False)
+                        sols = sp.solve(
+                            eq,
+                            sp.Symbol(target_str),
+                            simplify=False,
+                            check=False,
+                        )
                         if not sols:
                             continue
                         sol = sols[0]
@@ -1438,19 +1682,25 @@ class ConfigManager:
                             inp_sym = sp.Symbol(inp)
                             if not sol.has(inp_sym):
                                 continue
-                            d = float(sp.diff(sol, inp_sym).evalf(subs=resolved))
+                            d = float(
+                                sp.diff(sol, inp_sym).evalf(subs=resolved)
+                            )
                             if np.isfinite(d) and abs(d) < 1e15:
                                 var += (d * resolved_scales[inp]) ** 2
                                 active_inputs.append(inp)
                     if var <= 0 or not active_inputs:
                         continue
                     new_scale = float(np.sqrt(var))
-                    new_rank = sum(scale_provenance.get(s, 0) for s in active_inputs) / len(active_inputs)
+                    new_rank = sum(
+                        scale_provenance.get(s, 0) for s in active_inputs
+                    ) / len(active_inputs)
                     if new_rank > scale_provenance.get(target_str, 0):
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_rank
                 except SymbolicTimeout:
-                    logger.debug(f"Forward scale pass timed out solving {eq} for {target_str}; skipped.")
+                    logger.debug(
+                        f"Forward scale pass timed out solving {eq} for {target_str}; skipped."
+                    )
                 except Exception as e:
                     pass
 
@@ -1470,30 +1720,42 @@ class ConfigManager:
                 sigma_derived = resolved_scales.get(derived_str)
                 if sigma_derived is None:
                     continue
-                new_rank = min(RANK_DERIVED_USER, scale_provenance[derived_str])
+                new_rank = min(
+                    RANK_DERIVED_USER, scale_provenance[derived_str]
+                )
                 parents = [s for s in syms if s != derived_str]
                 # Skip the expensive sp.solve if no parent can benefit
                 if not any(
-                    scale_provenance.get(p, 0) < RANK_USER and new_rank > scale_provenance.get(p, 0)
+                    scale_provenance.get(p, 0) < RANK_USER
+                    and new_rank > scale_provenance.get(p, 0)
                     for p in parents
                 ):
                     continue
                 try:
                     with _sympy_time_limit(2):
-                        sols = sp.solve(eq, sp.Symbol(derived_str),
-                                        simplify=False, check=False)
+                        sols = sp.solve(
+                            eq,
+                            sp.Symbol(derived_str),
+                            simplify=False,
+                            check=False,
+                        )
                         if not sols:
                             continue
                         sol = sols[0]
                         for parent_str in parents:
-                            if scale_provenance.get(parent_str, 0) >= RANK_USER:
+                            if (
+                                scale_provenance.get(parent_str, 0)
+                                >= RANK_USER
+                            ):
                                 continue
                             if new_rank <= scale_provenance.get(parent_str, 0):
                                 continue
                             parent_sym = sp.Symbol(parent_str)
                             if not sol.has(parent_sym):
                                 continue
-                            d = float(sp.diff(sol, parent_sym).evalf(subs=resolved))
+                            d = float(
+                                sp.diff(sol, parent_sym).evalf(subs=resolved)
+                            )
                             if not np.isfinite(d) or abs(d) < 1e-15:
                                 continue
                             implied = sigma_derived / abs(d)
@@ -1504,7 +1766,9 @@ class ConfigManager:
                                 f"(σ={sigma_derived:.4g} → {implied:.4g})"
                             )
                 except SymbolicTimeout:
-                    logger.debug(f"Backward scale pass timed out solving {eq} for {derived_str}; skipped.")
+                    logger.debug(
+                        f"Backward scale pass timed out solving {eq} for {derived_str}; skipped."
+                    )
                 except Exception:
                     pass
 
@@ -1521,8 +1785,9 @@ class ConfigManager:
 
         return resolved
 
-    def _run_standalone_solvers(self, resolved, provenance, tolerance,
-                                pinned_vars=None):
+    def _run_standalone_solvers(
+        self, resolved, provenance, tolerance, pinned_vars=None
+    ):
         """
         Run standalone-registered custom solvers once per relaxation
         iteration, for every instance path of their target in the symbol
@@ -1532,33 +1797,55 @@ class ConfigManager:
         """
         for lookup_key in self.standalone_solvers:
             solver_func = self.custom_solvers[lookup_key]
-            comp, param = lookup_key.split('.')[0], lookup_key.split('.')[-1]
+            comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
             for path in list(self.master_symbol_map):
-                parts = path.split('.')
-                if (len(parts) != 3 or parts[0] != comp or parts[2] != param
-                        or not parts[1].isdigit()):
+                parts = path.split(".")
+                if (
+                    len(parts) != 3
+                    or parts[0] != comp
+                    or parts[2] != param
+                    or not parts[1].isdigit()
+                ):
                     continue
                 if pinned_vars and path in pinned_vars:
                     continue
                 try:
-                    val = float(solver_func(resolved, self.system_config,
-                                            int(parts[1])))
+                    val = float(
+                        solver_func(
+                            resolved, self.system_config, int(parts[1])
+                        )
+                    )
                 except Exception as e:
                     logger.debug(f"Standalone solver for {path} deferred: {e}")
                     continue
-                if not _meaningful_change(val, resolved.get(path),
-                                          RANK_DERIVED_MIXED,
-                                          provenance.get(path, 0), tolerance,
-                                          resolved, provenance, path):
+                if not _meaningful_change(
+                    val,
+                    resolved.get(path),
+                    RANK_DERIVED_MIXED,
+                    provenance.get(path, 0),
+                    tolerance,
+                    resolved,
+                    provenance,
+                    path,
+                ):
                     continue
                 resolved[path] = val
                 provenance[path] = RANK_DERIVED_MIXED
-                self._last_solved_by[path] = f"{lookup_key} (standalone solver)"
+                self._last_solved_by[path] = (
+                    f"{lookup_key} (standalone solver)"
+                )
                 logger.debug(f"Updated {path} = {val:.4g} (standalone solver)")
 
-    def _apply_directed_links(self, directed_links, resolved, provenance,
-                              resolved_scales, scale_provenance, tolerance,
-                              pinned_vars=None):
+    def _apply_directed_links(
+        self,
+        directed_links,
+        resolved,
+        provenance,
+        resolved_scales,
+        scale_provenance,
+        tolerance,
+        pinned_vars=None,
+    ):
         """
         Assert user-defined link assignments (target := f(deps), internal units).
 
@@ -1578,15 +1865,26 @@ class ConfigManager:
             try:
                 val = float(expr_int.evalf(subs=resolved))
             except (TypeError, ValueError) as e:
-                logger.debug(f"Link '{target} := {plink.expr_str}' not evaluable yet: {e}")
+                logger.debug(
+                    f"Link '{target} := {plink.expr_str}' not evaluable yet: {e}"
+                )
                 continue
 
-            if _meaningful_change(val, resolved.get(target), RANK_USER,
-                                  provenance.get(target, 0), tolerance,
-                                  resolved, provenance, target):
+            if _meaningful_change(
+                val,
+                resolved.get(target),
+                RANK_USER,
+                provenance.get(target, 0),
+                tolerance,
+                resolved,
+                provenance,
+                target,
+            ):
                 resolved[target] = val
                 provenance[target] = RANK_USER
-                logger.debug(f"Updated {target} = {val:.4g} (user link: {plink.expr_str})")
+                logger.debug(
+                    f"Updated {target} = {val:.4g} (user link: {plink.expr_str})"
+                )
 
             # Scale propagation through the link Jacobian
             if scale_provenance.get(target, 0) >= RANK_USER:
@@ -1598,18 +1896,32 @@ class ConfigManager:
                 if dep_scale is None:
                     continue
                 try:
-                    d = float(sp.diff(expr_int, sp.Symbol(dep)).evalf(subs=resolved))
+                    d = float(
+                        sp.diff(expr_int, sp.Symbol(dep)).evalf(subs=resolved)
+                    )
                 except (TypeError, ValueError):
                     continue
                 if np.isfinite(d) and abs(d) < 1e15:
                     var += (d * dep_scale) ** 2
                     any_input = True
-            if any_input and var > 0 and RANK_DERIVED_USER > scale_provenance.get(target, 0):
+            if (
+                any_input
+                and var > 0
+                and RANK_DERIVED_USER > scale_provenance.get(target, 0)
+            ):
                 resolved_scales[target] = float(np.sqrt(var))
                 scale_provenance[target] = RANK_DERIVED_USER
 
-    def _relax_equation(self, eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
-                        pinned_vars=None):
+    def _relax_equation(
+        self,
+        eq,
+        resolved,
+        provenance,
+        resolved_scales,
+        scale_provenance,
+        tolerance,
+        pinned_vars=None,
+    ):
 
         if not isinstance(eq, sp.Eq):
             return False
@@ -1667,7 +1979,9 @@ class ConfigManager:
         # Condition B floor is RANK_DEFAULT so conflict resolution never produces
         # armor weaker than an unseeded default.
         inputs = [s for s in symbols_in_eq if s != target]
-        min_input_rank = min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
+        min_input_rank = (
+            min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
+        )
         # Condition A floor: RANK_DEFAULT-1 so indirect derivations always yield
         #   to expression-path derivations or defaults in Condition B.
         # Condition B floor: 0 so low-rank inputs (e.g. pm defaults at rank 10)
@@ -1687,7 +2001,8 @@ class ConfigManager:
             logger.debug(
                 f"Over-constrained: all variables in '{eq}' have user rank "
                 f"but equation is violated (error={error:.4g}). "
-                f"Leaving all user values unchanged.")
+                f"Leaving all user values unchanged."
+            )
             self._record_diagnostic(
                 "error",
                 f"Over-constrained relation '{eq.lhs} = {eq.rhs}' is violated "
@@ -1697,31 +2012,63 @@ class ConfigManager:
             )
             return False
 
-        return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
-                                   inputs, pinned_vars=pinned_vars, tolerance=tolerance)
+        return self._execute_solve(
+            eq,
+            target,
+            resolved,
+            provenance,
+            new_rank,
+            resolved_scales,
+            scale_provenance,
+            inputs,
+            pinned_vars=pinned_vars,
+            tolerance=tolerance,
+        )
 
-    def _execute_solve(self, eq, target_str, resolved, provenance, new_rank, resolved_scales, scale_provenance, inputs,
-                       pinned_vars=None, tolerance=1e-3):
+    def _execute_solve(
+        self,
+        eq,
+        target_str,
+        resolved,
+        provenance,
+        new_rank,
+        resolved_scales,
+        scale_provenance,
+        inputs,
+        pinned_vars=None,
+        tolerance=1e-3,
+    ):
         if pinned_vars and target_str in pinned_vars:
             return False
 
         # 1. ALWAYS check custom solvers FIRST
-        parts = target_str.split('.')
+        parts = target_str.split(".")
         lookup_key = f"{parts[0]}.{parts[-1]}"
         idx = int(parts[1]) if len(parts) >= 3 else 0
 
         if lookup_key in self.custom_solvers:
             solver_func = self.custom_solvers[lookup_key]
             try:
-                valid_val = float(solver_func(resolved, self.system_config, idx))
-                if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
-                                          provenance.get(target_str, 0), tolerance,
-                                          resolved, provenance, target_str):
+                valid_val = float(
+                    solver_func(resolved, self.system_config, idx)
+                )
+                if not _meaningful_change(
+                    valid_val,
+                    resolved.get(target_str),
+                    new_rank,
+                    provenance.get(target_str, 0),
+                    tolerance,
+                    resolved,
+                    provenance,
+                    target_str,
+                ):
                     return False
                 resolved[target_str] = valid_val
                 provenance[target_str] = new_rank
                 self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
-                logger.debug(f"Updated {target_str} = {valid_val:.4g} (custom solver)")
+                logger.debug(
+                    f"Updated {target_str} = {valid_val:.4g} (custom solver)"
+                )
                 return True
             except Exception as e:
                 # A custom solver is a shortcut for one specific relation
@@ -1729,8 +2076,10 @@ class ConfigManager:
                 # dependencies), fall through to the generic symbolic solver
                 # so OTHER equations targeting this parameter (e.g.
                 # q * M_primary = M_companion) still get their chance.
-                logger.debug(f"Custom solver failed for {target_str}: {e}; "
-                             f"falling back to symbolic solve.")
+                logger.debug(
+                    f"Custom solver failed for {target_str}: {e}; "
+                    f"falling back to symbolic solve."
+                )
 
         # 2. Skip equations whose symbolic inversion has previously timed out
         if target_str in self.symbolic_blacklist:
@@ -1751,7 +2100,9 @@ class ConfigManager:
                     # Format to 5 sig figs (handles scientific notation automatically)
                     val_str = f"{float(resolved[s_str]):.5g}"
                     # Use regex with word boundaries to replace exact variable names
-                    eq_str = re.sub(rf'\b{re.escape(s_str)}\b', val_str, eq_str)
+                    eq_str = re.sub(
+                        rf"\b{re.escape(s_str)}\b", val_str, eq_str
+                    )
 
             logger.debug(f"  Substituted: {eq_str}")
         except Exception as e:
@@ -1769,7 +2120,9 @@ class ConfigManager:
         used_nsolve = False
 
         try:
-            target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
+            target_sym = next(
+                s for s in eq.free_symbols if str(s) == target_str
+            )
             # simplify=False + check=False: sp.solve's default post-simplify and
             # its checksol() verification pass together dominate prepare()
             # (sympy.simplify + sympy.checksol) and are redundant here -- every
@@ -1778,12 +2131,17 @@ class ConfigManager:
             # the code already does its own root validation. simplify only
             # changes the expression's form (identical numeric value); check
             # only pre-filters roots the numeric bounds/scoring pass re-filters.
-            solutions = sp.solve(eq, target_sym, dict=False,
-                                 simplify=False, check=False)
+            solutions = sp.solve(
+                eq, target_sym, dict=False, simplify=False, check=False
+            )
             elapsed = time.time() - start_time
-            logger.debug(f"sp.solve finished in {elapsed:.4f}s for {target_str}")
+            logger.debug(
+                f"sp.solve finished in {elapsed:.4f}s for {target_str}"
+            )
         except TimeoutError:
-            logger.debug(f"sp.solve timed out for {target_str} — blacklisting.")
+            logger.debug(
+                f"sp.solve timed out for {target_str} — blacklisting."
+            )
             self.symbolic_blacklist.add(target_str)
             signal.alarm(0)
             return False
@@ -1808,13 +2166,17 @@ class ConfigManager:
 
         # 4. Validation — collect all in-bounds solutions
         cfg = self.resolve(parts[0], parts[-1], shape=(), element=idx)
-        lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
-        upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
+        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
+        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
 
         valid_solutions = []
         for sol in solutions:
             try:
-                val = float(sol.evalf(subs=resolved)) if not used_nsolve else float(sol)
+                val = (
+                    float(sol.evalf(subs=resolved))
+                    if not used_nsolve
+                    else float(sol)
+                )
                 if lower <= val <= upper:
                     valid_solutions.append((val, sol))
             except (TypeError, ValueError):
@@ -1830,7 +2192,7 @@ class ConfigManager:
         if len(valid_solutions) == 1:
             valid_val, valid_sol = valid_solutions[0]
         else:
-            best_val, best_sol, best_score = None, None, float('inf')
+            best_val, best_sol, best_score = None, None, float("inf")
             for val, sol in valid_solutions:
                 temp = {**resolved, target_str: val}
                 score = 0.0
@@ -1854,9 +2216,16 @@ class ConfigManager:
 
         # 5. Apply Value and Armor
         if valid_val is not None:
-            if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
-                                      provenance.get(target_str, 0), tolerance,
-                                      resolved, provenance, target_str):
+            if not _meaningful_change(
+                valid_val,
+                resolved.get(target_str),
+                new_rank,
+                provenance.get(target_str, 0),
+                tolerance,
+                resolved,
+                provenance,
+                target_str,
+            ):
                 return False
             # 5b. Jacobian-filtered rank refinement.
             # Replace raw min(input_ranks) with min(active_input_ranks), where
@@ -1865,20 +2234,30 @@ class ConfigManager:
             # mu_dec_rel = sqrt(mu_rel_mag² - mu_ra_rel²) equation) from dragging
             # down the trustworthiness of the result.
             jac_active_inputs = []
-            if not used_nsolve and hasattr(valid_sol, 'free_symbols') and inputs:
+            if (
+                not used_nsolve
+                and hasattr(valid_sol, "free_symbols")
+                and inputs
+            ):
                 for parent_str in inputs:
                     parent_sym = sp.Symbol(parent_str)
                     if not valid_sol.has(parent_sym):
                         continue
                     try:
-                        d = float(sp.diff(valid_sol, parent_sym).evalf(subs=resolved))
+                        d = float(
+                            sp.diff(valid_sol, parent_sym).evalf(subs=resolved)
+                        )
                         if np.isfinite(d) and abs(d) > 1e-6:
                             jac_active_inputs.append(parent_str)
                     except Exception:
-                        jac_active_inputs.append(parent_str)  # conservative: include on error
+                        jac_active_inputs.append(
+                            parent_str
+                        )  # conservative: include on error
 
             if jac_active_inputs:
-                min_jac_rank = min(provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs)
+                min_jac_rank = min(
+                    provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs
+                )
                 # Refine upward only: never reduce a rank that was already determined
                 # by a valid floor (e.g. Condition A floor of RANK_DEFAULT-1).
                 new_rank = max(new_rank, min(RANK_DERIVED_USER, min_jac_rank))
@@ -1886,10 +2265,16 @@ class ConfigManager:
             resolved[target_str] = valid_val
             provenance[target_str] = new_rank
             self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
-            logger.debug(f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})")
+            logger.debug(
+                f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})"
+            )
 
             # 6. Independent Scale Propagation via Jacobian
-            if not used_nsolve and hasattr(valid_sol, 'free_symbols') and inputs:
+            if (
+                not used_nsolve
+                and hasattr(valid_sol, "free_symbols")
+                and inputs
+            ):
                 scale_variance = 0.0
                 valid_scale_inputs = []
 
@@ -1906,7 +2291,10 @@ class ConfigManager:
                         sensitivity = float(derivative.evalf(subs=resolved))
 
                         # Only update variance if the sensitivity is a sane number
-                        if np.isfinite(sensitivity) and abs(sensitivity) < 1e15:
+                        if (
+                            np.isfinite(sensitivity)
+                            and abs(sensitivity) < 1e15
+                        ):
                             scale_variance += (sensitivity * parent_scale) ** 2
 
                     except (OverflowError, FloatingPointError, TypeError):
@@ -1917,22 +2305,31 @@ class ConfigManager:
                         break
 
                 if valid_scale_inputs:
-                    new_scale_rank = sum(scale_provenance.get(s, 0) for s in valid_scale_inputs) / len(
-                        valid_scale_inputs)
+                    new_scale_rank = sum(
+                        scale_provenance.get(s, 0) for s in valid_scale_inputs
+                    ) / len(valid_scale_inputs)
                     new_scale = float(np.sqrt(scale_variance))
                     if new_scale_rank > scale_provenance.get(target_str, 0):
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_scale_rank
 
-                    if target_str in self.user_params and isinstance(self.user_params[target_str], dict):
-                        factor = self.get_conversion_factor(parts[0], parts[-1], full_path=target_str)
-                        self.user_params[target_str]["init_scale"] = resolved_scales[target_str] / factor
+                    if target_str in self.user_params and isinstance(
+                        self.user_params[target_str], dict
+                    ):
+                        factor = self.get_conversion_factor(
+                            parts[0], parts[-1], full_path=target_str
+                        )
+                        self.user_params[target_str]["init_scale"] = (
+                            resolved_scales[target_str] / factor
+                        )
 
             return True
 
         return False
 
-    def _attempt_rank_upgrade(self, eq, resolved, provenance, resolved_scales, scale_provenance):
+    def _attempt_rank_upgrade(
+        self, eq, resolved, provenance, resolved_scales, scale_provenance
+    ):
         symbols_in_eq = [str(s) for s in eq.free_symbols]
 
         def get_rank(s):
@@ -1958,20 +2355,39 @@ class ConfigManager:
 
         # 5. Monotonic upgrade check
         if new_rank > get_rank(target):
-            logger.debug(f"Rank upgrade: {target} ({get_rank(target)} -> {new_rank}) via {eq}")
-            return self._solve_and_update(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance)
+            logger.debug(
+                f"Rank upgrade: {target} ({get_rank(target)} -> {new_rank}) via {eq}"
+            )
+            return self._solve_and_update(
+                eq,
+                target,
+                resolved,
+                provenance,
+                new_rank,
+                resolved_scales,
+                scale_provenance,
+            )
 
         return False
 
-    def _solve_and_update(self, eq, target_str, resolved, provenance_map, new_rank, resolved_scales, scale_provenance):
+    def _solve_and_update(
+        self,
+        eq,
+        target_str,
+        resolved,
+        provenance_map,
+        new_rank,
+        resolved_scales,
+        scale_provenance,
+    ):
         target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
 
         # 1. Setup bounds and solver lookups
-        parts = target_str.split('.')
+        parts = target_str.split(".")
         el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
         cfg = self.resolve(parts[0], parts[-1], shape=(), element=el)
-        lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
-        upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
+        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
+        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
 
         # 2. Logic to isolate target and solve
         solutions = []
@@ -1993,7 +2409,11 @@ class ConfigManager:
         if not solutions:
             try:
                 guess = float(resolved.get(target_str, 1.0))
-                sub_dict = {s: resolved[str(s)] for s in eq.free_symbols if str(s) != target_str}
+                sub_dict = {
+                    s: resolved[str(s)]
+                    for s in eq.free_symbols
+                    if str(s) != target_str
+                }
                 expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
                 solutions = [sp.nsolve(expr, target_sym, guess)]
             except Exception:
@@ -2017,7 +2437,7 @@ class ConfigManager:
             provenance_map[target_str] = new_rank
 
             # Propagate Scale (Calculus-based)
-            if hasattr(valid_sol, 'free_symbols'):
+            if hasattr(valid_sol, "free_symbols"):
                 scale_variance = 0.0
                 for parent_sym in valid_sol.free_symbols:
                     parent_str = str(parent_sym)
@@ -2030,13 +2450,21 @@ class ConfigManager:
 
                 # Apply scale update only if rank allows
                 if new_rank >= scale_provenance.get(target_str, 0):
-                    resolved_scales[target_str] = float(np.sqrt(scale_variance))
+                    resolved_scales[target_str] = float(
+                        np.sqrt(scale_variance)
+                    )
                     scale_provenance[target_str] = new_rank
 
                     # Sync scale back to user_params if necessary
-                    if target_str in self.user_params and isinstance(self.user_params[target_str], dict):
-                        factor = self.get_conversion_factor(parts[0], parts[-1], full_path=target_str)
-                        self.user_params[target_str]["init_scale"] = resolved_scales[target_str] / factor
+                    if target_str in self.user_params and isinstance(
+                        self.user_params[target_str], dict
+                    ):
+                        factor = self.get_conversion_factor(
+                            parts[0], parts[-1], full_path=target_str
+                        )
+                        self.user_params[target_str]["init_scale"] = (
+                            resolved_scales[target_str] / factor
+                        )
 
             return True
 
@@ -2047,8 +2475,8 @@ class ConfigManager:
             "!" * 60 + "\n"
             "WARNING: PHYSICAL CONTRADICTION DETECTED\n"
             f"Relation: {eq}\n"
-            f"Relative Error: {error:.2%}\n"
-            + "-" * 60 + "\n"
+            f"Relative Error: {error:.2%}\n" + "-" * 60 + "\n"
             "The parameters provided in your config do not satisfy this equation.\n"
             "Verify your starting values; a bad initialization will destroy NUTS efficiency.\n"
-            + "!" * 60)
+            + "!" * 60
+        )

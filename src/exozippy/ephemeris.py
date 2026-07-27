@@ -13,23 +13,22 @@ import os
 import warnings
 
 import numpy as np
-from scipy.interpolate import CubicSpline
-
 from astropy.coordinates import (
+    ICRS,
+    EarthLocation,
     get_body_barycentric,
     solar_system_ephemeris,
-    EarthLocation,
-    ICRS,
 )
 from astropy.time import Time
+from scipy.interpolate import CubicSpline
 
 logger = logging.getLogger(__name__)
 
 # Package-internal directory of spacecraft ephemeris files (*.eph)
-EPHEMERIDES_DIR = os.path.join(os.path.dirname(__file__), 'ephemerides')
+EPHEMERIDES_DIR = os.path.join(os.path.dirname(__file__), "ephemerides")
 
 
-def get_observer_position(time, observer_location='earth'):
+def get_observer_position(time, observer_location="earth"):
     """
     High-precision observer position dispatcher.
 
@@ -50,35 +49,46 @@ def get_observer_position(time, observer_location='earth'):
         (N, 3) array of barycentric X, Y, Z coordinates in AU (ICRS/J2000
         equatorial frame).
     """
-    solar_system_ephemeris.set('jpl')
-    t_obj = Time(time, format='jd', scale='tdb')
+    solar_system_ephemeris.set("jpl")
+    t_obj = Time(time, format="jd", scale="tdb")
 
     # 1. Handle Terrestrial / Topocentric (Lat/Lon)
     # Check if string looks like "lat, lon, alt" or a known site name
     try:
-        if ',' in observer_location:
+        if "," in observer_location:
             # Parse "lat, lon, alt"
-            loc = EarthLocation.from_geodetic(*[float(x) for x in observer_location.split(',')])
+            loc = EarthLocation.from_geodetic(
+                *[float(x) for x in observer_location.split(",")]
+            )
         else:
             # Check for site names like 'CTIO' or 'Siding Spring'
             loc = EarthLocation.of_site(observer_location)
 
         # Get topocentric position: Barycentric Earth + Geocentric Offset
         # This accounts for Earth's orbit and the observer's specific spot on the globe
-        return loc.get_itrs(t_obj).transform_to(ICRS()).cartesian.xyz.to('au').value.T
+        return (
+            loc.get_itrs(t_obj)
+            .transform_to(ICRS())
+            .cartesian.xyz.to("au")
+            .value.T
+        )
     except Exception:
         # Not a ground site, move to next check
         pass
 
     # 2. Handle Major Bodies
-    if observer_location in ['earth', 'moon']:
-        return get_body_barycentric(observer_location, t_obj).xyz.to('au').value.T
+    if observer_location in ["earth", "moon"]:
+        return (
+            get_body_barycentric(observer_location, t_obj).xyz.to("au").value.T
+        )
 
     # 3. Handle Satellite Ephemeris Files with Search Paths
     search_paths = [
         observer_location,  # absolute/relative path
         os.path.join(EPHEMERIDES_DIR, observer_location),  # Package internal
-        os.path.join(EPHEMERIDES_DIR, observer_location + '.eph')  # Package internal
+        os.path.join(
+            EPHEMERIDES_DIR, observer_location + ".eph"
+        ),  # Package internal
     ]
 
     for path in search_paths:
@@ -87,7 +97,8 @@ def get_observer_position(time, observer_location='earth'):
 
     raise ValueError(
         f"observer location not recognized: {observer_location}; see "
-        f"$EXOZIPPY_PATH/src/exozippy/ephemerides/get_ephemeris.py to generate an ephemeris")
+        f"$EXOZIPPY_PATH/src/exozippy/ephemerides/get_ephemeris.py to generate an ephemeris"
+    )
 
 
 def interpolate_ephemeris(time, ephemeris_file):
@@ -117,11 +128,13 @@ def interpolate_ephemeris(time, ephemeris_file):
     # Check if we are extrapolating (which is dangerous)
     t_min, t_max = np.min(t_grid), np.max(t_grid)
     if np.any(time < t_min) or np.any(time > t_max):
-        warnings.warn(f"Extrapolating outside ephemeris range! "
-                      f"Grid: {t_min:.2f}-{t_max:.2f}, Requested: {np.min(time):.2f}")
+        warnings.warn(
+            f"Extrapolating outside ephemeris range! "
+            f"Grid: {t_min:.2f}-{t_max:.2f}, Requested: {np.min(time):.2f}"
+        )
 
     # Create the spline object
     # bc_type='not-a-knot' is standard for smooth orbital curves
-    cs = CubicSpline(t_grid, xyz_grid, axis=0, bc_type='not-a-knot')
+    cs = CubicSpline(t_grid, xyz_grid, axis=0, bc_type="not-a-knot")
 
     return cs(time)

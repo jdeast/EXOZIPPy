@@ -6,25 +6,28 @@ trace lines; the old dist + trace two-column layout is now plot_trace_dist.
 These tests pin the restored layout.
 """
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import arviz as az
+import matplotlib.pyplot as plt
 import pytest
 
-from exozippy.run import save_multipage_trace, _render_trace_page
+from exozippy.run import _render_trace_page, save_multipage_trace
 
 
 @pytest.fixture
 def small_idata():
     rng = np.random.default_rng(42)
-    return az.from_dict({
-        "posterior": {
-            "a": rng.normal(size=(2, 60)),
-            "b": rng.normal(size=(2, 60)),
+    return az.from_dict(
+        {
+            "posterior": {
+                "a": rng.normal(size=(2, 60)),
+                "b": rng.normal(size=(2, 60)),
+            }
         }
-    })
+    )
 
 
 def test_trace_page_has_dist_and_trace_columns(small_idata):
@@ -66,10 +69,13 @@ def _with_mode_var(idata, mode_vals):
     """Attach a posterior['mode'] (chain, draw) int array, mirroring what
     identify_modes.attach() writes onto a real trace."""
     import xarray as xr
+
     post = idata.posterior
-    post["mode"] = xr.DataArray(np.asarray(mode_vals, dtype=int),
-                                dims=("chain", "draw"),
-                                coords={"chain": post.chain, "draw": post.draw})
+    post["mode"] = xr.DataArray(
+        np.asarray(mode_vals, dtype=int),
+        dims=("chain", "draw"),
+        coords={"chain": post.chain, "draw": post.draw},
+    )
     return idata
 
 
@@ -81,9 +87,12 @@ def test_render_trace_page_shades_multimodal_by_mode(small_idata):
     Then each trace axis gains a per-draw scatter overlay colored by mode
       (visualizing the hop), on top of the existing dist+trace line layout.
     """
-    n_chain, n_draw = small_idata.posterior.sizes["chain"], small_idata.posterior.sizes["draw"]
+    n_chain, n_draw = (
+        small_idata.posterior.sizes["chain"],
+        small_idata.posterior.sizes["draw"],
+    )
     mode_vals = np.zeros((n_chain, n_draw), dtype=int)
-    mode_vals[:, n_draw // 2:] = 1
+    mode_vals[:, n_draw // 2 :] = 1
     idata = _with_mode_var(small_idata, mode_vals)
 
     # ACT
@@ -108,7 +117,10 @@ def test_render_trace_page_unimodal_mode_var_unchanged(small_idata):
     Then no scatter overlay is added -- single-mode output renders exactly
       as it did before mode-shading existed.
     """
-    n_chain, n_draw = small_idata.posterior.sizes["chain"], small_idata.posterior.sizes["draw"]
+    n_chain, n_draw = (
+        small_idata.posterior.sizes["chain"],
+        small_idata.posterior.sizes["draw"],
+    )
     idata = _with_mode_var(small_idata, np.zeros((n_chain, n_draw), dtype=int))
 
     # ACT
@@ -142,13 +154,15 @@ def test_render_trace_page_no_mode_var_unchanged(small_idata):
 def many_chain_idata():
     """70 chains x 4000 draws -- the shape a production PTDE run produces."""
     rng = np.random.default_rng(7)
-    return az.from_dict({
-        "posterior": {
-            "a": rng.normal(size=(70, 4000)),
-            "b": rng.normal(size=(70, 4000)),
-        },
-        "sample_stats": {"lp": rng.normal(size=(70, 4000))},
-    })
+    return az.from_dict(
+        {
+            "posterior": {
+                "a": rng.normal(size=(70, 4000)),
+                "b": rng.normal(size=(70, 4000)),
+            },
+            "sample_stats": {"lp": rng.normal(size=(70, 4000))},
+        }
+    )
 
 
 def test_thinning_keeps_draws_per_chain_not_total(many_chain_idata, tmp_path):
@@ -162,6 +176,7 @@ def test_thinning_keeps_draws_per_chain_not_total(many_chain_idata, tmp_path):
     # ARRANGE
     captured = {}
     import exozippy.run as run_mod
+
     real = run_mod._render_trace_page
 
     def spy(idata, *a, **kw):
@@ -171,8 +186,12 @@ def test_thinning_keeps_draws_per_chain_not_total(many_chain_idata, tmp_path):
     run_mod._render_trace_page = spy
     try:
         # ACT
-        save_multipage_trace(many_chain_idata, ["a", "b"],
-                             str(tmp_path / "t.pdf"), draws_per_chain=100)
+        save_multipage_trace(
+            many_chain_idata,
+            ["a", "b"],
+            str(tmp_path / "t.pdf"),
+            draws_per_chain=100,
+        )
     finally:
         run_mod._render_trace_page = real
 
@@ -191,18 +210,24 @@ def test_thinning_preserves_true_draw_numbers(many_chain_idata, tmp_path):
     # ARRANGE
     captured = {}
     import exozippy.run as run_mod
+
     real = run_mod._render_trace_page
 
     def spy(idata, *a, **kw):
-        captured.setdefault("draw_coord",
-                            np.asarray(idata.posterior.draw.values))
+        captured.setdefault(
+            "draw_coord", np.asarray(idata.posterior.draw.values)
+        )
         return real(idata, *a, **kw)
 
     run_mod._render_trace_page = spy
     try:
         # ACT
-        save_multipage_trace(many_chain_idata, ["a"], str(tmp_path / "t.pdf"),
-                             draws_per_chain=100)
+        save_multipage_trace(
+            many_chain_idata,
+            ["a"],
+            str(tmp_path / "t.pdf"),
+            draws_per_chain=100,
+        )
     finally:
         run_mod._render_trace_page = real
 
@@ -229,8 +254,11 @@ def test_dist_column_is_density_not_ecdf(many_chain_idata):
 
     try:
         # ASSERT: a CDF is monotonically non-decreasing and tops out at 1.0
-        ys = [np.asarray(l.get_ydata()) for l in fig.axes[0].lines
-              if len(l.get_ydata()) > 2]
+        ys = [
+            np.asarray(l.get_ydata())
+            for l in fig.axes[0].lines
+            if len(l.get_ydata()) > 2
+        ]
         assert ys, "dist column drew nothing"
         assert not all(np.all(np.diff(y) >= -1e-12) for y in ys)
     finally:

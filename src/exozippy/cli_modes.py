@@ -27,13 +27,13 @@ import logging
 import os
 from pathlib import Path
 
+import arviz as az
 import click
 import yaml
-import arviz as az
 
 from .logger import setup_logging
-from .system import System
 from .outputs.report_pipeline import build_mode_reports
+from .system import System
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +53,44 @@ def _persist_trace(idata, trace_path):
 
 @click.command()
 @click.argument("config_file")
-@click.option("--min-weight", type=float, default=None,
-              help="Modes below this fraction of valid draws are dropped "
-                   "and their draws left unassigned "
-                   "(identify_modes default: 0.005).")
-@click.option("--max-modes", type=int, default=None,
-              help="Upper limit for the BIC mode-count scan "
-                   "(identify_modes default: 8).")
-@click.option("--feature-vars", default=None,
-              help="Comma-separated posterior variable names to cluster on "
-                   "(identify_modes default: every '*_raw' unconstrained "
-                   "sampled variable in the trace).")
-@click.option("--seed", type=int, default=None,
-              help="Random seed for k-means clustering (identify_modes "
-                   "default: 20260711). identify_modes is deterministic "
-                   "for a fixed seed, so re-running this CLI on the same "
-                   "trace file with the same seed reproduces identical "
-                   "mode labels and reports every time.")
-@click.option("--logger-level", default=None,
-              type=click.Choice(["DEBUG", "INFO", "WARNING"], case_sensitive=False),
-              help="Logging level (overrides logger_level in config file).")
+@click.option(
+    "--min-weight",
+    type=float,
+    default=None,
+    help="Modes below this fraction of valid draws are dropped "
+    "and their draws left unassigned "
+    "(identify_modes default: 0.005).",
+)
+@click.option(
+    "--max-modes",
+    type=int,
+    default=None,
+    help="Upper limit for the BIC mode-count scan "
+    "(identify_modes default: 8).",
+)
+@click.option(
+    "--feature-vars",
+    default=None,
+    help="Comma-separated posterior variable names to cluster on "
+    "(identify_modes default: every '*_raw' unconstrained "
+    "sampled variable in the trace).",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=None,
+    help="Random seed for k-means clustering (identify_modes "
+    "default: 20260711). identify_modes is deterministic "
+    "for a fixed seed, so re-running this CLI on the same "
+    "trace file with the same seed reproduces identical "
+    "mode labels and reports every time.",
+)
+@click.option(
+    "--logger-level",
+    default=None,
+    type=click.Choice(["DEBUG", "INFO", "WARNING"], case_sensitive=False),
+    help="Logging level (overrides logger_level in config file).",
+)
 def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     """Reprocess a saved trace through posterior mode identification.
 
@@ -102,7 +120,8 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
         raise FileNotFoundError(
             f"No saved trace found at {trace_path}. exozippy-modes reprocesses "
             f"an existing trace produced by a live fit; run "
-            f"`exozippy {config_file}` first.")
+            f"`exozippy {config_file}` first."
+        )
 
     # Build the System (needed for Parameter units/expressions and
     # derived-parameter posteriors) but never sample -- prepare() +
@@ -120,17 +139,23 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     # loud warning banner, not the raise build_mode_reports does for a live
     # fit (raise_on_invalid=True there).
     mode_report = build_mode_reports(
-        system, idata, prefix,
-        min_weight=min_weight, max_modes=max_modes,
-        feature_vars=feature_var_list, seed=seed, raise_on_invalid=False)
+        system,
+        idata,
+        prefix,
+        min_weight=min_weight,
+        max_modes=max_modes,
+        feature_vars=feature_var_list,
+        seed=seed,
+        raise_on_invalid=False,
+    )
 
     if mode_report is None:
         logger.warning(
             "!" * 60 + "\n"
             "MODE IDENTIFICATION FAILED: wrote combined-posterior tables "
             f"only. See the warning above and {prefix}_modes.txt (if "
-            "present) for details.\n"
-            + "!" * 60)
+            "present) for details.\n" + "!" * 60
+        )
     else:
         n_total = mode_report.labels.size
         invalid_frac = mode_report.n_invalid / n_total if n_total else 0.0
@@ -143,12 +168,14 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
                 "rejected as invalid, weights "
                 f"{'validated' if mode_report.weights_reliable else 'UNRELIABLE'}. "
                 f"See {prefix}_modes.txt before trusting these tables.\n"
-                + "!" * 60)
+                + "!" * 60
+            )
         else:
             logger.info(
                 f"Mode report: {mode_report.n_modes} mode(s), "
                 f"{mode_report.n_invalid}/{n_total} draws rejected as "
-                f"invalid; see {prefix}_modes.txt")
+                f"invalid; see {prefix}_modes.txt"
+            )
 
     _persist_trace(idata, trace_path)
     logger.info(f"Rewrote {trace_path} with posterior mode labels attached.")

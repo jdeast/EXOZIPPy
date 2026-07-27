@@ -16,13 +16,13 @@ import pytensor.tensor as pt
 from ...physics_registry import register_physics
 
 # Mann+2015 Table 1: radius from absolute Ks.
-_R_COEFF_NOFEH = (1.9515, -0.3520, 0.01680)              # eq 4
-_R_COEFF_FEH = (1.9305, -0.3466, 0.01647, 0.04458)       # eq 5
+_R_COEFF_NOFEH = (1.9515, -0.3520, 0.01680)  # eq 4
+_R_COEFF_FEH = (1.9305, -0.3466, 0.01647, 0.04458)  # eq 5
 
 # Mann+2019 Table 6 (n=5): mass from absolute Ks.
 _M_ZP = 7.5
-_M_COEFF_NOFEH = (-0.642, -0.208, -8.43e-4, 7.87e-3, 1.42e-4, -2.13e-4)   # eq 4
-_M_COEFF_FEH = (-0.647, -0.207, -6.53e-4, 7.13e-3, 1.84e-4, -1.6e-4)      # eq 5
+_M_COEFF_NOFEH = (-0.642, -0.208, -8.43e-4, 7.87e-3, 1.42e-4, -2.13e-4)  # eq 4
+_M_COEFF_FEH = (-0.647, -0.207, -6.53e-4, 7.13e-3, 1.84e-4, -1.6e-4)  # eq 5
 _M_FEH_TERM = -0.0035
 
 # Fractional scatter of each relation, keyed by whether the [Fe/H]-dependent

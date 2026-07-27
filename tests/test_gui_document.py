@@ -62,9 +62,7 @@ def test_set_value_preserves_comments_and_order(project):
     # Assert -- the only differing line is the one we edited.
     orig_lines = _norm(original)
     saved_lines = _norm(saved)
-    diffs = [
-        (o, s) for o, s in zip(orig_lines, saved_lines) if o != s
-    ]
+    diffs = [(o, s) for o, s in zip(orig_lines, saved_lines) if o != s]
     assert len(orig_lines) == len(saved_lines)
     assert diffs == [("  initval: 1.610", "  initval: 1.999")]
 
@@ -231,8 +229,10 @@ def test_command_from_json_dispatch(project):
     matching Command and applies."""
     doc = _open(project)
     cmd = command_from_json(
-        {"op": "set_param_field",
-         "args": {"path": "star.A.teff", "field": "initval", "value": 6100}}
+        {
+            "op": "set_param_field",
+            "args": {"path": "star.A.teff", "field": "initval", "value": 6100},
+        }
     )
     doc.execute(cmd)
     assert doc.params["star.A.teff"]["initval"] == 6100

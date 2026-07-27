@@ -16,14 +16,13 @@ import yaml
 
 from exozippy.system import System
 
-_KMT_DIR = (
-    Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
-)
+_KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
 # ---------------------------------------------------------------------------
 # Mulensing zeropoint (stage 5)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def kmt_system(monkeypatch_module_cwd=None):
@@ -100,8 +99,11 @@ def test_zeropoint_prior_penalty_scales_with_sigma(kmt_system):
     """
     system, model, point = kmt_system
     zp = _eval(model, model["mulensinstrument.KMTC04.zeropoint"], point)
-    pot = [p for p in model.potentials
-           if p.name == "mulensinstrument.KMTC04.zeropoint_prior"][0]
+    pot = [
+        p
+        for p in model.potentials
+        if p.name == "mulensinstrument.KMTC04.zeropoint_prior"
+    ][0]
     val = _eval(model, pot, point)
     assert val == pytest.approx(-0.5 * (float(zp) / 0.2) ** 2, rel=1e-8)
 
@@ -138,7 +140,9 @@ def test_zeropoint_sigma_zero_raises():
         for k in ("run", "prefix", "parameter_file", "sampler"):
             config.pop(k, None)
         user_params["mulensinstrument.KMTC04.zeropoint"] = {
-            "initval": 0.0, "sigma": 0.0}
+            "initval": 0.0,
+            "sigma": 0.0,
+        }
 
         system = System(config, user_params=user_params)
         system.prepare()
@@ -152,6 +156,7 @@ def test_zeropoint_sigma_zero_raises():
 # Astrometry SED fluxfrac (stage 7)
 # ---------------------------------------------------------------------------
 
+
 def test_astrometry_fluxfrac_derived_from_sed(tmp_path):
     """
     Given a two-star system (host + luminous companion star) with a sed
@@ -163,7 +168,7 @@ def test_astrometry_fluxfrac_derived_from_sed(tmp_path):
     F_companion/(F_companion + F_host) computed from the per-star SED
     magnitude predictions.
     """
-    from test_astrometry import _simulate, _TRUTH
+    from test_astrometry import _TRUTH, _simulate
 
     tc, epoch = _simulate(tmp_path)
     T = _TRUTH
@@ -177,9 +182,15 @@ def test_astrometry_fluxfrac_derived_from_sed(tmp_path):
         "orbit": [{"name": "BH"}],
         "band": [{"name": "GaiaG", "filter": "GAIA2r.G", "ld_law": "linear"}],
         "astrometryinstrument": [
-            {"name": "GaiaSim", "file": str(tmp_path / "sim.gaia.astrom"),
-             "mode": "gaia", "observer_location": "earth", "epoch": epoch,
-             "band": "GaiaG", "companion_star_ndx": 1},
+            {
+                "name": "GaiaSim",
+                "file": str(tmp_path / "sim.gaia.astrom"),
+                "mode": "gaia",
+                "observer_location": "earth",
+                "epoch": epoch,
+                "band": "GaiaG",
+                "companion_star_ndx": 1,
+            },
         ],
         "sed": {"file": str(sed_file)},
     }
@@ -218,14 +229,17 @@ def test_astrometry_fluxfrac_derived_from_sed(tmp_path):
     free_names = [rv.name for rv in model.free_RVs]
     assert "astrometryinstrument.fluxfrac" not in free_names
 
-    beta = _eval(model, model["astrometryinstrument.GaiaSim.fluxfrac_sed"],
-                 point)
+    beta = _eval(
+        model, model["astrometryinstrument.GaiaSim.fluxfrac_sed"], point
+    )
     # independently recompute from the per-star mag predictions
     # (host = star_ndx default 0, companion = companion_star_ndx 1)
-    m_h = _eval(model, system.sed.predict_star_appmag(0, "GAIA2r.G", system),
-                point)
-    m_c = _eval(model, system.sed.predict_star_appmag(1, "GAIA2r.G", system),
-                point)
+    m_h = _eval(
+        model, system.sed.predict_star_appmag(0, "GAIA2r.G", system), point
+    )
+    m_c = _eval(
+        model, system.sed.predict_star_appmag(1, "GAIA2r.G", system), point
+    )
     F_h, F_c = 10 ** (-0.4 * float(m_h)), 10 ** (-0.4 * float(m_c))
     assert float(beta) == pytest.approx(F_c / (F_c + F_h), rel=1e-10)
     assert 0.0 < float(beta) < 1.0

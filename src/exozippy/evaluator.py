@@ -155,7 +155,14 @@ def _param_structure(user_params: Optional[dict]) -> dict:
             except (TypeError, ValueError):
                 pass
         # Expression wiring: any string-valued field is a link (structural).
-        for field in ("initval", "mu", "lower", "upper", "sigma", "init_scale"):
+        for field in (
+            "initval",
+            "mu",
+            "lower",
+            "upper",
+            "sigma",
+            "init_scale",
+        ):
             if isinstance(spec.get(field), str):
                 entry[f"{field}_link"] = spec[field]
         if entry:
@@ -186,6 +193,7 @@ def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
 # Evaluator
 # ---------------------------------------------------------------------------
 
+
 class Evaluator:
     """Millisecond-scale forward evaluator for GUI slider updates.
 
@@ -198,8 +206,9 @@ class Evaluator:
     ``plot_data(system, point)`` again, not a separate compiled graph.
     """
 
-    def __init__(self, system, model, specs, spec_owner, base_raw_point,
-                 free_rvs):
+    def __init__(
+        self, system, model, specs, spec_owner, base_raw_point, free_rvs
+    ):
         self.system = system
         self.model = model
         self.specs = specs
@@ -215,7 +224,8 @@ class Evaluator:
         internal_outputs = list(free_rvs) + det_outputs
         self._internal_names = [v.name for v in internal_outputs]
         self._internal_fn = pytensor.function(
-            inputs=list(free_rvs), outputs=internal_outputs,
+            inputs=list(free_rvs),
+            outputs=internal_outputs,
             on_unused_input="ignore",
         )
 
@@ -250,9 +260,9 @@ class Evaluator:
         values = self._internal_fn(*self._inputs_for(raw_point))
         return dict(zip(self._internal_names, values))
 
-    def eval_plots(self, raw_point,
-                    changed_label: Optional[str] = None
-                    ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
+    def eval_plots(
+        self, raw_point, changed_label: Optional[str] = None
+    ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
         """Re-render every plot's model traces at ``raw_point``.
 
         Returns ``{plot_id: {trace_name: {"x": array, "y": array}}}`` (data
@@ -280,11 +290,16 @@ class Evaluator:
             except Exception as exc:  # noqa: BLE001 - keep sliders usable
                 logger.warning(
                     "Evaluator: plot_data failed for %s during live eval: %s",
-                    getattr(comp, "prefix", comp), exc)
+                    getattr(comp, "prefix", comp),
+                    exc,
+                )
                 continue
             for spec in comp_specs:
-                traces = {tr.name: {"x": tr.x, "y": tr.y}
-                          for tr in spec.traces if tr.role == "model"}
+                traces = {
+                    tr.name: {"x": tr.x, "y": tr.y}
+                    for tr in spec.traces
+                    if tr.role == "model"
+                }
                 if traces:
                     out[spec.id] = traces
         return out
@@ -325,11 +340,13 @@ class Evaluator:
         else:
             raise KeyError(
                 f"Instance '{inst}' not found for parameter '{label}' "
-                f"(names={par.names})")
+                f"(names={par.names})"
+            )
         return par, elem
 
-    def set_value(self, param_path: str, value_in_user_units: float,
-                  raw_point) -> Dict[str, np.ndarray]:
+    def set_value(
+        self, param_path: str, value_in_user_units: float, raw_point
+    ) -> Dict[str, np.ndarray]:
         """Return a NEW raw point with ``param_path`` set to a user-unit value.
 
         Converts user units to internal units and inverts the parameter's
@@ -352,21 +369,25 @@ class Evaluator:
         if elem in links.get("lower", {}) or elem in links.get("upper", {}):
             raise NeedsResolve(
                 f"{param_path}: element {elem} has tensor-valued (linked) "
-                f"bounds; cannot invert statically -- re-solve required.")
+                f"bounds; cannot invert statically -- re-solve required."
+            )
         if elem in links.get("hard", {}):
             raise NeedsResolve(
                 f"{param_path}: element {elem} is hard-linked (deterministic); "
-                f"it is not a free slider -- re-solve required.")
+                f"it is not a free slider -- re-solve required."
+            )
 
         tf = getattr(par, "_raw_transform", None)
         if tf is None or elem not in list(tf["sampled_idx"]):
             raise NeedsResolve(
                 f"{param_path}: element {elem} is not a sampled free variable "
-                f"(fixed or derived); cannot set via slider -- re-solve required.")
+                f"(fixed or derived); cannot set via slider -- re-solve required."
+            )
 
         # user -> internal units
-        factors = np.atleast_1d(np.asarray(par._get_conversion_factors(),
-                                           dtype=float))
+        factors = np.atleast_1d(
+            np.asarray(par._get_conversion_factors(), dtype=float)
+        )
         factor = factors[elem] if elem < factors.size else factors[0]
         val_internal = float(value_in_user_units) / factor
 
@@ -374,10 +395,11 @@ class Evaluator:
         if raw_key not in raw_point:
             raise NeedsResolve(
                 f"{param_path}: no raw variable '{raw_key}' in the point "
-                f"(parameter not sampled in this model) -- re-solve required.")
+                f"(parameter not sampled in this model) -- re-solve required."
+            )
 
         cur_raw = np.asarray(raw_point[raw_key], dtype=float)
-        phys = par.phys_from_raw(cur_raw)      # full element vector (internal)
+        phys = par.phys_from_raw(cur_raw)  # full element vector (internal)
         phys = np.asarray(phys, dtype=float).copy()
         phys[elem] = val_internal
         try:
@@ -385,22 +407,27 @@ class Evaluator:
         except SeedBoundViolation as e:
             raise ValueError(
                 f"{param_path}: value {value_in_user_units} is outside the "
-                f"parameter's hard bounds ({e}).") from e
+                f"parameter's hard bounds ({e})."
+            ) from e
 
         new_point = {k: np.array(v, copy=True) for k, v in raw_point.items()}
         new_point[raw_key] = np.asarray(new_raw, dtype=float).reshape(
-            np.shape(raw_point[raw_key]))
+            np.shape(raw_point[raw_key])
+        )
         return new_point
 
     # convenience: expose the module-level hash on the instance too
     @staticmethod
-    def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
+    def structural_hash(
+        config: dict, user_params: Optional[dict] = None
+    ) -> str:
         return structural_hash(config, user_params)
 
 
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
+
 
 def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
     """Build an :class:`Evaluator` for a prepared+built system.
@@ -433,11 +460,16 @@ def compile_evaluator(system, model, base_raw_point=None) -> Evaluator:
         try:
             comp_specs = comp.plot_data(system, base_internal)
         except Exception as e:  # noqa: BLE001 - a component may lack data
-            logger.warning("Evaluator: plot_data failed for %s: %s",
-                            getattr(comp, "prefix", comp), e)
+            logger.warning(
+                "Evaluator: plot_data failed for %s: %s",
+                getattr(comp, "prefix", comp),
+                e,
+            )
             continue
         for spec in comp_specs:
             spec_owner[spec.id] = comp
         specs.extend(comp_specs)
 
-    return Evaluator(system, model, specs, spec_owner, base_raw_point, free_rvs)
+    return Evaluator(
+        system, model, specs, spec_owner, base_raw_point, free_rvs
+    )

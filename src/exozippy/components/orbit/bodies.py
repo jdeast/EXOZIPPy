@@ -31,8 +31,10 @@ def component_instance_names(system_config, comp_key):
     section = system_config.get(comp_key) or []
     if not isinstance(section, list):
         section = [section]
-    return [c.get("name", str(i)) if isinstance(c, dict) else str(i)
-            for i, c in enumerate(section)]
+    return [
+        c.get("name", str(i)) if isinstance(c, dict) else str(i)
+        for i, c in enumerate(section)
+    ]
 
 
 def parse_body_ref(ref, star_names, planet_names, context=""):
@@ -49,20 +51,23 @@ def parse_body_ref(ref, star_names, planet_names, context=""):
         if comp not in ("star", "planet"):
             raise ValueError(
                 f"{context}invalid body reference '{ref}': component must be "
-                f"'star' or 'planet'.")
+                f"'star' or 'planet'."
+            )
         names = star_names if comp == "star" else planet_names
         if tail.isdigit():
             idx = int(tail)
             if idx >= len(names):
                 raise ValueError(
                     f"{context}body reference '{ref}' is out of range "
-                    f"({comp} has {len(names)} instance(s)).")
+                    f"({comp} has {len(names)} instance(s))."
+                )
         elif tail in names:
             idx = names.index(tail)
         else:
             raise ValueError(
                 f"{context}body reference '{ref}' not found; {comp} "
-                f"instances are {names}.")
+                f"instances are {names}."
+            )
         return (comp, idx)
 
     hits = []
@@ -73,11 +78,13 @@ def parse_body_ref(ref, star_names, planet_names, context=""):
     if not hits:
         raise ValueError(
             f"{context}body '{ref}' does not match any star or planet "
-            f"instance name (stars: {star_names}, planets: {planet_names}).")
+            f"instance name (stars: {star_names}, planets: {planet_names})."
+        )
     if len(hits) > 1:
         raise ValueError(
             f"{context}body '{ref}' is ambiguous (both a star and a planet "
-            f"use that name); qualify it as 'star.{ref}' or 'planet.{ref}'.")
+            f"use that name); qualify it as 'star.{ref}' or 'planet.{ref}'."
+        )
     return hits[0]
 
 
@@ -107,15 +114,19 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
         if "bodies" in cfg:
             raise ValueError(
                 f"{ctx}'bodies' is not a supported key; declare the two "
-                f"sides explicitly with 'primary:' and 'companion:'.")
+                f"sides explicitly with 'primary:' and 'companion:'."
+            )
 
         prim_cfg = cfg.get("primary")
         comp_cfg = cfg.get("companion")
         if prim_cfg is None and comp_cfg is None:
             # Legacy implicit topology: companion = planets pointing here,
             # primary = their host stars.
-            comp_b = [("planet", j) for j, p in enumerate(planet_cfgs)
-                      if int((p or {}).get("orbit_ndx", 0)) == i]
+            comp_b = [
+                ("planet", j)
+                for j, p in enumerate(planet_cfgs)
+                if int((p or {}).get("orbit_ndx", 0)) == i
+            ]
             prim_b = []
             for _, j in comp_b:
                 host = ("star", int((planet_cfgs[j] or {}).get("star_ndx", 0)))
@@ -130,20 +141,29 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
         elif prim_cfg is None or comp_cfg is None:
             raise ValueError(
                 f"{ctx}give both 'primary:' and 'companion:' (or neither, "
-                f"for the implicit planet-orbit pairing).")
+                f"for the implicit planet-orbit pairing)."
+            )
         else:
-            prim_b = [parse_body_ref(r, star_names, planet_names, ctx)
-                      for r in _as_list(prim_cfg)]
-            comp_b = [parse_body_ref(r, star_names, planet_names, ctx)
-                      for r in _as_list(comp_cfg)]
+            prim_b = [
+                parse_body_ref(r, star_names, planet_names, ctx)
+                for r in _as_list(prim_cfg)
+            ]
+            comp_b = [
+                parse_body_ref(r, star_names, planet_names, ctx)
+                for r in _as_list(comp_cfg)
+            ]
 
         if not prim_b or not comp_b:
-            raise ValueError(f"{ctx}primary and companion groups must each "
-                             f"contain at least one body.")
+            raise ValueError(
+                f"{ctx}primary and companion groups must each "
+                f"contain at least one body."
+            )
         overlap = set(prim_b) & set(comp_b)
         if overlap:
-            raise ValueError(f"{ctx}body/bodies {sorted(overlap)} appear in "
-                             f"both the primary and companion groups.")
+            raise ValueError(
+                f"{ctx}body/bodies {sorted(overlap)} appear in "
+                f"both the primary and companion groups."
+            )
         if len(set(prim_b)) != len(prim_b) or len(set(comp_b)) != len(comp_b):
             raise ValueError(f"{ctx}duplicate body in a group.")
 

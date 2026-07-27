@@ -7,8 +7,9 @@ flattening posterior variables into a sample matrix and rendering it.
 
 import logging
 import math
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,17 @@ def _flatten_arrays(items):
 
         if arr.ndim == 1:
             samples_list.append(arr)
-            labels.append(element_labels[0] if element_labels else fallback_name)
+            labels.append(
+                element_labels[0] if element_labels else fallback_name
+            )
         else:
             arr_flat = arr.reshape(-1, n_samples)
             n_elem = arr_flat.shape[0]
             if n_elem > 100:
-                logger.warning(f"corner_utils: {fallback_name} has {n_elem} "
-                               "elements -- possible shape mismatch")
+                logger.warning(
+                    f"corner_utils: {fallback_name} has {n_elem} "
+                    "elements -- possible shape mismatch"
+                )
             for i in range(n_elem):
                 samples_list.append(arr_flat[i])
                 if element_labels and i < len(element_labels):
@@ -110,7 +115,9 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
     import corner
 
     if samples is None or samples.shape[0] == 0 or samples.shape[1] == 0:
-        logger.warning(f"save_corner_plot: no samples to plot for {filename}; skipping")
+        logger.warning(
+            f"save_corner_plot: no samples to plot for {filename}; skipping"
+        )
         return
 
     if samples.shape[0] > max_samples:
@@ -136,5 +143,7 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         fig.savefig(filename, dpi=150)
         plt.close(fig)
     except Exception as e:
-        logger.warning(f"Corner plot failed (sample size {samples.shape[0]}, "
-                       f"file {filename}): {e}")
+        logger.warning(
+            f"Corner plot failed (sample size {samples.shape[0]}, "
+            f"file {filename}): {e}"
+        )

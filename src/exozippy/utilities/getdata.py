@@ -23,23 +23,61 @@ import sys
 def build_parser():
     """Return the argparse parser for the getdata utility."""
     parser = argparse.ArgumentParser(
-        prog='getdata.py',
-        description='Downloads TESS/Kepler data and formats it for EXOFASTv2')
-    parser.add_argument('id', help='SIMBAD-resolvable star name')
-    parser.add_argument('-d', '--depth', default=0.03, type=float, dest='depth',
-                        help='Fractional transit depth. Flux >= 1-depth will not be clipped.')
-    parser.add_argument('-n', '--nsigma', default=5.0, type=float, dest='nsigma',
-                        help='N sigma clipping. Negative values will skip clipping.')
-    parser.add_argument('-p', '--path', default='.', dest='path',
-                        help='path to output files')
-    parser.add_argument('-u', '--undeblend', default=False, action='store_true', dest='undeblend',
-                        help='Undo deblending from lightcurves')
-    parser.add_argument('-v', '--verbose', default=False, action='store_true', dest='verbose',
-                        help='Display clipping stats')
-    parser.add_argument('-a', '--all', default=False, action='store_true', dest='download_all',
-                        help='Download all lightcurves')
-    parser.add_argument('-o', '--overwrite', default=False, action='store_true', dest='overwrite',
-                        help='Overwrite previously downloaded files')
+        prog="getdata.py",
+        description="Downloads TESS/Kepler data and formats it for EXOFASTv2",
+    )
+    parser.add_argument("id", help="SIMBAD-resolvable star name")
+    parser.add_argument(
+        "-d",
+        "--depth",
+        default=0.03,
+        type=float,
+        dest="depth",
+        help="Fractional transit depth. Flux >= 1-depth will not be clipped.",
+    )
+    parser.add_argument(
+        "-n",
+        "--nsigma",
+        default=5.0,
+        type=float,
+        dest="nsigma",
+        help="N sigma clipping. Negative values will skip clipping.",
+    )
+    parser.add_argument(
+        "-p", "--path", default=".", dest="path", help="path to output files"
+    )
+    parser.add_argument(
+        "-u",
+        "--undeblend",
+        default=False,
+        action="store_true",
+        dest="undeblend",
+        help="Undo deblending from lightcurves",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        default=False,
+        action="store_true",
+        dest="verbose",
+        help="Display clipping stats",
+    )
+    parser.add_argument(
+        "-a",
+        "--all",
+        default=False,
+        action="store_true",
+        dest="download_all",
+        help="Download all lightcurves",
+    )
+    parser.add_argument(
+        "-o",
+        "--overwrite",
+        default=False,
+        action="store_true",
+        dest="overwrite",
+        help="Overwrite previously downloaded files",
+    )
     return parser
 
 
@@ -52,22 +90,30 @@ def run(args):
     if args.undeblend:
         # this feature probably won't be used often. don't make it a dependency if not used
         from astroquery.vizier import Vizier
-        v = Vizier(columns=['TIC', 'Ncont', 'Rcont', '_r'],
-                   catalog='IV/39/tic82').query_object(args.id)[0]
-        ndx = np.argmin(v['_r'])
+
+        v = Vizier(
+            columns=["TIC", "Ncont", "Rcont", "_r"], catalog="IV/39/tic82"
+        ).query_object(args.id)[0]
+        ndx = np.argmin(v["_r"])
         v = v[ndx]
 
-        if str(v['Rcont']) == '--':
+        if str(v["Rcont"]) == "--":
             if args.verbose:
                 print("No deblending to undo")
             og_contratio = 0.0
         else:
             if args.verbose:
-                print("Undoing deblending for " + str(v['Ncont']) + ' stars (' + str(v['Rcont']) + ')')
-            og_contratio = float(v['Rcont'])
-        file_ext = '.undeblended.dat'
+                print(
+                    "Undoing deblending for "
+                    + str(v["Ncont"])
+                    + " stars ("
+                    + str(v["Rcont"])
+                    + ")"
+                )
+            og_contratio = float(v["Rcont"])
+        file_ext = ".undeblended.dat"
     else:
-        file_ext = '.dat'
+        file_ext = ".dat"
         contratio = 0.0
 
     t0 = datetime.datetime(2000, 1, 1)
@@ -75,10 +121,25 @@ def run(args):
 
     search_results = lk.search_lightcurve(
         args.id,
-        author=('SPOC', 'TESS-SPOC', 'QLP', 'TASOC', 'CDIPS', 'Kepler', 'K2', 'K2SFF', 'EVEREST'))
+        author=(
+            "SPOC",
+            "TESS-SPOC",
+            "QLP",
+            "TASOC",
+            "CDIPS",
+            "Kepler",
+            "K2",
+            "K2SFF",
+            "EVEREST",
+        ),
+    )
 
     if len(search_results) == 0:
-        print("No light curves found for " + args.id + ". Name must be SIMBAD-resolveable")
+        print(
+            "No light curves found for "
+            + args.id
+            + ". Name must be SIMBAD-resolveable"
+        )
         return
 
     # sometimes IDs match to multiple TIC IDs
@@ -90,15 +151,15 @@ def run(args):
     # download them
     match = []
     for id in unique_ids:
-        if 'ktwo' in id:
+        if "ktwo" in id:
             match.append(id)
-        if 'kplr' in id:
-            match.append('KIC' + id[4:])
+        if "kplr" in id:
+            match.append("KIC" + id[4:])
 
     if len(match) == 1 and len(unique_ids) <= 2:
         pass
     else:
-        if len(unique_ids) > 1 and 'TIC' in args.id:
+        if len(unique_ids) > 1 and "TIC" in args.id:
             match = np.where(search_results.target_name == args.id[3:])
             if len(match) > 0:
                 search_results = search_results[match]
@@ -125,40 +186,72 @@ def run(args):
                 to_download.append(match[0])
             if len(match) > 1:
                 # prioritize by exptime: 120, 200, 20, (short cadence) 300, 600, then 1800 (long cadence)
-                match2 = np.where(search_results[match].exptime.value == 120)[0]
+                match2 = np.where(search_results[match].exptime.value == 120)[
+                    0
+                ]
                 if len(match2) == 0:
-                    match2 = np.where(search_results[match].exptime.value == 200)[0]
+                    match2 = np.where(
+                        search_results[match].exptime.value == 200
+                    )[0]
                 if len(match2) == 0:
-                    match2 = np.where(search_results[match].exptime.value == 20)[0]
+                    match2 = np.where(
+                        search_results[match].exptime.value == 20
+                    )[0]
                 if len(match2) == 0:
-                    match2 = np.where(search_results[match].exptime.value == 300)[0]
+                    match2 = np.where(
+                        search_results[match].exptime.value == 300
+                    )[0]
                 if len(match2) == 0:
-                    match2 = np.where(search_results[match].exptime.value == 600)[0]
+                    match2 = np.where(
+                        search_results[match].exptime.value == 600
+                    )[0]
                 if len(match2) == 0:
-                    match2 = np.where(search_results[match].exptime.value == 1800)[0]
+                    match2 = np.where(
+                        search_results[match].exptime.value == 1800
+                    )[0]
                 if len(match2) == 1:
                     to_download.append(match[match2[0]])
                 if len(match2) > 1:
                     # prioritize by author: TESS, SPOC, TESS-SPOC, QLP, Kepler, K2SFF, EVEREST, K2, CDIPS, then TASOC
-                    match3 = np.where(search_results[match[match2]].author == 'TESS')[0]
+                    match3 = np.where(
+                        search_results[match[match2]].author == "TESS"
+                    )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'SPOC')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "SPOC"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'TESS-SPOC')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "TESS-SPOC"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'QLP')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "QLP"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'Kepler')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "Kepler"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'K2SFF')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "K2SFF"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'EVEREST')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "EVEREST"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'K2')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "K2"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'CDIPS')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "CDIPS"
+                        )[0]
                     if len(match3) == 0:
-                        match3 = np.where(search_results[match[match2]].author == 'TASOC')[0]
+                        match3 = np.where(
+                            search_results[match[match2]].author == "TASOC"
+                        )[0]
                     if len(match3) == 1:
                         to_download.append(match[match2[match3[0]]])
 
@@ -166,55 +259,83 @@ def run(args):
 
         author = search_result.author[0]  # SPOC, QLP, etc
         exptime = str(int(search_result.exptime[0].value)).zfill(4)
-        ticid = 'TIC' + search_result.target_name[0]
+        ticid = "TIC" + search_result.target_name[0]
 
         if author == "Kepler":
             # Quarters of Kepler (prime) data
             bjd_offset = 2454833.0
-            sector = 'Q' + search_result.mission[0][-2:]
-            filter = 'Kepler'
-            telescope = 'Kepler'
+            sector = "Q" + search_result.mission[0][-2:]
+            filter = "Kepler"
+            telescope = "Kepler"
             if args.undeblend:
                 contratio = 0.0
-                file_ext = '.dat'
-                print('WARNING: undeblending not supported for Kepler -- ignoring -u option')
-        elif author == 'K2' or author == 'EVEREST' or author == 'K2SFF' or author == 'K2VARCAT':
+                file_ext = ".dat"
+                print(
+                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
+                )
+        elif (
+            author == "K2"
+            or author == "EVEREST"
+            or author == "K2SFF"
+            or author == "K2VARCAT"
+        ):
             # Campaigns of K2 data
             bjd_offset = 2454833.0
-            sector = 'C' + search_result.mission[0][-2:]
-            filter = 'Kepler'
-            telescope = 'Kepler'
+            sector = "C" + search_result.mission[0][-2:]
+            filter = "Kepler"
+            telescope = "Kepler"
             if args.undeblend:
                 contratio = 0.0
-                file_ext = '.dat'
-                print('WARNING: undeblending not supported for Kepler -- ignoring -u option')
-        elif author == "TESS-SPOC" or author == 'QLP' or author == 'SPOC':
+                file_ext = ".dat"
+                print(
+                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
+                )
+        elif author == "TESS-SPOC" or author == "QLP" or author == "SPOC":
             # TESS sectors
             bjd_offset = 2457000.0
-            sector = 'S' + str(int(str(search_result.mission[0]).split()[-1])).zfill(2)
-            filter = 'TESS'
-            telescope = 'TESS'
+            sector = "S" + str(
+                int(str(search_result.mission[0]).split()[-1])
+            ).zfill(2)
+            filter = "TESS"
+            telescope = "TESS"
             if args.undeblend:
                 contratio = og_contratio
-                file_ext = '.undeblended.dat'
-        elif author == 'CDIPS' or author == 'TASOC':
+                file_ext = ".undeblended.dat"
+        elif author == "CDIPS" or author == "TASOC":
             # they don't have flux in the same place. Or errors.
             print("WARNING: CDIPS and TASOC LCs are not supported (yet?)")
             continue
         else:
-            print("WARNING: Skipping lightcurve with unrecognized author: " + author)
+            print(
+                "WARNING: Skipping lightcurve with unrecognized author: "
+                + author
+            )
             continue
-        file_suffix = '.' + filter + '.' + telescope + '.' + args.id + '.' + sector + '.' + exptime + '.' + author + file_ext
+        file_suffix = (
+            "."
+            + filter
+            + "."
+            + telescope
+            + "."
+            + args.id
+            + "."
+            + sector
+            + "."
+            + exptime
+            + "."
+            + author
+            + file_ext
+        )
 
         # skip if I've already got it
         if not args.overwrite:
-            files = glob.glob(os.path.join(args.path, '*' + file_suffix))
+            files = glob.glob(os.path.join(args.path, "*" + file_suffix))
             if len(files) != 0:
                 continue
 
         lc = search_result.download()
         lc = lc.remove_nans()
-        lc *= (1.0 + contratio)
+        lc *= 1.0 + contratio
         lc = lc.normalize()
 
         time = np.array(lc.time.value) + bjd_offset
@@ -237,7 +358,10 @@ def run(args):
         while nbad != 0:
             rms = np.std(flux)
             median = np.median(flux)
-            good = np.where((flux > (median - args.depth - args.nsigma * rms)) & (flux < (median + args.nsigma * rms)))[0]
+            good = np.where(
+                (flux > (median - args.depth - args.nsigma * rms))
+                & (flux < (median + args.nsigma * rms))
+            )[0]
             ngood = len(good)
             nbad = len(flux) - ngood
 
@@ -250,10 +374,14 @@ def run(args):
         # are they all bad?
         if ngood == 0:
             print("WARNING: no good points after sigma clipping")
-            print("Skipping lightcurve " + sector + ' ' + exptime + ' ' + author)
+            print(
+                "Skipping lightcurve " + sector + " " + exptime + " " + author
+            )
             continue
 
-        datestr = (t0 + datetime.timedelta(days=time[0] - jd0)).strftime('n%Y%m%d')
+        datestr = (t0 + datetime.timedelta(days=time[0] - jd0)).strftime(
+            "n%Y%m%d"
+        )
 
         # create the filename in EXOFASTv2 format
         filename = os.path.join(args.path, datestr + file_suffix)
@@ -269,5 +397,5 @@ def main(argv=None):
     run(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

@@ -135,21 +135,27 @@ def _bounds_diagnostics(parameters):
         if value is None:
             continue
         if lower is not None and value < lower:
-            diags.append({
-                "severity": "error",
-                "message": (
-                    f"initval {value:.6g} for '{path}' is below its lower "
-                    f"bound {lower:.6g}; no in-bounds start exists."),
-                "param_paths": [path],
-            })
+            diags.append(
+                {
+                    "severity": "error",
+                    "message": (
+                        f"initval {value:.6g} for '{path}' is below its lower "
+                        f"bound {lower:.6g}; no in-bounds start exists."
+                    ),
+                    "param_paths": [path],
+                }
+            )
         elif upper is not None and value > upper:
-            diags.append({
-                "severity": "error",
-                "message": (
-                    f"initval {value:.6g} for '{path}' is above its upper "
-                    f"bound {upper:.6g}; no in-bounds start exists."),
-                "param_paths": [path],
-            })
+            diags.append(
+                {
+                    "severity": "error",
+                    "message": (
+                        f"initval {value:.6g} for '{path}' is above its upper "
+                        f"bound {upper:.6g}; no in-bounds start exists."
+                    ),
+                    "param_paths": [path],
+                }
+            )
     return diags
 
 
@@ -196,11 +202,13 @@ def validate(config, user_params=None, workdir=None):
     try:
         system, _ = _prepare_system(config, user_params, workdir)
     except Exception as e:
-        return [{
-            "severity": "error",
-            "message": f"{type(e).__name__}: {e}",
-            "param_paths": [],
-        }]
+        return [
+            {
+                "severity": "error",
+                "message": f"{type(e).__name__}: {e}",
+                "param_paths": [],
+            }
+        ]
 
     export = system.config_manager.export_solution()
     diagnostics = list(system.config_manager.diagnostics)

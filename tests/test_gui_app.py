@@ -89,6 +89,7 @@ def test_open_project_rejects_missing_dir(tmp_path):
 
 # --- CLI arg resolution (`exozippy-gui [project]`) ----------------------------
 
+
 def test_resolve_project_arg_defaults_to_cwd(tmp_path):
     """Given no positional arg, When resolved, Then it falls back to cwd."""
     from exozippy.gui.app import resolve_project_arg
@@ -146,6 +147,7 @@ def test_resolve_project_arg_missing_path_raises(tmp_path):
 
 
 # --- endpoint tests (require the 'gui' extra) --------------------------------
+
 
 @pytest.fixture
 def client():
@@ -271,8 +273,10 @@ def test_doc_open_command_undo_save_flow(client, rvonly_project):
     # command: set a param field
     resp = client.post(
         "/api/doc/command",
-        json={"op": "set_param_field",
-              "args": {"path": "star.A.teff", "field": "initval", "value": 6300}},
+        json={
+            "op": "set_param_field",
+            "args": {"path": "star.A.teff", "field": "initval", "value": 6300},
+        },
     )
     assert resp.status_code == 200
     body = resp.json()

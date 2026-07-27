@@ -7,6 +7,7 @@ assigned to seeds round-robin (chain j -> seed j % K); the first chain of
 each seed group starts exactly at that seed, later chains in the group jitter
 around it.
 """
+
 import numpy as np
 import pymc as pm
 import pytest
@@ -46,7 +47,8 @@ def test_make_starts_round_robins_chains_across_two_seeds():
     start1 = {"x": np.array(1.5), "y": np.array(-2.0)}
 
     starts, chain_seed_index = _make_starts(
-        4, [start0, start1], logp_fn, rng, seed_indices=[0, 7])
+        4, [start0, start1], logp_fn, rng, seed_indices=[0, 7]
+    )
 
     assert len(starts) == 4
     assert chain_seed_index == [0, 7, 0, 7]
@@ -93,9 +95,17 @@ def test_ptde_sample_records_chain_seed_index_in_posterior_attrs():
     start1 = {"x": np.array(0.2), "y": np.array(2.8)}
 
     idata = ptde_sample(
-        model, system, draws=20, tune=20,
-        n_temps=2, T_max=2.0, n_chains=4, cores=1, seed=0,
-        raw_starts=[start0, start1], seed_indices=[0, 1],
+        model,
+        system,
+        draws=20,
+        tune=20,
+        n_temps=2,
+        T_max=2.0,
+        n_chains=4,
+        cores=1,
+        seed=0,
+        raw_starts=[start0, start1],
+        seed_indices=[0, 1],
         log_interval=100,
     )
 

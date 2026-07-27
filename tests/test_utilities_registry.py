@@ -6,6 +6,7 @@ without importing argparse semantics, and (c) run a utility headless while
 detecting the files it produced. No test hits the network: real downloaders
 are only introspected, never run; run_utility is exercised with a tiny fake.
 """
+
 import json
 import subprocess
 import sys
@@ -15,15 +16,19 @@ import pytest
 
 from exozippy.components.component import Component
 from exozippy.components.transit.transit import Transit
-from exozippy.utilities import registry
-from exozippy.utilities.registry import UtilitySpec, parser_to_schema, run_utility
-from exozippy.utilities import getdata, mkticsed, mmexofast_to_params
+from exozippy.utilities import getdata, mkticsed, mmexofast_to_params, registry
+from exozippy.utilities.registry import (
+    UtilitySpec,
+    parser_to_schema,
+    run_utility,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 
 
 # --- parser -> JSON schema ----------------------------------------------------
+
 
 def test_parser_to_schema_is_json_serializable_for_all_real_parsers():
     """
@@ -32,8 +37,11 @@ def test_parser_to_schema_is_json_serializable_for_all_real_parsers():
     Then the result survives json.dumps unchanged.
     """
     # Arrange
-    parsers = [getdata.build_parser(), mkticsed.build_parser(),
-               mmexofast_to_params.build_parser()]
+    parsers = [
+        getdata.build_parser(),
+        mkticsed.build_parser(),
+        mmexofast_to_params.build_parser(),
+    ]
 
     # Act / Assert
     for parser in parsers:
@@ -41,7 +49,13 @@ def test_parser_to_schema_is_json_serializable_for_all_real_parsers():
         assert json.loads(json.dumps(schema)) == schema
         for entry in schema:
             assert set(entry) == {
-                "name", "type", "default", "required", "choices", "help"}
+                "name",
+                "type",
+                "default",
+                "required",
+                "choices",
+                "help",
+            }
 
 
 def test_mkticsed_schema_exposes_expected_argument_names():
@@ -83,7 +97,9 @@ def test_mmexofast_schema_exposes_json_and_options():
     Then the positional 'json' and options '--lens-name'/'--out' appear.
     """
     # Act
-    names = {e["name"] for e in parser_to_schema(mmexofast_to_params.build_parser())}
+    names = {
+        e["name"] for e in parser_to_schema(mmexofast_to_params.build_parser())
+    }
 
     # Assert
     assert "json" in names
@@ -92,6 +108,7 @@ def test_mmexofast_schema_exposes_json_and_options():
 
 
 # --- component-declared utilities ---------------------------------------------
+
 
 def test_transit_declares_getdata_and_a_disabled_bls():
     """
@@ -129,8 +146,13 @@ def test_all_utilities_gathers_expected_names():
     utils = registry.all_utilities()
 
     # Assert
-    for name in ("getdata", "bls", "mkticsed", "mmexofast_to_params",
-                 "lomb_scargle"):
+    for name in (
+        "getdata",
+        "bls",
+        "mkticsed",
+        "mmexofast_to_params",
+        "lomb_scargle",
+    ):
         assert name in utils, name
     assert utils["mkticsed"].component_keys == ["sed"]
     assert utils["mmexofast_to_params"].component_keys == ["lens"]
@@ -157,9 +179,11 @@ def test_utility_to_schema_round_trips_through_json():
 
 # --- headless run with a fake spec (no network) -------------------------------
 
+
 @pytest.fixture
 def fake_utility():
     """A tiny in-process utility that writes one file and returns rc=7."""
+
     def _run(args_dict, cwd):
         out = Path(cwd) / args_dict["outfile"]
         out.write_text("produced by fake utility\n")
@@ -177,7 +201,9 @@ def fake_utility():
     )
 
 
-def test_run_utility_captures_produced_files_and_returncode(tmp_path, fake_utility):
+def test_run_utility_captures_produced_files_and_returncode(
+    tmp_path, fake_utility
+):
     """
     Given a fake utility that writes a file,
     When run_utility executes it in a working directory,
@@ -187,7 +213,9 @@ def test_run_utility_captures_produced_files_and_returncode(tmp_path, fake_utili
     reg = {fake_utility.name: fake_utility}
 
     # Act
-    result = run_utility("fake", {"outfile": "new.txt"}, tmp_path, registry=reg)
+    result = run_utility(
+        "fake", {"outfile": "new.txt"}, tmp_path, registry=reg
+    )
 
     # Assert
     assert result["returncode"] == 7
@@ -204,8 +232,9 @@ def test_run_utility_rejects_placeholder(fake_utility, tmp_path):
     Then it raises rather than executing anything.
     """
     # Arrange
-    placeholder = UtilitySpec(name="ph", label="ph", description="",
-                              available=False)
+    placeholder = UtilitySpec(
+        name="ph", label="ph", description="", available=False
+    )
     reg = {"ph": placeholder}
 
     # Act / Assert
@@ -226,8 +255,10 @@ def test_run_utility_unknown_name_raises(tmp_path):
 
 # --- scripts wrappers still work ----------------------------------------------
 
-@pytest.mark.parametrize("script", ["getdata.py", "mkticsed.py",
-                                    "mmexofast_to_params.py"])
+
+@pytest.mark.parametrize(
+    "script", ["getdata.py", "mkticsed.py", "mmexofast_to_params.py"]
+)
 def test_script_wrapper_responds_to_help(script):
     """
     Given a thin scripts/*.py wrapper,
@@ -237,7 +268,10 @@ def test_script_wrapper_responds_to_help(script):
     # Act
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS / script), "--help"],
-        cwd=str(REPO_ROOT), capture_output=True, text=True)
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
 
     # Assert
     assert proc.returncode == 0, proc.stderr

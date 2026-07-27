@@ -1,8 +1,10 @@
-from .parameter import Parameter
-from ..physics_registry import PHYSICS_REGISTRY
 from abc import ABC, abstractmethod
+
 import numpy as np
 import pytensor.tensor as pt
+
+from ..physics_registry import PHYSICS_REGISTRY
+from .parameter import Parameter
 
 
 class Component(ABC):
@@ -142,20 +144,28 @@ class Component(ABC):
                 # Only convert if it's actually an array/list (safeguard)
                 if isinstance(logical_array, (np.ndarray, list)):
                     tensor_name = attr_name + "_tensor"
-                    tensor_var = pt.as_tensor_variable(logical_array).astype("int32")
+                    tensor_var = pt.as_tensor_variable(logical_array).astype(
+                        "int32"
+                    )
                     setattr(self, tensor_name, tensor_var)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
 
         # 0. Prevent double-building nodes
-        if hasattr(self, param_name) and isinstance(getattr(self, param_name), Parameter):
+        if hasattr(self, param_name) and isinstance(
+            getattr(self, param_name), Parameter
+        ):
             return getattr(self, param_name).value
 
-        if not hasattr(self, 'manifest'):
-            raise ValueError(f"[{self.prefix}] has no manifest. Did register_parameters run?")
+        if not hasattr(self, "manifest"):
+            raise ValueError(
+                f"[{self.prefix}] has no manifest. Did register_parameters run?"
+            )
         if param_name not in self.manifest:
-            raise KeyError(f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest.")
+            raise KeyError(
+                f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest."
+            )
 
         options = self.manifest[param_name] or {}
         if isinstance(options, str):
@@ -167,7 +177,7 @@ class Component(ABC):
         # per-element names used for user-param resolution and display labels
         # (e.g. per-source lens params named after the source stars).
         shape = tuple(options.pop("shape", None) or (self.n_elements,))
-        names = options.pop("names", None) or getattr(self, 'names', None)
+        names = options.pop("names", None) or getattr(self, "names", None)
 
         # Component-computed per-element defaults ("overrides") are layered in
         # BELOW the user's params file, unlike the remaining manifest options,
@@ -181,8 +191,11 @@ class Component(ABC):
 
         # 1. Grab configuration properties agnostically
         cfg = self.config_manager.resolve(
-            self.prefix, param_name, shape=shape, names=names,
-            internal_overrides=overrides
+            self.prefix,
+            param_name,
+            shape=shape,
+            names=names,
+            internal_overrides=overrides,
         )
 
         expr_key = options.pop("expr_key", None)
@@ -197,11 +210,16 @@ class Component(ABC):
 
             if func_name not in PHYSICS_REGISTRY:
                 raise NotImplementedError(
-                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY.")
+                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY."
+                )
 
             func = PHYSICS_REGISTRY[func_name]
             manifest_deps = options.pop("deps", None)
-            dep_names = manifest_deps if manifest_deps is not None else expr_cfg.get("deps", [])
+            dep_names = (
+                manifest_deps
+                if manifest_deps is not None
+                else expr_cfg.get("deps", [])
+            )
             dep_nodes = []
 
             for d in dep_names:
@@ -220,16 +238,24 @@ class Component(ABC):
                     ext_comp_name, ext_param_name = d_lookup.split(".", 1)
                     ext_comp = getattr(system, ext_comp_name, None)
                     if not ext_comp:
-                        raise ValueError(f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active.")
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active."
+                        )
 
                     # Ensure the dependency node is built lazily on demand
                     if not hasattr(ext_comp, ext_param_name):
-                        ext_comp.add_parameter(model, ext_param_name, system, context_nodes)
+                        ext_comp.add_parameter(
+                            model, ext_param_name, system, context_nodes
+                        )
 
                     ext_param = getattr(ext_comp, ext_param_name)
 
                     # Dynamically slice via requested map name or component fallback name
-                    map_attr = f"{custom_slice}_tensor" if custom_slice else f"{ext_comp_name}_map_tensor"
+                    map_attr = (
+                        f"{custom_slice}_tensor"
+                        if custom_slice
+                        else f"{ext_comp_name}_map_tensor"
+                    )
                     if hasattr(self, map_attr):
                         map_tensor = getattr(self, map_attr)
                         dep_nodes.append(ext_param.value[map_tensor])
@@ -237,7 +263,9 @@ class Component(ABC):
                         dep_nodes.append(ext_param.value)
                 else:
                     # Local tracking recursive lookup
-                    if not hasattr(self, d) or not isinstance(getattr(self, d), Parameter):
+                    if not hasattr(self, d) or not isinstance(
+                        getattr(self, d), Parameter
+                    ):
                         self.add_parameter(model, d, system, context_nodes)
                     dep_nodes.append(getattr(self, d).value)
 
@@ -245,7 +273,9 @@ class Component(ABC):
 
         # 2b. Wire up user-defined parameter links (initval/mu/lower/upper
         # expressions from the params file referencing other parameters).
-        element_links = self._wire_user_links(model, param_name, system, cfg, expression)
+        element_links = self._wire_user_links(
+            model, param_name, system, cfg, expression
+        )
 
         # 3. Create Parameter Node
         full_params = {**cfg, **options}
@@ -255,7 +285,7 @@ class Component(ABC):
             expression=expression,
             element_links=element_links,
             user_params=self.config_manager.user_params,
-            **full_params
+            **full_params,
         )
 
         setattr(self, param_name, param_obj)
@@ -291,62 +321,85 @@ class Component(ABC):
                 if fld == "initval":
                     s = sigma_arr[idx] if sigma_arr is not None else np.nan
                     if s == 0:
-                        key = "hard"     # derived element: tracks the expression exactly
+                        key = "hard"  # derived element: tracks the expression exactly
                     elif s > 0:
-                        key = "mu"       # soft link: Gaussian penalty on the difference
+                        key = "mu"  # soft link: Gaussian penalty on the difference
                     else:
-                        continue         # initialization-only; solver already applied it
+                        continue  # initialization-only; solver already applied it
                 elif fld == "mu":
                     key = "mu"
                 elif fld in ("lower", "upper"):
                     key = fld
                 else:
-                    continue             # sigma / init_scale: static snapshots
+                    continue  # sigma / init_scale: static snapshots
 
                 if expression is not None and key != "mu":
                     raise ValueError(
                         f"[{self.prefix}.{param_name}] link '{plink.expr_str}' targets "
                         f"field '{fld}', but this parameter is derived from a physics "
-                        f"expression; only soft (mu) links are supported there.")
+                        f"expression; only soft (mu) links are supported there."
+                    )
 
-                ext_vals = {}     # dep path -> tensor in the dep's USER units
-                self_refs = {}    # dep path -> (element index, user->internal factor)
+                ext_vals = {}  # dep path -> tensor in the dep's USER units
+                self_refs = (
+                    {}
+                )  # dep path -> (element index, user->internal factor)
                 for dep in plink.dep_paths:
-                    dparts = dep.split('.')
+                    dparts = dep.split(".")
                     dcomp, didx, dparam = dparts[0], int(dparts[1]), dparts[2]
-                    dfactor = cm.get_conversion_factor(dcomp, dparam, full_path=dep)
+                    dfactor = cm.get_conversion_factor(
+                        dcomp, dparam, full_path=dep
+                    )
                     if dcomp == self.prefix and dparam == param_name:
                         self_refs[dep] = (didx, dfactor)
                         continue
-                    comp = self if dcomp == self.prefix else getattr(system, dcomp, None)
+                    comp = (
+                        self
+                        if dcomp == self.prefix
+                        else getattr(system, dcomp, None)
+                    )
                     if comp is None:
                         raise ValueError(
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
-                            f"references component '{dcomp}', which is not active.")
-                    if not (hasattr(comp, dparam) and isinstance(getattr(comp, dparam), Parameter)):
+                            f"references component '{dcomp}', which is not active."
+                        )
+                    if not (
+                        hasattr(comp, dparam)
+                        and isinstance(getattr(comp, dparam), Parameter)
+                    ):
                         comp.add_parameter(model, dparam, system)
                     node = getattr(comp, dparam).value
-                    if getattr(node, 'ndim', 0) >= 1:
+                    if getattr(node, "ndim", 0) >= 1:
                         node = node[didx]
                     elif didx != 0:
                         raise ValueError(
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}': "
-                            f"'{dep}' indexes element {didx} of a scalar parameter.")
+                            f"'{dep}' indexes element {didx} of a scalar parameter."
+                        )
                     ext_vals[dep] = node / dfactor if dfactor != 1.0 else node
 
                 tfactor = cm.get_conversion_factor(
-                    self.prefix, param_name,
-                    full_path=f"{self.prefix}.{idx}.{param_name}")
+                    self.prefix,
+                    param_name,
+                    full_path=f"{self.prefix}.{idx}.{param_name}",
+                )
 
-                def make_fn(plink=plink, ext_vals=ext_vals, self_refs=self_refs,
-                            tfactor=tfactor):
+                def make_fn(
+                    plink=plink,
+                    ext_vals=ext_vals,
+                    self_refs=self_refs,
+                    tfactor=tfactor,
+                ):
                     def fn(phys_internal):
                         vals = dict(ext_vals)
                         for dep, (j, f) in self_refs.items():
                             v = phys_internal[j]
                             vals[dep] = v / f if f != 1.0 else v
                         user_val = sympy_to_pytensor(plink.expr, vals)
-                        return user_val * tfactor if tfactor != 1.0 else user_val
+                        return (
+                            user_val * tfactor if tfactor != 1.0 else user_val
+                        )
+
                     return fn
 
                 out.setdefault(key, {})[idx] = {

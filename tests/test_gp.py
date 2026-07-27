@@ -15,14 +15,15 @@ Three layers:
 The default is off everywhere, so the strongest regression guarantee is the
 "no gp: key changes nothing" test in each layer.
 """
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 import pytest
 
+from conftest import _DummyConfigManager
 from exozippy.components import gp as gp_support
 from exozippy.components.instrument import Instrument
-from conftest import _DummyConfigManager
 
 
 class _DummyInstrument(Instrument):
@@ -64,23 +65,26 @@ def _make(config, config_manager=None):
 # ---------------------------------------------------------------------------
 # 1. The gp: config vocabulary
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("value,expected", [
-    (None, ()),
-    ("none", ()),
-    ("off", ()),
-    ("", ()),
-    (False, ()),
-    ([], ()),
-    ("rotation", ("rotation",)),
-    ("RotationTerm", ("rotation",)),
-    ("  ROT  ", ("rotation",)),
-    ("sho", ("sho",)),
-    ("SHOTerm", ("sho",)),
-    (["rotation", "sho"], ("rotation", "sho")),
-    (["sho", "rotation"], ("rotation", "sho")),
-    (["sho", "sho"], ("sho",)),
-    (["rotation", "none"], ("rotation",)),
-])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, ()),
+        ("none", ()),
+        ("off", ()),
+        ("", ()),
+        (False, ()),
+        ([], ()),
+        ("rotation", ("rotation",)),
+        ("RotationTerm", ("rotation",)),
+        ("  ROT  ", ("rotation",)),
+        ("sho", ("sho",)),
+        ("SHOTerm", ("sho",)),
+        (["rotation", "sho"], ("rotation", "sho")),
+        (["sho", "rotation"], ("rotation", "sho")),
+        (["sho", "sho"], ("sho",)),
+        (["rotation", "none"], ("rotation",)),
+    ],
+)
 def test_parse_gp_spec_normalizes_every_accepted_spelling(value, expected):
     """
     Given any accepted form of the gp: key,
@@ -161,20 +165,23 @@ def test_introspection_reports_every_gp_parameter_with_merged_units():
     """
     from exozippy.introspect import component_schema
 
-    expected = {name for kind in gp_support.GP_TERMS
-                for name in gp_support.GP_TERM_PARAMS[kind]}
+    expected = {
+        name
+        for kind in gp_support.GP_TERMS
+        for name in gp_support.GP_TERM_PARAMS[kind]
+    }
 
     for key in ("rvinstrument", "transit", "mulensinstrument"):
         params = component_schema(key)["parameters"]
         assert expected <= set(params), key
 
     rv_amp = component_schema("rvinstrument")["parameters"]["gp_rot_sigma"]
-    assert rv_amp["unit"] == "m/s"                 # from rvinstrument's block
+    assert rv_amp["unit"] == "m/s"  # from rvinstrument's block
     assert rv_amp["internal_unit"] == "solRad/d"
-    assert rv_amp["description"]                   # inherited from the root file
+    assert rv_amp["description"]  # inherited from the root file
 
     rv_period = component_schema("rvinstrument")["parameters"]["gp_rot_period"]
-    assert rv_period["unit"] == "d"                # entirely from the root file
+    assert rv_period["unit"] == "d"  # entirely from the root file
 
     astro = component_schema("astrometryinstrument")["parameters"]
     assert not [p for p in astro if p.startswith("gp_")]
@@ -219,11 +226,13 @@ def test_gp_terms_are_parsed_per_element():
     When the base loads the GP config,
     Then each element carries its own terms and has_gp is True.
     """
-    inst = _make([
-        {"file": "a.rv", "gp": "rotation"},
-        {"file": "b.rv"},
-        {"file": "c.rv", "gp": ["sho", "rotation"]},
-    ])
+    inst = _make(
+        [
+            {"file": "a.rv", "gp": "rotation"},
+            {"file": "b.rv"},
+            {"file": "c.rv", "gp": ["sho", "rotation"]},
+        ]
+    )
     assert inst.gp_terms == [("rotation",), (), ("rotation", "sho")]
     assert inst.has_gp is True
     assert inst._gp_elements("rotation") == [0, 2]
@@ -252,10 +261,11 @@ def test_astrometry_declares_no_gp_support():
     Then it opts out of GP support (so the base raises on a gp: key).
     """
     from exozippy.components.astrometryinstrument.astrometryinstrument import (
-        AstrometryInstrument)
+        AstrometryInstrument,
+    )
+    from exozippy.components.mulensing.mulensinstrument import MulensInstrument
     from exozippy.components.rvinstrument.rvinstrument import RVInstrument
     from exozippy.components.transit.transit import Transit
-    from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 
     assert AstrometryInstrument.supports_gp is False
     # the three single-observable children keep the base default
@@ -272,11 +282,13 @@ def test_register_gp_pins_the_files_that_did_not_opt_in():
     user paths resolve by instrument name) with sigma pinned to 0 on the two
     files that opted out and left alone (NaN) on the one that did.
     """
-    inst = _make([
-        {"file": "a.rv"},
-        {"file": "b.rv", "gp": "rotation"},
-        {"file": "c.rv"},
-    ])
+    inst = _make(
+        [
+            {"file": "a.rv"},
+            {"file": "b.rv", "gp": "rotation"},
+            {"file": "c.rv"},
+        ]
+    )
     manifest = {}
     inst._register_gp(manifest)
 
@@ -293,7 +305,9 @@ def test_register_gp_omits_the_pin_when_every_file_opted_in():
     When _register_gp builds the manifest,
     Then no override is emitted at all (nothing to pin).
     """
-    inst = _make([{"file": "a.rv", "gp": "sho"}, {"file": "b.rv", "gp": "sho"}])
+    inst = _make(
+        [{"file": "a.rv", "gp": "sho"}, {"file": "b.rv", "gp": "sho"}]
+    )
     manifest = {}
     inst._register_gp(manifest)
     assert set(manifest) == set(gp_support.GP_TERM_PARAMS["sho"])
@@ -307,12 +321,15 @@ def test_register_gp_registers_both_terms_independently():
     Then both parameter sets appear, each pinned off on the file that did not
     ask for that term -- the two kernels never share a hyperparameter.
     """
-    inst = _make([{"file": "a.rv", "gp": "rotation"}, {"file": "b.rv", "gp": "sho"}])
+    inst = _make(
+        [{"file": "a.rv", "gp": "rotation"}, {"file": "b.rv", "gp": "sho"}]
+    )
     manifest = {}
     inst._register_gp(manifest)
 
     expected = set(gp_support.GP_TERM_PARAMS["rotation"]) | set(
-        gp_support.GP_TERM_PARAMS["sho"])
+        gp_support.GP_TERM_PARAMS["sho"]
+    )
     assert set(manifest) == expected
     rot_pin = manifest["gp_rot_sigma"]["overrides"]["sigma"]
     sho_pin = manifest["gp_sho_sigma"]["overrides"]["sigma"]
@@ -338,9 +355,9 @@ def test_prepare_gp_sorts_each_file_by_time_and_hints_the_white_noise_level():
     inst._prepare_gp(time, err, inst_map, user_factor=10.0)
 
     idx = inst._gp_obs_index[1]
-    assert list(idx) == [1, 3, 4]                      # rows of file b
-    assert list(time[idx]) == [1.0, 3.0, 7.0]          # ascending
-    assert 0 not in inst._gp_obs_index                 # file a has no GP
+    assert list(idx) == [1, 3, 4]  # rows of file b
+    assert list(time[idx]) == [1.0, 3.0, 7.0]  # ascending
+    assert 0 not in inst._gp_obs_index  # file a has no GP
 
     # median([0.5, 0.4, 0.6]) = 0.5, times the user_factor
     assert cm.hints["dummy.1.gp_sho_sigma"] == pytest.approx(5.0)
@@ -384,7 +401,9 @@ def test_prepare_gp_rejects_a_file_with_too_few_observations():
     When _prepare_gp runs,
     Then it raises: there is nothing for a covariance kernel to constrain.
     """
-    inst = _make([{"file": "a.rv", "gp": "rotation"}], _RecordingConfigManager())
+    inst = _make(
+        [{"file": "a.rv", "gp": "rotation"}], _RecordingConfigManager()
+    )
     with pytest.raises(ValueError, match="at least 3 observations"):
         inst._prepare_gp(np.arange(2.0), np.ones(2), np.zeros(2, dtype=int))
 
@@ -424,8 +443,8 @@ def test_celerite_ops_have_a_registered_jax_implementation():
     decision above rests on. If a celerite2 upgrade drops it, this fails here
     rather than at someone's first numpyro run.
     """
-    from pytensor.link.jax.dispatch import jax_funcify
     from celerite2.pymc.ops import _CeleriteOp
+    from pytensor.link.jax.dispatch import jax_funcify
 
     assert _CeleriteOp in jax_funcify.registry
 
@@ -438,8 +457,13 @@ def _celerite_logp(kernel_kind, params, t, y, mu, sigma):
     with pm.Model() as model:
         kernel = gp_support.build_term(kernel_kind, params)
         gp_support.marginal_likelihood(
-            "obs", kernel, t=t, yerr=pt.as_tensor_variable(sigma),
-            mean=pt.as_tensor_variable(mu), observed=y)
+            "obs",
+            kernel,
+            t=t,
+            yerr=pt.as_tensor_variable(sigma),
+            mean=pt.as_tensor_variable(mu),
+            observed=y,
+        )
     return float(model.compile_logp()({}))
 
 
@@ -457,15 +481,25 @@ def test_vanishing_amplitude_reproduces_the_independent_gaussian_logp():
     sigma = rng.uniform(0.05, 0.15, 40)
     y = mu + rng.normal(0, sigma)
 
-    expected = float(np.sum(
-        -0.5 * ((y - mu) / sigma) ** 2 - np.log(sigma) - 0.5 * np.log(2 * np.pi)))
+    expected = float(
+        np.sum(
+            -0.5 * ((y - mu) / sigma) ** 2
+            - np.log(sigma)
+            - 0.5 * np.log(2 * np.pi)
+        )
+    )
 
     rot = _celerite_logp(
         "rotation",
         {"sigma": 1e-8, "period": 12.0, "Q0": 2.0, "dQ": 1.0, "f": 0.5},
-        t, y, mu, sigma)
+        t,
+        y,
+        mu,
+        sigma,
+    )
     sho = _celerite_logp(
-        "sho", {"sigma": 1e-8, "rho": 5.0, "Q": 1.0 / 3.0}, t, y, mu, sigma)
+        "sho", {"sigma": 1e-8, "rho": 5.0, "Q": 1.0 / 3.0}, t, y, mu, sigma
+    )
 
     assert rot == pytest.approx(expected, rel=1e-8)
     assert sho == pytest.approx(expected, rel=1e-8)
@@ -485,12 +519,21 @@ def test_a_real_kernel_prefers_correlated_data_over_white_noise():
     y = 0.4 * np.sin(2 * np.pi * t / 11.0) + rng.normal(0, sigma)
     mu = np.zeros_like(t)
 
-    white = float(np.sum(
-        -0.5 * ((y - mu) / sigma) ** 2 - np.log(sigma) - 0.5 * np.log(2 * np.pi)))
+    white = float(
+        np.sum(
+            -0.5 * ((y - mu) / sigma) ** 2
+            - np.log(sigma)
+            - 0.5 * np.log(2 * np.pi)
+        )
+    )
     gp = _celerite_logp(
         "rotation",
         {"sigma": 0.4, "period": 11.0, "Q0": 5.0, "dQ": 1.0, "f": 0.1},
-        t, y, mu, sigma)
+        t,
+        y,
+        mu,
+        sigma,
+    )
 
     assert gp > white
 
@@ -507,12 +550,15 @@ def test_build_kernel_sums_the_requested_terms():
     tau = pt.as_tensor_variable(np.linspace(0.0, 5.0, 11))
 
     both = gp_support.build_kernel(
-        ("rotation", "sho"), {"rotation": rot_p, "sho": sho_p})
+        ("rotation", "sho"), {"rotation": rot_p, "sho": sho_p}
+    )
     rot = gp_support.build_term("rotation", rot_p)
     sho = gp_support.build_term("sho", sho_p)
 
-    assert np.allclose(both.get_value(tau).eval(),
-                       (rot.get_value(tau) + sho.get_value(tau)).eval())
+    assert np.allclose(
+        both.get_value(tau).eval(),
+        (rot.get_value(tau) + sho.get_value(tau)).eval(),
+    )
 
 
 def test_add_observation_likelihood_without_gp_is_the_plain_normal():
@@ -533,13 +579,21 @@ def test_add_observation_likelihood_without_gp_is_the_plain_normal():
 
     with pm.Model() as model:
         rv = inst.add_observation_likelihood(
-            "m", mu=pt.as_tensor_variable(mu),
-            sigma=pt.as_tensor_variable(sigma), observed=y)
+            "m",
+            mu=pt.as_tensor_variable(mu),
+            sigma=pt.as_tensor_variable(sigma),
+            observed=y,
+        )
         assert rv is not None
         assert [v.name for v in model.observed_RVs] == ["m"]
 
-    expected = float(np.sum(
-        -0.5 * ((y - mu) / sigma) ** 2 - np.log(sigma) - 0.5 * np.log(2 * np.pi)))
+    expected = float(
+        np.sum(
+            -0.5 * ((y - mu) / sigma) ** 2
+            - np.log(sigma)
+            - 0.5 * np.log(2 * np.pi)
+        )
+    )
     assert float(model.compile_logp()({})) == pytest.approx(expected)
 
 
@@ -553,15 +607,18 @@ def test_mixed_files_split_into_one_normal_plus_one_gp_per_file():
     """
     rng = np.random.default_rng(3)
     n_per = 8
-    time = np.concatenate([np.sort(rng.uniform(0, 20, n_per)) for _ in range(3)])
+    time = np.concatenate(
+        [np.sort(rng.uniform(0, 20, n_per)) for _ in range(3)]
+    )
     inst_map = np.repeat([0, 1, 2], n_per)
     sigma = rng.uniform(0.05, 0.2, 3 * n_per)
     mu = np.sin(time)
     y = mu + rng.normal(0, sigma)
 
-    inst = _make([{"file": "a.rv"},
-                  {"file": "b.rv", "gp": "sho"},
-                  {"file": "c.rv"}], _RecordingConfigManager())
+    inst = _make(
+        [{"file": "a.rv"}, {"file": "b.rv", "gp": "sho"}, {"file": "c.rv"}],
+        _RecordingConfigManager(),
+    )
     inst.inst_map = inst_map
     inst.n_total_obs = len(time)
     inst._prepare_gp(time, sigma, inst_map)
@@ -571,18 +628,28 @@ def test_mixed_files_split_into_one_normal_plus_one_gp_per_file():
         # amplitude small enough that the GP reduces to white noise.
         inst.gp_sho_sigma = _FakeParam(np.array([0.0, 1e-8, 0.0]))
         inst.gp_sho_rho = _FakeParam(np.array([1.0, 5.0, 1.0]))
-        inst._gp_linear = {"gp_sho_q": pt.as_tensor_variable([1.0, 1.0 / 3.0, 1.0])}
+        inst._gp_linear = {
+            "gp_sho_q": pt.as_tensor_variable([1.0, 1.0 / 3.0, 1.0])
+        }
         inst._build_gp_deterministics = lambda: None
 
         inst.add_observation_likelihood(
-            "m", mu=pt.as_tensor_variable(mu),
-            sigma=pt.as_tensor_variable(sigma), observed=y)
+            "m",
+            mu=pt.as_tensor_variable(mu),
+            sigma=pt.as_tensor_variable(sigma),
+            observed=y,
+        )
 
     names = sorted(v.name for v in model.observed_RVs)
     assert names == ["m", "m.gp.1"]
 
-    expected = float(np.sum(
-        -0.5 * ((y - mu) / sigma) ** 2 - np.log(sigma) - 0.5 * np.log(2 * np.pi)))
+    expected = float(
+        np.sum(
+            -0.5 * ((y - mu) / sigma) ** 2
+            - np.log(sigma)
+            - 0.5 * np.log(2 * np.pi)
+        )
+    )
     assert float(model.compile_logp()({})) == pytest.approx(expected, rel=1e-8)
 
 
@@ -604,7 +671,9 @@ def test_gp_likelihood_is_invariant_to_the_input_ordering():
     perm = rng.permutation(n)
 
     def logp(order):
-        inst = _make([{"file": "a.rv", "gp": "rotation"}], _RecordingConfigManager())
+        inst = _make(
+            [{"file": "a.rv", "gp": "rotation"}], _RecordingConfigManager()
+        )
         inst.inst_map = np.zeros(n, dtype=int)
         inst.n_total_obs = n
         inst._prepare_gp(time[order], sigma[order], inst.inst_map)
@@ -612,12 +681,17 @@ def test_gp_likelihood_is_invariant_to_the_input_ordering():
             inst.gp_rot_sigma = _FakeParam(np.array([0.3]))
             inst.gp_rot_period = _FakeParam(np.array([9.0]))
             inst.gp_rot_f = _FakeParam(np.array([0.4]))
-            inst._gp_linear = {"gp_rot_q0": pt.as_tensor_variable([3.0]),
-                               "gp_rot_dq": pt.as_tensor_variable([2.0])}
+            inst._gp_linear = {
+                "gp_rot_q0": pt.as_tensor_variable([3.0]),
+                "gp_rot_dq": pt.as_tensor_variable([2.0]),
+            }
             inst._build_gp_deterministics = lambda: None
             inst.add_observation_likelihood(
-                "m", mu=pt.as_tensor_variable(mu[order]),
-                sigma=pt.as_tensor_variable(sigma[order]), observed=y[order])
+                "m",
+                mu=pt.as_tensor_variable(mu[order]),
+                sigma=pt.as_tensor_variable(sigma[order]),
+                observed=y[order],
+            )
         return float(model.compile_logp()({}))
 
     assert logp(perm) == pytest.approx(logp(np.arange(n)), rel=1e-10)
@@ -651,8 +725,10 @@ def two_rv_files(tmp_path_factory):
 def _rv_system(files, gp_spec):
     from exozippy.system import System
 
-    inst = [{"name": "A_inst", "file": files[0]},
-            {"name": "B_inst", "file": files[1]}]
+    inst = [
+        {"name": "A_inst", "file": files[0]},
+        {"name": "B_inst", "file": files[1]},
+    ]
     if gp_spec is not None:
         inst[0]["gp"] = gp_spec
     config = {
@@ -709,7 +785,7 @@ def test_rv_system_with_gp_on_one_file_samples_only_that_file(two_rv_files):
 
     observed = {v.name for v in model.observed_RVs}
     assert "rvinstrument.model.gp.A_inst" in observed
-    assert "rvinstrument.model" in observed        # B_inst keeps a plain Normal
+    assert "rvinstrument.model" in observed  # B_inst keeps a plain Normal
     assert "rvinstrument.model.gp.B_inst" not in observed
 
     # The linear quality factors are reported alongside the sampled logs.
@@ -719,12 +795,18 @@ def test_rv_system_with_gp_on_one_file_samples_only_that_file(two_rv_files):
 
     point = model.initial_point()
     assert np.isfinite(model.compile_logp()(point))
-    assert np.all(np.isfinite(np.concatenate(
-        [np.atleast_1d(g) for g in [model.compile_dlogp()(point)]])))
+    assert np.all(
+        np.isfinite(
+            np.concatenate(
+                [np.atleast_1d(g) for g in [model.compile_dlogp()(point)]]
+            )
+        )
+    )
 
 
 def test_gp_prediction_is_consistent_between_the_data_and_grid_evaluators(
-        two_rv_files):
+    two_rv_files,
+):
     """
     Given a fitted GP,
     When the conditional mean is asked for at the observation times and again
@@ -756,7 +838,8 @@ def test_gp_prediction_is_consistent_between_the_data_and_grid_evaluators(
 
 
 def test_plots_put_the_gp_in_the_unphased_model_and_out_of_the_phased_data(
-        two_rv_files):
+    two_rv_files,
+):
     """
     Given a GP on the first of two RV instruments,
     When the plot payloads are built,
@@ -794,7 +877,7 @@ def test_plots_put_the_gp_in_the_unphased_model_and_out_of_the_phased_data(
     # the GP conditional mean on the nose.
     prep = rv._phased_arrays(system, point, 0, rv._plot_orbit_map[0])
     gp_at_data = rv.gp_mean_at_data(system, point)
-    assert np.any(gp_at_data != 0.0)          # the GP is doing something
+    assert np.any(gp_at_data != 0.0)  # the GP is doing something
     assert np.allclose(prep["other_signals"], gp_at_data, rtol=0, atol=1e-12)
 
 

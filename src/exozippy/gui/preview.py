@@ -37,12 +37,14 @@ def run_preview(config, params, workdir, comp_type, timeout=DEFAULT_TIMEOUT_S):
         ``{"specs": [...]}`` on success, or ``{"error": "..."}`` on any
         failure (bad file, missing component, crash, or timeout).
     """
-    request = json.dumps({
-        "config": config,
-        "params": params,
-        "workdir": workdir,
-        "comp_type": comp_type,
-    })
+    request = json.dumps(
+        {
+            "config": config,
+            "params": params,
+            "workdir": workdir,
+            "comp_type": comp_type,
+        }
+    )
 
     try:
         proc = subprocess.run(

@@ -27,10 +27,10 @@ def _call(fn, teff, logg, feh):
 #   IDL> massradius_torres, logg, teff, feh, mstar, rstar
 # (teff, logg, feh, mstar, rstar)
 _IDL_REFERENCE = [
-    (5778.0, 4.438, 0.0, 1.05077482864747, 1.01764587819543),   # the Sun
+    (5778.0, 4.438, 0.0, 1.05077482864747, 1.01764587819543),  # the Sun
     (6207.0, 4.10, -0.116, 1.26594776886753, 1.65376498791201),  # ~KELT-4A
-    (4800.0, 4.50, 0.25, 0.82451403303288, 0.82705475886732),   # K dwarf
-    (6500.0, 3.80, -0.5, 1.42345372564569, 2.51783507677170),   # subgiant
+    (4800.0, 4.50, 0.25, 0.82451403303288, 0.82705475886732),  # K dwarf
+    (6500.0, 3.80, -0.5, 1.42345372564569, 2.51783507677170),  # subgiant
 ]
 
 
@@ -78,8 +78,12 @@ def test_relations_are_differentiable():
     point = {t: 5778.0, g: 4.438, f: 0.0}
 
     # Act
-    grads = [pt.grad(physics.calc_torres_logmass(t, g, f), w) for w in (t, g, f)]
-    grads += [pt.grad(physics.calc_torres_logradius(t, g, f), w) for w in (t, g, f)]
+    grads = [
+        pt.grad(physics.calc_torres_logmass(t, g, f), w) for w in (t, g, f)
+    ]
+    grads += [
+        pt.grad(physics.calc_torres_logradius(t, g, f), w) for w in (t, g, f)
+    ]
     vals = [float(gr.eval(point)) for gr in grads]
 
     # Assert
@@ -101,6 +105,7 @@ def test_published_scatter_is_in_dex():
 # ----------------------------------------------------------------------
 # Config parsing / validation
 # ----------------------------------------------------------------------
+
 
 class _FakeStar:
     names = ["A", "B", "C"]
@@ -164,14 +169,20 @@ def test_register_parameters_declares_no_parameters():
     assert comp.manifest == {}
 
 
-@pytest.mark.parametrize("cfg,match", [
-    ([{"constrain": ["mass"]}], "'star:' key is required"),
-    ([{"star": "Z"}], "unknown star"),
-    ([{"star": "A", "constrain": ["mass", "teff"]}], "unknown 'constrain:'"),
-    ([{"star": "A", "constrain": []}], "is empty"),
-    ([{"star": "A", "logm_floor": 0}], "must be > 0 dex"),
-    ([{"star": "A"}, {"star": "A"}], "Duplicate names"),
-])
+@pytest.mark.parametrize(
+    "cfg,match",
+    [
+        ([{"constrain": ["mass"]}], "'star:' key is required"),
+        ([{"star": "Z"}], "unknown star"),
+        (
+            [{"star": "A", "constrain": ["mass", "teff"]}],
+            "unknown 'constrain:'",
+        ),
+        ([{"star": "A", "constrain": []}], "is empty"),
+        ([{"star": "A", "logm_floor": 0}], "must be > 0 dex"),
+        ([{"star": "A"}, {"star": "A"}], "Duplicate names"),
+    ],
+)
 def test_config_errors_are_actionable(cfg, match):
     """
     Given a malformed torres block,

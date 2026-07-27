@@ -20,16 +20,24 @@ from exozippy.components.sed.make_bc import make_bc_tables
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
-        "filters", nargs="+",
-        help="SVO filter IDs, e.g. Generic/Cousins.I 2MASS/2MASS.J")
+        "filters",
+        nargs="+",
+        help="SVO filter IDs, e.g. Generic/Cousins.I 2MASS/2MASS.J",
+    )
     parser.add_argument(
-        "--model", default="NextGen",
-        help="Spectral model whose grid to integrate (default: NextGen)")
+        "--model",
+        default="NextGen",
+        help="Spectral model whose grid to integrate (default: NextGen)",
+    )
     parser.add_argument(
-        "--bc-root", default=None,
-        help="Root of the models tree (default: the installed package's)")
+        "--bc-root",
+        default=None,
+        help="Root of the models tree (default: the installed package's)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

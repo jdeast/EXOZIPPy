@@ -5,6 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+
 from . import physics
 
 logger = logging.getLogger(__name__)
@@ -128,12 +129,15 @@ class Torres(Component):
             # Scatter overrides, in dex (mann's floors are fractional -- hence
             # the different names).
             self.logm_floor.append(
-                float(c.get("logm_floor", physics.LOGM_FLOOR)))
+                float(c.get("logm_floor", physics.LOGM_FLOOR))
+            )
             self.logr_floor.append(
-                float(c.get("logr_floor", physics.LOGR_FLOOR)))
+                float(c.get("logr_floor", physics.LOGR_FLOOR))
+            )
             if self.logm_floor[-1] <= 0 or self.logr_floor[-1] <= 0:
                 raise ValueError(
-                    f"torres '{nm}': 'logm_floor:'/'logr_floor:' must be > 0 dex.")
+                    f"torres '{nm}': 'logm_floor:'/'logr_floor:' must be > 0 dex."
+                )
 
     def build_maps(self):
         """Stage 1b: index array linking each instance to its star."""
@@ -189,16 +193,20 @@ class Torres(Component):
         logr_pred = physics.calc_torres_logradius(teff, logg, feh)
 
         # Report in linear units for humans; the penalties stay in log space.
-        pm.Deterministic(f"{self.prefix}.mass_pred", 10.0 ** logm_pred)
-        pm.Deterministic(f"{self.prefix}.radius_pred", 10.0 ** logr_pred)
+        pm.Deterministic(f"{self.prefix}.mass_pred", 10.0**logm_pred)
+        pm.Deterministic(f"{self.prefix}.radius_pred", 10.0**logr_pred)
 
         # star.logmass IS log10(M/Msun), so the mass penalty needs no
         # conversion. star.radius is linear, so take its log.
         self._add_penalty(
-            "mass", star.logmass.value[smap], logm_pred, self.logm_floor)
+            "mass", star.logmass.value[smap], logm_pred, self.logm_floor
+        )
         self._add_penalty(
-            "radius", pt.log10(star.radius.value[smap]), logr_pred,
-            self.logr_floor)
+            "radius",
+            pt.log10(star.radius.value[smap]),
+            logr_pred,
+            self.logr_floor,
+        )
 
     def _add_penalty(self, which, observed_log, predicted_log, floors):
         """Gaussian potential in log space tying a star parameter to Torres.

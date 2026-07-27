@@ -152,7 +152,7 @@ class Instrument(Component):
         """
         order = np.argsort(df.iloc[:, time_col].values, kind="stable")
         if np.all(order == np.arange(len(order))):
-            return df                        # already sorted: no copy
+            return df  # already sorted: no copy
         return df.iloc[order].reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -170,13 +170,15 @@ class Instrument(Component):
         self.gp_terms = []
         for i, c in enumerate(self.config):
             terms = gp_support.parse_gp_spec(
-                c.get("gp"), context=f"{self.prefix}[{self.names[i]}]")
+                c.get("gp"), context=f"{self.prefix}[{self.names[i]}]"
+            )
             if terms and not self.supports_gp:
                 raise NotImplementedError(
                     f"[{self.prefix}[{self.names[i]}]] Gaussian-process noise "
                     f"is not supported by this component: it models more than "
                     f"one observable per data file (with different units), so "
-                    f"a single GP kernel is ambiguous. Remove the 'gp:' key.")
+                    f"a single GP kernel is ambiguous. Remove the 'gp:' key."
+                )
             self.gp_terms.append(terms)
         self.has_gp = any(self.gp_terms)
 
@@ -214,8 +216,11 @@ class Instrument(Component):
         """
         if not cls.supports_gp:
             return []
-        return [name for kind in gp_support.GP_TERMS
-                for name in gp_support.GP_TERM_PARAMS[kind]]
+        return [
+            name
+            for kind in gp_support.GP_TERMS
+            for name in gp_support.GP_TERM_PARAMS[kind]
+        ]
 
     def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
         """Stage 1a: index and seed the GP terms from the loaded data.
@@ -258,7 +263,8 @@ class Instrument(Component):
                 raise ValueError(
                     f"[{self.prefix}[{self.names[i]}]] a Gaussian process "
                     f"needs at least 3 observations; this file has "
-                    f"{sel.size}.")
+                    f"{sel.size}."
+                )
             self._gp_obs_index[i] = sel[np.argsort(time[sel], kind="stable")]
 
             amp = float(np.median(err[sel])) * user_factor
@@ -268,7 +274,9 @@ class Instrument(Component):
                 # which would pin the logit transform against its lower bound.
                 continue
             for kind in terms:
-                path = f"{self.prefix}.{i}.{gp_support.GP_AMPLITUDE_PARAM[kind]}"
+                path = (
+                    f"{self.prefix}.{i}.{gp_support.GP_AMPLITUDE_PARAM[kind]}"
+                )
                 self.config_manager.add_hint(path, amp)
                 self.config_manager.add_scale_hint(path, amp)
 
@@ -316,7 +324,8 @@ class Instrument(Component):
             if param is None or param.value is None:
                 continue
             self._gp_linear[lin_name] = pm.Deterministic(
-                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value))
+                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
+            )
 
     def _gp_kernel(self, i):
         """The summed celerite2 kernel for element ``i``."""
@@ -359,7 +368,8 @@ class Instrument(Component):
         if self._gp_time is None:
             raise RuntimeError(
                 f"[{self.prefix}] a 'gp:' key is configured but load_data "
-                f"never called _prepare_gp; the GP times are unknown.")
+                f"never called _prepare_gp; the GP times are unknown."
+            )
 
         self._build_gp_deterministics()
 
@@ -369,24 +379,37 @@ class Instrument(Component):
 
         plain = np.flatnonzero(~gp_obs)
         if plain.size:
-            pm.Normal(name, mu=mu[plain], sigma=sigma[plain],
-                      observed=observed[plain])
+            pm.Normal(
+                name,
+                mu=mu[plain],
+                sigma=sigma[plain],
+                observed=observed[plain],
+            )
 
         for i in sorted(self._gp_obs_index):
             idx = self._gp_obs_index[i]
             t = gp_support.check_sorted(
-                self._gp_time[idx], context=f"{self.prefix}[{self.names[i]}]")
+                self._gp_time[idx], context=f"{self.prefix}[{self.names[i]}]"
+            )
             self.gp_objects[i] = gp_support.marginal_likelihood(
                 f"{name}.gp.{self.names[i]}",
                 self._gp_kernel(i),
-                t=t, yerr=sigma[idx], mean=mu[idx], observed=observed[idx])
+                t=t,
+                yerr=sigma[idx],
+                mean=mu[idx],
+                observed=observed[idx],
+            )
             # Kept for the plotting path: predicting the GP component needs
             # the same observations the likelihood conditioned on, in the same
             # sorted order.
             self._gp_observed_node[i] = observed[idx]
             logger.info(
-                "[%s] %s: %s GP on %d observations.", self.prefix,
-                self.names[i], "+".join(self.gp_terms[i]), idx.size)
+                "[%s] %s: %s GP on %d observations.",
+                self.prefix,
+                self.names[i],
+                "+".join(self.gp_terms[i]),
+                idx.size,
+            )
 
     # ------------------------------------------------------------------
     # GP conditional prediction, for plotting
@@ -425,11 +448,13 @@ class Instrument(Component):
             self._gp_pred_at_data[i] = pytensor.function(
                 inputs=param_symbols,
                 outputs=gp.predict(y, include_mean=False),
-                on_unused_input='ignore')
+                on_unused_input="ignore",
+            )
             self._gp_pred_on_grid[i] = pytensor.function(
                 inputs=[t_input] + param_symbols,
                 outputs=gp.predict(y, t=t_input, include_mean=False),
-                on_unused_input='ignore')
+                on_unused_input="ignore",
+            )
 
     def has_gp_plotters(self):
         """True when _compile_gp_plotters has produced evaluators."""
@@ -461,7 +486,8 @@ class Instrument(Component):
             return np.zeros_like(t_grid)
         values = self._point_to_plot_params(point, system)
         return np.asarray(
-            self._gp_pred_on_grid[i](t_grid, *values), dtype=float)
+            self._gp_pred_on_grid[i](t_grid, *values), dtype=float
+        )
 
     # NOTE: a GP imposes NO sampler constraint, so this class deliberately
     # does not override sampler_requirements().  celerite2 ships a JAX
@@ -495,7 +521,7 @@ class Instrument(Component):
         unit first (rv scales to m/s; transit/astrometry use factor 1).
         """
         scaled_min = np.min(np.asarray(err, dtype=float)) * factor
-        return -0.95 * scaled_min ** 2
+        return -0.95 * scaled_min**2
 
     def _register_noise(self, manifest, jittervar_lower=None):
         """Add the shared per-instrument noise term to ``manifest``.
@@ -511,7 +537,8 @@ class Instrument(Component):
             if jittervar_lower is None:
                 raise ValueError(
                     f"[{self.prefix}] jitter_variance noise model requires a "
-                    f"jittervar_lower floor.")
+                    f"jittervar_lower floor."
+                )
             manifest["jitter_variance"] = {"lower": jittervar_lower}
             manifest["jitter"] = "default"
         return manifest
@@ -526,8 +553,10 @@ class Instrument(Component):
         """
         if self.noise_model == "err_scale":
             return err_tensor * self.err_scale.value[self.inst_map_tensor]
-        return pt.sqrt(pt.sqr(err_tensor)
-                       + self.jitter_variance.value[self.inst_map_tensor])
+        return pt.sqrt(
+            pt.sqr(err_tensor)
+            + self.jitter_variance.value[self.inst_map_tensor]
+        )
 
     # ------------------------------------------------------------------
     # Shared optional detrending against extra data columns
@@ -550,6 +579,6 @@ class Instrument(Component):
         for block in all_detrend:
             n_r, n_c = block.shape
             if n_c > 0:
-                matrix[r:r + n_r, c:c + n_c] = block
+                matrix[r : r + n_r, c : c + n_c] = block
             r, c = r + n_r, c + n_c
         return matrix, n_per, total

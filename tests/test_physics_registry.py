@@ -13,9 +13,9 @@ import numpy as np
 import pytensor.tensor as pt
 import pytest
 
+from exozippy.components.factory import discover_components
 from exozippy.constants import LOGG_CONST
 from exozippy.physics_registry import PHYSICS_REGISTRY, register_physics
-from exozippy.components.factory import discover_components
 
 
 def test_no_duplicate_physics_names_across_components():
@@ -44,10 +44,11 @@ def test_register_physics_rejects_a_shadowing_duplicate():
     When a different function registers under it,
     Then it raises rather than silently shadowing.
     """
+
     # Arrange
     def _make():
         @register_physics
-        def calc_density(mass, radius):   # noqa: F811 - deliberate collision
+        def calc_density(mass, radius):  # noqa: F811 - deliberate collision
             return mass
 
     # Act / Assert

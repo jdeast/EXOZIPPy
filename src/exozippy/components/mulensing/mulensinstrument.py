@@ -1,22 +1,21 @@
 import logging
 import os
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
+import astropy.units as u
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
 from scipy.optimize import nnls
 
-import astropy.units as u
 from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
-import pytensor.tensor as pt
-import pytensor
-import pymc as pm
 
 
 def _raw_initval(data, default=None):
@@ -128,8 +127,11 @@ class MulensInstrument(Instrument):
         first instrument when none (or an out-of-range name) is set. Warns if
         more than one instrument is flagged and uses the first flagged one.
         """
-        flagged = [i for i in range(self.n_elements)
-                   if self.config[i].get("reference", False)]
+        flagged = [
+            i
+            for i in range(self.n_elements)
+            if self.config[i].get("reference", False)
+        ]
         if not flagged:
             return 0
         if len(flagged) > 1:
@@ -151,7 +153,7 @@ class MulensInstrument(Instrument):
         all_detrend = []
         self.fs_init = []
         self.q_source_init = []
-        self.q_flux_init = []      # per-instrument f_s2/f_s1 (binary source)
+        self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         self._raw_time_list = []
         all_obspos = []
         all_obspos_abs = []
@@ -161,9 +163,13 @@ class MulensInstrument(Instrument):
         # Source RA/Dec (degrees from resolve → radians for projection math)
         source_ndx = int(system.lens.source_map[0])
         n_stars = system.star.n_elements
-        ra_deg  = self.config_manager.resolve("star", "ra",  shape=(n_stars,))['initval'][source_ndx]
-        dec_deg = self.config_manager.resolve("star", "dec", shape=(n_stars,))['initval'][source_ndx]
-        ra_rad  = float(ra_deg)  * np.pi / 180.0
+        ra_deg = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
+            "initval"
+        ][source_ndx]
+        dec_deg = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
+            "initval"
+        ][source_ndx]
+        ra_rad = float(ra_deg) * np.pi / 180.0
         dec_rad = float(dec_deg) * np.pi / 180.0
 
         # Geocentric reference (Skowron+2011 convention): Earth's position and
@@ -172,21 +178,34 @@ class MulensInstrument(Instrument):
         # t_0/u_0 remain geocentric parameters.
         self._t0_par = float(system.lens.t0_par[0])
         self._earth_pos_ref = self.get_observer_position(
-            np.array([self._t0_par]), 'earth')[0]                # (3,) AU
+            np.array([self._t0_par]), "earth"
+        )[
+            0
+        ]  # (3,) AU
         _dt = 0.5  # days for finite-difference velocity
-        _ep = self.get_observer_position(np.array([self._t0_par + _dt]), 'earth')[0]
-        _em = self.get_observer_position(np.array([self._t0_par - _dt]), 'earth')[0]
-        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)         # AU/day
+        _ep = self.get_observer_position(
+            np.array([self._t0_par + _dt]), "earth"
+        )[0]
+        _em = self.get_observer_position(
+            np.array([self._t0_par - _dt]), "earth"
+        )[0]
+        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
 
         # Median absolute position per instrument (used by Lens to detect parallax)
         self.inst_ref_pos = []
 
         for i, file in enumerate(self.files):
-            df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            df = pd.read_csv(
+                file, sep=r"\s+", engine="c", header=None, comment="#"
+            )
             # Sort before the observer positions are computed from t, so the
             # ephemeris rows stay aligned with the photometry.
             df = self._sort_by_time(df)
-            t, m, e = df.iloc[:, 0].values, df.iloc[:, 1].values, df.iloc[:, 2].values
+            t, m, e = (
+                df.iloc[:, 0].values,
+                df.iloc[:, 1].values,
+                df.iloc[:, 2].values,
+            )
 
             if self.config[i].get("data_format", "magnitude") == "flux":
                 # Convert normalized flux to instrumental magnitudes.
@@ -211,7 +230,12 @@ class MulensInstrument(Instrument):
             self.q_flux_init.append(q_flux)
 
             self._check_data_format(
-                t, m, e, xyz_delta, ra_rad, dec_rad,
+                t,
+                m,
+                e,
+                xyz_delta,
+                ra_rad,
+                dec_rad,
                 self.config[i].get("file", f"instrument {i}"),
                 data_format=self.config[i].get("data_format", "magnitude"),
             )
@@ -233,25 +257,43 @@ class MulensInstrument(Instrument):
             else:
                 all_detrend.append(np.empty((len(t), 0)))
 
-        self.inst_ref_pos = np.array(self.inst_ref_pos)   # (n_inst, 3) absolute AU
-        self.time     = np.concatenate(all_times).astype(float)
-        self.mag      = np.concatenate(all_mags).astype(float)
-        self.err      = np.concatenate(all_errs).astype(float)
+        self.inst_ref_pos = np.array(
+            self.inst_ref_pos
+        )  # (n_inst, 3) absolute AU
+        self.time = np.concatenate(all_times).astype(float)
+        self.mag = np.concatenate(all_mags).astype(float)
+        self.err = np.concatenate(all_errs).astype(float)
         self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.observer_pos     = np.vstack(all_obspos).astype(float)      # geocentric deviations
-        self.observer_pos_abs = np.vstack(all_obspos_abs).astype(float)  # absolute barycentric (for get_magnification_op)
+        self.observer_pos = np.vstack(all_obspos).astype(
+            float
+        )  # geocentric deviations
+        self.observer_pos_abs = np.vstack(all_obspos_abs).astype(
+            float
+        )  # absolute barycentric (for get_magnification_op)
         self.n_total_obs = len(self.time)
 
         # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
-            self._build_block_detrend(all_detrend, self.n_total_obs)
+        (
+            self.detrend_matrix,
+            self.n_detrend_per_inst,
+            self.total_detrend_cols,
+        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
 
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
 
-    def _check_data_format(self, t, m, e, xyz_delta, ra_rad, dec_rad,
-                           label, data_format="magnitude"):
+    def _check_data_format(
+        self,
+        t,
+        m,
+        e,
+        xyz_delta,
+        ra_rad,
+        dec_rad,
+        label,
+        data_format="magnitude",
+    ):
         """Warn if data appears fainter at peak than at baseline.
 
         By the time this runs m is always in magnitudes (flux data has already been
@@ -264,6 +306,7 @@ class MulensInstrument(Instrument):
         (e.g., Spitzer peak-only data) — no comparison is possible there.
         """
         cm = self.config_manager
+
         def _get(key, default=None):
             return _raw_initval(cm.user_params.get(key), default)
 
@@ -279,24 +322,26 @@ class MulensInstrument(Instrument):
 
         x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
-                   - y * np.sin(ra_rad) * np.sin(dec_rad)
-                   + z * np.cos(dec_rad))
-        tau   = (t - float(t0)) / tE_safe
+        delta_n = (
+            -x * np.cos(ra_rad) * np.sin(dec_rad)
+            - y * np.sin(ra_rad) * np.sin(dec_rad)
+            + z * np.cos(dec_rad)
+        )
+        tau = (t - float(t0)) / tE_safe
         tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
-        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
-        A_traj = (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p**2 + u_p**2)
+        A_traj = (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
 
         baseline_mask = A_traj < 1.1
-        peak_mask     = A_traj > 1.5
+        peak_mask = A_traj > 1.5
 
         # Skip if no baseline coverage (e.g., Spitzer peak-only data)
         if np.sum(baseline_mask) < 3 or np.sum(peak_mask) < 3:
             return
 
         m_baseline = float(np.median(m[baseline_mask]))
-        m_peak     = float(np.median(m[peak_mask]))
+        m_peak = float(np.median(m[peak_mask]))
 
         # In magnitudes, brighter = smaller value.  Peak must be brighter.
         if m_peak > m_baseline:
@@ -322,11 +367,11 @@ class MulensInstrument(Instrument):
     def _pspl_magnification(t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E):
         """Point-source Paczynski magnification along one source trajectory."""
         tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
-        tau   = (t - float(t0)) / tE_safe
+        tau = (t - float(t0)) / tE_safe
         tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p   = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
-        u_traj = np.sqrt(tau_p ** 2 + u_p ** 2)
-        return (u_traj ** 2 + 2.0) / (u_traj * np.sqrt(u_traj ** 2 + 4.0))
+        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_traj = np.sqrt(tau_p**2 + u_p**2)
+        return (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
 
     @staticmethod
     def _binary_magnification_columns(t, n_src, _get):
@@ -351,6 +396,7 @@ class MulensInstrument(Instrument):
 
         try:
             import MulensModel as mm
+
             cols = []
             for j in range(n_src):
                 t0 = _get(f"lens.{j}.t_0")
@@ -373,15 +419,20 @@ class MulensInstrument(Instrument):
                 if rho is not None:
                     window = 3.0 * params["t_E"]
                     model.set_magnification_methods(
-                        [params["t_0"] - window, "VBM", params["t_0"] + window])
+                        [params["t_0"] - window, "VBM", params["t_0"] + window]
+                    )
                 cols.append(np.asarray(model.get_magnification(t)))
             return cols
         except Exception as e:
-            logger.warning(f"Binary-lens flux bootstrap failed ({e}); "
-                           "falling back to PSPL columns.")
+            logger.warning(
+                f"Binary-lens flux bootstrap failed ({e}); "
+                "falling back to PSPL columns."
+            )
             return None
 
-    def _estimate_flux_components(self, t, m, xyz_au, ra_rad, dec_rad, inst_idx):
+    def _estimate_flux_components(
+        self, t, m, xyz_au, ra_rad, dec_rad, inst_idx
+    ):
         """Estimate (f_total, q_source, q_flux) for one instrument.
 
         f_total  = total baseline flux (all sources + blend)
@@ -417,18 +468,20 @@ class MulensInstrument(Instrument):
         q_flux_user = _get_flux("q_flux")
         q_flux_fallback = q_flux_user if q_flux_user is not None else 1.0
 
-        t0     = _get("lens.0.t_0")
-        u0     = _get("lens.0.u_0")
-        tE     = _get("lens.0.t_E")
+        t0 = _get("lens.0.t_0")
+        u0 = _get("lens.0.u_0")
+        tE = _get("lens.0.t_E")
         pi_E_N = _get("lens.0.pi_E_N", 0.0)
         pi_E_E = _get("lens.0.pi_E_E", 0.0)
 
         f_source_user = _get_flux("f_source")
-        f_blend_user  = _get_flux("f_blend")
+        f_blend_user = _get_flux("f_blend")
 
         if f_source_user is not None and f_blend_user is not None:
             f_total = f_source_user + f_blend_user
-            q_source = float(np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95))
+            q_source = float(
+                np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95)
+            )
             return f_total, q_source, q_flux_fallback
 
         if t0 is None or u0 is None:
@@ -437,9 +490,11 @@ class MulensInstrument(Instrument):
 
         x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (-x * np.cos(ra_rad) * np.sin(dec_rad)
-                   - y * np.sin(ra_rad) * np.sin(dec_rad)
-                   + z * np.cos(dec_rad))
+        delta_n = (
+            -x * np.cos(ra_rad) * np.sin(dec_rad)
+            - y * np.sin(ra_rad) * np.sin(dec_rad)
+            + z * np.cos(dec_rad)
+        )
 
         # One magnification column per source trajectory.  Prefer the full
         # binary-lens model (breaks the NNLS degeneracy between overlapping
@@ -447,8 +502,11 @@ class MulensInstrument(Instrument):
         # params (j > 0) degrade gracefully to the single-source estimate.
         A_cols = self._binary_magnification_columns(t, n_src, _get)
         if A_cols is None:
-            A_cols = [self._pspl_magnification(t, delta_e, delta_n,
-                                               t0, u0, tE, pi_E_N, pi_E_E)]
+            A_cols = [
+                self._pspl_magnification(
+                    t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E
+                )
+            ]
             for j in range(1, n_src):
                 t0_j = _get(f"lens.{j}.t_0")
                 u0_j = _get(f"lens.{j}.u_0")
@@ -459,9 +517,11 @@ class MulensInstrument(Instrument):
                         f"as blended into source 0."
                     )
                     continue
-                A_cols.append(self._pspl_magnification(t, delta_e, delta_n,
-                                                       t0_j, u0_j, tE_j,
-                                                       pi_E_N, pi_E_E))
+                A_cols.append(
+                    self._pspl_magnification(
+                        t, delta_e, delta_n, t0_j, u0_j, tE_j, pi_E_N, pi_E_E
+                    )
+                )
 
         A_traj = A_cols[0]
         F_obs = 10.0 ** (-0.4 * m)
@@ -477,14 +537,26 @@ class MulensInstrument(Instrument):
                 q_flux_est = float(np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3))
             if f_source_user is not None and f_source_est > 1e-30:
                 # honor the user's total source flux; keep the NNLS ratio
-                f_blend_est = max(float(np.median(
-                    F_obs - X[:, :-1] @ (f_srcs * f_source_user / f_source_est))), 0.0)
+                f_blend_est = max(
+                    float(
+                        np.median(
+                            F_obs
+                            - X[:, :-1]
+                            @ (f_srcs * f_source_user / f_source_est)
+                        )
+                    ),
+                    0.0,
+                )
                 f_source_est = f_source_user
         elif f_source_user is not None:
-            f_blend_est = max(float(np.median(F_obs - f_source_user * A_traj)), 0.0)
+            f_blend_est = max(
+                float(np.median(F_obs - f_source_user * A_traj)), 0.0
+            )
             f_source_est = f_source_user
         elif f_blend_user is not None:
-            (f_source_est,), _ = nnls(A_traj.reshape(-1, 1), F_obs - f_blend_user)
+            (f_source_est,), _ = nnls(
+                A_traj.reshape(-1, 1), F_obs - f_blend_user
+            )
             f_blend_est = f_blend_user
         else:
             X = np.column_stack([A_traj, np.ones(len(A_traj))])
@@ -519,7 +591,7 @@ class MulensInstrument(Instrument):
         t_delta = (t - self._t0_par)[:, np.newaxis]  # (N, 1)
         return xyz_abs - (self._earth_pos_ref + self._earth_vel_ref * t_delta)
 
-    def get_observer_position(self, time, observer_location='earth'):
+    def get_observer_position(self, time, observer_location="earth"):
         """
         High-precision observer position dispatcher.
         Delegates to the shared exozippy.ephemeris module (major bodies,
@@ -541,8 +613,12 @@ class MulensInstrument(Instrument):
             q = q_source_init[i]
             f_source_guess = f_total_init[i] * q
             f_blend_guess = f_total_init[i] * (1.0 - q)
-            self.config_manager.add_hint(f"{self.prefix}.{i}.f_source", f_source_guess)
-            self.config_manager.add_hint(f"{self.prefix}.{i}.f_blend", f_blend_guess)
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.f_source", f_source_guess
+            )
+            self.config_manager.add_hint(
+                f"{self.prefix}.{i}.f_blend", f_blend_guess
+            )
             self.config_manager.add_hint(
                 f"{self.prefix}.{i}.q_source", q, rank=RANK_DERIVED_DATA
             )
@@ -563,7 +639,9 @@ class MulensInstrument(Instrument):
         self._register_gp(self.manifest)
 
         if self.total_detrend_cols > 0:
-            self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
+            self.manifest["detrend_coeffs"] = {
+                "shape": (self.total_detrend_cols,)
+            }
 
         # Binary source: one flux ratio q_flux = f_s2/f_s1 per instrument
         # (sources have different colors, so the ratio is chromatic).
@@ -579,21 +657,33 @@ class MulensInstrument(Instrument):
             self.manifest["q_flux"] = None
             for i in range(self.n_elements):
                 self.config_manager.add_hint(
-                    f"{self.prefix}.{i}.q_flux", float(self.q_flux_init[i]),
+                    f"{self.prefix}.{i}.q_flux",
+                    float(self.q_flux_init[i]),
                     rank=RANK_DERIVED_DATA,
                 )
 
         # Map each instrument to a Band instance by name.
         band_names = [c.get("band", None) for c in self.config]
-        if hasattr(system, 'band'):
+        if hasattr(system, "band"):
             name_to_idx = {name: i for i, name in enumerate(system.band.names)}
-            self.band_map = np.array([
-                name_to_idx[n] if (n is not None and n in name_to_idx) else -1
-                for n in band_names
-            ], dtype=int)
-            missing = [n for n in band_names if n is not None and n not in name_to_idx]
+            self.band_map = np.array(
+                [
+                    (
+                        name_to_idx[n]
+                        if (n is not None and n in name_to_idx)
+                        else -1
+                    )
+                    for n in band_names
+                ],
+                dtype=int,
+            )
+            missing = [
+                n for n in band_names if n is not None and n not in name_to_idx
+            ]
             for n in missing:
-                logger.warning(f"Instrument references unknown band '{n}'; LD will be skipped.")
+                logger.warning(
+                    f"Instrument references unknown band '{n}'; LD will be skipped."
+                )
         else:
             self.band_map = np.full(self.n_elements, -1, dtype=int)
 
@@ -613,11 +703,16 @@ class MulensInstrument(Instrument):
         #    supported for finite-source LD; the first band found is used.
         u1 = None
         bandpass = None
-        if (system.lens.finite_source[0]
-                and hasattr(system, 'band')
-                and np.any(self.band_map >= 0)):
-            band_indices = [self.band_map[i] for i in range(self.n_elements)
-                            if self.band_map[i] >= 0]
+        if (
+            system.lens.finite_source[0]
+            and hasattr(system, "band")
+            and np.any(self.band_map >= 0)
+        ):
+            band_indices = [
+                self.band_map[i]
+                for i in range(self.n_elements)
+                if self.band_map[i] >= 0
+            ]
             unique = sorted(set(band_indices))
             if len(unique) > 1:
                 logger.warning(
@@ -632,9 +727,16 @@ class MulensInstrument(Instrument):
         A_per_source = []
         for j in range(n_src):
             system.lens.resolve_auto_vbbl(self.time, index=j)
-            A_per_source.append(system.lens.get_magnification_op(
-                t, self.observer_pos_abs, system, index=j, u1=u1, bandpass=bandpass
-            ))
+            A_per_source.append(
+                system.lens.get_magnification_op(
+                    t,
+                    self.observer_pos_abs,
+                    system,
+                    index=j,
+                    u1=u1,
+                    bandpass=bandpass,
+                )
+            )
 
         # 3. Flux Model: F = Σ_j f_s,j·A_j + f_b, with f_s,1 = f_s/(1+q_F),
         #    f_s,2 = f_s·q_F/(1+q_F) (q_F per instrument — sources differ in color)
@@ -646,9 +748,11 @@ class MulensInstrument(Instrument):
         else:
             qf = self.q_flux.value[self.inst_map_tensor]
             qf_safe = pt.maximum(qf, 0.0)
-            model_flux = (fs / (1.0 + qf_safe) * A_per_source[0]
-                          + fs * qf_safe / (1.0 + qf_safe) * A_per_source[1]
-                          + fb)
+            model_flux = (
+                fs / (1.0 + qf_safe) * A_per_source[0]
+                + fs * qf_safe / (1.0 + qf_safe) * A_per_source[1]
+                + fb
+            )
 
         # Guard against negative flux causing log10(NaN) crash during tuning
         safe_flux = pt.maximum(model_flux, 1e-12)
@@ -667,7 +771,8 @@ class MulensInstrument(Instrument):
         sigma = self.total_sigma(obs_err)
 
         self.add_observation_likelihood(
-            f"{self.prefix}.model", mu=model_mag, sigma=sigma, observed=obs_mag)
+            f"{self.prefix}.model", mu=model_mag, sigma=sigma, observed=obs_mag
+        )
 
         # 5. SED-based source flux constraint (issue #18)
         if hasattr(system, "sed"):
@@ -711,8 +816,11 @@ class MulensInstrument(Instrument):
         other_indices = [i for i in range(n_stars) if i not in source_indices]
 
         zp_cfg = self.config_manager.resolve(
-            self.prefix, "zeropoint", shape=(self.n_elements,),
-            names=self.names)
+            self.prefix,
+            "zeropoint",
+            shape=(self.n_elements,),
+            names=self.names,
+        )
         zp_mu = np.asarray(zp_cfg.get("mu"), dtype=float)
         zp_sigma = np.asarray(zp_cfg.get("sigma"), dtype=float)
 
@@ -721,46 +829,55 @@ class MulensInstrument(Instrument):
             if band_idx < 0:
                 logger.info(
                     f"mulensinstrument {name}: no band reference; skipping "
-                    f"SED flux constraint.")
+                    f"SED flux constraint."
+                )
                 continue
             filter_key = system.band.filter_mist[band_idx]
             if not sed.has_filter(filter_key):
                 logger.warning(
                     f"mulensinstrument {name}: band filter '{filter_key}' "
                     f"is not in the SED's BC grid; skipping SED flux "
-                    f"constraint.")
+                    f"constraint."
+                )
                 continue
             if zp_sigma[i] == 0:
                 raise ValueError(
                     f"mulensinstrument.{name}.zeropoint has sigma=0. An "
                     f"exact zeropoint would make f_source deterministic "
                     f"given the SED; give a small nonzero sigma instead "
-                    f"(e.g. 0.01).")
+                    f"(e.g. 0.01)."
+                )
 
             m_src_pred = sed.predict_blend_appmag(
-                source_indices, filter_key, system)
+                source_indices, filter_key, system
+            )
             fs_i = pt.maximum(self.f_source.value[i], 1e-30)
             zp = pm.Deterministic(
                 f"{self.prefix}.{name}.zeropoint",
-                m_src_pred + 2.5 * pt.log10(fs_i))
+                m_src_pred + 2.5 * pt.log10(fs_i),
+            )
             pm.Potential(
                 f"{self.prefix}.{name}.zeropoint_prior",
-                -0.5 * ((zp - zp_mu[i]) / zp_sigma[i]) ** 2)
+                -0.5 * ((zp - zp_mu[i]) / zp_sigma[i]) ** 2,
+            )
 
             if self.config[i].get("sed_constrain_blend", False):
                 if not other_indices:
                     logger.warning(
                         f"mulensinstrument {name}: sed_constrain_blend is "
-                        f"set but every modeled star is a source; skipping.")
+                        f"set but every modeled star is a source; skipping."
+                    )
                     continue
                 blend_sigma = float(self.config[i].get("sed_blend_sigma", 0.2))
                 m_blend_pred = sed.predict_blend_appmag(
-                    other_indices, filter_key, system)
+                    other_indices, filter_key, system
+                )
                 fb_i = pt.maximum(self.f_blend.value[i], 1e-30)
                 m_blend_inst = -2.5 * pt.log10(fb_i) + zp
                 pm.Potential(
                     f"{self.prefix}.{name}.sed_blend_prior",
-                    -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2)
+                    -0.5 * ((m_blend_pred - m_blend_inst) / blend_sigma) ** 2,
+                )
 
     def compile_plotters(self, model, system):
         """Compile fast PyTensor functions for the lightcurve."""
@@ -772,7 +889,9 @@ class MulensInstrument(Instrument):
 
         n_src = self._n_sources
         A_per_source = [
-            system.lens.get_magnification_op(t_input, obs_pos_input, system, index=j)
+            system.lens.get_magnification_op(
+                t_input, obs_pos_input, system, index=j
+            )
             for j in range(n_src)
         ]
 
@@ -785,9 +904,11 @@ class MulensInstrument(Instrument):
             model_flux = fs_inst * A_per_source[0] + fb_inst
         else:
             qf_inst = pt.maximum(self.q_flux.value[inst_idx], 0.0)
-            model_flux = (fs_inst / (1.0 + qf_inst) * A_per_source[0]
-                          + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
-                          + fb_inst)
+            model_flux = (
+                fs_inst / (1.0 + qf_inst) * A_per_source[0]
+                + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
+                + fb_inst
+            )
         f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
         A_eff = model_flux / f_total_inst
         model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))
@@ -795,7 +916,7 @@ class MulensInstrument(Instrument):
         self._compiled_delta_mag = pytensor.function(
             inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
             outputs=model_delta_mag,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Baseline flux at a given parameter point, used by plot() to normalize
@@ -803,7 +924,7 @@ class MulensInstrument(Instrument):
         self._compiled_f_total = pytensor.function(
             inputs=[inst_idx] + param_symbols,
             outputs=f_total_inst,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Full per-instrument f_source / f_blend vectors at a given point, used
@@ -812,15 +933,17 @@ class MulensInstrument(Instrument):
         self._compiled_flux = pytensor.function(
             inputs=param_symbols,
             outputs=[self.f_source.value, self.f_blend.value],
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Per-file GP conditional-mean evaluators (no-op without a gp: key).
         self._compile_gp_plotters(system)
 
     def plot(self, system, points, filename_prefix="debug"):
-        if isinstance(points, dict): points = [points]
-        if len(points) == 0: return
+        if isinstance(points, dict):
+            points = [points]
+        if len(points) == 0:
+            return
 
         # Model time grid: ±5 tE around t_0 when known, else full data span
         cm = self.config_manager
@@ -829,25 +952,36 @@ class MulensInstrument(Instrument):
         def _get_param(base_param):
             # Try numeric index form first (user-provided params), then name form
             # (derived params stored by finalize_user_params under the name key).
-            for key in (f"lens.0.{base_param}", f"lens.{_lens_name}.{base_param}"):
+            for key in (
+                f"lens.0.{base_param}",
+                f"lens.{_lens_name}.{base_param}",
+            ):
                 d = cm.user_params.get(key)
                 if d is not None:
-                    return d.get("initval") if isinstance(d, dict) else float(d)
+                    return (
+                        d.get("initval") if isinstance(d, dict) else float(d)
+                    )
             return None
 
         t0 = _get_param("t_0")
         tE = _get_param("t_E")
         if t0 is not None and tE is not None:
-            t_model = np.linspace(t0 - 5.0*tE, t0 + 5.0*tE, 2000).astype(np.float64)
+            t_model = np.linspace(t0 - 5.0 * tE, t0 + 5.0 * tE, 2000).astype(
+                np.float64
+            )
         else:
-            t_model = np.linspace(self.time.min(), self.time.max(), 2000).astype(np.float64)
+            t_model = np.linspace(
+                self.time.min(), self.time.max(), 2000
+            ).astype(np.float64)
 
         # Each instrument gets its own color.  Model lines are one per unique
         # observer_location: multiple earth instruments share one model curve
         # (parallax between terrestrial sites is negligible unless lat/lon is
         # explicitly specified, in which case each site is a distinct string).
-        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        inst_color = {i: colors[i % len(colors)] for i in range(self.n_elements)}
+        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        inst_color = {
+            i: colors[i % len(colors)] for i in range(self.n_elements)
+        }
 
         # Map unique observer_location strings to the first instrument with that location.
         unique_observers = []
@@ -862,17 +996,25 @@ class MulensInstrument(Instrument):
         # Both the symbolic PSPL path and the MulensModel Op expect absolute barycentric AU;
         # get_magnification converts internally to geocentric deviations as needed.
         obs_model_pos = {
-            obs_loc: self.get_observer_position(t_model, observer_location=obs_loc)
+            obs_loc: self.get_observer_position(
+                t_model, observer_location=obs_loc
+            )
             for obs_loc in unique_observers
         }
-        inst_obs_loc = {i: self.config[i].get("observer_location", "earth")
-                        for i in range(self.n_elements)}
+        inst_obs_loc = {
+            i: self.config[i].get("observer_location", "earth")
+            for i in range(self.n_elements)
+        }
 
         def _point_values(point):
             return [
-                float(np.squeeze(np.asarray(point.get(p.label, p.initval))))
-                if getattr(p.value, "ndim", 0) == 0
-                else np.atleast_1d(point.get(p.label, p.initval))
+                (
+                    float(
+                        np.squeeze(np.asarray(point.get(p.label, p.initval)))
+                    )
+                    if getattr(p.value, "ndim", 0) == 0
+                    else np.atleast_1d(point.get(p.label, p.initval))
+                )
                 for p in system.plot_params
             ]
 
@@ -909,7 +1051,7 @@ class MulensInstrument(Instrument):
 
         def draw(ax):
             for i in range(self.n_elements):
-                mask = (self.inst_map == i)
+                mask = self.inst_map == i
                 mag_i = self.mag[mask]
                 err_i = self.err[mask]
                 delta_mag = _align_mag(mag_i, i)
@@ -917,8 +1059,14 @@ class MulensInstrument(Instrument):
                 lo = delta_mag - _align_mag(mag_i - err_i, i)
                 hi = _align_mag(mag_i + err_i, i) - delta_mag
                 ax.errorbar(
-                    self.time[mask], delta_mag, yerr=np.vstack([lo, hi]),
-                    fmt='.', color=inst_color[i], alpha=0.6, zorder=1, label=self.names[i]
+                    self.time[mask],
+                    delta_mag,
+                    yerr=np.vstack([lo, hi]),
+                    fmt=".",
+                    color=inst_color[i],
+                    alpha=0.6,
+                    zorder=1,
+                    label=self.names[i],
                 )
             for obs_loc in unique_observers:
                 i = obs_to_inst[obs_loc]
@@ -928,11 +1076,23 @@ class MulensInstrument(Instrument):
                     try:
                         # ref_idx: reference flux system, this observer's
                         # magnification (parallax between sites is preserved).
-                        y_model = self._compiled_delta_mag(t_model, obs_pretty, ref_idx, *param_values)
+                        y_model = self._compiled_delta_mag(
+                            t_model, obs_pretty, ref_idx, *param_values
+                        )
                         alpha = 0.8 if len(points) == 1 else 0.1
-                        ax.plot(t_model, y_model, '-', color=inst_color[i], lw=1.5, alpha=alpha, zorder=2)
+                        ax.plot(
+                            t_model,
+                            y_model,
+                            "-",
+                            color=inst_color[i],
+                            lw=1.5,
+                            alpha=alpha,
+                            zorder=2,
+                        )
                     except Exception as e:
-                        logger.warning(f"Model eval failed for observer '{obs_loc}': {e}")
+                        logger.warning(
+                            f"Model eval failed for observer '{obs_loc}': {e}"
+                        )
 
             # One "physical + GP" curve per light curve that requested a GP.
             # The GP is additive in that instrument's own magnitudes, so it is
@@ -944,20 +1104,31 @@ class MulensInstrument(Instrument):
                 if obs_pretty is None:
                     continue
                 fs_i = max(float(fs_vec[i]), 1e-30)
-                baseline_i = -2.5 * np.log10(max(fs_i + float(fb_vec[i]), 1e-30))
+                baseline_i = -2.5 * np.log10(
+                    max(fs_i + float(fb_vec[i]), 1e-30)
+                )
                 for point in points:
                     param_values = _point_values(point)
                     try:
                         delta_i = self._compiled_delta_mag(
-                            t_model, obs_pretty, i, *param_values)
+                            t_model, obs_pretty, i, *param_values
+                        )
                         gp_i = self.gp_mean_on_grid(system, point, i, t_model)
                         y_gp = _align_mag(delta_i + baseline_i + gp_i, i)
                         alpha = 0.8 if len(points) == 1 else 0.1
-                        ax.plot(t_model, y_gp, '-', color=inst_color[i], lw=1.0,
-                                alpha=alpha, zorder=3)
+                        ax.plot(
+                            t_model,
+                            y_gp,
+                            "-",
+                            color=inst_color[i],
+                            lw=1.0,
+                            alpha=alpha,
+                            zorder=3,
+                        )
                     except Exception as e:
                         logger.warning(
-                            f"GP model eval failed for '{self.names[i]}': {e}")
+                            f"GP model eval failed for '{self.names[i]}': {e}"
+                        )
             ax.set_xlabel("Time [BJD]")
             ax.set_ylabel("mag − mag$_0$")
             ax.invert_yaxis()

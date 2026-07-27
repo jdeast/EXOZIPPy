@@ -5,6 +5,7 @@ close/wide degeneracy is an exact reflection log_s -> -log_s.  These tests
 assert that log_s is the sampled coordinate, s = 10**log_s is derived, and that
 user-supplied lens.s initval / bounds translate onto log_s.
 """
+
 import numpy as np
 import pytensor
 import pytest
@@ -17,9 +18,13 @@ def _binary_config():
     return {
         "star": [{"name": "Lens"}, {"name": "Source"}],
         "planet": [{"name": "b"}],
-        "lens": [{"name": "Lens",
-                  "lenses": ["star.0", "planet.0"],
-                  "sources": ["star.1"]}],
+        "lens": [
+            {
+                "name": "Lens",
+                "lenses": ["star.0", "planet.0"],
+                "sources": ["star.1"],
+            }
+        ],
     }
 
 
@@ -75,12 +80,15 @@ def test_log_s_is_sampled_and_s_is_derived(default_s_system):
         f = pytensor.function(
             model.free_RVs,
             [system.lens.s.value, system.lens.log_s.value],
-            on_unused_input="ignore")
+            on_unused_input="ignore",
+        )
         ip = model.initial_point()
-        zeros = [np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs]
+        zeros = [
+            np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs
+        ]
         s_val, log_s_val = [np.atleast_1d(x) for x in f(*zeros)]
 
-    np.testing.assert_allclose(s_val, 10.0 ** log_s_val, rtol=1e-6)
+    np.testing.assert_allclose(s_val, 10.0**log_s_val, rtol=1e-6)
 
 
 def test_user_s_initval_seeds_log_s_start(default_s_system):
@@ -92,10 +100,11 @@ def test_user_s_initval_seeds_log_s_start(default_s_system):
 
     np.testing.assert_allclose(system.lens.s.initval, [s0], rtol=1e-9)
     np.testing.assert_allclose(
-        system.lens.log_s.initval, [np.log10(s0)], atol=1e-6)
+        system.lens.log_s.initval, [np.log10(s0)], atol=1e-6
+    )
     np.testing.assert_allclose(
-        system.lens.log_s.init_scale,
-        [scale0 / (s0 * np.log(10.0))], rtol=1e-4)
+        system.lens.log_s.init_scale, [scale0 / (s0 * np.log(10.0))], rtol=1e-4
+    )
 
 
 def test_user_s_bounds_translate_to_log_s():
@@ -103,10 +112,15 @@ def test_user_s_bounds_translate_to_log_s():
     registers, then the bounds are moved onto log_s as log10(bound) and removed
     from the s entry."""
     system, _ = _build(
-        {"initval": 1.0, "init_scale": 0.01, "lower": 0.5, "upper": 5.0})
+        {"initval": 1.0, "init_scale": 0.01, "lower": 0.5, "upper": 5.0}
+    )
 
-    np.testing.assert_allclose(system.lens.log_s.lower, [np.log10(0.5)], atol=1e-6)
-    np.testing.assert_allclose(system.lens.log_s.upper, [np.log10(5.0)], atol=1e-6)
+    np.testing.assert_allclose(
+        system.lens.log_s.lower, [np.log10(0.5)], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        system.lens.log_s.upper, [np.log10(5.0)], atol=1e-6
+    )
 
     up_s = system.config_manager.user_params.get("lens.0.s")
     assert "lower" not in up_s

@@ -1,47 +1,50 @@
 # generic imports
-import logging
-from pathlib import Path
-import yaml
 import ast
 import importlib
+import logging
+from pathlib import Path
+
+# astronomy imports
+import astropy.units as u
+
+# plotting imports
+import matplotlib.pyplot as plt
 
 # scientific imports
 import numpy as np
 import pandas as pd
 
-# astronomy imports
-import astropy.units as u
-
 # pymc imports
 import pymc as pm
-import pytensor.tensor as pt
 import pytensor
+import pytensor.tensor as pt
+import yaml
+from matplotlib.legend_handler import HandlerTuple
+from matplotlib.lines import Line2D
+
+from exozippy.components.component import Component
 
 # local imports
 from exozippy.components.parameter import Parameter
-from exozippy.components.component import Component
-from exozippy.constants import LOGG_CONST, ANG_TO_MICRON_CONST
+from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
+
+from ..star.physics import calc_logg_from_logmass, calc_luminosity
+
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
-from .physics import *
 from .bc_grid import (
-    build_bc_grid,
-    peek_grid_axes,
-    slice_bc,
-    RegularGridInterpolator,
     DEFAULT_BC_ROOT,
-    resolve_filter_name,
-    facility_from_svo_name,
-    _load_alias_table,
+    RegularGridInterpolator,
     _collect_facility_files,
+    _load_alias_table,
+    build_bc_grid,
+    facility_from_svo_name,
+    peek_grid_axes,
+    resolve_filter_name,
+    slice_bc,
 )
-from ..star.physics import calc_logg_from_logmass, calc_luminosity
-
-# plotting imports
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.legend_handler import HandlerTuple
+from .physics import *
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,7 @@ try:
     current_dir = Path(__file__).parent
 except NameError:
     current_dir = Path.cwd()
+
 
 class SED(Component):
     """
@@ -107,10 +111,10 @@ class SED(Component):
         # for now lets assume only one SED file
         self.sedfile = self.config.get("file")
         # read in sed file to get model
-        with open(self.sedfile, 'r') as f:
+        with open(self.sedfile, "r") as f:
             self.SED_yaml = yaml.safe_load(f)
-        self.sedmodel = self.SED_yaml.get('model', 'NextGen')
-        
+        self.sedmodel = self.SED_yaml.get("model", "NextGen")
+
         self.teffsedfloor = self.config.get("teffsedfloor", 0.020)
         self.fbolsedfloor = self.config.get("fbolsedfloor", 0.024)
 
@@ -171,9 +175,7 @@ class SED(Component):
     def _inject_grid_bounds(self):
 
         try:
-            axes = peek_grid_axes(
-                model=self.sedmodel, bc_root=self.bc_root
-            )
+            axes = peek_grid_axes(model=self.sedmodel, bc_root=self.bc_root)
         except FileNotFoundError as e:
             # If the grid isn't findable at construction time,
             # defer to load_data's own error handling rather than
@@ -195,8 +197,8 @@ class SED(Component):
 
         overrides = {
             f"star.teffsed": {"lower": teff_lo, "upper": teff_hi},
-            f"star.feh":     {"lower": feh_lo,  "upper": feh_hi},
-            f"star.av":      {"lower": av_lo,   "upper": av_hi},
+            f"star.feh": {"lower": feh_lo, "upper": feh_hi},
+            f"star.av": {"lower": av_lo, "upper": av_hi},
         }
 
         for key, bounds in overrides.items():
@@ -219,16 +221,18 @@ class SED(Component):
                     "initval": existing,
                     **bounds,
                 }
-    
+
     @property
     def prefix(self):
         return "sed"
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities.registry import (
-            UtilitySpec, argparse_subprocess_runner)
         from ...utilities import mkticsed
+        from ...utilities.registry import (
+            UtilitySpec,
+            argparse_subprocess_runner,
+        )
 
         return [
             UtilitySpec(
@@ -236,7 +240,8 @@ class SED(Component):
                 label="Build SED + priors from TIC/Gaia",
                 description=(
                     "Query TICv8.2 and associated catalogs to write an "
-                    "EXOZIPPy SED file and stellar priors params.yaml."),
+                    "EXOZIPPy SED file and stellar priors params.yaml."
+                ),
                 component_keys=["sed"],
                 available=True,
                 build_parser=mkticsed.build_parser,
@@ -329,13 +334,15 @@ class SED(Component):
                 except ValueError:
                     raise ValueError(
                         f"Unknown star reference '{ref}' in photType. "
-                        f"Known stars: {star_names} (or indices 0..{n - 1}).")
+                        f"Known stars: {star_names} (or indices 0..{n - 1})."
+                    )
         else:
             raise ValueError(f"Invalid star reference {ref!r} in photType.")
         if not 0 <= idx < n:
             raise ValueError(
                 f"Star index {idx} in photType out of range; the system "
-                f"defines {n} star(s): {star_names}.")
+                f"defines {n} star(s): {star_names}."
+            )
         return idx
 
     @staticmethod
@@ -378,29 +385,40 @@ class SED(Component):
                     raise ValueError(
                         f"Unknown photType key(s) {sorted(unknown)} for "
                         f"``{self.filters[i]}``. Allowed: pos, neg, blend "
-                        f"(alias for pos).")
+                        f"(alias for pos)."
+                    )
                 if "blend" in phot and "pos" in phot:
                     raise ValueError(
                         f"photType for ``{self.filters[i]}`` sets both "
                         f"'blend' and 'pos'; 'blend' is an alias for 'pos' — "
-                        f"use one.")
+                        f"use one."
+                    )
                 pos_refs = phot.get("pos", phot.get("blend"))
                 if not pos_refs:
                     raise ValueError(
                         f"photType for ``{self.filters[i]}`` needs a "
-                        f"non-empty 'pos' (or 'blend') star list.")
-                pos = [self._resolve_star_ref(r, star_names) for r in np.atleast_1d(pos_refs)]
-                neg = [self._resolve_star_ref(r, star_names) for r in np.atleast_1d(phot.get("neg") or [])]
+                        f"non-empty 'pos' (or 'blend') star list."
+                    )
+                pos = [
+                    self._resolve_star_ref(r, star_names)
+                    for r in np.atleast_1d(pos_refs)
+                ]
+                neg = [
+                    self._resolve_star_ref(r, star_names)
+                    for r in np.atleast_1d(phot.get("neg") or [])
+                ]
             else:
                 raise ValueError(
                     f"photType for ``{self.filters[i]}`` must be a mapping "
-                    f"with 'pos'/'neg' (or 'blend') star lists; got {phot!r}.")
+                    f"with 'pos'/'neg' (or 'blend') star lists; got {phot!r}."
+                )
 
             overlap = set(pos) & set(neg)
             if overlap:
                 raise ValueError(
                     f"photType for ``{self.filters[i]}`` lists star(s) "
-                    f"{sorted(overlap)} in both pos and neg.")
+                    f"{sorted(overlap)} in both pos and neg."
+                )
 
             blend_matrix[i, pos] = 1
             blend_matrix[i, neg] = -1
@@ -408,7 +426,6 @@ class SED(Component):
 
         self.blend_matrix = blend_matrix
         self.combo_labels = combo_labels
-
 
     def _ensure_model_data(self):
         """Fetch the raw model spectra from Zenodo if not already cached.
@@ -439,7 +456,8 @@ class SED(Component):
         alias_df = _load_alias_table()
 
         known_mist = {
-            resolve_filter_name(n, alias_df, alias="MIST") for n in self.filters
+            resolve_filter_name(n, alias_df, alias="MIST")
+            for n in self.filters
         }
         extra = []
         for cfg in band_cfgs:
@@ -466,9 +484,7 @@ class SED(Component):
 
     def load_data(self, system):
         if self.sedfile is None:
-            raise ValueError(
-                f"sed is missing the required 'file' key"
-            )
+            raise ValueError(f"sed is missing the required 'file' key")
 
         self._ensure_model_data()
         self._process_SED_yaml()
@@ -522,36 +538,51 @@ class SED(Component):
         # the star parameter bounds. _inject_grid_bounds() already wrote the
         # grid-axis limits into config_manager.user_params during __init__,
         # so resolve() returns the correct tightened bounds here.
-        teff_cfg = self.config_manager.resolve('star', 'teffsed')
-        feh_cfg  = self.config_manager.resolve('star', 'feh')
-        av_cfg   = self.config_manager.resolve('star', 'av')
+        teff_cfg = self.config_manager.resolve("star", "teffsed")
+        feh_cfg = self.config_manager.resolve("star", "feh")
+        av_cfg = self.config_manager.resolve("star", "av")
 
         grid_dict = {
             "model": self.sedmodel,
             "grid": {
                 "teff": self.bc_grid_data["teff_pts"],
                 "logg": self.bc_grid_data["logg_pts"],
-                "feh":  self.bc_grid_data["feh_pts"],
-                "av":   self.bc_grid_data["av_pts"],
+                "feh": self.bc_grid_data["feh_pts"],
+                "av": self.bc_grid_data["av_pts"],
             },
         }
         # Bounds may differ per star (user overrides); keep every grid
         # point any star can reach.
         bc_slice, axes = slice_bc(
-            grid_dict, self.bc_grid_data['bc_values'],
-            teff=(float(np.min(teff_cfg['lower'])), float(np.max(teff_cfg['upper']))),
-            feh=(float(np.min(feh_cfg['lower'])),   float(np.max(feh_cfg['upper']))),
-            av=(float(np.min(av_cfg['lower'])),      float(np.max(av_cfg['upper']))),
+            grid_dict,
+            self.bc_grid_data["bc_values"],
+            teff=(
+                float(np.min(teff_cfg["lower"])),
+                float(np.max(teff_cfg["upper"])),
+            ),
+            feh=(
+                float(np.min(feh_cfg["lower"])),
+                float(np.max(feh_cfg["upper"])),
+            ),
+            av=(
+                float(np.min(av_cfg["lower"])),
+                float(np.max(av_cfg["upper"])),
+            ),
         )
         axes_full = {
             "teff": self.bc_grid_data["teff_pts"],
             "logg": self.bc_grid_data["logg_pts"],
-            "feh":  self.bc_grid_data["feh_pts"],
-            "av":   self.bc_grid_data["av_pts"],
+            "feh": self.bc_grid_data["feh_pts"],
+            "av": self.bc_grid_data["av_pts"],
         }
         axes_full.update(axes)
         self.bc_interpolator = RegularGridInterpolator(
-            points=[axes_full['teff'], axes_full['logg'], axes_full['feh'], axes_full['av']],
+            points=[
+                axes_full["teff"],
+                axes_full["logg"],
+                axes_full["feh"],
+                axes_full["av"],
+            ],
             values=bc_slice,
         )
 
@@ -574,26 +605,26 @@ class SED(Component):
             return self._m_pred_matrix
 
         star = system.star
-        teffsed = star.teffsed.value       # K,        (nstars,)
-        radiussed = star.radiussed.value   # R_sun,    (nstars,)
-        logmass = star.logmass.value       # dex(M_sun)
-        feh = star.feh.value               # dex
-        av = star.av.value                 # mag
-        distance = star.distance.value     # pc
+        teffsed = star.teffsed.value  # K,        (nstars,)
+        radiussed = star.radiussed.value  # R_sun,    (nstars,)
+        logmass = star.logmass.value  # dex(M_sun)
+        feh = star.feh.value  # dex
+        av = star.av.value  # mag
+        distance = star.distance.value  # pc
 
         # Reconstruct loggsed from logmass + radiussed (NOT radius).
         loggsed = calc_logg_from_logmass(logmass, radiussed)
 
         # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
         coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
-        bc = self.bc_interpolator.evaluate(coords)   # (nstars, n_all_filters)
+        bc = self.bc_interpolator.evaluate(coords)  # (nstars, n_all_filters)
 
         # Bolometric luminosity
         Lbol = calc_luminosity(radiussed, teffsed)
         # Absolute bolometric magnitude from bolometric luminosity.
         # M_bol = -2.5 log10(L_bol / L_bol_0) with IAU 2015 zero
         # point (see physics.L_BOL_ZERO_LSUN).
-        Mbol_abs = calc_absbolmag(Lbol)              # (nstars,)
+        Mbol_abs = calc_absbolmag(Lbol)  # (nstars,)
 
         # Absolute magnitude per star per filter.
         M_abs = calc_absmag_from_bc(Mbol_abs[:, None], bc)
@@ -609,13 +640,13 @@ class SED(Component):
         are -2.5*log10(F_pos/F_neg) (exofast_multised convention).
         Shape (nfilters,).
         """
-        m_app = self._predicted_appmag_node(system)[:, :self.nfilters]
-        F = 10 ** (-0.4 * m_app)                         # (nstars, nfilters)
-        Cpos = np.clip(self.blend_matrix, 0, None)       # (nfilters, nstars)
+        m_app = self._predicted_appmag_node(system)[:, : self.nfilters]
+        F = 10 ** (-0.4 * m_app)  # (nstars, nfilters)
+        Cpos = np.clip(self.blend_matrix, 0, None)  # (nfilters, nstars)
         Cneg = np.clip(-self.blend_matrix, 0, None)
-        F_pos = pt.sum(Cpos * F.T, axis=1)               # (nfilters,)
+        F_pos = pt.sum(Cpos * F.T, axis=1)  # (nfilters,)
         F_neg = pt.sum(Cneg * F.T, axis=1)
-        has_neg = (self.blend_matrix < 0).any(axis=1)    # static numpy mask
+        has_neg = (self.blend_matrix < 0).any(axis=1)  # static numpy mask
         F_neg_safe = pt.switch(pt.as_tensor(has_neg), F_neg, 1.0)
         return -2.5 * (pt.log10(F_pos) - pt.log10(F_neg_safe))
 
@@ -656,7 +687,7 @@ class SED(Component):
     def predict_blend_appmag(self, star_indices, filter_key, system):
         """Predicted apparent magnitude of the flux sum of several stars."""
         col = self.filter_column(filter_key)
-        m = self._predicted_appmag_node(system)[:, col]   # (nstars,)
+        m = self._predicted_appmag_node(system)[:, col]  # (nstars,)
         idx = np.asarray(list(star_indices), dtype=int)
         F_sum = pt.sum(10 ** (-0.4 * m[idx]))
         return -2.5 * pt.log10(F_sum)
@@ -668,7 +699,7 @@ class SED(Component):
         (depth dilution) and the astrometric photocenter fluxfrac.
         """
         col = self.filter_column(filter_key)
-        m = self._predicted_appmag_node(system)[:, col]   # (nstars,)
+        m = self._predicted_appmag_node(system)[:, col]  # (nstars,)
         F = 10 ** (-0.4 * m)
         return F[star_idx] / pt.sum(F)
 
@@ -681,13 +712,13 @@ class SED(Component):
     def build_likelihood(self, model, system):
         star = system.star
 
-        teff = star.teff.value             # K
-        teffsed = star.teffsed.value       # K
-        fbol = star.fbol.value             # erg/s/cm2
-        fbolsed = star.fbolsed.value       # erg/s/cm2
+        teff = star.teff.value  # K
+        teffsed = star.teffsed.value  # K
+        fbol = star.fbol.value  # erg/s/cm2
+        fbolsed = star.fbolsed.value  # erg/s/cm2
 
         if self.nfilters > 0:
-            m_pred = self._combined_appmag_node(system)   # (nfilters,)
+            m_pred = self._combined_appmag_node(system)  # (nfilters,)
 
             mag_data = pm.Data(f"sed_mag_data", self.mag)
             err_data = pm.Data(f"sed_mag_err", self.err)
@@ -702,10 +733,18 @@ class SED(Component):
             )
 
         # this links the two with a user settable error floor
-        self.teffsed_floor_prior = pm.Potential("sed.teffsed_floor_prior",
-                                                pt.sum(-0.5 * ((teff - teffsed) / (teff * self.teffsedfloor)) ** 2))
-        self.fbolsed_floor_prior = pm.Potential("sed.fbolsed_floor_prior",
-                                                pt.sum(-0.5 * ((fbol - fbolsed) / (fbol * self.fbolsedfloor)) ** 2))
+        self.teffsed_floor_prior = pm.Potential(
+            "sed.teffsed_floor_prior",
+            pt.sum(
+                -0.5 * ((teff - teffsed) / (teff * self.teffsedfloor)) ** 2
+            ),
+        )
+        self.fbolsed_floor_prior = pm.Potential(
+            "sed.fbolsed_floor_prior",
+            pt.sum(
+                -0.5 * ((fbol - fbolsed) / (fbol * self.fbolsedfloor)) ** 2
+            ),
+        )
 
     # ------------------------------------------------------------------
     # 6) compile_plotters — stash the compiled pytensor functions we
@@ -725,14 +764,19 @@ class SED(Component):
         #   _compiled_mag_predictors : (nstars, nfilters) per-star app mags
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
-        m_star_node = self._predicted_appmag_node(system)[:, :self.nfilters]
-        loggsed_node = calc_logg_from_logmass(star.logmass.value, star.radiussed.value)
+        m_star_node = self._predicted_appmag_node(system)[:, : self.nfilters]
+        loggsed_node = calc_logg_from_logmass(
+            star.logmass.value, star.radiussed.value
+        )
 
         # Retain a symbolic model node so plot_data can derive param_deps
         # (graph walk) and hand G5 the tensors behind the model traces.
         self._sed_mag_node = m_star_node
         self._sed_combined_node = (
-            self._combined_appmag_node(system) if self.nfilters > 0 else m_star_node)
+            self._combined_appmag_node(system)
+            if self.nfilters > 0
+            else m_star_node
+        )
 
         try:
             self._compiled_mag_predictors = pytensor.function(
@@ -772,9 +816,15 @@ class SED(Component):
         interpolates the model spectra, computes model flux at Earth, and
         converts observed magnitudes to flux for the given draws.
         """
-        plot_class_path = Path(current_dir / "models" / system.sed.sedmodel / "plot.py")
+        plot_class_path = Path(
+            current_dir / "models" / system.sed.sedmodel / "plot.py"
+        )
         parsed_ast = ast.parse(plot_class_path.read_text())
-        plot_cls_str = [node.name for node in parsed_ast.body if isinstance(node, ast.ClassDef)][0]
+        plot_cls_str = [
+            node.name
+            for node in parsed_ast.body
+            if isinstance(node, ast.ClassDef)
+        ][0]
         mod_name = f"exozippy.components.sed.models.{system.sed.sedmodel}.plot"
         module = importlib.import_module(mod_name)
         plot_cls = getattr(module, plot_cls_str)
@@ -790,7 +840,9 @@ class SED(Component):
             logger.warning("SED.plot: no points provided.")
             return
         if self.nfilters == 0:
-            logger.info("SED.plot: no catalog photometry rows; skipping SED plot.")
+            logger.info(
+                "SED.plot: no catalog photometry rows; skipping SED plot."
+            )
             return
         if getattr(self, "_compiled_mag_predictors", None) is None:
             logger.warning(
@@ -804,7 +856,9 @@ class SED(Component):
         plot_obj = self._make_plot_obj(system, points)
 
         fig, (ax_top, ax_bot) = plt.subplots(
-            2, 1, figsize=(max(6, 0.6 * plot_obj.nfilters + 2), 6),
+            2,
+            1,
+            figsize=(max(6, 0.6 * plot_obj.nfilters + 2), 6),
             sharex=True,
             gridspec_kw={"height_ratios": [3, 1]},
         )
@@ -826,61 +880,93 @@ class SED(Component):
         for combo in plot_obj.unique_combos:
             if combo not in identities:
                 identities.append(combo)
-        id_color = {name: plot_obj.colors_obs[i % n_colors] for i, name in enumerate(identities)}
-        id_marker = {name: plot_obj.markers[i % n_markers] for i, name in enumerate(identities)}
-        id_line = {name: plot_obj.linetypes[i % n_lines] for i, name in enumerate(identities)}
+        id_color = {
+            name: plot_obj.colors_obs[i % n_colors]
+            for i, name in enumerate(identities)
+        }
+        id_marker = {
+            name: plot_obj.markers[i % n_markers]
+            for i, name in enumerate(identities)
+        }
+        id_line = {
+            name: plot_obj.linetypes[i % n_lines]
+            for i, name in enumerate(identities)
+        }
 
         # ---- model spectra: one line per star, plus the blended total, ----
         # ---- plus any other multi-star combination the data measure    ----
         # ---- (e.g. "B+C" from an "A-(B+C)" differential row); the full  ----
         # ---- nstars set is "Total" and isn't duplicated here.           ----
         all_idx = frozenset(range(plot_obj.nstars))
-        sub_combos = []  # (label, sorted star-index list); size >= 2, not the full set
+        sub_combos = (
+            []
+        )  # (label, sorted star-index list); size >= 2, not the full set
         seen_combos = set()
         for row in range(plot_obj.nfilters):
             bm = plot_obj.blend_matrix[row]
             for idx in (np.where(bm > 0)[0], np.where(bm < 0)[0]):
                 combo = frozenset(idx)
-                if len(combo) >= 2 and combo != all_idx and combo not in seen_combos:
+                if (
+                    len(combo) >= 2
+                    and combo != all_idx
+                    and combo not in seen_combos
+                ):
                     seen_combos.add(combo)
                     combo_idx = sorted(combo)
                     label = "+".join(plot_obj.star_names[i] for i in combo_idx)
                     sub_combos.append((label, combo_idx))
 
         alpha_spec = 0.7 if plot_obj.ndraws == 1 else 0.15
-        x_spec = plot_obj.df_wave['wavelength_micron']
-        wave_ang = plot_obj.df_wave['wavelength_angstrom']
+        x_spec = plot_obj.df_wave["wavelength_micron"]
+        wave_ang = plot_obj.df_wave["wavelength_angstrom"]
         for d, draw in enumerate(plot_obj.draws):
             for nstar in range(plot_obj.nstars):
                 name = plot_obj.star_names[nstar]
-                y_spec = np.log10(plot_obj.flux_model_draws[d][nstar]*wave_ang)
-                ax_top.plot(x_spec,
-                            y_spec,
-                            ls=id_line[name],
-                            color=id_color[name],
-                            alpha=alpha_spec,
-                            label=f"Star {name}")
+                y_spec = np.log10(
+                    plot_obj.flux_model_draws[d][nstar] * wave_ang
+                )
+                ax_top.plot(
+                    x_spec,
+                    y_spec,
+                    ls=id_line[name],
+                    color=id_color[name],
+                    alpha=alpha_spec,
+                    label=f"Star {name}",
+                )
             if plot_obj.nstars > 1:
                 # blended total (exofast_multised plots this in black)
                 total = np.sum(plot_obj.flux_model_draws[d], axis=0)
-                ax_top.plot(x_spec, np.log10(total*wave_ang),
-                            color="#001219", lw=1.2, alpha=alpha_spec)
+                ax_top.plot(
+                    x_spec,
+                    np.log10(total * wave_ang),
+                    color="#001219",
+                    lw=1.2,
+                    alpha=alpha_spec,
+                )
             for label, combo_idx in sub_combos:
-                combo_flux = np.sum(plot_obj.flux_model_draws[d][combo_idx], axis=0)
-                ax_top.plot(x_spec, np.log10(combo_flux*wave_ang),
-                            ls=id_line[label],
-                            color=id_color[label],
-                            lw=1.0, alpha=alpha_spec)
+                combo_flux = np.sum(
+                    plot_obj.flux_model_draws[d][combo_idx], axis=0
+                )
+                ax_top.plot(
+                    x_spec,
+                    np.log10(combo_flux * wave_ang),
+                    ls=id_line[label],
+                    color=id_color[label],
+                    lw=1.0,
+                    alpha=alpha_spec,
+                )
 
         # ---- observed photometry: one point per plot point (a blended  ----
         # ---- row contributes one, a differential row contributes two,  ----
         # ---- one per constituent side), colored/markered by its star   ----
         # ---- combination                                               ----
-        x = plot_obj.wave_filter*ANG_TO_MICRON_CONST
-        xerr = plot_obj.wave_err*ANG_TO_MICRON_CONST
+        x = plot_obj.wave_filter * ANG_TO_MICRON_CONST
+        xerr = plot_obj.wave_err * ANG_TO_MICRON_CONST
 
-        y = np.log10(plot_obj.flux_obs*plot_obj.wave_filter)
-        y_limits_from_err = np.log10(plot_obj.f_limits_from_err*plot_obj.wave_filter)
+        y = np.log10(plot_obj.flux_obs * plot_obj.wave_filter)
+        y_limits_from_err = np.log10(
+            plot_obj.f_limits_from_err * plot_obj.wave_filter
+        )
 
         # initialize yerr array
         yerr = np.zeros(np.shape(y_limits_from_err))
@@ -896,30 +982,47 @@ class SED(Component):
             marker = id_marker[label]
 
             ax_top.errorbar(
-                x[p:p+1], y[p:p+1],
-                xerr=xerr[:, p:p+1], yerr=yerr[:, p:p+1], fmt='',
-                color=color, capsize=3, linestyle='None',
-                zorder=3
+                x[p : p + 1],
+                y[p : p + 1],
+                xerr=xerr[:, p : p + 1],
+                yerr=yerr[:, p : p + 1],
+                fmt="",
+                color=color,
+                capsize=3,
+                linestyle="None",
+                zorder=3,
             )
             ax_top.scatter(x[p], y[p], color=color, marker=marker, zorder=3)
 
         # ---- residuals: one per filter ROW (the actual measurement),  ----
         # ---- against its combined (blend/diff) prediction              ----
-        wave_row = np.array(
-            [plot_obj.filter_params[f]['wave_eff'] for f in plot_obj.filters]
-        ) * ANG_TO_MICRON_CONST
+        wave_row = (
+            np.array(
+                [
+                    plot_obj.filter_params[f]["wave_eff"]
+                    for f in plot_obj.filters
+                ]
+            )
+            * ANG_TO_MICRON_CONST
+        )
         for row in range(plot_obj.nfilters):
             # use the pos-side point's color/marker for this row's residual
-            p = np.where((plot_obj.point_row == row) & (plot_obj.point_side == 1))[0][0]
+            p = np.where(
+                (plot_obj.point_row == row) & (plot_obj.point_side == 1)
+            )[0][0]
             label = plot_obj.point_labels[p]
             color = id_color[label]
             marker = id_marker[label]
 
             residual = plot_obj.mag_obs[row] - combined_pred_med[row]
             ax_bot.errorbar(
-                wave_row[row], residual, yerr=plot_obj.mag_obs_err[row], capsize=3,
-                fmt=marker, color=color,
-                alpha=alpha_res
+                wave_row[row],
+                residual,
+                yerr=plot_obj.mag_obs_err[row],
+                capsize=3,
+                fmt=marker,
+                color=color,
+                alpha=alpha_res,
             )
 
         ax_top.set_xscale("log")
@@ -934,24 +1037,36 @@ class SED(Component):
             legend_handles = []
             for nstar in range(plot_obj.nstars):
                 name = plot_obj.star_names[nstar]
-                line = Line2D([0], [0], color=id_color[name],
-                                linestyle=id_line[name],
-                                alpha=0.7,
-                                label=f"Star {name}")
-                marker = Line2D([0], [0], color='none',
-                                marker=id_marker[name],
-                                markerfacecolor=id_color[name],
-                                markeredgecolor=id_color[name],
-                                alpha=1.0)
+                line = Line2D(
+                    [0],
+                    [0],
+                    color=id_color[name],
+                    linestyle=id_line[name],
+                    alpha=0.7,
+                    label=f"Star {name}",
+                )
+                marker = Line2D(
+                    [0],
+                    [0],
+                    color="none",
+                    marker=id_marker[name],
+                    markerfacecolor=id_color[name],
+                    markeredgecolor=id_color[name],
+                    alpha=1.0,
+                )
                 legend_handles.append((line, marker))
 
-            labels = [f"Star {plot_obj.star_names[nstar]}" for nstar in range(plot_obj.nstars)]
+            labels = [
+                f"Star {plot_obj.star_names[nstar]}"
+                for nstar in range(plot_obj.nstars)
+            ]
 
             ax_top.legend(
                 handles=legend_handles,
                 labels=labels,
                 handler_map={tuple: HandlerTuple(ndivide=None, pad=-5)},
-                fontsize="small", handlelength=5.0
+                fontsize="small",
+                handlelength=5.0,
             )
         else:
             # per-star spectrum lines, the blended total, and one marker
@@ -959,34 +1074,53 @@ class SED(Component):
             legend_handles, labels = [], []
             for nstar in range(plot_obj.nstars):
                 name = plot_obj.star_names[nstar]
-                legend_handles.append(Line2D(
-                    [0], [0], color=id_color[name],
-                    linestyle=id_line[name], alpha=0.7))
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color=id_color[name],
+                        linestyle=id_line[name],
+                        alpha=0.7,
+                    )
+                )
                 labels.append(f"Star {name}")
             legend_handles.append(Line2D([0], [0], color="#001219", lw=1.2))
             labels.append("Total")
             for label, combo_idx in sub_combos:
-                legend_handles.append(Line2D(
-                    [0], [0], color=id_color[label],
-                    linestyle=id_line[label], lw=1.0, alpha=0.7))
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color=id_color[label],
+                        linestyle=id_line[label],
+                        lw=1.0,
+                        alpha=0.7,
+                    )
+                )
                 labels.append(label)
             for combo in plot_obj.unique_combos:
-                legend_handles.append(Line2D(
-                    [0], [0], color='none',
-                    marker=id_marker[combo],
-                    markerfacecolor=id_color[combo],
-                    markeredgecolor=id_color[combo]))
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color="none",
+                        marker=id_marker[combo],
+                        markerfacecolor=id_color[combo],
+                        markeredgecolor=id_color[combo],
+                    )
+                )
                 labels.append(combo)
 
-            ax_top.legend(handles=legend_handles, labels=labels,
-                          fontsize="small")
+            ax_top.legend(
+                handles=legend_handles, labels=labels, fontsize="small"
+            )
 
         ax_bot.set_xscale("log")
         ax_bot.set_xlim(5e-2, 30)
         ax_bot.set_ylabel("Residuals (mag)")
         ax_bot.set_xlabel(r"$\lambda$ ($\mu$m)")
         # horizontal line for match between obs and pred
-        ax_bot.axhline(0.0, color="#001219", lw=1, zorder=1, ls='dashed')
+        ax_bot.axhline(0.0, color="#001219", lw=1, zorder=1, ls="dashed")
 
         plt.tight_layout()
         pdf_path = f"{filename_prefix}_SED.pdf"
@@ -996,11 +1130,12 @@ class SED(Component):
     def _filter_wave_eff_micron(self):
         """Effective wavelength (micron) of each .sed filter row."""
         from .filters import filter as VOID
+
         alias_df = _load_alias_table()
         waves = []
         for f in self.filters:
             svo = resolve_filter_name(f, alias_df, "SVO")
-            waves.append(VOID.Filter(svo).WavelengthEff)   # angstrom
+            waves.append(VOID.Filter(svo).WavelengthEff)  # angstrom
         return np.asarray(waves, dtype=float) * ANG_TO_MICRON_CONST
 
     def plot_data(self, system, point=None):
@@ -1021,26 +1156,44 @@ class SED(Component):
         # ---- Data-only preview: observed mag vs effective wavelength --
         if point is None:
             wave = self._filter_wave_eff_micron()
-            traces = [Trace(name="observed", role="data", kind="scatter",
-                            x=wave, y=self.mag, yerr=self.err)]
-            return [PlotSpec(
-                id=f"{self.prefix}.photometry",
-                component={"yaml_key": self.prefix, "instance": None},
-                title="SED Photometry (observed)",
-                xlabel="Wavelength [micron]", ylabel="Apparent Magnitude",
-                traces=traces, param_deps=[],
-                meta={"x_log": True, "y_inverted": True})]
+            traces = [
+                Trace(
+                    name="observed",
+                    role="data",
+                    kind="scatter",
+                    x=wave,
+                    y=self.mag,
+                    yerr=self.err,
+                )
+            ]
+            return [
+                PlotSpec(
+                    id=f"{self.prefix}.photometry",
+                    component={"yaml_key": self.prefix, "instance": None},
+                    title="SED Photometry (observed)",
+                    xlabel="Wavelength [micron]",
+                    ylabel="Apparent Magnitude",
+                    traces=traces,
+                    param_deps=[],
+                    meta={"x_log": True, "y_inverted": True},
+                )
+            ]
 
         # ---- Model mode: model spectra + observed flux points ---------
         if getattr(self, "_compiled_mag_predictors", None) is None:
-            logger.warning("SED.plot_data: plotters failed to compile; "
-                           "returning data-only spec.")
+            logger.warning(
+                "SED.plot_data: plotters failed to compile; "
+                "returning data-only spec."
+            )
             return self.plot_data(system, point=None)
 
         plot_obj = self._make_plot_obj(system, [point])
-        wave_micron = np.asarray(plot_obj.df_wave['wavelength_micron'], dtype=float)
+        wave_micron = np.asarray(
+            plot_obj.df_wave["wavelength_micron"], dtype=float
+        )
         deps = self._model_trace_param_deps(
-            getattr(self, "_sed_combined_node", None), system)
+            getattr(self, "_sed_combined_node", None), system
+        )
 
         # Plot log10(lambda * F_lambda) on a LINEAR axis -- the same quantity and
         # units the matplotlib SED plot() uses (the standard SED representation).
@@ -1053,21 +1206,36 @@ class SED(Component):
             with np.errstate(divide="ignore", invalid="ignore"):
                 return np.log10(np.asarray(a, dtype=float))
 
-        wave_ang = np.asarray(plot_obj.df_wave['wavelength_angstrom'], dtype=float)
+        wave_ang = np.asarray(
+            plot_obj.df_wave["wavelength_angstrom"], dtype=float
+        )
 
         traces = []
         # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
-            traces.append(Trace(
-                name=f"Star {plot_obj.star_names[nstar]}", role="model", kind="line",
-                x=wave_micron, y=_log10(plot_obj.flux_model_draws[0][nstar] * wave_ang),
-                node=getattr(self, "_sed_mag_node", None)))
+            traces.append(
+                Trace(
+                    name=f"Star {plot_obj.star_names[nstar]}",
+                    role="model",
+                    kind="line",
+                    x=wave_micron,
+                    y=_log10(plot_obj.flux_model_draws[0][nstar] * wave_ang),
+                    node=getattr(self, "_sed_mag_node", None),
+                )
+            )
         if plot_obj.nstars > 1:
-            traces.append(Trace(
-                name="Total", role="model", kind="line",
-                x=wave_micron,
-                y=_log10(np.sum(plot_obj.flux_model_draws[0], axis=0) * wave_ang),
-                node=getattr(self, "_sed_mag_node", None)))
+            traces.append(
+                Trace(
+                    name="Total",
+                    role="model",
+                    kind="line",
+                    x=wave_micron,
+                    y=_log10(
+                        np.sum(plot_obj.flux_model_draws[0], axis=0) * wave_ang
+                    ),
+                    node=getattr(self, "_sed_mag_node", None),
+                )
+            )
 
         # observed photometry points (one per plot point; angstrom -> micron).
         # Error bars are asymmetric in log space; the flux limits carry the +/-.
@@ -1075,21 +1243,37 @@ class SED(Component):
         log_yobs = _log10(plot_obj.flux_obs * plot_obj.wave_filter)
         y_lim = _log10(plot_obj.f_limits_from_err * plot_obj.wave_filter)
         yerr = np.vstack([log_yobs - y_lim[0], y_lim[1] - log_yobs])
-        traces.append(Trace(
-            name="observed", role="data", kind="scatter",
-            x=wave_obs, y=log_yobs, yerr=yerr))
+        traces.append(
+            Trace(
+                name="observed",
+                role="data",
+                kind="scatter",
+                x=wave_obs,
+                y=log_yobs,
+                yerr=yerr,
+            )
+        )
 
         # Focus the y-axis on the observed data (same window matplotlib uses):
         # the model spectra tail off to ~1e-78 at the far UV/IR edges, so letting
         # the axis autorange to those would squash the interesting region.
         plot_obj._get_ylim()
 
-        return [PlotSpec(
-            id=f"{self.prefix}.sed",
-            component={"yaml_key": self.prefix, "instance": None},
-            title="Spectral Energy Distribution",
-            xlabel="Wavelength [micron]",
-            ylabel="log10(lambda F_lambda [erg/s/cm2])",
-            traces=traces, param_deps=deps,
-            meta={"x_log": True,
-                  "y_range": [float(plot_obj.y_lower), float(plot_obj.y_upper)]})]
+        return [
+            PlotSpec(
+                id=f"{self.prefix}.sed",
+                component={"yaml_key": self.prefix, "instance": None},
+                title="Spectral Energy Distribution",
+                xlabel="Wavelength [micron]",
+                ylabel="log10(lambda F_lambda [erg/s/cm2])",
+                traces=traces,
+                param_deps=deps,
+                meta={
+                    "x_log": True,
+                    "y_range": [
+                        float(plot_obj.y_lower),
+                        float(plot_obj.y_upper),
+                    ],
+                },
+            )
+        ]

@@ -58,7 +58,7 @@ def _pid_is_running(pid):
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True   # exists but owned by another user
+        return True  # exists but owned by another user
     except (TypeError, ValueError):
         return False
     return True
@@ -184,8 +184,11 @@ def start_run(config_path, cwd=None):
     cwd = str(cwd) if cwd is not None else os.getcwd()
     config_path = str(config_path)
 
-    resolved_config = (config_path if os.path.isabs(config_path)
-                       else os.path.join(cwd, config_path))
+    resolved_config = (
+        config_path
+        if os.path.isabs(config_path)
+        else os.path.join(cwd, config_path)
+    )
     prefix = _parse_prefix(resolved_config)
 
     env = dict(os.environ)
@@ -226,16 +229,18 @@ def list_runs(directory):
             phase = doc.get("phase")
             if not alive and phase not in TERMINAL_PHASES:
                 phase = "error"
-            runs.append({
-                "prefix": path[: -len(_STATUS_SUFFIX)],
-                "status_path": path,
-                "phase": phase,
-                "recorded_phase": doc.get("phase"),
-                "pid": pid,
-                "alive": alive,
-                "state": doc.get("state", {}),
-                "started_at": doc.get("started_at"),
-                "updated_at": doc.get("updated_at"),
-            })
+            runs.append(
+                {
+                    "prefix": path[: -len(_STATUS_SUFFIX)],
+                    "status_path": path,
+                    "phase": phase,
+                    "recorded_phase": doc.get("phase"),
+                    "pid": pid,
+                    "alive": alive,
+                    "state": doc.get("state", {}),
+                    "started_at": doc.get("started_at"),
+                    "updated_at": doc.get("updated_at"),
+                }
+            )
     runs.sort(key=lambda r: (r.get("updated_at") or 0), reverse=True)
     return runs

@@ -1,4 +1,5 @@
 """Tests for the PTDE (Parallel Tempering + Differential Evolution) sampler."""
+
 import multiprocessing as mp
 import threading
 import time
@@ -8,22 +9,21 @@ import numpy as np
 import pymc as pm
 import pytest
 import xarray as xr
-
 from scipy.stats import kstest
 
 from exozippy.components.parameter import Parameter
-from exozippy.system import System
 from exozippy.samplers.ptde import (
+    _PROBE_FLAT_SCALE,
     _active_rungs,
-    _make_starts,
     _geometric_ladder,
+    _make_starts,
     _probe_scales,
     _probe_step_1d,
-    _PROBE_FLAT_SCALE,
     _shutdown_pool,
     _worker_init,
     ptde_sample,
 )
+from exozippy.system import System
 
 
 def _hang_forever(_):
@@ -37,8 +37,10 @@ def _hang_forever(_):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class _MinimalSystem:
     """Minimal system stub for ptde_sample: supplies raw_start from model."""
+
     active_components = {}
 
     def get_raw_start(self, model):
@@ -56,6 +58,7 @@ def _simple_model():
 # ---------------------------------------------------------------------------
 # _geometric_ladder
 # ---------------------------------------------------------------------------
+
 
 def test_geometric_ladder_single_temp_returns_one():
     """
@@ -93,6 +96,7 @@ def test_geometric_ladder_is_monotonically_increasing():
 # cores formula
 # ---------------------------------------------------------------------------
 
+
 def test_default_cores_is_within_physical_bounds():
     """
     Given no user-specified cores,
@@ -109,6 +113,7 @@ def test_default_cores_is_within_physical_bounds():
 # n_chains default
 # ---------------------------------------------------------------------------
 
+
 def test_n_chains_defaults_to_twice_n_params():
     """
     Given a 2-parameter model and no explicit n_chains,
@@ -118,8 +123,14 @@ def test_n_chains_defaults_to_twice_n_params():
     model = _simple_model()
     system = _MinimalSystem()
     idata = ptde_sample(
-        model, system, draws=20, tune=20,
-        n_temps=2, T_max=2.0, cores=1, seed=42,
+        model,
+        system,
+        draws=20,
+        tune=20,
+        n_temps=2,
+        T_max=2.0,
+        cores=1,
+        seed=42,
         log_interval=100,
     )
     # 2 params → n_chains = 4; 2 temps × 4 chains = 8 total chains in the run,
@@ -131,6 +142,7 @@ def test_n_chains_defaults_to_twice_n_params():
 # End-to-end: InferenceData structure
 # ---------------------------------------------------------------------------
 
+
 def test_ptde_returns_inferencedata_with_expected_structure():
     """
     Given a simple 2-D normal model,
@@ -141,8 +153,15 @@ def test_ptde_returns_inferencedata_with_expected_structure():
     model = _simple_model()
     system = _MinimalSystem()
     idata = ptde_sample(
-        model, system, draws=30, tune=20,
-        n_temps=2, T_max=2.0, n_chains=4, cores=1, seed=0,
+        model,
+        system,
+        draws=30,
+        tune=20,
+        n_temps=2,
+        T_max=2.0,
+        n_chains=4,
+        cores=1,
+        seed=0,
         log_interval=100,
     )
 
@@ -161,6 +180,7 @@ def test_ptde_returns_inferencedata_with_expected_structure():
 # _active_rungs (rung thinning)
 # ---------------------------------------------------------------------------
 
+
 def test_active_rungs_no_thinning_returns_all_rungs_every_step():
     """
     Given thin_factor=1 (default, disabled),
@@ -168,7 +188,9 @@ def test_active_rungs_no_thinning_returns_all_rungs_every_step():
     Then every rung is active, regardless of thin_start.
     """
     for step in range(5):
-        assert _active_rungs(step, n_temps=8, thin_start=4, thin_factor=1) == list(range(8))
+        assert _active_rungs(
+            step, n_temps=8, thin_start=4, thin_factor=1
+        ) == list(range(8))
 
 
 def test_active_rungs_cold_rungs_always_active():
@@ -189,9 +211,18 @@ def test_active_rungs_hot_rungs_thinned_on_alternate_steps():
     Then hot rungs (4-7) are active on step 0 (all 8 rungs) and absent on
       step 1 (only rungs 0-3).
     """
-    assert _active_rungs(0, n_temps=8, thin_start=4, thin_factor=2) == list(range(8))
-    assert _active_rungs(1, n_temps=8, thin_start=4, thin_factor=2) == [0, 1, 2, 3]
-    assert _active_rungs(2, n_temps=8, thin_start=4, thin_factor=2) == list(range(8))
+    assert _active_rungs(0, n_temps=8, thin_start=4, thin_factor=2) == list(
+        range(8)
+    )
+    assert _active_rungs(1, n_temps=8, thin_start=4, thin_factor=2) == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    assert _active_rungs(2, n_temps=8, thin_start=4, thin_factor=2) == list(
+        range(8)
+    )
 
 
 def test_ptde_rung_thinning_runs_end_to_end():
@@ -204,9 +235,18 @@ def test_ptde_rung_thinning_runs_end_to_end():
     model = _simple_model()
     system = _MinimalSystem()
     idata = ptde_sample(
-        model, system, draws=30, tune=20,
-        n_temps=4, T_max=8.0, n_chains=4, cores=1, seed=1,
-        log_interval=100, rung_thin_factor=2, rung_thin_start=2,
+        model,
+        system,
+        draws=30,
+        tune=20,
+        n_temps=4,
+        T_max=8.0,
+        n_chains=4,
+        cores=1,
+        seed=1,
+        log_interval=100,
+        rung_thin_factor=2,
+        rung_thin_start=2,
     )
     assert idata.posterior.sizes["draw"] == 30
     assert idata.posterior.sizes["chain"] == 4
@@ -223,9 +263,17 @@ def test_ptde_collect_rung_timing_runs_end_to_end(caplog):
     system = _MinimalSystem()
     with caplog.at_level("INFO", logger="exozippy.samplers.ptde"):
         idata = ptde_sample(
-            model, system, draws=20, tune=20,
-            n_temps=3, T_max=8.0, n_chains=4, cores=1, seed=3,
-            log_interval=100, collect_rung_timing=True,
+            model,
+            system,
+            draws=20,
+            tune=20,
+            n_temps=3,
+            T_max=8.0,
+            n_chains=4,
+            cores=1,
+            seed=3,
+            log_interval=100,
+            collect_rung_timing=True,
         )
     assert idata.posterior.sizes["draw"] == 20
     messages = "\n".join(r.message for r in caplog.records)
@@ -249,12 +297,23 @@ def test_ptde_warns_once_when_t1_lp_exceeds_plausibility_ceiling(caplog):
     system = _MinimalSystem()
     with caplog.at_level("WARNING", logger="exozippy.samplers.ptde"):
         ptde_sample(
-            model, system, draws=20, tune=20,
-            n_temps=2, T_max=2.0, n_chains=4, cores=1, seed=1,
-            log_interval=100, lp_plausibility_ceiling=0.1,
+            model,
+            system,
+            draws=20,
+            tune=20,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=1,
+            log_interval=100,
+            lp_plausibility_ceiling=0.1,
         )
-    warnings = [r.message for r in caplog.records
-                if "plausibility ceiling" in r.message]
+    warnings = [
+        r.message
+        for r in caplog.records
+        if "plausibility ceiling" in r.message
+    ]
     assert len(warnings) == 1, (
         f"expected exactly one plausibility-ceiling warning, got "
         f"{len(warnings)}: {warnings}"
@@ -271,19 +330,29 @@ def test_ptde_posterior_mean_near_true_values():
     model = _simple_model()
     system = _MinimalSystem()
     idata = ptde_sample(
-        model, system, draws=200, tune=100,
-        n_temps=2, T_max=4.0, n_chains=6, cores=1, seed=7,
+        model,
+        system,
+        draws=200,
+        tune=100,
+        n_temps=2,
+        T_max=4.0,
+        n_chains=6,
+        cores=1,
+        seed=7,
         log_interval=500,
     )
     x_mean = float(idata.posterior["x"].values.mean())
     y_mean = float(idata.posterior["y"].values.mean())
     assert abs(x_mean) < 1.0, f"x posterior mean {x_mean:.2f} too far from 0"
-    assert abs(y_mean - 3.0) < 0.5, f"y posterior mean {y_mean:.2f} too far from 3"
+    assert (
+        abs(y_mean - 3.0) < 0.5
+    ), f"y posterior mean {y_mean:.2f} too far from 3"
 
 
 # ---------------------------------------------------------------------------
 # _probe_scales: step search
 # ---------------------------------------------------------------------------
+
 
 def test_probe_scale_recovers_gaussian_sigma():
     """
@@ -314,6 +383,7 @@ def test_probe_step_1d_lands_on_the_target_drop():
       in that direction -- including when the direction starts out UPHILL and
       the search must grow through the turnover to find the far side.
     """
+
     # ARRANGE: mode at 3.0, start at 0.0.  +x climbs to the mode then falls;
     # -x falls immediately.
     def logp(x):
@@ -325,8 +395,10 @@ def test_probe_step_1d_lands_on_the_target_drop():
         return map_lp - logp(step)
 
     # 0.5 nats below logp(0) is (x-3)^2 = 10, i.e. x = 3 +/- sqrt(10)
-    for sign, expected in ((1.0, 3.0 + np.sqrt(10.0)),
-                           (-1.0, np.sqrt(10.0) - 3.0)):
+    for sign, expected in (
+        (1.0, 3.0 + np.sqrt(10.0)),
+        (-1.0, np.sqrt(10.0) - 3.0),
+    ):
         # ACT
         step = _probe_step_1d(eval_delta, sign)
 
@@ -400,14 +472,14 @@ def test_probe_scale_flat_direction_falls_back():
     start = {"x": np.zeros(2)}
 
     def logp_fn(p):
-        return float(-0.5 * p["x"][0] ** 2)      # x[1] unused
+        return float(-0.5 * p["x"][0] ** 2)  # x[1] unused
 
     # ACT
     _, scales = _probe_scales(start, logp_fn)
 
     # ASSERT
-    assert scales["x"][0] == pytest.approx(1.0, rel=0.05)   # constrained
-    assert scales["x"][1] == _PROBE_FLAT_SCALE              # flat
+    assert scales["x"][0] == pytest.approx(1.0, rel=0.05)  # constrained
+    assert scales["x"][1] == _PROBE_FLAT_SCALE  # flat
 
 
 def test_probe_scale_respects_hard_prior_wall():
@@ -440,6 +512,7 @@ def test_probe_scale_respects_hard_prior_wall():
 # Chain seeding: physical-space truncated jitter
 # ---------------------------------------------------------------------------
 
+
 class _ParamSystem:
     """Exposes the real System.jitter_raw_start against a bare Parameter."""
 
@@ -455,8 +528,9 @@ class _ParamSystem:
 def _flat_param():
     """A parameter whose logp is flat in PHYSICAL space out to both bounds."""
     with pm.Model() as model:
-        par = Parameter(label="p", initval=0.5, init_scale=0.05,
-                        lower=0.0, upper=1.0)
+        par = Parameter(
+            label="p", initval=0.5, init_scale=0.05, lower=0.0, upper=1.0
+        )
         par.build_pymc()
     return par, model
 
@@ -464,8 +538,15 @@ def _flat_param():
 def _narrow_param():
     """A parameter tightly constrained relative to its prior volume."""
     with pm.Model() as model:
-        par = Parameter(label="p", initval=0.5, init_scale=0.05,
-                        mu=0.5, sigma=0.02, lower=0.0, upper=1.0)
+        par = Parameter(
+            label="p",
+            initval=0.5,
+            init_scale=0.05,
+            mu=0.5,
+            sigma=0.02,
+            lower=0.0,
+            upper=1.0,
+        )
         par.build_pymc()
     return par, model
 
@@ -476,8 +557,10 @@ def _seed_physical(par, model, n, factor=3.0, seed=0):
     _, scales = _probe_scales(center, logp_fn)
     sysobj = _ParamSystem(par)
     rng = np.random.default_rng(seed)
-    raws = [sysobj.jitter_raw_start(center, scales, factor, rng)["p_raw"][0]
-            for _ in range(n)]
+    raws = [
+        sysobj.jitter_raw_start(center, scales, factor, rng)["p_raw"][0]
+        for _ in range(n)
+    ]
     return np.array([par.phys_from_raw(np.array([r]))[0] for r in raws])
 
 
@@ -593,7 +676,9 @@ def test_shutdown_pool_kills_workers_that_ignore_sigterm():
     elapsed = time.time() - t0
 
     # ASSERT
-    assert finished, "_shutdown_pool did not return -- the recycle hang regressed"
+    assert (
+        finished
+    ), "_shutdown_pool did not return -- the recycle hang regressed"
     assert elapsed < 10.0, f"_shutdown_pool took {elapsed:.1f}s, expected ~1s"
 
     # a fresh pool is usable after the recycle

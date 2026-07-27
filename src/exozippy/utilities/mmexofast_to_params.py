@@ -52,7 +52,9 @@ def _log_scale(fit, log_key, phys_key):
     return fit["parameters"][phys_key] * fit["sigmas"][log_key]
 
 
-def mmexofast_to_params(json_path, lens_name="Lens", solution_index=None, out_path=None):
+def mmexofast_to_params(
+    json_path, lens_name="Lens", solution_index=None, out_path=None
+):
     """Build a params.yaml text seeding ``lens.<lens_name>`` from MMEXOFAST fits.
 
     ``solution_index=None`` (default) uses every solution in the file, one
@@ -70,7 +72,9 @@ def mmexofast_to_params(json_path, lens_name="Lens", solution_index=None, out_pa
         indices = list(range(n))
     else:
         if solution_index >= n:
-            raise ValueError(f"Solution {solution_index} requested but file has only {n} solution(s)")
+            raise ValueError(
+                f"Solution {solution_index} requested but file has only {n} solution(s)"
+            )
         chosen = [fits[solution_index]]
         indices = [solution_index]
 
@@ -161,14 +165,23 @@ def mmexofast_to_params(json_path, lens_name="Lens", solution_index=None, out_pa
 def build_parser():
     """Return the argparse parser for the mmexofast_to_params utility."""
     ap = argparse.ArgumentParser(
-        prog='mmexofast_to_params.py',
+        prog="mmexofast_to_params.py",
         description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("json", help="Path to mmexofast.json")
-    ap.add_argument("--lens-name", default="Lens", help="Lens component name in YAML (default: Lens)")
-    ap.add_argument("--solution", type=int, default=None,
-                    help="Restrict to a single solution, 0-indexed (default: use "
-                         "every solution in the file as list-valued initvals)")
+    ap.add_argument(
+        "--lens-name",
+        default="Lens",
+        help="Lens component name in YAML (default: Lens)",
+    )
+    ap.add_argument(
+        "--solution",
+        type=int,
+        default=None,
+        help="Restrict to a single solution, 0-indexed (default: use "
+        "every solution in the file as list-valued initvals)",
+    )
     ap.add_argument("--out", help="Output params.yaml path (default: stdout)")
     return ap
 

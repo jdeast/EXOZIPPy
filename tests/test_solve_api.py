@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exozippy.solve_api import solve, validate, SolveResult
+from exozippy.solve_api import SolveResult, solve, validate
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
@@ -52,7 +52,12 @@ def test_solve_result_is_json_serializable(solved):
     # Assert
     text = json.dumps(payload)
     assert isinstance(text, str) and len(text) > 0
-    assert set(payload) >= {"parameters", "warnings", "diagnostics", "elapsed_s"}
+    assert set(payload) >= {
+        "parameters",
+        "warnings",
+        "diagnostics",
+        "elapsed_s",
+    }
     assert isinstance(solved, SolveResult)
     assert solved.elapsed_s >= 0.0
 

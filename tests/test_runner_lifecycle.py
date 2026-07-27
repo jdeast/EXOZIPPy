@@ -6,15 +6,12 @@ kelt4 workdir fixture are imported from test_runner (tests/ is on sys.path).
 
 See test_runner.py for why these must be real subprocess fits.
 """
+
 import os
 
 import arviz as az
 import numpy as np
 import pytest
-
-from exozippy.gui import TERMINAL_PHASES
-from exozippy.gui import runner
-
 from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
     REACH_SAMPLING_TIMEOUT,
     _poll_until,
@@ -22,10 +19,14 @@ from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
     kelt4_workdir,
 )
 
+from exozippy.gui import TERMINAL_PHASES, runner
+
 
 @pytest.mark.slow
 @pytest.mark.timeout(900)
-def test_run_lifecycle_status_snapshot_and_graceful_stop(kelt4_workdir, tmp_path):
+def test_run_lifecycle_status_snapshot_and_graceful_stop(
+    kelt4_workdir, tmp_path
+):
     """
     Given a fit launched via start_run with the GUI flag,
     When it reaches the sampling phase and is then stopped,
@@ -46,20 +47,24 @@ def test_run_lifecycle_status_snapshot_and_graceful_stop(kelt4_workdir, tmp_path
         def _sampling_with_progress():
             st = handle.status()
             if not handle.is_alive() and st.get("phase") not in ("sampling",):
-                return True   # died/finished; assertion below inspects it
-            return (st.get("phase") == "sampling"
-                    and st.get("state", {}).get("n_draws", 0) >= 100)
+                return True  # died/finished; assertion below inspects it
+            return (
+                st.get("phase") == "sampling"
+                and st.get("state", {}).get("n_draws", 0) >= 100
+            )
 
-        assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), \
-            "run never reported n_draws>=100 during sampling"
+        assert _poll_until(
+            _sampling_with_progress, REACH_SAMPLING_TIMEOUT
+        ), "run never reported n_draws>=100 during sampling"
         status = handle.status()
         assert status["phase"] == "sampling", f"unexpected phase {status}"
         assert status["state"].get("n_draws", 0) >= 100
 
         # 2. the snapshot artifacts written by that same convergence check exist.
         snap_npz = os.path.join(handle.snapshot_dir, "partial.npz")
-        assert _poll_until(lambda: os.path.exists(snap_npz), timeout=60.0), \
-            "snapshot npz never appeared"
+        assert _poll_until(
+            lambda: os.path.exists(snap_npz), timeout=60.0
+        ), "snapshot npz never appeared"
         snap = np.load(snap_npz)
         assert "_lp" in snap and any(k.endswith("_raw") for k in snap.files)
 

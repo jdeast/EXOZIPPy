@@ -84,13 +84,15 @@ def eligible_associations(filename, config, schema):
         for name, _inst in instances:
             for key, glob, doc in keys:
                 if _matches(filename, glob):
-                    out.append({
-                        "comp_type": comp_type,
-                        "name": name,
-                        "key": key,
-                        "glob": glob,
-                        "doc": doc,
-                    })
+                    out.append(
+                        {
+                            "comp_type": comp_type,
+                            "name": name,
+                            "key": key,
+                            "glob": glob,
+                            "doc": doc,
+                        }
+                    )
     out.sort(key=lambda e: (e["comp_type"], e["name"], e["key"]))
     return out
 
@@ -114,12 +116,14 @@ def current_associations(config, schema):
                 if not isinstance(val, str) or not val:
                     continue
                 base = os.path.basename(val)
-                out.setdefault(base, []).append({
-                    "comp_type": comp_type,
-                    "name": name,
-                    "key": key,
-                    "path": val,
-                })
+                out.setdefault(base, []).append(
+                    {
+                        "comp_type": comp_type,
+                        "name": name,
+                        "key": key,
+                        "path": val,
+                    }
+                )
     return out
 
 
@@ -140,7 +144,9 @@ def list_directory(dirpath, root=None):
     root_resolved = Path(root).expanduser().resolve() if root else None
 
     entries = []
-    for child in sorted(d.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+    for child in sorted(
+        d.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+    ):
         if child.name.startswith("."):
             continue
         try:
@@ -148,12 +154,14 @@ def list_directory(dirpath, root=None):
             size = None if is_dir else child.stat().st_size
         except OSError:
             continue
-        entries.append({
-            "name": child.name,
-            "path": str(child),
-            "size": size,
-            "is_dir": is_dir,
-        })
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "size": size,
+                "is_dir": is_dir,
+            }
+        )
 
     parent = None
     if d.parent != d:

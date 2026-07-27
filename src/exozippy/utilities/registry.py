@@ -31,8 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
-
 # --- the declaration ----------------------------------------------------------
+
 
 @dataclass
 class UtilitySpec:
@@ -90,10 +90,13 @@ class UtilitySpec:
 
 # --- argparse -> JSON-serializable schema -------------------------------------
 
+
 def _type_name(action):
     """Map an argparse action to a JSON-friendly type string."""
     # store_true / store_false take no argument -> boolean flag.
-    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+    if isinstance(
+        action, (argparse._StoreTrueAction, argparse._StoreFalseAction)
+    ):
         return "bool"
     t = action.type
     if t is int:
@@ -137,18 +140,21 @@ def parser_to_schema(parser):
         default = action.default
         if default is argparse.SUPPRESS:
             default = None
-        schema.append({
-            "name": _arg_name(action),
-            "type": _type_name(action),
-            "default": default,
-            "required": _is_required(action),
-            "choices": choices,
-            "help": action.help or "",
-        })
+        schema.append(
+            {
+                "name": _arg_name(action),
+                "type": _type_name(action),
+                "default": default,
+                "required": _is_required(action),
+                "choices": choices,
+                "help": action.help or "",
+            }
+        )
     return schema
 
 
 # --- turning an args dict into a command line ---------------------------------
+
 
 def args_dict_to_argv(parser, args_dict):
     """Marshal a plain args dict into an argv list the parser accepts.
@@ -157,6 +163,7 @@ def args_dict_to_argv(parser, args_dict):
     store_true/store_false flags are emitted only when truthy. Keys may be
     given with or without leading dashes; unknown keys are ignored.
     """
+
     def lookup(action):
         name = _arg_name(action)
         if name in args_dict:
@@ -178,7 +185,9 @@ def args_dict_to_argv(parser, args_dict):
                 positionals.append(str(value))
             continue
         opt = _arg_name(action)
-        if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        if isinstance(
+            action, (argparse._StoreTrueAction, argparse._StoreFalseAction)
+        ):
             if value:
                 optionals.append(opt)
         elif value is not None:
@@ -194,9 +203,11 @@ def argparse_subprocess_runner(module_name):
     isolates the host from utilities that call sys.exit or print heavily, and
     makes the working directory unambiguous for produced-file detection.
     """
+
     def run(args_dict, cwd):
         # Import lazily so schema/introspection never imports the module.
         from importlib import import_module
+
         module = import_module(module_name)
         argv = args_dict_to_argv(module.build_parser(), args_dict)
         proc = subprocess.run(
@@ -209,6 +220,7 @@ def argparse_subprocess_runner(module_name):
             "returncode": proc.returncode,
             "output": proc.stdout + proc.stderr,
         }
+
     return run
 
 
@@ -219,6 +231,7 @@ def inprocess_runner(func):
     lightweight, well-behaved utilities (and test fakes) that neither call
     sys.exit nor spawn a heavy import stack.
     """
+
     def run(args_dict, cwd):
         buf = io.StringIO()
         prev = os.getcwd()
@@ -230,14 +243,20 @@ def inprocess_runner(func):
             if isinstance(rc, int):
                 returncode = rc
         except SystemExit as e:
-            returncode = int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+            returncode = (
+                int(e.code)
+                if isinstance(e.code, int)
+                else (0 if e.code is None else 1)
+            )
         finally:
             os.chdir(prev)
         return {"returncode": returncode, "output": buf.getvalue()}
+
     return run
 
 
 # --- discovery ----------------------------------------------------------------
+
 
 def all_utilities():
     """Gather every component-declared utility, keyed by unique name.
@@ -256,12 +275,14 @@ def all_utilities():
             if spec.name in out and out[spec.name] is not spec:
                 raise ValueError(
                     f"Duplicate utility name '{spec.name}' declared by "
-                    f"{cls.__name__} and elsewhere; names must be unique.")
+                    f"{cls.__name__} and elsewhere; names must be unique."
+                )
             out[spec.name] = spec
     return out
 
 
 # --- headless execution -------------------------------------------------------
+
 
 def _snapshot(cwd):
     """Return the set of file paths (recursive) currently under cwd."""
@@ -300,7 +321,9 @@ def run_utility(name, args_dict, cwd, registry=None):
         raise KeyError(f"Unknown utility '{name}'. Known: {sorted(registry)}")
     spec = registry[name]
     if not spec.available or spec.run is None:
-        raise ValueError(f"Utility '{name}' is a placeholder and cannot be run.")
+        raise ValueError(
+            f"Utility '{name}' is a placeholder and cannot be run."
+        )
 
     cwd = Path(cwd)
     cwd.mkdir(parents=True, exist_ok=True)

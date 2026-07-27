@@ -1,13 +1,14 @@
 import logging
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.sed.bc_grid import (
-    resolve_filter_name,
-    facility_from_svo_name,
     _load_alias_table,
+    facility_from_svo_name,
+    resolve_filter_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,10 +81,20 @@ class Band(Component):
         self.filter_svo = []
         for band_name, filt in zip(self.names, self.filter_names):
             self.filter_mist.append(
-                resolve_filter_name(filt, alias_df, alias="MIST") if filt else None)
+                resolve_filter_name(filt, alias_df, alias="MIST")
+                if filt
+                else None
+            )
             self.filter_svo.append(
-                resolve_filter_name(filt, alias_df, alias="SVO") if filt else None)
-            if filt and alias_df is not None and not alias_df.eq(filt).any(axis=1).any():
+                resolve_filter_name(filt, alias_df, alias="SVO")
+                if filt
+                else None
+            )
+            if (
+                filt
+                and alias_df is not None
+                and not alias_df.eq(filt).any(axis=1).any()
+            ):
                 logger.warning(
                     f"Band '{band_name}': filter '{filt}' is not in the "
                     f"filter alias table (components/sed/filters/"

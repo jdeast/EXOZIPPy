@@ -1,6 +1,7 @@
 # tests/test_config_healing.py
-import pytest
 import numpy as np
+import pytest
+
 from exozippy.config import ConfigManager
 
 
@@ -12,13 +13,8 @@ def test_config_derives_te_from_physical_input():
     """
     # 1. Define the system topology so it knows what "Lens" and "Source" mean
     system_config = {
-        "star": [
-            {"name": "Lens"},
-            {"name": "Source"}
-        ],
-        "lens": [
-            {"name": "Lens", "lens_ndx": 0, "source_ndx": 1}
-        ]
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
     }
 
     user_params = {
@@ -30,7 +26,7 @@ def test_config_derives_te_from_physical_input():
         "star.Lens.pm_ra": {"initval": 5.0},  # mas/yr
         "star.Lens.pm_dec": {"initval": 0.0},
         "star.Source.pm_ra": {"initval": 0.0},
-        "star.Source.pm_dec": {"initval": 0.0}
+        "star.Source.pm_dec": {"initval": 0.0},
     }
 
     cm = ConfigManager(user_params, system_config=system_config)

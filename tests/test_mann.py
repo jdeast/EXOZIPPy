@@ -114,6 +114,7 @@ def test_published_scatter_floors():
 # Config parsing / validation
 # ----------------------------------------------------------------------
 
+
 class _FakeStar:
     names = ["A", "B", "C"]
     n_elements = 3
@@ -140,9 +141,9 @@ def test_instances_resolve_stars_and_default_to_synthetic():
 
     # Assert
     assert comp.star_indices == [1, 2]
-    assert comp.names == ["B", "C"]          # named after their star
+    assert comp.names == ["B", "C"]  # named after their star
     assert comp.ks_synthetic == [True, True]
-    assert comp.ks_err == [0.02, 0.02]       # EXOFASTv2's synthetic floor
+    assert comp.ks_err == [0.02, 0.02]  # EXOFASTv2's synthetic floor
     assert comp.constrain == [{"mass", "radius"}, {"mass", "radius"}]
     assert comp.use_feh == [True, True]
 
@@ -169,25 +170,33 @@ def test_floors_default_per_relation_form_and_can_be_overridden():
     Then defaults follow the feh switch and overrides win.
     """
     # Arrange / Act
-    comp = _mann([
-        {"star": "B"},
-        {"star": "C", "feh": False, "mstar_floor": 0.05},
-    ])
+    comp = _mann(
+        [
+            {"star": "B"},
+            {"star": "C", "feh": False, "mstar_floor": 0.05},
+        ]
+    )
 
     # Assert
     assert comp.mstar_floor == [0.021, 0.05]
     assert comp.rstar_floor == [0.027, 0.0289]
 
 
-@pytest.mark.parametrize("cfg,match", [
-    ([{"ks": "synthetic"}], "'star:' key is required"),
-    ([{"star": "Z"}], "unknown star"),
-    ([{"star": "B", "ks": 12.7}], "'ks_err:' is required"),
-    ([{"star": "B", "ks": "sed"}], "must be either the string"),
-    ([{"star": "B", "constrain": ["mass", "teff"]}], "unknown 'constrain:'"),
-    ([{"star": "B", "constrain": []}], "is empty"),
-    ([{"star": "B"}, {"star": "B"}], "Duplicate names"),
-])
+@pytest.mark.parametrize(
+    "cfg,match",
+    [
+        ([{"ks": "synthetic"}], "'star:' key is required"),
+        ([{"star": "Z"}], "unknown star"),
+        ([{"star": "B", "ks": 12.7}], "'ks_err:' is required"),
+        ([{"star": "B", "ks": "sed"}], "must be either the string"),
+        (
+            [{"star": "B", "constrain": ["mass", "teff"]}],
+            "unknown 'constrain:'",
+        ),
+        ([{"star": "B", "constrain": []}], "is empty"),
+        ([{"star": "B"}, {"star": "B"}], "Duplicate names"),
+    ],
+)
 def test_config_errors_are_actionable(cfg, match):
     """
     Given a malformed mann block,

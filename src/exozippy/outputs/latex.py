@@ -1,6 +1,8 @@
 import csv
 import pathlib
+
 import numpy as np
+
 from ..components import Parameter
 from ..components.parameter import _idx_to_words
 
@@ -20,7 +22,10 @@ def _instance_name(params, index):
 def _instance_subhead(name, n_cols=4):
     """A secondary row that acts as an indented instance sub-header."""
     return (
-        rf"\multicolumn{{{n_cols}}}{{l}}{{~~~~~\textit{{" + name + r":}} \\" + "\n"
+        rf"\multicolumn{{{n_cols}}}{{l}}{{~~~~~\textit{{"
+        + name
+        + r":}} \\"
+        + "\n"
     )
 
 
@@ -36,7 +41,8 @@ def _ensure_mode_summaries(system, p, mode_report):
     if labels is None:
         raise ValueError(
             "mode_report given but system has no mode labels; call "
-            "identify_modes(idata) before system.distribute_posterior(idata)")
+            "identify_modes(idata) before system.distribute_posterior(idata)"
+        )
     p.compute_mode_summaries(labels, mode_report.n_modes)
 
 
@@ -52,7 +58,9 @@ def build_csv_output(system, csv_filename, mode_report=None):
 
     rows = []
     for comp in system.get_all_components():
-        comp_params = [v for v in comp.__dict__.values() if isinstance(v, Parameter)]
+        comp_params = [
+            v for v in comp.__dict__.values() if isinstance(v, Parameter)
+        ]
         printable = [p for p in comp_params if p.print_to_table]
         for p in printable:
             n_instances = _instance_count(p)
@@ -63,8 +71,11 @@ def build_csv_output(system, csv_filename, mode_report=None):
 
             def emit(name, index):
                 """Rows for one parameter instance (one per mode if multimodal)."""
+
                 def summ_at(summary):
-                    s_list = summary if isinstance(summary, list) else [summary]
+                    s_list = (
+                        summary if isinstance(summary, list) else [summary]
+                    )
                     return s_list[index] if index < len(s_list) else s_list[-1]
 
                 if p.summary is not None:
@@ -72,13 +83,19 @@ def build_csv_output(system, csv_filename, mode_report=None):
                     if multimodal:
                         rows.append((name, "all", 1.0, med, ep, em))
                         for k, m in enumerate(mode_report.modes):
-                            med, ep, em = summ_at(p.mode_summaries[k]).format(sigfigs=2)
-                            rows.append((name, k + 1, round(m.weight, 4), med, ep, em))
+                            med, ep, em = summ_at(p.mode_summaries[k]).format(
+                                sigfigs=2
+                            )
+                            rows.append(
+                                (name, k + 1, round(m.weight, 4), med, ep, em)
+                            )
                     else:
                         rows.append((name, med, ep, em))
                 elif p.initval is not None:
                     inits = np.atleast_1d(p.from_internal(p.initval))
-                    val = float(inits[index] if index < len(inits) else inits[-1])
+                    val = float(
+                        inits[index] if index < len(inits) else inits[-1]
+                    )
                     if multimodal:
                         rows.append((name, "all", 1.0, val, "", ""))
                     else:
@@ -99,8 +116,14 @@ def build_csv_output(system, csv_filename, mode_report=None):
         writer.writerows(rows)
 
 
-def build_latex_output(system, var_filename="variables.tex", template_filename="table_template.tex",
-                       caption=None, tablecomments=None, mode_report=None):
+def build_latex_output(
+    system,
+    var_filename="variables.tex",
+    template_filename="table_template.tex",
+    caption=None,
+    tablecomments=None,
+    mode_report=None,
+):
     """Write the LaTeX variable definitions and deluxetable template.
 
     With a multimodal ``mode_report`` (from outputs.modes.identify_modes,
@@ -111,9 +134,11 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
     document; the unsuffixed macros keep their combined-posterior meaning.
     """
     multimodal = _multimodal(mode_report)
-    mode_suffixes = ([f"mode{_idx_to_words(k + 1)}"
-                      for k in range(mode_report.n_modes)]
-                     if multimodal else None)
+    mode_suffixes = (
+        [f"mode{_idx_to_words(k + 1)}" for k in range(mode_report.n_modes)]
+        if multimodal
+        else None
+    )
 
     all_defs = []
     all_table_lines = []
@@ -129,12 +154,21 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
             note_marks[p.table_note] = chr(ord("a") + len(note_marks))
         return note_marks[p.table_note]
 
-    all_defs.append(r"\providecommand{\bjdtdb}{\ensuremath{\rm {BJD_{TDB}}}}" + "\n")
-    all_defs.append(r"\providecommand{\feh}{\ensuremath{\left[{\rm Fe}/{\rm H}\right]}}" + "\n")
+    all_defs.append(
+        r"\providecommand{\bjdtdb}{\ensuremath{\rm {BJD_{TDB}}}}" + "\n"
+    )
+    all_defs.append(
+        r"\providecommand{\feh}{\ensuremath{\left[{\rm Fe}/{\rm H}\right]}}"
+        + "\n"
+    )
     all_defs.append(r"\providecommand{\teff}{\ensuremath{T_{\rm eff}}}" + "\n")
     all_defs.append(r"\providecommand{\teq}{\ensuremath{T_{\rm eq}}}" + "\n")
-    all_defs.append(r"\providecommand{\ecosw}{\ensuremath{e\cos{\omega_*}}}" + "\n")
-    all_defs.append(r"\providecommand{\esinw}{\ensuremath{e\sin{\omega_*}}}" + "\n")
+    all_defs.append(
+        r"\providecommand{\ecosw}{\ensuremath{e\cos{\omega_*}}}" + "\n"
+    )
+    all_defs.append(
+        r"\providecommand{\esinw}{\ensuremath{e\sin{\omega_*}}}" + "\n"
+    )
     all_defs.append(r"\providecommand{\msun}{\ensuremath{\,M_\Sun}}" + "\n")
     all_defs.append(r"\providecommand{\rsun}{\ensuremath{\,R_\Sun}}" + "\n")
     all_defs.append(r"\providecommand{\lsun}{\ensuremath{\,L_\Sun}}" + "\n")
@@ -143,10 +177,14 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
     all_defs.append(r"\providecommand{\me}{\ensuremath{\,M_{\rm E}}}" + "\n")
     all_defs.append(r"\providecommand{\re}{\ensuremath{\,R_{\rm E}}}" + "\n")
     all_defs.append(r"\providecommand{\fave}{\langle F \rangle}" + "\n")
-    all_defs.append(r"\providecommand{\fluxcgs}{10$^9$ erg s$^{-1}$ cm$^{-2}$}" + "\n")
+    all_defs.append(
+        r"\providecommand{\fluxcgs}{10$^9$ erg s$^{-1}$ cm$^{-2}$}" + "\n"
+    )
 
     for comp in system.get_all_components():
-        comp_params = [v for v in comp.__dict__.values() if isinstance(v, Parameter)]
+        comp_params = [
+            v for v in comp.__dict__.values() if isinstance(v, Parameter)
+        ]
         if not comp_params:
             continue
 
@@ -174,8 +212,11 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
             for p in printable:
-                all_table_lines.append(p.to_table_line(note_mark=_mark_for(p),
-                                                       mode_suffixes=mode_suffixes))
+                all_table_lines.append(
+                    p.to_table_line(
+                        note_mark=_mark_for(p), mode_suffixes=mode_suffixes
+                    )
+                )
         else:
             # Component-level header (no instance name — sub-headers carry that)
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
@@ -188,56 +229,81 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
                 for p in printable:
                     p_n = _instance_count(p)
                     if p_n > 1:
-                        all_table_lines.append(p.to_table_line_at(i, note_mark=_mark_for(p),
-                                                                  mode_suffixes=mode_suffixes))
+                        all_table_lines.append(
+                            p.to_table_line_at(
+                                i,
+                                note_mark=_mark_for(p),
+                                mode_suffixes=mode_suffixes,
+                            )
+                        )
                     elif i == 0:
                         # Scalar param shared across instances: show once
-                        all_table_lines.append(p.to_table_line(note_mark=_mark_for(p),
-                                                               mode_suffixes=mode_suffixes))
+                        all_table_lines.append(
+                            p.to_table_line(
+                                note_mark=_mark_for(p),
+                                mode_suffixes=mode_suffixes,
+                            )
+                        )
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.
         for k, m in enumerate(mode_report.modes):
             all_defs.append(
                 rf"\providecommand{{\ezmodeweight{_idx_to_words(k + 1)}}}"
-                rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n")
+                rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n"
+            )
         weight_cells = " & ".join(
             rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
-            for k in range(mode_report.n_modes))
-        weight_row = (r"~~~~Mode weight\dotfill & "
-                      r"Fraction of posterior mass\dotfill & "
-                      + weight_cells + r" &  \\" + "\n")
+            for k in range(mode_report.n_modes)
+        )
+        weight_row = (
+            r"~~~~Mode weight\dotfill & "
+            r"Fraction of posterior mass\dotfill & "
+            + weight_cells
+            + r" &  \\"
+            + "\n"
+        )
         all_table_lines.insert(0, weight_row)
 
         provenance_note = (
             "Mode weights: " + mode_report.provenance + ". Combined "
             "(pooled-across-modes) parameter values are suppressed above "
             "because pooled values inherit the mode-weight provenance; see "
-            "the per-mode columns.")
-        tablecomments = (provenance_note if not tablecomments
-                         else tablecomments + " " + provenance_note)
+            "the per-mode columns."
+        )
+        tablecomments = (
+            provenance_note
+            if not tablecomments
+            else tablecomments + " " + provenance_note
+        )
 
     if mode_report is not None and mode_report.n_invalid:
         invalid_note = (
             f"{mode_report.n_invalid} draws ({mode_report.invalid_frac:.2%}) "
             "rejected as numerically invalid -- this indicates a model or "
-            "sampler bug; investigate before trusting this table.")
-        tablecomments = (invalid_note if not tablecomments
-                         else tablecomments + " " + invalid_note)
+            "sampler bug; investigate before trusting this table."
+        )
+        tablecomments = (
+            invalid_note
+            if not tablecomments
+            else tablecomments + " " + invalid_note
+        )
 
-    with open(var_filename, 'w') as f:
+    with open(var_filename, "w") as f:
         f.write(f"% ExoZIPPy Generated Variables - {system.name}\n")
         f.writelines(all_defs)
 
     n_value_cols = mode_report.n_modes if multimodal else 1
     colspec = "l" + "c" * (2 + n_value_cols)
     if multimodal:
-        value_heads = " & ".join(rf"\colhead{{Value (mode {k + 1})}}"
-                                 for k in range(mode_report.n_modes))
+        value_heads = " & ".join(
+            rf"\colhead{{Value (mode {k + 1})}}"
+            for k in range(mode_report.n_modes)
+        )
     else:
         value_heads = r"\colhead{Value}"
 
-    with open(template_filename, 'w') as f:
+    with open(template_filename, "w") as f:
         f.write(r"\documentclass{aastex701}" + "\n")
         f.write(r"\usepackage{apjfonts}" + "\n")
         f.write(rf"\input{{{pathlib.Path(var_filename).stem}}}" + "\n")
@@ -245,9 +311,16 @@ def build_latex_output(system, var_filename="variables.tex", template_filename="
         f.write(r"\startlongtable" + "\n")
         f.write(rf"\begin{{deluxetable*}}{{{colspec}}}" + "\n")
         if caption is not None:
-            f.write(rf"\tablecaption{{{caption} \label{{tab:{system.name}}}}}" + "\n")
-        f.write(r"\tablehead{\colhead{~~~Parameter} & \colhead{Description} & "
-                + value_heads + r" & \colhead{Prior}}" + "\n")
+            f.write(
+                rf"\tablecaption{{{caption} \label{{tab:{system.name}}}}}"
+                + "\n"
+            )
+        f.write(
+            r"\tablehead{\colhead{~~~Parameter} & \colhead{Description} & "
+            + value_heads
+            + r" & \colhead{Prior}}"
+            + "\n"
+        )
         f.write(r"\startdata" + "\n")
         f.writelines(all_table_lines)
         f.write(r"\enddata" + "\n")

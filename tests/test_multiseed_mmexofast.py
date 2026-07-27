@@ -7,6 +7,7 @@ _load_mmexofast_seeds reads them and pushes each fit's observable-space
 values as a per-seed hint set feeding the layer-(a) multi-seed relaxation
 engine.
 """
+
 import json
 from pathlib import Path
 
@@ -16,12 +17,15 @@ import yaml
 
 from exozippy.components.mulensing.lens import Lens
 
-MMX_PATH = Path(__file__).parent.parent / "examples" / "DC2018_128" / "mmexofast.json"
+MMX_PATH = (
+    Path(__file__).parent.parent / "examples" / "DC2018_128" / "mmexofast.json"
+)
 
 
 class _RecordingConfigManager:
     """Minimal config_manager stub: records add_seed_hints/add_scale_hint calls
-    without touching the real relaxation engine (unit-tests the loader alone)."""
+    without touching the real relaxation engine (unit-tests the loader alone).
+    """
 
     def __init__(self, system_config=None, user_params=None):
         self.system_config = system_config or {}
@@ -48,18 +52,22 @@ def _make_binary_lens(mmexofast_path, finite_source=True):
         "planet": [{"name": "Companion"}],
     }
     cfg_manager = _RecordingConfigManager(system_config=system_config)
-    lens_config = [{
-        "name": "Lens",
-        "lenses": ["star.0", "planet.0"],
-        "sources": ["star.1"],
-        "finite_source": finite_source,
-        "mmexofast": str(mmexofast_path),
-    }]
+    lens_config = [
+        {
+            "name": "Lens",
+            "lenses": ["star.0", "planet.0"],
+            "sources": ["star.1"],
+            "finite_source": finite_source,
+            "mmexofast": str(mmexofast_path),
+        }
+    ]
     lens = Lens(lens_config, cfg_manager)
     return lens, cfg_manager
 
 
-@pytest.mark.skipif(not MMX_PATH.exists(), reason="DC2018_128 fixture not present")
+@pytest.mark.skipif(
+    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
+)
 def test_mmexofast_loader_pushes_two_seeds_matching_json():
     """
     Given examples/DC2018_128/mmexofast.json (2 fits),
@@ -89,7 +97,9 @@ def test_mmexofast_loader_pushes_two_seeds_matching_json():
         assert np.isclose(seed["lens.0.alpha"], p["alpha"])
 
 
-@pytest.mark.skipif(not MMX_PATH.exists(), reason="DC2018_128 fixture not present")
+@pytest.mark.skipif(
+    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
+)
 def test_mmexofast_loader_missing_file_warns_and_noops(caplog):
     """
     Given a lens config with a nonexistent mmexofast file,
@@ -115,18 +125,22 @@ def test_mmexofast_key_absent_is_a_noop():
         "planet": [{"name": "Companion"}],
     }
     cfg_manager = _RecordingConfigManager(system_config=system_config)
-    lens_config = [{
-        "name": "Lens",
-        "lenses": ["star.0", "planet.0"],
-        "sources": ["star.1"],
-    }]
+    lens_config = [
+        {
+            "name": "Lens",
+            "lenses": ["star.0", "planet.0"],
+            "sources": ["star.1"],
+        }
+    ]
     lens = Lens(lens_config, cfg_manager)
     lens._load_mmexofast_seeds()
 
     assert cfg_manager.seed_hint_sets == []
 
 
-@pytest.mark.skipif(not MMX_PATH.exists(), reason="DC2018_128 fixture not present")
+@pytest.mark.skipif(
+    not MMX_PATH.exists(), reason="DC2018_128 fixture not present"
+)
 def test_mmexofast_alpha_convention_is_identity_not_180_minus():
     """
     Given the shipped examples/DC2018_128/DC2018_128.params.yaml (seeded from
@@ -148,7 +162,11 @@ def test_mmexofast_alpha_convention_is_identity_not_180_minus():
         params = yaml.safe_load(f)
 
     alpha_entry = params["lens.Lens.alpha"]
-    initval = alpha_entry["initval"] if isinstance(alpha_entry, dict) else alpha_entry
+    initval = (
+        alpha_entry["initval"]
+        if isinstance(alpha_entry, dict)
+        else alpha_entry
+    )
     seed0_alpha = initval[0] if isinstance(initval, list) else initval
 
     # The params file pins seed-0 alpha to the MMEXOFAST fit-0 value (to the

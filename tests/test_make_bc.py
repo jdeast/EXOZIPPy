@@ -38,7 +38,9 @@ def regenerated_2mass(tmp_path_factory):
     (model_dir / "BCs" / "2MASS").mkdir(parents=True)
     for name in ("NextGen.spectra.csv", "NextGen.wavelength.csv"):
         (model_dir / name).symlink_to(_NEXTGEN / name)
-    shutil.copy(_SHIPPED_2MASS, model_dir / "BCs" / "2MASS" / _SHIPPED_2MASS.name)
+    shutil.copy(
+        _SHIPPED_2MASS, model_dir / "BCs" / "2MASS" / _SHIPPED_2MASS.name
+    )
 
     written = make_bc_tables(["2MASS/2MASS.J"], model="NextGen", bc_root=root)
 
@@ -67,7 +69,7 @@ def test_regenerated_2mass_j_matches_shipped_at_av0(regenerated_2mass):
 
     # ASSERT
     assert diff.median() < 0.05
-    assert diff.max() < 0.35   # coolest grid corners are resolution-limited
+    assert diff.max() < 0.35  # coolest grid corners are resolution-limited
 
 
 def test_merge_preserves_existing_columns_exactly(regenerated_2mass):

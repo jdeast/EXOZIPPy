@@ -7,14 +7,15 @@ floor, the optional per-instrument plot styling, and the factory's skipping of
 the abstract base.  Physics/likelihood behavior of the four children is covered
 by their own integration suites; here we pin the shared scaffolding directly.
 """
+
 import inspect
 
 import numpy as np
 import pytest
 
-from exozippy.components.instrument import Instrument
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components
+from exozippy.components.instrument import Instrument
 from exozippy.plotspec import Trace
 
 
@@ -95,7 +96,7 @@ def test_jitter_floor_matches_formula():
     Then it returns -0.95 * min(err)**2.
     """
     err = np.array([0.3, 0.1, 0.25])
-    assert Instrument._jitter_floor(err) == pytest.approx(-0.95 * 0.1 ** 2)
+    assert Instrument._jitter_floor(err) == pytest.approx(-0.95 * 0.1**2)
 
 
 def test_jitter_floor_applies_unit_factor_before_squaring():
@@ -107,7 +108,8 @@ def test_jitter_floor_applies_unit_factor_before_squaring():
     err = np.array([2.0, 0.5, 1.0])
     factor = 3.0
     assert Instrument._jitter_floor(err, factor=factor) == pytest.approx(
-        -0.95 * (0.5 * factor) ** 2)
+        -0.95 * (0.5 * factor) ** 2
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +122,8 @@ def test_build_block_detrend_places_columns_on_the_diagonal():
     Then the design matrix is block-diagonal so coefficients never mix across
     instruments, and the column counts are reported.
     """
-    a = np.array([[1.0], [2.0], [3.0]])          # inst 0: 3 obs, 1 col
-    b = np.array([[4.0, 5.0], [6.0, 7.0]])       # inst 1: 2 obs, 2 cols
+    a = np.array([[1.0], [2.0], [3.0]])  # inst 0: 3 obs, 1 col
+    b = np.array([[4.0, 5.0], [6.0, 7.0]])  # inst 1: 2 obs, 2 cols
     matrix, per_inst, total = Instrument._build_block_detrend([a, b], 5)
 
     assert per_inst == [1, 2]
@@ -129,7 +131,7 @@ def test_build_block_detrend_places_columns_on_the_diagonal():
     assert matrix.shape == (5, 3)
     # inst 0 column only populated in its own rows/cols
     assert np.array_equal(matrix[:3, 0], [1.0, 2.0, 3.0])
-    assert np.all(matrix[:3, 1:] == 0.0)         # no cross-instrument leakage
+    assert np.all(matrix[:3, 1:] == 0.0)  # no cross-instrument leakage
     assert np.all(matrix[3:, 0] == 0.0)
     assert np.array_equal(matrix[3:, 1:], b)
 
@@ -209,15 +211,20 @@ def test_plot_styles_read_user_overrides():
     When styles are loaded,
     Then the overrides surface in _data_trace_style alongside series_index.
     """
-    inst = _make([
-        {"file": "a.dat", "plot": {"color": "#1f77b4", "marker": "s"}},
-        {"file": "b.dat", "plot": {"color": "red"}},
-        {"file": "c.dat"},
-    ])
+    inst = _make(
+        [
+            {"file": "a.dat", "plot": {"color": "#1f77b4", "marker": "s"}},
+            {"file": "b.dat", "plot": {"color": "red"}},
+            {"file": "c.dat"},
+        ]
+    )
     assert inst.plot_color == ["#1f77b4", "red", None]
     assert inst.plot_marker == ["s", None, None]
     assert inst._data_trace_style(0) == {
-        "series_index": 0, "color": "#1f77b4", "marker": "s"}
+        "series_index": 0,
+        "color": "#1f77b4",
+        "marker": "s",
+    }
     assert inst._data_trace_style(1) == {"series_index": 1, "color": "red"}
     assert inst._data_trace_style(2) == {"series_index": 2}
 
@@ -244,8 +251,14 @@ def test_trace_style_serializes_when_present():
     When to_json runs,
     Then the style is included (and absent when None).
     """
-    t = Trace(name="TESS", role="data", kind="scatter",
-              x=[1.0], y=[2.0], style={"series_index": 0, "marker": "s"})
+    t = Trace(
+        name="TESS",
+        role="data",
+        kind="scatter",
+        x=[1.0],
+        y=[2.0],
+        style={"series_index": 0, "marker": "s"},
+    )
     d = t.to_json()
     assert d["style"] == {"series_index": 0, "marker": "s"}
 

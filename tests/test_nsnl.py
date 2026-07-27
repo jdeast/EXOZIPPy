@@ -3,11 +3,12 @@
 The 2S2L configuration mirrors examples/ob161003 (OGLE-2016-BLG-1003,
 Jung et al. 2017): two source stars sharing a binary star lens.
 """
+
 import numpy as np
 import pytest
 
-from exozippy.system import System
 from exozippy.config import ConfigManager
+from exozippy.system import System
 
 
 def _config_2s2l():
@@ -18,12 +19,14 @@ def _config_2s2l():
             {"name": "SourceA"},
             {"name": "SourceB"},
         ],
-        "lens": [{
-            "name": "Lens",
-            "lenses": ["star.0", "star.1"],
-            "sources": ["star.2", "star.3"],
-            "finite_source": True,
-        }],
+        "lens": [
+            {
+                "name": "Lens",
+                "lenses": ["star.0", "star.1"],
+                "sources": ["star.2", "star.3"],
+                "finite_source": True,
+            }
+        ],
     }
 
 
@@ -83,9 +86,12 @@ def test_per_source_shapes_and_initvals(system_2s2l):
     assert lens.u_0.shape == (2,)
     assert lens.rho.shape == (2,)
     np.testing.assert_allclose(
-        lens.t_0.initval, [2457551.038, 2457552.517], rtol=1e-9)
+        lens.t_0.initval, [2457551.038, 2457552.517], rtol=1e-9
+    )
     np.testing.assert_allclose(lens.u_0.initval, [0.059, 0.135], rtol=1e-9)
-    np.testing.assert_allclose(lens.rho.initval, [0.000451, 0.001293], rtol=1e-6)
+    np.testing.assert_allclose(
+        lens.rho.initval, [0.000451, 0.001293], rtol=1e-6
+    )
 
 
 def test_source_map_covers_all_sources(system_2s2l):
@@ -101,23 +107,36 @@ def test_total_mass_convention(system_2s2l):
     t_E = theta_E / (mu_rel / 365.25) reproduces the user's t_E for both
     sources."""
     import pytensor
+
     from exozippy.constants import KAPPA
+
     system, model = system_2s2l
     with model:
         f = pytensor.function(
             model.free_RVs,
-            [system.star.mass.value, system.lens.mlens_total.value,
-             system.lens.theta_E.value, system.lens.pi_rel.value,
-             system.lens.t_E.value],
-            on_unused_input="ignore")
+            [
+                system.star.mass.value,
+                system.lens.mlens_total.value,
+                system.lens.theta_E.value,
+                system.lens.pi_rel.value,
+                system.lens.t_E.value,
+            ],
+            on_unused_input="ignore",
+        )
         ip = model.initial_point()
-        zeros = [np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs]
-        mass, m_tot, theta_E, pi_rel, t_E = [np.atleast_1d(x) for x in f(*zeros)]
+        zeros = [
+            np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs
+        ]
+        mass, m_tot, theta_E, pi_rel, t_E = [
+            np.atleast_1d(x) for x in f(*zeros)
+        ]
 
     m1, m2 = mass[0], mass[1]
     np.testing.assert_allclose(m_tot[0], m1 + m2, rtol=1e-6)
     np.testing.assert_allclose(m2 / m1, 1.188, rtol=0.01)
-    np.testing.assert_allclose(theta_E**2, KAPPA * m_tot[0] * pi_rel, rtol=1e-5)
+    np.testing.assert_allclose(
+        theta_E**2, KAPPA * m_tot[0] * pi_rel, rtol=1e-5
+    )
     np.testing.assert_allclose(t_E, [28.931, 28.931], rtol=0.02)
 
 
@@ -134,15 +153,20 @@ def test_magnification_per_source_differs(system_2s2l):
     is evaluated at SourceA's peak time, then the two sources' magnifications
     differ (each source follows its own trajectory)."""
     import pytensor
+
     system, model = system_2s2l
     t = np.array([2457551.038])
     obs = np.zeros((1, 3))
     with model:
         A0 = system.lens.get_magnification_op(t, obs, system, index=0)
         A1 = system.lens.get_magnification_op(t, obs, system, index=1)
-        f = pytensor.function(model.free_RVs, [A0, A1], on_unused_input="ignore")
+        f = pytensor.function(
+            model.free_RVs, [A0, A1], on_unused_input="ignore"
+        )
         ip = model.initial_point()
-        zeros = [np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs]
+        zeros = [
+            np.zeros_like(ip[v.name]).astype(float) for v in model.free_RVs
+        ]
         a0, a1 = f(*zeros)
     assert np.isfinite(a0).all() and np.isfinite(a1).all()
     assert abs(float(a0[0]) - float(a1[0])) > 1e-3

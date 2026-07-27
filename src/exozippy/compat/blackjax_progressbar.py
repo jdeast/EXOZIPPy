@@ -72,23 +72,32 @@ def _is_affected(func):
     if "progress_bar.gen_scan_fn" in src:
         try:
             import blackjax
+
             missing_gen_scan_fn = not hasattr(
-                blackjax.progress_bar, "gen_scan_fn")
-        except Exception:                  # pragma: no cover - optional dep
+                blackjax.progress_bar, "gen_scan_fn"
+            )
+        except Exception:  # pragma: no cover - optional dep
             missing_gen_scan_fn = False
 
     return leaks_progress_bar or missing_gen_scan_fn
 
 
-def _inference_loop(seed, init_position, logp_fn, draws, tune, target_accept,
-                    **adaptation_kwargs):
+def _inference_loop(
+    seed,
+    init_position,
+    logp_fn,
+    draws,
+    tune,
+    target_accept,
+    **adaptation_kwargs,
+):
     """Corrected copy of pymc's ``_blackjax_inference_loop``.
 
     Same contract: returns ``(samples, stats)`` for one chain.
     """
+    import blackjax
     import jax
     import jax.numpy as jnp
-    import blackjax
     from blackjax.adaptation.base import get_filter_adapt_info_fn
 
     # Defect 1: strip it before window_adaptation can forward it. We do not
@@ -102,7 +111,8 @@ def _inference_loop(seed, init_position, logp_fn, draws, tune, target_accept,
         algorithm = blackjax.hmc
     else:
         raise ValueError(
-            "Only supporting 'nuts' or 'hmc' as algorithm to draw samples.")
+            "Only supporting 'nuts' or 'hmc' as algorithm to draw samples."
+        )
 
     adapt = blackjax.window_adaptation(
         algorithm=algorithm,
@@ -111,8 +121,9 @@ def _inference_loop(seed, init_position, logp_fn, draws, tune, target_accept,
         adaptation_info_fn=get_filter_adapt_info_fn(),
         **adaptation_kwargs,
     )
-    (last_state, tuned_params), _ = adapt.run(seed, init_position,
-                                              num_steps=tune)
+    (last_state, tuned_params), _ = adapt.run(
+        seed, init_position, num_steps=tune
+    )
     kernel = algorithm(logp_fn, **tuned_params).step
 
     def _one_step(state, xs):
@@ -132,7 +143,8 @@ def _inference_loop(seed, init_position, logp_fn, draws, tune, target_accept,
     # Defect 2: pymc would call blackjax.progress_bar.gen_scan_fn here; with
     # no progress bar that function is exactly jax.lax.scan.
     _, (samples, stats) = jax.lax.scan(
-        _one_step, last_state, (jnp.arange(draws), keys))
+        _one_step, last_state, (jnp.arange(draws), keys)
+    )
 
     return samples, stats
 
@@ -145,7 +157,7 @@ def patch_blackjax_progress_bar():
     """
     try:
         from pymc.sampling import jax as pmjax
-    except Exception:                      # pragma: no cover - optional dep
+    except Exception:  # pragma: no cover - optional dep
         return False
 
     original = getattr(pmjax, "_blackjax_inference_loop", None)
@@ -160,5 +172,6 @@ def patch_blackjax_progress_bar():
     logger.info(
         "Applied the pymc/blackjax compatibility patch "
         "(exozippy.compat.blackjax_progressbar): blackjax runs without a "
-        "progress bar.")
+        "progress bar."
+    )
     return True

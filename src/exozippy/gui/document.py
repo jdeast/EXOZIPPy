@@ -294,7 +294,9 @@ class AddComponentInstance(Command):
             block = CommentedSeq()
             doc.config[self.comp_type] = block
         for entry in block:
-            if isinstance(entry, dict) and str(entry.get("name")) == str(self.name):
+            if isinstance(entry, dict) and str(entry.get("name")) == str(
+                self.name
+            ):
                 raise ValueError(
                     f"{self.comp_type} already has an instance '{self.name}'"
                 )
@@ -329,7 +331,9 @@ class RenameInstance(Command):
             return
         block, idx = _find_instance(doc.config, self.comp_type, self.old_name)
         for entry in block:
-            if isinstance(entry, dict) and str(entry.get("name")) == str(self.new_name):
+            if isinstance(entry, dict) and str(entry.get("name")) == str(
+                self.new_name
+            ):
                 raise ValueError(
                     f"{self.comp_type} already has an instance '{self.new_name}'"
                 )
@@ -353,7 +357,9 @@ class DuplicateInstance(Command):
     def _do(self, doc):
         block, idx = _find_instance(doc.config, self.comp_type, self.name)
         for entry in block:
-            if isinstance(entry, dict) and str(entry.get("name")) == str(self.new_name):
+            if isinstance(entry, dict) and str(entry.get("name")) == str(
+                self.new_name
+            ):
                 raise ValueError(
                     f"{self.comp_type} already has an instance '{self.new_name}'"
                 )
@@ -380,7 +386,9 @@ _PARAM_FIELDS = set(LINKABLE_FIELDS)
 
 _COMMANDS = {
     "set_config_key": lambda a: SetConfigKey(a["path"], a["value"]),
-    "set_param_field": lambda a: SetParamField(a["path"], a["field"], a["value"]),
+    "set_param_field": lambda a: SetParamField(
+        a["path"], a["field"], a["value"]
+    ),
     "add_component_instance": lambda a: AddComponentInstance(
         a["comp_type"], a["name"], a.get("fields")
     ),
@@ -521,7 +529,9 @@ class ProjectDocument:
 
         def rename(key):
             k = str(key)
-            return new_prefix + k[len(prefix):] if k.startswith(prefix) else key
+            return (
+                new_prefix + k[len(prefix) :] if k.startswith(prefix) else key
+            )
 
         self.params = _rename_top_keys(self.params, rename)
 
@@ -532,13 +542,18 @@ class ProjectDocument:
         for key in list(self.params.keys()):
             k = str(key)
             if k.startswith(prefix):
-                additions.append((new_prefix + k[len(prefix):], self.params[key]))
+                additions.append(
+                    (new_prefix + k[len(prefix) :], self.params[key])
+                )
         for new_key, value in additions:
             self.params[new_key] = copy.deepcopy(value)
 
     def _rewrite_param_links(self, comp_type, old, new):
         pat = re.compile(
-            r"(?<![\w.])" + re.escape(comp_type) + r"\." + re.escape(str(old))
+            r"(?<![\w.])"
+            + re.escape(comp_type)
+            + r"\."
+            + re.escape(str(old))
             + r"\.([A-Za-z_]\w*)"
         )
 
@@ -550,7 +565,9 @@ class ProjectDocument:
                 continue
             for fld in LINKABLE_FIELDS:
                 val = entry.get(fld)
-                if isinstance(val, str) and is_link_expression(val, self.config):
+                if isinstance(val, str) and is_link_expression(
+                    val, self.config
+                ):
                     new_val = pat.sub(repl, val)
                     if new_val != val:
                         entry[fld] = new_val
@@ -612,8 +629,12 @@ class ProjectDocument:
             "dirty": self.dirty,
             "undo_depth": len(self.undo_stack),
             "redo_depth": len(self.redo_stack),
-            "undo_label": self.undo_stack[-1].label if self.undo_stack else None,
-            "redo_label": self.redo_stack[-1].label if self.redo_stack else None,
+            "undo_label": (
+                self.undo_stack[-1].label if self.undo_stack else None
+            ),
+            "redo_label": (
+                self.redo_stack[-1].label if self.redo_stack else None
+            ),
         }
 
     def config_text(self):

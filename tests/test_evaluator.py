@@ -55,6 +55,7 @@ _KELT4_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def rvonly_evaluator():
     """kelt4 RV-only system, built, with a compiled Evaluator and base point."""
@@ -81,11 +82,15 @@ _TRANSIT_CONFIG = {
     "planet": [{"name": "b"}],
     "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
     "band": [{"name": "TESS", "filter": "TESS"}],
-    "transit": [{
-        "name": "TESS_S48",
-        "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
-        "band": "TESS", "exptime": 2.0, "ninterp": 1.0,
-    }],
+    "transit": [
+        {
+            "name": "TESS_S48",
+            "file": "n20220130.TESS.TESS.TIC165297570.S48.0120.SPOC.dat",
+            "band": "TESS",
+            "exptime": 2.0,
+            "ninterp": 1.0,
+        }
+    ],
 }
 _TRANSIT_PARAMS = {
     "star.0.radius": {"initval": 1.610, "sigma": 0.05},
@@ -107,7 +112,9 @@ def transit_evaluator():
     cwd = os.getcwd()
     os.chdir(_KELT4_DIR)
     try:
-        system = System(dict(_TRANSIT_CONFIG), user_params=dict(_TRANSIT_PARAMS))
+        system = System(
+            dict(_TRANSIT_CONFIG), user_params=dict(_TRANSIT_PARAMS)
+        )
         system.prepare()
         model = system.build_model()
         base_raw = system.get_raw_start(model)
@@ -120,6 +127,7 @@ def transit_evaluator():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _unphased_id(ev):
     return [s.id for s in ev.specs if "unphased" in s.id][0]
@@ -134,13 +142,16 @@ def _period_and_logP(system, model, raw):
     o = system.orbit
     ip = system.get_internal_point(model, raw)
     period = float(np.atleast_1d(ip[o.period.label])[0])
-    logP_user = float(o.logP.phys_from_raw(np.asarray(raw[o.logP.label + "_raw"]))[0])
+    logP_user = float(
+        o.logP.phys_from_raw(np.asarray(raw[o.logP.label + "_raw"]))[0]
+    )
     return period, logP_user
 
 
 # ---------------------------------------------------------------------------
 # eval_plots: finiteness and the period-shift response
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.timeout(900)
 def test_eval_plots_returns_finite_model_traces(rvonly_evaluator):
@@ -189,7 +200,9 @@ def test_period_shift_changes_and_restores_rv_curves(rvonly_evaluator):
     py0 = np.asarray(base[pid]["model"]["y"])
 
     period0, logP0 = _period_and_logP(system, model, base_raw)
-    shifted_raw = ev.set_value("orbit.b.logP", np.log10(period0 * 1.01), base_raw)
+    shifted_raw = ev.set_value(
+        "orbit.b.logP", np.log10(period0 * 1.01), base_raw
+    )
     period1, _ = _period_and_logP(system, model, shifted_raw)
     shifted = ev.eval_plots(shifted_raw)
     y1 = np.asarray(shifted[uid]["model"]["y"])
@@ -243,13 +256,16 @@ def test_second_eval_at_same_point_is_identical(rvonly_evaluator):
     for pid in a:
         for name in a[pid]:
             for axis in ("x", "y"):
-                np.testing.assert_array_equal(np.asarray(a[pid][name][axis]),
-                                              np.asarray(b[pid][name][axis]))
+                np.testing.assert_array_equal(
+                    np.asarray(a[pid][name][axis]),
+                    np.asarray(b[pid][name][axis]),
+                )
 
 
 # ---------------------------------------------------------------------------
 # Latency benchmark
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.timeout(900)
 def test_eval_plots_latency_under_50ms(rvonly_evaluator):
@@ -273,6 +289,7 @@ def test_eval_plots_latency_under_50ms(rvonly_evaluator):
 # set_value round-trip and NeedsResolve
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.timeout(900)
 def test_set_value_round_trip_to_float64_precision(rvonly_evaluator):
     """
@@ -287,13 +304,17 @@ def test_set_value_round_trip_to_float64_precision(rvonly_evaluator):
     target_user = 0.4801234567891011  # dex(d); factor 1
     new_raw = ev.set_value("orbit.b.logP", target_user, base_raw)
 
-    readback = float(logP.phys_from_raw(np.asarray(new_raw[logP.label + "_raw"]))[0])
+    readback = float(
+        logP.phys_from_raw(np.asarray(new_raw[logP.label + "_raw"]))[0]
+    )
     factor = float(np.atleast_1d(logP._get_conversion_factors())[0])
     assert readback * factor == pytest.approx(target_user, rel=0, abs=1e-12)
 
 
 @pytest.mark.timeout(900)
-def test_set_value_returns_new_point_leaving_original_unchanged(rvonly_evaluator):
+def test_set_value_returns_new_point_leaving_original_unchanged(
+    rvonly_evaluator,
+):
     """
     Given a compiled evaluator and a base raw point,
     When set_value is called,
@@ -327,6 +348,7 @@ def test_set_value_on_derived_param_raises_needs_resolve(rvonly_evaluator):
 # ---------------------------------------------------------------------------
 # Transit component
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.timeout(900)
 def test_transit_eval_and_radius_shift(transit_evaluator):
@@ -373,6 +395,7 @@ def test_transit_eval_and_radius_shift(transit_evaluator):
 # ---------------------------------------------------------------------------
 # structural_hash
 # ---------------------------------------------------------------------------
+
 
 def test_structural_hash_stable_across_reordered_keys():
     """
@@ -460,4 +483,6 @@ def test_evaluator_structural_hash_matches_module_function():
     config = {"star": [{"name": "A"}]}
     params = {"star.A.mass": {"lower": 0.5}}
 
-    assert Evaluator.structural_hash(config, params) == structural_hash(config, params)
+    assert Evaluator.structural_hash(config, params) == structural_hash(
+        config, params
+    )

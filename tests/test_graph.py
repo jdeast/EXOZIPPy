@@ -1,4 +1,5 @@
 """Tests for graph.py: determine_pymc_build_order topological sort."""
+
 import pytest
 
 from exozippy.graph import determine_pymc_build_order

@@ -7,6 +7,7 @@ through the runner API (start_run / status / stop / list_runs). They poll on
 conditions with generous timeouts rather than sleeping a fixed amount, so a
 slow machine only makes them slower, never flaky.
 """
+
 import json
 import os
 import shutil
@@ -30,6 +31,7 @@ POLL_INTERVAL = 0.5
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _poll_until(predicate, timeout, interval=POLL_INTERVAL):
     """Return the first truthy predicate() value within timeout, else None."""
@@ -67,8 +69,8 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         "cores": 1,
         "check_curvatures": False,
         "recompute_trace": True,
-        "min_ess": 100_000_000,   # unreachable -> never converge
-        "max_rhat": 1.0000001,    # unreachable -> never converge
+        "min_ess": 100_000_000,  # unreachable -> never converge
+        "max_rhat": 1.0000001,  # unreachable -> never converge
     }
     config_name = "run_ptde.yaml"
     with open(work_dir / config_name, "w") as fh:
@@ -81,7 +83,8 @@ def kelt4_workdir(tmp_path):
     """A throwaway copy of the kelt4 example directory (data + params)."""
     work_dir = tmp_path / "kelt4"
     shutil.copytree(
-        EXAMPLE_DIR, work_dir,
+        EXAMPLE_DIR,
+        work_dir,
         ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
     return work_dir
@@ -90,6 +93,7 @@ def kelt4_workdir(tmp_path):
 # ---------------------------------------------------------------------------
 # GuiReporter unit behavior (fast, no subprocess)
 # ---------------------------------------------------------------------------
+
 
 def test_gui_enabled_reads_config_and_env(monkeypatch):
     """
@@ -114,10 +118,15 @@ def test_disabled_reporter_writes_nothing(tmp_path):
     reporter = GuiReporter(prefix, enabled=False)
 
     reporter.phase("preparing")
-    reporter.progress_callback({"n_draws": 100, "n_chains": 4,
-                                "stored_raw": {"x": np.zeros((4, 100))},
-                                "stored_lp": np.zeros((4, 100)),
-                                "raw_var_names": ["x"]})
+    reporter.progress_callback(
+        {
+            "n_draws": 100,
+            "n_chains": 4,
+            "stored_raw": {"x": np.zeros((4, 100))},
+            "stored_lp": np.zeros((4, 100)),
+            "raw_var_names": ["x"],
+        }
+    )
     reporter.terminal("done")
 
     assert not os.path.exists(str(prefix) + "_gui_status.json")
@@ -134,23 +143,34 @@ def test_snapshot_is_thinned_and_atomic(tmp_path):
     reporter = GuiReporter(prefix, enabled=True)
     stored_raw = {"x": np.random.randn(4, 500), "y": np.random.randn(4, 500)}
 
-    reporter.progress_callback({
-        "n_draws": 500, "n_chains": 4, "max_rhat": 1.03, "min_ess": 250.0,
-        "elapsed_s": 2.0, "stop_reason": None,
-        "stored_raw": stored_raw, "stored_lp": np.random.randn(4, 500),
-        "raw_var_names": ["x", "y"]})
+    reporter.progress_callback(
+        {
+            "n_draws": 500,
+            "n_chains": 4,
+            "max_rhat": 1.03,
+            "min_ess": 250.0,
+            "elapsed_s": 2.0,
+            "stop_reason": None,
+            "stored_raw": stored_raw,
+            "stored_lp": np.random.randn(4, 500),
+            "raw_var_names": ["x", "y"],
+        }
+    )
 
     snap = np.load(str(prefix) + "_gui_snapshot" + os.sep + "partial.npz")
     assert set(snap.keys()) == {"x", "y", "_lp"}
     assert snap["x"].shape[0] == 4
     assert snap["x"].shape[1] <= 200
-    meta = json.load(open(str(prefix) + "_gui_snapshot" + os.sep + "partial.json"))
+    meta = json.load(
+        open(str(prefix) + "_gui_snapshot" + os.sep + "partial.json")
+    )
     assert meta["n_draws"] == 500 and meta["n_kept"] <= 200
 
 
 # ---------------------------------------------------------------------------
 # End-to-end subprocess lifecycle
 # ---------------------------------------------------------------------------
+
 
 # Real subprocess fits (startup + graph compile + a real fit + full report/plot
 # output on graceful stop) legitimately exceed the 300s global pytest timeout,
@@ -175,17 +195,27 @@ def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):
     with open(EXAMPLE_DIR / "kelt4_rvonly.yaml") as fh:
         config = yaml.safe_load(fh)
     config["prefix"] = str(out_prefix)
-    config["sampler"] = {"method": "nuts", "tune": 2, "draws": 1,
-                         "chains": 1, "cores": 1, "check_curvatures": False,
-                         "recompute_trace": True}
+    config["sampler"] = {
+        "method": "nuts",
+        "tune": 2,
+        "draws": 1,
+        "chains": 1,
+        "cores": 1,
+        "check_curvatures": False,
+        "recompute_trace": True,
+    }
     with open(kelt4_workdir / "noflag.yaml", "w") as fh:
         yaml.safe_dump(config, fh)
 
     env = dict(os.environ)
-    env.pop("EXOZIPPY_GUI_SNAPSHOT", None)   # ensure the flag is OFF
+    env.pop("EXOZIPPY_GUI_SNAPSHOT", None)  # ensure the flag is OFF
     subprocess.run(
         [sys.executable, "-m", "exozippy.cli", "noflag.yaml"],
-        cwd=str(kelt4_workdir), env=env, timeout=600, check=True)
+        cwd=str(kelt4_workdir),
+        env=env,
+        timeout=600,
+        check=True,
+    )
 
     assert not os.path.exists(str(out_prefix) + "_gui_status.json")
     assert not os.path.exists(str(out_prefix) + "_gui_snapshot")
