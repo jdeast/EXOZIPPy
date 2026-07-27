@@ -1,6 +1,10 @@
 [tool.poetry]
 name = "exozippy"
-version = "0.1.0"
+# Placeholder only. poetry-dynamic-versioning overwrites this at build time
+# with the version derived from `git describe`, so a release is a tag and
+# nothing else -- there is no version string to forget to bump. A working tree
+# with no tags at all builds as 0.0.0.
+version = "0.0.0"
 description = "general modeling fitting code"
 authors = ["Jason Eastman <jason.eastman@cfa.harvard.edu>","Phoebe Sandhaus <pjs5535@psu.edu>"]
 readme = "README.md"
@@ -11,9 +15,13 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
+    # Keep in sync with the `python` constraint below, which stops at 3.14 --
+    # advertising a version the constraint excludes is a metadata lie pip acts
+    # on. The cap is NOT numba's doing (numba has shipped cp314 wheels since
+    # 0.63, and pytensor has allowed <3.15 since 3.1.0); it is the unused
+    # `celerite` dep, whose wheels stop at cp312. See its entry below.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
 ]
 packages = [{include = "exozippy", from = "src"}]
@@ -29,6 +37,12 @@ pymc = ">=6.0.0,<7.0.0"
 pyyaml = ">=6.0.3,<7.0.0"
 matplotlib = ">=3.10.9,<4.0.0"
 astropy = ">=7.2.0,<8.0.0"
+# NOTE: celerite v1 is imported nowhere in the tree -- the GP terms all come
+# from celerite2 below. It is also the ONLY dependency blocking Python 3.14:
+# its wheels stop at cp312 (no cp313, no cp314), so 3.13 already source-builds
+# it and 3.14 would too. Dropping it and raising `python` to <3.15 is the whole
+# 3.14 story; it needs a `poetry lock` and a test run, so it is deliberately
+# not bundled into the release-plumbing commit.
 celerite = ">=0.4.3,<0.5.0"
 # celerite2's PyMC backend supplies the optional per-file Gaussian-process
 # noise terms (the `gp:` key on any instrument data file; see
@@ -121,8 +135,25 @@ microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
 gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
 
 [build-system]
-requires = ["poetry-core>=2.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.4.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+# Version comes from the git tag, never from this file. `poetry build` and
+# `pip install .` both go through the backend shim above, so an sdist built
+# from a v1.2.3 tag is 1.2.3 and an untagged working tree is 0.0.0.post<n>.
+#
+# For interactive `poetry build` / `poetry version`, the plugin must also be
+# installed into poetry itself:
+#     poetry self add "poetry-dynamic-versioning[plugin]"
+#     pipx inject poetry "poetry-dynamic-versioning[plugin]"   # pipx installs
+# Without it poetry falls back to the placeholder version above -- which the
+# publish workflow's tag/version guard would catch before anything reaches PyPI.
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "pep440"
+# Tags are written v1.2.3; the version is 1.2.3.
+pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?P<stage>[a-zA-Z]+)?(?P<revision>\\d+)?"
 
 [tool.poetry.scripts]
 exozippy = "exozippy.cli:main"

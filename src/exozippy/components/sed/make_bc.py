@@ -76,17 +76,44 @@ _MODEL_DATA_URLS = {
     }
 }
 
+# Emitted once per process, the first time a spectra grid is actually fetched.
+# Warning (not info) on purpose: anyone generating their own BC table is doing
+# science with the result and needs to know its accuracy floor up front.
+_DOWNSAMPLING_WARNING = (
+    "The %s model spectra hosted on Zenodo are SEVERELY DOWNSAMPLED. "
+    "Bolometric corrections synthesized from them carry errors of order 2 "
+    "percent -- larger than the photometric uncertainties of most modern "
+    "surveys, so a BC table generated here can dominate the error budget of "
+    "any parameter that depends on it. The shipped BC tables (models/%s/BCs/) "
+    "are not affected; this applies only to tables you generate yourself for "
+    "filters that have none. Full-resolution spectra (~250 GB) are the "
+    "intended long-term fix and are not distributed yet."
+)
+
+_warned_models: set[str] = set()
+
 
 def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
-    """Download large model data files from Zenodo if not present locally."""
+    """Download large model data files from Zenodo if not present locally.
+
+    These are the raw model spectra used to synthesize bolometric corrections
+    for filters with no precomputed BC table. They are far too large to ship
+    in the package (~300 MB) and are git-ignored, so they are fetched on first
+    use and cached in place. See _DOWNSAMPLING_WARNING for their accuracy.
+    """
     urls = _MODEL_DATA_URLS.get(model, {})
     model_dir = Path(bc_root) / model
     for filename, url in urls.items():
         dest = model_dir / filename
-        if not dest.exists():
-            logger.info(f"Downloading {filename} from Zenodo...")
-            urllib.request.urlretrieve(url, dest)
-            logger.info(f"Saved {filename} to {dest}")
+        if dest.exists():
+            continue
+        if model not in _warned_models:
+            _warned_models.add(model)
+            logger.warning(_DOWNSAMPLING_WARNING, model, model)
+        logger.info(f"Downloading {filename} from Zenodo...")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, dest)
+        logger.info(f"Saved {filename} to {dest}")
 
 
 def _load_spectra(model: str, bc_root: Path) -> tuple[pd.DataFrame, np.ndarray]:

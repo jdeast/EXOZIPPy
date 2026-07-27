@@ -1,6 +1,5 @@
 # generic imports
 import logging
-import urllib.request
 from pathlib import Path
 import yaml
 import ast
@@ -411,23 +410,18 @@ class SED(Component):
         self.combo_labels = combo_labels
 
 
-    _MODEL_DATA_URLS = {
-        "NextGen": {
-            "NextGen.spectra.csv":    "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
-            "NextGen.wavelength.csv": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
-        }
-    }
-
     def _ensure_model_data(self):
-        """Download large model data files from Zenodo if not present locally."""
-        urls = self._MODEL_DATA_URLS.get(self.sedmodel, {})
-        model_dir = current_dir / "models" / self.sedmodel
-        for filename, url in urls.items():
-            dest = model_dir / filename
-            if not dest.exists():
-                logger.info(f"Downloading {filename} from Zenodo...")
-                urllib.request.urlretrieve(url, dest)
-                logger.info(f"Saved {filename} to {dest}")
+        """Fetch the raw model spectra from Zenodo if not already cached.
+
+        Delegates to make_bc.ensure_model_data so the URL table and the
+        downsampling warning have exactly one home -- this used to be a
+        verbatim copy of it, which is how a warning goes stale. Imported
+        lazily: make_bc pulls in the BC-synthesis stack, which a fit that
+        never generates a table has no reason to load.
+        """
+        from .make_bc import ensure_model_data
+
+        ensure_model_data(self.sedmodel, current_dir / "models")
 
     def _collect_band_filters(self):
         """
