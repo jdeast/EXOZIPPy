@@ -5,6 +5,24 @@
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
+# Import sorting runs BEFORE black: isort decides which lines exist, black
+# decides how they wrap. Running them the other way round means black formats
+# imports isort is about to move.
+#
+# The rev is pinned exactly, and must stay that way. Everyone has to produce
+# byte-identical output or the format-then-merge recipe for long-running
+# branches stops working: a collaborator formats with a different version,
+# and the merge conflicts on formatting rather than on content.
+-   repo: https://github.com/PyCQA/isort
+    rev: 8.0.1
+    hooks:
+    -   id: isort
+
+-   repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.5.1
+    hooks:
+    -   id: black
+
 -   repo: local
     hooks:
     # The full suite runs on PUSH, not on commit. It takes ~3 minutes locally

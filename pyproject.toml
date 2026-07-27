@@ -222,6 +222,28 @@ style = "pep440"
 # Tags are written v1.2.3; the version is 1.2.3.
 pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?P<stage>[a-zA-Z]+)?(?P<revision>\\d+)?"
 
+[tool.black]
+# 79 matches the width this codebase's comments and docstrings already wrap
+# at, so prose and code agree, and it matches exoplanet-core's config.
+line-length = 79
+
+[tool.isort]
+# profile = "black" is what makes the two agree on trailing commas and
+# parenthesised wrapping; without it they fight and reformat each other's
+# output on every run.
+profile = "black"
+line_length = 79
+# DO NOT set float_to_top. It hoists imports above intervening statements, and
+# two places here depend on that NOT happening:
+#   * src/exozippy/__init__.py sets OMP/BLAS thread vars before `import
+#     pytensor`, and the comment there explains it must run first -- getting it
+#     wrong costs GBs of RSS per process on an HPC node and fails no test.
+#   * tests/test_trace_plots.py and tests/test_multimode_outputs.py call
+#     matplotlib.use("Agg") between imports.
+# Default isort treats any non-import statement as a wall and leaves both
+# alone; float_to_top removes that wall. Verified with `isort --diff` on both
+# files before adopting these hooks.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["exozippy", "src"]
