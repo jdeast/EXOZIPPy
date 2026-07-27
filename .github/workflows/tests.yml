@@ -6,11 +6,14 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+  # Callable from publish.yml so a release runs exactly this suite, rather
+  # than a copy of it that drifts out of sync.
+  workflow_call:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -23,8 +26,19 @@ jobs:
           python-version: "3.12"
           cache: poetry
 
+      # --extras gui is required, not polish: ruamel-yaml lives in that extra,
+      # so without it tests/test_gui_document.py fails at import and the whole
+      # GUI test surface never runs here. (httpx, which fastapi's TestClient
+      # needs, is in the dev group and so is always installed.)
       - name: Install dependencies
-        run: poetry install --no-interaction
+        run: poetry install --extras gui --no-interaction
 
+      # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
+      # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
+      # building a System and compiling PyTensor graphs. The symptom was never
+      # an assertion failure but "worker 'gwN' crashed", landing on whichever
+      # heavy test drew the short straw -- it moved between
+      # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
+      # and vanished entirely on others. That is a memory ceiling, not a bug.
       - name: Run test suite
-        run: poetry run pytest -q
+        run: poetry run pytest -q -n 2

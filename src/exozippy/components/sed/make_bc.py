@@ -33,6 +33,7 @@ percent-level absolute calibration is needed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import urllib.request
@@ -69,10 +70,21 @@ V_BAND_MICRON = 0.55
 # spectrum (mirrors models/NextGen/plot.py ALPHA_GRID_PTS).
 ALPHA_FALLBACK = (0.0, 0.2, -0.2, 0.4, 0.6)
 
-_MODEL_DATA_URLS = {
+# size and md5 come from the Zenodo record's own API
+# (https://zenodo.org/api/records/20547997). They pin the content, so a
+# re-uploaded or truncated file is caught rather than silently used.
+_MODEL_DATA = {
     "NextGen": {
-        "NextGen.spectra.csv":    "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
-        "NextGen.wavelength.csv": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
+        "NextGen.spectra.csv": {
+            "url": "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
+            "size": 259149813,
+            "md5": "7a2b81333f6a5bfccd4cbc07bdea6648",
+        },
+        "NextGen.wavelength.csv": {
+            "url": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
+            "size": 60943,
+            "md5": "29ae520da3a5b7b3c407688abba7abf2",
+        },
     }
 }
 
@@ -93,6 +105,15 @@ _DOWNSAMPLING_WARNING = (
 _warned_models: set[str] = set()
 
 
+def _md5(path: Path, chunk: int = 1 << 20) -> str:
+    """Streaming md5 of a file (the spectra grid is ~250 MB)."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
     """Download large model data files from Zenodo if not present locally.
 
@@ -100,19 +121,60 @@ def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
     for filters with no precomputed BC table. They are far too large to ship
     in the package (~300 MB) and are git-ignored, so they are fetched on first
     use and cached in place. See _DOWNSAMPLING_WARNING for their accuracy.
+
+    Integrity is enforced, because the failure mode without it is silent and
+    lasting: urlretrieve happily writes a truncated body to the destination,
+    and every later run then reads that half-file. It surfaced as
+    `pandas.errors.ParserError: EOF inside string starting at row 11248`, in a
+    test that has nothing to do with downloading. So:
+
+    * a cached file is size-checked on every call (cheap, and truncation --
+      the observed failure -- always changes the size);
+    * a download lands on a .part file, is checked for size AND md5, and only
+      then atomically renamed into place, so an interrupted fetch can never be
+      mistaken for a cached one;
+    * a corrupt cached file is re-fetched rather than raising, since the
+      recovery is unambiguous.
     """
-    urls = _MODEL_DATA_URLS.get(model, {})
+    files = _MODEL_DATA.get(model, {})
     model_dir = Path(bc_root) / model
-    for filename, url in urls.items():
+    for filename, meta in files.items():
         dest = model_dir / filename
         if dest.exists():
-            continue
+            actual = dest.stat().st_size
+            if actual == meta["size"]:
+                continue
+            logger.warning(
+                "Cached %s is %d bytes, expected %d -- it is truncated or "
+                "stale. Re-downloading.", dest, actual, meta["size"],
+            )
+            dest.unlink()
+
         if model not in _warned_models:
             _warned_models.add(model)
             logger.warning(_DOWNSAMPLING_WARNING, model, model)
+
         logger.info(f"Downloading {filename} from Zenodo...")
         model_dir.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, dest)
+        part = dest.with_name(dest.name + ".part")
+        try:
+            urllib.request.urlretrieve(meta["url"], part)
+            size = part.stat().st_size
+            if size != meta["size"]:
+                raise RuntimeError(
+                    f"{filename} downloaded {size} bytes, expected "
+                    f"{meta['size']}. The download was truncated; retry."
+                )
+            digest = _md5(part)
+            if digest != meta["md5"]:
+                raise RuntimeError(
+                    f"{filename} has md5 {digest}, expected {meta['md5']}. "
+                    f"The file on Zenodo may have been replaced, or the "
+                    f"download was corrupted."
+                )
+            part.replace(dest)          # atomic within the same directory
+        finally:
+            part.unlink(missing_ok=True)
         logger.info(f"Saved {filename} to {dest}")
 
 

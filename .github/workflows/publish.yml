@@ -30,6 +30,12 @@ on:
         default: false
 
 jobs:
+  # The full test suite, gating the real PyPI upload below. Reused from
+  # tests.yml via workflow_call rather than copied, so the release runs the
+  # same suite CI runs and the two cannot drift.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -85,6 +91,10 @@ jobs:
 
   # Rehearsal target. TestPyPI needs its own trusted publisher registered
   # against this same workflow, with environment name "testpypi".
+  #
+  # Deliberately gated on build only, NOT on tests: this exists to exercise the
+  # publish plumbing quickly, and TestPyPI is disposable. The real upload below
+  # is the one that must wait for a green suite.
   testpypi:
     needs: [build]
     runs-on: ubuntu-latest
@@ -103,8 +113,12 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
 
+  # needs: tests as well as build -- a PyPI version can never be reused, so a
+  # release must not be able to go out over a red suite. v0.1.0rc1 published
+  # without this gate; it happened to be backed by a verified local run, which
+  # is not a control.
   pypi:
-    needs: [build]
+    needs: [build, tests]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     environment:
