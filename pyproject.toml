@@ -141,6 +141,12 @@ scipy-stubs = ">=1.17.1.5,<2.0.0.0"
 pandas-stubs = "=3.0.3.260530,<4.0.0.0"
 pytest-timeout = "^2.4.0"
 pytest-xdist = ">=3.0"
+# fastapi.testclient.TestClient is built on httpx, which fastapi does NOT pull
+# in (it lives behind fastapi[standard]). It used to be present only by
+# accident, as a transitive dep of something else; a `poetry sync` removed it
+# and every GUI endpoint test errored at fixture setup. Declared here so the
+# test environment is reproducible rather than lucky.
+httpx = ">=0.27,<1.0"
 
 [tool.poetry.extras]
 gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
