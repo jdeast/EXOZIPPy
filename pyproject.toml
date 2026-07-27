@@ -1,76 +1,113 @@
-[tool.poetry]
+[project]
 name = "exozippy"
-# Placeholder only. poetry-dynamic-versioning overwrites this at build time
-# with the version derived from `git describe`, so a release is a tag and
-# nothing else -- there is no version string to forget to bump. A working tree
-# with no tags at all builds as 0.0.0.
-version = "0.0.0"
+# Supplied by poetry-dynamic-versioning from `git describe`, so a release is a
+# tag and nothing else -- there is no version string to forget to bump. A
+# working tree with no tags at all builds as 0.0.0. Declaring it dynamic is
+# what lets the [project] table omit `version` entirely.
+dynamic = ["version"]
 description = "general modeling fitting code"
-authors = ["Jason Eastman <jason.eastman@cfa.harvard.edu>","Phoebe Sandhaus <pjs5535@psu.edu>"]
+# NOTE: poetry-core emits only the FIRST author into the built metadata --
+# `Author: Jason Eastman` with no trace of the second -- and that is true of
+# this PEP 621 table exactly as it was of the old `authors = ["A <a>", "B <b>"]`
+# list. Verified with a minimal package on stock poetry-core, so it is a
+# backend limitation, not something wrong here. Both are kept because this file
+# is the source of truth; a backend that follows PEP 621 (hatchling, uv) emits
+# `Author-email: A <a>, B <b>` from these same lines with no edit needed.
+authors = [
+    { name = "Jason Eastman", email = "jason.eastman@cfa.harvard.edu" },
+    { name = "Phoebe Sandhaus", email = "pjs5535@psu.edu" },
+]
 readme = "README.md"
-homepage = "https://github.com/jdeast/EXOZIPPy"
 license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 keywords = ["exofast", "exofastv2", "exoplanet", "transit", "radial velocity", "sed", "mist", "microlensing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
-    # Keep in sync with the `python` constraint below -- advertising a version
-    # the constraint excludes is a metadata lie that pip acts on.
+    # Under [project], poetry no longer auto-enriches the classifier list, so
+    # anything it used to add silently has to be written out here. This one and
+    # the "3 :: Only" entry below were previously invisible in this file but
+    # present in the built metadata. (The "License :: OSI Approved" classifier
+    # it also added is deliberately NOT reinstated -- see license-files above.)
+    "Programming Language :: Python :: 3",
+    # Keep in sync with requires-python below -- advertising a version the
+    # constraint excludes is a metadata lie that pip acts on.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
 ]
-packages = [{include = "exozippy", from = "src"}]
-
-[tool.poetry.dependencies]
 # <3.15 is pytensor's own cap (it has declared >=3.12,<3.15 since 3.1.0).
 # Everything else in this tree is either pure-Python, ships cp314 wheels
 # (numba since 0.63, numpy, scipy, pandas, h5py, jaxlib, nutpie, celerite2,
 # exoplanet-core), or is stable-ABI cp311-abi3 (astropy).
-python = ">=3.12,<3.15"
-pytensor = ">=3.1.2,<3.2.0"
-pandas = ">=1.3.6,<3.0.0"
-arviz = ">=1.1.0,<2.0.0"
-dm-tree = ">=0.1.8"
-numpy = ">=2.0"
-pymc = ">=6.0.0,<7.0.0"
-pyyaml = ">=6.0.3,<7.0.0"
-matplotlib = ">=3.10.9,<4.0.0"
-astropy = ">=7.2.0,<8.0.0"
-# celerite v1 used to be pinned here. It was imported nowhere in the tree (the
-# GP terms all come from celerite2 below) and was the ONLY dependency blocking
-# Python 3.14 -- its wheels stop at cp312, so even 3.13 was source-building it.
-# Do not add it back; use celerite2.
-#
-# celerite2's PyMC backend supplies the optional per-file Gaussian-process
-# noise terms (the `gp:` key on any instrument data file; see
-# components/gp.py).  It registers a JAX conversion for its PyTensor ops
-# (@jax_funcify.register(_CeleriteOp)), so the JAX samplers work too and a GP
-# imposes no sampler constraint. Imported lazily, so a fit with no `gp:` key
-# never loads it.
-celerite2 = ">=0.3.3,<0.4.0"
-corner = ">=2.2.3,<3.0.0"
-mulensmodel = ">=3.9.0,<4.0.0"
-jplephem = ">=2.24,<3.0"
-lightkurve = ">=2.6.0,<3.0.0"
-# 0.4.0 ships cp312/cp313/cp314 wheels (manylinux_2_28 -> glibc 2.28/el8,
-# macos arm64, win_amd64), so no git clone or C++ compiler is needed. Intel
-# macOS has no wheel and falls back to an sdist build. This was a git HEAD dep,
-# then a prerelease pin, until 0.4.0 was published.
-#
-# The 0.4.0 FLOOR is load-bearing, not cosmetic: through 0.4.0rc1 the JAX
-# conversion of the limb-darkening Op had no differentiation rule, so
-# nuts_sampler="numpyro" / "blackjax" died at HMC init on any transit model
-# (exoplanet-dev/exoplanet-core#144). Lowering this floor silently breaks the
-# JAX samplers again.
-exoplanet-core = { version = ">=0.4.0,<0.5.0", extras = ["pymc"] }
-click = ">=8.3.3,<9.0.0"
-h5py = ">=3.16.0,<4.0.0"
-numba = ">=0.65.1,<0.66.0"
-astroquery = ">=0.4.7"
-gaiadr3-zeropoint = ">=0.0.1"
+requires-python = ">=3.12,<3.15"
+
+# PEP 508 requirement strings. Poetry's `^x.y` shorthand has no equivalent
+# here, so those became explicit ranges: `^2023.0` -> >=2023.0,<2024.0 and
+# `^1.8.1` -> >=1.8.1,<2.0.0, which is exactly what poetry was expanding them
+# to in the built metadata anyway.
+dependencies = [
+    "pytensor>=3.1.2,<3.2.0",
+    "pandas>=1.3.6,<3.0.0",
+    "arviz>=1.1.0,<2.0.0",
+    "dm-tree>=0.1.8",
+    "numpy>=2.0",
+    "pymc>=6.0.0,<7.0.0",
+    "pyyaml>=6.0.3,<7.0.0",
+    "matplotlib>=3.10.9,<4.0.0",
+    "astropy>=7.2.0,<8.0.0",
+    # celerite v1 used to be pinned here. It was imported nowhere in the tree
+    # (the GP terms all come from celerite2) and was the ONLY dependency
+    # blocking Python 3.14 -- its wheels stop at cp312, so even 3.13 was
+    # source-building it. Do not add it back; use celerite2.
+    #
+    # celerite2's PyMC backend supplies the optional per-file Gaussian-process
+    # noise terms (the `gp:` key on any instrument data file; see
+    # components/gp.py). It registers a JAX conversion for its PyTensor ops
+    # (@jax_funcify.register(_CeleriteOp)), so the JAX samplers work too and a
+    # GP imposes no sampler constraint. Imported lazily, so a fit with no `gp:`
+    # key never loads it.
+    "celerite2>=0.3.3,<0.4.0",
+    "corner>=2.2.3,<3.0.0",
+    "mulensmodel>=3.9.0,<4.0.0",
+    "jplephem>=2.24,<3.0",
+    "lightkurve>=2.6.0,<3.0.0",
+    # 0.4.0 ships cp312/cp313/cp314 wheels (manylinux_2_28 -> glibc 2.28/el8,
+    # macos arm64, win_amd64), so no git clone or C++ compiler is needed. Intel
+    # macOS has no wheel and falls back to an sdist build. This was a git HEAD
+    # dep, then a prerelease pin, until 0.4.0 was published.
+    #
+    # The 0.4.0 FLOOR is load-bearing, not cosmetic: through 0.4.0rc1 the JAX
+    # conversion of the limb-darkening Op had no differentiation rule, so
+    # nuts_sampler="numpyro" / "blackjax" died at HMC init on any transit model
+    # (exoplanet-dev/exoplanet-core#144). Lowering this floor silently breaks
+    # the JAX samplers again.
+    "exoplanet-core[pymc]>=0.4.0,<0.5.0",
+    "click>=8.3.3,<9.0.0",
+    "h5py>=3.16.0,<4.0.0",
+    "numba>=0.65.1,<0.66.0",
+    "astroquery>=0.4.7",
+    "gaiadr3-zeropoint>=0.0.1",
+    # jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend
+    # (exoplanet-dev/exoplanet-core#143); the prior <0.5.0 cap was a workaround
+    # for a pytensor 2.35-2.38 Kepler JAX dispatch bug that no longer applies
+    # now that we're on pytensor 3.x.
+    "jax>=0.5.0,<1.0.0",
+    "jaxlib>=0.5.0,<1.0.0",
+    "numpyro>=0.21.0,<1.0.0",
+    "blackjax>=0.8.0,<2.0.0",
+    "nutpie>=0.13.0",
+    # OS specific dependencies
+    "mkl>=2023.0,<2024.0; sys_platform == 'win32'",
+    "mkl-include>=2023.0,<2024.0; sys_platform == 'win32'",
+    # NetCDF write backend for idata.to_netcdf(); arviz/xarray no longer pull
+    # one in by default (it's an optional "io" extra), but we need it to save
+    # traces.
+    "h5netcdf>=1.8.1,<2.0.0",
+    "lxml>=5.0",
+]
 
 # NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live
 # here as an optional extra. They are now a poetry GROUP -- see
@@ -89,48 +126,52 @@ gaiadr3-zeropoint = ">=0.0.1"
 # When mmexofast and sfit-minimizer are on PyPI, move them back up here as a
 # real optional extra with normal version constraints.
 
-# Optional: GUI extra (pip install exozippy[gui] / poetry install -E gui). Declared
-# as optional main dependencies (NOT a dev group) so `pip install exozippy[gui]`
-# pulls them in for end users. The plain CLI and `import exozippy` must keep
-# working without these installed -- every GUI import is guarded.
-fastapi = { version = ">=0.115.0,<1.0.0", optional = true }
-uvicorn = { version = ">=0.30.0,<1.0.0", extras = ["standard"], optional = true }
-websockets = { version = ">=13.0,<16.0", optional = true }
-pywebview = { version = ">=5.0,<6.0", optional = true }
-ruamel-yaml = { version = ">=0.18.0,<1.0.0", optional = true }
+# Optional: GUI extra (pip install exozippy[gui] / poetry install --extras gui).
+# A real extra, NOT a dev group, so `pip install exozippy[gui]` pulls them in
+# for end users. The plain CLI and `import exozippy` must keep working without
+# these installed -- every GUI import is guarded.
 
-# pywebview ships NO GUI backend on Linux -- it only declares one behind its own
-# extras (pywebview[qt] / [gtk]), so `exozippy-gui` without --browser died with
-# "No module named 'qtpy'". pywebview probes GTK first, then Qt; GTK needs
-# PyGObject built against the system gobject-introspection, which is not
-# pip-installable in a venv on older distros, so we supply the Qt backend.
-# Windows (EdgeChromium/pythonnet) and macOS (Cocoa/pyobjc) get their backends
-# from pywebview itself -- hence the linux-only marker.
-#
-# The <6.10 cap is a glibc floor, NOT a bug workaround: PyQt6 6.10+ publishes
-# only manylinux_2_34 wheels, and RHEL/Rocky/Alma 8 ship glibc 2.28. Without the
-# cap pip falls back to a source build and fails for want of qmake. 6.9.x is the
-# last series with manylinux_2_28 wheels. Raise it only once el8 is unsupported.
-qtpy = { version = ">=2.4,<3.0", optional = true, markers = "sys_platform == 'linux'" }
-pyqt6 = { version = ">=6.7,<6.10", optional = true, markers = "sys_platform == 'linux'" }
-pyqt6-webengine = { version = ">=6.7,<6.10", optional = true, markers = "sys_platform == 'linux'" }
+[project.optional-dependencies]
+gui = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+    "websockets>=13.0,<16.0",
+    "pywebview>=5.0,<6.0",
+    "ruamel-yaml>=0.18.0,<1.0.0",
+    # pywebview ships NO GUI backend on Linux -- it only declares one behind its
+    # own extras (pywebview[qt] / [gtk]), so `exozippy-gui` without --browser
+    # died with "No module named 'qtpy'". pywebview probes GTK first, then Qt;
+    # GTK needs PyGObject built against the system gobject-introspection, which
+    # is not pip-installable in a venv on older distros, so we supply the Qt
+    # backend. Windows (EdgeChromium/pythonnet) and macOS (Cocoa/pyobjc) get
+    # their backends from pywebview itself -- hence the linux-only marker.
+    #
+    # The <6.10 cap is a glibc floor, NOT a bug workaround: PyQt6 6.10+
+    # publishes only manylinux_2_34 wheels, and RHEL/Rocky/Alma 8 ship glibc
+    # 2.28. Without the cap pip falls back to a source build and fails for want
+    # of qmake. 6.9.x is the last series with manylinux_2_28 wheels. Raise it
+    # only once el8 is unsupported.
+    "qtpy>=2.4,<3.0; sys_platform == 'linux'",
+    "pyqt6>=6.7,<6.10; sys_platform == 'linux'",
+    "pyqt6-webengine>=6.7,<6.10; sys_platform == 'linux'",
+]
 
-# jax>=0.5.0 is required by exoplanet-core's JAX-FFI backend (exoplanet-dev/exoplanet-core#143);
-# the prior <0.5.0 cap was a workaround for a pytensor 2.35-2.38 Kepler JAX dispatch bug that
-# no longer applies now that we're on pytensor 3.x.
-jax = ">=0.5.0,<1.0.0"
-jaxlib = ">=0.5.0,<1.0.0"
-numpyro = ">=0.21.0,<1.0.0"
-blackjax = ">=0.8.0,<2.0.0"
-nutpie = ">=0.13.0"
+[project.urls]
+Homepage = "https://github.com/jdeast/EXOZIPPy"
 
-# OS specific dependencies
-mkl = { version = "^2023.0", markers = "sys_platform == 'win32'" }
-mkl-include = { version = "^2023.0", markers = "sys_platform == 'win32'" }
-# NetCDF write backend for idata.to_netcdf(); arviz/xarray no longer pull one
-# in by default (it's an optional "io" extra), but we need it to save traces.
-h5netcdf = "^1.8.1"
-lxml = ">=5.0"
+[project.scripts]
+exozippy = "exozippy.cli:main"
+exozippy-modes = "exozippy.cli_modes:main"
+exozippy-gui = "exozippy.gui.app:main"
+
+# Only poetry-specific configuration belongs under [tool.poetry] now; every
+# field above is standard PEP 621 metadata that any tool can read.
+[tool.poetry]
+# Required placeholder. With `dynamic = ["version"]` in [project], poetry-core
+# still insists on a version living in one of the two tables, and
+# poetry-dynamic-versioning overwrites this one at build time. Never edit it.
+packages = [{include = "exozippy", from = "src"}]
+version = "0.0.0"
 
 [tool.poetry.group.dev.dependencies]
 ipdb = ">=0.13.13,<0.14.0"
@@ -148,12 +189,9 @@ pytest-xdist = ">=3.0"
 # test environment is reproducible rather than lucky.
 httpx = ">=0.27,<1.0"
 
-[tool.poetry.extras]
-gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
-
 # Microlensing tooling, git-only and therefore unpublishable as an extra (see
-# the note in [tool.poetry.dependencies]). optional = true keeps it out of a
-# default `poetry install`, exactly as the old extra did.
+# the note in [project]). optional = true keeps it out of a default
+# `poetry install`, exactly as the old extra did.
 #   poetry install --with microlensing
 [tool.poetry.group.microlensing]
 optional = true
@@ -175,19 +213,14 @@ build-backend = "poetry_dynamic_versioning.backend"
 # installed into poetry itself:
 #     poetry self add "poetry-dynamic-versioning[plugin]"
 #     pipx inject poetry "poetry-dynamic-versioning[plugin]"   # pipx installs
-# Without it poetry falls back to the placeholder version above -- which the
-# publish workflow's tag/version guard would catch before anything reaches PyPI.
+# Without it poetry falls back to 0.0.0 -- which the publish workflow's
+# tag/version guard would catch before anything reaches PyPI.
 [tool.poetry-dynamic-versioning]
 enable = true
 vcs = "git"
 style = "pep440"
 # Tags are written v1.2.3; the version is 1.2.3.
 pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?P<stage>[a-zA-Z]+)?(?P<revision>\\d+)?"
-
-[tool.poetry.scripts]
-exozippy = "exozippy.cli:main"
-exozippy-modes = "exozippy.cli_modes:main"
-exozippy-gui = "exozippy.gui.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -196,7 +229,8 @@ norecursedirs = ["exozippy", "src"]
 # same worker so module/session-scoped fixtures (many System builds) are shared,
 # not rebuilt per worker. -n is capped at 6 (not "auto") because each worker
 # peaks ~1-2 GB building a System and compiling graphs; 36 workers would OOM.
-# Override for single-test debugging with `-n0`, e.g.
+# CI overrides this to -n 2 (see .github/workflows/tests.yml) because a GitHub
+# runner cannot afford six. Override for single-test debugging with `-n0`, e.g.
 #   poetry run pytest tests/test_foo.py::test_bar -n0 -x
 addopts = "-n 6 --dist loadfile"
 markers = [
