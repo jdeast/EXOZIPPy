@@ -53,8 +53,6 @@ from exozippy.system import System
 
 from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
-
-# local imports
 from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix

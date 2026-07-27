@@ -1,20 +1,12 @@
-# generic imports
 import ast
 import importlib
 import logging
 from pathlib import Path
 
-# astronomy imports
 import astropy.units as u
-
-# plotting imports
 import matplotlib.pyplot as plt
-
-# scientific imports
 import numpy as np
 import pandas as pd
-
-# pymc imports
 import pymc as pm
 import pytensor
 import pytensor.tensor as pt
@@ -23,8 +15,6 @@ from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 
 from exozippy.components.component import Component
-
-# local imports
 from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
 

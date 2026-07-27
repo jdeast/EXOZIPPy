@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-# local imports
 import logging
 import math
 import re

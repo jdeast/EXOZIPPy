@@ -6,14 +6,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 import pymc as pm
-
-# pymc/exoplanet imports
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.component import Component
-
-# local imports
 from exozippy.components.parameter import Parameter
 
 # this import is required even though it's not used explicitly

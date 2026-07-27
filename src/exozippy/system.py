@@ -12,7 +12,6 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
-# local imports
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec

@@ -1,17 +1,10 @@
-# general imports
 import json
 from pathlib import Path
 from typing import Dict, List, Literal, Sequence, Tuple
 
 import astropy.constants as const
-
-# astronomy imports
 import astropy.units as u
-
-# plotting imports
 import matplotlib.pyplot as plt
-
-# scientific imports
 import numpy as np
 import pandas as pd
 import yaml
@@ -19,7 +12,6 @@ from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 from scipy import interpolate
 
-# internal imports
 # from exozippy.constants import *
 from ...constants import *
 from .bc_grid import _load_alias_table, resolve_filter_name

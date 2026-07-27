@@ -1,4 +1,3 @@
-# general imports
 import os
 import pathlib
 
@@ -7,8 +6,6 @@ import pickle
 from typing import Tuple
 
 import numpy as np
-
-# scientific imports
 import pandas as pd
 import requests
 from astropy import units as u
