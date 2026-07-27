@@ -1,6 +1,10 @@
 [tool.poetry]
 name = "exozippy"
-version = "0.1.0"
+# Placeholder only. poetry-dynamic-versioning overwrites this at build time
+# with the version derived from `git describe`, so a release is a tag and
+# nothing else -- there is no version string to forget to bump. A working tree
+# with no tags at all builds as 0.0.0.
+version = "0.0.0"
 description = "general modeling fitting code"
 authors = ["Jason Eastman <jason.eastman@cfa.harvard.edu>","Phoebe Sandhaus <pjs5535@psu.edu>"]
 readme = "README.md"
@@ -11,9 +15,11 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
+    # Keep in sync with the `python` constraint below. 3.14 is excluded there
+    # (numba <0.66 has no 3.14 support), so advertising it here would be a
+    # metadata lie that pip acts on.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
 ]
 packages = [{include = "exozippy", from = "src"}]
@@ -110,8 +116,25 @@ microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
 gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
 
 [build-system]
-requires = ["poetry-core>=2.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.4.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+# Version comes from the git tag, never from this file. `poetry build` and
+# `pip install .` both go through the backend shim above, so an sdist built
+# from a v1.2.3 tag is 1.2.3 and an untagged working tree is 0.0.0.post<n>.
+#
+# For interactive `poetry build` / `poetry version`, the plugin must also be
+# installed into poetry itself:
+#     poetry self add "poetry-dynamic-versioning[plugin]"
+#     pipx inject poetry "poetry-dynamic-versioning[plugin]"   # pipx installs
+# Without it poetry falls back to the placeholder version above -- which the
+# publish workflow's tag/version guard would catch before anything reaches PyPI.
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "pep440"
+# Tags are written v1.2.3; the version is 1.2.3.
+pattern = "^v(?P<base>\\d+\\.\\d+\\.\\d+)(?P<stage>[a-zA-Z]+)?(?P<revision>\\d+)?"
 
 [tool.poetry.scripts]
 exozippy = "exozippy.cli:main"

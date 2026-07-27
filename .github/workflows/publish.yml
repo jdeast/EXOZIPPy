@@ -1,0 +1,152 @@
+name: Publish
+
+# EXOZIPPy is pure Python, so there are no binary wheels to build per platform
+# -- one sdist plus one py3-none-any wheel covers everything. That is the whole
+# difference between this file and exoplanet-core's wheels.yml.
+#
+# Triggers:
+#   push of a v* tag  -> build, verify, publish to PyPI, create a GitHub Release
+#   workflow_dispatch -> build and verify only; optionally publish to TestPyPI
+#
+# Publishing uses PyPI Trusted Publishing (OIDC), so there is no API token in
+# the repository secrets. The trust is registered on PyPI against this exact
+# combination and nothing else can use it:
+#
+#     owner/repo:    jdeast/EXOZIPPy
+#     workflow:      publish.yml     <- this file's name; renaming it breaks
+#                                       publishing until PyPI is updated too
+#     environment:   pypi            <- must also exist in repo Settings
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Also publish the build to TestPyPI (rehearsal)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is required, not tidiness: poetry-dynamic-versioning
+      # derives the version from `git describe`, and a shallow clone has no
+      # tags to describe against.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install -U pip
+          pipx install poetry
+          pipx inject poetry "poetry-dynamic-versioning[plugin]"
+          python -m pip install -U twine
+
+      - name: Build sdist and wheel
+        run: poetry build
+
+      - name: Check the metadata
+        run: python -m twine check dist/*
+
+      # On a tag push, fail fast if the version the build derived does not match
+      # the tag. exoplanet-core shipped a v0.4.0 run that built rc2-named
+      # artifacts because two tags sat on one commit and `git describe` picked
+      # between them non-deterministically; it only failed because those files
+      # already existed on PyPI. A first-time name would have published silently
+      # wrong. PyPI versions can never be reused, so check before uploading.
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.tar.gz | sed -E 's|.*/exozippy-(.*)\.tar\.gz|\1|')
+          echo "tag=$tag built=$built"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME implies version '$tag' but the" \
+                 "build produced '$built'. Refusing to publish. If two tags" \
+                 "point at this commit, move the release tag to its own commit."
+            exit 1
+          fi
+
+      # upload/download-artifact stay on v4: v5 still declares node20, so
+      # bumping gains nothing for the Node 24 migration.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  # Rehearsal target. TestPyPI needs its own trusted publisher registered
+  # against this same workflow, with environment name "testpypi".
+  testpypi:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/exozippy
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@v1.12.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/exozippy
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@v1.12.3
+
+  # Pushing a tag publishes to PyPI but does NOT create a GitHub Release -- that
+  # is a separate object -- so the Releases page silently falls behind the tags.
+  # Create it here from the annotated tag's own message so the two never
+  # diverge. Tags containing a/b/rc are marked as pre-releases.
+  github_release:
+    needs: [pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # Body = the annotated tag message minus its first line (the title).
+          git tag -l "$tag" --format='%(contents)' | tail -n +2 > notes.md
+          prerelease=""
+          case "$tag" in
+            *a*|*b*|*rc*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$tag" --verify-tag --title "$tag" \
+            --notes-file notes.md $prerelease dist/*
