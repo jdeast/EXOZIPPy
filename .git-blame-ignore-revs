@@ -1,0 +1,14 @@
+# Commits listed here are skipped by `git blame`, so a mechanical reformat
+# does not show up as the last author of every line in the repository.
+#
+# GitHub honours this file automatically in its blame view. Locally it needs
+# one opt-in, once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only ever add commits that are PURELY mechanical -- no logic changes mixed
+# in. A commit listed here becomes invisible to blame, so anything real hidden
+# inside it is effectively lost to archaeology.
+
+# Apply black and isort across the tree (176 files).
+536c2da893368f42094cdcf5e4ca940abdd5de89
