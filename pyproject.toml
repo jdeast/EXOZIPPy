@@ -15,9 +15,11 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
-    # Keep in sync with the `python` constraint below. 3.14 is excluded there
-    # (numba <0.66 has no 3.14 support), so advertising it here would be a
-    # metadata lie that pip acts on.
+    # Keep in sync with the `python` constraint below, which stops at 3.14 --
+    # advertising a version the constraint excludes is a metadata lie pip acts
+    # on. The cap is NOT numba's doing (numba has shipped cp314 wheels since
+    # 0.63, and pytensor has allowed <3.15 since 3.1.0); it is the unused
+    # `celerite` dep, whose wheels stop at cp312. See its entry below.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3 :: Only",
@@ -35,6 +37,12 @@ pymc = ">=6.0.0,<7.0.0"
 pyyaml = ">=6.0.3,<7.0.0"
 matplotlib = ">=3.10.9,<4.0.0"
 astropy = ">=7.2.0,<8.0.0"
+# NOTE: celerite v1 is imported nowhere in the tree -- the GP terms all come
+# from celerite2 below. It is also the ONLY dependency blocking Python 3.14:
+# its wheels stop at cp312 (no cp313, no cp314), so 3.13 already source-builds
+# it and 3.14 would too. Dropping it and raising `python` to <3.15 is the whole
+# 3.14 story; it needs a `poetry lock` and a test run, so it is deliberately
+# not bundled into the release-plumbing commit.
 celerite = ">=0.4.3,<0.5.0"
 corner = ">=2.2.3,<3.0.0"
 mulensmodel = ">=3.9.0,<4.0.0"
