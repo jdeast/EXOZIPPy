@@ -694,43 +694,6 @@ files = [
 ]
 
 [[package]]
-name = "celerite"
-version = "0.4.3"
-description = "Scalable 1D Gaussian Processes"
-optional = false
-python-versions = ">=3.9"
-groups = ["main"]
-files = [
-    {file = "celerite-0.4.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:c433697026c144b3968342de380d30e5871e3dcb8f0c7db17e59786d67d943fb"},
-    {file = "celerite-0.4.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:3be153dc1a06948dcc35b394455af68b03e39b7bbfa5835d4cf62d040c090b4a"},
-    {file = "celerite-0.4.3-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b2f1377789600a9fd66962d38fd4b35df255205512a2d5d6171d8569aa104fb5"},
-    {file = "celerite-0.4.3-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:845db1bd018a5c03399385aa5a8b1f5913aaaa613d51e4d8ba1092a84c4b73c5"},
-    {file = "celerite-0.4.3-cp310-cp310-win_amd64.whl", hash = "sha256:c06643359d5f2d02429c151d2fc567a8bea1e1f2f7fe2a1050729c9de843231a"},
-    {file = "celerite-0.4.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:702646a2fd7664648dcd126f0ecbefdacec16d2ff06b3b98b14f5321c1184af0"},
-    {file = "celerite-0.4.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:383532f043a11a25c5d3889169273db3f8ef33026c86397bafebbedd7e013dfd"},
-    {file = "celerite-0.4.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7a8003db2e725f93844ca40acb2919290b9b6b20395abeb3d252ccd275e18ab8"},
-    {file = "celerite-0.4.3-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:433c3a3ccc52afbcb360b66ad4b501bfe06d9b81e75cfd7495680640ddbbc45d"},
-    {file = "celerite-0.4.3-cp311-cp311-win_amd64.whl", hash = "sha256:760c9624d65a524da3ed04dedcab6a964310306faefcce20e94da0034964df5a"},
-    {file = "celerite-0.4.3-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:1e9a68739f1e051401a0bf40e18779563965f22ca36a2f10dfe58e7d31f71bbf"},
-    {file = "celerite-0.4.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:68ac010dc3990d3339e1c7c35536b92ecc3d5a6bad2ee9add8646b241a290ce8"},
-    {file = "celerite-0.4.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3ab8b71513fba2bf54b8a152d21071efc1282c9ae69a1fc193fa077a7997befd"},
-    {file = "celerite-0.4.3-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:a1ab89af0f99aaafc1f7f26d103c679410eb0698986f92309d67cadbb7063a9e"},
-    {file = "celerite-0.4.3-cp312-cp312-win_amd64.whl", hash = "sha256:1fa4e44a6a12941e1ff0cc6a8d0ce6a036ebfd253337705cb81c6bff529b29a0"},
-    {file = "celerite-0.4.3-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:f574ee15abcfb155bdca1e5ce02c249154b50a3e40b0afe1db60624a9240252f"},
-    {file = "celerite-0.4.3-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:e7c22b522027fcb702b033088ca8c6bcf1c853597651f1fb4f7e1921a7ad2d25"},
-    {file = "celerite-0.4.3-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:16c0d84b86f6238e1df5c28b4ab56e5fc8e344fc8ec31e4ec739495c3e4edba6"},
-    {file = "celerite-0.4.3-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:a47dda015f487ba0d4d5f0fa98af1ef2ef06a261afe2beabcf2e3307a111955f"},
-    {file = "celerite-0.4.3-cp39-cp39-win_amd64.whl", hash = "sha256:f31b2b378af53e20b47d4e75752fb7e7a5f52bf51ab79fa201ef5f342aed5c0b"},
-    {file = "celerite-0.4.3.tar.gz", hash = "sha256:aa8b487f57a7cc9793c4652b19b2df090beaa849730b50805f030694e94d0f6d"},
-]
-
-[package.dependencies]
-numpy = "*"
-
-[package.extras]
-test = ["coverage[toml]", "pytest", "pytest-cov"]
-
-[[package]]
 name = "celerite2"
 version = "0.3.3"
 description = "Fast and scalable Gaussian Processes in 1D"
@@ -1391,7 +1354,8 @@ files = [
 absl-py = ">=0.6.1"
 attrs = ">=18.2.0"
 numpy = [
-    {version = ">=2.1.0", markers = "python_version >= \"3.13\""},
+    {version = ">=2.3.2", markers = "python_version >= \"3.14\""},
+    {version = ">=2.1.0", markers = "python_version == \"3.13\""},
     {version = ">=1.26.0", markers = "python_version == \"3.12\""},
 ]
 wrapt = ">=1.11.2"
@@ -1419,10 +1383,9 @@ test = ["cloudpickle", "pytest"]
 name = "emcee"
 version = "3.1.6"
 description = "The Python ensemble sampling toolkit for MCMC"
-optional = true
+optional = false
 python-versions = "*"
-groups = ["main"]
-markers = "extra == \"microlensing\""
+groups = ["microlensing"]
 files = [
     {file = "emcee-3.1.6-py2.py3-none-any.whl", hash = "sha256:f2d63752023bdccf744461450e512a5b417ae7d28f18e12acd76a33de87580cb"},
     {file = "emcee-3.1.6.tar.gz", hash = "sha256:11af4daf6ab8f9ca69681e3c29054665db7bbd87fd4eb8e437d2c3a1248c637d"},
@@ -3225,10 +3188,9 @@ dev = ["absl-py", "pyink", "pylint (>=2.6.0)", "pytest", "pytest-xdist"]
 name = "mmexofast"
 version = "0.0.0"
 description = ""
-optional = true
+optional = false
 python-versions = "*"
-groups = ["main"]
-markers = "extra == \"microlensing\""
+groups = ["microlensing"]
 files = []
 develop = false
 
@@ -3644,7 +3606,7 @@ version = "2.4.6"
 description = "Fundamental package for array computing in Python"
 optional = false
 python-versions = ">=3.11"
-groups = ["main", "dev"]
+groups = ["main", "dev", "microlensing"]
 files = [
     {file = "numpy-2.4.6-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:0280e0356c0829a18d9de1cb7eee50ec22ca639878d7240307ca0943d73cd2c4"},
     {file = "numpy-2.4.6-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:110f8b71aacb688ec69062bb7f6938a0f8acb01b7c1c4beb453c65b6d234584d"},
@@ -5734,10 +5696,9 @@ type = ["importlib_metadata (>=7.0.2) ; python_version < \"3.10\"", "jaraco.deve
 name = "sfit_minimizer"
 version = "0.0.0"
 description = ""
-optional = true
+optional = false
 python-versions = "*"
-groups = ["main"]
-markers = "extra == \"microlensing\""
+groups = ["microlensing"]
 files = []
 develop = false
 
@@ -6710,9 +6671,8 @@ remote = ["fsspec (>=2023.10.0)", "obstore (>=0.5.1)"]
 
 [extras]
 gui = ["fastapi", "pyqt6", "pyqt6-webengine", "pywebview", "qtpy", "ruamel-yaml", "uvicorn", "websockets"]
-microlensing = ["emcee", "mmexofast", "sfit-minimizer"]
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.12,<3.14"
-content-hash = "422517edd5edac41b32e6d2e308d7bb0b79ed3016548202c52d936fcf7a7d364"
+python-versions = ">=3.12,<3.15"
+content-hash = "a19064b8179c73a03576e315fdcfc74fded847c807772f1da5377f729d64e379"

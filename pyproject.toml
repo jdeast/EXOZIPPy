@@ -15,19 +15,21 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering",
-    # Keep in sync with the `python` constraint below, which stops at 3.14 --
-    # advertising a version the constraint excludes is a metadata lie pip acts
-    # on. The cap is NOT numba's doing (numba has shipped cp314 wheels since
-    # 0.63, and pytensor has allowed <3.15 since 3.1.0); it is the unused
-    # `celerite` dep, whose wheels stop at cp312. See its entry below.
+    # Keep in sync with the `python` constraint below -- advertising a version
+    # the constraint excludes is a metadata lie that pip acts on.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
 ]
 packages = [{include = "exozippy", from = "src"}]
 
 [tool.poetry.dependencies]
-python = ">=3.12,<3.14"
+# <3.15 is pytensor's own cap (it has declared >=3.12,<3.15 since 3.1.0).
+# Everything else in this tree is either pure-Python, ships cp314 wheels
+# (numba since 0.63, numpy, scipy, pandas, h5py, jaxlib, nutpie, celerite2,
+# exoplanet-core), or is stable-ABI cp311-abi3 (astropy).
+python = ">=3.12,<3.15"
 pytensor = ">=3.1.2,<3.2.0"
 pandas = ">=1.3.6,<3.0.0"
 arviz = ">=1.1.0,<2.0.0"
@@ -37,13 +39,11 @@ pymc = ">=6.0.0,<7.0.0"
 pyyaml = ">=6.0.3,<7.0.0"
 matplotlib = ">=3.10.9,<4.0.0"
 astropy = ">=7.2.0,<8.0.0"
-# NOTE: celerite v1 is imported nowhere in the tree -- the GP terms all come
-# from celerite2 below. It is also the ONLY dependency blocking Python 3.14:
-# its wheels stop at cp312 (no cp313, no cp314), so 3.13 already source-builds
-# it and 3.14 would too. Dropping it and raising `python` to <3.15 is the whole
-# 3.14 story; it needs a `poetry lock` and a test run, so it is deliberately
-# not bundled into the release-plumbing commit.
-celerite = ">=0.4.3,<0.5.0"
+# celerite v1 used to be pinned here. It was imported nowhere in the tree (the
+# GP terms all come from celerite2 below) and was the ONLY dependency blocking
+# Python 3.14 -- its wheels stop at cp312, so even 3.13 was source-building it.
+# Do not add it back; use celerite2.
+#
 # celerite2's PyMC backend supplies the optional per-file Gaussian-process
 # noise terms (the `gp:` key on any instrument data file; see
 # components/gp.py).  It registers a JAX conversion for its PyTensor ops
@@ -72,10 +72,22 @@ numba = ">=0.65.1,<0.66.0"
 astroquery = ">=0.4.7"
 gaiadr3-zeropoint = ">=0.0.1"
 
-# Optional: microlensing extra (pip install exozippy[microlensing] / poetry install -E microlensing)
-mmexofast = { git = "https://github.com/jenniferyee/MMEXOFAST.git", optional = true }
-sfit-minimizer = { git = "https://github.com/jenniferyee/sfit_minimizer.git", optional = true }
-emcee = { version = "^3.1.6", optional = true }
+# NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live
+# here as an optional extra. They are now a poetry GROUP -- see
+# [tool.poetry.group.microlensing] near the bottom -- because PyPI REJECTS any
+# distribution whose metadata carries a direct URL reference (PEP 440), and
+# being behind an optional extra does not exempt them. Two `pkg @ git+https://`
+# entries in Requires-Dist are a hard 400 at upload time; `twine check` does
+# NOT catch it, since that rule is enforced server-side only.
+#
+# Groups are a build-time/dev concept and never reach the published metadata,
+# so `poetry install --with microlensing` still works from a git clone while
+# `pip install exozippy` stays publishable. Nothing in the tree imports any of
+# the three (the mmexofast integration parses its JSON output, it does not
+# import the package), so this costs end users nothing.
+#
+# When mmexofast and sfit-minimizer are on PyPI, move them back up here as a
+# real optional extra with normal version constraints.
 
 # Optional: GUI extra (pip install exozippy[gui] / poetry install -E gui). Declared
 # as optional main dependencies (NOT a dev group) so `pip install exozippy[gui]`
@@ -131,8 +143,19 @@ pytest-timeout = "^2.4.0"
 pytest-xdist = ">=3.0"
 
 [tool.poetry.extras]
-microlensing = ["mmexofast", "sfit-minimizer", "emcee"]
 gui = ["fastapi", "uvicorn", "websockets", "pywebview", "ruamel-yaml", "qtpy", "pyqt6", "pyqt6-webengine"]
+
+# Microlensing tooling, git-only and therefore unpublishable as an extra (see
+# the note in [tool.poetry.dependencies]). optional = true keeps it out of a
+# default `poetry install`, exactly as the old extra did.
+#   poetry install --with microlensing
+[tool.poetry.group.microlensing]
+optional = true
+
+[tool.poetry.group.microlensing.dependencies]
+mmexofast = { git = "https://github.com/jenniferyee/MMEXOFAST.git" }
+sfit-minimizer = { git = "https://github.com/jenniferyee/sfit_minimizer.git" }
+emcee = "^3.1.6"
 
 [build-system]
 requires = ["poetry-core>=2.0.0", "poetry-dynamic-versioning>=1.4.0,<2.0.0"]
