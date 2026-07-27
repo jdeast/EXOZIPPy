@@ -136,6 +136,49 @@ def _load_param_block(cls, yaml_key):
     return block if isinstance(block, dict) else {}
 
 
+def _load_shared_defaults():
+    """Load the root-level (component-agnostic) parameter defaults.
+
+    ``src/exozippy/components/defaults.yaml`` declares parameters by bare name
+    instead of under a component key; ConfigManager.resolve() treats it as the
+    blueprint any component's own block is layered over. Mirroring that here
+    keeps introspection's view of a parameter identical to the one the model
+    is actually built from.
+    """
+    path = Path(__file__).parent / "components" / "defaults.yaml"
+    if not path.exists():
+        return {}
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _merged_param_block(cls, yaml_key):
+    """A component's parameter block, including the shared parameters it uses.
+
+    ``Component.shared_parameter_names()`` names root-level parameters the
+    component may register but does not fully redeclare (Instrument's optional
+    GP hyperparameters are the current case: the shared file carries the
+    blueprint, the component overrides only the amplitude's unit and bounds).
+    Those are layered in here so a GUI sees every parameter a fit can produce,
+    not just the ones a component happened to override.
+    """
+    block = _load_param_block(cls, yaml_key)
+    shared_names = list(cls.shared_parameter_names())
+    if not shared_names:
+        return dict(block)
+
+    shared = _load_shared_defaults()
+    merged = dict(block)
+    for name in shared_names:
+        if name not in shared and name not in merged:
+            continue
+        entry = dict(shared.get(name, {}))
+        entry.update(block.get(name, {}))   # the component's own block wins
+        merged[name] = entry
+    return merged
+
+
 def list_components():
     """Return a summary of every discoverable component.
 
@@ -167,7 +210,7 @@ def component_schema(yaml_key):
             f"Known components: {sorted(registry)}"
         )
     cls = registry[yaml_key]
-    block = _load_param_block(cls, yaml_key)
+    block = _merged_param_block(cls, yaml_key)
 
     parameters = {
         name: _param_schema(name, raw) for name, raw in block.items()

@@ -99,6 +99,15 @@ VALID_MODES = ("gaia", "abs", "rel")
 
 
 class AstrometryInstrument(Instrument):
+    # No per-file Gaussian process here.  Unlike the other instruments, an
+    # astrometric dataset carries two observables per epoch -- (dE, dN) in
+    # 'abs' mode, (sep, PA) in 'rel' mode -- with different units, so a single
+    # kernel amplitude cannot describe both.  'gaia' mode's along-scan
+    # abscissa residual is one-dimensional and could support one, but wiring
+    # only that mode would make the `gp:` key silently mean different things
+    # per dataset.  Instrument._load_gp_config raises on `gp:` here instead.
+    supports_gp = False
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Astrometry Parameters"
@@ -268,6 +277,9 @@ class AstrometryInstrument(Instrument):
         for i, file in enumerate(self.files):
             mode = self.modes[i]
             df = pd.read_csv(file, sep=r"\s+", engine="c", header=None, comment="#")
+            # Sort before the parallax factors are computed from t, so every
+            # per-epoch quantity stays aligned regardless of mode.
+            df = self._sort_by_time(df)
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))

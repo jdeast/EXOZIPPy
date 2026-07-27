@@ -731,6 +731,41 @@ numpy = "*"
 test = ["coverage[toml]", "pytest", "pytest-cov"]
 
 [[package]]
+name = "celerite2"
+version = "0.3.3"
+description = "Fast and scalable Gaussian Processes in 1D"
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+files = [
+    {file = "celerite2-0.3.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:f3d624e3d8ac2c3a27cfbf0db240f13eae84682d129bd31f299d60f6912dc975"},
+    {file = "celerite2-0.3.3-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ec0919e12dcade861907df75e5d1e73bef85385bafcd05cb342e1af682c30f16"},
+    {file = "celerite2-0.3.3-cp311-cp311-win_amd64.whl", hash = "sha256:d69a07345d634305eec1669cf4068642231d9a61925b2d0003a6c6e38360a6a2"},
+    {file = "celerite2-0.3.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:41a0e96946eebf2ac7373534d7b8b0c57a0cd21dbb597018233e780f9e1708c4"},
+    {file = "celerite2-0.3.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:151aa79ed968c41105858d9e06914dbf37e9e77661ac056c68203dacaab97cd7"},
+    {file = "celerite2-0.3.3-cp312-cp312-win_amd64.whl", hash = "sha256:81037873b7bae3f566c1e04deef5076db6473c9c19013ef815ccc0cf27fec157"},
+    {file = "celerite2-0.3.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:10451cc2d0a51588fc5fe42ab6f7bbbf9369c77013a67c0d3000eaffdcf52804"},
+    {file = "celerite2-0.3.3-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d0672edc16bed7dfc6965db85dfa12c47d3d336631c79fb10d3e67c14d15f4fd"},
+    {file = "celerite2-0.3.3-cp313-cp313-win_amd64.whl", hash = "sha256:d01127a97a4d1075b1f9323bea108fdab72d16614c7c6b9dca5c69650660daec"},
+    {file = "celerite2-0.3.3-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:7cdd0f1abafad933cc858b6d25d8a23e7de90a425cda31c5ea48e4d0659bad80"},
+    {file = "celerite2-0.3.3-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:592440f017a75fffedf518840ecaece9e57ece7be3d53a17ae6869c96951cf5d"},
+    {file = "celerite2-0.3.3-cp314-cp314-win_amd64.whl", hash = "sha256:9d13c4216c455dfa35e4ef5421370d241b79371aa157a29ecc50b9bcbc4186c8"},
+    {file = "celerite2-0.3.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:a8219b291715fdc7c5c326d5c7a1508fb148577c4cde4da3ef5b50d323aee3ea"},
+    {file = "celerite2-0.3.3-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:61bbcd1bfefa25711d8013bb1610ebfe7f94d2a6efce71292771ad64634f45d8"},
+    {file = "celerite2-0.3.3.tar.gz", hash = "sha256:794208355023c742f1b95e5478535eace1ca2e698cbdfd4757b541e23742384f"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+docs = ["breathe", "emcee", "matplotlib", "myst-nb", "numpyro", "pymc (>=5.26.1)", "scipy", "sphinx", "sphinx-material", "sphinx_copybutton", "tqdm"]
+jax = ["jax (>=0.8.0)"]
+pymc = ["pymc (>=5.26.1)"]
+test = ["celerite", "pytest", "scipy"]
+tutorials = ["emcee", "matplotlib", "numpyro", "pymc (>=5.26.1)", "scipy", "tqdm"]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -1357,7 +1392,7 @@ absl-py = ">=0.6.1"
 attrs = ">=18.2.0"
 numpy = [
     {version = ">=2.1.0", markers = "python_version >= \"3.13\""},
-    {version = ">=1.26.0", markers = "python_version >= \"3.12\""},
+    {version = ">=1.26.0", markers = "python_version == \"3.12\""},
 ]
 wrapt = ">=1.11.2"
 
@@ -1448,25 +1483,25 @@ tests = ["asttokens (>=2.1.0)", "coverage", "coverage-enable-subprocess", "ipyth
 
 [[package]]
 name = "exoplanet-core"
-version = "0.4.0rc1"
+version = "0.4.0"
 description = "The compiled backend for exoplanet"
 optional = false
 python-versions = ">=3.12"
 groups = ["main"]
 files = [
-    {file = "exoplanet_core-0.4.0rc1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f00239831403a4033b1d7b9490fc7fc0e6584e72b93e092f2f6b69424fa55cd0"},
-    {file = "exoplanet_core-0.4.0rc1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:421bde3e16fd27815726db227ecc70bb5255c0dce7ea2f8f43ff8f21c98caae4"},
-    {file = "exoplanet_core-0.4.0rc1-cp312-cp312-win_amd64.whl", hash = "sha256:6685d1fb16cb584f2fbaf433007785020b0dea8c18f755683102170532d8ef19"},
-    {file = "exoplanet_core-0.4.0rc1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a7d8fcc41531b46d1f70c0b18e966d5af493a43ec5f606c996fae61820d0db5b"},
-    {file = "exoplanet_core-0.4.0rc1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:afd98a13c4aeaff0a12ac863bc814f80ba5c6fe0062fca38056e32a459629710"},
-    {file = "exoplanet_core-0.4.0rc1-cp313-cp313-win_amd64.whl", hash = "sha256:b3180d2bc90508e1fe84f10f1fd235921fc036948ac22177d6681ecf162588b0"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:4e58fa5c1af7aa6fe9ea58e76eaedf45ac7184ddfac6d498b3677519a0731d50"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dbda0a7caf45bbc93027be0e62fc39cd5b5c688c57ef159da47db942bab48377"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314-win_amd64.whl", hash = "sha256:468d263e976f8ecf828efc8af1279a7648966502cf75f12a960d7826e73b910a"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:995cec11d71e53a4173f440442f515c0dc97e8da5de6d688de86061b35f96b6f"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a9ab2b544ba3e05d9bf1db1f1d406642071975f853c89536d19b6b1ca3dda7c7"},
-    {file = "exoplanet_core-0.4.0rc1-cp314-cp314t-win_amd64.whl", hash = "sha256:f88179f1dee95b113c38bdd954558a0988aad2980b22f20bb61769dd37821384"},
-    {file = "exoplanet_core-0.4.0rc1.tar.gz", hash = "sha256:349b194436f98e20741d00832cd778c8f28768e6f1f8a498ad4c16acbec7a5da"},
+    {file = "exoplanet_core-0.4.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9690d600681ff224a7b0bbc5f03631a1db2bffa44712b75842b3a777578d98a3"},
+    {file = "exoplanet_core-0.4.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:edfe7ff129dbfc3e5c9d1ef8a53d3af1cd0b3e8b99950a4eca33a7e28c2a3b2b"},
+    {file = "exoplanet_core-0.4.0-cp312-cp312-win_amd64.whl", hash = "sha256:4b7b2e4eaba547444f94546aa85087050a8a76c70b8197165197b6d6c99746d8"},
+    {file = "exoplanet_core-0.4.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:f9245f8d56d237324d852b4aa8fed57809244d015bfe6acb3b0040e6c44b8365"},
+    {file = "exoplanet_core-0.4.0-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fd36806879bfd9de224f0b32a3b6816b51b967cecd2ab9219f0c8c00c00bc720"},
+    {file = "exoplanet_core-0.4.0-cp313-cp313-win_amd64.whl", hash = "sha256:250d33101331423d000d48fb8f3b36f459d4b05643ccc6da55673248065f4fb5"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:ef7339e60b3e656cc623f8a721ebdb5258f085011e77b01bc91c5c2d338a579f"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d627995bab59cd42cc56eb12780f3ad154d7c7b68fe067c9bb28569463d4318f"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314-win_amd64.whl", hash = "sha256:34905e7bea1b6bcf77b05ecfc1e8712f63db0d3e2a68d92713a54bed2c796825"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:4302914a4e1cf3389228fd35ef6bdaa223a5180b39d878f8364d2042dc0c63cb"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:25c8d5204f051080e8ebf16c615412b17b31dcf9756ab8c720eec3afa3d696ac"},
+    {file = "exoplanet_core-0.4.0-cp314-cp314t-win_amd64.whl", hash = "sha256:d9ca38d88dcf50a778f61f21944325efff92f83e82ab4ba497d8f1fc23dcc1ec"},
+    {file = "exoplanet_core-0.4.0.tar.gz", hash = "sha256:6354063acf2e2a6705a7ef08e975612e9f1f30990c539a38ad99d7b2ad331055"},
 ]
 
 [package.dependencies]
@@ -3180,7 +3215,7 @@ files = [
 [package.dependencies]
 numpy = [
     {version = ">=2.1.0", markers = "python_version >= \"3.13\""},
-    {version = ">=1.26.0", markers = "python_version == \"3.12\""},
+    {version = ">=1.26.0", markers = "python_version >= \"3.12\""},
 ]
 
 [package.extras]
@@ -6680,4 +6715,4 @@ microlensing = ["emcee", "mmexofast", "sfit-minimizer"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "3932f5cb41c29d44db127992cdf2329981f929996d28f72c4ad56c2051d3402a"
+content-hash = "422517edd5edac41b32e6d2e308d7bb0b79ed3016548202c52d936fcf7a7d364"

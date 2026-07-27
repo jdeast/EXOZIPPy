@@ -1,0 +1,112 @@
+# Root-level defaults shared by every instrument component.
+#
+# ConfigManager.resolve() layers `base_defaults[<param>]` (this file) under
+# `base_defaults[<component>][<param>]`, so these are the generic blueprint for
+# the optional celerite2 Gaussian-process noise terms (see components/gp.py and
+# the `gp:` key on any instrument data file).  Each instrument overrides only
+# what is genuinely instrument-specific in its own defaults.yaml -- in practice
+# just the amplitude's unit and bounds, since "GP amplitude" means m/s for RVs,
+# relative flux for a light curve, and magnitudes for a microlensing curve.
+#
+# Only files with a `gp:` key register these at all; a fit with no GP has zero
+# extra parameters.  Elements of an instrument that did not opt in are pinned
+# fixed (sigma: 0) by Instrument._register_gp and never sampled.
+
+# --- RotationTerm: two SHO modes at P and P/2 (stellar rotation) -------------
+
+gp_rot_sigma:
+  # Amplitude (standard deviation) of the rotation kernel.  Overridden per
+  # component with the data's own unit; the initval and init_scale here are
+  # superseded by a data-driven hint (scatter of the observations) whenever
+  # the component supplies one.
+  lower: 0.0
+  upper: 1.0e6
+  initval: 1.0
+  init_scale: 0.5
+  unit: ""
+  internal_unit: ""
+  latex: "\\sigma_{\\rm GP,rot}"
+  description: "GP rotation-term amplitude"
+
+gp_rot_period:
+  # The rotation period itself.  Sampled linearly, in days, so a literature
+  # prior can be written as-is: {mu: 22.56, sigma: 0.29}.
+  lower: 0.05
+  upper: 10000.0
+  initval: 10.0
+  init_scale: 0.5
+  unit: "d"
+  internal_unit: "d"
+  latex: "P_{\\rm GP,rot}"
+  description: "GP rotation-term period"
+
+gp_rot_log_q0:
+  # log10 of the quality factor of the secondary (P/2) oscillation.  Sampled
+  # in the log because Q spans decades; the linear Q0 is reported as a
+  # Deterministic by Instrument.  Range 0.1 -- 1e4.
+  lower: -1.0
+  upper: 4.0
+  initval: 0.3
+  init_scale: 0.2
+  unit: ""
+  internal_unit: ""
+  latex: "\\log{Q_{0,\\rm GP}}"
+  description: "log10 GP rotation-term secondary quality factor"
+
+gp_rot_log_dq:
+  # log10 of the difference between the primary and secondary quality factors.
+  lower: -1.0
+  upper: 4.0
+  initval: 0.0
+  init_scale: 0.2
+  unit: ""
+  internal_unit: ""
+  latex: "\\log{\\Delta Q_{\\rm GP}}"
+  description: "log10 GP rotation-term quality-factor difference"
+
+gp_rot_f:
+  # Fractional amplitude of the secondary (P/2) mode relative to the primary.
+  lower: 0.01
+  upper: 1.0
+  initval: 0.5
+  init_scale: 0.1
+  unit: ""
+  internal_unit: ""
+  latex: "f_{\\rm GP}"
+  description: "GP rotation-term secondary-mode amplitude fraction"
+
+# --- SHOTerm: one damped oscillator (granulation, generic red noise) ---------
+
+gp_sho_sigma:
+  lower: 0.0
+  upper: 1.0e6
+  initval: 1.0
+  init_scale: 0.5
+  unit: ""
+  internal_unit: ""
+  latex: "\\sigma_{\\rm GP,SHO}"
+  description: "GP SHO-term amplitude"
+
+gp_sho_rho:
+  # Undamped period of the oscillator, in days.
+  lower: 0.05
+  upper: 10000.0
+  initval: 10.0
+  init_scale: 0.5
+  unit: "d"
+  internal_unit: "d"
+  latex: "\\rho_{\\rm GP}"
+  description: "GP SHO-term undamped period"
+
+gp_sho_log_q:
+  # log10 of the oscillator quality factor.  The default start is Q = 1/3
+  # (log10 = -0.4771), the standard overdamped granulation choice.  Note the
+  # kernel switches formula at Q = 0.5; see components/gp.py.
+  lower: -1.0
+  upper: 4.0
+  initval: -0.4771
+  init_scale: 0.2
+  unit: ""
+  internal_unit: ""
+  latex: "\\log{Q_{\\rm GP}}"
+  description: "log10 GP SHO-term quality factor"

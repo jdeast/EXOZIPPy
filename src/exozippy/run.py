@@ -288,6 +288,12 @@ def _run_fit(config, gui):
             elif method in ("numpyro", "blackjax"):
                 import jax
                 jax.config.update("jax_enable_x64", True)
+                if method == "blackjax":
+                    # pymc forwards its own progress_bar kwarg into blackjax's
+                    # kernel, which raises for every model. See
+                    # exozippy/compat/blackjax_progressbar.py; self-retiring.
+                    from .compat import patch_blackjax_progress_bar
+                    patch_blackjax_progress_bar()
                 from pymc.sampling.jax import sample_jax_nuts
                 chain_method = sampler_cfg.get("chain_method", "parallel")
                 # jitter=False: the JAX samplers default to jittering each

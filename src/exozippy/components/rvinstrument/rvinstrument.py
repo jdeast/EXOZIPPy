@@ -79,6 +79,7 @@ class RVInstrument(Instrument):
                 ),
             },
             cls._plot_style_config_schema(),
+            cls._gp_config_schema(),
         ]
 
     def load_data(self, system):
@@ -89,6 +90,9 @@ class RVInstrument(Instrument):
 
         for i, file in enumerate(self.files):
             df = pd.read_csv(file, sep=r'\s+', engine='c', header=None, comment='#')
+            # One sort per file, before anything is derived from it: keeps the
+            # RVs, errors and detrend columns aligned by construction.
+            df = self._sort_by_time(df)
             n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
             all_times.append(df.iloc[:, 0].values)
@@ -120,6 +124,11 @@ class RVInstrument(Instrument):
         self.detrend_matrix, self.n_detrend_per_inst, self.total_detrend_cols = \
             self._build_block_detrend(all_detrend, self.n_total_obs)
 
+        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
+        # self.err is in solRad/d; the amplitude parameter is declared in m/s.
+        self._prepare_gp(self.time, self.err, self.inst_map,
+                         user_factor=(u.solRad / u.d).to(u.m / u.s))
+
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
         gamma_arr = np.atleast_1d(self.gamma_init)
@@ -129,6 +138,7 @@ class RVInstrument(Instrument):
 
         self.manifest = {"gamma": "default"}
         self._register_noise(self.manifest, self.jittervar_lower)
+        self._register_gp(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {"shape": (self.total_detrend_cols,)}
@@ -188,29 +198,14 @@ class RVInstrument(Instrument):
             detrend = pm.Data("rv_detrend",self.detrend_matrix)
             rv_model += pt.dot(detrend, self.detrend_coeffs.value)
 
-        # 2. Define the Likelihood (The Normal Distribution)
-        # Total variance = data_error^2 + jitter^2 (shared base helper)
+        # 2. Define the Likelihood.  Total variance = data_error^2 + jitter^2
+        # (shared base helper).  The shared dispatcher writes the plain Normal
+        # unless a file asked for a GP, in which case that file's residuals get
+        # a celerite2 marginal likelihood with this same mu and sigma.
         sigma = self.total_sigma(err)
 
-        pm.Normal(
-            f"{self.prefix}.model",
-            mu=rv_model,
-            sigma=sigma,
-            observed=rv
-        )
-
-        """
-        # GP implementation (this replaces pm.normal above)
-        log_sigma_rv_gp = pm.Normal("log_sigma_rv_gp", mu=np.log(2.0), sigma=1.0)
-        log_rho_rv_gp = pm.Normal("log_rho_rv_gp", mu=np.log(10.0), sigma=1.0)
-        kernel_rv = terms.SHOTerm(sigma=pt.exp(log_sigma_rv_gp), rho=pt.exp(log_rho_rv_gp), Q=1.0/3.0)
-        gp_rv = GaussianProcess(
-            kernel_rv,
-            t=pm.time,
-            yerr=sigma,
-            mean=rv_model)
-        gp_rv.marginal("obs_rv", observed=rv)
-        """
+        self.add_observation_likelihood(
+            f"{self.prefix}.model", mu=rv_model, sigma=sigma, observed=rv)
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions used by plot_unphased and plot_phased."""
@@ -252,6 +247,9 @@ class RVInstrument(Instrument):
                 on_unused_input='ignore'
             )
 
+        # Per-file GP conditional-mean evaluators (no-op without a gp: key).
+        self._compile_gp_plotters(system)
+
     # ------------------------------------------------------------------
     # Shared data preparation. Both the matplotlib plot() path and the
     # GUI plot_data() path go through these helpers, so the two paths
@@ -274,13 +272,43 @@ class RVInstrument(Instrument):
         return np.linspace(self.time.min(), self.time.max(), 2000).astype(np.float64)
 
     def _eval_unphased_model(self, system, point):
-        """Summed RV model on the pretty grid, returned in m/s."""
+        """Summed RV model on the pretty grid, returned in m/s.
+
+        Physical (orbit + gamma-free) signal only; any GP is per-instrument
+        and is added by _eval_unphased_gp_models.
+        """
         t_pretty = self._unphased_grid()
         param_values = self._point_to_plot_params(point, system)
         y_model = self._compiled_full_rv(t_pretty, *param_values)
         if y_model.ndim > 1:
             y_model = np.squeeze(y_model)
         return t_pretty, y_model * self._rv_factor()
+
+    def _eval_unphased_gp_models(self, system, point):
+        """Full (physical + GP) unphased curves, one per GP instrument.
+
+        The GP is a per-instrument noise model, so there is no single "full
+        model" curve: each instrument that requested a GP gets its own,
+        evaluated only over the span where that instrument actually has data
+        (the conditional mean reverts to zero outside it, which would draw a
+        misleading flat line across the whole plot). Returns a list of
+        (instrument index, t, y in m/s); empty without any GP.
+        """
+        if not self.has_gp_plotters():
+            return []
+        factor = self._rv_factor()
+        param_values = self._point_to_plot_params(point, system)
+        out = []
+        for i in sorted(self._gp_pred_on_grid):
+            mask = (self.inst_map == i)
+            t_i = np.linspace(self.time[mask].min(), self.time[mask].max(),
+                              2000).astype(np.float64)
+            y_phys = self._compiled_full_rv(t_i, *param_values)
+            if y_phys.ndim > 1:
+                y_phys = np.squeeze(y_phys)
+            y_gp = self.gp_mean_on_grid(system, point, i, t_i)
+            out.append((i, t_i, (y_phys + y_gp) * factor))
+        return out
 
     def _instrument_gamma(self, point, i):
         """The reference-point gamma for instrument i, in internal units."""
@@ -310,10 +338,16 @@ class RVInstrument(Instrument):
         other_mask[col] = False
         other_signals = np.sum(data_rv_matrix[:, other_mask], axis=1)
 
+        # Phasing data that still contains the correlated (e.g. rotation)
+        # signal just smears the panel, so the GP conditional mean is removed
+        # from the data here along with the other orbits' signal. Zeros for
+        # instruments without a GP, so this is a no-op then.
+        gp_signals = self.gp_mean_at_data(system, point)
+
         return {
             "P_ref": P_ref, "tc_ref": tc_ref, "factor": factor,
             "phase_model": phase_model[sort_m], "y_model": y_orbit[sort_m] * factor,
-            "other_signals": other_signals,
+            "other_signals": other_signals + gp_signals,
         }
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -345,6 +379,12 @@ class RVInstrument(Instrument):
                 # Transparency: Solid for one point, faint for spaghetti
                 alpha = 0.8 if len(points) == 1 else 0.1
                 plt.plot(t_pretty, y_model, 'r-', lw=1.5, alpha=alpha, zorder=2)
+
+                # One "physical + GP" curve per GP instrument, drawn per draw
+                # so the spaghetti shows the GP's own uncertainty too.
+                for i, t_gp, y_gp in self._eval_unphased_gp_models(system, point):
+                    plt.plot(t_gp, y_gp, '-', lw=1.0, alpha=alpha, zorder=3,
+                             color=f"C{i}")
             except Exception as e:
                 logger.warning(f"Failed to evaluate model for draw {idx}: {e}")
                 continue
@@ -450,6 +490,14 @@ class RVInstrument(Instrument):
             traces.append(Trace(name="model", role="model", kind="line",
                                 x=t_pretty, y=y_model,
                                 node=getattr(self, "_rv_full_node", None)))
+            # One physical+GP curve per GP instrument (see
+            # _eval_unphased_gp_models). No symbolic node: the GP conditional
+            # mean is not part of the model graph, so the GUI cannot re-render
+            # these on a slider move -- it must ask for a fresh point.
+            for i, t_gp, y_gp in self._eval_unphased_gp_models(system, point):
+                traces.append(Trace(
+                    name=f"{self.names[i]} model+GP", role="model", kind="line",
+                    x=t_gp, y=y_gp, style={"series_index": int(i)}))
         for i in range(self.n_elements):
             mask = (self.inst_map == i)
             # gamma offset only when a point supplies it; raw data otherwise
