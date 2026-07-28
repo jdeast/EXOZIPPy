@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Nightly, so the slow Windows job still runs regularly without sitting in
+  # front of every pull request.
+  schedule:
+    - cron: "0 7 * * *"
   workflow_dispatch:
   # Callable from publish.yml so a release runs exactly this suite, rather
   # than a copy of it that drifts out of sync.
@@ -22,10 +26,18 @@ jobs:
   # the matrix below is called `pytest` and the aggregating gate job at the
   # bottom is called `test` -- the required name stays stable no matter how
   # the matrix grows or shrinks.
+
+  # Runs on everything, including pull requests.
+  #
+  # These four combinations cost the SAME wall clock as the single 3.12 job
+  # that preceded them, because matrix combinations run concurrently -- a
+  # measured run had all four starting within 6 seconds of each other and
+  # finishing between 12 and 16 minutes. Adding Python versions here is
+  # effectively free; do not trim them to "save time", there is none to save.
   pytest:
     name: pytest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       # Do not cancel the other combinations when one fails. When a new Python
       # breaks something, "3.14 failed and everything else was cancelled" tells
@@ -35,21 +47,9 @@ jobs:
         os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
         include:
-          # CONTRIBUTING documents a macOS setup and this history has commits
-          # from a Windows machine, so ubuntu-only coverage was a blind spot
-          # for a stack that compiles C through PyTensor and BLAS. One
-          # combination each catches platform breakage without paying for the
-          # full 3x3 cross product.
-          #
-          # Windows is the one most likely to need work: PyTensor's C backend
-          # wants a compiler it can find, and the usual Windows answer is the
-          # m2w64 toolchain rather than the MSVC the runner ships with. If it
-          # fails, the useful options are to fix the toolchain setup or to drop
-          # Windows from the matrix -- NOT to add continue-on-error, which
-          # turns a real signal into decoration nobody reads.
+          # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
+          # here, so it stays on the pull-request path.
           - os: macos-latest
-            python-version: "3.12"
-          - os: windows-latest
             python-version: "3.12"
 
     steps:
@@ -81,6 +81,46 @@ jobs:
       - name: Run test suite
         run: poetry run pytest -q -n 2
 
+  # Windows is deliberately OFF the pull-request path.
+  #
+  # It is not slightly slower, it is ~4x slower: a measured run was cancelled
+  # still unfinished at the 60-minute cap while every other combination
+  # finished inside 16. Gating pull requests on it would roughly quadruple
+  # merge latency for every one-line change. It runs on pushes to master, on
+  # the nightly schedule, and on releases (publish.yml reaches this through
+  # workflow_call, where github.event_name is the original tag push).
+  #
+  # The trade is explicit: Windows breakage is found AFTER a merge rather than
+  # before it. With no bypass actor and non-fast-forward enforced, the fix is
+  # forward-only. That is accepted because the alternative -- a 60+ minute
+  # blocking check on a platform with known-failing tests -- would block every
+  # PR indefinitely.
+  pytest-windows:
+    name: pytest-windows
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    # 60 was not enough; the job was cancelled mid-suite. Latency does not
+    # matter off the PR path, so give it room rather than tune it blind.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --extras gui --no-interaction
+
+      - name: Run test suite
+        run: poetry run pytest -q -n 2
+
   # The stable name the ruleset requires. It exists only to aggregate the
   # matrix into one pass/fail, so the required check never has to be renamed
   # when the matrix changes.
@@ -91,10 +131,21 @@ jobs:
   test:
     name: test
     if: always()
-    needs: [pytest]
+    needs: [pytest, pytest-windows]
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if any matrix combination did not succeed
+      - name: Fail if any required combination did not succeed
         run: |
-          echo "matrix result: ${{ needs.pytest.result }}"
+          echo "pytest:         ${{ needs.pytest.result }}"
+          echo "pytest-windows: ${{ needs.pytest-windows.result }}"
+
+          # The cross-platform matrix must pass everywhere.
           test "${{ needs.pytest.result }}" = "success"
+
+          # Windows is skipped entirely on pull requests, and `skipped` is the
+          # expected result there -- it must NOT be treated as a failure. On
+          # every other event it has actually run and must have succeeded.
+          case "${{ needs.pytest-windows.result }}" in
+            success|skipped) ;;
+            *) echo "Windows job failed"; exit 1 ;;
+          esac

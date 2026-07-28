@@ -30,6 +30,7 @@ import pymc as pm
 import pytensor.tensor as pt
 import pytest
 
+from conftest import requires_fork
 from exozippy.outputs.evidence import (
     EvidenceResult,
     apply_evidence_weighting,
@@ -161,6 +162,7 @@ def _mixture_lp(x, mu0, mu1, w0, w1):
     return np.logaddexp(lp0, lp1)
 
 
+@requires_fork
 def test_evidence_weights_recover_true_mixture_weights():
     """
     Given a well-separated two-mode mixture with equal draw occupancy (~50/50)
@@ -261,6 +263,7 @@ def test_apply_evidence_weighting_falls_back_on_refusal():
     assert "refused" in report.provenance
 
 
+@requires_fork
 def test_evidence_refuses_heavy_tailed_mode():
     """
     Given a single mode whose raw-space target is heavy-tailed (Cauchy) so a

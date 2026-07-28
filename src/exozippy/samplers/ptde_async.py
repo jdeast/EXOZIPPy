@@ -338,6 +338,13 @@ def ptde_async_sample(
 
     old_sigint = signal.signal(signal.SIGINT, _stop_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
+    # Windows delivers the GUI's stop request as CTRL_BREAK_EVENT, which
+    # arrives here as SIGBREAK rather than SIGINT (see gui/runner.py).
+    old_sigbreak = (
+        signal.signal(signal.SIGBREAK, _stop_handler)
+        if hasattr(signal, "SIGBREAK")
+        else None
+    )
 
     result_q = queue.Queue()
     submitted_at = {}  # (k, i) -> submission time, only while in flight
@@ -648,6 +655,8 @@ def ptde_async_sample(
     finally:
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
+        if old_sigbreak is not None:
+            signal.signal(signal.SIGBREAK, old_sigbreak)
         if pool is not None:
             # terminate() (not close()) at shutdown: close() waits for any
             # in-flight eval to finish, so a worker still stuck on a slow
