@@ -2108,19 +2108,36 @@ files = [
 ]
 
 [[package]]
-name = "intel-openmp"
-version = "2023.2.4"
-description = "Intel® OpenMP* Runtime Library"
+name = "intel-cmplr-lib-ur"
+version = "2026.1.0"
+description = "Intel® oneAPI Unified Runtime Libraries package"
 optional = false
 python-versions = "*"
 groups = ["main"]
 markers = "sys_platform == \"win32\""
 files = [
-    {file = "intel_openmp-2023.2.4-py2.py3-none-manylinux1_i686.whl", hash = "sha256:7724dd133c3889a0659abe9ca47bed84f92796292787a791506ea0e455cc2da4"},
-    {file = "intel_openmp-2023.2.4-py2.py3-none-manylinux1_x86_64.whl", hash = "sha256:15c601fce77757142fdbda700ca158895ceaf972230dc27c89ee4aa90b26f79f"},
-    {file = "intel_openmp-2023.2.4-py2.py3-none-win32.whl", hash = "sha256:24cca6bd0f2903abf4f91fd0503699b89e4c9eb5957cad6cad73bee1e464435b"},
-    {file = "intel_openmp-2023.2.4-py2.py3-none-win_amd64.whl", hash = "sha256:2d1e9696b3692fdf47e1a90067cdb72afc2e128f2d8e6934b1b0db638d03dc33"},
+    {file = "intel_cmplr_lib_ur-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:74b64ace8277b031aa36328dc8f87f7f959a6ca4da5b68c69923d37283e01664"},
+    {file = "intel_cmplr_lib_ur-2026.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:538e1135ee1801fb19fa1a580838a1f666f05534d35350d82736d959373d3b15"},
 ]
+
+[package.dependencies]
+umf = "==1.1.*"
+
+[[package]]
+name = "intel-openmp"
+version = "2026.1.0"
+description = "Intel OpenMP* Runtime Library"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "sys_platform == \"win32\""
+files = [
+    {file = "intel_openmp-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:e6887f701b7d2323ed147008893b9af22e511aaa97e0fc9c37eb8be24a5366b0"},
+    {file = "intel_openmp-2026.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:8f9f86d93da9d549eec7bae26d65d6188ed748792ce655b5cdbc2e1a15cb7206"},
+]
+
+[package.dependencies]
+intel-cmplr-lib-ur = "2026.1.0"
 
 [[package]]
 name = "ipdb"
@@ -3147,31 +3164,37 @@ typing_extensions = "*"
 
 [[package]]
 name = "mkl"
-version = "2023.2.2"
+version = "2026.1.0"
 description = "Intel® oneAPI Math Kernel Library"
 optional = false
 python-versions = "*"
 groups = ["main"]
 markers = "sys_platform == \"win32\""
 files = [
-    {file = "mkl-2023.2.2-py2.py3-none-macosx_10_15_x86_64.macosx_11_0_x86_64.whl", hash = "sha256:d13bbffd3315d135d1584cb33ddba76ed3130201963d1efcfb9fbe3a631fb956"},
+    {file = "mkl-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:4d5a26449818a8aebd4b2aaf6b291831e691f9cf74b152df49b99cf48bbd5360"},
+    {file = "mkl-2026.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:8194a8270d70622eff00eec84c793efc382b14848b98c3ace6bacdda42170a80"},
 ]
 
 [package.dependencies]
-intel-openmp = "==2023.*"
-tbb = "==2021.*"
+intel-openmp = ">=2025,<2027"
+onemkl-license = "2026.1.0"
+tbb = "==2023.*"
 
 [[package]]
 name = "mkl-include"
-version = "2023.2.2"
+version = "2026.1.0"
 description = "Intel® oneAPI Math Kernel Library"
 optional = false
 python-versions = "*"
 groups = ["main"]
 markers = "sys_platform == \"win32\""
 files = [
-    {file = "mkl_include-2023.2.2-py2.py3-none-macosx_10_15_x86_64.macosx_11_0_x86_64.whl", hash = "sha256:20ead2d598ed2e2c7053a99ce83c4a4459e4d667191bf32860c072c269113d0f"},
+    {file = "mkl_include-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:e64b260e67284b8a696343d58c339ad9d990cc985077dab1269d1c6d2a2e2b1b"},
+    {file = "mkl_include-2026.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:d933db23875da7d145a8897fa0cab1014228af3c387972f25b65472b49b23c94"},
 ]
+
+[package.dependencies]
+onemkl-license = "2026.1.0"
 
 [[package]]
 name = "ml-dtypes"
@@ -3878,6 +3901,19 @@ files = [
 
 [package.dependencies]
 typing-extensions = {version = "*", markers = "python_full_version < \"3.13.0\""}
+
+[[package]]
+name = "onemkl-license"
+version = "2026.1.0"
+description = "Intel® oneAPI Math Kernel Library"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "sys_platform == \"win32\""
+files = [
+    {file = "onemkl_license-2026.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:39fd829648af92c9e03c22ba228f07174d829aaa2fe3c5f6cd7073b8eb8a9805"},
+    {file = "onemkl_license-2026.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:425b599af279e6bc03e27319d75aa156ca7dd8645dbcd0c324ef894d3fae6be3"},
+]
 
 [[package]]
 name = "opt-einsum"
@@ -5839,17 +5875,31 @@ dev = ["hypothesis (>=6.70.0)", "pytest (>=7.1.0)"]
 
 [[package]]
 name = "tbb"
-version = "2021.13.1"
+version = "2023.1.0"
 description = "Intel® oneAPI Threading Building Blocks (oneTBB)"
 optional = false
 python-versions = "*"
 groups = ["main"]
 markers = "sys_platform == \"win32\""
 files = [
-    {file = "tbb-2021.13.1-py2.py3-none-manylinux1_i686.whl", hash = "sha256:bb5bdea0c0e9e6ad0739e7a8796c2635ce9eccca86dd48c426cd8027ac70fb1d"},
-    {file = "tbb-2021.13.1-py2.py3-none-manylinux1_x86_64.whl", hash = "sha256:d916359dc685579d09e4b344241550afc1cc034f7f5ec7234c258b6680912d70"},
-    {file = "tbb-2021.13.1-py3-none-win32.whl", hash = "sha256:00f5e5a70051650ddd0ab6247c0549521968339ec21002e475cd23b1cbf46d66"},
-    {file = "tbb-2021.13.1-py3-none-win_amd64.whl", hash = "sha256:cbf024b2463fdab3ebe3fa6ff453026358e6b903839c80d647e08ad6d0796ee9"},
+    {file = "tbb-2023.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:64ad35241c736a595498f5343abec8eaaa203e9fe0dbdbf4b86d37c5a3ab1d9c"},
+    {file = "tbb-2023.1.0-py3-none-win_amd64.whl", hash = "sha256:27df1315202defc67a73800c667ba4fbd03cf8924f73949373d4a34d1443fca2"},
+]
+
+[package.dependencies]
+tcmlib = "==1.*"
+
+[[package]]
+name = "tcmlib"
+version = "1.5.0"
+description = "Thread Composability Manager"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "sys_platform == \"win32\""
+files = [
+    {file = "tcmlib-1.5.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:9d7c01cff35aae9bf5390b620680ebdf10a7d211c22d6488a27a029502e7d0aa"},
+    {file = "tcmlib-1.5.0-py2.py3-none-win_amd64.whl", hash = "sha256:f7b62787214083d490b39d7650f1e477eeacc875e7f86799feb9aa1fd34460d4"},
 ]
 
 [[package]]
@@ -5973,6 +6023,22 @@ files = [
     {file = "tzdata-2026.3-py2.py3-none-any.whl", hash = "sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931"},
     {file = "tzdata-2026.3.tar.gz", hash = "sha256:4a1518b8993086a7982523e071643f3c0e5f213e75b21318e78bcabfff9d1415"},
 ]
+
+[[package]]
+name = "umf"
+version = "1.1.0"
+description = "Unified Memory Framework"
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "sys_platform == \"win32\""
+files = [
+    {file = "umf-1.1.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:567152c5ee6b8e16cc56b29a8a9a6b918de1febf89877f71ea2e8247ef39fc32"},
+    {file = "umf-1.1.0-py2.py3-none-win_amd64.whl", hash = "sha256:a8c5ff84901fe6348715b6c1c85de4d195a6c69185d99ce4ebf7449b5d04011c"},
+]
+
+[package.dependencies]
+tcmlib = ">=1.5"
 
 [[package]]
 name = "uncertainties"
@@ -6722,4 +6788,4 @@ gui = ["fastapi", "pyqt6", "pyqt6-webengine", "pywebview", "qtpy", "ruamel-yaml"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "d4c755863654291352d0dda1b195658899e3fdbdc3ac80f1502aaada89132489"
+content-hash = "a65d31b6077d9e3b7932255501382ff0108f73afbdd23f1555ebe77afb50538b"
