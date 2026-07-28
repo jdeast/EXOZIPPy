@@ -11,19 +11,57 @@ on:
   workflow_call:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+  # NOTE ON JOB NAMES -- read before renaming anything here.
+  #
+  # The branch ruleset requires a status check literally named `test`, and
+  # there are no bypass actors, so if nothing ever reports that name then
+  # NOTHING CAN EVER MERGE, including the PR that would fix it.
+  #
+  # A matrix job does not report its own id: it reports one check per
+  # combination, named `pytest (ubuntu-latest, 3.12)` and so on. That is why
+  # the matrix below is called `pytest` and the aggregating gate job at the
+  # bottom is called `test` -- the required name stays stable no matter how
+  # the matrix grows or shrinks.
+  pytest:
+    name: pytest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      # Do not cancel the other combinations when one fails. When a new Python
+      # breaks something, "3.14 failed and everything else was cancelled" tells
+      # you much less than seeing which combinations passed.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          # CONTRIBUTING documents a macOS setup and this history has commits
+          # from a Windows machine, so ubuntu-only coverage was a blind spot
+          # for a stack that compiles C through PyTensor and BLAS. One
+          # combination each catches platform breakage without paying for the
+          # full 3x3 cross product.
+          #
+          # Windows is the one most likely to need work: PyTensor's C backend
+          # wants a compiler it can find, and the usual Windows answer is the
+          # m2w64 toolchain rather than the MSVC the runner ships with. If it
+          # fails, the useful options are to fix the toolchain setup or to drop
+          # Windows from the matrix -- NOT to add continue-on-error, which
+          # turns a real signal into decoration nobody reads.
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Poetry
         run: pipx install poetry
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: poetry
 
       # --extras gui is required, not polish: ruamel-yaml lives in that extra,
@@ -42,3 +80,21 @@ jobs:
       # and vanished entirely on others. That is a memory ceiling, not a bug.
       - name: Run test suite
         run: poetry run pytest -q -n 2
+
+  # The stable name the ruleset requires. It exists only to aggregate the
+  # matrix into one pass/fail, so the required check never has to be renamed
+  # when the matrix changes.
+  #
+  # `if: always()` is load-bearing. Without it this job is skipped when any
+  # matrix combination fails, and a skipped required check reads as neutral
+  # rather than failing -- the PR would look mergeable with a red matrix.
+  test:
+    name: test
+    if: always()
+    needs: [pytest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any matrix combination did not succeed
+        run: |
+          echo "matrix result: ${{ needs.pytest.result }}"
+          test "${{ needs.pytest.result }}" = "success"
