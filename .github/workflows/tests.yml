@@ -60,13 +60,13 @@ jobs:
             python-version: "3.12"
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Poetry
         run: pipx install poetry
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: poetry
@@ -90,7 +90,7 @@ jobs:
       # correct by construction: change the data, change the key. Keep it in
       # sync if that pin ever moves.
       - name: Cache the Zenodo model spectra
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: src/exozippy/components/sed/models/NextGen
           key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
@@ -135,9 +135,9 @@ jobs:
       issues: write
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -154,7 +154,7 @@ jobs:
       # Same Zenodo spectra cache as the other jobs -- see the comment there.
       # Shares their key, so this job is usually a cache hit populated by them.
       - name: Cache the Zenodo model spectra
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: src/exozippy/components/sed/models/NextGen
           key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
