@@ -21,3 +21,7 @@ examples/*/fitresults/
 /examples/ob140939/n20140605.L.Spitzer.OB140939.txt
 src/exozippy/components/sed/models/NextGen/NextGen.spectra.csv
 src/exozippy/components/sed/models/NextGen/NextGen.wavelength.csv
+src/exozippy/components/evolutionarymodel/testing.ipynb
+src/exozippy/components/evolutionarymodel/massradius_mann.py
+src/exozippy/components/evolutionarymodel/massradius_mist.py
+src/exozippy/components/evolutionarymodel/MISTv2.5_duplicate_ages.txt
