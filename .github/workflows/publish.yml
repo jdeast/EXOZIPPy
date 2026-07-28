@@ -71,6 +71,33 @@ jobs:
           pipx inject poetry "poetry-dynamic-versioning[plugin]"
           python -m pip install -U twine
 
+      # A rehearsal build cannot be uploaded as-is. Off a tag,
+      # poetry-dynamic-versioning derives something like
+      # "0.1.0rc1.post20.dev0+a911ca1" from `git describe`, and the "+<sha>"
+      # is a PEP 440 LOCAL VERSION, which PyPI and TestPyPI both refuse:
+      #
+      #   400 The use of local versions in '...' is not allowed.
+      #
+      # So the rehearsal used to validate every step except the one that
+      # actually uploads. Substituting a clean throwaway version on dispatch
+      # makes the last link testable too.
+      #
+      # This MUST be a conditional step rather than a conditional value on the
+      # build step. poetry-dynamic-versioning checks `if bypass is not None`,
+      # not truthiness, so setting the variable to an empty string on a tag
+      # push would make the release build's version the empty string.
+      # The !startsWith guard matters: dispatching this workflow FROM a tag ref
+      # would otherwise substitute a throwaway version while the "Version
+      # matches the tag" step below compared it against the tag, failing with a
+      # mismatch that looks like a versioning bug rather than a rehearsal.
+      - name: Use a throwaway version for rehearsal builds
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          !startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "POETRY_DYNAMIC_VERSIONING_BYPASS=0.1.0.dev${{ github.run_number }}" \
+            >> "$GITHUB_ENV"
+
       - name: Build sdist and wheel
         run: poetry build
 
@@ -96,8 +123,11 @@ jobs:
             exit 1
           fi
 
-      # upload/download-artifact stay on v4: v5 still declares node20, so
-      # bumping gains nothing for the Node 24 migration.
+      # The v7/v8 pairing of upload/download-artifact is verified, not assumed:
+      # they are only exercised on a release, so no test covers them. It was
+      # checked by dispatching this workflow as a rehearsal and confirming the
+      # download step succeeded. Do the same if you bump either of them --
+      # they must stay compatible with each other.
       - uses: actions/upload-artifact@v7
         with:
           name: dist
