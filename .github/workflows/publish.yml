@@ -35,6 +35,20 @@ jobs:
   # same suite CI runs and the two cannot drift.
   tests:
     uses: ./.github/workflows/tests.yml
+    # REQUIRED, not tidiness. A called workflow cannot request more permission
+    # than its caller grants, and this repository's default workflow token is
+    # read-only. tests.yml's pytest-latest-deps job asks for `issues: write`
+    # (it files a tracking issue when the nightly unlocked-resolution run
+    # fails), so without this line the whole workflow dies at STARTUP with a
+    # permissions error -- before a single job runs, and regardless of whether
+    # that job would have been skipped by its own `if:`.
+    #
+    # This was found by dispatching publish.yml as a release rehearsal, which
+    # returned `startup_failure`. It would otherwise have surfaced the first
+    # time a version tag was pushed, i.e. during a real release.
+    permissions:
+      contents: read
+      issues: write
 
   build:
     runs-on: ubuntu-latest
