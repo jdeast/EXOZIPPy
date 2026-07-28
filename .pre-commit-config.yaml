@@ -5,23 +5,31 @@
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-# Import sorting runs BEFORE black: isort decides which lines exist, black
-# decides how they wrap. Running them the other way round means black formats
-# imports isort is about to move.
+# ONE tool does linting, import sorting and formatting. This replaced black
+# (formatting) plus isort (imports): three pinned tools where one does the job,
+# and three chances for versions to drift apart.
 #
 # The rev is pinned exactly, and must stay that way. Everyone has to produce
 # byte-identical output or the format-then-merge recipe for long-running
 # branches stops working: a collaborator formats with a different version,
-# and the merge conflicts on formatting rather than on content.
--   repo: https://github.com/PyCQA/isort
-    rev: 8.0.1
+# and the merge conflicts on formatting rather than on content. Pinning one
+# tool instead of three is most of the reason for consolidating.
+#
+# ruff-check runs BEFORE ruff-format: the linter's import sorting (rule `I`)
+# decides which lines exist, the formatter decides how they wrap.
+#
+# `args: [--fix]` on ruff-check is deliberately limited to the import rule
+# (`--fixable I`). NEVER broaden it. F401 is the obvious next rule to enable,
+# and ruff considers the `from . import physics` side-effect imports
+# auto-fixable -- deleting those breaks PHYSICS_REGISTRY lookup in eight
+# components. A linter that silently deletes code is not worth the seconds it
+# saves.
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
     hooks:
-    -   id: isort
-
--   repo: https://github.com/psf/black-pre-commit-mirror
-    rev: 26.5.1
-    hooks:
-    -   id: black
+    -   id: ruff-check
+        args: [--fix, --fixable, I]
+    -   id: ruff-format
 
 -   repo: local
     hooks:

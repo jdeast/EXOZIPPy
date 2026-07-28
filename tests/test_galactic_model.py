@@ -91,9 +91,9 @@ def test_build_likelihood_adds_exactly_two_potentials():
     gm_potentials = [
         k for k in model.named_vars if k.startswith("galacticmodel.")
     ]
-    assert (
-        len(gm_potentials) == 2
-    ), f"Expected 2 potentials, got: {gm_potentials}"
+    assert len(gm_potentials) == 2, (
+        f"Expected 2 potentials, got: {gm_potentials}"
+    )
 
 
 def test_imf_prior_is_negative_for_star_above_chabrier_peak():

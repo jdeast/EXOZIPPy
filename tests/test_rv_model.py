@@ -32,7 +32,6 @@ def test_isolated_orbital_mechanics_match_pure_numpy_sinusoid():
     orbit = system.orbit
 
     with model:
-
         times = np.linspace(0, 10, 100)
         t_tensor = pt.vector("t")
         k_tensor = pt.vector("k")

@@ -35,8 +35,9 @@ def test_interrupt_during_prepare_leaves_terminal_phase(
         # then interrupt -- this is the prepare/compile window, well before
         # any draws are stored.
         appeared = _poll_until(
-            lambda: os.path.exists(handle.status_path)
-            or not handle.is_alive(),
+            lambda: (
+                os.path.exists(handle.status_path) or not handle.is_alive()
+            ),
             timeout=REACH_SAMPLING_TIMEOUT,
         )
         assert appeared, "run never wrote an initial status or exited"
@@ -50,9 +51,9 @@ def test_interrupt_during_prepare_leaves_terminal_phase(
             handle.wait(timeout=60.0)
 
     final = handle.status()
-    assert (
-        final["phase"] in TERMINAL_PHASES
-    ), f"status left on non-terminal phase: {final}"
+    assert final["phase"] in TERMINAL_PHASES, (
+        f"status left on non-terminal phase: {final}"
+    )
 
     # list_runs finds the run and reports the same terminal phase.
     summaries = runner.list_runs(tmp_path)

@@ -53,18 +53,18 @@ def test_run_lifecycle_status_snapshot_and_graceful_stop(
                 and st.get("state", {}).get("n_draws", 0) >= 100
             )
 
-        assert _poll_until(
-            _sampling_with_progress, REACH_SAMPLING_TIMEOUT
-        ), "run never reported n_draws>=100 during sampling"
+        assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), (
+            "run never reported n_draws>=100 during sampling"
+        )
         status = handle.status()
         assert status["phase"] == "sampling", f"unexpected phase {status}"
         assert status["state"].get("n_draws", 0) >= 100
 
         # 2. the snapshot artifacts written by that same convergence check exist.
         snap_npz = os.path.join(handle.snapshot_dir, "partial.npz")
-        assert _poll_until(
-            lambda: os.path.exists(snap_npz), timeout=60.0
-        ), "snapshot npz never appeared"
+        assert _poll_until(lambda: os.path.exists(snap_npz), timeout=60.0), (
+            "snapshot npz never appeared"
+        )
         snap = np.load(snap_npz)
         assert "_lp" in snap and any(k.endswith("_raw") for k in snap.files)
 

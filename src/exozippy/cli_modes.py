@@ -168,7 +168,8 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
                 "rejected as invalid, weights "
                 f"{'validated' if mode_report.weights_reliable else 'UNRELIABLE'}. "
                 f"See {prefix}_modes.txt before trusting these tables.\n"
-                + "!" * 60
+                + "!"
+                * 60
             )
         else:
             logger.info(

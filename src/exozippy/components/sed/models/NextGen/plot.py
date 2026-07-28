@@ -7,7 +7,6 @@ from ...plot import Plot
 
 
 class NextGenPlot(Plot):
-
     ALPHA_GRID_PTS = np.array([0, 0.2, -0.2, 0.4, 0.6])
     axis_alias = {
         "teff": "star.teffsed",

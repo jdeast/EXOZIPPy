@@ -180,7 +180,6 @@ def run(args):
         # only get unique lightcurves (prioritized by cadence and pipeline)
         to_download = []
         for sector in unique_sectors:
-
             match = np.where(search_results.mission == sector)[0]
             if len(match) == 1:
                 to_download.append(match[0])
@@ -256,7 +255,6 @@ def run(args):
                         to_download.append(match[match2[match3[0]]])
 
     for search_result in search_results[to_download]:
-
         author = search_result.author[0]  # SPOC, QLP, etc
         exptime = str(int(search_result.exptime[0].value)).zfill(4)
         ticid = "TIC" + search_result.target_name[0]

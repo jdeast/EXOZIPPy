@@ -409,12 +409,12 @@ def test_q_is_derived_for_planet_companion():
     assert isinstance(q_entry, dict)
     assert q_entry.get("expr_key") == "default"
     deps = q_entry.get("deps", [])
-    assert any(
-        "planet.mass" in d for d in deps
-    ), f"planet companion: expected 'planet.mass' dep, got {deps}"
-    assert any(
-        "star.mass" in d for d in deps
-    ), f"planet companion: expected 'star.mass' dep for primary, got {deps}"
+    assert any("planet.mass" in d for d in deps), (
+        f"planet companion: expected 'planet.mass' dep, got {deps}"
+    )
+    assert any("star.mass" in d for d in deps), (
+        f"planet companion: expected 'star.mass' dep for primary, got {deps}"
+    )
 
 
 def test_q_deps_use_star_mass_for_stellar_binary():
@@ -434,12 +434,12 @@ def test_q_deps_use_star_mass_for_stellar_binary():
     lens.register_parameters(system)
 
     deps = lens.manifest["q"]["deps"]
-    assert all(
-        "star.mass" in d for d in deps
-    ), f"stellar binary: all q deps should reference star.mass, got {deps}"
-    assert not any(
-        "planet" in d for d in deps
-    ), f"stellar binary: no q dep should reference planet, got {deps}"
+    assert all("star.mass" in d for d in deps), (
+        f"stellar binary: all q deps should reference star.mass, got {deps}"
+    )
+    assert not any("planet" in d for d in deps), (
+        f"stellar binary: no q dep should reference planet, got {deps}"
+    )
 
 
 def test_companion_mass_map_points_to_correct_index():

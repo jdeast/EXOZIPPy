@@ -46,9 +46,9 @@ def test_parameter_scaling_adapts_to_initialization_scenarios():
         # ASSERT: all declared raw distributions are N(0,1) — no 1000x hack
         for rv in model.free_RVs:
             sigma_val = float(np.asarray(rv.owner.inputs[1].eval()).ravel()[0])
-            assert np.isclose(
-                sigma_val, 1.0
-            ), f"{rv.name} sigma={sigma_val}, expected 1.0"
+            assert np.isclose(sigma_val, 1.0), (
+                f"{rv.name} sigma={sigma_val}, expected 1.0"
+            )
 
         # ASSERT: logit-bounded params get the flat-prior correction potential
         assert "logit_uniform_prior.p1" in potential_names
@@ -127,9 +127,9 @@ def test_out_of_bounds_parameter_applies_logp_penalty():
         # ASSERT: exactly 1 free RV; flat-prior correction is a potential (not an RV)
         assert len(model.free_RVs) == 1
         pot_names = [p.name for p in model.potentials]
-        assert any(
-            "logit_uniform_prior" in n for n in pot_names
-        ), "correction potential missing"
+        assert any("logit_uniform_prior" in n for n in pot_names), (
+            "correction potential missing"
+        )
         assert not any(
             "low_bound" in n or "up_bound" in n for n in pot_names
         ), "No barrier potentials needed for logit param"
@@ -178,9 +178,9 @@ def test_extreme_raw_never_produces_runaway_positive_logp():
         prev = logp_at_raw(0.0)
         for mag in (1e2, 1e3, 1e4, 1e6, 1e8, 1e12, 1e17, 1e20):
             val = logp_at_raw(mag)
-            assert (
-                val < 1e6
-            ), f"logp exploded to a large positive value at raw={mag:g}: {val:.3e}"
+            assert val < 1e6, (
+                f"logp exploded to a large positive value at raw={mag:g}: {val:.3e}"
+            )
             assert np.isneginf(val) or val <= prev + 1e-6, (
                 f"logp increased ({prev:.3e} -> {val:.3e}) as |raw| grew to "
                 f"{mag:g}; expected a non-increasing restoring force"
@@ -228,19 +228,19 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     curv = curvatures["star.mass"]
 
     # 1. Did it successfully restore the original shape?
-    assert (
-        len(curv) == 2
-    ), "Curvature array was not expanded to match the physical shape!"
+    assert len(curv) == 2, (
+        "Curvature array was not expanded to match the physical shape!"
+    )
 
     # 2. Does the sampled parameter have a real curvature?
-    assert not np.isnan(
-        curv[0]
-    ), "The sampled element's curvature was improperly wiped out!"
+    assert not np.isnan(curv[0]), (
+        "The sampled element's curvature was improperly wiped out!"
+    )
 
     # 3. Did the frozen parameter safely receive a NaN?
-    assert np.isnan(
-        curv[1]
-    ), "The frozen element did not receive a NaN padding!"
+    assert np.isnan(curv[1]), (
+        "The frozen element did not receive a NaN padding!"
+    )
 
 
 def test_parameter_bypasses_float_conversion_for_tensor_expressions():
@@ -272,17 +272,17 @@ def test_parameter_bypasses_float_conversion_for_tensor_expressions():
     # ASSERT
     # If we reach here, the code survived the __post_init__ crash point!
     # We also verify it successfully held onto the raw expression.
-    assert (
-        param.initval == mock_expr
-    ), "The initval should be the identical PyTensor expression object!"
-    assert hasattr(
-        param.initval, "owner"
-    ), "initval must retain its symbolic PyTensor properties"
+    assert param.initval == mock_expr, (
+        "The initval should be the identical PyTensor expression object!"
+    )
+    assert hasattr(param.initval, "owner"), (
+        "initval must retain its symbolic PyTensor properties"
+    )
     with pytest.raises(TypeError):
         float(param.initval)
-    assert (
-        param.expression is mock_expr
-    ), "The PyTensor expression was mangled or lost!"
+    assert param.expression is mock_expr, (
+        "The PyTensor expression was mangled or lost!"
+    )
 
 
 def test_parameter_builds_from_list_of_tensors():
@@ -349,9 +349,9 @@ def test_parameter_strips_astropy_quantities_from_expressions():
         val = param.build_pymc()
 
     assert hasattr(val, "type"), "Did not return a valid PyTensor variable!"
-    assert not hasattr(
-        val, "unit"
-    ), "The Astropy unit was not successfully stripped!"
+    assert not hasattr(val, "unit"), (
+        "The Astropy unit was not successfully stripped!"
+    )
 
 
 def test_generate_posterior_strips_quantities_before_walking():
@@ -412,17 +412,17 @@ def test_derived_parameter_retains_numeric_initval():
     )
 
     # 4. Verify the numeric initval survived
-    assert (
-        period_param.initval is not None
-    ), "Derived parameter initval was incorrectly set to None!"
+    assert period_param.initval is not None, (
+        "Derived parameter initval was incorrectly set to None!"
+    )
     assert np.isclose(period_param.initval, 2.9991625, atol=1e-5)
 
     # 5. Verify it can still build a PyMC node (the symbolic side works)
     with pm.Model():
         node = period_param.build_pymc()
-        assert hasattr(
-            node, "owner"
-        ), "PyMC node should be a symbolic expression"
+        assert hasattr(node, "owner"), (
+            "PyMC node should be a symbolic expression"
+        )
 
 
 def test_to_vec_handles_quantity_wrapping_tensor():
@@ -539,12 +539,12 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
-    assert (
-        star.mass.initval is not None
-    ), "Fatal: initval was wiped out by NoneType assignment bug!"
-    assert np.isclose(
-        star.mass.initval[0], 1.204
-    ), f"Expected 1.204, but got {star.mass.initval[0]}"
+    assert star.mass.initval is not None, (
+        "Fatal: initval was wiped out by NoneType assignment bug!"
+    )
+    assert np.isclose(star.mass.initval[0], 1.204), (
+        f"Expected 1.204, but got {star.mass.initval[0]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -578,9 +578,9 @@ def test_logit_transform_raw_zero_maps_to_initval():
         q_init = np.clip((initval - lower) / (upper - lower), 1e-6, 1 - 1e-6)
         logit_q = np.log(q_init / (1.0 - q_init))
         phys_at_zero = lower + (upper - lower) / (1.0 + np.exp(-logit_q))
-        assert np.isclose(
-            phys_at_zero, initval, rtol=1e-5
-        ), f"raw=0 → {phys_at_zero}, expected {initval}"
+        assert np.isclose(phys_at_zero, initval, rtol=1e-5), (
+            f"raw=0 → {phys_at_zero}, expected {initval}"
+        )
 
 
 def test_logit_transform_init_scale_is_whitening_only():
@@ -615,9 +615,9 @@ def test_logit_transform_init_scale_is_whitening_only():
     dval_draw = (val(eps) - val(-eps)) / (2 * eps)
     curv = (lp(eps) - 2 * lp(0.0) + lp(-eps)) / eps**2
 
-    assert np.isclose(
-        dval_draw, init_scale, rtol=1e-3
-    ), f"dval/draw = {dval_draw:.5f}, expected init_scale = {init_scale}"
+    assert np.isclose(dval_draw, init_scale, rtol=1e-3), (
+        f"dval/draw = {dval_draw:.5f}, expected init_scale = {init_scale}"
+    )
     assert abs(curv) < 0.2, (
         f"Curvature {curv:.3f} at raw=0 — flat prior should have ~0 curvature; "
         f"a large value means init_scale is leaking into the posterior"
@@ -638,9 +638,9 @@ def test_logit_transform_physical_value_strictly_inside_bounds():
     for raw in [-50.0, -10.0, -1.0, 0.0, 1.0, 10.0, 50.0]:
         lq = logit_q + init_scale_logit * raw
         phys = lower + (upper - lower) / (1.0 + np.exp(-np.clip(lq, -30, 30)))
-        assert (
-            lower < phys < upper
-        ), f"raw={raw} → phys={phys} outside ({lower}, {upper})"
+        assert lower < phys < upper, (
+            f"raw={raw} → phys={phys} outside ({lower}, {upper})"
+        )
 
 
 def test_logit_prior_is_flat_in_physical_space():
@@ -677,9 +677,9 @@ def test_logit_prior_is_flat_in_physical_space():
         residuals.append(lp - np.log(q * (1.0 - q)))
 
     # ASSERT
-    assert np.allclose(
-        residuals, residuals[0], atol=1e-6
-    ), f"Prior is not flat in physical space: residuals = {residuals}"
+    assert np.allclose(residuals, residuals[0], atol=1e-6), (
+        f"Prior is not flat in physical space: residuals = {residuals}"
+    )
 
 
 def test_bounded_sigma_param_logp_matches_truncated_normal():
@@ -719,9 +719,9 @@ def test_bounded_sigma_param_logp_matches_truncated_normal():
         residuals.append(lp - expected)
 
     # ASSERT
-    assert np.allclose(
-        residuals, residuals[0], atol=1e-6
-    ), f"logp does not match truncated-normal semantics: residuals = {residuals}"
+    assert np.allclose(residuals, residuals[0], atol=1e-6), (
+        f"logp does not match truncated-normal semantics: residuals = {residuals}"
+    )
 
 
 def test_equal_bounds_raise_clear_error():
@@ -788,9 +788,9 @@ def test_gaussian_sampled_prior_penalizes_deviations():
 
     lp_center = float(logp_fn({"mass_raw": np.array([0.0])}))
     lp_3sigma = float(logp_fn({"mass_raw": np.array([3.0])}))
-    assert (
-        lp_3sigma < lp_center - 4.0
-    ), f"3-sigma deviation not penalized enough: Δlogp = {lp_3sigma - lp_center:.2f}"
+    assert lp_3sigma < lp_center - 4.0, (
+        f"3-sigma deviation not penalized enough: Δlogp = {lp_3sigma - lp_center:.2f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -821,9 +821,9 @@ def test_gaussian_potential_created_for_derived_parameter_with_sigma():
         p.build_pymc()
 
     potential_names = [pot.name for pot in model.potentials]
-    assert (
-        "gaussian_prior.theta_E" in potential_names
-    ), "Derived parameter with sigma must have a gaussian_prior potential"
+    assert "gaussian_prior.theta_E" in potential_names, (
+        "Derived parameter with sigma must have a gaussian_prior potential"
+    )
 
 
 def test_gaussian_potential_on_derived_parameter_penalizes_deviations():
@@ -849,9 +849,9 @@ def test_gaussian_potential_on_derived_parameter_penalizes_deviations():
         # by checking model.potentials
         pot_names = [pot.name for pot in model.potentials]
 
-    assert (
-        "gaussian_prior.t_E" in pot_names
-    ), "gaussian_prior potential missing for derived param"
+    assert "gaussian_prior.t_E" in pot_names, (
+        "gaussian_prior potential missing for derived param"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -878,12 +878,12 @@ def test_soft_bounds_on_derived_parameter():
         p.build_pymc()
 
     potential_names = [pot.name for pot in model.potentials]
-    assert (
-        "low_bound.pi_rel" in potential_names
-    ), "Missing lower soft bound on derived param"
-    assert (
-        "up_bound.pi_rel" in potential_names
-    ), "Missing upper soft bound on derived param"
+    assert "low_bound.pi_rel" in potential_names, (
+        "Missing lower soft bound on derived param"
+    )
+    assert "up_bound.pi_rel" in potential_names, (
+        "Missing upper soft bound on derived param"
+    )
 
 
 def test_no_soft_bounds_on_derived_parameter_without_bounds():
@@ -926,12 +926,12 @@ def test_bounds_on_gaussian_sampled_parameter_are_hard():
         val_fn = pytensor.function(model.value_vars, out)
 
     potential_names = [pot.name for pot in model.potentials]
-    assert (
-        "low_bound.ecc" not in potential_names
-    ), "Sigmoid enforces bounds; no barrier expected"
-    assert (
-        "up_bound.ecc" not in potential_names
-    ), "Sigmoid enforces bounds; no barrier expected"
+    assert "low_bound.ecc" not in potential_names, (
+        "Sigmoid enforces bounds; no barrier expected"
+    )
+    assert "up_bound.ecc" not in potential_names, (
+        "Sigmoid enforces bounds; no barrier expected"
+    )
     assert "gaussian_prior.ecc" in potential_names
     assert "logit_uniform_prior.ecc" in potential_names
 
@@ -956,9 +956,9 @@ def test_fixed_parameter_has_no_raw_rv():
         p.build_pymc()
 
     raw_names = [rv.name for rv in model.free_RVs]
-    assert not any(
-        "radius" in n for n in raw_names
-    ), f"Fixed parameter should not create a free RV, got: {raw_names}"
+    assert not any("radius" in n for n in raw_names), (
+        f"Fixed parameter should not create a free RV, got: {raw_names}"
+    )
     assert len(model.free_RVs) == 0
 
 
@@ -1012,9 +1012,9 @@ def test_derived_unconstrained_prior_str_is_empty():
     result = p.get_prior_str(latex=True)
 
     # Assert
-    assert (
-        result == ""
-    ), f"Expected empty string for unconstrained derived parameter, got {result!r}"
+    assert result == "", (
+        f"Expected empty string for unconstrained derived parameter, got {result!r}"
+    )
 
 
 def test_to_latex_prior_def_emits_providecommand_for_sampled():
@@ -1093,9 +1093,9 @@ def test_to_table_line_references_prior_command_not_inline():
 
     # Assert
     varname = p.latex_varname
-    assert (
-        f"\\{varname}prior" in line
-    ), f"Expected \\{varname}prior in table line, got:\n{line}"
+    assert f"\\{varname}prior" in line, (
+        f"Expected \\{varname}prior in table line, got:\n{line}"
+    )
     # Must NOT contain inline prior text like $\mathcal{N}$ or "Fixed"
     assert r"\mathcal{N}" not in line
     assert "Fixed" not in line

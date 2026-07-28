@@ -28,7 +28,6 @@ except NameError:
 
 
 class Plot:
-
     # Validated 8-hue categorical palette (light mode), fixed order --
     # see dataviz skill references/palette.md. Same hex used for a given
     # star/combo's spectrum curve (drawn translucent) and its data-point

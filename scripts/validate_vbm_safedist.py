@@ -50,7 +50,7 @@ print(
 )
 print(
     f"=> minimum clearance between any caustic and the guard circle: "
-    f"{(1-worst_ratio)*100:.1f}% of R_inf"
+    f"{(1 - worst_ratio) * 100:.1f}% of R_inf"
 )
 # where is the bound tightest as a function of s?
 for smask, lbl in [
@@ -88,7 +88,7 @@ for s in s_vals:
                 if err > worst_abs:
                     worst_abs = err
                     worst_cfg = (s, q, rho, x, y, A_ps, A_fs)
-print(f"{n} boundary configurations in {time.time()-t0:.0f}s")
+print(f"{n} boundary configurations in {time.time() - t0:.0f}s")
 s, q, rho, x, y, A_ps, A_fs = worst_cfg
 print(
     f"max |A_ps - A_fs| = {worst_abs:.3e}  "
@@ -96,5 +96,5 @@ print(
     f"A_ps={A_ps:.8f}, A_fs={A_fs:.8f})"
 )
 print(
-    f"=> worst boundary error is {worst_abs/1e-3:.3f} x VBM's default Tol (1e-3)"
+    f"=> worst boundary error is {worst_abs / 1e-3:.3f} x VBM's default Tol (1e-3)"
 )

@@ -233,15 +233,15 @@ def test_ptde_async_posterior_mean_near_true_values():
     x_std = float(idata.posterior["x"].values.std())
     y_std = float(idata.posterior["y"].values.std())
     assert abs(x_mean) < 1.0, f"x posterior mean {x_mean:.2f} too far from 0"
-    assert (
-        abs(y_mean - 3.0) < 0.5
-    ), f"y posterior mean {y_mean:.2f} too far from 3"
-    assert (
-        abs(x_std - 1.0) < 0.5
-    ), f"x posterior std {x_std:.2f} too far from 1"
-    assert (
-        abs(y_std - 0.5) < 0.3
-    ), f"y posterior std {y_std:.2f} too far from 0.5"
+    assert abs(y_mean - 3.0) < 0.5, (
+        f"y posterior mean {y_mean:.2f} too far from 3"
+    )
+    assert abs(x_std - 1.0) < 0.5, (
+        f"x posterior std {x_std:.2f} too far from 1"
+    )
+    assert abs(y_std - 0.5) < 0.3, (
+        f"y posterior std {y_std:.2f} too far from 0.5"
+    )
 
 
 def test_ptde_async_early_stop_via_maxtime():

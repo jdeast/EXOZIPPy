@@ -340,9 +340,9 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
                 and st.get("state", {}).get("n_draws", 0) >= 100
             )
 
-        assert _poll_until(
-            _sampling_with_progress, REACH_SAMPLING_TIMEOUT
-        ), "run never reported n_draws>=100 during sampling"
+        assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), (
+            "run never reported n_draws>=100 during sampling"
+        )
 
         status = client.get("/api/run/status").json()
         assert status["phase"] == "sampling", f"unexpected phase {status}"

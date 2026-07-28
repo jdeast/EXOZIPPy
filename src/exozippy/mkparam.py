@@ -332,8 +332,9 @@ def mkprior(
         for prefix in set(_x_keys) & set(_y_keys):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
-            xs, ys = output[x_key].get("init_scale", 0.0), output[y_key].get(
-                "init_scale", 0.0
+            xs, ys = (
+                output[x_key].get("init_scale", 0.0),
+                output[y_key].get("init_scale", 0.0),
             )
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.

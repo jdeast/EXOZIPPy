@@ -643,7 +643,6 @@ class Transit(Instrument):
             points = [points]
 
         for p_idx in range(planets.n_elements):
-
             for i in range(self.n_elements):
                 plt.figure(figsize=(10, 6))
                 ref_point = points[0]

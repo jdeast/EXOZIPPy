@@ -263,7 +263,6 @@ def test_radial_velocity_computes_correctly_over_vectorized_time_array():
     orbit = system.orbit
 
     with model:
-
         t = np.array([0.0, 2.5, 5.0, 7.5])
         t_pt = pt.vector("t")
         K_pt = pt.vector("K")

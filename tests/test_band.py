@@ -104,6 +104,6 @@ def test_build_likelihood_adds_no_potentials():
     with pm.Model() as model:
         band.build_likelihood(model, system=None)
 
-    assert (
-        list(model.named_vars) == []
-    ), f"Expected no model variables from build_likelihood, found: {list(model.named_vars)}"
+    assert list(model.named_vars) == [], (
+        f"Expected no model variables from build_likelihood, found: {list(model.named_vars)}"
+    )

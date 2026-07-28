@@ -61,7 +61,6 @@ class GalacticModel(Component):
 
         # 1. Pre-compute transformation matrices using Astropy based on initial RA/Dec
         for i in range(self.n_elements):
-
             # Grab the internal initvals (which are in radians)
             ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
             dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])

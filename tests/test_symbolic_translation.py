@@ -82,12 +82,12 @@ def test_sampled_parameter_fallback_scaling():
     potential_names = [p.name for p in model.potentials]
     # sigma on a bounded sampled param is a Gaussian potential on the physical
     # value (the raw N(0,1) is cancelled by the flat-prior correction)
-    assert (
-        "gaussian_prior.ecc" in potential_names
-    ), "bounded sampled sigma must add a Gaussian potential"
-    assert (
-        "gaussian_prior.logP" not in potential_names
-    ), "init_scale should never create a Gaussian prior!"
+    assert "gaussian_prior.ecc" in potential_names, (
+        "bounded sampled sigma must add a Gaussian potential"
+    )
+    assert "gaussian_prior.logP" not in potential_names, (
+        "init_scale should never create a Gaussian prior!"
+    )
 
     logp_fn = model.compile_logp()
     logp_center = logp_fn(
@@ -100,6 +100,6 @@ def test_sampled_parameter_fallback_scaling():
     logp_3sigma = logp_fn(
         {"ecc_raw": np.array([3.0]), "logP_raw": np.array([0.0])}
     )
-    assert (
-        logp_3sigma < logp_center - 3.0
-    ), "large deviation should be penalized"
+    assert logp_3sigma < logp_center - 3.0, (
+        "large deviation should be penalized"
+    )

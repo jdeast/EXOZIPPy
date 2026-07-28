@@ -69,7 +69,6 @@ def construct_wave_grid(
     next_wave = wave_min
 
     while next_wave < wave_max:
-
         # iterate forward wavelength
         next_wave += dwave_array[i]
 
@@ -91,7 +90,6 @@ def construct_wave_grid(
 
 
 class Filter(BaseQuery):
-
     SVO_BASE_URL = "https://svo2.cab.inta-csic.es/theory/fps/"
     DEFAULT_FILTER_DIR = pathlib.Path(__file__).parent
 

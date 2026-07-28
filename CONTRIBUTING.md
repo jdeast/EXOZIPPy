@@ -123,33 +123,48 @@ Run the push-stage hook without pushing:
 
 We follow standard Python conventions to ensure readability and maintainability.
 
-Formatters
+ruff does all three jobs
 
-You rarely need to worry about formatting code manually. The pre-commit hooks
-format your code for you:
+You rarely need to worry about formatting code manually. One tool -- ruff --
+handles linting, import sorting and formatting, via two pre-commit hooks:
 
-    isort: sorts imports alphabetically and separates them into logical
-    sections (standard library, third-party, first-party). Configured with
-    profile = "black" so the two agree instead of reformatting each other.
+    ruff-check: sorts imports (rule `I`, replacing isort) and reports bugs.
+    Its --fix is scoped to `--fixable I`, so it may reorder imports and
+    nothing else.
 
-    black: the uncompromising code formatter. Note we set line-length = 79,
-    NOT black's default of 88 -- it matches the width this codebase's comments
-    and docstrings already wrap at. If black formats it, that is the standard.
+    ruff-format: the formatter, replacing black. Note line-length = 79, NOT
+    the default 88 -- it matches the width this codebase's comments and
+    docstrings already wrap at. If ruff formats it, that is the standard.
 
-isort runs before black: isort decides which lines exist, black decides how
-they wrap.
+ruff-check runs before ruff-format: the linter decides which lines exist, the
+formatter decides how they wrap.
 
-Both revs are pinned exactly in .pre-commit-config.yaml and must stay that way.
+The rev is pinned exactly in .pre-commit-config.yaml and must stay that way.
 Everyone has to produce byte-identical output, or merging a long-running branch
-conflicts on formatting rather than on content.
+conflicts on formatting rather than on content. Keeping one tool aligned across
+contributors instead of three is most of why ruff replaced black and isort.
 
-We do NOT currently run a linter (no ruff, no flake8). Unused imports and
-undefined variables are not caught automatically; that's a gap, not a policy.
+`ruff format` is used, but there is deliberately NO second formatter. Do not
+add [tool.black] or [tool.isort] back.
 
-Note on `git blame`: commit 536c2da applied black and isort across 176 files at
-once, so naive blame attributes most lines to that commit. .git-blame-ignore-revs
-fixes this. GitHub's blame view honours it automatically; locally it takes one
-opt-in per clone:
+The lint rule set (pyproject.toml, [tool.ruff.lint]) is deliberately narrow:
+undefined names, syntax errors, `is` against a literal, broken format strings,
+pylint's error category, and import order. Every one had zero violations when
+adopted, so it exists to stop regressions rather than to relitigate style.
+pyproject.toml lists the rules that are switched OFF and why -- including
+several that look useful but produce only false positives here -- so read that
+before widening the set.
+
+Unused imports (F401) are NOT checked yet. Enabling that rule needs care: the
+`from . import physics` lines in eight components look unused but populate
+PHYSICS_REGISTRY via @register_physics, and ruff considers them auto-fixable.
+Never broaden the hook's --fix beyond `I`.
+
+Note on `git blame`: two commits reformatted the tree wholesale -- 536c2da
+(black and isort, 176 files) and the ruff-format adoption (49 files) -- so
+naive blame attributes many lines to them. .git-blame-ignore-revs fixes this.
+GitHub's blame view honours it automatically; locally it takes one opt-in per
+clone:
 
     git config blame.ignoreRevsFile .git-blame-ignore-revs
 

@@ -120,12 +120,12 @@ def test_with_explicit_mu_preserved(tmp_path):
     result = yaml.safe_load(open(out))
     entry = result["star.Host.teff"]
 
-    assert entry["initval"] == pytest.approx(
-        5750.0, abs=1e-6
-    ), "initval must be MAP"
-    assert entry["mu"] == pytest.approx(
-        5800.0, abs=1e-6
-    ), "mu must stay at original prior center"
+    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6), (
+        "initval must be MAP"
+    )
+    assert entry["mu"] == pytest.approx(5800.0, abs=1e-6), (
+        "mu must stay at original prior center"
+    )
     assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
 
 
@@ -160,12 +160,12 @@ def test_initval_sigma_promotes_mu(tmp_path):
     result = yaml.safe_load(open(out))
     entry = result["star.Host.teff"]
 
-    assert entry["initval"] == pytest.approx(
-        6193.0, abs=1e-6
-    ), "initval must be MAP"
-    assert entry["mu"] == pytest.approx(
-        6207.0, abs=1e-6
-    ), "original initval promoted to mu"
+    assert entry["initval"] == pytest.approx(6193.0, abs=1e-6), (
+        "initval must be MAP"
+    )
+    assert entry["mu"] == pytest.approx(6207.0, abs=1e-6), (
+        "original initval promoted to mu"
+    )
     assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
 
 
@@ -200,9 +200,9 @@ def test_fixed_sigma_zero_no_mu_promotion(tmp_path):
     result = yaml.safe_load(open(out))
     entry = result["star.Host.radius"]
 
-    assert entry["initval"] == pytest.approx(
-        1.05, abs=1e-6
-    ), "initval must be MAP"
+    assert entry["initval"] == pytest.approx(1.05, abs=1e-6), (
+        "initval must be MAP"
+    )
     assert "mu" not in entry, "sigma=0 is fixed, not a prior — must not add mu"
     assert entry["sigma"] == pytest.approx(0.0)
 
@@ -241,15 +241,15 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
     )
 
     result = yaml.safe_load(open(out))
-    assert (
-        "lens.Lens.t_0" not in result
-    ), "initval-only non-sampled entry should be dropped"
-    assert (
-        "lens.Lens.u_0" not in result
-    ), "mu-only entry (no sigma) should be dropped"
-    assert (
-        "star.Lens.ra" in result
-    ), "entry with sigma constraint should be kept"
+    assert "lens.Lens.t_0" not in result, (
+        "initval-only non-sampled entry should be dropped"
+    )
+    assert "lens.Lens.u_0" not in result, (
+        "mu-only entry (no sigma) should be dropped"
+    )
+    assert "star.Lens.ra" in result, (
+        "entry with sigma constraint should be kept"
+    )
 
 
 def test_non_sampled_with_upper_limit_is_kept(tmp_path):
@@ -362,9 +362,9 @@ def test_derived_parameter_excluded_from_output(tmp_path):
     )
     # Internal _raw variables must never appear in the output
     for key in result:
-        assert not key.endswith(
-            "_raw"
-        ), f"Raw variable leaked into output: {key}"
+        assert not key.endswith("_raw"), (
+            f"Raw variable leaked into output: {key}"
+        )
 
 
 def test_output_filename_increments(tmp_path):
@@ -415,12 +415,12 @@ def test_flat_dict_component_writes_two_part_key(tmp_path):
         written = yaml.safe_load(f)
 
     # mkprior must write 'sed.errscale' (2-part) NOT 'sed.0.errscale' (3-part)
-    assert (
-        "sed.errscale" in written
-    ), f"Expected 'sed.errscale' in output; got keys: {list(written)}"
-    assert not any(
-        k.startswith("sed.0.") for k in written
-    ), f"3-part indexed key found in output: {[k for k in written if k.startswith('sed.0.')]}"
+    assert "sed.errscale" in written, (
+        f"Expected 'sed.errscale' in output; got keys: {list(written)}"
+    )
+    assert not any(k.startswith("sed.0.") for k in written), (
+        f"3-part indexed key found in output: {[k for k in written if k.startswith('sed.0.')]}"
+    )
 
 
 def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
@@ -458,9 +458,9 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
     parallax_entry = written.get("star.parallax") or written.get(
         "star.A.parallax"
     )
-    assert (
-        parallax_entry is not None
-    ), f"parallax key missing from output: {list(written)}"
+    assert parallax_entry is not None, (
+        f"parallax key missing from output: {list(written)}"
+    )
     assert "mu" in parallax_entry, (
         f"parallax entry has no 'mu' — prior center would drift on successive runs. "
         f"Got: {parallax_entry}"

@@ -146,9 +146,9 @@ def test_multi_lens_frame_reduces_to_binary():
         A_bin = f_bin(p, times, obs)
         A_multi = f_multi(p_multi, times, obs)
         worst = max(worst, np.max(np.abs(A_bin - A_multi) / np.abs(A_bin)))
-    assert (
-        worst < 1e-3
-    ), f"multi-lens frame does not reduce to binary: {worst:.2e}"
+    assert worst < 1e-3, (
+        f"multi-lens frame does not reduce to binary: {worst:.2e}"
+    )
 
 
 def test_triple_lens_magnification_evaluates():

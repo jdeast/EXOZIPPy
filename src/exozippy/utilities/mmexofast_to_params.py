@@ -17,11 +17,17 @@ Usage:
     python scripts/mmexofast_to_params.py examples/DC2018_128/mmexofast.json \\
         --lens-name Lens --solution 1 --out examples/DC2018_128/DC2018_128.params.yaml
 
-MMEXOFAST provides initvals and estimated uncertainties from a quick
-optimization fit to the data.  The uncertainties are mapped to EXOZIPPy
+MMEXOFAST provides initvals and, optionally, estimated uncertainties from a
+quick optimization fit to the data.  The uncertainties are mapped to EXOZIPPy
 init_scales, which only sets the sampler's initial step size without adding any
 logp penalty. They are NOT used as priors, which would double-count the data and
 artificially shrink the posterior.
+
+Uncertainties are optional: MMEXOFAST omits the per-fit ``sigmas`` block for
+solutions that are initial estimates rather than optimized fits, and is
+expected to stop emitting sigmas altogether. Any parameter whose sigma is
+absent simply gets no ``init_scale`` line, leaving EXOZIPPy's own default step
+size in place. Only ``initval`` is required.
 
 MMEXOFAST gives uncertainties in log space for s, q, rho (log_s, log_q,
 log_rho).  Physical init_scale is recovered via first-order propagation:
@@ -47,9 +53,36 @@ def _fmt(values, spec):
     return "[" + ", ".join(format(v, spec) for v in values) + "]"
 
 
+def _scale(fit, key):
+    """Linear-space init_scale for ``key``, or None when it is unavailable.
+
+    MMEXOFAST omits ``sigmas`` entirely for solutions that are initial
+    estimates rather than optimized fits, and is expected to stop emitting
+    them altogether. init_scale is only a sampler hint, so a missing sigma
+    means "let EXOZIPPy pick the step size", not an error.
+    """
+    return (fit.get("sigmas") or {}).get(key)
+
+
 def _log_scale(fit, log_key, phys_key):
-    """Convert a log-space sigma to a physical init_scale: x * sigma_ln_x."""
-    return fit["parameters"][phys_key] * fit["sigmas"][log_key]
+    """Convert a log-space sigma to a physical init_scale: x * sigma_ln_x.
+
+    Returns None when the sigma is unavailable; see :func:`_scale`.
+    """
+    sigma = _scale(fit, log_key)
+    if sigma is None:
+        return None
+
+    return fit["parameters"][phys_key] * sigma
+
+
+def _param_block(path, initval, scale, scale_spec):
+    """YAML lines for one parameter, omitting init_scale when it is None."""
+    lines = [f"{path}:", f"    initval: {initval}"]
+    if scale is not None:
+        lines.append(f"    init_scale: {format(scale, scale_spec)}")
+
+    return lines
 
 
 def mmexofast_to_params(
@@ -99,40 +132,58 @@ def mmexofast_to_params(
         ]
     lines.append("")
 
+    lines += _param_block(
+        f"lens.{lens_name}.t_0",
+        _fmt([fit["parameters"]["t_0"] for fit in chosen], ".8f"),
+        _scale(chosen[0], "t_0"),
+        ".8f",
+    )
+    lines.append("")
+    lines += _param_block(
+        f"lens.{lens_name}.u_0",
+        _fmt([fit["parameters"]["u_0"] for fit in chosen], ".8f"),
+        _scale(chosen[0], "u_0"),
+        ".8f",
+    )
     lines += [
-        f"lens.{lens_name}.t_0:",
-        f"    initval: {_fmt([fit['parameters']['t_0'] for fit in chosen], '.8f')}",
-        f"    init_scale: {chosen[0]['sigmas']['t_0']:.8f}",
-        f"",
-        f"lens.{lens_name}.u_0:",
-        f"    initval: {_fmt([fit['parameters']['u_0'] for fit in chosen], '.8f')}",
-        f"    init_scale: {chosen[0]['sigmas']['u_0']:.8f}",
         f"",
         f"# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.",
         f"# Provided here as an initval hint to seed the relaxation engine.",
-        f"lens.{lens_name}.t_E:",
-        f"    initval: {_fmt([fit['parameters']['t_E'] for fit in chosen], '.8f')}",
-        f"    init_scale: {chosen[0]['sigmas']['t_E']:.8f}",
-        f"",
-        f"lens.{lens_name}.s:",
-        f"    initval: {_fmt([fit['parameters']['s'] for fit in chosen], '.8f')}",
-        f"    init_scale: {_log_scale(chosen[0], 'log_s', 's'):.8f}",
+    ]
+    lines += _param_block(
+        f"lens.{lens_name}.t_E",
+        _fmt([fit["parameters"]["t_E"] for fit in chosen], ".8f"),
+        _scale(chosen[0], "t_E"),
+        ".8f",
+    )
+    lines.append("")
+    lines += _param_block(
+        f"lens.{lens_name}.s",
+        _fmt([fit["parameters"]["s"] for fit in chosen], ".8f"),
+        _log_scale(chosen[0], "log_s", "s"),
+        ".8f",
+    )
+    lines += [
         f"",
         f"# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.",
-        f"lens.{lens_name}.alpha:",
-        f"    initval: {_fmt([fit['parameters']['alpha'] for fit in chosen], '.8f')}",
-        f"    init_scale: {chosen[0]['sigmas']['alpha']:.8f}",
     ]
+    lines += _param_block(
+        f"lens.{lens_name}.alpha",
+        _fmt([fit["parameters"]["alpha"] for fit in chosen], ".8f"),
+        _scale(chosen[0], "alpha"),
+        ".8f",
+    )
 
     rhos = [fit["parameters"].get("rho", 0.0) for fit in chosen]
     use_rho = any(r > 1e-10 for r in rhos)
     if use_rho:
-        lines += [
-            f"",
-            f"lens.{lens_name}.rho:",
-            f"    initval: {_fmt(rhos, '.8e')}",
-            f"    init_scale: {_log_scale(chosen[0], 'log_rho', 'rho'):.8e}",
-        ]
+        lines.append("")
+        lines += _param_block(
+            f"lens.{lens_name}.rho",
+            _fmt(rhos, ".8e"),
+            _log_scale(chosen[0], "log_rho", "rho"),
+            ".8e",
+        )
     else:
         lines += [
             f"",
@@ -146,10 +197,13 @@ def mmexofast_to_params(
             f"# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates",
             f"# this through the symbolic relation  q * M_primary = M_companion",
             f"# to set the companion's mass initval automatically.",
-            f"lens.{lens_name}.q:",
-            f"    initval: {_fmt(qs, '.8e')}",
-            f"    init_scale: {_log_scale(chosen[0], 'log_q', 'q'):.8e}",
         ]
+        lines += _param_block(
+            f"lens.{lens_name}.q",
+            _fmt(qs, ".8e"),
+            _log_scale(chosen[0], "log_q", "q"),
+            ".8e",
+        )
 
     text = "\n".join(lines) + "\n"
 

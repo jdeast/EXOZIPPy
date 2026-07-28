@@ -179,9 +179,7 @@ class MulensInstrument(Instrument):
         self._t0_par = float(system.lens.t0_par[0])
         self._earth_pos_ref = self.get_observer_position(
             np.array([self._t0_par]), "earth"
-        )[
-            0
-        ]  # (3,) AU
+        )[0]  # (3,) AU
         _dt = 0.5  # days for finite-difference velocity
         _ep = self.get_observer_position(
             np.array([self._t0_par + _dt]), "earth"
