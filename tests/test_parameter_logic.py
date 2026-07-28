@@ -6,7 +6,7 @@ import pytensor.tensor as pt
 import pytest
 
 from conftest import MockSystem
-from exozippy.components.parameter import Parameter, to_vec
+from exozippy.components.parameter import Parameter, UnitTranslator, to_vec
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
 from exozippy.diagnostics import ModelAuditor
@@ -1099,3 +1099,60 @@ def test_to_table_line_references_prior_command_not_inline():
     # Must NOT contain inline prior text like $\mathcal{N}$ or "Fixed"
     assert r"\mathcal{N}" not in line
     assert "Fixed" not in line
+
+
+def test_unit_translator_rejects_bad_unit_with_a_usable_message():
+    """
+    Given a unit string astropy cannot parse,
+    When UnitTranslator.get_latex is called with the owning parameter's label,
+    Then it raises ValueError naming both the unit and the label.
+
+    Regression: the error path referenced `self` inside a @classmethod, so it
+    raised `NameError: name 'self' is not defined` instead of this message,
+    and the f-string fragments were concatenated without spaces.
+    """
+    # ARRANGE
+    bad_unit = "not_a_real_unit"
+    label = "star.0.mass"
+
+    # ACT
+    with pytest.raises(ValueError) as excinfo:
+        UnitTranslator.get_latex(bad_unit, label=label)
+
+    # ASSERT
+    message = str(excinfo.value)
+    assert bad_unit in message
+    assert label in message
+    assert "unitSpecify" not in message, "f-string fragments lost their space"
+    assert "self" not in message
+
+
+def test_unit_translator_error_message_omits_label_when_not_supplied():
+    """
+    Given no label is passed,
+    When UnitTranslator.get_latex rejects a bad unit,
+    Then the message still renders cleanly rather than naming a missing label.
+    """
+    # ARRANGE / ACT
+    with pytest.raises(ValueError) as excinfo:
+        UnitTranslator.get_latex("not_a_real_unit")
+
+    # ASSERT
+    message = str(excinfo.value)
+    assert "None" not in message
+    assert "'user_unit_latex' manually" in message
+
+
+def test_parameter_rejects_an_unparseable_unit_at_construction():
+    """
+    Given a Parameter whose unit astropy cannot parse,
+    When it is constructed,
+    Then it raises at unit parsing -- before the LaTeX step is ever reached.
+
+    This pins WHERE the failure happens. The LaTeX translator has its own
+    fallback to "", but a bad unit never gets that far, so that fallback
+    covers units that parse yet have no pretty form, not typos.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError, match="not_a_real_unit"):
+        Parameter(label="star.0.mass", unit="not_a_real_unit", initval=1.0)

@@ -1365,44 +1365,6 @@ def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
         )
 
 
-def _initialize_internal_maps(self):
-    """
-    The Bridge Phase: Converts YAML indices into PyTensor variables
-    so Step 3 can use them for vectorized math.
-    """
-    # 1. Planet Mappings (Planet -> Star and Planet -> Orbit)
-    if "planets" in self.active_components:
-        planet_comp = self.active_components["planets"]
-
-        # Read 'star_ndx' from each planet entry in the YAML
-        star_map_indices = np.array(
-            [p_cfg.get("star_ndx", 0) for p_cfg in planet_comp.config]
-        )
-        self.star_map = pt.as_tensor_variable(star_map_indices).astype("int32")
-        # Also attach it to the component so it can use 'self.star_map'
-        planet_comp.star_map = self.star_map
-
-        # Read 'orbit_ndx' from each planet entry in the YAML
-        orbit_map_indices = np.array(
-            [p_cfg.get("orbit_ndx", 0) for p_cfg in planet_comp.config]
-        )
-        self.orbit_map = pt.as_tensor_variable(orbit_map_indices).astype(
-            "int32"
-        )
-        planet_comp.orbit_map = self.orbit_map
-
-    # 2. RV Instrument Mapping (Observation -> Instrument Offset)
-    # We find any component that looks like an RVInstrument
-    for comp in self.active_components.values():
-        if hasattr(comp, "inst_map") and not isinstance(
-            comp, (Star, Planet, Orbit)
-        ):
-            # This handles the gamma/jitter slicing for RVs and Transits
-            comp.inst_map_tensor = pt.as_tensor_variable(comp.inst_map).astype(
-                "int32"
-            )
-
-
 def get_diagonal_curvature(model, point):
     import pytensor.gradient as ptg
 

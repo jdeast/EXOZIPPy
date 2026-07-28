@@ -198,8 +198,12 @@ class UnitTranslator:
     }
 
     @classmethod
-    def get_latex(cls, unit):
-        """Strict translator: returns pretty string or raises ValueError."""
+    def get_latex(cls, unit, label=None):
+        """Strict translator: returns pretty string or raises ValueError.
+
+        `label` is only used to name the offending parameter in the error
+        message; it is optional so the translator stays usable standalone.
+        """
         # Check direct hits (handles aliases like u.R_sun vs u.solRad)
         if unit in cls.PRETTY_MAP:
             return cls.PRETTY_MAP[unit]
@@ -216,10 +220,11 @@ class UnitTranslator:
 
         except (TypeError, ValueError, AttributeError):
             # 3. If it's not a unit object or a string astropy understands
+            where = f" for {label}" if label is not None else ""
             raise ValueError(
-                f"Unit '{unit}' is not a recognized Astropy unit"
-                f"Specify valid units or set 'user_unit_latex' for"
-                f"{self.label} manually in your parameter files."
+                f"Unit '{unit}' is not a recognized Astropy unit. "
+                f"Specify valid units or set 'user_unit_latex'{where} "
+                f"manually in your parameter files."
             )
 
 
@@ -438,8 +443,10 @@ class Parameter:
 
         # 3. GET LATEX DISPLAY NAME (Use the first unit in the list)
         try:
-            self.unit_latex = UnitTranslator.get_latex(self.unit[0])
-        except:
+            self.unit_latex = UnitTranslator.get_latex(
+                self.unit[0], label=self.label
+            )
+        except (TypeError, ValueError, AttributeError):
             self.unit_latex = ""
 
         # 4. STRUCTURAL NAMING
