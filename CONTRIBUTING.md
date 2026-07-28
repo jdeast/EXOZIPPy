@@ -143,8 +143,23 @@ Both revs are pinned exactly in .pre-commit-config.yaml and must stay that way.
 Everyone has to produce byte-identical output, or merging a long-running branch
 conflicts on formatting rather than on content.
 
-We do NOT currently run a linter (no ruff, no flake8). Unused imports and
-undefined variables are not caught automatically; that's a gap, not a policy.
+Linter
+
+    ruff: catches bugs, not style. It does NOT format -- black and isort own
+    that, and `ruff format` is deliberately unused so two formatters can never
+    disagree.
+
+The rule set (in pyproject.toml under [tool.ruff.lint]) is deliberately narrow:
+undefined names, syntax errors, `is` against a literal, broken format strings,
+and pylint's error category. Every one of those had zero violations when the
+hook was adopted, so it exists to stop regressions rather than to relitigate
+style. pyproject.toml lists the rules that are switched OFF and why, so you
+don't have to re-derive it -- read that before widening the set.
+
+Unused imports (F401) are NOT checked yet. Enabling that rule needs care: the
+`from . import physics` lines in eight components look unused but populate
+PHYSICS_REGISTRY via @register_physics, and ruff considers them auto-fixable.
+Never run the ruff hook with `--fix`.
 
 Note on `git blame`: commit 536c2da applied black and isort across 176 files at
 once, so naive blame attributes most lines to that commit. .git-blame-ignore-revs

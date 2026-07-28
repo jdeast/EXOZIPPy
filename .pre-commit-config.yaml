@@ -23,6 +23,20 @@ repos:
     hooks:
     -   id: black
 
+# ruff lints only -- it does NOT format. black and isort own formatting, and
+# `ruff format` is not used here on purpose (see the note in pyproject.toml).
+#
+# NEVER add `args: [--fix]` to this hook. The rule set in pyproject.toml is
+# narrow enough that there is nothing to auto-fix today, but F401 is the
+# obvious next rule to enable, and ruff considers the `from . import physics`
+# side-effect imports auto-fixable. Deleting those breaks PHYSICS_REGISTRY
+# lookup in eight components. A linter that edits your code silently is not
+# worth the seconds it saves.
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+    -   id: ruff-check
+
 -   repo: local
     hooks:
     # The full suite runs on PUSH, not on commit. It takes ~3 minutes locally

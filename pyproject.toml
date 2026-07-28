@@ -244,6 +244,45 @@ line_length = 79
 # alone; float_to_top removes that wall. Verified with `isort --diff` on both
 # files before adopting these hooks.
 
+[tool.ruff]
+line-length = 79
+# black and isort own formatting. ruff is here ONLY to catch bugs, so
+# `ruff format` is deliberately not used -- two formatters with independent
+# pins can disagree, and byte-identical output across contributors is what
+# makes merging long-running branches survivable.
+
+[tool.ruff.lint]
+# Deliberately narrow: every rule here has ZERO violations in the tree as of
+# this commit, so the hook goes on without a mass-edit and without a single
+# `# noqa`. Its job is to stop regressions, not to relitigate style.
+#
+#   E9    syntax / IO errors
+#   F821  undefined name -- the rule that found the bugs fixed in #23
+#   F632  `is` compared against a literal (always a bug, never intent)
+#   F502  `%`-format with a dict where a tuple is required
+#   F522  .format() given keys the string never uses
+#   F701  `break` outside a loop
+#   F702  `continue` outside a loop
+#   B002  `++x`, which is two unary plusses and does nothing
+#   PLE   pylint's error (not style) category
+select = ["E9", "F821", "F632", "F502", "F522", "F701", "F702", "B002", "PLE"]
+
+# NOT enabled, with reasons, so nobody has to re-derive these:
+#
+# F401 (unused import), 105 hits. Eight of them are `from . import physics`
+#   side-effect imports that populate PHYSICS_REGISTRY via @register_physics
+#   (astrometryinstrument, orbit, planet, rvinstrument, sed, star, transit).
+#   ruff marks them auto-fixable, so `--fix` would delete all eight and break
+#   physics lookup in those components. Enable only after marking them, and
+#   never run this hook with --fix. A further 22 are __init__.py re-exports.
+# F841 (unused variable), 25 hits -- worth a pass, none urgent.
+# B023 (loop-variable closure), 8 hits, ALL false alarms: the closures in
+#   outputs/latex.py and config.py are invoked inside the same iteration that
+#   defines them, so late binding never bites. Checked, do not re-add.
+# F811 (redefinition), 4 hits, 2 of them the standard pytest false positive
+#   of importing a conftest fixture and shadowing it as a test argument.
+# UP*/BLE001 -- modernization and style churn, ~150 hits, no bugs.
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["exozippy", "src"]
