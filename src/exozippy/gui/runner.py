@@ -242,5 +242,5 @@ def list_runs(directory):
                     "updated_at": doc.get("updated_at"),
                 }
             )
-    runs.sort(key=lambda r: (r.get("updated_at") or 0), reverse=True)
+    runs.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
     return runs

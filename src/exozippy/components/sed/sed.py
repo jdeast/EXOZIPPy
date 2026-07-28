@@ -888,9 +888,7 @@ class SED(Component):
         # ---- (e.g. "B+C" from an "A-(B+C)" differential row); the full  ----
         # ---- nstars set is "Total" and isn't duplicated here.           ----
         all_idx = frozenset(range(plot_obj.nstars))
-        sub_combos = (
-            []
-        )  # (label, sorted star-index list); size >= 2, not the full set
+        sub_combos = []  # (label, sorted star-index list); size >= 2, not the full set
         seen_combos = set()
         for row in range(plot_obj.nfilters):
             bm = plot_obj.blend_matrix[row]

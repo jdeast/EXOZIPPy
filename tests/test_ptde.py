@@ -344,9 +344,9 @@ def test_ptde_posterior_mean_near_true_values():
     x_mean = float(idata.posterior["x"].values.mean())
     y_mean = float(idata.posterior["y"].values.mean())
     assert abs(x_mean) < 1.0, f"x posterior mean {x_mean:.2f} too far from 0"
-    assert (
-        abs(y_mean - 3.0) < 0.5
-    ), f"y posterior mean {y_mean:.2f} too far from 3"
+    assert abs(y_mean - 3.0) < 0.5, (
+        f"y posterior mean {y_mean:.2f} too far from 3"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -676,9 +676,9 @@ def test_shutdown_pool_kills_workers_that_ignore_sigterm():
     elapsed = time.time() - t0
 
     # ASSERT
-    assert (
-        finished
-    ), "_shutdown_pool did not return -- the recycle hang regressed"
+    assert finished, (
+        "_shutdown_pool did not return -- the recycle hang regressed"
+    )
     assert elapsed < 10.0, f"_shutdown_pool took {elapsed:.1f}s, expected ~1s"
 
     # a fresh pool is usable after the recycle

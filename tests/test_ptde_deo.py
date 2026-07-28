@@ -259,9 +259,9 @@ def test_deo_and_random_agree_on_bimodal_moments():
     assert abs(float(x_deo.std()) - float(x_rnd.std())) < 1.0
     # DEO mixes well enough to populate both modes roughly evenly.
     frac_pos = float((x_deo > 0).mean())
-    assert (
-        0.3 < frac_pos < 0.7
-    ), f"DEO mode balance off: frac_pos={frac_pos:.2f}"
+    assert 0.3 < frac_pos < 0.7, (
+        f"DEO mode balance off: frac_pos={frac_pos:.2f}"
+    )
 
 
 def test_deo_achieves_higher_round_trip_rate_than_random():

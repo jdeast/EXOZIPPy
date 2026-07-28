@@ -218,9 +218,7 @@ class ConfigManager:
             RANK_DERIVED_USER  # 80: below RANK_USER, above data
         )
         self.scale_hints = {}  # path -> init_scale in internal units
-        self.propagated_scales = (
-            {}
-        )  # path -> init_scale (internal) from Jacobian forward pass
+        self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
         self.symbolic_blacklist = set()
 
@@ -2478,5 +2476,6 @@ class ConfigManager:
             f"Relative Error: {error:.2%}\n" + "-" * 60 + "\n"
             "The parameters provided in your config do not satisfy this equation.\n"
             "Verify your starting values; a bad initialization will destroy NUTS efficiency.\n"
-            + "!" * 60
+            + "!"
+            * 60
         )

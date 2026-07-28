@@ -196,8 +196,8 @@ col_sep = "-" * val_w + " " + "-" * sig_w
 
 hdrs = [f"{'Param':<8}", f"{'Unit':<5}", f"{'Truth (DC18)':<{val_w}}"]
 for i in range(n_mmx):
-    hdrs.append(f"{'MMEXOFAST sol '+str(i):<{val_w+1+sig_w}}")
-hdrs.append(f"{'EXOZIPPy':<{val_w+1+sig_w}}")
+    hdrs.append(f"{'MMEXOFAST sol ' + str(i):<{val_w + 1 + sig_w}}")
+hdrs.append(f"{'EXOZIPPy':<{val_w + 1 + sig_w}}")
 header = "  ".join(hdrs)
 print(header)
 print("-" * len(header))

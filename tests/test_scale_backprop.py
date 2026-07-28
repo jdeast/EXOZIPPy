@@ -58,9 +58,9 @@ def test_mass_init_scale_propagates_to_logmass():
     )
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
-    assert (
-        logmass_scale is not None
-    ), "logmass should have a back-propagated scale"
+    assert logmass_scale is not None, (
+        "logmass should have a back-propagated scale"
+    )
 
     expected = sigma_mass / (mass_initval * np.log(10))
     assert logmass_scale == pytest.approx(expected, rel=0.05), (
@@ -85,9 +85,9 @@ def test_user_specified_parent_scale_beats_backprop():
     )
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
-    assert logmass_scale == pytest.approx(
-        999.0, rel=0.01
-    ), "User-specified logmass init_scale should override back-propagated scale"
+    assert logmass_scale == pytest.approx(999.0, rel=0.01), (
+        "User-specified logmass init_scale should override back-propagated scale"
+    )
 
 
 def test_backprop_overrides_default_scale():
@@ -112,9 +112,9 @@ def test_backprop_overrides_default_scale():
 
     logmass_scale = cm.propagated_scales.get("star.0.logmass")
     assert logmass_scale is not None
-    assert logmass_scale == pytest.approx(
-        expected, rel=0.05
-    ), "Back-propagated scale should replace the default logmass scale"
+    assert logmass_scale == pytest.approx(expected, rel=0.05), (
+        "Back-propagated scale should replace the default logmass scale"
+    )
 
 
 def test_derived_param_scale_not_warned(caplog):
@@ -135,6 +135,6 @@ def test_derived_param_scale_not_warned(caplog):
         for r in caplog.records
         if r.levelno == logging.WARNING and "ignored" in r.message
     ]
-    assert (
-        not ignored
-    ), f"Unexpected 'ignored' warnings: {[r.message for r in ignored]}"
+    assert not ignored, (
+        f"Unexpected 'ignored' warnings: {[r.message for r in ignored]}"
+    )

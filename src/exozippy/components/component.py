@@ -341,9 +341,7 @@ class Component(ABC):
                     )
 
                 ext_vals = {}  # dep path -> tensor in the dep's USER units
-                self_refs = (
-                    {}
-                )  # dep path -> (element index, user->internal factor)
+                self_refs = {}  # dep path -> (element index, user->internal factor)
                 for dep in plink.dep_paths:
                     dparts = dep.split(".")
                     dcomp, didx, dparam = dparts[0], int(dparts[1]), dparts[2]

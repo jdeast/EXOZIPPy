@@ -212,7 +212,7 @@ def main():
         d = np.sqrt(x * x + y * y)
         far = d > (r_inf + 2.0 * rho)
         print(
-            f"    R_inf={r_inf:.4g}  guard_radius={r_inf + 2*rho:.4g}  "
+            f"    R_inf={r_inf:.4g}  guard_radius={r_inf + 2 * rho:.4g}  "
             f"source distance range=[{d.min():.4g}, {d.max():.4g}]  "
             f"epochs far-field={far.sum()}/{len(d)}"
         )
@@ -246,7 +246,7 @@ def main():
                 if dtk > worst_dt:
                     worst_dt, worst_i = dtk, k
             print(
-                f"    epoch walk: total={time.perf_counter()-t0:.3f}s  "
+                f"    epoch walk: total={time.perf_counter() - t0:.3f}s  "
                 f"slowest epoch {worst_i} took {worst_dt:.3f}s  "
                 f"(x={x[worst_i]:.6g}, y={y[worst_i]:.6g}, d={d[worst_i]:.6g}, "
                 f"far={bool(far[worst_i])})"

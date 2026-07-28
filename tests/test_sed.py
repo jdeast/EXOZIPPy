@@ -124,9 +124,9 @@ def test_read_single_bc_file_teff_column_is_linear_not_log():
     df, _ = _read_single_bc_file(_SOLAR_FEH_2MASS_NEXTGEN)
 
     # ASSERT
-    assert (
-        df["teff"] > 100
-    ).all(), "teff column contains values <= 100; looks like lgTef was not exponentiated"
+    assert (df["teff"] > 100).all(), (
+        "teff column contains values <= 100; looks like lgTef was not exponentiated"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +376,9 @@ def test_build_bc_grid_contains_no_nan_values():
     )
 
     # ASSERT
-    assert not np.any(
-        np.isnan(grid["bc_values"])
-    ), "bc_values contains NaN entries; grid may not be fully populated"
+    assert not np.any(np.isnan(grid["bc_values"])), (
+        "bc_values contains NaN entries; grid may not be fully populated"
+    )
 
 
 def test_build_bc_grid_filter_order_matches_mist_names():
@@ -813,9 +813,9 @@ def test_sed_init_injects_grid_bounds_into_config_manager(minimal_sed_file):
     for key in ("star.teffsed", "star.feh", "star.av"):
         assert key in cm.user_params, f"config_manager missing key: {key}"
         entry = cm.user_params[key]
-        assert (
-            "lower" in entry and "upper" in entry
-        ), f"{key} entry is missing 'lower' / 'upper': {entry}"
+        assert "lower" in entry and "upper" in entry, (
+            f"{key} entry is missing 'lower' / 'upper': {entry}"
+        )
 
     # ASSERT — teff bounds are physically sane
     teff_entry = cm.user_params["star.teffsed"]
@@ -889,9 +889,9 @@ def test_sed_register_parameters_creates_errscale_parameter(minimal_sed_file):
         sed.add_parameter(model, "errscale", system=None)
 
     # ASSERT
-    assert hasattr(
-        sed, "errscale"
-    ), "SED missing self.errscale after add_parameter"
+    assert hasattr(sed, "errscale"), (
+        "SED missing self.errscale after add_parameter"
+    )
     assert sed.errscale is not None
 
 

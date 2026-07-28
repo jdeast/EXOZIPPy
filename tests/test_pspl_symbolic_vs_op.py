@@ -96,9 +96,9 @@ def test_pspl_symbolic_vs_op_no_parallax():
     m_sym, m_op = _eval_both(system, model, zero_obs, t_vals)
 
     max_diff = np.max(np.abs(m_sym - m_op))
-    assert (
-        max_diff < 1e-4
-    ), f"max |A_sym - A_op| (no parallax) = {max_diff:.2e}"
+    assert max_diff < 1e-4, (
+        f"max |A_sym - A_op| (no parallax) = {max_diff:.2e}"
+    )
 
 
 def test_pspl_symbolic_vs_op_with_earth_parallax():

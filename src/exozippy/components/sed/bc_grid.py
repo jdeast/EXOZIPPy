@@ -382,7 +382,7 @@ def build_bc_grid(
         if not feh_files:
             file_dir = bc_root / model / "BCs" / fac
             raise FileNotFoundError(
-                f"No BC files for facility '{fac}' under " f"{file_dir}"
+                f"No BC files for facility '{fac}' under {file_dir}"
             )
 
         def _read_all(files):

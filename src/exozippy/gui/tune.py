@@ -337,9 +337,7 @@ class TuneSession:
             }
             self.structural_hash = res["structural_hash"]
             self.phase = "live"
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 - surfaced to the status endpoint
+        except Exception as exc:  # noqa: BLE001 - surfaced to the status endpoint
             logger.exception("tune solve failed")
             self.error = f"{type(exc).__name__}: {exc}"
             self.phase = "error"

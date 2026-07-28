@@ -1262,12 +1262,12 @@ def ptde_sample(
             _t_step = time.time()
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    f"PTDE step {step+1} ({phase})  "
+                    f"PTDE step {step + 1} ({phase})  "
                     f"n_props={len(props_flat)}  "
-                    f"total={_t_step-_t0:.3f}s  "
-                    f"build={_t_build-_t0:.3f}s  "
-                    f"eval={_t_eval-_t_build:.3f}s  "
-                    f"rest={_t_step-_t_eval:.3f}s  "
+                    f"total={_t_step - _t0:.3f}s  "
+                    f"build={_t_build - _t0:.3f}s  "
+                    f"eval={_t_eval - _t_build:.3f}s  "
+                    f"rest={_t_step - _t_eval:.3f}s  "
                     f"T1_lp=[{min(logps[0]):.1f},{max(logps[0]):.1f}]"
                 )
 
@@ -1332,7 +1332,7 @@ def ptde_sample(
 
                 rt_rate = round_trips[0] / max(n_swap_rounds, 1)
                 logger.info(
-                    f"PTDE {step+1}/{total_steps} ({phase})  "
+                    f"PTDE {step + 1}/{total_steps} ({phase})  "
                     f"accept=[{', '.join(f'{r:.2f}' for r in ar)}]  "
                     f"γ={gamma:.4f}  "
                     + (

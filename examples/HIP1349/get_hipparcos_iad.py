@@ -179,7 +179,7 @@ def main():
     print(f"AL parallax factor: max |ours - IAD| = {max_diff:.4f}")
     if max_diff > 0.02:
         raise SystemExit(
-            "Parallax factor mismatch with the IAD -- " "check conventions!"
+            "Parallax factor mismatch with the IAD -- check conventions!"
         )
 
     # Convention check: the raw residuals (wrt the 5-parameter reference
@@ -195,8 +195,7 @@ def main():
     )
     if chi2_orb > 3.0:
         raise SystemExit(
-            "DMSA/O orbit does not explain the residuals -- "
-            "check conventions!"
+            "DMSA/O orbit does not explain the residuals -- check conventions!"
         )
 
     # Reconstruct the full abscissa relative to the J1991.25 catalog

@@ -220,7 +220,6 @@ def _run_fit(config, gui):
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
     with model:
-
         # 1. Get your starting dictionaries
         nuts_scales, phys_scales, phys_inits, transformed_inits = (
             system.get_mcmc_init(model)
@@ -835,7 +834,8 @@ def inspect_start(
             "The following nodes have Infinite or NaN Log-Probability:\n"
             f"{bad_list}\n"
             "Check your initial values against your bounds/priors!\n"
-            + "!" * 40
+            + "!"
+            * 40
         )
         raise ValueError(
             "Initialization failed due to non-finite Log-Probability."
@@ -846,7 +846,8 @@ def inspect_start(
             "?" * 60 + "\n"
             f"WARNING: No curvature detected for: {flat_warnings}. Check your bounds/initialization.\n"
             "Even a single unconstrained parameter will destroy HMC efficiency.\n"
-            + "?" * 60
+            + "?"
+            * 60
         )
 
     if unused_yaml:

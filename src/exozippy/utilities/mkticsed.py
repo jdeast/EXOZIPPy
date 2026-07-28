@@ -609,9 +609,9 @@ def mkticsed(
                 for i in range(len(qpz)):
                     try:
                         tyc_str = (
-                            f"{int(_get(qpz,'TYC1',i)):04d}-"
-                            f"{int(_get(qpz,'TYC2',i)):05d}-"
-                            f"{int(_get(qpz,'TYC3',i)):01d}"
+                            f"{int(_get(qpz, 'TYC1', i)):04d}-"
+                            f"{int(_get(qpz, 'TYC2', i)):05d}-"
+                            f"{int(_get(qpz, 'TYC3', i)):01d}"
                         )
                         if tyc_str == tyc_id:
                             p_row = i

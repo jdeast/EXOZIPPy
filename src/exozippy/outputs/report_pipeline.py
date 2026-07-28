@@ -159,7 +159,7 @@ def build_mode_reports(
             )
         except Exception:
             logger.warning(
-                "Evidence weighting failed; keeping occupancy " "weights",
+                "Evidence weighting failed; keeping occupancy weights",
                 exc_info=True,
             )
 

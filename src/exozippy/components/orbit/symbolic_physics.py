@@ -109,7 +109,7 @@ def register_solvers(config_manager):
             val = resolved.get(f"{ctype}.{idx}.mass")
             if val is None:
                 raise KeyError(
-                    f"Missing {ctype}.{idx}.mass for " f"orbit.{index}.m_total"
+                    f"Missing {ctype}.{idx}.mass for orbit.{index}.m_total"
                 )
             total += float(val)
         return total

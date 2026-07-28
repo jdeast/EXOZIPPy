@@ -95,9 +95,9 @@ def test_convert_posterior_skips_raw_variables():
 
     # ASSERT
     raw_result = float(idata.posterior["planet.b.mass_raw"].mean())
-    assert (
-        raw_result == raw_value
-    ), f"_raw variable should be unchanged; got {raw_result}"
+    assert raw_result == raw_value, (
+        f"_raw variable should be unchanged; got {raw_result}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -212,9 +212,9 @@ def test_generate_posterior_without_param_lookup_returns_internal_units():
 
     # ASSERT: result should be 2× the internal input, still in solMass
     expected = 2.0 * internal_value
-    assert np.isclose(
-        result_val, expected, rtol=1e-3
-    ), f"Expected {expected:.4e} solMass (internal); got {result_val:.4e}."
+    assert np.isclose(result_val, expected, rtol=1e-3), (
+        f"Expected {expected:.4e} solMass (internal); got {result_val:.4e}."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -289,6 +289,6 @@ def test_compute_summary_handles_scalar_float_posterior():
     # ACT / ASSERT — must not raise AttributeError
     summary = p.compute_summary()
 
-    assert np.isclose(
-        summary.median, 1.0, rtol=1e-6
-    ), f"Scalar-float posterior: expected median 1.0, got {summary.median}"
+    assert np.isclose(summary.median, 1.0, rtol=1e-6), (
+        f"Scalar-float posterior: expected median 1.0, got {summary.median}"
+    )

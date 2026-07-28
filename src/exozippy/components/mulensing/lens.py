@@ -467,8 +467,7 @@ class Lens(Component):
         fits = data.get("fits", [])
         if not fits:
             logger.warning(
-                f"mmexofast file '{mmx_file}' has no 'fits'; "
-                f"no seeds loaded."
+                f"mmexofast file '{mmx_file}' has no 'fits'; no seeds loaded."
             )
             return
 

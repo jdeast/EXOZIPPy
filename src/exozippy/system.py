@@ -324,9 +324,10 @@ class System(Component):
             return [base], [0]
 
         lookup = {p.label: p for p in self.get_all_parameters()}
-        starts, seed_indices = [base], [
-            0
-        ]  # seed 0 == the canonical base start
+        starts, seed_indices = (
+            [base],
+            [0],
+        )  # seed 0 == the canonical base start
 
         for k in range(1, len(seed_resolved)):
             resolved = seed_resolved[k]

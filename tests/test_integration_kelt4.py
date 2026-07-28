@@ -121,21 +121,21 @@ def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
 
     # logP ≈ log10(3 d) ≈ 0.476 for KELT-4Ab
     logP = float(post["orbit.logP"].values.mean())
-    assert (
-        0.2 < logP < 0.7
-    ), f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    assert 0.2 < logP < 0.7, (
+        f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    )
 
     # Planet mass ≈ 0.9 Mjup; allow a broad range given only 1 draw
     planet_mass = float(post["planet.mass"].values.mean())
-    assert (
-        0.3 < planet_mass < 2.5
-    ), f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    assert 0.3 < planet_mass < 2.5, (
+        f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    )
 
     # Star logmass ≈ 0.08 (≈1.2 Msun)
     star_logmass = float(post["star.logmass"].values.mean())
-    assert (
-        -0.3 < star_logmass < 0.5
-    ), f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    assert -0.3 < star_logmass < 0.5, (
+        f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    )
 
 
 def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):

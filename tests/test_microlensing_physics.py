@@ -185,9 +185,9 @@ def test_calc_theta_E_negative_pi_rel_returns_zero_not_nan():
 
     # Assert: finite zero, not NaN
     assert np.isfinite(theta_E_neg), f"Expected finite 0.0, got {theta_E_neg}"
-    assert (
-        theta_E_neg == 0.0
-    ), f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    assert theta_E_neg == 0.0, (
+        f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    )
     assert theta_E_zero == 0.0
 
     # Positive pi_rel still works correctly
