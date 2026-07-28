@@ -144,6 +144,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    # Scoped to this job, not the workflow. Only this job files issues; nothing
+    # here needs write access to the repository contents.
+    permissions:
+      contents: read
+      issues: write
+
     steps:
       - uses: actions/checkout@v5
 
@@ -161,11 +167,62 @@ jobs:
           pip install ".[gui]"
           pip install pytest pytest-timeout pytest-xdist httpx
 
-      - name: Show what actually got resolved
-        run: pip freeze
+      # Saved to a file, not just echoed: the failure report below quotes it,
+      # and "which versions did it actually pick" is the first question anyone
+      # asks about a resolution failure.
+      - name: Record what actually got resolved
+        run: pip freeze | tee resolved.txt
 
       - name: Run test suite
         run: pytest -q -n 2
+
+      # Email alone is a weak alarm for this job. A nightly that stays broken
+      # for a week sends seven identical emails, which is how an alarm becomes
+      # noise and then becomes invisible. One issue, updated in place, stays
+      # visible to collaborators and has a state that means something: open =
+      # still broken, closed = fixed.
+      #
+      # Uses the preinstalled gh CLI and the automatic GITHUB_TOKEN, so there
+      # is no marketplace action in the supply chain for this.
+      - name: Open or update the tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Nightly: suite fails against freshly resolved dependencies"
+
+          {
+            echo "The nightly unlocked-resolution job failed."
+            echo
+            echo "This job installs with \`pip install \".[gui]\"\` -- no"
+            echo "poetry.lock -- so it reflects what a user gets from PyPI"
+            echo "rather than what we ship. A failure here usually means an"
+            echo "upstream release is incompatible with our declared ranges,"
+            echo "not that anything in this repository changed."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo "<details><summary>Resolved versions</summary>"
+            echo
+            echo '```'
+            # Key packages first; the full list is in the run's logs.
+            grep -iE '^(pymc|pytensor|numpy|scipy|astropy|jax|jaxlib|numpyro|blackjax|nutpie|celerite2|exoplanet-core)' resolved.txt || true
+            echo '```'
+            echo "</details>"
+          } > body.md
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+                       --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing issue #$EXISTING"
+            gh issue comment "$EXISTING" --body-file body.md
+          else
+            echo "Opening a new issue"
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
 
   # The stable name the ruleset requires. It exists only to aggregate the
   # matrix into one pass/fail, so the required check never has to be renamed
