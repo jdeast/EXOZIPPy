@@ -5,8 +5,8 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
-  # Nightly, so the slow Windows job still runs regularly without sitting in
-  # front of every pull request.
+  # Nightly, for the unlocked-resolution job below -- it catches an upstream
+  # release breaking us, which has nothing to do with when we push.
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
@@ -34,6 +34,13 @@ jobs:
   # measured run had all four starting within 6 seconds of each other and
   # finishing between 12 and 16 minutes. Adding Python versions here is
   # effectively free; do not trim them to "save time", there is none to save.
+  #
+  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite takes
+  # over 90 minutes there against ~16 on Linux, and the job was cancelled at
+  # the cap on every attempt -- it never once produced a result, green or red.
+  # Adding it back means first making the suite finish, not raising the
+  # timeout again. The bugs it did find (mkl wheels, SIGALRM, the GUI's
+  # cross-process signal) are fixed and stay fixed. See notes/todo.txt.
   pytest:
     name: pytest
     runs-on: ${{ matrix.os }}
@@ -95,63 +102,6 @@ jobs:
       # heavy test drew the short straw -- it moved between
       # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
       # and vanished entirely on others. That is a memory ceiling, not a bug.
-      - name: Run test suite
-        run: poetry run pytest -q -n 2
-
-  # Windows is deliberately OFF the pull-request path.
-  #
-  # It is not slightly slower, it is ~4x slower: a measured run was cancelled
-  # still unfinished at the 60-minute cap while every other combination
-  # finished inside 16. Gating pull requests on it would roughly quadruple
-  # merge latency for every one-line change. It runs on pushes to master, on
-  # the nightly schedule, and on releases (publish.yml reaches this through
-  # workflow_call, where github.event_name is the original tag push).
-  #
-  # The trade is explicit: Windows breakage is found AFTER a merge rather than
-  # before it. With no bypass actor and non-fast-forward enforced, the fix is
-  # forward-only. That is accepted because the alternative -- a 60+ minute
-  # blocking check on a platform with known-failing tests -- would block every
-  # PR indefinitely.
-  pytest-windows:
-    name: pytest-windows
-    if: github.event_name != 'pull_request'
-    runs-on: windows-latest
-    # 60 was not enough; the job was cancelled mid-suite. Latency does not
-    # matter off the PR path, so give it room rather than tune it blind.
-    timeout-minutes: 90
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: poetry
-
-      - name: Install dependencies
-        run: poetry install --extras gui --no-interaction
-
-      # The SED tests need ~250 MB of NextGen model spectra that
-      # ensure_model_data() fetches from Zenodo on first use, caching into the
-      # checkout -- which is fresh in every job, so without this EVERY matrix
-      # combination re-downloads it. That is ~1.3 GB per run pulled from a free
-      # academic host, and it is why two consecutive Dependabot PRs went red on
-      # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
-      # to do with their diffs.
-      #
-      # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
-      # correct by construction: change the data, change the key. Keep it in
-      # sync if that pin ever moves.
-      - name: Cache the Zenodo model spectra
-        uses: actions/cache@v4
-        with:
-          path: src/exozippy/components/sed/models/NextGen
-          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
-
       - name: Run test suite
         run: poetry run pytest -q -n 2
 
@@ -276,21 +226,10 @@ jobs:
   test:
     name: test
     if: always()
-    needs: [pytest, pytest-windows]
+    needs: [pytest]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required combination did not succeed
         run: |
-          echo "pytest:         ${{ needs.pytest.result }}"
-          echo "pytest-windows: ${{ needs.pytest-windows.result }}"
-
-          # The cross-platform matrix must pass everywhere.
+          echo "pytest: ${{ needs.pytest.result }}"
           test "${{ needs.pytest.result }}" = "success"
-
-          # Windows is skipped entirely on pull requests, and `skipped` is the
-          # expected result there -- it must NOT be treated as a failure. On
-          # every other event it has actually run and must have succeeded.
-          case "${{ needs.pytest-windows.result }}" in
-            success|skipped) ;;
-            *) echo "Windows job failed"; exit 1 ;;
-          esac
