@@ -167,6 +167,18 @@ class RunHandle:
         return self.proc.wait(timeout=timeout)
 
     def _signal(self, sig):
+        # Windows cannot deliver SIGINT to another process: send_signal raises
+        # `ValueError: Unsupported signal: 2`. The only cross-process interrupts
+        # it accepts are CTRL_C_EVENT and CTRL_BREAK_EVENT, and CTRL_C_EVENT
+        # cannot be aimed -- it goes to every process sharing the console,
+        # including the GUI itself. CTRL_BREAK_EVENT can be aimed, which is why
+        # start_run gives the child its own process group.
+        #
+        # Python delivers CTRL_BREAK_EVENT to the child as SIGBREAK rather than
+        # SIGINT, so the samplers register _stop_handler for SIGBREAK too. Both
+        # halves are required; either alone leaves stop silently doing nothing.
+        if sys.platform == "win32" and sig == signal.SIGINT:
+            sig = signal.CTRL_BREAK_EVENT
         try:
             self.proc.send_signal(sig)
         except ProcessLookupError:
@@ -196,10 +208,18 @@ def start_run(config_path, cwd=None):
 
     # A fresh interpreter via -m avoids any dependence on the console-script
     # entry point being on PATH and gives the child a clean PyTensor/pymc state.
+    # On Windows the child needs its own process group, or CTRL_BREAK_EVENT
+    # cannot be aimed at it (see RunHandle._signal). Harmless elsewhere, but
+    # the flag only exists on Windows, so it is added conditionally.
+    popen_kwargs = {}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     proc = subprocess.Popen(
         [sys.executable, "-m", "exozippy.cli", config_path],
         cwd=cwd,
         env=env,
+        **popen_kwargs,
     )
     return RunHandle(proc, prefix, cwd, config_path)
 

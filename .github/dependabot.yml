@@ -1,0 +1,40 @@
+# Dependabot opens PRs for out-of-date dependencies. Since master requires a
+# passing `test` check, an update that breaks the suite cannot merge -- the PR
+# just sits there as a visible warning, which is the useful outcome.
+version: 2
+
+updates:
+  # GitHub Actions. This is the one that has already bitten us: the runner
+  # deprecated the Node 20 runtimes and CI started warning until 2832a56
+  # bumped checkout and setup-python by hand. Dependabot would have opened
+  # that PR unprompted.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # One PR for all action bumps rather than three. Actions move together
+      # and are near-always safe.
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "CI"
+
+  # Python dependencies, read from pyproject.toml (dependabot's "pip"
+  # ecosystem understands poetry projects).
+  #
+  # Monthly, not weekly, and grouped. This is a scientific stack -- pymc,
+  # pytensor, numpy, astropy -- where a minor bump can shift numerical results
+  # rather than fail loudly. A slower cadence with fewer, larger PRs means each
+  # one actually gets looked at instead of rubber-stamped.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+        # Majors stay separate: those are the ones that need a human reading
+        # a changelog, not a grouped bump alongside twelve patch releases.
+        update-types: ["minor", "patch"]

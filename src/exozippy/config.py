@@ -23,6 +23,36 @@ class SymbolicTimeout(Exception):
 
 import contextlib
 
+# SIGALRM is POSIX-only -- Windows has no such signal, and touching
+# signal.SIGALRM there raises AttributeError at import-adjacent call time.
+# Guarding on the attribute rather than on sys.platform keeps this honest on
+# any other platform that lacks it.
+#
+# The consequence on Windows is real and worth stating: the symbolic solver
+# runs WITHOUT a wall-clock timeout. A pathological equation/target pair that
+# would be abandoned after 2s on Linux can hang instead. The alternative --
+# a thread-based timeout -- cannot actually interrupt sympy once it is down
+# in C, so it would provide the appearance of a limit rather than a limit.
+_HAS_SIGALRM = hasattr(signal, "SIGALRM")
+
+
+def _arm_alarm(seconds, handler):
+    """Arm a SIGALRM timeout. No-op (returns None) where SIGALRM is absent."""
+    if not _HAS_SIGALRM:
+        return None
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    return old_handler
+
+
+def _disarm_alarm(old_handler=None):
+    """Cancel a pending SIGALRM and optionally restore the prior handler."""
+    if not _HAS_SIGALRM:
+        return
+    signal.alarm(0)
+    if old_handler is not None:
+        signal.signal(signal.SIGALRM, old_handler)
+
 
 @contextlib.contextmanager
 def _sympy_time_limit(seconds=2):
@@ -44,13 +74,11 @@ def _sympy_time_limit(seconds=2):
         signal.alarm(1)
         raise SymbolicTimeout()
 
-    old_handler = signal.signal(signal.SIGALRM, handler)
-    signal.alarm(seconds)
+    old_handler = _arm_alarm(seconds, handler)
     try:
         yield
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        _disarm_alarm(old_handler)
 
 
 # Instance names appear as the middle part of dotted parameter paths
@@ -2111,8 +2139,7 @@ class ConfigManager:
         def handler(signum, frame):
             raise TimeoutError("Symbolic solver timed out!")
 
-        signal.signal(signal.SIGALRM, handler)
-        signal.alarm(2)  # 2-second hard limit
+        _arm_alarm(2, handler)  # 2-second hard limit (POSIX only)
 
         solutions = []
         used_nsolve = False
@@ -2141,14 +2168,14 @@ class ConfigManager:
                 f"sp.solve timed out for {target_str} — blacklisting."
             )
             self.symbolic_blacklist.add(target_str)
-            signal.alarm(0)
+            _disarm_alarm()
             return False
         except Exception as e:
             logger.debug(f"sp.solve exception for {target_str}: {e}")
-            signal.alarm(0)
+            _disarm_alarm()
             return False
         finally:
-            signal.alarm(0)
+            _disarm_alarm()
 
         # 3. Fallback to nsolve if analytical failed
         if not solutions:

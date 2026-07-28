@@ -99,9 +99,18 @@ dependencies = [
     "numpyro>=0.21.0,<1.0.0",
     "blackjax>=0.8.0,<2.0.0",
     "nutpie>=0.13.0",
-    # OS specific dependencies
-    "mkl>=2023.0,<2024.0; sys_platform == 'win32'",
-    "mkl-include>=2023.0,<2024.0; sys_platform == 'win32'",
+    # OS specific dependencies -- PyTensor's BLAS on Windows.
+    #
+    # The floor is 2024.2 for a concrete reason: Intel stopped shipping Windows
+    # wheels partway through the 2023 series. 2023.1.0 and 2023.2.0 have them,
+    # 2023.2.1 and 2023.2.2 are macOS-only. The old `<2024.0` cap (poetry's
+    # `^2023.0`, carried verbatim through the PEP 621 migration and never a
+    # deliberate compatibility bound) therefore resolved to 2023.2.2 and made
+    # `poetry install` IMPOSSIBLE on Windows -- "Unable to find installation
+    # candidates for mkl (2023.2.2)". Every release from 2024.2.1 to 2026.1.0
+    # ships win_amd64. Do not re-cap below 2024.2 without checking PyPI first.
+    "mkl>=2024.2,<2027.0; sys_platform == 'win32'",
+    "mkl-include>=2024.2,<2027.0; sys_platform == 'win32'",
     # NetCDF write backend for idata.to_netcdf(); arviz/xarray no longer pull
     # one in by default (it's an optional "io" extra), but we need it to save
     # traces.

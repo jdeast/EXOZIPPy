@@ -41,3 +41,61 @@ def test_config_derives_te_from_physical_input():
     # theta_E = sqrt(8.144 * 0.5 * 0.125) = 0.7134
     # t_E = (0.7134 / 5.0) * 365.25 = 52.12
     assert np.isclose(derived_te, 52.12, atol=0.1)
+
+
+def test_symbolic_time_limit_is_inert_where_sigalrm_is_absent(monkeypatch):
+    """
+    Given a platform whose signal module has no SIGALRM (Windows),
+    When the symbolic solver's timeout guard is armed and disarmed,
+    Then it degrades to a no-op instead of raising AttributeError.
+
+    Regression: config.py called signal.signal(signal.SIGALRM, ...) and
+    signal.alarm() unguarded, so every Windows run died with
+    `AttributeError: module 'signal' has no attribute 'SIGALRM'` before the
+    solver could do any work. Caught by adding Windows to the CI matrix.
+    """
+    # ARRANGE
+    import exozippy.config as cfg
+
+    monkeypatch.setattr(cfg, "_HAS_SIGALRM", False)
+    calls = []
+    monkeypatch.setattr(
+        cfg.signal, "alarm", lambda *a: calls.append(a), raising=False
+    )
+
+    def boom(*args, **kwargs):  # must never be reached
+        raise AssertionError("signal.signal called without SIGALRM support")
+
+    monkeypatch.setattr(cfg.signal, "signal", boom)
+
+    # ACT
+    old = cfg._arm_alarm(2, lambda *a: None)
+    cfg._disarm_alarm(old)
+    with cfg._sympy_time_limit(2):
+        result = 1 + 1
+
+    # ASSERT
+    assert old is None
+    assert calls == [], "signal.alarm must not be called without SIGALRM"
+    assert result == 2, "the guarded block must still execute"
+
+
+def test_symbolic_time_limit_still_arms_where_sigalrm_exists():
+    """
+    Given a POSIX platform,
+    When _sympy_time_limit guards a block that overruns its limit,
+    Then SymbolicTimeout is still raised -- the Windows guard must not have
+    disabled the timeout everywhere.
+    """
+    # ARRANGE
+    import time
+
+    import exozippy.config as cfg
+
+    if not cfg._HAS_SIGALRM:
+        pytest.skip("platform has no SIGALRM")
+
+    # ACT / ASSERT
+    with pytest.raises(cfg.SymbolicTimeout):
+        with cfg._sympy_time_limit(1):
+            time.sleep(5)

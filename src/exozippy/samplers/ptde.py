@@ -1061,6 +1061,14 @@ def ptde_sample(
     # discarding whatever draws were already collected).
     old_sigint = signal.signal(signal.SIGINT, _stop_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _stop_handler)
+    # Windows delivers the GUI's stop request as CTRL_BREAK_EVENT, which
+    # arrives here as SIGBREAK rather than SIGINT (see gui/runner.py).
+    # Without this the request is received and silently ignored.
+    old_sigbreak = (
+        signal.signal(signal.SIGBREAK, _stop_handler)
+        if hasattr(signal, "SIGBREAK")
+        else None
+    )
     try:
         # initial logp evaluations
         flat_starts = [
@@ -1405,6 +1413,8 @@ def ptde_sample(
     finally:
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
+        if old_sigbreak is not None:
+            signal.signal(signal.SIGBREAK, old_sigbreak)
         if pool is not None:
             pool.close()
             pool.join()

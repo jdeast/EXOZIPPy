@@ -11,6 +11,7 @@ import pytest
 import xarray as xr
 from scipy.stats import kstest
 
+from conftest import requires_fork
 from exozippy.components.parameter import Parameter
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
@@ -644,6 +645,7 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
 
 
+@requires_fork
 def test_shutdown_pool_kills_workers_that_ignore_sigterm():
     """
     Given a fork Pool whose workers ignore SIGTERM (as _worker_init sets up)

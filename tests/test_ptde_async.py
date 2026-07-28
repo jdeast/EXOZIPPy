@@ -15,6 +15,7 @@ import pymc as pm
 import pytest
 import xarray as xr
 
+from conftest import requires_fork
 from exozippy.samplers.ptde_async import ptde_async_sample
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,7 @@ def test_ptde_async_returns_inferencedata_with_expected_structure():
     assert "lp" in idata.sample_stats.data_vars
 
 
+@requires_fork
 def test_ptde_async_runs_with_multiple_cores():
     """
     Given cores>1 (a real fork Pool, not the serial fallback),
@@ -174,6 +176,7 @@ def test_ptde_async_collect_rung_timing_runs_end_to_end(caplog):
 # ---------------------------------------------------------------------------
 
 
+@requires_fork
 def test_ptde_async_with_eval_timeout_runs_end_to_end():
     """
     Given eval_timeout set on a model whose logp always evaluates quickly,

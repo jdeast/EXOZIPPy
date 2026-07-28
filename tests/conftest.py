@@ -4,8 +4,32 @@ Plain classes (not fixtures) — imported explicitly by test files that need the
 Pytest adds the tests/ directory to sys.path, so ``from conftest import ...`` works.
 """
 
+import os
+
+import pytest
+
 from exozippy.components.parameter import Parameter
 from exozippy.config import ConfigManager
+
+# The PTDE samplers build their worker pools with
+# multiprocessing.get_context("fork"), which raises
+# `ValueError: cannot find context for 'fork'` on Windows -- fork simply does
+# not exist there, and the only alternative, "spawn", re-imports the module in
+# each worker and requires all worker state to be picklable. Converting them is
+# a real piece of work, not a portability tweak, so these tests are skipped
+# rather than left permanently red.
+#
+# This is not only a Windows concern: Python 3.14 deprecates fork in
+# multi-threaded processes, and the ubuntu CI logs already emit
+# "DeprecationWarning: This process is multi-threaded, use of fork() may lead
+# to deadlocks in the child". The eventual fix is fork -> spawn everywhere.
+requires_fork = pytest.mark.skipif(
+    not hasattr(os, "fork"),
+    reason=(
+        "PTDE uses multiprocessing's fork start method, which does not exist "
+        "on this platform (see conftest.requires_fork)"
+    ),
+)
 
 
 class _DummyConfigManager:
