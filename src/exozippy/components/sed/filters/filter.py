@@ -19,8 +19,13 @@ def construct_wave_grid(
     R: int | float,
     wave_min: float,
     wave_max: float,
-    input_unit: Quantity["length"] = u.micron,
-    output_unit: Quantity["length"] = u.Angstrom,
+    # Quantity["length"] is astropy's physical-type annotation and is valid at
+    # runtime (it evaluates to Annotated[Quantity, PhysicalType('length')]).
+    # Linters read the string subscript as a forward reference and report
+    # `length` as an undefined name; it is not. Do not "fix" this by removing
+    # the annotation.
+    input_unit: Quantity["length"] = u.micron,  # noqa: F821
+    output_unit: Quantity["length"] = u.Angstrom,  # noqa: F821
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Constructs grid of wavelengths for a specified wavelength range at a specific spectral resolution
