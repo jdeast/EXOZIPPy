@@ -42,11 +42,11 @@ jobs:
       # fetch-depth: 0 is required, not tidiness: poetry-dynamic-versioning
       # derives the version from `git describe`, and a shallow clone has no
       # tags to describe against.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -84,7 +84,7 @@ jobs:
 
       # upload/download-artifact stay on v4: v5 still declares node20, so
       # bumping gains nothing for the Node 24 migration.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
@@ -105,11 +105,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@v1.12.3
+      - uses: pypa/gh-action-pypi-publish@v1.14.1
         with:
           repository-url: https://test.pypi.org/legacy/
 
@@ -127,11 +127,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
-      - uses: pypa/gh-action-pypi-publish@v1.12.3
+      - uses: pypa/gh-action-pypi-publish@v1.14.1
 
   # Pushing a tag publishes to PyPI but does NOT create a GitHub Release -- that
   # is a separate object -- so the Releases page silently falls behind the tags.
@@ -144,10 +144,10 @@ jobs:
       contents: write
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
