@@ -71,6 +71,23 @@ jobs:
       - name: Install dependencies
         run: poetry install --extras gui --no-interaction
 
+      # The SED tests need ~250 MB of NextGen model spectra that
+      # ensure_model_data() fetches from Zenodo on first use, caching into the
+      # checkout -- which is fresh in every job, so without this EVERY matrix
+      # combination re-downloads it. That is ~1.3 GB per run pulled from a free
+      # academic host, and it is why two consecutive Dependabot PRs went red on
+      # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
+      # to do with their diffs.
+      #
+      # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
+      # correct by construction: change the data, change the key. Keep it in
+      # sync if that pin ever moves.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v4
+        with:
+          path: src/exozippy/components/sed/models/NextGen
+          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+
       # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
       # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
       # building a System and compiling PyTensor graphs. The symptom was never
@@ -117,6 +134,23 @@ jobs:
 
       - name: Install dependencies
         run: poetry install --extras gui --no-interaction
+
+      # The SED tests need ~250 MB of NextGen model spectra that
+      # ensure_model_data() fetches from Zenodo on first use, caching into the
+      # checkout -- which is fresh in every job, so without this EVERY matrix
+      # combination re-downloads it. That is ~1.3 GB per run pulled from a free
+      # academic host, and it is why two consecutive Dependabot PRs went red on
+      # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
+      # to do with their diffs.
+      #
+      # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
+      # correct by construction: change the data, change the key. Keep it in
+      # sync if that pin ever moves.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v4
+        with:
+          path: src/exozippy/components/sed/models/NextGen
+          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
 
       - name: Run test suite
         run: poetry run pytest -q -n 2
@@ -166,6 +200,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[gui]"
           pip install pytest pytest-timeout pytest-xdist httpx
+
+      # Same Zenodo spectra cache as the other jobs -- see the comment there.
+      # Shares their key, so this job is usually a cache hit populated by them.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v4
+        with:
+          path: src/exozippy/components/sed/models/NextGen
+          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
 
       # Saved to a file, not just echoed: the failure report below quotes it,
       # and "which versions did it actually pick" is the first question anyone
