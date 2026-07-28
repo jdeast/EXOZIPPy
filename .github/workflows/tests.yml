@@ -121,6 +121,52 @@ jobs:
       - name: Run test suite
         run: poetry run pytest -q -n 2
 
+  # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
+  # `pip install exozippy` does.
+  #
+  # Every other job here installs the lock: one exact, frozen dependency set.
+  # That verifies what we SHIP. It does not verify what users RESOLVE, and
+  # those are different artifacts -- pyproject declares ranges ("jax>=0.5.0,
+  # <1.0.0", "nutpie>=0.13.0") that nothing otherwise exercises. This stack is
+  # unusually sensitive to that gap: a pymc/pytensor/numpy minor release can
+  # shift numerical results rather than fail loudly.
+  #
+  # Dependabot does not cover this. It bumps the lock, so it tells us a new
+  # version works with our pins; it never tests a fresh resolution.
+  #
+  # Deliberately NOT in the `test` gate's needs. An upstream project releasing
+  # something incompatible must not turn the required check red and block
+  # merges for a reason that has nothing to do with the pull request. A
+  # failure here fails the workflow run, which is the alarm we want.
+  pytest-latest-deps:
+    name: pytest-latest-deps
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # No poetry, no lock. pip resolves from pyproject's ranges, exactly as a
+      # user installing from PyPI would. The test harness is installed
+      # separately and unpinned -- it lives in poetry's dev GROUP, which never
+      # reaches published metadata, so `pip install .[gui]` cannot bring it in.
+      - name: Install with a fresh resolution
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]"
+          pip install pytest pytest-timeout pytest-xdist httpx
+
+      - name: Show what actually got resolved
+        run: pip freeze
+
+      - name: Run test suite
+        run: pytest -q -n 2
+
   # The stable name the ruleset requires. It exists only to aggregate the
   # matrix into one pass/fail, so the required check never has to be renamed
   # when the matrix changes.
