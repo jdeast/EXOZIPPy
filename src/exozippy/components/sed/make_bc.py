@@ -36,6 +36,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -104,6 +106,12 @@ _DOWNSAMPLING_WARNING = (
 
 _warned_models: set[str] = set()
 
+# Zenodo is a free academic host and 5xx-es under load. Four attempts with
+# doubling backoff spans ~35s, which covers the transient gateway errors seen
+# in CI without making a genuinely dead URL take minutes to report.
+_DOWNLOAD_ATTEMPTS = 4
+_RETRY_BACKOFF = 5  # seconds; doubles each attempt
+
 
 def _md5(path: Path, chunk: int = 1 << 20) -> str:
     """Streaming md5 of a file (the spectra grid is ~250 MB)."""
@@ -160,24 +168,64 @@ def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
         logger.info(f"Downloading {filename} from Zenodo...")
         model_dir.mkdir(parents=True, exist_ok=True)
         part = dest.with_name(dest.name + ".part")
-        try:
-            urllib.request.urlretrieve(meta["url"], part)
-            size = part.stat().st_size
-            if size != meta["size"]:
-                raise RuntimeError(
-                    f"{filename} downloaded {size} bytes, expected "
-                    f"{meta['size']}. The download was truncated; retry."
+
+        # Retried with backoff. Zenodo is a free academic host serving a 250 MB
+        # file, and it returns 5xx under load -- observed as
+        # `HTTPError: HTTP Error 504: Gateway Time-out` failing CI on pull
+        # requests that had touched nothing related. A transient gateway error
+        # should cost a few seconds, not a whole run.
+        #
+        # Only transport and integrity errors are retried. A 404 means the URL
+        # or record is wrong, and retrying that just delays a real failure by
+        # _RETRY_BACKOFF seconds, so it is re-raised at once.
+        last_error = None
+        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+            try:
+                urllib.request.urlretrieve(meta["url"], part)
+                size = part.stat().st_size
+                if size != meta["size"]:
+                    raise RuntimeError(
+                        f"{filename} downloaded {size} bytes, expected "
+                        f"{meta['size']}. The download was truncated; retry."
+                    )
+                digest = _md5(part)
+                if digest != meta["md5"]:
+                    raise RuntimeError(
+                        f"{filename} has md5 {digest}, expected "
+                        f"{meta['md5']}. The file on Zenodo may have been "
+                        f"replaced, or the download was corrupted."
+                    )
+                part.replace(dest)  # atomic within the same directory
+                last_error = None
+                break
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    raise
+                last_error = e
+            except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
+                last_error = e
+            finally:
+                part.unlink(missing_ok=True)
+
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                delay = _RETRY_BACKOFF * 2 ** (attempt - 1)
+                logger.warning(
+                    "Download of %s failed (attempt %d/%d): %s. "
+                    "Retrying in %ds.",
+                    filename,
+                    attempt,
+                    _DOWNLOAD_ATTEMPTS,
+                    last_error,
+                    delay,
                 )
-            digest = _md5(part)
-            if digest != meta["md5"]:
-                raise RuntimeError(
-                    f"{filename} has md5 {digest}, expected {meta['md5']}. "
-                    f"The file on Zenodo may have been replaced, or the "
-                    f"download was corrupted."
-                )
-            part.replace(dest)  # atomic within the same directory
-        finally:
-            part.unlink(missing_ok=True)
+                time.sleep(delay)
+
+        if last_error is not None:
+            raise RuntimeError(
+                f"Could not download {filename} from Zenodo after "
+                f"{_DOWNLOAD_ATTEMPTS} attempts: {last_error}"
+            ) from last_error
+
         logger.info(f"Saved {filename} to {dest}")
 
 
