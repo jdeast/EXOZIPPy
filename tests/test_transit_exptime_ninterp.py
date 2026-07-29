@@ -156,16 +156,18 @@ def test_long_exptime_with_ninterp_smooths_ingress_egress(tmp_path_factory):
     assert max_slope_smeared < 0.5 * max_slope_instant
 
 
-def test_mixed_ninterp_across_instruments_is_padded_per_instrument(tmp_path_factory):
+def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(tmp_path_factory):
     """
     Given two transit instruments in one component with different
     exptime/ninterp (inst0: ninterp=1; inst1: exptime=60min, ninterp=3),
-    When load_data builds the oversampling grid,
-    Then max_ninterp is the largest ninterp among instruments, inst0's rows
-    use only their first column at weight 1 (padding weighted to zero), and
-    inst1's rows get 3 evenly-spaced sub-times each weighted 1/3 -- each
-    instrument's own ninterp/exptime is honored rather than assuming one
-    uniform value for the whole component.
+    When load_data builds the oversampling groups,
+    Then max_ninterp is the largest ninterp among instruments, and
+    observations are partitioned into one group per distinct ninterp value:
+    inst0's rows form a width-1 group (grid is just each row's own
+    timestamp, weight 1) and inst1's rows form a width-3 group (3
+    evenly-spaced sub-times per row, each weighted 1/3) -- each
+    instrument's own ninterp/exptime is honored, and neither group is
+    padded out to the other's width (no wasted sub-samples).
     """
     d = tmp_path_factory.mktemp("mixed_ninterp")
     t0 = np.linspace(TC - 0.1, TC + 0.1, 5)
@@ -182,26 +184,27 @@ def test_mixed_ninterp_across_instruments_is_padded_per_instrument(tmp_path_fact
 
     tr = system.transit
     assert tr.max_ninterp == 3
-    assert tr.oversample_time.shape == (10, 3)
-    assert tr.oversample_weights.shape == (10, 3)
 
-    inst0_rows = tr.inst_map == 0
-    inst1_rows = tr.inst_map == 1
+    groups_by_width = {grid.shape[1]: (rows, grid, weights)
+                        for rows, grid, weights in tr._oversample_groups}
+    assert set(groups_by_width.keys()) == {1, 3}
 
-    np.testing.assert_allclose(
-        tr.oversample_weights[inst0_rows], np.tile([1.0, 0.0, 0.0], (5, 1)))
-    np.testing.assert_allclose(
-        tr.oversample_time[inst0_rows, 0], t0)
-    # Padding columns collapse onto the timestamp itself (finite, inert).
-    np.testing.assert_allclose(
-        tr.oversample_time[inst0_rows, 1:], np.tile(t0[:, None], (1, 2)))
+    inst0_rows = np.nonzero(tr.inst_map == 0)[0]
+    rows0, grid0, weights0 = groups_by_width[1]
+    assert sorted(rows0) == list(inst0_rows)
+    order0 = np.argsort(rows0)
+    np.testing.assert_allclose(weights0, [1.0])
+    np.testing.assert_allclose(grid0[order0], t0[:, None])
 
+    inst1_rows = np.nonzero(tr.inst_map == 1)[0]
+    rows1, grid1, weights1 = groups_by_width[3]
+    assert sorted(rows1) == list(inst1_rows)
+    order1 = np.argsort(rows1)
     exptime_days = 60.0 / 1440.0
     expected_offsets = np.array([-0.5, 0.0, 0.5]) * exptime_days
+    np.testing.assert_allclose(weights1, [1 / 3, 1 / 3, 1 / 3])
     np.testing.assert_allclose(
-        tr.oversample_weights[inst1_rows], np.tile([1 / 3, 1 / 3, 1 / 3], (5, 1)))
-    np.testing.assert_allclose(
-        tr.oversample_time[inst1_rows], t1[:, None] + expected_offsets[None, :])
+        grid1[order1], t1[:, None] + expected_offsets[None, :])
 
 
 def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
@@ -249,3 +252,42 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
     # measurably from its own instantaneous reference.
     max_diff_inst1 = np.max(np.abs(model_flux[inst1_rows] - ref1))
     assert max_diff_inst1 > 1e-4
+
+
+def test_plotted_model_matches_likelihood_model(tmp_path_factory):
+    """
+    Given a transit instrument with a long exptime and ninterp>1 (Jason's
+    PR #20 review, point 2: plots must use the smeared model),
+    When Transit._smeared_full_lc/_smeared_lc_matrix -- the functions
+    plot_unphased/plot_phased actually call -- are evaluated at the data's
+    own timestamps,
+    Then they match transit.model_flux (the likelihood's own smeared
+    model) to floating-point precision, unlike the raw instantaneous
+    compile_plotters output (_compiled_full_lc), which the test above
+    shows differs from it measurably for this same ninterp=21 instrument.
+    This proves the plotting path now reproduces the exact model the fit
+    optimized against, not the instantaneous one.
+    """
+    d = tmp_path_factory.mktemp("plot_matches_fit")
+    t = np.linspace(TC - 0.55 * T14, TC + 0.55 * T14, 401)
+    lc = _write_lc(d / "lc.dat", t)
+
+    config = _config([lc], [{"exptime": 60.0, "ninterp": 21}])
+    system = System(config, user_params=_params())
+    system.prepare()
+    model = system.build_model()
+
+    model_flux = _model_flux_at_initial_point(system, model)
+
+    tr = system.transit
+    param_values = _plot_param_values(system)
+    baseline = float(np.atleast_1d(tr.baseline.initval)[0])
+
+    smeared_decrement = tr._smeared_full_lc(tr.time, 0, *param_values)
+    np.testing.assert_allclose(baseline + smeared_decrement, model_flux, atol=1e-8)
+
+    # Sanity check the matrix-valued plotting entry point (used by
+    # plot_phased) agrees with the scalar one (used by plot_unphased).
+    smeared_matrix = tr._smeared_lc_matrix(tr.time, 0, *param_values)
+    np.testing.assert_allclose(
+        smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10)
