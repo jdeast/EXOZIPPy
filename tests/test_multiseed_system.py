@@ -6,6 +6,7 @@ a seed whose solved start violates a hard bound is skipped (not clipped -- a
 clipped start sits in no posterior basin), and that seed provenance is
 available for the sampler to round-robin against.
 """
+
 import logging
 import os
 import shutil
@@ -22,20 +23,20 @@ def _base_user_params():
     test_pspl_magnification_accuracy, factored out so both seed-list tests
     share one baseline."""
     return {
-        "lens.Lens.t_0":        {"initval": 2460025.0},
-        "lens.Lens.pi_E_N":     {"initval": 0.0, "sigma": 0.0},
-        "lens.Lens.pi_E_E":     {"initval": 0.0, "sigma": 0.0},
-        "star.Lens.distance":   {"initval": 4000.0},
+        "lens.Lens.t_0": {"initval": 2460025.0},
+        "lens.Lens.pi_E_N": {"initval": 0.0, "sigma": 0.0},
+        "lens.Lens.pi_E_E": {"initval": 0.0, "sigma": 0.0},
+        "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
-        "star.Lens.mass":       {"initval": 0.5},
-        "star.Lens.pm_ra":      {"initval": 0.0},
-        "star.Lens.pm_dec":     {"initval": 0.0},
-        "star.Source.pm_ra":    {"initval": 0.0},
-        "star.Source.pm_dec":   {"initval": 0.0},
-        "star.Source.ra":       {"initval": 0.0},
-        "star.Source.dec":      {"initval": 0.0},
-        "star.Lens.ra":         {"initval": 0.0},
-        "star.Lens.dec":        {"initval": 0.0},
+        "star.Lens.mass": {"initval": 0.5},
+        "star.Lens.pm_ra": {"initval": 0.0},
+        "star.Lens.pm_dec": {"initval": 0.0},
+        "star.Source.pm_ra": {"initval": 0.0},
+        "star.Source.pm_dec": {"initval": 0.0},
+        "star.Source.ra": {"initval": 0.0},
+        "star.Source.dec": {"initval": 0.0},
+        "star.Lens.ra": {"initval": 0.0},
+        "star.Lens.dec": {"initval": 0.0},
     }
 
 
@@ -132,10 +133,15 @@ def test_dc2018_128_example_builds_with_list_valued_mmexofast_seeds(tmp_path):
       scalar -- the synthetic PSPL configs elsewhere in this file have no
       mulensinstrument component and never exercised that code path.
     """
-    example_dir = os.path.join(os.path.dirname(__file__), "..", "examples", "DC2018_128")
+    example_dir = os.path.join(
+        os.path.dirname(__file__), "..", "examples", "DC2018_128"
+    )
     work_dir = tmp_path / "DC2018_128"
-    shutil.copytree(example_dir, work_dir,
-                    ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"))
+    shutil.copytree(
+        example_dir,
+        work_dir,
+        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
+    )
 
     orig_cwd = os.getcwd()
     os.chdir(work_dir)

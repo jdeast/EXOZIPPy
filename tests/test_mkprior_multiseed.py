@@ -21,9 +21,11 @@ def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
     """Synthetic trace: a scalar lens param, a 2-star vector param, an
     xalpha/yalpha direction pair, each with a _raw counterpart, plus lp."""
     rng = np.random.default_rng(seed)
+
     def pair(shape):
         raw = rng.standard_normal(shape)
         return raw
+
     post = {
         "lens.t_0": 2000.0 + pair((nchain, ndraw)),
         "lens.t_0_raw": pair((nchain, ndraw)),
@@ -42,9 +44,11 @@ def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
 
 
 def _config():
-    return {"prefix": "run",
-            "star": [{"name": "A"}, {"name": "B"}],
-            "lens": [{"name": "L"}]}
+    return {
+        "prefix": "run",
+        "star": [{"name": "A"}, {"name": "B"}],
+        "lens": [{"name": "L"}],
+    }
 
 
 def test_single_seed_emits_scalars(tmp_path):
@@ -52,8 +56,13 @@ def test_single_seed_emits_scalars(tmp_path):
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
     # When mkprior runs
-    mkprior(_config(), base_dir=tmp_path, trace_path=trace,
-            output_path=out, n_seeds=1)
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=out,
+        n_seeds=1,
+    )
     params = yaml.safe_load(out.read_text())
     # Then every sampled initval is a plain scalar (legacy behavior)
     assert isinstance(params["lens.L.t_0"]["initval"], float)
@@ -65,8 +74,13 @@ def test_multi_seed_emits_length_k_lists(tmp_path):
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
     # When mkprior runs
-    mkprior(_config(), base_dir=tmp_path, trace_path=trace,
-            output_path=out, n_seeds=3)
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=out,
+        n_seeds=3,
+    )
     params = yaml.safe_load(out.read_text())
     # Then each sampled initval is a length-3 list and init_scale stays scalar
     for key in ("lens.L.t_0", "star.A.mass", "star.B.mass"):
@@ -81,12 +95,20 @@ def test_multi_seed_lists_share_one_length(tmp_path):
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
     # When mkprior runs with n_seeds=3
-    mkprior(_config(), base_dir=tmp_path, trace_path=trace,
-            output_path=out, n_seeds=3)
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=out,
+        n_seeds=3,
+    )
     params = yaml.safe_load(out.read_text())
     # Then every list-valued initval has length exactly 3
-    lengths = {len(v["initval"]) for v in params.values()
-               if isinstance(v.get("initval"), list)}
+    lengths = {
+        len(v["initval"])
+        for v in params.values()
+        if isinstance(v.get("initval"), list)
+    }
     assert lengths == {3}
 
 
@@ -95,8 +117,13 @@ def test_multi_seed_converts_direction_pair_to_angle_list(tmp_path):
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
     # When mkprior runs with n_seeds=3
-    mkprior(_config(), base_dir=tmp_path, trace_path=trace,
-            output_path=out, n_seeds=3)
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=out,
+        n_seeds=3,
+    )
     params = yaml.safe_load(out.read_text())
     # Then the pair collapses to a length-3 alpha angle list (no x/y written)
     assert "lens.L.alpha" in params
@@ -114,8 +141,15 @@ def test_multi_seed_seed0_is_map(tmp_path):
     map_t0 = float(idata.posterior["lens.t_0"].values[mc, md])
     out = tmp_path / "out.params.yaml"
     # When mkprior emits multiple seeds
-    mkprior(_config(), base_dir=tmp_path, trace_path=trace,
-            output_path=out, n_seeds=4)
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=out,
+        n_seeds=4,
+    )
     params = yaml.safe_load(out.read_text())
     # Then seed 0 of the list is exactly the MAP value
-    assert params["lens.L.t_0"]["initval"][0] == pytest.approx(map_t0, abs=1e-6)
+    assert params["lens.L.t_0"]["initval"][0] == pytest.approx(
+        map_t0, abs=1e-6
+    )

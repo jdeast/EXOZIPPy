@@ -26,7 +26,7 @@ planet:
     description: "Surface Gravity"
     expressions:
       default:
-        func_name: "calc_logg"
+        func_name: "calc_logg_from_mass"
         deps: ["mass", "radius"]
 
   distance:

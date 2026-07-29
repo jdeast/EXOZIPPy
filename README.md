@@ -1,25 +1,82 @@
 # EXOZIPPy
 [DeepWiki](https://www.deepwiki.com/jdeast/EXOZIPPy)
 
-This will eventually be a python successor to EXOFASTv2, but it is not officially released yet. Many features are missing, not tested, or not functional. If you'd like to help with development, please contact me at jason.eastman@cfa.harvard.edu
+This will eventually be a python successor to EXOFASTv2, but it is not officially
+released yet. Many features are missing, not tested, or not functional. If you'd
+like to help with development, please contact me at jason.eastman@cfa.harvard.edu
 
-When we officially release the code, it'll be a pip installable package. For now, install it with conda (PyMC 5 is a heavy dependency and can only reliably be installed with conda):
+## Installing
+
+EXOZIPPy is on PyPI. Only pre-releases exist so far, so `--pre` is required --
+without it pip reports that no matching version exists:
+
+```
+pip install --pre exozippy
+```
+
+All dependencies resolve from PyPI, so no compiler is required on the supported
+platforms below. A nightly CI job installs exactly this way, with no lock file,
+to check that a fresh install keeps working as upstream packages move.
+
+### For development
+
+Use Poetry, which installs the pinned `poetry.lock` and so reproduces a known
+good dependency set:
 
 ```
 conda create -n exozippy python=3.12
 conda activate exozippy
-conda install -c conda-forge pymc pytensor arviz numpy scipy pandas matplotlib astropy corner
-mkdir -p ~/python
-cd ~/python
 git clone https://github.com/jdeast/EXOZIPPy.git
 cd EXOZIPPy
-pip install -e .
+poetry install --extras gui
+poetry run pre-commit install
 ```
 
-# Windows (powershell)
-good luck! If you manage to install it and run it on windows, please send instructions.
+`--extras gui` is worth taking even if you never open the GUI: ruamel-yaml lives
+in that extra, and without it roughly 30 tests fail at import.
 
-skips compiler (slow!) Installation via Conda recommended!
+See CONTRIBUTING.md for the workflow (`master` is protected; changes go through
+a pull request with a passing test suite).
 
-This might be relevant:
-setx PYTENSOR_FLAGS "blas__ldflags=,cxx="
+## Supported platforms
+
+Every push and pull request runs the full test suite on:
+
+| OS | Python |
+|----|--------|
+| Linux (ubuntu-latest) | 3.12, 3.13, 3.14 |
+| macOS (arm64) | 3.12 |
+
+Windows is **not currently tested and not supported.** It is not merely
+unverified -- the test suite takes over 90 minutes there against ~16 minutes on
+Linux and has never completed a CI run, so the job was removed rather than left
+producing no signal. Three real Windows bugs were found and fixed along the way
+(an unsatisfiable mkl pin, a POSIX-only `SIGALRM` in the symbolic solver, and
+the GUI's cross-process stop signal), so basic use may well work. But the PTDE
+sampler will not: it builds worker pools with multiprocessing's `fork` start
+method, which does not exist on Windows. See `notes/todo.txt` if you want to
+pick this up -- patches welcome.
+
+Intel macOS is untested here and needs a C++ compiler: exoplanet-core publishes
+wheels for CPython 3.12-3.14 on Linux (glibc 2.28+), Apple Silicon macOS and
+Windows, but not Intel macOS, so it builds from source there.
+
+If PyTensor cannot find a compiler you can fall back to its slower pure-Python
+mode:
+
+```
+PYTENSOR_FLAGS="blas__ldflags=,cxx="
+```
+
+## Running a fit
+
+```
+cd examples/ob140939
+exozippy ob140939.yaml
+```
+
+The optional browser GUI (installed by the `gui` extra) starts with:
+
+```
+exozippy-gui
+```

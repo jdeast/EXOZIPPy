@@ -11,15 +11,15 @@ pipeline that run.run_fit() uses on a live fit (outputs.report_pipeline.
 build_mode_reports), so the two call sites cannot drift apart.
 """
 
-import yaml
-import numpy as np
 import arviz as az
+import numpy as np
 import pytest
+import yaml
 from click.testing import CliRunner
 
-from exozippy.system import System
-from exozippy import run as run_module
 from exozippy import cli_modes
+from exozippy import run as run_module
+from exozippy.system import System
 
 pytestmark = pytest.mark.slow
 
@@ -83,14 +83,18 @@ def _write_synthetic_trace(prefix, rng, w2=0.3, sep=10.0):
     for i, name in enumerate(names):
         # first raw dim carries the mode separation; the rest are noise
         shift = sep * truth if i == 0 else 0.0
-        posterior[name] = (rng.normal(0, 1, N) + shift).reshape(N_CHAIN, N_DRAW)
+        posterior[name] = (rng.normal(0, 1, N) + shift).reshape(
+            N_CHAIN, N_DRAW
+        )
 
     lp = (rng.normal(1000, 3, N) - 5 * truth).reshape(N_CHAIN, N_DRAW)
 
-    idata = az.from_dict({
-        "posterior": posterior,
-        "sample_stats": {"lp": lp},
-    })
+    idata = az.from_dict(
+        {
+            "posterior": posterior,
+            "sample_stats": {"lp": lp},
+        }
+    )
 
     trace_path = str(prefix) + "_trace.nc"
     idata.to_netcdf(trace_path)
@@ -98,6 +102,7 @@ def _write_synthetic_trace(prefix, rng, w2=0.3, sep=10.0):
 
 
 # ----------------------------------------------------------------------
+
 
 def test_cli_reproduces_pipeline_outputs(tmp_path):
     """
@@ -117,7 +122,12 @@ def test_cli_reproduces_pipeline_outputs(tmp_path):
 
     assert result.exit_code == 0, result.output + "\n" + repr(result.exception)
 
-    for suffix in ("_modes.txt", "_definitions.tex", "_template.tex", "_results.csv"):
+    for suffix in (
+        "_modes.txt",
+        "_definitions.tex",
+        "_template.tex",
+        "_results.csv",
+    ):
         p = tmp_path / (prefix.name + suffix)
         assert p.exists(), f"{p} was not written"
         assert p.stat().st_size > 0
@@ -170,7 +180,9 @@ def test_cli_min_weight_flag_drops_minor_mode(tmp_path):
     trace_path, _ = _write_synthetic_trace(prefix, rng)
 
     runner = CliRunner()
-    result = runner.invoke(cli_modes.main, [str(config_path), "--min-weight", "0.5"])
+    result = runner.invoke(
+        cli_modes.main, [str(config_path), "--min-weight", "0.5"]
+    )
 
     assert result.exit_code == 0, result.output
     reloaded = az.from_netcdf(trace_path)

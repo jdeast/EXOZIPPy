@@ -1,30 +1,24 @@
-# general imports
-from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Literal
 import json
-import yaml
+from pathlib import Path
+from typing import Dict, List, Literal, Sequence, Tuple
 
-# scientific imports
+import astropy.constants as const
+import astropy.units as u
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yaml
+from matplotlib.legend_handler import HandlerTuple
+from matplotlib.lines import Line2D
 from scipy import interpolate
 
-# astronomy imports
-import astropy.units as u
-import astropy.constants as const
-
-# internal imports
-#from exozippy.constants import *
+# from exozippy.constants import *
 from ...constants import *
-from .filters import filter as VOID
 from .bc_grid import _load_alias_table, resolve_filter_name
-#import exozippy.components.sed.filters.filter as VOID
-#from exozippy.components.sed.bc_grid import _load_alias_table, resolve_filter_name
+from .filters import filter as VOID
 
-# plotting imports
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.legend_handler import HandlerTuple
+# import exozippy.components.sed.filters.filter as VOID
+# from exozippy.components.sed.bc_grid import _load_alias_table, resolve_filter_name
 
 
 try:
@@ -34,32 +28,46 @@ except NameError:
 
 
 class Plot:
-
     # Validated 8-hue categorical palette (light mode), fixed order --
     # see dataviz skill references/palette.md. Same hex used for a given
     # star/combo's spectrum curve (drawn translucent) and its data-point
     # marker (drawn opaque), so identity is color-consistent across both;
     # markers additionally vary by shape so identity is never color-alone.
-    colors_spec = ["#2a78d6", "#1baf7a", "#eda100", "#008300",
-                   "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+    colors_spec = [
+        "#2a78d6",
+        "#1baf7a",
+        "#eda100",
+        "#008300",
+        "#4a3aa7",
+        "#e34948",
+        "#e87ba4",
+        "#eb6834",
+    ]
     colors_obs = colors_spec
     linetypes = ["solid", "dashed", "dashdot", "dotted"]
     markers = ["o", "D", "v", "s", "^", "P", "X", "*"]
 
     # read in extinction values
     extinction_dir = current_dir / "models" / "extinction_law.ascii"
-    extinction_df = pd.read_csv(extinction_dir, names=['wavelength', 'extinction'], 
-                                delimiter=' ', index_col=False, skipinitialspace=True)
-    
+    extinction_df = pd.read_csv(
+        extinction_dir,
+        names=["wavelength", "extinction"],
+        delimiter=" ",
+        index_col=False,
+        skipinitialspace=True,
+    )
+
     # read in filter magnitude systems
     filtersys_dir = current_dir / "filters" / "filter_magsys.txt"
-    filtersys_df = pd.read_csv(filtersys_dir, sep='\t', comment='#', skipinitialspace=True)
+    filtersys_df = pd.read_csv(
+        filtersys_dir, sep="\t", comment="#", skipinitialspace=True
+    )
 
     filter_alias_df = _load_alias_table()
 
-
-    def _findNearestGridPoints(self, pt_dict: Dict[str, np.ndarray], 
-                               df_spec: pd.DataFrame) -> np.ndarray:
+    def _findNearestGridPoints(
+        self, pt_dict: Dict[str, np.ndarray], df_spec: pd.DataFrame
+    ) -> np.ndarray:
         """
         Finds nearest grid points as defined in df_spec to the point values in pt_dict
 
@@ -80,7 +88,7 @@ class Plot:
                                 Example:
                                 [[array([5100, 9000]), array([5200, 9200])],
                                 [array([4.5, 3.5]), array([5., 4.])],
-                                [array([ 0.3, -0.5]), array([0.5, 0. ])]]                  
+                                [array([ 0.3, -0.5]), array([0.5, 0. ])]]
         """
         nearestGridPts = []
         for axis in pt_dict:
@@ -92,14 +100,13 @@ class Plot:
 
             # check for edges of grid
             index = np.searchsorted(grid_pts, pt)
-            index = np.clip(index, 1, len(grid_pts)-1)
+            index = np.clip(index, 1, len(grid_pts) - 1)
             lower = grid_pts[index - 1]
             upper = grid_pts[index]
 
             nearestGridPts.append([lower, upper])
-        
+
         return nearestGridPts
-    
 
     def __init__(self, system, draws):
 
@@ -113,9 +120,9 @@ class Plot:
         self.nfilters = len(self.filters)
         # one observation per filter row (blended or differential mags;
         # star membership per row lives in the blend matrix)
-        self.mag_obs = self.system.sed.mag                 # (nfilters,)
-        self.mag_obs_err = self.system.sed.err             # (nfilters,)
-        self.blend_matrix = self.system.sed.blend_matrix   # (nfilters, nstars)
+        self.mag_obs = self.system.sed.mag  # (nfilters,)
+        self.mag_obs_err = self.system.sed.err  # (nfilters,)
+        self.blend_matrix = self.system.sed.blend_matrix  # (nfilters, nstars)
         self.combo_labels = self.system.sed.combo_labels
 
         # Expand each filter row into one "plot point" per side: a blended
@@ -137,7 +144,9 @@ class Plot:
             if neg_idx.size > 0:
                 point_row.append(row)
                 point_side.append(-1)
-                point_label.append("+".join(self.star_names[i] for i in neg_idx))
+                point_label.append(
+                    "+".join(self.star_names[i] for i in neg_idx)
+                )
 
         self.point_row = np.array(point_row, dtype=int)
         self.point_side = np.array(point_side, dtype=int)
@@ -157,10 +166,9 @@ class Plot:
 
         ### calculations on spectra performed in models/MODEL/plot.py ###
 
-
     def _load_spectra_data(self):
         """
-        Loads spectra (R=150) and wavelength grid for specified model; 
+        Loads spectra (R=150) and wavelength grid for specified model;
         Defaults to NextGen for plotting
 
         Created Class Attributes
@@ -169,25 +177,40 @@ class Plot:
             self.df_spec   :  pd.DataFrame, columns: ['filename', AXES_THE_MODEL_DEFINED_ON, 'flux']
                               Example: ['filename', 'teff', 'logg', 'feh', 'alpha', 'flux']
                               flux will be in erg/s/cm^2/Angstrom
-            self.df_wave   :  pd.DataFrame, columns: ['wavelength_micron', 'wavelength_angstrom', 'dlambda_micron']               
+            self.df_wave   :  pd.DataFrame, columns: ['wavelength_micron', 'wavelength_angstrom', 'dlambda_micron']
         """
 
         self.sedmodel = self.system.sed.sedmodel
 
         try:
-            df_spec = pd.read_csv(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.spectra.csv")
-            df_wave = pd.read_csv(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.wavelength.csv")
+            df_spec = pd.read_csv(
+                current_dir
+                / "models"
+                / f"{self.sedmodel}"
+                / f"{self.sedmodel}.spectra.csv"
+            )
+            df_wave = pd.read_csv(
+                current_dir
+                / "models"
+                / f"{self.sedmodel}"
+                / f"{self.sedmodel}.wavelength.csv"
+            )
         except:
-            print(f"No spectra found for ``{self.sedmodel}`` model.\n"
-                "Defaulting to using ``NextGen`` spectra for plotting.")
-            df_spec = pd.read_csv(current_dir / "models" / "NextGen" / "NextGen.spectra.csv")
-            df_wave = pd.read_csv(current_dir / "models" / "NextGen" / "NextGen.wavelength.csv")
+            print(
+                f"No spectra found for ``{self.sedmodel}`` model.\n"
+                "Defaulting to using ``NextGen`` spectra for plotting."
+            )
+            df_spec = pd.read_csv(
+                current_dir / "models" / "NextGen" / "NextGen.spectra.csv"
+            )
+            df_wave = pd.read_csv(
+                current_dir / "models" / "NextGen" / "NextGen.wavelength.csv"
+            )
 
-        df_spec['flux'] = df_spec['flux'].apply(json.loads).apply(np.array)
+        df_spec["flux"] = df_spec["flux"].apply(json.loads).apply(np.array)
 
         self.df_spec = df_spec
         self.df_wave = df_wave
-
 
     def _load_model_grid_yaml(self):
         """
@@ -201,13 +224,20 @@ class Plot:
             self.grid_axes          :  Set(List)
                                         'grid' axes that the model will be interpolated on
         """
-        with open(current_dir / "models" / f"{self.sedmodel}" / f"{self.sedmodel}.grid.yaml", 'r') as f:
+        with open(
+            current_dir
+            / "models"
+            / f"{self.sedmodel}"
+            / f"{self.sedmodel}.grid.yaml",
+            "r",
+        ) as f:
             self.model_grid_yaml = yaml.safe_load(f)
 
-        # when dealing with the raw model spectra 
+        # when dealing with the raw model spectra
         # we don't need to deal with the extinction Av
-        self.grid_axes = set(list(self.model_grid_yaml.get("grid").keys())) - set(["av"])
-    
+        self.grid_axes = set(
+            list(self.model_grid_yaml.get("grid").keys())
+        ) - set(["av"])
 
     def _load_filter_data(self):
         """
@@ -236,16 +266,15 @@ class Plot:
             filter_params[filter] = {}
             obj = filter_dict[filter]
             if obj.Zp_Spec_Fl_Vega:
-                filter_params[filter]['zp'] = obj.Zp_Spec_Fl_Vega
+                filter_params[filter]["zp"] = obj.Zp_Spec_Fl_Vega
             else:
-                filter_params[filter]['zp'] = obj.Zp_Calc_Fl_Vega
+                filter_params[filter]["zp"] = obj.Zp_Calc_Fl_Vega
 
-            filter_params[filter]['wave_eff'] = obj.WavelengthEff # angstroms
-            filter_params[filter]['wave_min'] = obj.WavelengthMin # angstroms
-            filter_params[filter]['wave_max'] = obj.WavelengthMax # angstroms
-        
+            filter_params[filter]["wave_eff"] = obj.WavelengthEff  # angstroms
+            filter_params[filter]["wave_min"] = obj.WavelengthMin  # angstroms
+            filter_params[filter]["wave_max"] = obj.WavelengthMax  # angstroms
+
         self.filter_params = filter_params
-    
 
     ######## model specific functions defined in models/MODEL/plot.py ########
 
@@ -257,7 +286,7 @@ class Plot:
 
     def _interp_spectra(self):
         """
-        Linearly interpolates model spectra in n-dimensions 
+        Linearly interpolates model spectra in n-dimensions
         for star(s) parameters reported in draw
 
         Created Class Attribute
@@ -279,19 +308,31 @@ class Plot:
         """
         # interpolate extinction function onto same wavelength scale, but in microns
         V_BAND_MICRON = 0.55
-        extinction_func = interpolate.interp1d(self.extinction_df['wavelength'], self.extinction_df['extinction'], fill_value='extrapolate')
+        extinction_func = interpolate.interp1d(
+            self.extinction_df["wavelength"],
+            self.extinction_df["extinction"],
+            fill_value="extrapolate",
+        )
         V_band_extinction = extinction_func(V_BAND_MICRON)
-        extinction_modeled = extinction_func(self.df_wave['wavelength_micron'])
-        extinction_modeled = np.broadcast_to(extinction_modeled[np.newaxis], (self.nstars, *extinction_modeled.shape))
+        extinction_modeled = extinction_func(self.df_wave["wavelength_micron"])
+        extinction_modeled = np.broadcast_to(
+            extinction_modeled[np.newaxis],
+            (self.nstars, *extinction_modeled.shape),
+        )
 
-        optical_depth_draws = np.zeros((self.ndraws, self.nstars, len(self.df_wave)))
+        optical_depth_draws = np.zeros(
+            (self.ndraws, self.nstars, len(self.df_wave))
+        )
         for d, draw in enumerate(self.draws):
             av = draw.get("star.av")
-            optical_depth = (extinction_modeled/V_band_extinction) * av[:, np.newaxis]/1.086 
+            optical_depth = (
+                (extinction_modeled / V_band_extinction)
+                * av[:, np.newaxis]
+                / 1.086
+            )
             optical_depth_draws[d, :] = optical_depth
 
         self.optical_depth_draws = optical_depth_draws
-
 
     def _calc_model_flux(self):
         """
@@ -302,15 +343,24 @@ class Plot:
             self.flux_model_draws   :  np.ndarray, shape (ndraws, nstars, len(self.df_wave))
 
         """
-        flux_model_draws = np.zeros((self.ndraws, self.nstars, len(self.df_wave)))
+        flux_model_draws = np.zeros(
+            (self.ndraws, self.nstars, len(self.df_wave))
+        )
         for d, draw in enumerate(self.draws):
             radiussed = draw.get("star.radiussed")
             distance = draw.get("star.distance")
-            f_model = self.model_spectrum_flux_draws[d, :] * np.exp(-self.optical_depth_draws[d, :]) * (radiussed[:, np.newaxis] / (PC_TO_RSUN_CONST * distance[:, np.newaxis]))**2
+            f_model = (
+                self.model_spectrum_flux_draws[d, :]
+                * np.exp(-self.optical_depth_draws[d, :])
+                * (
+                    radiussed[:, np.newaxis]
+                    / (PC_TO_RSUN_CONST * distance[:, np.newaxis])
+                )
+                ** 2
+            )
             flux_model_draws[d, :] = f_model
 
         self.flux_model_draws = flux_model_draws
-
 
     def _calc_obs_flux_from_obs_mag(self):
         """
@@ -348,7 +398,9 @@ class Plot:
         # per-star predicted mags at the median draw, for anchoring
         # differential rows (available: model plot classes call
         # _calc_compiled_func before this method)
-        mag_pred_med = np.median(self.mag_pred_draws, axis=0)  # (nstars, nfilters)
+        mag_pred_med = np.median(
+            self.mag_pred_draws, axis=0
+        )  # (nstars, nfilters)
 
         for p in range(self.npoints):
             row = self.point_row[p]
@@ -358,13 +410,15 @@ class Plot:
             mag_obs_err = self.mag_obs_err[row]
 
             # flux calculations
-            zp = self.filter_params[filter]['zp']
+            zp = self.filter_params[filter]["zp"]
 
             other_stars = np.where(self.blend_matrix[row] == -side)[0]
             if other_stars.size > 0:
                 # differential row: anchor this side on the model's flux
                 # for the OTHER side (whose sign is -side)
-                scale = np.sum(zp * 10 ** (-0.4 * mag_pred_med[other_stars, row]))
+                scale = np.sum(
+                    zp * 10 ** (-0.4 * mag_pred_med[other_stars, row])
+                )
             else:
                 scale = zp
 
@@ -378,16 +432,15 @@ class Plot:
             f_limits_from_err[1, p] = scale * max(f_a, f_b)
 
             # wavelength calculations (shared with the row's other side)
-            wave_eff = self.filter_params[filter]['wave_eff']
+            wave_eff = self.filter_params[filter]["wave_eff"]
             wave_filter[p] = wave_eff
-            wave_err[0, p] = wave_eff - self.filter_params[filter]['wave_min']
-            wave_err[1, p] = self.filter_params[filter]['wave_max'] - wave_eff
+            wave_err[0, p] = wave_eff - self.filter_params[filter]["wave_min"]
+            wave_err[1, p] = self.filter_params[filter]["wave_max"] - wave_eff
 
         self.flux_obs = f_obs
         self.f_limits_from_err = f_limits_from_err
         self.wave_filter = wave_filter
         self.wave_err = wave_err
-
 
     ######## functions used for plotting ########
 
@@ -402,5 +455,5 @@ class Plot:
         """
         y = np.log10(self.flux_obs * self.wave_filter)
 
-        self.y_lower = round(np.nanmin(y))-2.5
-        self.y_upper = round(np.nanmax(y))+0.5
+        self.y_lower = round(np.nanmin(y)) - 2.5
+        self.y_upper = round(np.nanmax(y)) + 0.5

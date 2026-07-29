@@ -17,8 +17,8 @@ import numpy as np
 import pymc as pm
 import pytest
 
-from exozippy.config import ConfigManager
 from exozippy.components.star.star import Star
+from exozippy.config import ConfigManager
 
 DEG2RAD = np.pi / 180.0
 
@@ -46,6 +46,7 @@ def _eval(model, tensor, point):
     """Evaluate a graph tensor at a raw point (same pattern as
     System.get_internal_point: free RVs are fed directly as inputs)."""
     import pytensor
+
     fn = pytensor.function(model.free_RVs, tensor, on_unused_input="ignore")
     return np.asarray(fn(*[point[rv.name] for rv in model.free_RVs]))
 
@@ -53,6 +54,7 @@ def _eval(model, tensor, point):
 # ----------------------------------------------------------------------
 # Hard link: sigma = 0
 # ----------------------------------------------------------------------
+
 
 def test_hard_link_fixes_parameter_to_other_parameter():
     """
@@ -95,17 +97,21 @@ def test_hard_link_relaxation_engine_solves_snapshot_initval():
     cm.finalize_user_params()
 
     # ASSERT: A's initval snapshot equals B's value
-    assert np.isclose(cm.user_params["star.0.logmass"]["initval"], 0.5, rtol=1e-3)
+    assert np.isclose(
+        cm.user_params["star.0.logmass"]["initval"], 0.5, rtol=1e-3
+    )
     # ASSERT: physics relations saw the linked value (mass = 10**logmass)
-    mass_entry = (cm.user_params.get("star.A.mass")
-                  or cm.user_params.get("star.0.mass"))
+    mass_entry = cm.user_params.get("star.A.mass") or cm.user_params.get(
+        "star.0.mass"
+    )
     assert mass_entry is not None
-    assert np.isclose(mass_entry["initval"], 10 ** 0.5, rtol=1e-3)
+    assert np.isclose(mass_entry["initval"], 10**0.5, rtol=1e-3)
 
 
 # ----------------------------------------------------------------------
 # Soft link: sigma > 0
 # ----------------------------------------------------------------------
+
 
 def test_soft_link_samples_both_and_penalizes_difference():
     """
@@ -146,14 +152,16 @@ def test_soft_link_does_not_double_count_static_gaussian_prior():
     cm, star, model = _build_star_param(user_params, ["age"])
 
     # ASSERT: the only Gaussian-type potential on star.age is the link
-    static_names = [p.name for p in model.potentials
-                    if p.name == "gaussian_prior.star.age"]
+    static_names = [
+        p.name for p in model.potentials if p.name == "gaussian_prior.star.age"
+    ]
     assert static_names == []
 
 
 # ----------------------------------------------------------------------
 # Dynamic bound link
 # ----------------------------------------------------------------------
+
 
 def test_lower_bound_link_enforces_ordering_constraint():
     """
@@ -187,6 +195,7 @@ def test_lower_bound_link_enforces_ordering_constraint():
 # Algebraic expressions
 # ----------------------------------------------------------------------
 
+
 def test_algebraic_link_orbit_omega_snapshot():
     """
     Given orbit.b.omega = {initval: "orbit.c.omega + math.pi", sigma: 0},
@@ -206,8 +215,9 @@ def test_algebraic_link_orbit_omega_snapshot():
     cm.finalize_user_params()
 
     # ASSERT: snapshot in user units (deg): 90 + pi
-    assert np.isclose(cm.user_params["orbit.0.omega"]["initval"],
-                      90.0 + np.pi, rtol=1e-6)
+    assert np.isclose(
+        cm.user_params["orbit.0.omega"]["initval"], 90.0 + np.pi, rtol=1e-6
+    )
 
 
 def test_algebraic_hard_link_with_unit_conversion_in_graph():
@@ -256,6 +266,7 @@ def test_cross_parameter_hard_link_within_component():
 # Initialization-only link (no sigma)
 # ----------------------------------------------------------------------
 
+
 def test_initval_link_without_sigma_seeds_start_only():
     """
     Given star.A.age = {initval: star.B.age} with star.B.age = 2.0 and no sigma,
@@ -284,6 +295,7 @@ def test_initval_link_without_sigma_seeds_start_only():
 # Static-field links: sigma / init_scale snapshots
 # ----------------------------------------------------------------------
 
+
 def test_sigma_link_snapshots_numerically():
     """
     Given star.A.age with sigma = "0.5 * star.B.age" and star.B.age = 4.0,
@@ -308,6 +320,7 @@ def test_sigma_link_snapshots_numerically():
 # ----------------------------------------------------------------------
 # Error handling
 # ----------------------------------------------------------------------
+
 
 def test_unknown_instance_in_link_raises():
     """

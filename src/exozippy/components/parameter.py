@@ -6,24 +6,20 @@
 
 from __future__ import annotations
 
-import pytensor
-import pytensor.tensor as pt
-import pytensor.graph.traversal
-
+import logging
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import math
-from astropy import units as u
-import re
-
 import pymc as pm
+import pytensor
+import pytensor.graph.traversal
 import pytensor.tensor as pt
+from astropy import units as u
 
-# local imports
-import logging
-from exozippy.constants import SIGMA_1_LOW, SIGMA_1_HIGH
+from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 logger = logging.getLogger(__name__)
@@ -33,6 +29,7 @@ class SeedBoundViolation(Exception):
     """Raised by Parameter.raw_from_initval when a seed's solved start falls
     outside a parameter's hard bounds. Multi-seed sampling skips such seeds
     rather than clipping them (a clipped start is in no posterior basin)."""
+
 
 Number = Union[int, float, np.floating]
 
@@ -56,6 +53,7 @@ _RAW_CANCELLATION_CLIP = 1.0e4
 # Helper functions
 # ----------------------------
 
+
 def _tighten_bounds(
     lower: Optional[Number],
     upper: Optional[Number],
@@ -69,6 +67,7 @@ def _tighten_bounds(
         upper = user_upper if upper is None else min(upper, user_upper)
     return lower, upper
 
+
 def _latex_varname(label: str, prefix: str = "ez") -> str:
     """
     Create a LaTeX-safe macro name from a label:
@@ -76,18 +75,42 @@ def _latex_varname(label: str, prefix: str = "ez") -> str:
     - replace digits with words
     - prefix to avoid global collisions
     """
-    old = [".","_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-    new = ["","", "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    old = [".", "_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    new = [
+        "",
+        "",
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+    ]
     var = label
     for o, n in zip(old, new):
         var = var.replace(o, n)
     return prefix + var
 
+
 def _idx_to_words(n):
-    words = {'0': 'zero', '1': 'one', '2': 'two', '3': 'three',
-             '4': 'four', '5': 'five', '6': 'six', '7': 'seven',
-             '8': 'eight', '9': 'nine'}
+    words = {
+        "0": "zero",
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine",
+    }
     return "".join(words[char] for char in str(n))
+
 
 def _as_flat_array(x: Any) -> np.ndarray:
     """Flatten posterior-like input to a 1D numpy array."""
@@ -110,11 +133,11 @@ def to_vec(val, n_elements, fill=np.nan):
     raw_val = getattr(val, "value", val)
 
     # 2. Check if the underlying value is a Tensor
-    if hasattr(raw_val, 'owner') or "TensorVariable" in str(type(raw_val)):
+    if hasattr(raw_val, "owner") or "TensorVariable" in str(type(raw_val)):
         return raw_val
 
     # 3. Handle evaluate-able tensors (for initvals)
-    if hasattr(raw_val, 'eval'):
+    if hasattr(raw_val, "eval"):
         try:
             raw_val = raw_val.eval()
         except:
@@ -123,16 +146,22 @@ def to_vec(val, n_elements, fill=np.nan):
     arr = np.atleast_1d(raw_val)
 
     # 4. Handle arrays of tensors (rare, but happens in stacking)
-    if arr.size > 0 and hasattr(arr[0], 'eval'):
+    if arr.size > 0 and hasattr(arr[0], "eval"):
         try:
-            arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
+            arr = np.array(
+                [
+                    float(x.eval()) if hasattr(x, "eval") else float(x)
+                    for x in arr
+                ]
+            )
         except:
             return np.full(n_elements, fill, dtype=float)
 
     # 5. Scalar conversion (This is where the crash was!)
     if arr.size == 1:
         # Bypass float() if it's STILL a tensor (e.g. a 1-element tensor)
-        if hasattr(arr[0], 'owner'): return arr[0]
+        if hasattr(arr[0], "owner"):
+            return arr[0]
         return np.full(n_elements, float(arr[0]), dtype=float)
 
     res = np.full(n_elements, fill, dtype=float)
@@ -140,9 +169,12 @@ def to_vec(val, n_elements, fill=np.nan):
     res[:n_to_copy] = arr.astype(float)[:n_to_copy]
     return res
 
+
 class UnitTranslator:
     # Essential "Pretty" Mapping
-    SOLAR_DENSITY_UNIT = u.def_unit('rho_sun', 3.0 * u.M_sun / (4.0 * np.pi * u.R_sun ** 3))
+    SOLAR_DENSITY_UNIT = u.def_unit(
+        "rho_sun", 3.0 * u.M_sun / (4.0 * np.pi * u.R_sun**3)
+    )
 
     PRETTY_MAP = {
         u.solMass: r"M_\odot",
@@ -159,15 +191,19 @@ class UnitTranslator:
         u.dex: "",
         # combined units
         u.m / u.s: r"\rm m~s^{-1}",
-        u.dex(u.cm / u.s ** 2): r"\rm cgs",
-        u.g / u.cm ** 3: r"\rm g~cm$^{-3}$",
-        SOLAR_DENSITY_UNIT : r"\rho_\odot",
-        u.erg / u.second / u.cm ** 2: r"\rm erg~s$^{-1}$~cm$^{-2}$"
+        u.dex(u.cm / u.s**2): r"\rm cgs",
+        u.g / u.cm**3: r"\rm g~cm$^{-3}$",
+        SOLAR_DENSITY_UNIT: r"\rho_\odot",
+        u.erg / u.second / u.cm**2: r"\rm erg~s$^{-1}$~cm$^{-2}$",
     }
 
     @classmethod
-    def get_latex(cls, unit):
-        """Strict translator: returns pretty string or raises ValueError."""
+    def get_latex(cls, unit, label=None):
+        """Strict translator: returns pretty string or raises ValueError.
+
+        `label` is only used to name the offending parameter in the error
+        message; it is optional so the translator stays usable standalone.
+        """
         # Check direct hits (handles aliases like u.R_sun vs u.solRad)
         if unit in cls.PRETTY_MAP:
             return cls.PRETTY_MAP[unit]
@@ -180,15 +216,17 @@ class UnitTranslator:
             # If valid, return the standard inline LaTeX string
             # We strip the $ symbols so it can be wrapped in \ensuremath or
             # placed inside existing math environments.
-            return valid_unit.to_string('latex_inline').replace('$', '')
+            return valid_unit.to_string("latex_inline").replace("$", "")
 
         except (TypeError, ValueError, AttributeError):
             # 3. If it's not a unit object or a string astropy understands
+            where = f" for {label}" if label is not None else ""
             raise ValueError(
-                f"Unit '{unit}' is not a recognized Astropy unit"
-                f"Specify valid units or set 'user_unit_latex' for" 
-                f"{self.label} manually in your parameter files."
+                f"Unit '{unit}' is not a recognized Astropy unit. "
+                f"Specify valid units or set 'user_unit_latex'{where} "
+                f"manually in your parameter files."
             )
+
 
 # Example Usage:
 # unit = u.solMass
@@ -199,9 +237,11 @@ class UnitTranslator:
 # Data containers
 # ----------------------------
 
+
 @dataclass(slots=True)
 class PosteriorSummary:
     """Numeric + formatted summary for tables."""
+
     median: float
     err_minus: float
     err_plus: float
@@ -212,7 +252,11 @@ class PosteriorSummary:
         - errors rounded to `sigfigs` significant figures
         - median rounded to match the more precise error
         """
-        if math.isnan(self.median) or math.isnan(self.err_minus) or math.isnan(self.err_plus):
+        if (
+            math.isnan(self.median)
+            or math.isnan(self.err_minus)
+            or math.isnan(self.err_plus)
+        ):
             return ("NaN", "NaN", "NaN")
 
         em = abs(self.err_minus)
@@ -276,9 +320,11 @@ def _broadcast_to_shape(val, shape, label, name):
         f"Expected scalar or length {n_target}, got {arr.size}"
     )
 
+
 # ----------------------------
 # Parameter
 # ----------------------------
+
 
 @dataclass(slots=True)
 class Parameter:
@@ -295,9 +341,13 @@ class Parameter:
 
     label: str
     unit: Any = None  # astropy Unit or None (kept as metadata)
-    unit_latex: Optional[str] = "" # I'll keep a look up table for units, but this can be specified by the user ->
+    unit_latex: Optional[str] = (
+        ""  # I'll keep a look up table for units, but this can be specified by the user ->
+    )
 
-    internal_unit: Any = None # this is the internally used unit that simplifies the math
+    internal_unit: Any = (
+        None  # this is the internally used unit that simplifies the math
+    )
     initval: Optional[Number] = None
     init_scale: Optional[Number] = 1.0
     force_node: bool = False
@@ -347,9 +397,13 @@ class Parameter:
     latex_prefix: str = "ez"
 
     # Runtime fields
-    value: Any = field(default=None, init=False)  # pm RV or pm.Deterministic after build_pymc()
+    value: Any = field(
+        default=None, init=False
+    )  # pm RV or pm.Deterministic after build_pymc()
     latex_varname: str = field(default="", init=False)
-    posterior: Any = None  # user stores idata posterior samples here if desired
+    posterior: Any = (
+        None  # user stores idata posterior samples here if desired
+    )
     summary: Optional[PosteriorSummary] = field(default=None, init=False)
     # one entry per posterior mode (same structure as summary), filled by
     # compute_mode_summaries when a mode report exists
@@ -383,16 +437,22 @@ class Parameter:
         elif isinstance(self.unit, (list, np.ndarray)):
             self.unit = [parse_u(x) for x in self.unit]
         else:
-            self.unit = [u.dimensionless_unscaled if self.unit is None else self.unit]
+            self.unit = [
+                u.dimensionless_unscaled if self.unit is None else self.unit
+            ]
 
         # 3. GET LATEX DISPLAY NAME (Use the first unit in the list)
         try:
-            self.unit_latex = UnitTranslator.get_latex(self.unit[0])
-        except:
+            self.unit_latex = UnitTranslator.get_latex(
+                self.unit[0], label=self.label
+            )
+        except (TypeError, ValueError, AttributeError):
             self.unit_latex = ""
 
         # 4. STRUCTURAL NAMING
-        self.latex_varname = _latex_varname(self.label, prefix=self.latex_prefix)
+        self.latex_varname = _latex_varname(
+            self.label, prefix=self.latex_prefix
+        )
 
         # --- 5. THE GATEKEEPER CONVERSION ---
         # Convert ALL numeric fields from User Units to Internal Units ONCE upon creation.
@@ -408,11 +468,11 @@ class Parameter:
 
             # Symbolic nodes (has 'owner') cannot be numerically scaled — preserve as-is.
             # Unit conversion is a concrete operation; bounds/scales must be numeric.
-            if hasattr(raw_val, 'owner'):
+            if hasattr(raw_val, "owner"):
                 return raw_val
 
             # Evaluate constant tensor nodes (e.g. pt.constant(5.0))
-            if hasattr(raw_val, 'eval'):
+            if hasattr(raw_val, "eval"):
                 try:
                     raw_val = raw_val.eval()
                 except Exception:
@@ -423,9 +483,15 @@ class Parameter:
 
             # Final check: Ensure we aren't storing an object-array of Tensors
             if arr.dtype == object:
-                arr = np.array([float(x.eval()) if hasattr(x, 'eval') else float(x) for x in arr])
+                arr = np.array(
+                    [
+                        float(x.eval()) if hasattr(x, "eval") else float(x)
+                        for x in arr
+                    ]
+                )
 
             return arr.astype(float) / factors
+
         # --- APPLY THE CONVERSION ---
         self.initval = convert(self.initval)
         self.init_scale = convert(self.init_scale)
@@ -455,10 +521,12 @@ class Parameter:
         if self.initval is not None:
             return float(self.initval)
 
-        raise KeyError(f"Parameter {self.label} not found in point and has no expression.")
+        raise KeyError(
+            f"Parameter {self.label} not found in point and has no expression."
+        )
 
     def get_display_label(self, index=0):
-        parts = self.label.split('.')
+        parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
         # If it's already 'inst.gamma' -> 'inst.EXPERT.gamma'
         prefix = parts[0]
@@ -493,13 +561,15 @@ class Parameter:
         for logit params it is converted to logit-space internally via the
         Jacobian and affects only tuning/conditioning, never the posterior.
         """
-        import pytensor.tensor as pt
         import pymc as pm
+        import pytensor.tensor as pt
 
         expr_raw = self.expression if expression is None else expression
 
         # 1. SETUP SHAPES
-        actual_shape = self.shape if isinstance(self.shape, tuple) else (self.shape,)
+        actual_shape = (
+            self.shape if isinstance(self.shape, tuple) else (self.shape,)
+        )
         n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
 
         inits = to_vec(self.initval, n_elements, fill=0.0)
@@ -575,7 +645,7 @@ class Parameter:
                 # spread by init_scale in physical space when init_scale < sigma
                 # (e.g. xalpha/yalpha where sigma=1 encodes a uniform-angle
                 # prior but init_scale reflects the actual alpha uncertainty).
-                whiten = (min(sigmas[i], scales[i]) if has_sigma else scales[i])
+                whiten = min(sigmas[i], scales[i]) if has_sigma else scales[i]
                 # Keep the start off the exact bound. The floor is in units of
                 # the whitening scale (1e-6*scale inside the bound is
                 # "essentially at the bound" in problem units); a span-based
@@ -591,14 +661,18 @@ class Parameter:
                         f"starting value nudged to {lowers[i] + q_init * span}."
                     )
                 logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
-                jac = q_init * (1.0 - q_init) * span  # dval/d(logit_q) at initval
+                jac = (
+                    q_init * (1.0 - q_init) * span
+                )  # dval/d(logit_q) at initval
                 # Near a wall jac → 0 and whiten/jac would explode, saturating
                 # the sigmoid within one tiny raw step (parameter frozen at the
                 # wall). Flooring jac at min(whiten, span/4) caps the logit
                 # step at ~1, so a pinned start escapes multiplicatively —
                 # one e-fold in (val - bound) per unit raw step — while
                 # interior starts are unaffected.
-                init_scale_logits[i] = whiten / max(jac, min(whiten, span / 4.0))
+                init_scale_logits[i] = whiten / max(
+                    jac, min(whiten, span / 4.0)
+                )
             elif has_sigma:
                 # Unbounded with sigma: non-centered Gaussian; the raw N(0,1)
                 # IS the prior.
@@ -628,8 +702,9 @@ class Parameter:
             raw_initvals = np.zeros(len(idx))
             for j, i in enumerate(idx):
                 if not use_logit[i]:
-                    raw_initvals[j] = ((inits[i] - gaussian_mus[i])
-                                       / max(gaussian_scales[i], 1e-30))
+                    raw_initvals[j] = (inits[i] - gaussian_mus[i]) / max(
+                        gaussian_scales[i], 1e-30
+                    )
             # Saved so run.py can override model.initial_point() with the correct raw start.
             self.raw_initval = raw_initvals
             # Freeze the per-element forward transform so raw_from_initval can
@@ -647,11 +722,13 @@ class Parameter:
                 "gaussian_mus": gaussian_mus.copy(),
                 "gaussian_scales": gaussian_scales.copy(),
             }
-            par_raw = pm.Normal(f"{self.label}_raw",
-                                mu=0,
-                                sigma=1.0,
-                                shape=len(idx),
-                                initval=raw_initvals)
+            par_raw = pm.Normal(
+                f"{self.label}_raw",
+                mu=0,
+                sigma=1.0,
+                shape=len(idx),
+                initval=raw_initvals,
+            )
             for j, actual_idx in enumerate(idx):
                 raw_elements[actual_idx] = par_raw[j]
 
@@ -662,22 +739,31 @@ class Parameter:
             phys_val = expr_raw() if callable(expr_raw) else expr_raw
         else:
             # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
-            lq = pt.as_tensor_variable(logit_q_inits) + pt.as_tensor_variable(init_scale_logits) * raw_vector
-            phys_logit = (pt.as_tensor_variable(lowers)
-                          + pt.as_tensor_variable(uppers - lowers) * pt.sigmoid(pt.clip(lq, -30.0, 30.0)))
+            lq = (
+                pt.as_tensor_variable(logit_q_inits)
+                + pt.as_tensor_variable(init_scale_logits) * raw_vector
+            )
+            phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
+                uppers - lowers
+            ) * pt.sigmoid(pt.clip(lq, -30.0, 30.0))
 
             # Gaussian / linear branch: mu + sigma * raw  (or initval + scale * raw)
-            phys_linear = pt.as_tensor_variable(gaussian_mus) + pt.as_tensor_variable(gaussian_scales) * raw_vector
+            phys_linear = (
+                pt.as_tensor_variable(gaussian_mus)
+                + pt.as_tensor_variable(gaussian_scales) * raw_vector
+            )
 
             if np.all(use_logit):
                 phys_val = phys_logit
             elif not np.any(use_logit):
                 phys_val = phys_linear
             else:
-                phys_val = pt.where(pt.as_tensor_variable(use_logit), phys_logit, phys_linear)
+                phys_val = pt.where(
+                    pt.as_tensor_variable(use_logit), phys_logit, phys_linear
+                )
 
         # Strip Astropy units
-        if hasattr(phys_val, 'value') and hasattr(phys_val, 'unit'):
+        if hasattr(phys_val, "value") and hasattr(phys_val, "unit"):
             phys_val = phys_val.value
 
         if isinstance(phys_val, (list, tuple)):
@@ -689,25 +775,37 @@ class Parameter:
         links = self.element_links or {}
         dyn_span_logps = []
         if links:
-            if expr_raw is not None and any(k in links for k in ("hard", "lower", "upper")):
+            if expr_raw is not None and any(
+                k in links for k in ("hard", "lower", "upper")
+            ):
                 raise ValueError(
                     f"Parameter '{self.label}': hard/bound links are not supported "
-                    f"on derived (expression) parameters; only 'mu' links are.")
+                    f"on derived (expression) parameters; only 'mu' links are."
+                )
 
             # Dynamic bounds: re-map the element's sigmoid coordinate q into
             # the tensor-valued interval.  q comes from the same logit raw
             # coordinate, so the bound is a hard constraint by construction.
-            dyn_idx = sorted(set(links.get("lower", {})) | set(links.get("upper", {})))
+            dyn_idx = sorted(
+                set(links.get("lower", {})) | set(links.get("upper", {}))
+            )
             for i in dyn_idx:
                 if not use_logit[i] and is_sampled[i]:
                     raise ValueError(
                         f"Parameter '{self.label}'[{i}]: a dynamic bound link "
                         f"requires finite static lower/upper bounds (used to "
-                        f"set up the logit transform).")
-                lo_t = (links["lower"][i]["fn"](phys_val)
-                        if i in links.get("lower", {}) else pt.constant(lowers[i]))
-                up_t = (links["upper"][i]["fn"](phys_val)
-                        if i in links.get("upper", {}) else pt.constant(uppers[i]))
+                        f"set up the logit transform)."
+                    )
+                lo_t = (
+                    links["lower"][i]["fn"](phys_val)
+                    if i in links.get("lower", {})
+                    else pt.constant(lowers[i])
+                )
+                up_t = (
+                    links["upper"][i]["fn"](phys_val)
+                    if i in links.get("upper", {})
+                    else pt.constant(uppers[i])
+                )
                 span_t = pt.maximum(up_t - lo_t, 1e-12)
                 q_i = pt.sigmoid(pt.clip(lq[i], -30.0, 30.0))
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
@@ -724,16 +822,24 @@ class Parameter:
             hard = links.get("hard", {})
             if hard:
                 import graphlib
-                intra_graph = {i: (set(spec.get("intra_deps", ())) & set(hard))
-                               for i, spec in hard.items()}
+
+                intra_graph = {
+                    i: (set(spec.get("intra_deps", ())) & set(hard))
+                    for i, spec in hard.items()
+                }
                 try:
-                    order = list(graphlib.TopologicalSorter(intra_graph).static_order())
+                    order = list(
+                        graphlib.TopologicalSorter(intra_graph).static_order()
+                    )
                 except graphlib.CycleError as e:
                     raise ValueError(
                         f"Parameter '{self.label}': circular hard links between "
-                        f"elements: {e}")
+                        f"elements: {e}"
+                    )
                 for i in order:
-                    phys_val = pt.set_subtensor(phys_val[i], hard[i]["fn"](phys_val))
+                    phys_val = pt.set_subtensor(
+                        phys_val[i], hard[i]["fn"](phys_val)
+                    )
 
         # 6. ASSIGN TO SELF.VALUE
         track_node = bool(np.any(is_sampled)) or self.force_node or bool(links)
@@ -741,7 +847,9 @@ class Parameter:
         if actual_shape == ():
             val_to_save = phys_val if expr_raw is not None else phys_val[0]
         else:
-            val_to_save = pt.broadcast_to(pt.as_tensor_variable(phys_val), actual_shape)
+            val_to_save = pt.broadcast_to(
+                pt.as_tensor_variable(phys_val), actual_shape
+            )
 
         if track_node:
             self.value = pm.Deterministic(self.label, val_to_save)
@@ -758,8 +866,11 @@ class Parameter:
         #      = truncated normal.
         #    Unbounded sampled Gaussian params encode their prior in raw ~
         #    N(0,1); no double-count.
-        gaussian_prior_mask = ((is_derived | (is_sampled & use_logit & has_sigma_prior))
-                               & ~np.isnan(sigmas) & (sigmas > 0))
+        gaussian_prior_mask = (
+            (is_derived | (is_sampled & use_logit & has_sigma_prior))
+            & ~np.isnan(sigmas)
+            & (sigmas > 0)
+        )
         # Elements with a dynamic (linked) prior center get their Gaussian
         # potential below with a tensor-valued mu — exclude them here so the
         # penalty is not double-counted against the static center.
@@ -769,10 +880,18 @@ class Parameter:
         if np.any(gaussian_prior_mask):
             prior_mus = np.where(~np.isnan(mus), mus, inits)
             mask = pt.as_tensor_variable(gaussian_prior_mask)
-            penalty = -0.5 * ((val_flat - pt.as_tensor_variable(prior_mus))
-                              / pt.as_tensor_variable(np.where(sigmas > 0, sigmas, 1.0))) ** 2
-            pm.Potential(f"gaussian_prior.{self.label}",
-                         pm.math.sum(pt.where(mask, penalty, 0.0)))
+            penalty = (
+                -0.5
+                * (
+                    (val_flat - pt.as_tensor_variable(prior_mus))
+                    / pt.as_tensor_variable(np.where(sigmas > 0, sigmas, 1.0))
+                )
+                ** 2
+            )
+            pm.Potential(
+                f"gaussian_prior.{self.label}",
+                pm.math.sum(pt.where(mask, penalty, 0.0)),
+            )
 
         # A2. Gaussian potentials with LINKED (tensor-valued) centers: soft
         #     links tie this element to an expression of other parameters,
@@ -783,10 +902,13 @@ class Parameter:
                 raise ValueError(
                     f"Parameter '{self.label}'[{i}]: a soft link (Gaussian "
                     f"penalty on a linked center) requires sigma > 0; got "
-                    f"sigma={sig_i}. Use sigma: 0 for a hard link.")
+                    f"sigma={sig_i}. Use sigma: 0 for a hard link."
+                )
             mu_t = spec["fn"](val_flat)
-            pm.Potential(f"link_mu.{self.label}.{i}",
-                         -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2)
+            pm.Potential(
+                f"link_mu.{self.label}.{i}",
+                -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2,
+            )
 
         # A3. Normalization of dynamic-bound conditional uniform priors.
         if dyn_span_logps:
@@ -807,23 +929,31 @@ class Parameter:
             # whole logp with NaN.
             barrier_scales = np.where(
                 np.isfinite(barrier_scales) & (barrier_scales > 0),
-                barrier_scales, 1.0)
+                barrier_scales,
+                1.0,
+            )
 
             has_lower = ~np.isinf(lowers) & needs_barrier
             if np.any(has_lower):
                 mask = pt.as_tensor_variable(has_lower)
                 penalty = soft_lower_bound(
-                    val_flat, pt.as_tensor_variable(lowers), barrier_scales)
-                pm.Potential(f"low_bound.{self.label}",
-                             pm.math.sum(pt.where(mask, penalty, 0.0)))
+                    val_flat, pt.as_tensor_variable(lowers), barrier_scales
+                )
+                pm.Potential(
+                    f"low_bound.{self.label}",
+                    pm.math.sum(pt.where(mask, penalty, 0.0)),
+                )
 
             has_upper = ~np.isinf(uppers) & needs_barrier
             if np.any(has_upper):
                 mask = pt.as_tensor_variable(has_upper)
                 penalty = soft_upper_bound(
-                    val_flat, pt.as_tensor_variable(uppers), barrier_scales)
-                pm.Potential(f"up_bound.{self.label}",
-                             pm.math.sum(pt.where(mask, penalty, 0.0)))
+                    val_flat, pt.as_tensor_variable(uppers), barrier_scales
+                )
+                pm.Potential(
+                    f"up_bound.{self.label}",
+                    pm.math.sum(pt.where(mask, penalty, 0.0)),
+                )
 
         # C. Flat-prior correction for logit-transformed sampled parameters.
         #    raw ~ N(0,1) through the sigmoid gives a logit-normal prior in
@@ -844,15 +974,23 @@ class Parameter:
             # branch; see potentials.py) -- beyond 700 the exact value is
             # linear in lq anyway, so the restoring slope is unchanged.
             lq_safe = pt.clip(lq, -700.0, 700.0)
-            log_jac = (-pt.softplus(lq_safe) - pt.softplus(-lq_safe)
-                       - pt.maximum(pt.abs(lq) - 700.0, 0.0))
+            log_jac = (
+                -pt.softplus(lq_safe)
+                - pt.softplus(-lq_safe)
+                - pt.maximum(pt.abs(lq) - 700.0, 0.0)
+            )
             # raw_vector is clipped before squaring: see _RAW_CANCELLATION_CLIP.
-            raw_cancel_safe = pt.clip(raw_vector, -_RAW_CANCELLATION_CLIP,
-                                      _RAW_CANCELLATION_CLIP)
-            correction = pt.where(logit_mask,
-                                  log_jac + 0.5 * pt.sqr(raw_cancel_safe),
-                                  pt.zeros_like(raw_vector))
-            pm.Potential(f"logit_uniform_prior.{self.label}", pt.sum(correction))
+            raw_cancel_safe = pt.clip(
+                raw_vector, -_RAW_CANCELLATION_CLIP, _RAW_CANCELLATION_CLIP
+            )
+            correction = pt.where(
+                logit_mask,
+                log_jac + 0.5 * pt.sqr(raw_cancel_safe),
+                pt.zeros_like(raw_vector),
+            )
+            pm.Potential(
+                f"logit_uniform_prior.{self.label}", pt.sum(correction)
+            )
 
         return self.value
 
@@ -878,33 +1016,36 @@ class Parameter:
         if self.expression is None:
             return None
 
-        expr = self.expression() if callable(self.expression) else self.expression
+        expr = (
+            self.expression() if callable(self.expression) else self.expression
+        )
 
         # --- Strip Astropy Units before graph walking ---
-        if hasattr(expr, 'value') and hasattr(expr, 'unit'):
+        if hasattr(expr, "value") and hasattr(expr, "unit"):
             expr = expr.value
 
         all_nodes = pytensor.graph.traversal.ancestors([expr])
 
         inputs_in_posterior = [
-            n for n in all_nodes
-            if hasattr(n, 'name') and n.name in posterior_bundle
+            n
+            for n in all_nodes
+            if hasattr(n, "name") and n.name in posterior_bundle
         ]
 
         # fixed parameter, just return the scalar (convert output to user units)
         if not inputs_in_posterior:
             val = np.asarray(expr.eval(), dtype=float)
             if param_lookup is not None:
-                val = val * np.squeeze(np.asarray(self._get_conversion_factors(), dtype=float))
+                val = val * np.squeeze(
+                    np.asarray(self._get_conversion_factors(), dtype=float)
+                )
             if val.size > 1:
                 return val
             return val.item()
 
         # 1. Compile the function for a single evaluation
         calc_func = pytensor.function(
-            inputs_in_posterior,
-            expr,
-            on_unused_input='ignore'
+            inputs_in_posterior, expr, on_unused_input="ignore"
         )
 
         # 2. Extract the data arrays and align dimensions
@@ -924,7 +1065,11 @@ class Parameter:
             # receives the values it expects.
             if param_lookup is not None and n.name in param_lookup:
                 in_factor = np.squeeze(
-                    np.asarray(param_lookup[n.name]._get_conversion_factors(), dtype=float))
+                    np.asarray(
+                        param_lookup[n.name]._get_conversion_factors(),
+                        dtype=float,
+                    )
+                )
                 val = val / in_factor
 
             if n_samples is None:
@@ -937,13 +1082,15 @@ class Parameter:
         # A scalar variable lands as 0-D after arr[0], but build_pymc may have
         # compiled calc_func with a 1-D (n=1) input; atleast_nd fixes that.
         def _match_ndim(val, node):
-            target = node.ndim if hasattr(node, 'ndim') else 0
+            target = node.ndim if hasattr(node, "ndim") else 0
             while np.ndim(val) < target:
                 val = np.atleast_1d(val)
             return val
 
-        first_args = [_match_ndim(arr[0], n)
-                      for arr, n in zip(input_data, inputs_in_posterior)]
+        first_args = [
+            _match_ndim(arr[0], n)
+            for arr, n in zip(input_data, inputs_in_posterior)
+        ]
         first_result = np.asarray(calc_func(*first_args))
 
         # 4. Loop through the remaining samples
@@ -952,14 +1099,18 @@ class Parameter:
         result[0] = first_result
 
         for i in range(1, n_samples):
-            args = [_match_ndim(arr[i], n)
-                    for arr, n in zip(input_data, inputs_in_posterior)]
+            args = [
+                _match_ndim(arr[i], n)
+                for arr, n in zip(input_data, inputs_in_posterior)
+            ]
             result[i] = calc_func(*args)
 
         # Convert internal-unit result to user units when the inputs came from a
         # user-unit posterior (param_lookup provided).
         if param_lookup is not None:
-            out_factor = np.squeeze(np.asarray(self._get_conversion_factors(), dtype=float))
+            out_factor = np.squeeze(
+                np.asarray(self._get_conversion_factors(), dtype=float)
+            )
             result = result * out_factor
 
         # Return the proper shape with 'sample' at the end again to match ArviZ's format
@@ -978,7 +1129,7 @@ class Parameter:
         back to this parameter's physical value.
         """
         # Compile a quick function that takes the point and returns the RV value
-        fn = model.compile_fn(self.value, on_unused_input='ignore')
+        fn = model.compile_fn(self.value, on_unused_input="ignore")
         return fn(point)
 
     def _get_conversion_factors(self):
@@ -987,11 +1138,13 @@ class Parameter:
         Safely handles self.unit as a single Unit, a scalar Quantity, or a list/array.
         Halts immediately on invalid linear unit conversions.
         """
-        is_sequence = isinstance(self.unit, (list, tuple)) or \
-                      (isinstance(self.unit, np.ndarray) and getattr(self.unit, 'ndim', 0) > 0)
+        is_sequence = isinstance(self.unit, (list, tuple)) or (
+            isinstance(self.unit, np.ndarray)
+            and getattr(self.unit, "ndim", 0) > 0
+        )
 
         def _process_single(u_user):
-            target_u = getattr(u_user, 'unit', u_user)
+            target_u = getattr(u_user, "unit", u_user)
             i_str = str(self.internal_unit)
             u_str = str(target_u)
 
@@ -1011,28 +1164,33 @@ class Parameter:
                 )
 
         if is_sequence:
-            return np.array([_process_single(u) for u in self.unit], dtype=np.float64)
+            return np.array(
+                [_process_single(u) for u in self.unit], dtype=np.float64
+            )
 
         return _process_single(self.unit)
+
     def _get_conversion_factors_old(self):
         """
         Calculates the numerical conversion factor from internal -> user units.
         Safely handles self.unit as a single Unit, a scalar Quantity, or a list/array.
         """
         # A list/tuple is safe. An ndarray/Quantity is only safe if it has dimensions.
-        is_sequence = isinstance(self.unit, (list, tuple)) or \
-                      (isinstance(self.unit, np.ndarray) and getattr(self.unit, 'ndim', 0) > 0)
+        is_sequence = isinstance(self.unit, (list, tuple)) or (
+            isinstance(self.unit, np.ndarray)
+            and getattr(self.unit, "ndim", 0) > 0
+        )
 
         if is_sequence:
             factors = []
             for u_user in self.unit:
                 # getattr extracts the base Unit if u_user is accidentally a Quantity
-                target = getattr(u_user, 'unit', u_user)
+                target = getattr(u_user, "unit", u_user)
                 factors.append(self.internal_unit.to(target))
             return np.array(factors, dtype=np.float64)
 
         # Scalar fallback
-        target = getattr(self.unit, 'unit', self.unit)
+        target = getattr(self.unit, "unit", self.unit)
         return float(self.internal_unit.to(target))
 
     def raw_from_initval(self, initval_internal):
@@ -1053,7 +1211,9 @@ class Parameter:
             # No sampled elements (fully fixed/derived) -> empty raw start.
             return np.zeros(0)
         idx = tf["sampled_idx"]
-        n_elements = int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        )
         v = to_vec(initval_internal, n_elements)
         v = np.asarray(v, dtype=float).reshape(-1)
         raw = np.zeros(len(idx))
@@ -1071,21 +1231,62 @@ class Parameter:
                 if q < 0.0 or q > 1.0:
                     raise SeedBoundViolation(
                         f"{self.label}[{i}] seed initval {v[i]:.6g} is outside "
-                        f"bounds [{lower:.6g}, {upper:.6g}]")
+                        f"bounds [{lower:.6g}, {upper:.6g}]"
+                    )
                 qf = tf["q_floors"][i]
                 q = np.clip(q, qf, 1.0 - qf)
                 lq = np.log(q / (1.0 - q))
                 scale_logit = tf["init_scale_logits"][i]
-                raw[j] = (lq - tf["logit_q_inits"][i]) / max(scale_logit, 1e-30)
+                raw[j] = (lq - tf["logit_q_inits"][i]) / max(
+                    scale_logit, 1e-30
+                )
             else:
-                raw[j] = ((v[i] - tf["gaussian_mus"][i])
-                          / max(tf["gaussian_scales"][i], 1e-30))
+                raw[j] = (v[i] - tf["gaussian_mus"][i]) / max(
+                    tf["gaussian_scales"][i], 1e-30
+                )
         return raw
+
+    def phys_from_raw(self, raw_vec):
+        """Map raw N(0,1) coordinates to physical values (internal units).
+
+        The inverse of raw_from_initval, using the same frozen forward
+        transform from build_pymc (including the +/-30 sigmoid clip), so a
+        value produced here maps back through raw_from_initval consistently.
+
+        Takes one entry per SAMPLED element (shaped like self.raw_initval) and
+        returns a FULL-length element vector, which is what raw_from_initval
+        expects back.  Non-sampled entries are placeholders: raw_from_initval
+        only reads the sampled ones.
+        """
+        tf = getattr(self, "_raw_transform", None)
+        if tf is None:
+            return np.zeros(0)
+        idx = tf["sampled_idx"]
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        )
+        raw = np.asarray(raw_vec, dtype=float).reshape(-1)
+        out = np.zeros(n_elements)
+        for j, i in enumerate(idx):
+            if tf["use_logit"][i]:
+                lq = (
+                    tf["logit_q_inits"][i]
+                    + tf["init_scale_logits"][i] * raw[j]
+                )
+                q = 1.0 / (1.0 + np.exp(-np.clip(lq, -30.0, 30.0)))
+                out[i] = (
+                    tf["lowers"][i] + (tf["uppers"][i] - tf["lowers"][i]) * q
+                )
+            else:
+                out[i] = (
+                    tf["gaussian_mus"][i] + tf["gaussian_scales"][i] * raw[j]
+                )
+        return out
 
     # converts user units to internal units
     def to_internal(self, val=None):
         target = val if val is not None else self.value
-        return target/self._get_conversion_factors()
+        return target / self._get_conversion_factors()
 
     # converts internal units to user units
     def from_internal(self, val=None):
@@ -1098,7 +1299,6 @@ class Parameter:
     # converts internal units to arbitrary units
     def to_unit(self, target_unit: Any) -> Any:
         return self.value * self.internal_unit.to(target_unit).value
-
 
     # ---------
     # LaTeX helpers
@@ -1117,10 +1317,15 @@ class Parameter:
                     for i, val in enumerate(inits):
                         idx_str = _idx_to_words(i)
                         lines.append(
-                            rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{\equiv {val}}}}}" + "\n")
+                            rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{\equiv {val}}}}}"
+                            + "\n"
+                        )
                     return "".join(lines)
                 else:
-                    return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{\equiv {inits[0]}}}}}" + "\n"
+                    return (
+                        rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{\equiv {inits[0]}}}}}"
+                        + "\n"
+                    )
             return ""
 
         # SAMPLED PARAMETER PATH
@@ -1132,11 +1337,17 @@ class Parameter:
             for i, summ in enumerate(self.summary):
                 val = summ.latex_value(sigfigs=sigfigs)
                 idx_str = _idx_to_words(i)
-                lines.append(rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{{val}}}}}" + "\n")
+                lines.append(
+                    rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{{val}}}}}"
+                    + "\n"
+                )
             return "".join(lines)
 
         val = self.summary.latex_value(sigfigs=sigfigs)
-        return rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}" + "\n"
+        return (
+            rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{val}}}}}"
+            + "\n"
+        )
 
     def to_latex_mode_defs(self, sigfigs: int = 2) -> str:
         """Per-mode \\providecommand defs, suffixed modeone, modetwo, ...
@@ -1156,51 +1367,67 @@ class Parameter:
                     val = summ.latex_value(sigfigs=sigfigs)
                     lines.append(
                         rf"\providecommand{{\{self.latex_varname}{_idx_to_words(i)}{suffix}}}"
-                        rf"{{\ensuremath{{{val}}}}}" + "\n")
+                        rf"{{\ensuremath{{{val}}}}}" + "\n"
+                    )
             else:
                 val = summary.latex_value(sigfigs=sigfigs)
                 lines.append(
                     rf"\providecommand{{\{self.latex_varname}{suffix}}}"
-                    rf"{{\ensuremath{{{val}}}}}" + "\n")
+                    rf"{{\ensuremath{{{val}}}}}" + "\n"
+                )
         return "".join(lines)
 
     def get_unit_str(self, index=0):
         u_list = np.atleast_1d(self.unit)
         u_obj = u_list[index] if index < len(u_list) else u_list[0]
-        return u_obj.to_string() if u_obj and u_obj.to_string() != 'dimensionless' else ""
+        return (
+            u_obj.to_string()
+            if u_obj and u_obj.to_string() != "dimensionless"
+            else ""
+        )
 
     def get_prior_str(self, index=0, latex=True):
         def _scalar(val):
-            if val is None: return None
+            if val is None:
+                return None
             arr = np.atleast_1d(val)
             raw = arr[index] if index < len(arr) else arr[0]
-            if hasattr(raw, 'eval'):
+            if hasattr(raw, "eval"):
                 try:
                     raw = raw.eval()
                 except:
                     return None
             f_val = float(raw)
-            if np.isnan(f_val): return None
-            if self.unit is None or self.internal_unit is None: return f_val
+            if np.isnan(f_val):
+                return None
+            if self.unit is None or self.internal_unit is None:
+                return f_val
             f = np.atleast_1d(self._get_conversion_factors())
             return f_val * float(f[index] if index < len(f) else f[0])
 
         def _fmt(val, is_latex=True):
-            if val is None or np.isnan(val): return "nan"
-            if np.isinf(val): return (r"\infty" if val > 0 else r"-\infty") if is_latex else (
-                "inf" if val > 0 else "-inf")
-            if 0.001 <= abs(val) < 10000: return f"{val:.4f}".rstrip("0").rstrip(".")
+            if val is None or np.isnan(val):
+                return "nan"
+            if np.isinf(val):
+                return (
+                    (r"\infty" if val > 0 else r"-\infty")
+                    if is_latex
+                    else ("inf" if val > 0 else "-inf")
+                )
+            if 0.001 <= abs(val) < 10000:
+                return f"{val:.4f}".rstrip("0").rstrip(".")
             return f"{val:.2e}"
 
         sig = _scalar(self.sigma)
-        if sig == 0: return "Fixed"
+        if sig == 0:
+            return "Fixed"
 
         lo = _scalar(self.lower)
         hi = _scalar(self.upper)
 
         # Determine if there are actual constraints to print
-        has_prior = (sig is not None and sig > 0)
-        has_bounds = (lo is not None or hi is not None)
+        has_prior = sig is not None and sig > 0
+        has_bounds = lo is not None or hi is not None
 
         # Derived parameters with no custom constraint have no prior to display.
         if self.expression is not None and not (has_prior or has_bounds):
@@ -1214,14 +1441,26 @@ class Parameter:
             strs = []
             if has_prior:
                 strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
-            if strs: return " * ".join(strs)
+            if strs:
+                return " * ".join(strs)
 
             if has_bounds:
-                l_s = _fmt(lo, False) if (lo is not None and not np.isinf(lo)) else ""
-                h_s = _fmt(hi, False) if (hi is not None and not np.isinf(hi)) else ""
-                if l_s and h_s: return f"U({l_s}, {h_s})"
-                if l_s: return f"> {l_s}"
-                if h_s: return f"< {h_s}"
+                l_s = (
+                    _fmt(lo, False)
+                    if (lo is not None and not np.isinf(lo))
+                    else ""
+                )
+                h_s = (
+                    _fmt(hi, False)
+                    if (hi is not None and not np.isinf(hi))
+                    else ""
+                )
+                if l_s and h_s:
+                    return f"U({l_s}, {h_s})"
+                if l_s:
+                    return f"> {l_s}"
+                if h_s:
+                    return f"< {h_s}"
 
             if self.expression is not None:
                 return ""
@@ -1231,7 +1470,8 @@ class Parameter:
         if has_prior:
             strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
 
-        if strs: return r" $\times$ ".join(strs)
+        if strs:
+            return r" $\times$ ".join(strs)
 
         if has_bounds:
             l_s, h_s = _fmt(lo), _fmt(hi)
@@ -1240,9 +1480,12 @@ class Parameter:
             lo_is_inf = (lo is None) or np.isinf(lo)
             hi_is_inf = (hi is None) or np.isinf(hi)
 
-            if not lo_is_inf and not hi_is_inf: return rf"$\mathcal{{U}}({l_s}, {h_s})$"
-            if not lo_is_inf: return rf"$> {l_s}$"
-            if not hi_is_inf: return rf"$< {h_s}$"
+            if not lo_is_inf and not hi_is_inf:
+                return rf"$\mathcal{{U}}({l_s}, {h_s})$"
+            if not lo_is_inf:
+                return rf"$> {l_s}$"
+            if not hi_is_inf:
+                return rf"$< {h_s}$"
 
         return ""
 
@@ -1257,7 +1500,10 @@ class Parameter:
         prior_str = self.get_prior_str(index=0, latex=True)
         if not prior_str:
             return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
-        return rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}" + "\n"
+        return (
+            rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}"
+            + "\n"
+        )
 
     def _value_cells(self, idx_str: str, mode_suffixes: Optional[list]) -> str:
         """The Value column(s) of a table row.
@@ -1273,14 +1519,18 @@ class Parameter:
             return rf"\multicolumn{{{len(mode_suffixes)}}}{{c}}{{{base}}}"
         return " & ".join(base + sfx + r"\dotfill" for sfx in mode_suffixes)
 
-    def to_table_line(self, sigfigs: int = 2, note_mark: Optional[str] = None,
-                      mode_suffixes: Optional[list] = None) -> str:
+    def to_table_line(
+        self,
+        sigfigs: int = 2,
+        note_mark: Optional[str] = None,
+        mode_suffixes: Optional[list] = None,
+    ) -> str:
         if self.latex is None:
             raise ValueError(f"{self.label}: latex symbol not set.")
         if self.description is None:
             raise ValueError(f"{self.label}: description not set.")
 
-        safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
+        safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
 
@@ -1305,8 +1555,17 @@ class Parameter:
                 if self.summary is None:
                     self.compute_summary()
 
-                summ = self.summary[i] if isinstance(self.summary, list) else self.summary
-                val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}" + r"\dotfill"
+                summ = (
+                    self.summary[i]
+                    if isinstance(self.summary, list)
+                    else self.summary
+                )
+                val_txt = (
+                    r"\ensuremath{"
+                    + summ.latex_value(sigfigs=sigfigs)
+                    + "}"
+                    + r"\dotfill"
+                )
 
             prior_text = "\\" + self.latex_varname + "prior"
 
@@ -1319,9 +1578,13 @@ class Parameter:
 
         return "".join(lines)
 
-    def to_table_line_at(self, index: int, sigfigs: int = 2,
-                         note_mark: Optional[str] = None,
-                         mode_suffixes: Optional[list] = None) -> str:
+    def to_table_line_at(
+        self,
+        index: int,
+        sigfigs: int = 2,
+        note_mark: Optional[str] = None,
+        mode_suffixes: Optional[list] = None,
+    ) -> str:
         """Single table row for element ``index``, without an instance subscript.
 
         Used when the enclosing section header already identifies the instance.
@@ -1334,7 +1597,7 @@ class Parameter:
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
         idx_str = _idx_to_words(index) if n_elements > 1 else ""
 
-        safe_unit = self.unit_latex.replace('$', '') if self.unit_latex else ""
+        safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
 
@@ -1343,8 +1606,17 @@ class Parameter:
         else:
             if self.summary is None:
                 self.compute_summary()
-            summ = self.summary[index] if isinstance(self.summary, list) else self.summary
-            val_txt = r"\ensuremath{" + summ.latex_value(sigfigs=sigfigs) + "}" + r"\dotfill"
+            summ = (
+                self.summary[index]
+                if isinstance(self.summary, list)
+                else self.summary
+            )
+            val_txt = (
+                r"\ensuremath{"
+                + summ.latex_value(sigfigs=sigfigs)
+                + "}"
+                + r"\dotfill"
+            )
 
         prior_text = "\\" + self.latex_varname + "prior"
 
@@ -1364,15 +1636,20 @@ class Parameter:
 
         Returns a PosteriorSummary, or a list of them for vector parameters.
         """
+
         def get_stat(data):
             if data.size == 0 or not np.isfinite(data).any():
-                return PosteriorSummary(median=float("nan"),
-                                        err_minus=float("nan"),
-                                        err_plus=float("nan"))
+                return PosteriorSummary(
+                    median=float("nan"),
+                    err_minus=float("nan"),
+                    err_plus=float("nan"),
+                )
             med = float(np.nanquantile(data, 0.5))
             lo = float(np.nanquantile(data, SIGMA_1_LOW))
             hi = float(np.nanquantile(data, SIGMA_1_HIGH))
-            return PosteriorSummary(median=med, err_minus=med - lo, err_plus=hi - med)
+            return PosteriorSummary(
+                median=med, err_minus=med - lo, err_plus=hi - med
+            )
 
         if arr.ndim > 1:
             # Flatten any extra vector dimensions, iterate over the first axis,
@@ -1390,7 +1667,9 @@ class Parameter:
     def compute_summary(self, nsigma: float = 1.0) -> Any:
         # arr from az.extract places the 'sample' dimension LAST.
         # Posterior is stored in user units (from the user-unit trace Deterministic).
-        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
+        arr = np.asarray(
+            getattr(self.posterior, "values", self.posterior), dtype=float
+        )
         self.summary = self._summarize_array(arr)
         return self.summary
 
@@ -1402,7 +1681,9 @@ class Parameter:
         result mirrors ``summary`` (PosteriorSummary or list of them), one
         entry per mode.
         """
-        arr = np.asarray(getattr(self.posterior, "values", self.posterior), dtype=float)
+        arr = np.asarray(
+            getattr(self.posterior, "values", self.posterior), dtype=float
+        )
         labels = np.asarray(mode_labels)
         if arr.ndim == 0 or arr.shape[-1] != labels.size:
             # Constant over the trace (e.g. generate_posterior's fixed branch
@@ -1411,6 +1692,7 @@ class Parameter:
             self.mode_summaries = [self._summarize_array(arr)] * n_modes
         else:
             self.mode_summaries = [
-                self._summarize_array(arr[..., labels == k]) for k in range(n_modes)
+                self._summarize_array(arr[..., labels == k])
+                for k in range(n_modes)
             ]
         return self.mode_summaries

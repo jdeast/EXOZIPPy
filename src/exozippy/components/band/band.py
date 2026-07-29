@@ -1,13 +1,14 @@
 import logging
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.sed.bc_grid import (
-    resolve_filter_name,
-    facility_from_svo_name,
     _load_alias_table,
+    facility_from_svo_name,
+    resolve_filter_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,39 @@ class Band(Component):
     def prefix(self):
         return "band"
 
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "filter",
+                "kind": "option",
+                "accepts": None,
+                "required": True,
+                "doc": (
+                    "Filter/bandpass name; resolved through the SED filter "
+                    "alias table (components/sed/filters/filternames.txt) "
+                    "into a canonical name at load time."
+                ),
+            },
+            {
+                "key": "star_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": (
+                    "Index or name of the star whose limb darkening this "
+                    "band models. Default 0."
+                ),
+            },
+            {
+                "key": "ld_law",
+                "kind": "option",
+                "accepts": ["quadratic", "linear"],
+                "required": False,
+                "doc": "Limb-darkening law. Default 'quadratic'.",
+            },
+        ]
+
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
         self.star_indices = [c.get("star_ndx", 0) for c in self.config]
@@ -47,10 +81,20 @@ class Band(Component):
         self.filter_svo = []
         for band_name, filt in zip(self.names, self.filter_names):
             self.filter_mist.append(
-                resolve_filter_name(filt, alias_df, alias="MIST") if filt else None)
+                resolve_filter_name(filt, alias_df, alias="MIST")
+                if filt
+                else None
+            )
             self.filter_svo.append(
-                resolve_filter_name(filt, alias_df, alias="SVO") if filt else None)
-            if filt and alias_df is not None and not alias_df.eq(filt).any(axis=1).any():
+                resolve_filter_name(filt, alias_df, alias="SVO")
+                if filt
+                else None
+            )
+            if (
+                filt
+                and alias_df is not None
+                and not alias_df.eq(filt).any(axis=1).any()
+            ):
                 logger.warning(
                     f"Band '{band_name}': filter '{filt}' is not in the "
                     f"filter alias table (components/sed/filters/"

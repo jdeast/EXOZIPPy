@@ -10,26 +10,30 @@ extraction (get_draws(mode=...)), and the mode-restricted idata builder
 (_idata_for_mode).
 """
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import arviz as az
 import pytest
 
 from exozippy.outputs.modes import identify_modes, mode_suffix
-from exozippy.run import get_draws, _idata_for_mode, _emit_per_mode_outputs
-
+from exozippy.run import _emit_per_mode_outputs, _idata_for_mode, get_draws
 
 N_CHAIN, N_DRAW = 8, 500
 N = N_CHAIN * N_DRAW
 
 
 def _make_idata(posterior, lp):
-    return az.from_dict({
-        "posterior": {k: np.asarray(v).reshape(N_CHAIN, N_DRAW)
-                      for k, v in posterior.items()},
-        "sample_stats": {"lp": np.asarray(lp).reshape(N_CHAIN, N_DRAW)},
-    })
+    return az.from_dict(
+        {
+            "posterior": {
+                k: np.asarray(v).reshape(N_CHAIN, N_DRAW)
+                for k, v in posterior.items()
+            },
+            "sample_stats": {"lp": np.asarray(lp).reshape(N_CHAIN, N_DRAW)},
+        }
+    )
 
 
 def _two_mode_idata(rng, w2=0.3, sep=8.0):
@@ -58,6 +62,7 @@ class _FakeSystem:
     """Minimal System stand-in: no components, empty param lookup -- enough
     to exercise _emit_per_mode_outputs' plotting loop without building a
     real component graph."""
+
     active_components = {}
 
     def get_parameter_lookup(self):
@@ -67,6 +72,7 @@ class _FakeSystem:
 # ----------------------------------------------------------------------
 # get_draws(mode=...)
 # ----------------------------------------------------------------------
+
 
 def test_get_draws_mode_filter_disjoint():
     """
@@ -106,6 +112,7 @@ def test_get_draws_mode_missing_variable_raises():
 # _idata_for_mode
 # ----------------------------------------------------------------------
 
+
 def test_idata_for_mode_restricts_and_flattens():
     """
     Given a two-mode trace,
@@ -135,6 +142,7 @@ def test_idata_for_mode_restricts_and_flattens():
 # _emit_per_mode_outputs
 # ----------------------------------------------------------------------
 
+
 def test_emit_per_mode_outputs_writes_named_corner_files(tmp_path):
     """
     Given a two-mode trace and a component-free fake system,
@@ -151,10 +159,12 @@ def test_emit_per_mode_outputs_writes_named_corner_files(tmp_path):
     prefix = tmp_path / "fit"
     _emit_per_mode_outputs(_FakeSystem(), None, idata, rep, prefix)
 
-    expected = sorted([
-        f"fit_corner_{mode_suffix(0)}.png",
-        f"fit_corner_{mode_suffix(1)}.png",
-    ])
+    expected = sorted(
+        [
+            f"fit_corner_{mode_suffix(0)}.png",
+            f"fit_corner_{mode_suffix(1)}.png",
+        ]
+    )
     written = sorted(p.name for p in tmp_path.iterdir())
     assert written == expected
     for name in expected:
@@ -186,10 +196,12 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
 
     assert len(calls) == 2
     prefixes = sorted(p for p, _ in calls)
-    assert prefixes == sorted([
-        f"{prefix}_mcmc_{mode_suffix(0)}",
-        f"{prefix}_mcmc_{mode_suffix(1)}",
-    ])
+    assert prefixes == sorted(
+        [
+            f"{prefix}_mcmc_{mode_suffix(0)}",
+            f"{prefix}_mcmc_{mode_suffix(1)}",
+        ]
+    )
     for _, points in calls:
         assert len(points) > 0
 
@@ -197,6 +209,7 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
 # ----------------------------------------------------------------------
 # single-mode guard (mirrors the `mode_report.n_modes > 1` check in run_fit)
 # ----------------------------------------------------------------------
+
 
 def test_single_mode_report_skips_the_loop_guard():
     """

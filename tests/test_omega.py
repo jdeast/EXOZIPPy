@@ -1,15 +1,17 @@
-import numpy as np
-import pytest
 import os
-import pytensor
+
+import numpy as np
 import pymc as pm
+import pytensor
+import pytest
+
 from exozippy.components.orbit import Orbit
 from exozippy.config import ConfigManager
 
 pytestmark = pytest.mark.slow
 
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), 'tc2tp.txt')
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "tc2tp.txt")
 
 _IDL_ROWS = (
     [tuple(row) for row in np.loadtxt(_DATA_PATH)]
@@ -42,7 +44,9 @@ def compiled_tp_function():
         with pm.Model() as model:
             orbit_comp.register_parameters(system=None)
             for param_name in orbit_comp.manifest:
-                orbit_comp.add_parameter(model=model, param_name=param_name, system=None)
+                orbit_comp.add_parameter(
+                    model=model, param_name=param_name, system=None
+                )
 
             calc_tp = pytensor.function(
                 inputs=[
@@ -59,7 +63,9 @@ def compiled_tp_function():
 
 
 @pytest.mark.parametrize("row", _IDL_ROWS, ids=[_row_id(r) for r in _IDL_ROWS])
-def test_time_of_periastron_matches_idl_benchmark_grid(row, compiled_tp_function):
+def test_time_of_periastron_matches_idl_benchmark_grid(
+    row, compiled_tp_function
+):
     """
     Given a (tc, period, e, omega, tp_idl) row from the IDL benchmark grid,
     When PyTensor evaluates the Tp conversion,
@@ -67,19 +73,18 @@ def test_time_of_periastron_matches_idl_benchmark_grid(row, compiled_tp_function
     """
     tc_val, period_val, e_val, w_val, tp_idl = row
 
-    logP_in    = np.array([np.log10(period_val)],           dtype="float64")
-    tc_in      = np.array([tc_val],                         dtype="float64")
-    secosw_in  = np.array([np.sqrt(e_val) * np.cos(w_val)], dtype="float64")
-    sesinw_in  = np.array([np.sqrt(e_val) * np.sin(w_val)], dtype="float64")
+    logP_in = np.array([np.log10(period_val)], dtype="float64")
+    tc_in = np.array([tc_val], dtype="float64")
+    secosw_in = np.array([np.sqrt(e_val) * np.cos(w_val)], dtype="float64")
+    sesinw_in = np.array([np.sqrt(e_val) * np.sin(w_val)], dtype="float64")
 
     tp_python = compiled_tp_function(logP_in, tc_in, secosw_in, sesinw_in)[0]
 
     diff = tp_python - tp_idl
     remainder = diff % period_val
     tol = 1e-7
-    assert (
-        np.isclose(remainder, 0, atol=tol)
-        or np.isclose(remainder, period_val, atol=tol)
+    assert np.isclose(remainder, 0, atol=tol) or np.isclose(
+        remainder, period_val, atol=tol
     ), (
         f"e={e_val}, omega={w_val}, P={period_val}\n"
         f"IDL Tp={tp_idl}  Python Tp={tp_python[0]}\n"

@@ -28,7 +28,7 @@ star:
     description: "Surface Gravity"
     expressions:
       default:
-        func_name: "calc_logg"
+        func_name: "calc_logg_from_logmass"
         deps: ["logmass", "radius"]
 
   distance:
@@ -210,21 +210,6 @@ star:
       default:
         func_name: "calc_parallax"
         deps: [ "distance" ]
-  appks:
-    initval: 10.0
-    init_scale: 0.02
-    lower: -30.0 # the Sun is -28.29
-    upper: 50.0
-    unit: "mag"
-    internal_unit: "mag"
-    latex: "m_{K_s}"
-    description: "Apparent Ks magnitude"
-  absks:
-    unit: "mag"
-    internal_unit: "mag"
-    latex: "M_{K_s}"
-    description: "Absolute Ks magnitude"
-    expressions:
-      default:
-        func_name: "calc_absmag"
-        deps: ["appks", "distance"]
+# The apparent/absolute Ks the Mann relations key on live on the mann
+# component (mann.appks / mann.absks), which derives them from its own
+# non-centered Ks latent rather than sampling them here.

@@ -1,6 +1,7 @@
+from typing import Any, Dict, List
+
 import numpy as np
 import pytensor.tensor as pt
-from typing import Dict, Any, List
 
 
 class ModelAuditor:
@@ -13,18 +14,33 @@ class ModelAuditor:
         self.all_params = system.get_all_parameters()
 
         # Internal Filter Suffixes
-        self.hidden_suffixes = ["_raw", "_raw_n", "_raw_u", "_interval__", "_log__", "__"]
+        self.hidden_suffixes = [
+            "_raw",
+            "_raw_n",
+            "_raw_u",
+            "_interval__",
+            "_log__",
+            "__",
+        ]
 
-    def get_aggregated_logps(self) -> tuple[Dict[str, float], Dict[str, float]]:
+    def get_aggregated_logps(
+        self,
+    ) -> tuple[Dict[str, float], Dict[str, float]]:
         model_input_names = [v.name for v in self.model.value_vars]
-        filtered_point = {k: v for k, v in self.transformed_inits.items() if k in model_input_names}
+        filtered_point = {
+            k: v
+            for k, v in self.transformed_inits.items()
+            if k in model_input_names
+        }
         raw_logps = self.model.point_logps(filtered_point)
 
         param_logps = {}
         other_nodes = {}
 
         # ONLY group logps for parameters that are actively being sampled
-        sampled_labels = [p.label for p in self.all_params if p.expression is None]
+        sampled_labels = [
+            p.label for p in self.all_params if p.expression is None
+        ]
 
         for node_name, lp in raw_logps.items():
             if any(node_name.endswith(s) for s in self.hidden_suffixes):
@@ -35,7 +51,9 @@ class ModelAuditor:
                 clean_name = clean_name.replace(prefix, "")
 
             if "." in clean_name and not clean_name.replace(".", "").isdigit():
-                clean_name = ".".join([p for p in clean_name.split(".") if not p.isdigit()])
+                clean_name = ".".join(
+                    [p for p in clean_name.split(".") if not p.isdigit()]
+                )
 
             # If it's a bound/prior on a SAMPLED parameter, group it
             if clean_name in sampled_labels:
@@ -49,6 +67,7 @@ class ModelAuditor:
     def get_curvatures(self) -> Dict[str, np.ndarray]:
         """Calculates diagonal curvature in Unity space."""
         from .run import get_diagonal_curvature  # Keep circular import local
+
         curvature_map = {}
         curv_vec = get_diagonal_curvature(self.model, self.transformed_inits)
 
@@ -57,7 +76,7 @@ class ModelAuditor:
         raw_curvs = {}
         for var in self.model.value_vars:
             var_size = self.transformed_inits[var.name].size
-            raw_curvs[var.name] = curv_vec[idx: idx + var_size]
+            raw_curvs[var.name] = curv_vec[idx : idx + var_size]
             idx += var_size
 
         # 2. Safely expand them back to their full physical shapes
@@ -66,13 +85,13 @@ class ModelAuditor:
             full_curv = np.full(n_elements, np.nan)
             raw_name = f"{p.label}_raw"
 
-            if raw_name in raw_curvs and hasattr(p, 'is_sampled'):
+            if raw_name in raw_curvs and hasattr(p, "is_sampled"):
                 # Map the compressed curvature vector back to the original indices
                 if np.sum(p.is_sampled) == raw_curvs[raw_name].size:
                     full_curv[p.is_sampled] = raw_curvs[raw_name]
                 else:
                     # Fallback safeguard
-                    full_curv[:raw_curvs[raw_name].size] = raw_curvs[raw_name]
+                    full_curv[: raw_curvs[raw_name].size] = raw_curvs[raw_name]
 
             curvature_map[p.label] = full_curv
 
@@ -87,19 +106,28 @@ class ModelAuditor:
             for i in range(n):
                 used_keys.add(p.get_display_label(i))
                 # Add index fallback (star.0.radius)
-                parts = p.label.split('.')
+                parts = p.label.split(".")
                 used_keys.add(f"{parts[0]}.{i}.{parts[-1]}")
 
         unused_items = []
 
         # 1. Top-Level Unused Keys (e.g., misspelled component names: "inst.HIRES.gama")
         for k in self.user_params.keys():
-            if k not in used_keys and k != 'run':
+            if k not in used_keys and k != "run":
                 unused_items.append(k)
 
         # 2. Ignored Sub-Keys (e.g., spelled 'intival' instead of 'initval')
         # These are the exact and ONLY keys ConfigManager.resolve absorbs.
-        valid_subkeys = {"initval", "init_scale", "lower", "upper", "mu", "sigma", "derived", "unit"}
+        valid_subkeys = {
+            "initval",
+            "init_scale",
+            "lower",
+            "upper",
+            "mu",
+            "sigma",
+            "derived",
+            "unit",
+        }
 
         for k, ov in self.user_params.items():
             if k in used_keys and isinstance(ov, dict):

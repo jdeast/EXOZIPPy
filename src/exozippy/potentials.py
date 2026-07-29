@@ -17,6 +17,7 @@ differentiates through it in the backward pass, giving exp(820)=inf and
 then 0*inf=NaN.  Capping at 700 keeps exp(arg) finite everywhere (exp(700)
 ~ 1e304), so the unselected branch contributes 0, not NaN, to every VJP.
 """
+
 import numpy as np
 import pytensor.tensor as pt
 

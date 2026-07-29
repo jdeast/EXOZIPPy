@@ -2,21 +2,22 @@ import numpy as np
 import pytensor
 import pytensor.tensor as pt
 import pytest
-from exozippy.components.mulensing.lens import Lens
-from exozippy.components.parameter import Parameter
 from astropy import units as u
-from exozippy.physics_registry import PHYSICS_REGISTRY
-from exozippy.config import ConfigManager
+
+from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.physics import (
-    calc_theta_E,
     calc_pi_rel,
-    calc_t_E
+    calc_t_E,
+    calc_theta_E,
 )
+from exozippy.components.parameter import Parameter
+from exozippy.config import ConfigManager
+from exozippy.physics_registry import PHYSICS_REGISTRY
 from exozippy.system import System
 
 
 def get_val(x):
-    return x.eval() if hasattr(x, 'eval') else x
+    return x.eval() if hasattr(x, "eval") else x
 
 
 @pytest.mark.slow
@@ -37,21 +38,21 @@ def test_pspl_magnification_accuracy():
         "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
     }
     user_params = {
-        "lens.Lens.t_0":        {"initval": t0_val},
-        "lens.Lens.u_0":        {"initval": u0_val},
-        "lens.Lens.pi_E_N":     {"initval": 0.0, "sigma": 0.0},
-        "lens.Lens.pi_E_E":     {"initval": 0.0, "sigma": 0.0},
-        "star.Lens.distance":   {"initval": 4000.0},
+        "lens.Lens.t_0": {"initval": t0_val},
+        "lens.Lens.u_0": {"initval": u0_val},
+        "lens.Lens.pi_E_N": {"initval": 0.0, "sigma": 0.0},
+        "lens.Lens.pi_E_E": {"initval": 0.0, "sigma": 0.0},
+        "star.Lens.distance": {"initval": 4000.0},
         "star.Source.distance": {"initval": 8000.0},
-        "star.Lens.mass":       {"initval": 0.5},
-        "star.Lens.pm_ra":      {"initval": 0.0},
-        "star.Lens.pm_dec":     {"initval": 0.0},
-        "star.Source.pm_ra":    {"initval": 0.0},
-        "star.Source.pm_dec":   {"initval": 0.0},
-        "star.Source.ra":       {"initval": 0.0},
-        "star.Source.dec":      {"initval": 0.0},
-        "star.Lens.ra":         {"initval": 0.0},
-        "star.Lens.dec":        {"initval": 0.0},
+        "star.Lens.mass": {"initval": 0.5},
+        "star.Lens.pm_ra": {"initval": 0.0},
+        "star.Lens.pm_dec": {"initval": 0.0},
+        "star.Source.pm_ra": {"initval": 0.0},
+        "star.Source.pm_dec": {"initval": 0.0},
+        "star.Source.ra": {"initval": 0.0},
+        "star.Source.dec": {"initval": 0.0},
+        "star.Lens.ra": {"initval": 0.0},
+        "star.Lens.dec": {"initval": 0.0},
     }
 
     system = System(config, user_params=user_params)
@@ -62,10 +63,14 @@ def test_pspl_magnification_accuracy():
     t_at_peak = np.array([t0_val])
 
     with model:
-        A_node = system.lens.get_magnification(t_at_peak, obs_zero, system, index=0)
+        A_node = system.lens.get_magnification(
+            t_at_peak, obs_zero, system, index=0
+        )
         f = pytensor.function(model.free_RVs, A_node, on_unused_input="ignore")
         ip = model.initial_point()
-        zero_in = [np.zeros_like(ip[v.name]).astype("float64") for v in model.free_RVs]
+        zero_in = [
+            np.zeros_like(ip[v.name]).astype("float64") for v in model.free_RVs
+        ]
         A_result = float(f(*zero_in)[0])
 
     expected = (u0_val**2 + 2) / (u0_val * np.sqrt(u0_val**2 + 4))
@@ -101,30 +106,25 @@ def test_microlensing_physics_conversions():
     t_E = get_val(calc_t_E(theta_E, mu_rel))
     assert np.isclose(t_E, 52.12, atol=1e-2)
 
+
 def test_lens_parameter_unit_handling():
     """Ensure lens parameters correctly handle 'd' and 'mas' string units."""
-    p = Parameter(
-        label="lens.t_E",
-        unit="d",
-        internal_unit="d",
-        initval=50.0
-    )
+    p = Parameter(label="lens.t_E", unit="d", internal_unit="d", initval=50.0)
     # If the gatekeeper is working, this should stay 50.0
     # If internal_unit was accidentally '', it would have crashed or scaled.
     assert p.initval == 50.0
     assert p.internal_unit == u.day
 
 
-
 def test_microlensing_sympy_pytensor_equivalence():
     """
-            Ensures that initialization (SymPy) and sampling (PyTensor)
-            use the exact same mathematical constants and logic.
-            """
+    Ensures that initialization (SymPy) and sampling (PyTensor)
+    use the exact same mathematical constants and logic.
+    """
     # 1. Define Topology
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}]
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
     }
 
     user_params = {
@@ -134,7 +134,7 @@ def test_microlensing_sympy_pytensor_equivalence():
         "star.Lens.pm_ra": {"initval": 10.0},
         "star.Lens.pm_dec": {"initval": 0.0},
         "star.Source.pm_ra": {"initval": 0.0},
-        "star.Source.pm_dec": {"initval": 0.0}
+        "star.Source.pm_dec": {"initval": 0.0},
     }
 
     # 2. Pass topology and explicitly trigger the solver
@@ -185,7 +185,9 @@ def test_calc_theta_E_negative_pi_rel_returns_zero_not_nan():
 
     # Assert: finite zero, not NaN
     assert np.isfinite(theta_E_neg), f"Expected finite 0.0, got {theta_E_neg}"
-    assert theta_E_neg == 0.0, f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    assert theta_E_neg == 0.0, (
+        f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    )
     assert theta_E_zero == 0.0
 
     # Positive pi_rel still works correctly
@@ -202,15 +204,16 @@ def test_microlensing_contradiction_no_override(caplog):
     # Given: distances that imply pi_rel ~ 0.125, but user also sets pi_rel = 0.999
     system_config = {
         "star": [{"name": "Lens"}, {"name": "Source"}],
-        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}]
+        "lens": [{"name": "Lens", "lens_ndx": 0, "source_ndx": 1}],
     }
     user_params = {
         "star.Lens.distance": 4000.0,
         "star.Source.distance": 8000.0,
-        "lens.Lens.pi_rel": 0.999
+        "lens.Lens.pi_rel": 0.999,
     }
 
     import logging
+
     cm = ConfigManager(user_params, system_config=system_config)
     with caplog.at_level(logging.DEBUG):
         cm.finalize_user_params()

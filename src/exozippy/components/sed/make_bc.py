@@ -33,8 +33,11 @@ percent-level absolute calibration is needed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -44,11 +47,11 @@ import pandas as pd
 
 from .bc_grid import (
     DEFAULT_BC_ROOT,
-    peek_grid_axes,
-    resolve_filter_name,
-    facility_from_svo_name,
     _load_alias_table,
     _read_single_bc_file,
+    facility_from_svo_name,
+    peek_grid_axes,
+    resolve_filter_name,
 )
 from .filters.filter import Filter
 
@@ -59,37 +62,176 @@ try:
 except NameError:
     current_dir = Path.cwd()
 
-SIGMA_SB = 5.670374419e-5        # erg s^-1 cm^-2 K^-4
-L0 = 3.0128e35                   # IAU 2015 resolution B2, erg/s
+SIGMA_SB = 5.670374419e-5  # erg s^-1 cm^-2 K^-4
+L0 = 3.0128e35  # IAU 2015 resolution B2, erg/s
 PC_CM = 3.0856775814913673e18
-F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)   # erg s^-1 cm^-2
+F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)  # erg s^-1 cm^-2
 V_BAND_MICRON = 0.55
 
 # Alpha-abundance fallback order when a grid point has no alpha=0
 # spectrum (mirrors models/NextGen/plot.py ALPHA_GRID_PTS).
 ALPHA_FALLBACK = (0.0, 0.2, -0.2, 0.4, 0.6)
 
-_MODEL_DATA_URLS = {
+# size and md5 come from the Zenodo record's own API
+# (https://zenodo.org/api/records/20547997). They pin the content, so a
+# re-uploaded or truncated file is caught rather than silently used.
+_MODEL_DATA = {
     "NextGen": {
-        "NextGen.spectra.csv":    "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
-        "NextGen.wavelength.csv": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
+        "NextGen.spectra.csv": {
+            "url": "https://zenodo.org/records/20547997/files/NextGen.spectra.csv?download=1",
+            "size": 259149813,
+            "md5": "7a2b81333f6a5bfccd4cbc07bdea6648",
+        },
+        "NextGen.wavelength.csv": {
+            "url": "https://zenodo.org/records/20547997/files/NextGen.wavelength.csv?download=1",
+            "size": 60943,
+            "md5": "29ae520da3a5b7b3c407688abba7abf2",
+        },
     }
 }
 
+# Emitted once per process, the first time a spectra grid is actually fetched.
+# Warning (not info) on purpose: anyone generating their own BC table is doing
+# science with the result and needs to know its accuracy floor up front.
+_DOWNSAMPLING_WARNING = (
+    "The %s model spectra hosted on Zenodo are SEVERELY DOWNSAMPLED. "
+    "Bolometric corrections synthesized from them carry errors of order 2 "
+    "percent -- larger than the photometric uncertainties of most modern "
+    "surveys, so a BC table generated here can dominate the error budget of "
+    "any parameter that depends on it. The shipped BC tables (models/%s/BCs/) "
+    "are not affected; this applies only to tables you generate yourself for "
+    "filters that have none. Full-resolution spectra (~250 GB) are the "
+    "intended long-term fix and are not distributed yet."
+)
+
+_warned_models: set[str] = set()
+
+# Zenodo is a free academic host and 5xx-es under load. Four attempts with
+# doubling backoff spans ~35s, which covers the transient gateway errors seen
+# in CI without making a genuinely dead URL take minutes to report.
+_DOWNLOAD_ATTEMPTS = 4
+_RETRY_BACKOFF = 5  # seconds; doubles each attempt
+
+
+def _md5(path: Path, chunk: int = 1 << 20) -> str:
+    """Streaming md5 of a file (the spectra grid is ~250 MB)."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
 
 def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
-    """Download large model data files from Zenodo if not present locally."""
-    urls = _MODEL_DATA_URLS.get(model, {})
+    """Download large model data files from Zenodo if not present locally.
+
+    These are the raw model spectra used to synthesize bolometric corrections
+    for filters with no precomputed BC table. They are far too large to ship
+    in the package (~300 MB) and are git-ignored, so they are fetched on first
+    use and cached in place. See _DOWNSAMPLING_WARNING for their accuracy.
+
+    Integrity is enforced, because the failure mode without it is silent and
+    lasting: urlretrieve happily writes a truncated body to the destination,
+    and every later run then reads that half-file. It surfaced as
+    `pandas.errors.ParserError: EOF inside string starting at row 11248`, in a
+    test that has nothing to do with downloading. So:
+
+    * a cached file is size-checked on every call (cheap, and truncation --
+      the observed failure -- always changes the size);
+    * a download lands on a .part file, is checked for size AND md5, and only
+      then atomically renamed into place, so an interrupted fetch can never be
+      mistaken for a cached one;
+    * a corrupt cached file is re-fetched rather than raising, since the
+      recovery is unambiguous.
+    """
+    files = _MODEL_DATA.get(model, {})
     model_dir = Path(bc_root) / model
-    for filename, url in urls.items():
+    for filename, meta in files.items():
         dest = model_dir / filename
-        if not dest.exists():
-            logger.info(f"Downloading {filename} from Zenodo...")
-            urllib.request.urlretrieve(url, dest)
-            logger.info(f"Saved {filename} to {dest}")
+        if dest.exists():
+            actual = dest.stat().st_size
+            if actual == meta["size"]:
+                continue
+            logger.warning(
+                "Cached %s is %d bytes, expected %d -- it is truncated or "
+                "stale. Re-downloading.",
+                dest,
+                actual,
+                meta["size"],
+            )
+            dest.unlink()
+
+        if model not in _warned_models:
+            _warned_models.add(model)
+            logger.warning(_DOWNSAMPLING_WARNING, model, model)
+
+        logger.info(f"Downloading {filename} from Zenodo...")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+
+        # Retried with backoff. Zenodo is a free academic host serving a 250 MB
+        # file, and it returns 5xx under load -- observed as
+        # `HTTPError: HTTP Error 504: Gateway Time-out` failing CI on pull
+        # requests that had touched nothing related. A transient gateway error
+        # should cost a few seconds, not a whole run.
+        #
+        # Only transport and integrity errors are retried. A 404 means the URL
+        # or record is wrong, and retrying that just delays a real failure by
+        # _RETRY_BACKOFF seconds, so it is re-raised at once.
+        last_error = None
+        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+            try:
+                urllib.request.urlretrieve(meta["url"], part)
+                size = part.stat().st_size
+                if size != meta["size"]:
+                    raise RuntimeError(
+                        f"{filename} downloaded {size} bytes, expected "
+                        f"{meta['size']}. The download was truncated; retry."
+                    )
+                digest = _md5(part)
+                if digest != meta["md5"]:
+                    raise RuntimeError(
+                        f"{filename} has md5 {digest}, expected "
+                        f"{meta['md5']}. The file on Zenodo may have been "
+                        f"replaced, or the download was corrupted."
+                    )
+                part.replace(dest)  # atomic within the same directory
+                last_error = None
+                break
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    raise
+                last_error = e
+            except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
+                last_error = e
+            finally:
+                part.unlink(missing_ok=True)
+
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                delay = _RETRY_BACKOFF * 2 ** (attempt - 1)
+                logger.warning(
+                    "Download of %s failed (attempt %d/%d): %s. "
+                    "Retrying in %ds.",
+                    filename,
+                    attempt,
+                    _DOWNLOAD_ATTEMPTS,
+                    last_error,
+                    delay,
+                )
+                time.sleep(delay)
+
+        if last_error is not None:
+            raise RuntimeError(
+                f"Could not download {filename} from Zenodo after "
+                f"{_DOWNLOAD_ATTEMPTS} attempts: {last_error}"
+            ) from last_error
+
+        logger.info(f"Saved {filename} to {dest}")
 
 
-def _load_spectra(model: str, bc_root: Path) -> tuple[pd.DataFrame, np.ndarray]:
+def _load_spectra(
+    model: str, bc_root: Path
+) -> tuple[pd.DataFrame, np.ndarray]:
     """
     Load the model spectra table and its wavelength grid (Angstrom).
     The flux column is kept as JSON strings; _select_spectrum parses
@@ -106,12 +248,16 @@ def _unit_optical_depth(wave_ang: np.ndarray) -> np.ndarray:
     """Optical depth per magnitude of Av on the spectra wavelength grid."""
     ext = pd.read_csv(
         current_dir / "models" / "extinction_law.ascii",
-        names=["wavelength", "extinction"], delimiter=" ",
-        index_col=False, skipinitialspace=True,
+        names=["wavelength", "extinction"],
+        delimiter=" ",
+        index_col=False,
+        skipinitialspace=True,
     )
     from scipy import interpolate
+
     f = interpolate.interp1d(
-        ext["wavelength"], ext["extinction"], fill_value="extrapolate")
+        ext["wavelength"], ext["extinction"], fill_value="extrapolate"
+    )
     wave_micron = wave_ang * 1e-4
     return (f(wave_micron) / f(V_BAND_MICRON)) / 1.086
 
@@ -120,8 +266,10 @@ def _select_spectrum(df_spec, teff, logg, feh):
     """Spectrum at a grid node, with the alpha fallback order."""
     for alpha in ALPHA_FALLBACK:
         rows = df_spec[
-            (df_spec.teff == teff) & (df_spec.logg == logg)
-            & (df_spec.feh == feh) & (df_spec.alpha == alpha)
+            (df_spec.teff == teff)
+            & (df_spec.logg == logg)
+            & (df_spec.feh == feh)
+            & (df_spec.alpha == alpha)
         ]
         if len(rows) > 0:
             flux = rows.iloc[0].flux
@@ -133,10 +281,13 @@ def _select_spectrum(df_spec, teff, logg, feh):
 
 def _vega_zeropoint(filt: Filter) -> float:
     """Vega F_lambda zeropoint: specified when quoted, else calculated."""
-    zp = getattr(filt, "Zp_Spec_Fl_Vega", None) or getattr(filt, "Zp_Calc_Fl_Vega", None)
+    zp = getattr(filt, "Zp_Spec_Fl_Vega", None) or getattr(
+        filt, "Zp_Calc_Fl_Vega", None
+    )
     if zp is None:
         raise ValueError(
-            f"No Vega F_lambda zeropoint available for {filt.filterID}.")
+            f"No Vega F_lambda zeropoint available for {filt.filterID}."
+        )
     return float(zp)
 
 
@@ -187,8 +338,8 @@ def make_bc_tables(
             wf, tf = filt.ProcessedFilterCurve
             S.append(np.interp(wave_ang, wf, tf, left=0.0, right=0.0))
             zps.append(_vega_zeropoint(filt))
-        S = np.array(S)                     # (n_filt, n_wave)
-        zps = np.array(zps)                 # (n_filt,)
+        S = np.array(S)  # (n_filt, n_wave)
+        zps = np.array(zps)  # (n_filt,)
         # photon-weighted band normalization: int(S lambda dlam)
         S_norm = np.trapezoid(S * wave_ang, wave_ang, axis=1)
 
@@ -199,7 +350,7 @@ def make_bc_tables(
         for feh in feh_pts:
             recs = []
             for teff in teff_pts:
-                mbol_term = SIGMA_SB * teff ** 4 / F0_10PC
+                mbol_term = SIGMA_SB * teff**4 / F0_10PC
                 for logg in logg_pts:
                     spec = _select_spectrum(df_spec, teff, logg, feh)
                     if spec is None:
@@ -208,16 +359,24 @@ def make_bc_tables(
                             f"logg={logg}, feh={feh} (any alpha)."
                         )
                     # (n_av, n_filt) band-averaged flux densities
-                    fmean = np.trapezoid(
-                        (atten * spec)[:, None, :] * (S * wave_ang)[None, :, :],
-                        wave_ang, axis=2,
-                    ) / S_norm[None, :]
+                    fmean = (
+                        np.trapezoid(
+                            (atten * spec)[:, None, :]
+                            * (S * wave_ang)[None, :, :],
+                            wave_ang,
+                            axis=2,
+                        )
+                        / S_norm[None, :]
+                    )
                     # BC = M_bol - M_X ; the (R/d)^2 factor cancels
                     bc = 2.5 * np.log10(fmean / zps[None, :] / mbol_term)
                     for i_av, av in enumerate(av_pts):
-                        recs.append((float(teff), float(logg), float(av),
-                                     *bc[i_av]))
-            df_new = pd.DataFrame(recs, columns=["teff", "logg", "Av"] + new_cols)
+                        recs.append(
+                            (float(teff), float(logg), float(av), *bc[i_av])
+                        )
+            df_new = pd.DataFrame(
+                recs, columns=["teff", "logg", "Av"] + new_cols
+            )
 
             fname = f"feh{feh:+.1f}_afe+0.0.{fac}"
             path = out_dir / fname
@@ -232,7 +391,8 @@ def make_bc_tables(
                 if keep_old_cols:
                     df_new = df_new.merge(
                         df_old[["teff", "logg", "Av"] + keep_old_cols],
-                        on=["teff", "logg", "Av"], how="left",
+                        on=["teff", "logg", "Av"],
+                        how="left",
                     )
                     if df_new[keep_old_cols].isna().any().any():
                         raise ValueError(
@@ -247,8 +407,10 @@ def make_bc_tables(
                 f.write(f"# {model}\n")
                 f.write(f"# {fac} (Vega)\n")
                 f.write("#  filters spectra  num Av  num Rv version\n")
-                f.write(f"#       {len(out_cols):2d}   {n_spectra:4d}     "
-                        f"{len(av_pts):3d}       1       1\n")
+                f.write(
+                    f"#       {len(out_cols):2d}   {n_spectra:4d}     "
+                    f"{len(av_pts):3d}       1       1\n"
+                )
                 f.write(f"# lgTef  logg  Fe_H a_Fe   Av   Rv{col_hdr}\n")
                 # plain arrays: itertuples would mangle column names that
                 # start with a digit (e.g. 2MASS_J)
@@ -256,9 +418,11 @@ def make_bc_tables(
                 vals = df_new[out_cols].values
                 for (teff_r, logg_r, av_r), bcs in zip(keys, vals):
                     bc_str = "".join(f"{b:21.4f}" for b in bcs)
-                    f.write(f"{np.log10(teff_r):.5f} {logg_r:5.2f} "
-                            f"{feh:5.2f} {0.0:4.1f} "
-                            f"{av_r:4.2f} {3.10:4.2f}{bc_str}\n")
+                    f.write(
+                        f"{np.log10(teff_r):.5f} {logg_r:5.2f} "
+                        f"{feh:5.2f} {0.0:4.1f} "
+                        f"{av_r:4.2f} {3.10:4.2f}{bc_str}\n"
+                    )
             written.append(path)
             logger.info(f"Wrote {path}")
 

@@ -8,9 +8,9 @@ import sympy as sp
 # Positivity bounds are enforced downstream by defaults.yaml
 # NOTE: symbol names must match the get_symbol_map keys exactly; the
 # ConfigManager substitutes relation symbols by sym.name.
-jitter = sp.symbols('jitter', real=True)
-jitter_variance = sp.symbols('jitter_variance', real=True)
-fluxfrac = sp.symbols('fluxfrac', real=True)
+jitter = sp.symbols("jitter", real=True)
+jitter_variance = sp.symbols("jitter_variance", real=True)
+fluxfrac = sp.symbols("fluxfrac", real=True)
 
 comp_key = "astrometryinstrument"
 
@@ -20,12 +20,14 @@ comp_key = "astrometryinstrument"
 # Maps SymPy symbols back to the local parameter keys inside the
 # Astrometry Instrument component.
 
+
 def get_symbol_map(config):
     return {
         "jitter": "jitter",
         "jitter_variance": "jitter_variance",
         "fluxfrac": "fluxfrac",
     }
+
 
 # ---------------------------------------------------------
 # 3. Physics Relations

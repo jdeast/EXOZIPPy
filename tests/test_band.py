@@ -1,9 +1,10 @@
 """Tests for the Band component lifecycle (load_data, build_maps, register_parameters)."""
+
 import numpy as np
 import pytest
 
-from exozippy.components.band.band import Band
 from conftest import _DummyConfigManager
+from exozippy.components.band.band import Band
 
 
 def _make_band(config):
@@ -16,7 +17,9 @@ def test_load_data_populates_lists_from_config():
     When load_data is called,
     Then each attribute list is populated from the corresponding config key.
     """
-    band = _make_band([{"filter": "Cousins.I", "star_ndx": 1, "ld_law": "linear"}])
+    band = _make_band(
+        [{"filter": "Cousins.I", "star_ndx": 1, "ld_law": "linear"}]
+    )
     band.load_data(system=None)
     assert band.filter_names == ["Cousins.I"]
     assert band.star_indices == [1]

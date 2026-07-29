@@ -47,8 +47,8 @@ LINKABLE_FIELDS = ("initval", "mu", "sigma", "lower", "upper", "init_scale")
 # Tokens like math.pi / np.pi are rewritten to sympy constants before any
 # path matching so they are never mistaken for parameter references.
 _CONSTANT_ALIASES = [
-    (re.compile(r'(?<![\w.])(?:math|np|numpy)\.pi(?![\w.])'), "pi"),
-    (re.compile(r'(?<![\w.])(?:math|np|numpy)\.e(?![\w.])'), "E"),
+    (re.compile(r"(?<![\w.])(?:math|np|numpy)\.pi(?![\w.])"), "pi"),
+    (re.compile(r"(?<![\w.])(?:math|np|numpy)\.e(?![\w.])"), "E"),
 ]
 
 # comp.instance.param -- instance may contain hyphens (validated names allow
@@ -57,9 +57,9 @@ _CONSTANT_ALIASES = [
 # instance name actually exists in the config; otherwise we fall back and
 # the hyphen parses as subtraction.
 _PATH_3 = re.compile(
-    r'(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z0-9_][A-Za-z0-9_\-]*)\.([A-Za-z_]\w*)(?![\w.(])')
-_PATH_2 = re.compile(
-    r'(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?![\w.(])')
+    r"(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z0-9_][A-Za-z0-9_\-]*)\.([A-Za-z_]\w*)(?![\w.(])"
+)
+_PATH_2 = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?![\w.(])")
 
 _SYMPY_LOCALS_BASE = {"pi": sp.pi, "E": sp.E}
 
@@ -67,10 +67,11 @@ _SYMPY_LOCALS_BASE = {"pi": sp.pi, "E": sp.E}
 @dataclass
 class ParamLink:
     """One user-defined link: <target_path>.<field> = f(dep_paths...)."""
-    target_path: str          # standardized index form, e.g. "star.0.age"
-    field: str                # one of LINKABLE_FIELDS
-    expr_str: str             # original user string (for error messages)
-    expr: sp.Expr             # symbols named by standardized dep paths (user units)
+
+    target_path: str  # standardized index form, e.g. "star.0.age"
+    field: str  # one of LINKABLE_FIELDS
+    expr_str: str  # original user string (for error messages)
+    expr: sp.Expr  # symbols named by standardized dep paths (user units)
     dep_paths: List[str] = field(default_factory=list)
 
 
@@ -123,7 +124,7 @@ def parse_link_expression(expr_str, system_config, context=""):
     for pattern, repl in _CONSTANT_ALIASES:
         s = pattern.sub(repl, s)
 
-    placeholders = {}   # placeholder name -> standardized path
+    placeholders = {}  # placeholder name -> standardized path
 
     def _register(path):
         name = f"_LNK{len(placeholders)}_"
@@ -169,7 +170,7 @@ def parse_link_expression(expr_str, system_config, context=""):
     s = _PATH_2.sub(_sub2, s)
 
     # Any remaining dotted token is an unresolvable reference.
-    leftover = re.search(r'(?<![\w.])([A-Za-z_]\w*\.[A-Za-z0-9_.\-]+)', s)
+    leftover = re.search(r"(?<![\w.])([A-Za-z_]\w*\.[A-Za-z0-9_.\-]+)", s)
     if leftover:
         raise ValueError(
             f"Link expression '{expr_str}'{context}: cannot resolve "
@@ -240,7 +241,7 @@ def extract_links(user_params, system_config):
                     )
                 continue
 
-            parts = key.split('.')
+            parts = key.split(".")
             if len(parts) != 3 or not parts[1].isdigit():
                 raise ValueError(
                     f"Link on '{key}' could not be resolved to a single "
@@ -249,7 +250,9 @@ def extract_links(user_params, system_config):
                 )
 
             context = f" (on {key}.{fld})"
-            expr, dep_paths = parse_link_expression(val, system_config, context)
+            expr, dep_paths = parse_link_expression(
+                val, system_config, context
+            )
 
             if key in dep_paths:
                 raise ValueError(
@@ -258,8 +261,11 @@ def extract_links(user_params, system_config):
                 )
 
             links.setdefault(key, {})[fld] = ParamLink(
-                target_path=key, field=fld, expr_str=val,
-                expr=expr, dep_paths=dep_paths,
+                target_path=key,
+                field=fld,
+                expr_str=val,
+                expr=expr,
+                dep_paths=dep_paths,
             )
             del entry[fld]
 
@@ -269,6 +275,7 @@ def extract_links(user_params, system_config):
 # ----------------------------
 # SymPy -> PyTensor evaluation
 # ----------------------------
+
 
 def sympy_to_pytensor(expr, sym_values):
     """
@@ -280,13 +287,24 @@ def sympy_to_pytensor(expr, sym_values):
     import pytensor.tensor as pt
 
     _FUNC_MAP = {
-        sp.sin: pt.sin, sp.cos: pt.cos, sp.tan: pt.tan,
-        sp.asin: pt.arcsin, sp.acos: pt.arccos, sp.atan: pt.arctan,
+        sp.sin: pt.sin,
+        sp.cos: pt.cos,
+        sp.tan: pt.tan,
+        sp.asin: pt.arcsin,
+        sp.acos: pt.arccos,
+        sp.atan: pt.arctan,
         sp.atan2: pt.arctan2,
-        sp.sinh: pt.sinh, sp.cosh: pt.cosh, sp.tanh: pt.tanh,
-        sp.exp: pt.exp, sp.log: pt.log, sp.Abs: pt.abs,
-        sp.sign: pt.sign, sp.floor: pt.floor, sp.ceiling: pt.ceil,
-        sp.Min: pt.minimum, sp.Max: pt.maximum,
+        sp.sinh: pt.sinh,
+        sp.cosh: pt.cosh,
+        sp.tanh: pt.tanh,
+        sp.exp: pt.exp,
+        sp.log: pt.log,
+        sp.Abs: pt.abs,
+        sp.sign: pt.sign,
+        sp.floor: pt.floor,
+        sp.ceiling: pt.ceil,
+        sp.Min: pt.minimum,
+        sp.Max: pt.maximum,
     }
 
     def _eval(node):
@@ -294,7 +312,9 @@ def sympy_to_pytensor(expr, sym_values):
             try:
                 return sym_values[node.name]
             except KeyError:
-                raise ValueError(f"No value available for link symbol '{node.name}'.")
+                raise ValueError(
+                    f"No value available for link symbol '{node.name}'."
+                )
         if node.is_number:
             return float(node)
         args = [_eval(a) for a in node.args]

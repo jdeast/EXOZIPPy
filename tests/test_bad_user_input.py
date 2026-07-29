@@ -1,19 +1,23 @@
 import pytest
-from exozippy.config import ConfigManager, validate_instance_names
-from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+
 from exozippy.components.parameter import Parameter
+from exozippy.components.rvinstrument.rvinstrument import RVInstrument
+from exozippy.config import ConfigManager, validate_instance_names
 
 
-@pytest.mark.parametrize("bad_name, match", [
-    ("My.Star", "letters, digits, underscores, and hyphens"),
-    ("My Star", "letters, digits, underscores, and hyphens"),
-    ("star[0]", "letters, digits, underscores, and hyphens"),
-    ("", "letters, digits, underscores, and hyphens"),
-    ("1", "index notation"),
-    ("128", "index notation"),
-    (128, "must be strings"),
-    (1.5, "must be strings"),
-])
+@pytest.mark.parametrize(
+    "bad_name, match",
+    [
+        ("My.Star", "letters, digits, underscores, and hyphens"),
+        ("My Star", "letters, digits, underscores, and hyphens"),
+        ("star[0]", "letters, digits, underscores, and hyphens"),
+        ("", "letters, digits, underscores, and hyphens"),
+        ("1", "index notation"),
+        ("128", "index notation"),
+        (128, "must be strings"),
+        (1.5, "must be strings"),
+    ],
+)
 def test_invalid_instance_name_raises_value_error(bad_name, match):
     """
     Given a config whose instance name would corrupt parameter-path parsing
@@ -47,9 +51,9 @@ def test_unnamed_instances_and_flat_components_are_skipped():
     Then they are ignored rather than crashing the validator.
     """
     config = {
-        "star": [{"teff": 5778}],          # unnamed instance → defaults to index
-        "sed": {"errscale": 1.0},          # flat-dict component
-        "prefix": "fitresults/model",      # non-component scalar key
+        "star": [{"teff": 5778}],  # unnamed instance → defaults to index
+        "sed": {"errscale": 1.0},  # flat-dict component
+        "prefix": "fitresults/model",  # non-component scalar key
     }
     validate_instance_names(config)
 
@@ -63,7 +67,10 @@ def test_duplicate_component_names_raise_value_error():
     # ARRANGE
     user_params = {}
     config_manager = ConfigManager(user_params)
-    bad_config = [{"name": "HIRES", "file": "data1.txt"}, {"name": "HIRES", "file": "data2.txt"}]
+    bad_config = [
+        {"name": "HIRES", "file": "data1.txt"},
+        {"name": "HIRES", "file": "data2.txt"},
+    ]
 
     # ACT & ASSERT
     with pytest.raises(ValueError, match="Duplicate names found"):
@@ -108,7 +115,9 @@ def test_missing_instrument_data_file_raises_file_not_found_error(tmp_path):
     """
     # ARRANGE
     config_manager = ConfigManager({})
-    bad_config = [{"name": "GhostInst", "file": "this_file_does_not_exist.dat"}]
+    bad_config = [
+        {"name": "GhostInst", "file": "this_file_does_not_exist.dat"}
+    ]
     inst = RVInstrument(bad_config, config_manager)
 
     # ACT & ASSERT
@@ -134,12 +143,14 @@ def test_sampled_parameter_missing_bounds_raises_developer_error():
         lower=None,  # Missing!
         upper=None,  # Missing!
         unit="",
-        internal_unit=""
+        internal_unit="",
     )
 
     # ACT & ASSERT
     with pm.Model():
-        with pytest.raises(ValueError, match="MUST have explicit 'lower' and 'upper' bounds"):
+        with pytest.raises(
+            ValueError, match="MUST have explicit 'lower' and 'upper' bounds"
+        ):
             p.build_pymc()
 
 
@@ -152,14 +163,14 @@ def test_derived_parameter_missing_bounds_is_allowed():
     import pytensor.tensor as pt
 
     # ARRANGE
-    dummy_node = pt.dscalar('dummy')
+    dummy_node = pt.dscalar("dummy")
     p = Parameter(
         label="good.derived_param",
         expression=dummy_node * 2.0,
         lower=None,
         upper=None,
         unit="",
-        internal_unit=""
+        internal_unit="",
     )
 
     # ACT & ASSERT
@@ -167,4 +178,6 @@ def test_derived_parameter_missing_bounds_is_allowed():
         try:
             p.build_pymc()
         except ValueError:
-            pytest.fail("Developer guardrail incorrectly blocked a derived parameter!")
+            pytest.fail(
+                "Developer guardrail incorrectly blocked a derived parameter!"
+            )

@@ -31,6 +31,7 @@ def _transient(nc, nd, frac, seed=0):
 
 # --- good_chain_mask ------------------------------------------------------
 
+
 def test_good_chain_mask_drops_stuck_chain():
     # Given six chains where one never reaches the good-likelihood region
     rng = np.random.default_rng(3)
@@ -56,6 +57,7 @@ def test_good_chain_mask_keeps_all_when_too_few_good():
 
 
 # --- find_burnin ----------------------------------------------------------
+
 
 def test_find_burnin_stationary_trims_nothing():
     # Given an already-stationary trace
@@ -91,12 +93,14 @@ def test_find_burnin_transient_is_worse_before_trimming():
 
 # --- converged_on_tail (the live auto-stop test) --------------------------
 
+
 def test_converged_on_tail_true_for_stationary():
     # Given a stationary trace
     x = {"p.x_raw": _stationary(6, 3000)}
     # When we run the cheap tail check
-    converged, rhat, ess = C.converged_on_tail(x, None, min_ess=100,
-                                               max_rhat=1.01)
+    converged, rhat, ess = C.converged_on_tail(
+        x, None, min_ess=100, max_rhat=1.01
+    )
     # Then it reports converged
     assert converged is True
     assert rhat < 1.01
@@ -106,13 +110,15 @@ def test_converged_on_tail_false_when_transient_exceeds_tail():
     # Given a transient occupying the first 70% -- longer than the 50% tail
     x = {"p.x_raw": _transient(6, 3000, frac=0.7)}
     # When we run the cheap tail check (keeps the last half)
-    converged, rhat, ess = C.converged_on_tail(x, None, min_ess=100,
-                                               max_rhat=1.01)
+    converged, rhat, ess = C.converged_on_tail(
+        x, None, min_ess=100, max_rhat=1.01
+    )
     # Then the still-contaminated tail keeps it from declaring convergence
     assert converged is False
 
 
 # --- default_var_names ----------------------------------------------------
+
 
 def test_default_var_names_drops_raw_when_physical_present():
     # Given a posterior carrying both physical and raw copies plus mode
@@ -134,15 +140,21 @@ def test_default_var_names_keeps_raw_only_store():
 
 # --- analyze_idata (the reporting entry point) ----------------------------
 
+
 def test_analyze_idata_trims_and_flags(monkeypatch):
     az = pytest.importorskip("arviz")
     # Given an InferenceData with a transient, a raw duplicate, and lp
     raw = _transient(6, 2000, frac=0.3, seed=5)
-    idata = az.from_dict({
-        "posterior": {"p.x": raw * 2.0 + 10.0, "p.x_raw": raw,
-                      "mode": np.zeros((6, 2000), int)},
-        "sample_stats": {"lp": -0.5 * raw ** 2},
-    })
+    idata = az.from_dict(
+        {
+            "posterior": {
+                "p.x": raw * 2.0 + 10.0,
+                "p.x_raw": raw,
+                "mode": np.zeros((6, 2000), int),
+            },
+            "sample_stats": {"lp": -0.5 * raw**2},
+        }
+    )
     # When we analyze it
     trimmed, diag = C.analyze_idata(idata, min_ess=100, max_rhat=1.01)
     # Then draws are trimmed, chains preserved, and the diag reports a verdict

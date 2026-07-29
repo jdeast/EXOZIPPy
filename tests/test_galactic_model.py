@@ -1,12 +1,12 @@
 """Tests for the GalacticModel component (register_parameters, build_likelihood)."""
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 import pytest
 
-from exozippy.components.galacticmodel.galacticmodel import GalacticModel
 from conftest import _DummyConfigManager
-
+from exozippy.components.galacticmodel.galacticmodel import GalacticModel
 
 # RA/Dec for a typical Galactic-bulge microlensing field (Galactic center area).
 _RA_RAD = np.deg2rad(270.0)
@@ -27,11 +27,11 @@ class _MockStar:
     def __init__(self):
         self.ra = _MockParam(_RA_RAD)
         self.dec = _MockParam(_DEC_RAD)
-        self.logmass = _MockParam(np.log10(0.5))   # 0.5 M_sun
-        self.distance = _MockParam(8000.0)           # pc  (8 kpc, bulge distance)
-        self.pm_ra = _MockParam(0.0)                 # mas/yr
-        self.pm_dec = _MockParam(0.0)                # mas/yr
-        self.rv = _MockParam(0.0)                    # m/s
+        self.logmass = _MockParam(np.log10(0.5))  # 0.5 M_sun
+        self.distance = _MockParam(8000.0)  # pc  (8 kpc, bulge distance)
+        self.pm_ra = _MockParam(0.0)  # mas/yr
+        self.pm_dec = _MockParam(0.0)  # mas/yr
+        self.rv = _MockParam(0.0)  # m/s
 
 
 class _MockSystem:
@@ -88,8 +88,12 @@ def test_build_likelihood_adds_exactly_two_potentials():
     gm = _make_gm()
     with pm.Model() as model:
         gm.build_likelihood(model, _MockSystem())
-    gm_potentials = [k for k in model.named_vars if k.startswith("galacticmodel.")]
-    assert len(gm_potentials) == 2, f"Expected 2 potentials, got: {gm_potentials}"
+    gm_potentials = [
+        k for k in model.named_vars if k.startswith("galacticmodel.")
+    ]
+    assert len(gm_potentials) == 2, (
+        f"Expected 2 potentials, got: {gm_potentials}"
+    )
 
 
 def test_imf_prior_is_negative_for_star_above_chabrier_peak():

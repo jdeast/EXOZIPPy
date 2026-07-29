@@ -1,15 +1,15 @@
-import pytest
+import astropy.units as u
 import numpy as np
 import pymc as pm
-import astropy.units as u
 import pytensor
 import pytensor.tensor as pt
+import pytest
 
-from exozippy.diagnostics import ModelAuditor
-from exozippy.components.star.star import Star
-from exozippy.components.parameter import Parameter, to_vec
 from conftest import MockSystem
+from exozippy.components.parameter import Parameter, UnitTranslator, to_vec
+from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
+from exozippy.diagnostics import ModelAuditor
 
 
 def test_parameter_scaling_adapts_to_initialization_scenarios():
@@ -22,11 +22,22 @@ def test_parameter_scaling_adapts_to_initialization_scenarios():
     """
     # ARRANGE
     with pm.Model() as model:
-        p1 = Parameter(label="p1", initval=10.0, init_scale=2.0, lower=0.0, upper=100.0)
+        p1 = Parameter(
+            label="p1", initval=10.0, init_scale=2.0, lower=0.0, upper=100.0
+        )
         p1.build_pymc()
-        p2 = Parameter(label="p2", initval=10.0, init_scale=1.0, lower=0.0, upper=100.0)
+        p2 = Parameter(
+            label="p2", initval=10.0, init_scale=1.0, lower=0.0, upper=100.0
+        )
         p2.build_pymc()
-        p3 = Parameter(label="p3", initval=10.0, mu=10.0, sigma=0.5, lower=0.0, upper=100.0)
+        p3 = Parameter(
+            label="p3",
+            initval=10.0,
+            mu=10.0,
+            sigma=0.5,
+            lower=0.0,
+            upper=100.0,
+        )
         p3.build_pymc()
 
         logp_fn = model.compile_logp()
@@ -35,7 +46,9 @@ def test_parameter_scaling_adapts_to_initialization_scenarios():
         # ASSERT: all declared raw distributions are N(0,1) — no 1000x hack
         for rv in model.free_RVs:
             sigma_val = float(np.asarray(rv.owner.inputs[1].eval()).ravel()[0])
-            assert np.isclose(sigma_val, 1.0), f"{rv.name} sigma={sigma_val}, expected 1.0"
+            assert np.isclose(sigma_val, 1.0), (
+                f"{rv.name} sigma={sigma_val}, expected 1.0"
+            )
 
         # ASSERT: logit-bounded params get the flat-prior correction potential
         assert "logit_uniform_prior.p1" in potential_names
@@ -57,7 +70,9 @@ def test_parameter_unit_conversion_roundtrips_cleanly():
     Then it should perfectly reconstruct the original user-unit value.
     """
     # ARRANGE
-    p = Parameter(label="m", unit=u.jupiterMass, internal_unit=u.solMass, initval=1.0)
+    p = Parameter(
+        label="m", unit=u.jupiterMass, internal_unit=u.solMass, initval=1.0
+    )
 
     # ACT
     restored_val = p.from_internal(p.initval)
@@ -77,19 +92,29 @@ def test_out_of_bounds_parameter_applies_logp_penalty():
     """
     # ARRANGE
     with pm.Model() as model:
-        p = Parameter(label="bounded_param", initval=5.0, init_scale=1.0, upper=10.0, lower=-10.0)
+        p = Parameter(
+            label="bounded_param",
+            initval=5.0,
+            init_scale=1.0,
+            upper=10.0,
+            lower=-10.0,
+        )
         p.build_pymc()
 
         logp_fn = model.compile_logp()
 
         def logp_at_raw(raw_val):
-            pt = {k: np.zeros_like(v) for k, v in model.initial_point().items()}
+            pt = {
+                k: np.zeros_like(v) for k, v in model.initial_point().items()
+            }
             pt["bounded_param_raw"] = np.array([raw_val])
             return logp_fn(pt)
 
         # ACT
-        logp_center = logp_at_raw(0.0)    # raw=0 → initval
-        logp_extreme = logp_at_raw(10.0)  # deep in the sigmoid tail (near wall)
+        logp_center = logp_at_raw(0.0)  # raw=0 → initval
+        logp_extreme = logp_at_raw(
+            10.0
+        )  # deep in the sigmoid tail (near wall)
 
         # ASSERT: approaching the wall is penalized (less physical volume per
         # raw step), finite, and monotonic — a restoring force, not a cliff
@@ -102,9 +127,12 @@ def test_out_of_bounds_parameter_applies_logp_penalty():
         # ASSERT: exactly 1 free RV; flat-prior correction is a potential (not an RV)
         assert len(model.free_RVs) == 1
         pot_names = [p.name for p in model.potentials]
-        assert any("logit_uniform_prior" in n for n in pot_names), "correction potential missing"
-        assert not any("low_bound" in n or "up_bound" in n for n in pot_names), \
-            "No barrier potentials needed for logit param"
+        assert any("logit_uniform_prior" in n for n in pot_names), (
+            "correction potential missing"
+        )
+        assert not any(
+            "low_bound" in n or "up_bound" in n for n in pot_names
+        ), "No barrier potentials needed for logit param"
 
 
 def test_extreme_raw_never_produces_runaway_positive_logp():
@@ -129,12 +157,20 @@ def test_extreme_raw_never_produces_runaway_positive_logp():
     """
     # ARRANGE
     with pm.Model() as model:
-        p = Parameter(label="bounded_param", initval=5.0, init_scale=1.0, upper=10.0, lower=-10.0)
+        p = Parameter(
+            label="bounded_param",
+            initval=5.0,
+            init_scale=1.0,
+            upper=10.0,
+            lower=-10.0,
+        )
         p.build_pymc()
         logp_fn = model.compile_logp()
 
         def logp_at_raw(raw_val):
-            pt = {k: np.zeros_like(v) for k, v in model.initial_point().items()}
+            pt = {
+                k: np.zeros_like(v) for k, v in model.initial_point().items()
+            }
             pt["bounded_param_raw"] = np.array([raw_val])
             return float(np.asarray(logp_fn(pt)))
 
@@ -165,7 +201,7 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     # Override the second star's mass to be completely frozen
     user_params = {
         "star.0.mass": {"initval": 1.0, "init_scale": 0.1},
-        "star.1.mass": {"initval": 1.0, "init_scale": 0.0}  # Frozen!
+        "star.1.mass": {"initval": 1.0, "init_scale": 0.0},  # Frozen!
     }
 
     system = MockSystem(user_params)
@@ -192,13 +228,20 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     curv = curvatures["star.mass"]
 
     # 1. Did it successfully restore the original shape?
-    assert len(curv) == 2, "Curvature array was not expanded to match the physical shape!"
+    assert len(curv) == 2, (
+        "Curvature array was not expanded to match the physical shape!"
+    )
 
     # 2. Does the sampled parameter have a real curvature?
-    assert not np.isnan(curv[0]), "The sampled element's curvature was improperly wiped out!"
+    assert not np.isnan(curv[0]), (
+        "The sampled element's curvature was improperly wiped out!"
+    )
 
     # 3. Did the frozen parameter safely receive a NaN?
-    assert np.isnan(curv[1]), "The frozen element did not receive a NaN padding!"
+    assert np.isnan(curv[1]), (
+        "The frozen element did not receive a NaN padding!"
+    )
+
 
 def test_parameter_bypasses_float_conversion_for_tensor_expressions():
     """
@@ -210,7 +253,7 @@ def test_parameter_bypasses_float_conversion_for_tensor_expressions():
     mock_config = ConfigManager({})
 
     # Create a dummy PyTensor expression mimicking a derived formula
-    teff = pt.dvector('teff')
+    teff = pt.dvector("teff")
     mock_expr = (teff / 5778.0) ** 4
 
     # ACT
@@ -223,17 +266,23 @@ def test_parameter_bypasses_float_conversion_for_tensor_expressions():
         initval=mock_expr,
         expression=mock_expr,
         unit="",  # Keep units blank to avoid Astropy interference in this test
-        internal_unit=""
+        internal_unit="",
     )
 
     # ASSERT
     # If we reach here, the code survived the __post_init__ crash point!
     # We also verify it successfully held onto the raw expression.
-    assert param.initval == mock_expr, "The initval should be the identical PyTensor expression object!"
-    assert hasattr(param.initval, 'owner'), "initval must retain its symbolic PyTensor properties"
+    assert param.initval == mock_expr, (
+        "The initval should be the identical PyTensor expression object!"
+    )
+    assert hasattr(param.initval, "owner"), (
+        "initval must retain its symbolic PyTensor properties"
+    )
     with pytest.raises(TypeError):
         float(param.initval)
-    assert param.expression is mock_expr, "The PyTensor expression was mangled or lost!"
+    assert param.expression is mock_expr, (
+        "The PyTensor expression was mangled or lost!"
+    )
 
 
 def test_parameter_builds_from_list_of_tensors():
@@ -245,8 +294,8 @@ def test_parameter_builds_from_list_of_tensors():
     mock_config = ConfigManager({})
 
     # Create two separate scalar tensor variables
-    t1 = pt.dscalar('t1')
-    t2 = pt.dscalar('t2')
+    t1 = pt.dscalar("t1")
+    t2 = pt.dscalar("t2")
 
     # The expression is a Python list containing the tensors
     expr_list = [t1, t2]
@@ -256,7 +305,7 @@ def test_parameter_builds_from_list_of_tensors():
         shape=(2,),
         expression=expr_list,
         unit="",
-        internal_unit=""
+        internal_unit="",
     )
 
     with pm.Model() as model:
@@ -264,8 +313,9 @@ def test_parameter_builds_from_list_of_tensors():
         # TypeError: Unsupported dtype for TensorType: object
         val = param.build_pymc()
 
-    assert hasattr(val, 'type'), "Did not return a valid PyTensor variable!"
+    assert hasattr(val, "type"), "Did not return a valid PyTensor variable!"
     assert val.type.ndim == 1, "The list should be stacked into a 1D vector!"
+
 
 def test_parameter_strips_astropy_quantities_from_expressions():
     """
@@ -276,8 +326,8 @@ def test_parameter_strips_astropy_quantities_from_expressions():
     """
 
     mock_config = ConfigManager({})
-    t1 = pt.dscalar('t1_q')
-    t2 = pt.dscalar('t2_q')
+    t1 = pt.dscalar("t1_q")
+    t2 = pt.dscalar("t2_q")
 
     # Mock an Astropy Quantity to bypass Astropy's strict object-array ban
     class MockQuantity:
@@ -292,14 +342,16 @@ def test_parameter_strips_astropy_quantities_from_expressions():
         shape=(2,),
         expression=expr_quantity,
         unit="",
-        internal_unit=""
+        internal_unit="",
     )
 
     with pm.Model() as model:
         val = param.build_pymc()
 
-    assert hasattr(val, 'type'), "Did not return a valid PyTensor variable!"
-    assert not hasattr(val, 'unit'), "The Astropy unit was not successfully stripped!"
+    assert hasattr(val, "type"), "Did not return a valid PyTensor variable!"
+    assert not hasattr(val, "unit"), (
+        "The Astropy unit was not successfully stripped!"
+    )
 
 
 def test_generate_posterior_strips_quantities_before_walking():
@@ -309,7 +361,7 @@ def test_generate_posterior_strips_quantities_before_walking():
     Then it should strip the unit so PyTensor's ancestors() can walk the graph.
     """
     mock_config = ConfigManager({})
-    t_raw = pt.dvector('t_raw')
+    t_raw = pt.dvector("t_raw")
 
     # Simulate a Quantity-wrapped expression
     class MockQuantity:
@@ -319,10 +371,7 @@ def test_generate_posterior_strips_quantities_before_walking():
 
     expr_q = MockQuantity(t_raw * 2.0, u.day)
 
-    param = Parameter(
-        label="star.test_post",
-        expression=expr_q
-    )
+    param = Parameter(label="star.test_post", expression=expr_q)
 
     # This bundle simulates what ArviZ provides after sampling
     bundle = {"t_raw": np.array([[1.0, 2.0, 3.0]])}
@@ -344,11 +393,11 @@ def test_derived_parameter_retains_numeric_initval():
 
     # 1. Simulate the 'parent' (logP)
     logP_val = 0.477  # log10(3.0)
-    logP_node = pt.dscalar('logP')
+    logP_node = pt.dscalar("logP")
 
     # 2. Simulate the 'physics' function (10**logP)
     def calc_period(lp):
-        return 10 ** lp
+        return 10**lp
 
     # 3. Create the derived parameter
     # In the real app, add_parameter handles the math to generate this initval
@@ -359,17 +408,21 @@ def test_derived_parameter_retains_numeric_initval():
         expression=lambda: calc_period(logP_node),
         initval=expected_init,  # This must NOT be overwritten by None
         unit="d",
-        internal_unit="d"
+        internal_unit="d",
     )
 
     # 4. Verify the numeric initval survived
-    assert period_param.initval is not None, "Derived parameter initval was incorrectly set to None!"
+    assert period_param.initval is not None, (
+        "Derived parameter initval was incorrectly set to None!"
+    )
     assert np.isclose(period_param.initval, 2.9991625, atol=1e-5)
 
     # 5. Verify it can still build a PyMC node (the symbolic side works)
     with pm.Model():
         node = period_param.build_pymc()
-        assert hasattr(node, 'owner'), "PyMC node should be a symbolic expression"
+        assert hasattr(node, "owner"), (
+            "PyMC node should be a symbolic expression"
+        )
 
 
 def test_to_vec_handles_quantity_wrapping_tensor():
@@ -381,8 +434,8 @@ def test_to_vec_handles_quantity_wrapping_tensor():
     """
     # Create a symbolic tensor wrapped in an Astropy Quantity
     # This is exactly what star.py produces for derived physics
-    teff_node = pt.dvector('teff')
-    raw_node = (teff_node / 5778.0)
+    teff_node = pt.dvector("teff")
+    raw_node = teff_node / 5778.0
 
     class MockQuantity:
         def __init__(self, value, unit):
@@ -401,7 +454,7 @@ def test_to_vec_handles_quantity_wrapping_tensor():
     except TypeError as e:
         pytest.fail(f"to_vec crashed on Quantity-wrapped Tensor: {e}")
 
-    assert hasattr(result, 'owner') or "TensorVariable" in str(type(result))
+    assert hasattr(result, "owner") or "TensorVariable" in str(type(result))
 
 
 def test_get_prior_str_safely_handles_none_bounds():
@@ -419,7 +472,7 @@ def test_get_prior_str_safely_handles_none_bounds():
         lower=0.0,  # Satisfies guardrail
         upper=None,  # We test if the formatter handles this None gracefully
         unit="",
-        internal_unit=""
+        internal_unit="",
     )
 
     # ACT
@@ -448,7 +501,7 @@ def test_mulensinst_flux_defaults_are_dimensionless_and_bounded():
         "lower": 0.0,
         "upper": 10.0,
         "unit": "",
-        "internal_unit": ""
+        "internal_unit": "",
     }
 
     # 2. ACT: Pass the resolved dict directly to the Parameter
@@ -459,6 +512,7 @@ def test_mulensinst_flux_defaults_are_dimensionless_and_bounded():
     assert p_fs.upper is not None
     assert np.isclose(p_fs.lower[0], 0.0)
     assert np.isclose(p_fs.upper[0], 10.0)
+
 
 def test_explicit_initval_is_not_overwritten_by_derived_expression():
     """
@@ -471,9 +525,7 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
     # We explicitly set mass to 1.204.
     # If the bug were present, the expression calc_mass(logmass) would try to run,
     # mismanage the dictionary assignment, and overwrite this with None.
-    user_params = {
-        "star.0.mass": {"initval": 1.204}
-    }
+    user_params = {"star.0.mass": {"initval": 1.204}}
     config_manager = ConfigManager(user_params)
 
     # Initialize a dummy star to trigger the parameter building logic
@@ -487,13 +539,18 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
-    assert star.mass.initval is not None, "Fatal: initval was wiped out by NoneType assignment bug!"
-    assert np.isclose(star.mass.initval[0], 1.204), f"Expected 1.204, but got {star.mass.initval[0]}"
+    assert star.mass.initval is not None, (
+        "Fatal: initval was wiped out by NoneType assignment bug!"
+    )
+    assert np.isclose(star.mass.initval[0], 1.204), (
+        f"Expected 1.204, but got {star.mass.initval[0]}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Logit-transform correctness
 # ---------------------------------------------------------------------------
+
 
 def test_logit_transform_raw_zero_maps_to_initval():
     """
@@ -501,10 +558,20 @@ def test_logit_transform_raw_zero_maps_to_initval():
     When raw=0 is evaluated,
     Then the physical value must equal initval exactly (logit identity at initval).
     """
-    for initval, lower, upper in [(5.0, 0.0, 10.0), (0.95, 0.0, 1.0), (0.1, 0.0, 1.0), (-3.0, -10.0, 10.0)]:
+    for initval, lower, upper in [
+        (5.0, 0.0, 10.0),
+        (0.95, 0.0, 1.0),
+        (0.1, 0.0, 1.0),
+        (-3.0, -10.0, 10.0),
+    ]:
         with pm.Model() as model:
-            p = Parameter(label=f"p_{initval}", initval=initval, init_scale=0.1,
-                          lower=lower, upper=upper)
+            p = Parameter(
+                label=f"p_{initval}",
+                initval=initval,
+                init_scale=0.1,
+                lower=lower,
+                upper=upper,
+            )
             p.build_pymc()
 
         # At raw=0 the physical value must reconstruct initval
@@ -526,8 +593,13 @@ def test_logit_transform_init_scale_is_whitening_only():
     """
     initval, lower, upper, init_scale = 0.3, 0.0, 1.0, 0.05
     with pm.Model() as model:
-        p = Parameter(label="q", initval=initval, init_scale=init_scale,
-                      lower=lower, upper=upper)
+        p = Parameter(
+            label="q",
+            initval=initval,
+            init_scale=init_scale,
+            lower=lower,
+            upper=upper,
+        )
         p.build_pymc()
         logp_fn = model.compile_logp()
         out = model.replace_rvs_by_values([model["q"]])[0]
@@ -566,7 +638,9 @@ def test_logit_transform_physical_value_strictly_inside_bounds():
     for raw in [-50.0, -10.0, -1.0, 0.0, 1.0, 10.0, 50.0]:
         lq = logit_q + init_scale_logit * raw
         phys = lower + (upper - lower) / (1.0 + np.exp(-np.clip(lq, -30, 30)))
-        assert lower < phys < upper, f"raw={raw} → phys={phys} outside ({lower}, {upper})"
+        assert lower < phys < upper, (
+            f"raw={raw} → phys={phys} outside ({lower}, {upper})"
+        )
 
 
 def test_logit_prior_is_flat_in_physical_space():
@@ -580,8 +654,13 @@ def test_logit_prior_is_flat_in_physical_space():
     # ARRANGE
     initval, lower, upper, init_scale = 5.0, 0.0, 10.0, 1.0
     with pm.Model() as model:
-        p = Parameter(label="p", initval=initval, init_scale=init_scale,
-                      lower=lower, upper=upper)
+        p = Parameter(
+            label="p",
+            initval=initval,
+            init_scale=init_scale,
+            lower=lower,
+            upper=upper,
+        )
         p.build_pymc()
         logp_fn = model.compile_logp()
 
@@ -614,8 +693,14 @@ def test_bounded_sigma_param_logp_matches_truncated_normal():
     # ARRANGE
     initval, mu, sigma, lower, upper = 5.0, 5.0, 1.0, 0.0, 10.0
     with pm.Model() as model:
-        p = Parameter(label="m", initval=initval, mu=mu, sigma=sigma,
-                      lower=lower, upper=upper)
+        p = Parameter(
+            label="m",
+            initval=initval,
+            mu=mu,
+            sigma=sigma,
+            lower=lower,
+            upper=upper,
+        )
         p.build_pymc()
         logp_fn = model.compile_logp()
 
@@ -647,8 +732,9 @@ def test_equal_bounds_raise_clear_error():
       logp from the zero-span logit transform.
     """
     with pm.Model():
-        p = Parameter(label="pinned", initval=1.0, init_scale=0.1,
-                      lower=1.0, upper=1.0)
+        p = Parameter(
+            label="pinned", initval=1.0, init_scale=0.1, lower=1.0, upper=1.0
+        )
         with pytest.raises(ValueError, match="sigma: 0"):
             p.build_pymc()
 
@@ -656,6 +742,7 @@ def test_equal_bounds_raise_clear_error():
 # ---------------------------------------------------------------------------
 # Gaussian prior on sampled parameters (new scheme)
 # ---------------------------------------------------------------------------
+
 
 def test_bounded_sigma_param_is_truncated_normal():
     """
@@ -666,8 +753,9 @@ def test_bounded_sigma_param_is_truncated_normal():
     the raw variable is N(0,1).
     """
     with pm.Model() as model:
-        p = Parameter(label="mass", initval=1.0, mu=1.0, sigma=0.1,
-                      lower=0.0, upper=5.0)
+        p = Parameter(
+            label="mass", initval=1.0, mu=1.0, sigma=0.1, lower=0.0, upper=5.0
+        )
         p.build_pymc()
 
     potential_names = [pot.name for pot in model.potentials]
@@ -677,8 +765,10 @@ def test_bounded_sigma_param_is_truncated_normal():
     )
     assert "logit_uniform_prior.mass" in potential_names
     # No soft barriers: the sigmoid enforces the bounds
-    assert not any(n.startswith(("low_bound.mass", "up_bound.mass"))
-                   for n in potential_names)
+    assert not any(
+        n.startswith(("low_bound.mass", "up_bound.mass"))
+        for n in potential_names
+    )
     raw_names = [rv.name for rv in model.free_RVs]
     assert any("mass_raw" in n for n in raw_names)
 
@@ -690,8 +780,9 @@ def test_gaussian_sampled_prior_penalizes_deviations():
     Then logp drops by ~4.5 (= 0.5 * 3²).
     """
     with pm.Model() as model:
-        p = Parameter(label="mass", initval=1.0, mu=1.0, sigma=0.1,
-                      lower=0.0, upper=5.0)
+        p = Parameter(
+            label="mass", initval=1.0, mu=1.0, sigma=0.1, lower=0.0, upper=5.0
+        )
         p.build_pymc()
         logp_fn = model.compile_logp()
 
@@ -706,6 +797,7 @@ def test_gaussian_sampled_prior_penalizes_deviations():
 # Gaussian potential on DERIVED parameters (regression guard)
 # ---------------------------------------------------------------------------
 
+
 def test_gaussian_potential_created_for_derived_parameter_with_sigma():
     """
     Given a derived parameter (has an expression) with sigma > 0,
@@ -714,11 +806,18 @@ def test_gaussian_potential_created_for_derived_parameter_with_sigma():
     This is distinct from sampled params where sigma encodes in raw.
     """
     raw_node = pt.dscalar("theta_E_raw")
-    expr = lambda: raw_node * 0.5 + 1.0   # derived from some upstream node
+    expr = lambda: raw_node * 0.5 + 1.0  # derived from some upstream node
 
     with pm.Model() as model:
-        p = Parameter(label="theta_E", initval=1.0, sigma=0.2, mu=1.0,
-                      lower=0.0, upper=10.0, expression=expr)
+        p = Parameter(
+            label="theta_E",
+            initval=1.0,
+            sigma=0.2,
+            mu=1.0,
+            lower=0.0,
+            upper=10.0,
+            expression=expr,
+        )
         p.build_pymc()
 
     potential_names = [pot.name for pot in model.potentials]
@@ -736,19 +835,29 @@ def test_gaussian_potential_on_derived_parameter_penalizes_deviations():
     expr_val = pt.as_tensor_variable(np.float64(1.0))
 
     with pm.Model() as model:
-        p = Parameter(label="t_E", initval=1.0, sigma=0.1, mu=1.0,
-                      lower=0.0, upper=100.0, expression=lambda: expr_val)
+        p = Parameter(
+            label="t_E",
+            initval=1.0,
+            sigma=0.1,
+            mu=1.0,
+            lower=0.0,
+            upper=100.0,
+            expression=lambda: expr_val,
+        )
         p.build_pymc()
         # No free RVs from this parameter; just evaluate the potential directly
         # by checking model.potentials
         pot_names = [pot.name for pot in model.potentials]
 
-    assert "gaussian_prior.t_E" in pot_names, "gaussian_prior potential missing for derived param"
+    assert "gaussian_prior.t_E" in pot_names, (
+        "gaussian_prior potential missing for derived param"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Soft bounds on DERIVED parameters (regression guard)
 # ---------------------------------------------------------------------------
+
 
 def test_soft_bounds_on_derived_parameter():
     """
@@ -759,13 +868,22 @@ def test_soft_bounds_on_derived_parameter():
     expr_val = pt.as_tensor_variable(np.float64(5.0))
 
     with pm.Model() as model:
-        p = Parameter(label="pi_rel", initval=5.0, lower=0.0, upper=1000.0,
-                      expression=lambda: expr_val)
+        p = Parameter(
+            label="pi_rel",
+            initval=5.0,
+            lower=0.0,
+            upper=1000.0,
+            expression=lambda: expr_val,
+        )
         p.build_pymc()
 
     potential_names = [pot.name for pot in model.potentials]
-    assert "low_bound.pi_rel" in potential_names, "Missing lower soft bound on derived param"
-    assert "up_bound.pi_rel" in potential_names, "Missing upper soft bound on derived param"
+    assert "low_bound.pi_rel" in potential_names, (
+        "Missing lower soft bound on derived param"
+    )
+    assert "up_bound.pi_rel" in potential_names, (
+        "Missing upper soft bound on derived param"
+    )
 
 
 def test_no_soft_bounds_on_derived_parameter_without_bounds():
@@ -789,6 +907,7 @@ def test_no_soft_bounds_on_derived_parameter_without_bounds():
 # Bounds on sigma-prior sampled parameters (regression guard)
 # ---------------------------------------------------------------------------
 
+
 def test_bounds_on_gaussian_sampled_parameter_are_hard():
     """
     Given a sampled parameter with sigma AND explicit bounds,
@@ -799,15 +918,20 @@ def test_bounds_on_gaussian_sampled_parameter_are_hard():
     bounds, even for a Gaussian whose tails cross them.
     """
     with pm.Model() as model:
-        p = Parameter(label="ecc", initval=0.1, mu=0.0, sigma=0.3,
-                      lower=0.0, upper=1.0)
+        p = Parameter(
+            label="ecc", initval=0.1, mu=0.0, sigma=0.3, lower=0.0, upper=1.0
+        )
         p.build_pymc()
         out = model.replace_rvs_by_values([model["ecc"]])[0]
         val_fn = pytensor.function(model.value_vars, out)
 
     potential_names = [pot.name for pot in model.potentials]
-    assert "low_bound.ecc" not in potential_names, "Sigmoid enforces bounds; no barrier expected"
-    assert "up_bound.ecc" not in potential_names, "Sigmoid enforces bounds; no barrier expected"
+    assert "low_bound.ecc" not in potential_names, (
+        "Sigmoid enforces bounds; no barrier expected"
+    )
+    assert "up_bound.ecc" not in potential_names, (
+        "Sigmoid enforces bounds; no barrier expected"
+    )
     assert "gaussian_prior.ecc" in potential_names
     assert "logit_uniform_prior.ecc" in potential_names
 
@@ -819,6 +943,7 @@ def test_bounds_on_gaussian_sampled_parameter_are_hard():
 # ---------------------------------------------------------------------------
 # Fixed parameters
 # ---------------------------------------------------------------------------
+
 
 def test_fixed_parameter_has_no_raw_rv():
     """
@@ -841,6 +966,7 @@ def test_fixed_parameter_has_no_raw_rv():
 # Warning for fixing a derived parameter
 # ---------------------------------------------------------------------------
 
+
 def test_warning_when_sigma_zero_on_derived_parameter(caplog):
     """
     Given a derived parameter with sigma=0,
@@ -848,17 +974,24 @@ def test_warning_when_sigma_zero_on_derived_parameter(caplog):
     Then a warning is emitted explaining that sigma=0 has no effect on derived params.
     """
     import logging
+
     expr_val = pt.as_tensor_variable(np.float64(3.0))
 
     with pm.Model():
-        with caplog.at_level(logging.WARNING, logger="exozippy.components.parameter"):
-            p = Parameter(label="t_E_derived", initval=3.0, sigma=0,
-                          expression=lambda: expr_val)
+        with caplog.at_level(
+            logging.WARNING, logger="exozippy.components.parameter"
+        ):
+            p = Parameter(
+                label="t_E_derived",
+                initval=3.0,
+                sigma=0,
+                expression=lambda: expr_val,
+            )
             p.build_pymc()
 
-    assert any("sigma=0 has no effect" in rec.message for rec in caplog.records), (
-        "Expected a warning about sigma=0 on a derived parameter"
-    )
+    assert any(
+        "sigma=0 has no effect" in rec.message for rec in caplog.records
+    ), "Expected a warning about sigma=0 on a derived parameter"
 
 
 def test_derived_unconstrained_prior_str_is_empty():
@@ -871,8 +1004,9 @@ def test_derived_unconstrained_prior_str_is_empty():
     in the latex table prior column instead of being blank.
     """
     # Arrange
-    p = Parameter(label="star.luminosity", initval=1.0,
-                  expression=lambda: None)
+    p = Parameter(
+        label="star.luminosity", initval=1.0, expression=lambda: None
+    )
 
     # Act
     result = p.get_prior_str(latex=True)
@@ -890,8 +1024,14 @@ def test_to_latex_prior_def_emits_providecommand_for_sampled():
     Then it emits a \\providecommand{\\<varname>prior}{...} with the prior text.
     """
     # Arrange
-    p = Parameter(label="star.teff", initval=5778.0, mu=5778.0, sigma=100.0,
-                  unit="K", internal_unit="K")
+    p = Parameter(
+        label="star.teff",
+        initval=5778.0,
+        mu=5778.0,
+        sigma=100.0,
+        unit="K",
+        internal_unit="K",
+    )
     p.latex = r"T_{\rm eff}"
     p.latex_prefix = "ez"
 
@@ -912,8 +1052,9 @@ def test_to_latex_prior_def_empty_for_unconstrained_derived():
     to blank rather than being undefined.
     """
     # Arrange
-    p = Parameter(label="star.luminosity", initval=1.0,
-                  expression=lambda: None)
+    p = Parameter(
+        label="star.luminosity", initval=1.0, expression=lambda: None
+    )
     p.latex = r"L_*"
     p.latex_prefix = "ez"
 
@@ -934,8 +1075,14 @@ def test_to_table_line_references_prior_command_not_inline():
     """
     # Arrange: print_to_table=True means to_table_line uses the latex varname
     # for the value column and does not need posterior samples.
-    p = Parameter(label="star.teff", initval=5778.0, mu=5778.0, sigma=100.0,
-                  unit="K", internal_unit="K")
+    p = Parameter(
+        label="star.teff",
+        initval=5778.0,
+        mu=5778.0,
+        sigma=100.0,
+        unit="K",
+        internal_unit="K",
+    )
     p.latex = r"T_{\rm eff}"
     p.description = "Effective temperature"
     p.latex_prefix = "ez"
@@ -952,3 +1099,60 @@ def test_to_table_line_references_prior_command_not_inline():
     # Must NOT contain inline prior text like $\mathcal{N}$ or "Fixed"
     assert r"\mathcal{N}" not in line
     assert "Fixed" not in line
+
+
+def test_unit_translator_rejects_bad_unit_with_a_usable_message():
+    """
+    Given a unit string astropy cannot parse,
+    When UnitTranslator.get_latex is called with the owning parameter's label,
+    Then it raises ValueError naming both the unit and the label.
+
+    Regression: the error path referenced `self` inside a @classmethod, so it
+    raised `NameError: name 'self' is not defined` instead of this message,
+    and the f-string fragments were concatenated without spaces.
+    """
+    # ARRANGE
+    bad_unit = "not_a_real_unit"
+    label = "star.0.mass"
+
+    # ACT
+    with pytest.raises(ValueError) as excinfo:
+        UnitTranslator.get_latex(bad_unit, label=label)
+
+    # ASSERT
+    message = str(excinfo.value)
+    assert bad_unit in message
+    assert label in message
+    assert "unitSpecify" not in message, "f-string fragments lost their space"
+    assert "self" not in message
+
+
+def test_unit_translator_error_message_omits_label_when_not_supplied():
+    """
+    Given no label is passed,
+    When UnitTranslator.get_latex rejects a bad unit,
+    Then the message still renders cleanly rather than naming a missing label.
+    """
+    # ARRANGE / ACT
+    with pytest.raises(ValueError) as excinfo:
+        UnitTranslator.get_latex("not_a_real_unit")
+
+    # ASSERT
+    message = str(excinfo.value)
+    assert "None" not in message
+    assert "'user_unit_latex' manually" in message
+
+
+def test_parameter_rejects_an_unparseable_unit_at_construction():
+    """
+    Given a Parameter whose unit astropy cannot parse,
+    When it is constructed,
+    Then it raises at unit parsing -- before the LaTeX step is ever reached.
+
+    This pins WHERE the failure happens. The LaTeX translator has its own
+    fallback to "", but a bad unit never gets that far, so that fallback
+    covers units that parse yet have no pretty form, not typos.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError, match="not_a_real_unit"):
+        Parameter(label="star.0.mass", unit="not_a_real_unit", initval=1.0)

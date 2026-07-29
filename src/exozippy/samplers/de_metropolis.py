@@ -24,6 +24,7 @@ def _fix_de_stats(astep_fn):
                 if key in s and np.ndim(s[key]) > 0:
                     s[key] = float(np.ravel(s[key])[0])
         return result, stats
+
     return wrapper
 
 

@@ -24,29 +24,36 @@ Validation strategy:
     whose Gaussian proposal cannot support the tails).
 """
 
-import numpy as np
 import arviz as az
-import pytest
-
+import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
+import pytest
 
+from conftest import requires_fork
 from exozippy.outputs.evidence import (
-    bridge_lnZ, softmax_weights, estimate_mode_evidences,
-    apply_evidence_weighting, EvidenceResult,
+    EvidenceResult,
+    apply_evidence_weighting,
+    bridge_lnZ,
+    estimate_mode_evidences,
+    softmax_weights,
 )
-from exozippy.outputs.modes import identify_modes, ModeInfo, ModeReport
 from exozippy.outputs.latex import build_latex_output
+from exozippy.outputs.modes import ModeInfo, ModeReport, identify_modes
 
 
 def _normal_logpdf(x, mu, sigma):
-    return (-0.5 * ((x - mu) / sigma) ** 2
-            - np.log(sigma) - 0.5 * np.log(2 * np.pi))
+    return (
+        -0.5 * ((x - mu) / sigma) ** 2
+        - np.log(sigma)
+        - 0.5 * np.log(2 * np.pi)
+    )
 
 
 # ----------------------------------------------------------------------
 # pure bridge-sampling core
 # ----------------------------------------------------------------------
+
 
 def test_bridge_recovers_analytic_gaussian_constant():
     """
@@ -81,8 +88,8 @@ def test_bridge_recovers_shifted_gaussian_evidence():
     rng = np.random.default_rng(1)
     logC = -0.8
     sig = 1.3
-    x1 = rng.normal(0, sig, 6000)              # posterior draws ~ target/C
-    y2 = rng.normal(0, sig, 6000)              # proposal draws
+    x1 = rng.normal(0, sig, 6000)  # posterior draws ~ target/C
+    y2 = rng.normal(0, sig, 6000)  # proposal draws
     l1 = logC + _normal_logpdf(x1, 0, sig) - _normal_logpdf(x1, 0, sig)
     l2 = logC + _normal_logpdf(y2, 0, sig) - _normal_logpdf(y2, 0, sig)
 
@@ -103,8 +110,8 @@ def test_bridge_refuses_on_poor_overlap():
       estimate.
     """
     rng = np.random.default_rng(2)
-    x1 = rng.normal(0, 1.0, 4000)              # target ~ N(0,1)
-    y2 = rng.normal(8.0, 1.0, 4000)            # proposal ~ N(8,1), barely overlaps
+    x1 = rng.normal(0, 1.0, 4000)  # target ~ N(0,1)
+    y2 = rng.normal(8.0, 1.0, 4000)  # proposal ~ N(8,1), barely overlaps
     l1 = _normal_logpdf(x1, 0, 1.0) - _normal_logpdf(x1, 8.0, 1.0)
     l2 = _normal_logpdf(y2, 0, 1.0) - _normal_logpdf(y2, 8.0, 1.0)
 
@@ -155,6 +162,7 @@ def _mixture_lp(x, mu0, mu1, w0, w1):
     return np.logaddexp(lp0, lp1)
 
 
+@requires_fork
 def test_evidence_weights_recover_true_mixture_weights():
     """
     Given a well-separated two-mode mixture with equal draw occupancy (~50/50)
@@ -174,16 +182,19 @@ def test_evidence_weights_recover_true_mixture_weights():
     centers = np.where(origin[:, None] == 0, mu0, mu1)
     x = rng.normal(centers, 1.0)
     lp = _mixture_lp(x, mu0, mu1, w0, w1)
-    idata = az.from_dict({
-        "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW, 2)},
-        "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
-    })
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW, 2)},
+            "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
+        }
+    )
     report = identify_modes(idata)
     assert report.n_modes == 2
 
     model = _two_bump_mixture_model(mu0, mu1, w0, w1)
-    results = estimate_mode_evidences(model, idata, report,
-                                      max_posterior_draws=800, n_proposal=800)
+    results = estimate_mode_evidences(
+        model, idata, report, max_posterior_draws=800, n_proposal=800
+    )
 
     assert all(not r.refused for r in results)
     # Map each mode index to its bump via the mode's raw x[0] center.
@@ -192,7 +203,9 @@ def test_evidence_weights_recover_true_mixture_weights():
         c0 = m.center.get("x_raw[0]", np.nan)
         expected[m.index] = w0 if abs(c0 - 0.0) < abs(c0 - 8.0) else w1
     lnZ = np.array([r.lnZ for r in results])
-    weights, dweights = softmax_weights(lnZ, np.array([r.lnZ_err for r in results]))
+    weights, dweights = softmax_weights(
+        lnZ, np.array([r.lnZ_err for r in results])
+    )
     for r in results:
         exp = expected[r.mode] / (w0 + w1)
         assert abs(weights[r.mode] - exp) <= max(0.05, 5 * dweights[r.mode])
@@ -207,8 +220,10 @@ def test_apply_evidence_weighting_replaces_occupancy():
       and each mode carries a propagated weight uncertainty.
     """
     report = _fake_two_mode_report(w0_occ=0.5, w1_occ=0.5)
-    results = [EvidenceResult(0, np.log(0.75), 0.03, 0.001, 800, 800, False),
-               EvidenceResult(1, np.log(0.25), 0.05, 0.002, 800, 800, False)]
+    results = [
+        EvidenceResult(0, np.log(0.75), 0.03, 0.001, 800, 800, False),
+        EvidenceResult(1, np.log(0.25), 0.05, 0.002, 800, 800, False),
+    ]
 
     applied = apply_evidence_weighting(report, results)
 
@@ -227,9 +242,19 @@ def test_apply_evidence_weighting_falls_back_on_refusal():
       invalidates the softmax set) and records the refusal in the provenance.
     """
     report = _fake_two_mode_report(w0_occ=0.6, w1_occ=0.4)
-    results = [EvidenceResult(0, np.log(0.7), 0.03, 0.001, 800, 800, False),
-               EvidenceResult(1, np.nan, np.inf, np.inf, 800, 800, True,
-                              "relative-MSE diagnostic re2=1.2 exceeds 0.25")]
+    results = [
+        EvidenceResult(0, np.log(0.7), 0.03, 0.001, 800, 800, False),
+        EvidenceResult(
+            1,
+            np.nan,
+            np.inf,
+            np.inf,
+            800,
+            800,
+            True,
+            "relative-MSE diagnostic re2=1.2 exceeds 0.25",
+        ),
+    ]
 
     applied = apply_evidence_weighting(report, results)
 
@@ -238,6 +263,7 @@ def test_apply_evidence_weighting_falls_back_on_refusal():
     assert "refused" in report.provenance
 
 
+@requires_fork
 def test_evidence_refuses_heavy_tailed_mode():
     """
     Given a single mode whose raw-space target is heavy-tailed (Cauchy) so a
@@ -250,19 +276,22 @@ def test_evidence_refuses_heavy_tailed_mode():
     x = rng.standard_cauchy(N)
     # keep values finite/representable but retain the fat tail
     x = np.clip(x, -1e6, 1e6)
-    lp = -np.log1p(x ** 2)
-    idata = az.from_dict({
-        "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW)},
-        "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
-    })
+    lp = -np.log1p(x**2)
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x.reshape(N_CHAIN, N_DRAW)},
+            "sample_stats": {"lp": lp.reshape(N_CHAIN, N_DRAW)},
+        }
+    )
     report = _fake_one_mode_report(idata)
 
     with pm.Model() as model:
         xt = pm.Flat("x_raw")
-        pm.Potential("cauchy", -pt.log1p(xt ** 2))
+        pm.Potential("cauchy", -pt.log1p(xt**2))
 
-    results = estimate_mode_evidences(model, idata, report,
-                                      max_posterior_draws=800, n_proposal=800)
+    results = estimate_mode_evidences(
+        model, idata, report, max_posterior_draws=800, n_proposal=800
+    )
 
     assert len(results) == 1
     assert results[0].refused
@@ -272,6 +301,7 @@ def test_evidence_refuses_heavy_tailed_mode():
 # ----------------------------------------------------------------------
 # output wiring smoke test
 # ----------------------------------------------------------------------
+
 
 class _StubSystem:
     name = "toy"
@@ -288,15 +318,21 @@ def test_evidence_provenance_replaces_occupancy_in_output(tmp_path):
       table comments and the mode-weight macros carry the evidence weights.
     """
     report = _fake_two_mode_report(w0_occ=0.5, w1_occ=0.5)
-    results = [EvidenceResult(0, np.log(0.75), 0.03, 0.001, 800, 800, False),
-               EvidenceResult(1, np.log(0.25), 0.05, 0.002, 800, 800, False)]
+    results = [
+        EvidenceResult(0, np.log(0.75), 0.03, 0.001, 800, 800, False),
+        EvidenceResult(1, np.log(0.25), 0.05, 0.002, 800, 800, False),
+    ]
     assert apply_evidence_weighting(report, results)
 
     var_file = tmp_path / "defs.tex"
     tmpl_file = tmp_path / "table.tex"
-    build_latex_output(_StubSystem(), var_filename=str(var_file),
-                       template_filename=str(tmpl_file), caption="toy",
-                       mode_report=report)
+    build_latex_output(
+        _StubSystem(),
+        var_filename=str(var_file),
+        template_filename=str(tmpl_file),
+        caption="toy",
+        mode_report=report,
+    )
 
     defs = var_file.read_text()
     tmpl = tmpl_file.read_text()
@@ -309,10 +345,17 @@ def test_evidence_provenance_replaces_occupancy_in_output(tmp_path):
 # helpers to build synthetic ModeReports
 # ----------------------------------------------------------------------
 
+
 def _mode_info(index, weight, n=800):
-    return ModeInfo(index=index, weight=weight, n_draws=n, lp_med=0.0,
-                    lp_max=0.0, delta_lp_max=0.0,
-                    per_chain_weight=np.array([weight]))
+    return ModeInfo(
+        index=index,
+        weight=weight,
+        n_draws=n,
+        lp_med=0.0,
+        lp_max=0.0,
+        delta_lp_max=0.0,
+        per_chain_weight=np.array([weight]),
+    )
 
 
 def _fake_two_mode_report(w0_occ, w1_occ):
@@ -320,20 +363,33 @@ def _fake_two_mode_report(w0_occ, w1_occ):
     return ModeReport(
         labels=labels,
         modes=[_mode_info(0, w0_occ), _mode_info(1, w1_occ)],
-        n_valid=N, n_invalid=0, n_unassigned=0,
+        n_valid=N,
+        n_invalid=0,
+        n_unassigned=0,
         provenance="occupancy (UNRELIABLE: chains do not mix between modes)",
-        weights_reliable=False, n_transitions=0,
-        feature_vars=["x_raw"], notes=[])
+        weights_reliable=False,
+        n_transitions=0,
+        feature_vars=["x_raw"],
+        notes=[],
+    )
 
 
 def _fake_one_mode_report(idata):
     labels = np.zeros(
         (idata.posterior.sizes["chain"], idata.posterior.sizes["draw"]),
-        dtype=int)
+        dtype=int,
+    )
     rep = ModeReport(
-        labels=labels, modes=[_mode_info(0, 1.0, n=labels.size)],
-        n_valid=labels.size, n_invalid=0, n_unassigned=0,
-        provenance="unimodal", weights_reliable=True, n_transitions=0,
-        feature_vars=["x_raw"], notes=[])
+        labels=labels,
+        modes=[_mode_info(0, 1.0, n=labels.size)],
+        n_valid=labels.size,
+        n_invalid=0,
+        n_unassigned=0,
+        provenance="unimodal",
+        weights_reliable=True,
+        n_transitions=0,
+        feature_vars=["x_raw"],
+        notes=[],
+    )
     rep.attach(idata)
     return rep

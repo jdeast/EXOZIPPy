@@ -9,13 +9,15 @@ source tree. run_fit is called once (module scope) and all tests share the resul
 
 Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 """
+
 import os
 import shutil
-import yaml
+from pathlib import Path
+
+import arviz as az
 import numpy as np
 import pytest
-import arviz as az
-from pathlib import Path
+import yaml
 
 from exozippy.run import run_fit
 
@@ -38,7 +40,8 @@ def kelt4_result(tmp_path_factory):
     out_dir = tmp_path_factory.mktemp("kelt4_out")
 
     shutil.copytree(
-        EXAMPLE_DIR, work_dir,
+        EXAMPLE_DIR,
+        work_dir,
         # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
         # dangling symlink that would abort the copy.
         ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
@@ -71,6 +74,7 @@ def kelt4_result(tmp_path_factory):
 # ---------------------------------------------------------------------------
 # Tests — all read from the shared kelt4_result fixture
 # ---------------------------------------------------------------------------
+
 
 def test_run_fit_kelt4_trace_file_written(kelt4_result):
     """
@@ -117,15 +121,21 @@ def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
 
     # logP ≈ log10(3 d) ≈ 0.476 for KELT-4Ab
     logP = float(post["orbit.logP"].values.mean())
-    assert 0.2 < logP < 0.7, f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    assert 0.2 < logP < 0.7, (
+        f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    )
 
     # Planet mass ≈ 0.9 Mjup; allow a broad range given only 1 draw
     planet_mass = float(post["planet.mass"].values.mean())
-    assert 0.3 < planet_mass < 2.5, f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    assert 0.3 < planet_mass < 2.5, (
+        f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    )
 
     # Star logmass ≈ 0.08 (≈1.2 Msun)
     star_logmass = float(post["star.logmass"].values.mean())
-    assert -0.3 < star_logmass < 0.5, f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    assert -0.3 < star_logmass < 0.5, (
+        f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    )
 
 
 def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):

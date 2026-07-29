@@ -9,21 +9,23 @@ import sympy as sp
 # NOTE: symbol names must match the get_symbol_map keys exactly; the
 # ConfigManager substitutes relation symbols by sym.name, so a mismatched
 # name (e.g. 'jittervar') leaves the symbol unbound in the relations.
-gamma = sp.symbols('gamma', real=True)
-jitter = sp.symbols('jitter', real=True)
-jitter_variance = sp.symbols('jitter_variance', real=True)
+gamma = sp.symbols("gamma", real=True)
+jitter = sp.symbols("jitter", real=True)
+jitter_variance = sp.symbols("jitter_variance", real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
 # ---------------------------------------------------------
 # Maps SymPy symbols back to the local parameter keys inside the RV Instrument component.
 
+
 def get_symbol_map(config):
     return {
         "gamma": "gamma",
         "jitter": "jitter",
-        "jitter_variance": "jitter_variance"
+        "jitter_variance": "jitter_variance",
     }
+
 
 # ---------------------------------------------------------
 # 3. Physics Relations

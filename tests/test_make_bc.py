@@ -38,7 +38,9 @@ def regenerated_2mass(tmp_path_factory):
     (model_dir / "BCs" / "2MASS").mkdir(parents=True)
     for name in ("NextGen.spectra.csv", "NextGen.wavelength.csv"):
         (model_dir / name).symlink_to(_NEXTGEN / name)
-    shutil.copy(_SHIPPED_2MASS, model_dir / "BCs" / "2MASS" / _SHIPPED_2MASS.name)
+    shutil.copy(
+        _SHIPPED_2MASS, model_dir / "BCs" / "2MASS" / _SHIPPED_2MASS.name
+    )
 
     written = make_bc_tables(["2MASS/2MASS.J"], model="NextGen", bc_root=root)
 
@@ -67,7 +69,7 @@ def test_regenerated_2mass_j_matches_shipped_at_av0(regenerated_2mass):
 
     # ASSERT
     assert diff.median() < 0.05
-    assert diff.max() < 0.35   # coolest grid corners are resolution-limited
+    assert diff.max() < 0.35  # coolest grid corners are resolution-limited
 
 
 def test_merge_preserves_existing_columns_exactly(regenerated_2mass):
@@ -104,3 +106,117 @@ def test_generated_bc_includes_extinction_along_av_axis(regenerated_2mass):
 
     # ASSERT
     assert 1.0 < a_j < 2.5
+
+
+# --- ensure_model_data download retry -----------------------------------
+
+
+def _fake_meta(tmp_path, payload=b"hello"):
+    """A one-file _MODEL_DATA entry whose size/md5 match `payload`."""
+    import hashlib
+
+    return {
+        "f.csv": {
+            "url": "https://example.invalid/f.csv",
+            "size": len(payload),
+            "md5": hashlib.md5(payload).hexdigest(),
+        }
+    }
+
+
+def test_download_retries_a_transient_gateway_error(tmp_path, monkeypatch):
+    """
+    Given Zenodo returns 504 once and then succeeds,
+    When ensure_model_data runs,
+    Then it retries and the file lands, rather than failing the caller.
+
+    Regression: two consecutive Dependabot PRs went red purely because a
+    250 MB Zenodo fetch returned `HTTPError: HTTP Error 504: Gateway
+    Time-out` mid-CI. A transient gateway error must cost seconds, not a run.
+    """
+    # ARRANGE
+    import urllib.error
+
+    from exozippy.components.sed import make_bc
+
+    payload = b"hello"
+    monkeypatch.setattr(
+        make_bc, "_MODEL_DATA", {"M": _fake_meta(tmp_path, payload)}
+    )
+    monkeypatch.setattr(make_bc.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def flaky(url, dest):
+        calls.append(url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                url, 504, "Gateway Time-out", {}, None
+            )
+        open(dest, "wb").write(payload)
+
+    monkeypatch.setattr(make_bc.urllib.request, "urlretrieve", flaky)
+
+    # ACT
+    make_bc.ensure_model_data("M", tmp_path)
+
+    # ASSERT
+    assert len(calls) == 2, "should have retried exactly once"
+    assert (tmp_path / "M" / "f.csv").read_bytes() == payload
+
+
+def test_download_does_not_retry_a_404(tmp_path, monkeypatch):
+    """
+    Given the URL is simply wrong (404),
+    When ensure_model_data runs,
+    Then it raises immediately instead of burning the backoff schedule.
+    """
+    # ARRANGE
+    import urllib.error
+
+    from exozippy.components.sed import make_bc
+
+    monkeypatch.setattr(make_bc, "_MODEL_DATA", {"M": _fake_meta(tmp_path)})
+    monkeypatch.setattr(make_bc.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def missing(url, dest):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(make_bc.urllib.request, "urlretrieve", missing)
+
+    # ACT / ASSERT
+    with pytest.raises(urllib.error.HTTPError):
+        make_bc.ensure_model_data("M", tmp_path)
+    assert len(calls) == 1, "a 404 is not transient; do not retry it"
+
+
+def test_download_gives_up_after_the_attempt_budget(tmp_path, monkeypatch):
+    """
+    Given every attempt fails,
+    When the budget is exhausted,
+    Then a RuntimeError names the file and no .part is left behind.
+    """
+    # ARRANGE
+    import urllib.error
+
+    from exozippy.components.sed import make_bc
+
+    monkeypatch.setattr(make_bc, "_MODEL_DATA", {"M": _fake_meta(tmp_path)})
+    monkeypatch.setattr(make_bc.time, "sleep", lambda *a: None)
+
+    calls = []
+
+    def always_504(url, dest):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 504, "Gateway Time-out", {}, None)
+
+    monkeypatch.setattr(make_bc.urllib.request, "urlretrieve", always_504)
+
+    # ACT / ASSERT
+    with pytest.raises(RuntimeError, match="f.csv"):
+        make_bc.ensure_model_data("M", tmp_path)
+    assert len(calls) == make_bc._DOWNLOAD_ATTEMPTS
+    assert not list((tmp_path / "M").glob("*.part")), "left a .part behind"

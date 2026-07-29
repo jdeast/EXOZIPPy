@@ -1,22 +1,22 @@
 """Tests for code-review fixes in the MulensModel Op layer and Lens/Instrument
 config validation."""
+
 import logging
 from unittest.mock import patch
 
+import MulensModel as mm
 import numpy as np
 import pytest
-import MulensModel as mm
 
-from exozippy.components.mulensing.op import (
-    _get_sat_coord,
-    _build_pspl_model,
-    _build_binary_model,
-)
+from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
 from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
+from exozippy.components.mulensing.op import (
+    _build_binary_model,
+    _build_pspl_model,
+    _get_sat_coord,
+)
 from exozippy.run import KNOWN_SAMPLER_KEYS
-from conftest import _DummyConfigManager, _DummyComponent, _DummySystem
-
 
 COORDS = "270.0d -28.0d"
 
@@ -36,15 +36,18 @@ def test_sat_coord_cache_distinguishes_same_length_arrays():
     satellite = np.ones((5, 3))
 
     # Mock Earth ephemeris so the test doesn't require network / JPL file access.
-    with patch("exozippy.components.mulensing.op._earth_xyz_at",
-               return_value=np.zeros((5, 3))):
+    with patch(
+        "exozippy.components.mulensing.op._earth_xyz_at",
+        return_value=np.zeros((5, 3)),
+    ):
         # Act
         coord_earth = _get_sat_coord(earth, times_np, cache)
         coord_sat = _get_sat_coord(satellite, times_np, cache)
 
         # Assert
-        assert not np.allclose(coord_earth.cartesian.xyz.value,
-                               coord_sat.cartesian.xyz.value)
+        assert not np.allclose(
+            coord_earth.cartesian.xyz.value, coord_sat.cartesian.xyz.value
+        )
         assert _get_sat_coord(earth, times_np, cache) is coord_earth
         assert _get_sat_coord(satellite, times_np, cache) is coord_sat
 
@@ -81,11 +84,11 @@ def test_binary_method_selection_follows_finite_source_flag():
     # Act / Assert
     with patch.object(mm.Model, "set_magnification_methods") as set_methods:
         _build_binary_model(p_fs, COORDS, "auto_vbbl", use_rho=True)
-        assert set_methods.call_args[0][0][1] == 'VBM'
+        assert set_methods.call_args[0][0][1] == "VBM"
 
     with patch.object(mm.Model, "set_magnification_methods") as set_methods:
         _build_binary_model(p_ps, COORDS, "auto_vbbl", use_rho=False)
-        assert set_methods.call_args[0][0][1] == 'VBBL'
+        assert set_methods.call_args[0][0][1] == "VBBL"
 
 
 def test_lens_rejects_missing_body_component():
@@ -97,8 +100,10 @@ def test_lens_rejects_missing_body_component():
       the model build.
     """
     # Arrange
-    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
     system = _DummySystem()
     system.star = _DummyComponent(2)
 
@@ -115,8 +120,9 @@ def test_lens_rejects_out_of_range_body_index():
     Then a ValueError naming the out-of-range reference is raised.
     """
     # Arrange
-    lens = Lens([{"lenses": ["star.0"], "sources": ["star.5"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.5"]}], _DummyConfigManager()
+    )
     system = _DummySystem()
     system.star = _DummyComponent(2)
 
@@ -132,8 +138,10 @@ def test_lens_rejects_malformed_body_reference():
     Then a ValueError explaining the expected format is raised.
     """
     with pytest.raises(ValueError, match="body reference"):
-        Lens([{"lenses": ["planet"], "sources": ["star.1"]}],
-             _DummyConfigManager())
+        Lens(
+            [{"lenses": ["planet"], "sources": ["star.1"]}],
+            _DummyConfigManager(),
+        )
 
 
 def test_lens_rejects_multiple_events():
@@ -144,9 +152,13 @@ def test_lens_rejects_multiple_events():
       (instead of downstream code silently fitting all data with event 0).
     """
     with pytest.raises(ValueError, match="one lensing event"):
-        Lens([{"lenses": ["star.0"], "sources": ["star.1"]},
-              {"lenses": ["star.2"], "sources": ["star.3"]}],
-             _DummyConfigManager())
+        Lens(
+            [
+                {"lenses": ["star.0"], "sources": ["star.1"]},
+                {"lenses": ["star.2"], "sources": ["star.3"]},
+            ],
+            _DummyConfigManager(),
+        )
 
 
 def test_n_lens_bodies_are_accepted_and_sized_per_companion():
@@ -157,9 +169,15 @@ def test_n_lens_bodies_are_accepted_and_sized_per_companion():
       geometry parameters s/xalpha/yalpha are sized per companion.
     """
     # Arrange
-    lens = Lens([{"lenses": ["star.0", "planet.0", "planet.1"],
-                  "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [
+            {
+                "lenses": ["star.0", "planet.0", "planet.1"],
+                "sources": ["star.1"],
+            }
+        ],
+        _DummyConfigManager(),
+    )
     system = _DummySystem()
     system.star = _DummyComponent(2)
     system.planet = _DummyComponent(2)
@@ -185,10 +203,16 @@ def test_triple_lens_mulensmodel_backend_fails_loudly():
     The default vbm_direct backend supports 3+ bodies via VBMicrolensing
     MultiMag2 (see test_vbm_direct_vs_mulensmodel.py).
     """
-    lens = Lens([{"lenses": ["star.0", "planet.0", "planet.1"],
-                  "sources": ["star.1"],
-                  "backend": "mulensmodel"}],
-                _DummyConfigManager())
+    lens = Lens(
+        [
+            {
+                "lenses": ["star.0", "planet.0", "planet.1"],
+                "sources": ["star.1"],
+                "backend": "mulensmodel",
+            }
+        ],
+        _DummyConfigManager(),
+    )
     with pytest.raises(NotImplementedError, match="backend"):
         lens.get_magnification_op(None, None, None, index=0)
 
@@ -199,17 +223,34 @@ def test_lens_backend_defaults_to_vbm_direct_and_validates():
     When the Lens is constructed,
     Then backend defaults to 'vbm_direct'; an unknown backend raises.
     """
-    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
     assert lens.backend == "vbm_direct"
 
     with pytest.raises(ValueError, match="backend"):
-        Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"],
-               "backend": "nope"}], _DummyConfigManager())
+        Lens(
+            [
+                {
+                    "lenses": ["star.0", "planet.0"],
+                    "sources": ["star.1"],
+                    "backend": "nope",
+                }
+            ],
+            _DummyConfigManager(),
+        )
 
 
-def _make_inst_with_q_source_data(n=870, t0=2458554.89, u0=0.143, tE=18.17,
-                                   f_baseline=0.62, A_peak=6.0, peak_width=5):
+def _make_inst_with_q_source_data(
+    n=870,
+    t0=2458554.89,
+    u0=0.143,
+    tE=18.17,
+    f_baseline=0.62,
+    A_peak=6.0,
+    peak_width=5,
+):
     """Return a MulensInstrument whose _estimate_flux_components can be called.
 
     The synthetic light curve has f_baseline everywhere except for `peak_width`
@@ -244,7 +285,9 @@ def test_q_source_estimate_pspl_broad_peak():
     """
     inst, t, m, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
     ra, dec = 0.0, 0.0
-    _f_total, q, _q_flux = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    _f_total, q, _q_flux = inst._estimate_flux_components(
+        t, m, xyz, ra, dec, inst_idx=0
+    )
     assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
 
 
@@ -265,7 +308,9 @@ def test_flux_total_estimate_sharp_caustic_crossing():
         A_peak=6.0, peak_width=5, f_baseline=f_baseline
     )
     ra, dec = 0.0, 0.0
-    f_total, _q, _q_flux = inst._estimate_flux_components(t, m, xyz, ra, dec, inst_idx=0)
+    f_total, _q, _q_flux = inst._estimate_flux_components(
+        t, m, xyz, ra, dec, inst_idx=0
+    )
     assert 0.5 * f_baseline < f_total < 2.0 * f_baseline, (
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
         f"got {f_total:.3f}."
@@ -298,6 +343,12 @@ def test_log_f_total_bootstrap_yields_to_user_params():
     inst.config_manager = _RecordingConfigManager()
     inst.fs_init = [0.6038]
     inst.q_source_init = [0.65]
+    # __init__ is bypassed above, so stand in for the state
+    # register_parameters reads from it: the base's GP config (no file sets
+    # gp:, so it registers nothing) and the detrend column count (no extra
+    # data columns here).
+    inst._load_gp_config()
+    inst.total_detrend_cols = 0
 
     # Act
     inst.register_parameters(_DummySystem())
@@ -307,7 +358,9 @@ def test_log_f_total_bootstrap_yields_to_user_params():
         "manifest must not set initval directly — it would override the user's "
         "params.yaml value regardless of provenance rank"
     )
-    hint_val, hint_rank = inst.config_manager.hints["mulensinstrument.0.log_f_total"]
+    hint_val, hint_rank = inst.config_manager.hints[
+        "mulensinstrument.0.log_f_total"
+    ]
     assert hint_val == pytest.approx(np.log10(0.6038))
     assert hint_rank == RANK_DERIVED_DATA
 
@@ -316,14 +369,16 @@ def test_log_f_total_bootstrap_yields_to_user_params():
 # q derived from masses (regression for ghost-parameter bug)
 # ---------------------------------------------------------------------------
 
+
 def test_q_absent_from_pspl_manifest():
     """
     Given a PSPL lens config with one lens body,
     When register_parameters runs,
     Then 'q' is not in the manifest (no companion, no mass ratio).
     """
-    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1"]}], _DummyConfigManager()
+    )
     system = _DummySystem()
     system.star = _DummyComponent(2)
     lens.build_maps()
@@ -339,8 +394,10 @@ def test_q_is_derived_for_planet_companion():
     Then 'q' is in the manifest as a derived parameter (has expr_key) and
       its deps reference 'planet.mass' for the companion.
     """
-    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
     system = _DummySystem()
     system.star = _DummyComponent(2)
     system.planet = _DummyComponent(1)
@@ -367,8 +424,10 @@ def test_q_deps_use_star_mass_for_stellar_binary():
     Then 'q' deps reference 'star.mass' for both primary and companion
       (not 'planet.mass').
     """
-    lens = Lens([{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+        _DummyConfigManager(),
+    )
     system = _DummySystem()
     system.star = _DummyComponent(3)
     lens.build_maps()
@@ -390,8 +449,10 @@ def test_companion_mass_map_points_to_correct_index():
     Then primary_lens_map points to star index 0 and
       companion0_mass_map points to planet index 0.
     """
-    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
     lens.build_maps()
 
     np.testing.assert_array_equal(lens.primary_lens_map, [0])
@@ -404,8 +465,10 @@ def test_companion_mass_map_stellar_binary_points_to_second_star():
     When build_maps runs,
     Then companion0_mass_map points to star index 1.
     """
-    lens = Lens([{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+        _DummyConfigManager(),
+    )
     lens.build_maps()
 
     np.testing.assert_array_equal(lens.primary_lens_map, [0])
@@ -418,8 +481,9 @@ def test_calc_q_returns_mass_ratio():
     When calc_q is called,
     Then the result is 0.001 / 0.5 = 0.002.
     """
-    import pytensor.tensor as pt
     import pytensor
+    import pytensor.tensor as pt
+
     from exozippy.components.mulensing.physics import calc_q
 
     m_companion = pt.as_tensor_variable(np.array([0.001]))
@@ -432,6 +496,7 @@ def test_calc_q_returns_mass_ratio():
 # sampler_requirements() hook
 # ---------------------------------------------------------------------------
 
+
 def test_pspl_lens_has_no_sampler_requirements():
     """
     Given a PSPL lens (single lens body, no finite source, no use_op flag),
@@ -439,8 +504,9 @@ def test_pspl_lens_has_no_sampler_requirements():
     Then it returns an empty dict — PSPL uses a symbolic PyTensor formula
       that is NUTS-compatible and imposes no sampler constraints.
     """
-    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1"]}], _DummyConfigManager()
+    )
     assert lens.sampler_requirements() == {}
 
 
@@ -452,14 +518,16 @@ def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
       incompatible and recommends 'ptde', because the Op is not
       differentiable and gradient-based samplers produce invalid results.
     """
-    lens = Lens([{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
 
     reqs = lens.sampler_requirements()
 
-    assert 'incompatible' in reqs
-    assert {'nuts', 'numpyro', 'blackjax'} <= reqs['incompatible']
-    assert reqs.get('recommended') == 'ptde'
+    assert "incompatible" in reqs
+    assert {"nuts", "numpyro", "blackjax"} <= reqs["incompatible"]
+    assert reqs.get("recommended") == "ptde"
 
 
 def test_pspl_finite_source_requires_ptde():
@@ -468,17 +536,19 @@ def test_pspl_finite_source_requires_ptde():
     When sampler_requirements is called,
     Then gradient-based samplers are marked incompatible and 'ptde' is recommended.
     """
-    lens = Lens([{"lenses": ["star.0"], "sources": ["star.1"],
-                  "finite_source": True}],
-                _DummyConfigManager())
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1"], "finite_source": True}],
+        _DummyConfigManager(),
+    )
     reqs = lens.sampler_requirements()
-    assert 'nuts' in reqs.get('incompatible', set())
-    assert reqs.get('recommended') == 'ptde'
+    assert "nuts" in reqs.get("incompatible", set())
+    assert reqs.get("recommended") == "ptde"
 
 
 # ---------------------------------------------------------------------------
 # Unknown sampler key warning
 # ---------------------------------------------------------------------------
+
 
 def test_known_sampler_keys_excludes_legacy_step_method():
     """

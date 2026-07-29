@@ -1,21 +1,21 @@
-#import ipdb
+# import ipdb
 import logging
-import yaml
-import numpy as np
 import os
+
+import numpy as np
+import yaml
 
 logger = logging.getLogger(__name__)
 
+import arviz as az
+import pymc as pm
 import pytensor
 import pytensor.tensor as pt
-import pymc as pm
-import arviz as az
 
-# local imports
 from exozippy.components.component import Component
+from exozippy.components.factory import discover_components
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
-from exozippy.components.factory import discover_components
 from exozippy.graph import determine_pymc_build_order
 
 """
@@ -23,6 +23,8 @@ The System Class builds an entire system to model from its components.
 Critically, it contains no component-specific logic, so it 
 can generally construct any model containing arbitrary components.
 """
+
+
 class System(Component):
     def __init__(self, config, user_params=None):
         self.config = config
@@ -46,15 +48,24 @@ class System(Component):
                     f"run exozippy (currently: {os.getcwd()}). "
                     f"Check that the file exists and the path in your config YAML is correct."
                 )
-            with open(str(user_params_file), 'r') as f:
+            with open(str(user_params_file), "r") as f:
                 self.user_params = yaml.safe_load(f)
 
-        self.config_manager = ConfigManager(self.user_params, system_config=self.config)
+        self.config_manager = ConfigManager(
+            self.user_params, system_config=self.config
+        )
         self.registry = discover_components()
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = {"run", "parameter_file", "prefix", "sampler", "name", "logger_level"}
+        reserved_keys = {
+            "run",
+            "parameter_file",
+            "prefix",
+            "sampler",
+            "name",
+            "logger_level",
+        }
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]
@@ -62,7 +73,9 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
-                logger.warning(f"YAML key '{key}' does not match any registered component and will be ignored.")
+                logger.warning(
+                    f"YAML key '{key}' does not match any registered component and will be ignored."
+                )
 
         logger.info("Modeling the following components:")
         for key, comp in self.active_components.items():
@@ -82,12 +95,15 @@ class System(Component):
         # ==========================================================
         # Stage 1: DATA & LOGICAL MAPS
         for comp in self.active_components.values():
-            if hasattr(comp, 'load_data'): comp.load_data(self)
-            if hasattr(comp, 'build_maps'): comp.build_maps()
+            if hasattr(comp, "load_data"):
+                comp.load_data(self)
+            if hasattr(comp, "build_maps"):
+                comp.build_maps()
 
         # Stage 2: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
-            if hasattr(comp, 'register_parameters'): comp.register_parameters(self)
+            if hasattr(comp, "register_parameters"):
+                comp.register_parameters(self)
 
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
@@ -114,31 +130,37 @@ class System(Component):
 
             # Stage 4: Topological Sort for Parameter Building
             # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
-            pymc_build_order = determine_pymc_build_order(self.active_components, self.config_manager)
+            pymc_build_order = determine_pymc_build_order(
+                self.active_components, self.config_manager
+            )
 
             # Stage 5: Linearly materialize the nodes node-by-node
             for param_path in pymc_build_order:
-                comp_name, param_name = param_path.split('.', 1)
+                comp_name, param_name = param_path.split(".", 1)
                 if comp_name in self.active_components:
                     comp = self.active_components[comp_name]
-                    if param_name in getattr(comp, 'manifest', {}):
+                    if param_name in getattr(comp, "manifest", {}):
                         comp.add_parameter(model, param_name, self)
 
             # Warn about user-defined parameter links whose target was never
             # materialized (e.g. star.A.age linked in the params file, but the
             # current model configuration does not build 'age').
-            for target in getattr(self.config_manager, 'links', {}):
-                t_comp, t_param = target.split('.')[0], target.split('.')[-1]
+            for target in getattr(self.config_manager, "links", {}):
+                t_comp, t_param = target.split(".")[0], target.split(".")[-1]
                 comp = self.active_components.get(t_comp)
-                if comp is None or not isinstance(getattr(comp, t_param, None), Parameter):
+                if comp is None or not isinstance(
+                    getattr(comp, t_param, None), Parameter
+                ):
                     logger.warning(
                         f"Parameter link on '{target}' had no effect: "
                         f"'{t_comp}.{t_param}' is not built by the current model "
-                        f"configuration.")
+                        f"configuration."
+                    )
 
             # Stage 6: LIKELIHOOD
             for comp in self.active_components.values():
-                if hasattr(comp, 'build_likelihood'): comp.build_likelihood(model, system=self)
+                if hasattr(comp, "build_likelihood"):
+                    comp.build_likelihood(model, system=self)
 
         self.compile_plotter_functions(model)
         return model
@@ -171,15 +193,114 @@ class System(Component):
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
         for key in raw_start:
-            name = key[:-len("_raw")] if key.endswith("_raw") else key
+            name = key[: -len("_raw")] if key.endswith("_raw") else key
             par = lookup.get(name)
-            raw_init = getattr(par, "raw_initval", None) if par is not None else None
-            if raw_init is not None and np.size(raw_init) == np.size(raw_start[key]):
+            raw_init = (
+                getattr(par, "raw_initval", None) if par is not None else None
+            )
+            if raw_init is not None and np.size(raw_init) == np.size(
+                raw_start[key]
+            ):
                 raw_start[key] = np.asarray(raw_init, dtype=float).reshape(
-                    np.shape(raw_start[key]))
+                    np.shape(raw_start[key])
+                )
             else:
                 raw_start[key] = np.zeros_like(raw_start[key])
         return raw_start
+
+    def jitter_raw_start(self, center, raw_scales, factor, rng):
+        """One over-dispersed start, drawn in PHYSICAL space, returned as raw.
+
+        Jittering directly in raw space -- center + factor*scale*N(0,1) -- looks
+        natural but saturates the logit transform.  A raw element reaches its
+        bound through `lower + span*sigmoid(lq)`, so what governs saturation is
+        the jitter's width in lq (= factor * scale * init_scale_logit), not its
+        width in raw.  Once that approaches ~3 the sigmoid folds both tails onto
+        the bounds instead of spreading across them: measured on a [0,1]
+        parameter, pileup within 1% of a bound goes 0.0000 -> 0.105 -> 0.276 as
+        sigma/span goes 0.1 -> 0.3 -> 1.0, and a parameter whose logp is flat out
+        to its bounds starts 31.5% of its chains within 1% of a bound where
+        uniform wants 2.0%.  The flat case cannot be fixed by correcting the
+        scale: its jitter width in lq is factor * 1.41 regardless of init_scale.
+
+        Drawing in physical space from a Gaussian TRUNCATED to [lower, upper]
+        reproduces what rejecting out-of-bounds draws would give, in closed form
+        and with no rejection loop, and self-adapts across the whole range:
+          - scale << span: truncation never bites -> plain factor-x
+            over-dispersed Gaussian, unchanged.
+          - scale ~ span:  truncated Gaussian, no pileup.
+          - flat:          a Gaussian far wider than the interval, truncated,
+                           IS uniform -- which is max entropy on a bounded
+                           range, so over-dispersion correctly runs out there
+                           rather than folding onto the bounds.
+        Pileup never exceeds uniform's at any scale (worst measured 0.0196 vs
+        uniform's 0.0200) because a truncated normal's density is monotone
+        toward each bound.
+
+        `raw_scales` holds the probe's per-element 0.5-nat step (ptde._probe_scales)
+        in raw units; it is converted to a physical half-width through this
+        parameter's own transform.  The probe scale is used rather than
+        init_scale because it measures the ACTUAL local posterior width
+        including the likelihood -- for a flat parameter it lands at 0.304*span
+        independent of init_scale, which is exactly what makes the flat case
+        come out uniform.
+
+        Elements without a finite [lower, upper] pair are not logit-transformed
+        (their raw -> physical map is linear and unbounded), so they keep plain
+        Gaussian jitter; build_pymc's soft barriers handle any one-sided bound.
+        """
+        from scipy.stats import truncnorm
+
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        out = {}
+        for key, cval in center.items():
+            name = key[: -len("_raw")] if key.endswith("_raw") else key
+            par = lookup.get(name)
+            tf = (
+                getattr(par, "_raw_transform", None)
+                if par is not None
+                else None
+            )
+            shape = np.shape(cval)
+            c = np.asarray(cval, dtype=float).reshape(-1)
+            sc = np.asarray(raw_scales[key], dtype=float).reshape(-1)
+
+            if tf is None or len(tf["sampled_idx"]) != c.size:
+                # No frozen transform (or a shape we cannot line up): fall back
+                # to the historical raw-space jitter.
+                out[key] = np.asarray(cval, dtype=float) + (
+                    factor
+                    * np.asarray(raw_scales[key], dtype=float)
+                    * rng.standard_normal(shape)
+                )
+                continue
+
+            idx = tf["sampled_idx"]
+            # Physical center, and the physical half-width spanned by one probe
+            # scale either side of it -- measured through the real transform
+            # rather than linearized, since the point is that it is nonlinear.
+            p0 = par.phys_from_raw(c)
+            p_hi = par.phys_from_raw(c + sc)
+            p_lo = par.phys_from_raw(c - sc)
+
+            new_phys = np.array(p0, dtype=float, copy=True)
+            for j, i in enumerate(idx):
+                half = 0.5 * abs(p_hi[i] - p_lo[i])
+                s = factor * half
+                if not np.isfinite(s) or s <= 0:
+                    continue  # degenerate scale: start at the seed
+                if not tf["use_logit"][i]:
+                    new_phys[i] = p0[i] + s * rng.standard_normal()
+                    continue
+                lower, upper = tf["lowers"][i], tf["uppers"][i]
+                a, b = (lower - p0[i]) / s, (upper - p0[i]) / s
+                new_phys[i] = truncnorm.rvs(
+                    a, b, loc=p0[i], scale=s, random_state=rng
+                )
+
+            raw_vec = par.raw_from_initval(new_phys)
+            out[key] = np.asarray(raw_vec, dtype=float).reshape(shape)
+        return out
 
     def get_raw_starts(self, model):
         """Multi-seed variant of get_raw_start (P4).
@@ -203,15 +324,20 @@ class System(Component):
             return [base], [0]
 
         lookup = {p.label: p for p in self.get_all_parameters()}
-        starts, seed_indices = [base], [0]   # seed 0 == the canonical base start
+        starts, seed_indices = (
+            [base],
+            [0],
+        )  # seed 0 == the canonical base start
 
         for k in range(1, len(seed_resolved)):
             resolved = seed_resolved[k]
-            raw = {key: np.array(v, dtype=float, copy=True)
-                   for key, v in base.items()}
+            raw = {
+                key: np.array(v, dtype=float, copy=True)
+                for key, v in base.items()
+            }
             violated = False
             for key in base:
-                name = key[:-len("_raw")] if key.endswith("_raw") else key
+                name = key[: -len("_raw")] if key.endswith("_raw") else key
                 par = lookup.get(name)
                 if par is None:
                     continue
@@ -223,7 +349,8 @@ class System(Component):
                 except SeedBoundViolation as e:
                     logger.warning(
                         f"Multi-seed: seed {k} start violates a bound ({e}); "
-                        f"skipping this seed (a clipped start is in no basin).")
+                        f"skipping this seed (a clipped start is in no basin)."
+                    )
                     violated = True
                     break
                 if np.size(raw_vec) == np.size(base[key]):
@@ -234,15 +361,18 @@ class System(Component):
 
         logger.info(
             f"Multi-seed starts: {len(starts)}/{len(seed_resolved)} seeds "
-            f"usable (seed indices {seed_indices}).")
+            f"usable (seed indices {seed_indices})."
+        )
         return starts, seed_indices
 
     def _seed_initvals_for(self, par, resolved):
         """Internal-unit initval vector for one Parameter under one seed's solved
         state, or None if that seed does not touch any of its elements."""
-        comp_type = par.label.split('.')[0]
-        param_name = par.label.split('.', 1)[1]
-        n_elements = int(np.prod(par.shape)) if par.shape not in ((), None) else 1
+        comp_type = par.label.split(".")[0]
+        param_name = par.label.split(".", 1)[1]
+        n_elements = (
+            int(np.prod(par.shape)) if par.shape not in ((), None) else 1
+        )
         base_iv = to_vec(par.initval, n_elements, fill=np.nan)
         vals = np.array(base_iv, dtype=float).reshape(-1).copy()
         found = False
@@ -260,7 +390,7 @@ class System(Component):
         eval_fn = pytensor.function(
             inputs=model.free_RVs,
             outputs=output_vars,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Pull the values in the exact order the function expects them
@@ -268,7 +398,9 @@ class System(Component):
 
         physical_values = eval_fn(*input_values)
 
-        return {var.name: val for var, val in zip(output_vars, physical_values)}
+        return {
+            var.name: val for var, val in zip(output_vars, physical_values)
+        }
 
     def get_physical_point(self, model, raw_point):
         output_vars = model.free_RVs + model.deterministics
@@ -276,7 +408,7 @@ class System(Component):
         eval_fn = pytensor.function(
             inputs=model.free_RVs,
             outputs=output_vars,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Pull the values in the exact order the function expects them
@@ -314,10 +446,12 @@ class System(Component):
                 labels = labels[keep]
                 logger.info(
                     f"distribute_posterior: dropped {int((~keep).sum())} "
-                    f"invalid/unassigned draws flagged by mode identification")
+                    f"invalid/unassigned draws flagged by mode identification"
+                )
             self.mode_labels = labels
-            self.n_modes = int(posterior["mode"].attrs.get(
-                "n_modes", labels.max() + 1))
+            self.n_modes = int(
+                posterior["mode"].attrs.get("n_modes", labels.max() + 1)
+            )
         else:
             self.mode_labels = None
             self.n_modes = 1
@@ -339,7 +473,9 @@ class System(Component):
                     # Case B: Not in the trace; evaluate the PyTensor expression.
                     # Pass param_lookup so generate_posterior converts user-unit
                     # inputs → internal → evaluates → back to user units.
-                    attr.posterior = attr.generate_posterior(posterior, param_lookup=param_lookup)
+                    attr.posterior = attr.generate_posterior(
+                        posterior, param_lookup=param_lookup
+                    )
 
             # Recurse to children (Stars, Planets, etc.)
             elif isinstance(attr, Component) and attr is not component:
@@ -385,7 +521,7 @@ class System(Component):
 
             # Use __dict__ to respect insertion order instead of dir() (alphabetical)
             for attr_name, attr in obj.__dict__.items():
-                if attr_name.startswith('_'):
+                if attr_name.startswith("_"):
                     continue
 
                 # 1. If it's a Component, yield it and its children
@@ -398,7 +534,10 @@ class System(Component):
                 # 2. If it's a list of components (future-proofing)
                 elif isinstance(attr, (list, tuple)):
                     for item in attr:
-                        if isinstance(item, Component) and id(item) not in seen_components:
+                        if (
+                            isinstance(item, Component)
+                            and id(item) not in seen_components
+                        ):
                             seen_components.add(id(item))
                             yield item
                             yield from crawl(item)
@@ -424,12 +563,15 @@ class System(Component):
             # The unity start is 0.0 for logit params, (initval-mu)/sigma for
             # Gaussian-path params (see get_raw_start).
             unity_start = raw_start.get(
-                value_var.name, np.zeros(rv.shape.eval(), dtype=float))
+                value_var.name, np.zeros(rv.shape.eval(), dtype=float)
+            )
             transform = model.rvs_to_transforms.get(rv)
 
             if transform is not None:
                 # Forward the 0.0 through the interval/log math
-                t_node = transform.forward(pt.as_tensor_variable(unity_start), *rv.owner.inputs)
+                t_node = transform.forward(
+                    pt.as_tensor_variable(unity_start), *rv.owner.inputs
+                )
                 transformed_inits[value_var.name] = t_node.eval()
             else:
                 # No transform, raw == value
@@ -449,7 +591,12 @@ class System(Component):
         total_dims = sum(np.size(val) for val in transformed_inits.values())
 
         # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
-        return np.ones(total_dims), ordered_scales, ordered_inits, transformed_inits
+        return (
+            np.ones(total_dims),
+            ordered_scales,
+            ordered_inits,
+            transformed_inits,
+        )
 
     def compile_plotter_functions(self, model):
         """

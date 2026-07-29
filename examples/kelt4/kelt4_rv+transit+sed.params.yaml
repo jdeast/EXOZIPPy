@@ -1,0 +1,112 @@
+star.A.radius:
+  initval: 1.610
+star.A.mass:
+  # Seed only. The prior on A's mass/radius now comes from the torres: block
+  # in kelt4_rv+transit+sed.yaml, which replaces the hand-entered
+  # Eastman+2015 value (1.204 +/- 0.05) this used to impose. Torres predicts
+  # ~1.263 solMass at A's starting teff/logg/feh, about 1.2 sigma above that
+  # old prior, so A's mass should settle slightly higher than before.
+  initval: 1.204
+star.A.teff:
+  initval: 6207
+star.A.feh:
+  # Eastman+2016	
+  initval: -0.116
+  sigma: 0.08
+star.A.parallax:
+  # NOTE: the Gaia DR3 parallax (4.5860000) has been corrected by subtracting -0.031176187 mas as prescribed in Lindegren+ 2021
+  # NOTE: the Gaia DR3 parallax uncertainty (0.0158000) has been added in quadrature with 0.01 to account for remaining systematic residuals
+  mu: 4.61718
+  sigma: 0.01870
+
+# Schlegel+1998 3*E(B-V) upper limit (mkticsed.py)
+star.A.av:
+  upper: 0.0521
+
+# KELT-4B, KELT-4C: unresolved-companion pair at 1.6" (WDS), roughly equal
+# brightness (Fig. 8). No direct radius/teff/mass constraint -- only the
+# blended 2MASS/WISE photometry, the Gaia-resolved delta from A, and the
+# very loose B-C differential (kelt4.sed.yaml) constrain them. logmass/
+# radius/teff initvals below are a rough seed derived from the WDS combined
+# delta-V (~2.95 mag A to B+C, so ~3.7 mag each assuming near-equal
+# components) via a crude V-band main-sequence color estimate -- not a
+# literature value, just a starting point for the sampler.
+star.B.distance:
+  initval: star.A.distance
+  sigma: 0
+star.B.av:
+  initval: star.A.av
+  sigma: 0
+# when MIST is available, switch to initfeh, add age
+star.B.feh:
+  initval: star.A.feh
+  sigma: 0
+star.B.logmass:
+  initval: -0.125
+star.B.radius:
+  initval: 0.7
+star.B.teff:
+  initval: 4800
+
+star.C.distance:
+  initval: star.A.distance
+  sigma: 0
+star.C.av:
+  initval: star.A.av
+  sigma: 0
+star.C.feh:
+  initval: star.A.feh
+  sigma: 0
+star.C.logmass:
+  initval: -0.125
+star.C.radius:
+  initval: 0.7
+star.C.teff:
+  initval: 4800
+
+planet.b.radius:
+  initval: 1.706
+
+orbit.b.period:
+  initval: 2.9895933 
+orbit.b.tc:
+  initval: 2459634.3
+orbit.b.cosi:
+  initval: 0.11996
+
+rvinstrument.EXPERT.gamma:
+  #init_scale: 11.1130411925
+  lower: -1000
+  upper: 1000
+rvinstrument.EXPERT.jitter_variance:
+  init_scale: 10
+  lower: -1000
+  upper: 1000
+
+rvinstrument.FIES.gamma:
+  init_scale: 8.55538045957
+  lower: -1000
+  upper: 1000
+rvinstrument.FIES.jitter_variance:
+  init_scale: 10
+  lower: -100
+  upper: 100
+
+rvinstrument.HIRES.gamma:
+  #init_scale: 0.84847723031
+  lower: -100
+  upper: 100
+rvinstrument.HIRES.jitter_variance:
+  #init_scale: 0.49937616943
+  lower: -100
+  upper: 100
+
+rvinstrument.TRES.gamma:
+  #init_scale: 5.3882459687
+  lower: -100
+  upper: 100
+rvinstrument.TRES.jitter_variance:
+#  init_scale: 10
+  lower: -1000
+  upper: 1000
+

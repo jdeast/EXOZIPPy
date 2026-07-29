@@ -35,8 +35,8 @@ survivor set.
 
 import logging
 
-import numpy as np
 import arviz as az
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def default_var_names(posterior):
     for v in names:
         if v == "mode":
             continue
-        if v.endswith("_raw") and v[:-len("_raw")] in present:
+        if v.endswith("_raw") and v[: -len("_raw")] in present:
             continue
         out.append(v)
     return out
@@ -106,7 +106,7 @@ def good_chain_mask(lp):
     chain_max = np.nanmax(lp, axis=1)
     best = int(np.nanargmax(chain_max))
     threshold = np.nanmedian(lp[best])
-    mask = chain_max >= threshold          # the best chain always passes
+    mask = chain_max >= threshold  # the best chain always passes
     if int(mask.sum()) < min(_MIN_GOOD_CHAINS, n_chains):
         return np.ones(n_chains, dtype=bool), False
     return mask, True
@@ -151,8 +151,9 @@ def _thin_stride(n_draws):
     return max(1, n_draws // _STAT_DRAW_BUDGET)
 
 
-def converged_on_tail(posterior, lp, min_ess, max_rhat, tail_frac=0.5,
-                      var_names=None):
+def converged_on_tail(
+    posterior, lp, min_ess, max_rhat, tail_frac=0.5, var_names=None
+):
     """Cheap early-stop test: is the trace converged on its last ``tail_frac``?
 
     Used for the live auto-stop decision so the full burn-in scan
@@ -186,8 +187,9 @@ def converged_on_tail(posterior, lp, min_ess, max_rhat, tail_frac=0.5,
     if stat is None:
         return False, float("nan"), float("nan")
     rhat, ess, _, _ = stat
-    converged = ((max_rhat is None or rhat <= max_rhat)
-                 and (min_ess is None or ess >= min_ess))
+    converged = (max_rhat is None or rhat <= max_rhat) and (
+        min_ess is None or ess >= min_ess
+    )
     return converged, rhat, ess
 
 
@@ -223,11 +225,16 @@ def find_burnin(posterior, lp=None, var_names=None):
     good_idx = np.nonzero(good_mask)[0]
 
     diag = {
-        "burnin": 0, "burnin_frac": 0.0,
-        "max_rhat": float("nan"), "min_ess": float("nan"),
-        "worst_rhat_var": None, "worst_ess_var": None,
-        "good_mask": good_mask, "good_reliable": good_reliable,
-        "n_chains_used": int(len(good_idx)), "n_draws": int(n_draws),
+        "burnin": 0,
+        "burnin_frac": 0.0,
+        "max_rhat": float("nan"),
+        "min_ess": float("nan"),
+        "worst_rhat_var": None,
+        "worst_ess_var": None,
+        "good_mask": good_mask,
+        "good_reliable": good_reliable,
+        "n_chains_used": int(len(good_idx)),
+        "n_draws": int(n_draws),
     }
     if len(good_idx) < 2 or n_draws < 2 * _MIN_DRAWS_PER_CHAIN:
         return diag
@@ -251,9 +258,12 @@ def find_burnin(posterior, lp=None, var_names=None):
         rhat, ess, worst_rhat, worst_ess = stat
         if best is None or ess > best["min_ess"]:
             best = {
-                "burnin": int(b * thin), "burnin_frac": float(frac),
-                "max_rhat": rhat, "min_ess": ess,
-                "worst_rhat_var": worst_rhat, "worst_ess_var": worst_ess,
+                "burnin": int(b * thin),
+                "burnin_frac": float(frac),
+                "max_rhat": rhat,
+                "min_ess": ess,
+                "worst_rhat_var": worst_rhat,
+                "worst_ess_var": worst_ess,
             }
     if best is not None:
         diag.update(best)
@@ -292,9 +302,11 @@ def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     good_idx = np.nonzero(diag["good_mask"])[0]
     # isel across the whole InferenceData; missing_dims="ignore" leaves groups
     # without chain/draw (e.g. observed_data) untouched.
-    trimmed = idata.isel(chain=good_idx.tolist(),
-                         draw=slice(diag["burnin"], None),
-                         missing_dims="ignore")
+    trimmed = idata.isel(
+        chain=good_idx.tolist(),
+        draw=slice(diag["burnin"], None),
+        missing_dims="ignore",
+    )
     return trimmed, diag
 
 
@@ -313,7 +325,9 @@ def log_convergence(diag, log=logger):
         log.warning(
             "Convergence: fewer than %d chains reached the good-likelihood "
             "region; keeping ALL chains -- results may be contaminated by "
-            "stuck chains.", _MIN_GOOD_CHAINS)
+            "stuck chains.",
+            _MIN_GOOD_CHAINS,
+        )
     if diag.get("converged", False):
         log.info("Convergence OK: %s", summary)
     else:
@@ -321,5 +335,7 @@ def log_convergence(diag, log=logger):
             "CONVERGENCE NOT REACHED: %s [thresholds: Rhat<=%s, ESS>=%s] -- "
             "reporting anyway; inspect the trace and consider a longer or "
             "reseeded run.",
-            summary, diag.get("max_rhat_threshold"),
-            diag.get("min_ess_threshold"))
+            summary,
+            diag.get("max_rhat_threshold"),
+            diag.get("min_ess_threshold"),
+        )

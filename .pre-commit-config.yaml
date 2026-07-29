@@ -1,9 +1,59 @@
+# Install with:  poetry run pre-commit install
+# default_install_hook_types means that one command wires up BOTH the
+# pre-commit and pre-push hooks, so nobody has to remember
+# `--hook-type pre-push`.
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
+# ONE tool does linting, import sorting and formatting. This replaced black
+# (formatting) plus isort (imports): three pinned tools where one does the job,
+# and three chances for versions to drift apart.
+#
+# The rev is pinned exactly, and must stay that way. Everyone has to produce
+# byte-identical output or the format-then-merge recipe for long-running
+# branches stops working: a collaborator formats with a different version,
+# and the merge conflicts on formatting rather than on content. Pinning one
+# tool instead of three is most of the reason for consolidating.
+#
+# ruff-check runs BEFORE ruff-format: the linter's import sorting (rule `I`)
+# decides which lines exist, the formatter decides how they wrap.
+#
+# `args: [--fix]` on ruff-check is deliberately limited to the import rule
+# (`--fixable I`). NEVER broaden it. F401 is the obvious next rule to enable,
+# and ruff considers the `from . import physics` side-effect imports
+# auto-fixable -- deleting those breaks PHYSICS_REGISTRY lookup in eight
+# components. A linter that silently deletes code is not worth the seconds it
+# saves.
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+    -   id: ruff-check
+        args: [--fix, --fixable, I]
+    -   id: ruff-format
+
 -   repo: local
     hooks:
+    # The full suite runs on PUSH, not on commit. It takes ~3 minutes locally
+    # (~15 on CI), which is tolerable once per push but not once per commit --
+    # paying it per commit is what discourages small commits and tempts people
+    # into --no-verify, which skips the check entirely.
+    #
+    # always_run + no `types:` filter is deliberate. The old config had
+    # `types: [python]`, so a commit touching only pyproject.toml and
+    # poetry.lock reported "(no files to check) Skipped" and ran nothing --
+    # exactly the change most able to break everything while touching no .py
+    # file. Dependency and packaging edits must run the suite too.
+    #
+    # NOTE: pre-commit stashes unstaged changes while hooks run and restores
+    # them afterwards. Interrupting a hook mid-run can leave that stash
+    # unrestored -- the work is recoverable from the patch it prints under
+    # ~/.cache/pre-commit/, but do not kill a run that is in progress. This is
+    # a property of pre-commit itself and applies to pre-push exactly as it did
+    # to pre-commit; moving the stage does not avoid it.
     -   id: pytest
-        name: Run pytest
+        name: Run pytest (full suite)
         entry: poetry run pytest
         language: system
-        types: [python]
         pass_filenames: false
+        always_run: true
+        stages: [pre-push]

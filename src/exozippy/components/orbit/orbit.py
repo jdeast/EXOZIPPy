@@ -1,22 +1,22 @@
 import logging
 
-import numpy as np
 import astropy.units as u
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# pymc/exoplanet imports
-import pytensor.tensor as pt
 import pymc as pm
+import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
-# local imports
-from exozippy.components.parameter import Parameter
 from exozippy.components.component import Component
-from .bodies import parse_orbit_bodies
+from exozippy.components.parameter import Parameter
+
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
 from . import physics
+from .bodies import parse_orbit_bodies
+
 
 class Orbit(Component):
     """
@@ -29,6 +29,7 @@ class Orbit(Component):
     reads the same star.mass/planet.mass nodes.  Each group is treated as a
     point mass at its barycenter (standard hierarchical approximation).
     """
+
     def __init__(self, config, config_manager):
         # 1. Initialize the base Component
         # sets self.config and self.config_manager
@@ -36,13 +37,63 @@ class Orbit(Component):
         self.label = "Orbital Parameters"
 
         self.primary_bodies, self.companion_bodies = parse_orbit_bodies(
-            self.config, getattr(config_manager, "system_config", None))
-        self.i180 = [c.get("i180",False) for c in self.config]
-        self.fitvcve = [c.get("fitvcve",False) for c in self.config]
+            self.config, getattr(config_manager, "system_config", None)
+        )
+        self.i180 = [c.get("i180", False) for c in self.config]
+        self.fitvcve = [c.get("fitvcve", False) for c in self.config]
 
     @property
     def prefix(self):
         return "orbit"
+
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "primary",
+                "kind": "ref",
+                "accepts": ["star", "planet"],
+                "required": False,
+                "doc": (
+                    "Body group forming the primary of this two-body "
+                    "Keplerian arc: a list of star/planet instance names or "
+                    "star.X/planet.X paths (a multi-body group is treated as "
+                    "a point mass at its barycenter). Omit both primary and "
+                    "companion to use the legacy implicit host/planet "
+                    "topology."
+                ),
+            },
+            {
+                "key": "companion",
+                "kind": "ref",
+                "accepts": ["star", "planet"],
+                "required": False,
+                "doc": (
+                    "Body group forming the companion of this two-body "
+                    "Keplerian arc (see primary)."
+                ),
+            },
+            {
+                "key": "i180",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Reflect the inclination about 90 deg (retrograde branch "
+                    "of the transit/RV inclination degeneracy). Default false."
+                ),
+            },
+            {
+                "key": "fitvcve",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Parametrize eccentricity via V_c/V_e instead of "
+                    "sqrt(e)cos(omega)/sqrt(e)sin(omega). Default false."
+                ),
+            },
+        ]
 
     # ------------------------------------------------------------------
     # Body groups
@@ -76,19 +127,22 @@ class Orbit(Component):
         """
         sys_cfg = getattr(self.config_manager, "system_config", None) or {}
         self._group_w = {"primary": {}, "companion": {}}
-        for side, groups in (("primary", self.primary_bodies),
-                             ("companion", self.companion_bodies)):
+        for side, groups in (
+            ("primary", self.primary_bodies),
+            ("companion", self.companion_bodies),
+        ):
             types = {t for g in groups for (t, _) in g}
             for ctype in types:
                 section = sys_cfg.get(ctype) or []
                 if not isinstance(section, list):
                     section = [section]
-                n_cols = max([len(section)] +
-                             [idx + 1 for g in groups for (t, idx) in g
-                              if t == ctype])
+                n_cols = max(
+                    [len(section)]
+                    + [idx + 1 for g in groups for (t, idx) in g if t == ctype]
+                )
                 W = np.zeros((self.n_elements, n_cols))
                 for i, g in enumerate(groups):
-                    for (t, idx) in g:
+                    for t, idx in g:
                         if t == ctype:
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
@@ -98,12 +152,16 @@ class Orbit(Component):
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
-        logP_cfg = self.config_manager.resolve(self.prefix, "logP", shape=shape, names=self.names)
-        tc_cfg = self.config_manager.resolve(self.prefix, "tc", shape=shape, names=self.names)
+        logP_cfg = self.config_manager.resolve(
+            self.prefix, "logP", shape=shape, names=self.names
+        )
+        tc_cfg = self.config_manager.resolve(
+            self.prefix, "tc", shape=shape, names=self.names
+        )
 
         logP_init = np.atleast_1d(logP_cfg["initval"])
         tc_init = np.atleast_1d(tc_cfg["initval"])
-        half_period = (10 ** logP_init) / 2.0
+        half_period = (10**logP_init) / 2.0
 
         self.manifest = {
             "logP": None,
@@ -112,30 +170,36 @@ class Orbit(Component):
             "tc": {
                 "force_node": True,
                 "lower": tc_init - half_period,
-                "upper": tc_init + half_period
-            }
+                "upper": tc_init + half_period,
+            },
         }
 
-        fitvcve_mask = np.atleast_1d(getattr(self, 'fitvcve', False)).astype(bool)
+        fitvcve_mask = np.atleast_1d(getattr(self, "fitvcve", False)).astype(
+            bool
+        )
         hk_mask = ~fitvcve_mask
 
         if any(self.fitvcve):
-            raise NotImplementedError("VCVE parameterization not yet migrated to manifest.")
+            raise NotImplementedError(
+                "VCVE parameterization not yet migrated to manifest."
+            )
         else:
-            self.manifest.update({
-                "secosw": {"mask": hk_mask},
-                "sesinw": {"mask": hk_mask},
-                "cosi": {"mask": hk_mask},
-                "ecc": "default",
-                "omega": "default",
-                "inc": "default",
-                "sini": "default",
-                "sinw": "default",
-                "cosw": "default",
-                "esinw": "default",
-                "ecosw": "default",
-                "tp": "default",
-            })
+            self.manifest.update(
+                {
+                    "secosw": {"mask": hk_mask},
+                    "sesinw": {"mask": hk_mask},
+                    "cosi": {"mask": hk_mask},
+                    "ecc": "default",
+                    "omega": "default",
+                    "inc": "default",
+                    "sini": "default",
+                    "sinw": "default",
+                    "cosw": "default",
+                    "esinw": "default",
+                    "ecosw": "default",
+                    "tp": "default",
+                }
+            )
 
         # Physical scale of every orbit, from the member bodies' masses
         # (see class docstring).  Group-mass deps name the mass vectors of
@@ -144,16 +208,23 @@ class Orbit(Component):
         # Bare orbits whose implicit default bodies do not exist (test
         # harnesses, geometry-only systems) skip the scale parameters.
         if self._validate_bodies(system):
-            body_types = sorted({t for i in range(self.n_elements)
-                                 for (t, _) in self.bodies(i)})
+            body_types = sorted(
+                {
+                    t
+                    for i in range(self.n_elements)
+                    for (t, _) in self.bodies(i)
+                }
+            )
             group_deps = [f"{t}.mass" for t in body_types]
-            self.manifest.update({
-                "m_primary": {"expr_key": "default", "deps": group_deps},
-                "m_companion": {"expr_key": "default", "deps": group_deps},
-                "m_total": "default",
-                "arsun": "default",
-                "K": "default",
-            })
+            self.manifest.update(
+                {
+                    "m_primary": {"expr_key": "default", "deps": group_deps},
+                    "m_companion": {"expr_key": "default", "deps": group_deps},
+                    "m_total": "default",
+                    "arsun": "default",
+                    "K": "default",
+                }
+            )
 
         # Astrometry constrains the longitude of the ascending node and
         # breaks the i <-> 180-i degeneracy, so sample the node direction
@@ -161,10 +232,12 @@ class Orbit(Component):
         # bigomega, like the microlensing trajectory angle alpha) and allow
         # the full inclination range when an astrometry component is active.
         topology_keys = []
-        if hasattr(system, 'config') and hasattr(system.config, 'keys'):
+        if hasattr(system, "config") and hasattr(system.config, "keys"):
             topology_keys = list(system.config.keys())
-        has_astrometry = (hasattr(system, 'astrometryinstrument')
-                          or 'astrometryinstrument' in topology_keys)
+        has_astrometry = (
+            hasattr(system, "astrometryinstrument")
+            or "astrometryinstrument" in topology_keys
+        )
         if has_astrometry:
             self.manifest["xbigomega"] = None
             self.manifest["ybigomega"] = None
@@ -174,12 +247,14 @@ class Orbit(Component):
             # transformation is a reflection through the sky plane
             # (z -> -z): invisible to ANY astrometry, absolute or relative.
             # Only radial information (RVs) identifies the ascending node.
-            has_rv = (hasattr(system, 'rvinstrument')
-                      or 'rvinstrument' in topology_keys)
+            has_rv = (
+                hasattr(system, "rvinstrument")
+                or "rvinstrument" in topology_keys
+            )
             if not has_rv:
                 self._restrict_bigomega_halfplane(shape)
 
-        i180_arr = np.atleast_1d(getattr(self, 'i180', False)) | has_astrometry
+        i180_arr = np.atleast_1d(getattr(self, "i180", False)) | has_astrometry
         derived_lowers = np.where(i180_arr, -1.0, 0.0)
         self.manifest["cosi"] = {"lower": derived_lowers}
 
@@ -196,11 +271,13 @@ class Orbit(Component):
         unchanged.  A table note documents the artificial boundary on
         omega_* and bigomega.
         """
-        note = (r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
-                r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
-                r"degenerate (which node is ascending is unknown); "
-                r"$\Omega$ is artificially restricted to "
-                r"$[0^\circ, 180^\circ]$ to select one mode.")
+        note = (
+            r"With astrometry but no RVs, $(\Omega, \omega_*)$ and "
+            r"$(\Omega+180^\circ, \omega_*+180^\circ)$ are exactly "
+            r"degenerate (which node is ascending is unknown); "
+            r"$\Omega$ is artificially restricted to "
+            r"$[0^\circ, 180^\circ]$ to select one mode."
+        )
 
         # NOTE: this runs at stage 2, BEFORE the relaxation engine, so only
         # user-provided initvals (and defaults) are visible here.  The x/y
@@ -211,13 +288,15 @@ class Orbit(Component):
         n_el = int(np.prod(shape))
 
         def rslv(name):
-            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)["initval"]
+            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)[
+                "initval"
+            ]
             if val is None:
                 return np.full(n_el, np.nan)
             return np.atleast_1d(val).astype(float).copy()
 
         factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
-        bo = rslv("bigomega") * factor_bo   # rad; NaN where unseeded
+        bo = rslv("bigomega") * factor_bo  # rad; NaN where unseeded
 
         # Unseeded elements start at bigomega = 90 deg (center of the
         # allowed half-plane; y = 0 would sit exactly on the new bound).
@@ -232,7 +311,8 @@ class Orbit(Component):
             logger.warning(
                 f"[{self.prefix}] bigomega initval(s) in (180, 360) deg but no "
                 f"RVs are present; remapping element(s) {np.where(flip)[0]} to "
-                f"the degenerate (bigomega-180, omega+180) solution.")
+                f"the degenerate (bigomega-180, omega+180) solution."
+            )
 
             # Orientation in the user's own terms: prefer explicit ecc+omega
             # initvals; otherwise secosw/sesinw (user or defaults).
@@ -249,15 +329,18 @@ class Orbit(Component):
             # The relaxation engine has not run yet, so a user-supplied
             # 'period' has not been propagated to logP; prefer it directly.
             period_user = rslv("period")
-            period = np.where(~np.isnan(period_user), period_user,
-                              10.0 ** rslv("logP"))
+            period = np.where(
+                ~np.isnan(period_user), period_user, 10.0 ** rslv("logP")
+            )
 
             def _M_c(ecc, w):
-                E_c = 2.0 * np.arctan2(np.sqrt(1.0 - ecc) * (1.0 - np.sin(w)),
-                                       np.sqrt(1.0 + ecc) * np.cos(w))
+                E_c = 2.0 * np.arctan2(
+                    np.sqrt(1.0 - ecc) * (1.0 - np.sin(w)),
+                    np.sqrt(1.0 + ecc) * np.cos(w),
+                )
                 return E_c - ecc * np.sin(E_c)
 
-            ecc0 = np.clip(sc0 ** 2 + ss0 ** 2, 0.0, 0.9999)
+            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, 0.9999)
             w0 = np.arctan2(ss0, sc0)
             n_mm = 2.0 * np.pi / period
             tp = tc0 - _M_c(ecc0, w0) / n_mm
@@ -269,12 +352,21 @@ class Orbit(Component):
             ss_init = np.where(flip, -ss0, ss0)
             tc_init = np.where(flip, tc_new, tc0)
 
-            self.manifest["secosw"] = {**self.manifest["secosw"], "initval": sc_init}
-            self.manifest["sesinw"] = {**self.manifest["sesinw"], "initval": ss_init}
+            self.manifest["secosw"] = {
+                **self.manifest["secosw"],
+                "initval": sc_init,
+            }
+            self.manifest["sesinw"] = {
+                **self.manifest["sesinw"],
+                "initval": ss_init,
+            }
             half_period = period / 2.0
-            self.manifest["tc"] = {**self.manifest["tc"], "initval": tc_init,
-                                   "lower": tc_init - half_period,
-                                   "upper": tc_init + half_period}
+            self.manifest["tc"] = {
+                **self.manifest["tc"],
+                "initval": tc_init,
+                "lower": tc_init - half_period,
+                "upper": tc_init + half_period,
+            }
 
         # Keep seeded boundary values (bigomega exactly 0 or 180) strictly
         # inside the ybigomega >= 0 bound.
@@ -297,31 +389,38 @@ class Orbit(Component):
         if not hasattr(system, "active_components"):
             return False
         for i in range(self.n_elements):
-            explicit = ("primary" in self.config[i]
-                        or "companion" in self.config[i])
-            for (ctype, idx) in self.bodies(i):
+            explicit = (
+                "primary" in self.config[i] or "companion" in self.config[i]
+            )
+            for ctype, idx in self.bodies(i):
                 comp = getattr(system, ctype, None)
-                bad = (comp is None or not isinstance(comp, Component)
-                       or idx >= comp.n_elements)
+                bad = (
+                    comp is None
+                    or not isinstance(comp, Component)
+                    or idx >= comp.n_elements
+                )
                 if bad and explicit:
                     n = comp.n_elements if isinstance(comp, Component) else 0
                     raise ValueError(
                         f"[{self.prefix}.{self.names[i]}] references body "
                         f"'{ctype}.{idx}', but the active system has only "
-                        f"{n} '{ctype}' instance(s).")
+                        f"{n} '{ctype}' instance(s)."
+                    )
                 if bad:
                     logger.info(
                         f"[{self.prefix}.{self.names[i]}] implicit body "
                         f"'{ctype}.{idx}' is not in the system; orbit "
                         f"mass/scale parameters (m_total, arsun, K) are "
-                        f"disabled.")
+                        f"disabled."
+                    )
                     return False
         # A planet in a companion group should point its orbit_ndx here
         # (transit/planet geometry reads the orbit through that map).
-        planet_cfgs = (getattr(self.config_manager, "system_config", None)
-                       or {}).get("planet") or []
+        planet_cfgs = (
+            getattr(self.config_manager, "system_config", None) or {}
+        ).get("planet") or []
         for i in range(self.n_elements):
-            for (ctype, idx) in self.companion_bodies[i]:
+            for ctype, idx in self.companion_bodies[i]:
                 if ctype != "planet" or idx >= len(planet_cfgs):
                     continue
                 o_ndx = int((planet_cfgs[idx] or {}).get("orbit_ndx", 0))
@@ -330,7 +429,8 @@ class Orbit(Component):
                         f"[{self.prefix}.{self.names[i]}] companion planet."
                         f"{idx} has orbit_ndx={o_ndx}, not {i}; the planet's "
                         f"transit/RV geometry will follow orbit {o_ndx} "
-                        f"while its mass moves this orbit.")
+                        f"while its mass moves this orbit."
+                    )
         return True
 
     _GROUP_MASS_SIDE = {"m_primary": "primary", "m_companion": "companion"}
@@ -346,26 +446,30 @@ class Orbit(Component):
         side = self._GROUP_MASS_SIDE.get(param_name)
         if side is not None and not context_nodes:
             if not hasattr(self, "_group_w"):
-                self.build_maps()   # standalone use outside the lifecycle
+                self.build_maps()  # standalone use outside the lifecycle
             context_nodes = dict(context_nodes or {})
             for ctype, W in self._group_w[side].items():
                 comp = getattr(system, ctype, None)
                 if comp is None:
                     # Standalone harness (validated systems raised at stage
                     # 2): absent components contribute zero mass.
-                    context_nodes[f"{ctype}.mass"] = pt.zeros((self.n_elements,))
+                    context_nodes[f"{ctype}.mass"] = pt.zeros(
+                        (self.n_elements,)
+                    )
                     continue
                 if not isinstance(getattr(comp, "mass", None), Parameter):
                     comp.add_parameter(model, "mass", system)
                 context_nodes[f"{ctype}.mass"] = pt.dot(
-                    pt.as_tensor_variable(W), comp.mass.value)
+                    pt.as_tensor_variable(W), comp.mass.value
+                )
             # A group side may reference only a subset of the body types
             # named in the shared deps list; the missing type contributes
             # zero mass.
             for ctype in ("star", "planet"):
                 dep = f"{ctype}.mass"
                 if dep not in context_nodes and any(
-                        d == dep for d in self.manifest[param_name]["deps"]):
+                    d == dep for d in self.manifest[param_name]["deps"]
+                ):
                     context_nodes[dep] = pt.zeros((self.n_elements,))
         return super().add_parameter(model, param_name, system, context_nodes)
 
@@ -429,7 +533,7 @@ class Orbit(Component):
         sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
         # Separation from the barycenter (or primary) in units of a_scale
-        r = a_scale[None, :] * (1.0 - ecc ** 2) / (1.0 + ecc * cosf)
+        r = a_scale[None, :] * (1.0 - ecc**2) / (1.0 + ecc * cosf)
 
         # cos/sin(omega + f)
         coswf = cosw * cosf - sinw * sinf
@@ -467,6 +571,6 @@ class Orbit(Component):
 
         # 4. Calculate RV per planet
         # Using the identity: cos(w + f) = cos(w)cos(f) - sin(w)sin(f)
-        rv_matrix = K_grid * (cosw*cosf - sinw*sinf + ecc*cosw)
+        rv_matrix = K_grid * (cosw * cosf - sinw * sinf + ecc * cosw)
 
         return rv_matrix
