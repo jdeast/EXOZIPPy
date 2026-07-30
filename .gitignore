@@ -25,3 +25,4 @@ src/exozippy/components/evolutionarymodel/testing.ipynb
 src/exozippy/components/evolutionarymodel/massradius_mann.py
 src/exozippy/components/evolutionarymodel/massradius_mist.py
 src/exozippy/components/evolutionarymodel/MISTv2.5_duplicate_ages.txt
+src/exozippy/models/MISTv2.5/EEPs/MISTv2.5.grid.backup.yaml
