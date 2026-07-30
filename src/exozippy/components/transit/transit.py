@@ -353,6 +353,11 @@ class Transit(Instrument):
             u2_mapped = band.u2.value[self.obs_band_map_tensor]  # (N_obs,)
         else:
             u2_mapped = pt.zeros_like(u1_mapped)
+        # Secondary-eclipse thermal emission (ppm); 0 for every band unless
+        # that band set fitthermal: true (see Band.register_parameters).
+        thermal_mapped = band.thermal.value[
+            self.obs_band_map_tensor
+        ]  # (N_obs,)
 
         # 3b. SED deblending (EXOFASTv2 parity): with more than one
         # modeled star, only the host contributes the transit, so the
@@ -400,6 +405,18 @@ class Transit(Instrument):
             if dil_obs is not None:
                 blocked = blocked * dil_obs
             lc_model = lc_model - blocked
+
+            # Secondary eclipse / constant thermal emission (fitthermal,
+            # PR 1.a -- no phase-curve variation yet, see BEER/PR 1.b).
+            planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
+            thermal_term = 1e-6 * thermal_mapped * planetvisible
+            if dil_obs is not None:
+                # Same per-term dilution convention as the transit depth
+                # above: the planet's extra flux is diluted by the same
+                # blended-aperture fraction as the light it would otherwise
+                # block.
+                thermal_term = thermal_term * dil_obs
+            lc_model = lc_model + thermal_term
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
@@ -456,6 +473,7 @@ class Transit(Instrument):
                 u2_inst = band.u2.value[band_idx]
             else:
                 u2_inst = pt.zeros_like(u1_inst)
+            thermal_inst = band.thermal.value[band_idx]  # scalar, 0 unless fitthermal
             # See build_likelihood for the Green's-basis change-of-basis derivation.
             c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
             c1_inst = u1_inst + 2.0 * u2_inst
@@ -480,7 +498,15 @@ class Transit(Instrument):
                 dil_node = getattr(self, "_dilution_node", None)
                 if dil_node is not None:
                     blocked = blocked * dil_node[inst_idx]
-                decrement_matrix_list.append(-blocked)
+
+                # Secondary eclipse / constant thermal emission -- same
+                # shared helper build_likelihood uses (physics.py).
+                planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
+                thermal_term = 1e-6 * thermal_inst * planetvisible
+                if dil_node is not None:
+                    thermal_term = thermal_term * dil_node[inst_idx]
+
+                decrement_matrix_list.append(-blocked + thermal_term)
 
             lc_matrix = pt.stack(
                 decrement_matrix_list, axis=1

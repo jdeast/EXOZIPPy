@@ -65,12 +65,28 @@ class Band(Component):
                 "required": False,
                 "doc": "Limb-darkening law. Default 'quadratic'.",
             },
+            {
+                "key": "fitthermal",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a constant secondary-eclipse thermal-emission "
+                    "depth (ppm) for this band. Default False, which pins "
+                    "thermal at 0 (transit-only model, unchanged). "
+                    "Phase-curve variation (BEER) is not modeled by this "
+                    "flag; see PR 1.b."
+                ),
+            },
         ]
 
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
         self.star_indices = [c.get("star_ndx", 0) for c in self.config]
         self.ld_laws = [c.get("ld_law", "quadratic") for c in self.config]
+        self.fitthermal = [
+            bool(c.get("fitthermal", False)) for c in self.config
+        ]
 
         # Canonical filter identities via the SED alias table. An
         # unknown name passes through unchanged (the user may already be
@@ -118,6 +134,19 @@ class Band(Component):
             self.manifest = {
                 "u1": None,
             }
+
+        # thermal (secondary-eclipse depth, ppm) is opt-in per band via
+        # fitthermal: true. Bands that don't opt in are pinned at sigma=0
+        # (same "overrides" pattern Instrument._register_gp uses for terms
+        # an element didn't ask for), so thermal.value is exactly 0 and the
+        # transit model is unchanged unless a band explicitly asks for it.
+        off = [i for i in range(self.n_elements) if not self.fitthermal[i]]
+        thermal_entry = {}
+        if off:
+            pin = np.full(self.n_elements, np.nan)
+            pin[off] = 0.0
+            thermal_entry["overrides"] = {"sigma": pin.tolist()}
+        self.manifest["thermal"] = thermal_entry
 
     def build_likelihood(self, model, system):
         pass
