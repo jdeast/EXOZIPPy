@@ -1,0 +1,62 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc2018
+#$ -o dc2018.$JOB_ID.$TASK_ID.log
+#
+# DC2018 pipeline job (adapted from examples/DC2018_128/dc128.job).
+#
+# One SGE task = one event: MMEXOFAST init -> EXOZIPPy fit -> truth
+# comparison, all inside run_event.py. The event number comes from either
+#   - $EVENT (single-event test):    qsub -v EVENT=128 dc2018.job
+#   - the $SGE_TASK_ID'th line of events.txt (full array run):
+#                                    qsub -t 1-44 dc2018.job
+#
+# Optional overrides (qsub -v NAME=value, comma-separated for several):
+#   BANDS=Z087        fit only the sparse Z087 curve (fast; default W149,Z087)
+#   EXTRA="--quick"   any extra run_event.py flags
+#   DC18_DATA=...     data tree, if not at $HOME/python/MMEXOFAST/data/2018DataChallenge
+#
+# run_event.py reads $NSLOTS for the sampler's core count, so it always
+# matches the "-pe mthread N" grant above -- change them together anyway if
+# you edit the queue request (see the oversubscription note in
+# examples/DC2018_128/DC2018_128_hpc.yaml).
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+
+# Source conda and activate the exozippy environment (needs mmexofast:
+#   pip install git+https://github.com/jenniferyee/MMEXOFAST.git
+#   pip install git+https://github.com/jenniferyee/sfit_minimizer.git emcee)
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+which python
+
+# Navigate to the workflow directory
+cd $HOME/python/EXOZIPPy/examples/DC2018
+
+# Resolve the event number for this task
+if [ -n "$EVENT" ]; then
+    ev=$EVENT
+else
+    ev=$(sed -n "${SGE_TASK_ID}p" events.txt)
+fi
+if [ -z "$ev" ]; then
+    echo "No event for task ${SGE_TASK_ID:-<unset>} (events.txt has $(wc -l < events.txt) lines)" >&2
+    exit 1
+fi
+
+: "${DC18_DATA:=$HOME/python/MMEXOFAST/data/2018DataChallenge}"
+export DC18_DATA
+: "${BANDS:=W149,Z087}"
+
+echo "Running DC2018 event $ev (bands $BANDS, $NSLOTS cores)"
+python run_event.py "$ev" --bands "$BANDS" $EXTRA

@@ -12,6 +12,7 @@ from exozippy.corner_utils import (
 )
 from exozippy.potentials import soft_lower_bound
 
+from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
 
 logger = logging.getLogger(__name__)
@@ -299,8 +300,25 @@ class Lens(Component):
                 "accepts": "*.json",
                 "required": False,
                 "doc": (
-                    "MMEXOFAST fit-results JSON providing seed initvals and "
-                    "scales for the microlensing parameters."
+                    "MMEXOFAST integration: a fit-results JSON path provides "
+                    "seed initvals/scales for the microlensing parameters "
+                    "plus the bad-data mask and error factors; 'auto' forces "
+                    "an MMEXOFAST run on the raw light curves (cached at "
+                    "<prefix>_mmexofast.json); false disables the automatic "
+                    "run that otherwise happens when the params file lacks "
+                    "start values for the microlensing parameters."
+                ),
+            },
+            {
+                "key": "mmexofast_options",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Extra MMEXOFASTFitter keyword arguments for the "
+                    "automatic run (e.g. {no_parallax: false, "
+                    "limb_darkening_coeffs_gamma: {W149: 0.3}}), forwarded "
+                    "verbatim."
                 ),
             },
             {
@@ -435,99 +453,33 @@ class Lens(Component):
         `mmexofast: <file>` key on the lens config block (path relative to the
         run cwd, same as the light-curve `file:` key).
 
-        Alpha convention: MMEXOFAST alpha maps to EXOZIPPy alpha by the IDENTITY
-        transform. Verified against examples/DC2018_128 -- the hand-tuned
-        DC2018_128.params.yaml seed (the reference compare_results.py compares
-        against) sets lens.Lens.alpha to the MMEXOFAST json alpha value verbatim
-        (-52.15111097728343 in both). The ob161003 `alpha_MM = 180 - alpha_paper`
-        note is a paper-vs-MM relation on a different event and does NOT apply.
-
-        s is seeded as log_s = log10(s) because the mulensing manifest samples
-        log_s (s = 10**log_s is derived); see components/mulensing/defaults.yaml.
-
-        Rank sits between RANK_DERIVED_DATA and RANK_USER (config.add_seed_hints
-        default) so an explicit user initval list still wins.
+        The translation itself (seed sets, scale hints, jd_offset handling,
+        alpha/log_s conventions) lives in mmexofast_support.push_seed_hints,
+        shared with MulensInstrument's stage-1a auto-initialization (which
+        also applies the JSON's bad-data mask and error factors -- masks must
+        exist before the photometry is read, which is why the instrument owns
+        that half).
         """
         mmx_file = self.config[0].get("mmexofast") if self.config else None
-        if not mmx_file:
+        # Only an explicit file path is handled here. "auto" / absent-key
+        # auto-initialization is owned by MulensInstrument (stage 1a), which
+        # pushes the seed hints itself before this method ever runs; False
+        # opts out entirely.
+        if not isinstance(mmx_file, str) or mmx_file == "auto":
             return
 
-        import json
-
-        try:
-            with open(mmx_file) as f:
-                data = json.load(f)
-        except (OSError, ValueError) as e:
-            logger.warning(
-                f"Could not read mmexofast file '{mmx_file}': {e}; "
-                f"no seeds loaded."
-            )
+        data = mmexofast_support.load_json(mmx_file)
+        if data is None:
+            logger.warning(f"No seeds loaded from '{mmx_file}'.")
             return
 
-        fits = data.get("fits", [])
-        if not fits:
-            logger.warning(
-                f"mmexofast file '{mmx_file}' has no 'fits'; no seeds loaded."
-            )
-            return
-
-        want_rho = any(self.finite_source)
-        is_binary = self.n_companions >= 1
-        seed_sets = []
-        for fit in fits:
-            p = fit.get("parameters", {})
-            d = {}
-            for key, path in (
-                ("t_0", "lens.0.t_0"),
-                ("u_0", "lens.0.u_0"),
-                ("t_E", "lens.0.t_E"),
-            ):
-                if key in p:
-                    d[path] = float(p[key])
-            if want_rho and "rho" in p:
-                d["lens.0.rho"] = float(p["rho"])
-            # s/q/alpha are companion (binary-lens) geometry only.
-            if is_binary:
-                if "s" in p and float(p["s"]) > 0:
-                    d["lens.0.log_s"] = float(np.log10(float(p["s"])))
-                if "alpha" in p:
-                    d["lens.0.alpha"] = float(
-                        p["alpha"]
-                    )  # identity convention
-                if "q" in p:
-                    d["lens.0.q"] = float(p["q"])
-            seed_sets.append(d)
-
-        self.config_manager.add_seed_hints(seed_sets)
-        logger.info(
-            f"MMEXOFAST: loaded {len(seed_sets)} seed solution(s) from "
-            f"'{mmx_file}'."
+        mmexofast_support.push_seed_hints(
+            data,
+            self.config_manager,
+            want_rho=any(self.finite_source),
+            is_binary=self.n_companions >= 1,
+            source=mmx_file,
         )
-
-        # Scale hints from fit 0's sigmas (bounds/scales resolve from seed 0
-        # only; other seeds move only the start). log_rho/log_s/log_q sigmas are
-        # in dex -> convert to a linear scale as sigma_x = x * ln(10) * sigma_logx
-        # (matches examples/DC2018_128/compare_results.py).
-        s0 = fits[0].get("sigmas", {})
-        p0 = fits[0].get("parameters", {})
-        ln10 = np.log(10.0)
-
-        def _sh(path, val):
-            if val is not None and np.isfinite(val) and val > 0:
-                self.config_manager.add_scale_hint(path, float(val))
-
-        _sh("lens.0.t_0", s0.get("t_0"))
-        _sh("lens.0.u_0", s0.get("u_0"))
-        _sh("lens.0.t_E", s0.get("t_E"))
-        if want_rho and "log_rho" in s0 and "rho" in p0:
-            _sh("lens.0.rho", float(p0["rho"]) * float(s0["log_rho"]) * ln10)
-        if is_binary:
-            if "log_s" in s0:
-                _sh("lens.0.log_s", float(s0["log_s"]))
-            if "alpha" in s0:
-                _sh("lens.0.alpha", float(s0["alpha"]))
-            if "log_q" in s0 and "q" in p0:
-                _sh("lens.0.q", float(p0["q"]) * float(s0["log_q"]) * ln10)
 
     def register_parameters(self, system):
         """Stage 2: Declare the manifest."""

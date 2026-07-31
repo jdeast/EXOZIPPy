@@ -262,6 +262,7 @@ class AstrometryInstrument(Instrument):
                 "required": False,
                 "doc": "Reference epoch for the astrometric positions.",
             },
+            cls._mask_config_schema(),
             cls._plot_style_config_schema(),
         ]
 
@@ -289,8 +290,10 @@ class AstrometryInstrument(Instrument):
             df = pd.read_csv(
                 file, sep=r"\s+", engine="c", header=None, comment="#"
             )
-            # Sort before the parallax factors are computed from t, so every
-            # per-epoch quantity stays aligned regardless of mode.
+            # Mask (raw row order), then sort before the parallax factors are
+            # computed from t, so every per-epoch quantity stays aligned
+            # regardless of mode.
+            df = self._apply_mask(df, i)
             df = self._sort_by_time(df)
             t = df.iloc[:, 0].values.astype(float)
 

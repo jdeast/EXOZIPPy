@@ -82,6 +82,7 @@ class RVInstrument(Instrument):
                     "'m/s'."
                 ),
             },
+            cls._mask_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -102,8 +103,10 @@ class RVInstrument(Instrument):
             df = pd.read_csv(
                 file, sep=r"\s+", engine="c", header=None, comment="#"
             )
-            # One sort per file, before anything is derived from it: keeps the
-            # RVs, errors and detrend columns aligned by construction.
+            # Mask (raw row order), then one sort per file, before anything
+            # is derived from it: keeps the RVs, errors and detrend columns
+            # aligned by construction.
+            df = self._apply_mask(df, i)
             df = self._sort_by_time(df)
             n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
