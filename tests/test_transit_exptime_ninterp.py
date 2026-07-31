@@ -2,15 +2,22 @@
 Tests for exptime/ninterp exposure-time smearing on the transit component:
   - exptime/ninterp are fixed per-instrument properties read straight off
     the config (like self.files/self.band_names), not fitted parameters
+  - invalid smearing configs (ninterp < 1, exptime <= 0, or ninterp > 1
+    without an exptime) warn at load and fall back to no smearing
+  - the sub-exposure grid is EXOFASTv2's midpoint Riemann rule: ninterp
+    cell centers across [-exptime/2, +exptime/2], never the exposure edges
   - ninterp==1 must reproduce the pre-existing instantaneous model exactly,
     regardless of exptime
   - a long exptime with ninterp>1 measurably smooths ingress/egress
   - mixed ninterp/exptime across instruments in one component is handled
-    per-instrument (padded to the largest ninterp, inert padding weighted
-    to zero), not by assuming a single uniform ninterp
+    per-instrument: observations are partitioned into one group per
+    distinct ninterp (each group's grid exactly its own ninterp wide),
+    not padded to a single uniform ninterp
 
 All light curves here are synthetic (not the kelt4 example).
 """
+
+import logging
 
 import numpy as np
 import pytensor
@@ -74,8 +81,10 @@ def _plot_param_values(system):
     conversion (see Transit.plot_unphased), so we can call the untouched
     compile_plotters path (no oversampling) as an independent reference."""
     return [
-        float(np.squeeze(np.asarray(p.initval))) if getattr(p.value, "ndim", 0) == 0
-        else np.atleast_1d(p.initval) for p in system.plot_params
+        float(np.squeeze(np.asarray(p.initval)))
+        if getattr(p.value, "ndim", 0) == 0
+        else np.atleast_1d(p.initval)
+        for p in system.plot_params
     ]
 
 
@@ -88,10 +97,16 @@ def _model_flux_at_initial_point(system, model):
     chain to every trace, so it's deliberately kept out of the model graph's
     named/traced variables and only compiled here for testing."""
     ip = model.initial_point()
-    givens = [(rv, np.asarray(ip[rv.name])) for rv in model.free_RVs if rv.name in ip]
+    givens = [
+        (rv, np.asarray(ip[rv.name])) for rv in model.free_RVs if rv.name in ip
+    ]
     fn = pytensor.function(
-        [], system.transit._model_flux_node, givens=givens,
-        on_unused_input="ignore", mode="FAST_COMPILE")
+        [],
+        system.transit._model_flux_node,
+        givens=givens,
+        on_unused_input="ignore",
+        mode="FAST_COMPILE",
+    )
     return fn()
 
 
@@ -115,11 +130,65 @@ def test_ninterp_one_matches_instantaneous_model(tmp_path_factory):
     model_flux = _model_flux_at_initial_point(system, model)
 
     decrement = system.transit._compiled_full_lc(
-        system.transit.time, 0, *_plot_param_values(system))
+        system.transit.time, 0, *_plot_param_values(system)
+    )
     baseline = float(np.atleast_1d(system.transit.baseline.initval)[0])
     reference = baseline + decrement
 
     np.testing.assert_allclose(model_flux, reference, atol=1e-8)
+
+
+def test_invalid_smearing_config_warns_and_falls_back(
+    tmp_path_factory, caplog
+):
+    """
+    Given four transit instruments -- three with invalid smearing configs
+    (ninterp=0; a negative exptime; ninterp>1 with no exptime at all) and
+    one valid control (exptime=30, ninterp=3),
+    When load_data runs (via system.prepare()),
+    Then each invalid instrument gets one warning naming it and is reset to
+    the inert defaults (ninterp=1, exptime=1: no smearing), while the valid
+    instrument is untouched and gets no warning -- a bad config degrades to
+    the instantaneous model loudly instead of crashing in the grid builder
+    or silently smearing over a made-up exposure time.
+    """
+    d = tmp_path_factory.mktemp("invalid_smearing")
+    t = np.linspace(TC - 0.1, TC + 0.1, 5)
+    lcs = [_write_lc(d / f"lc{i}.dat", t) for i in range(4)]
+
+    config = _config(
+        lcs,
+        [
+            {"ninterp": 0},
+            {"exptime": -5.0, "ninterp": 3},
+            {"ninterp": 3},
+            {"exptime": 30.0, "ninterp": 3},
+        ],
+    )
+    system = System(config, user_params=_params())
+    with caplog.at_level(logging.WARNING, logger="exozippy"):
+        system.prepare()
+
+    tr = system.transit
+    assert tr.ninterp == [1, 1, 1, 3]
+    assert tr.exptime_min == [1.0, 1.0, 1.0, 30.0]
+
+    smearing_warnings = [
+        r.message for r in caplog.records if "exposure smearing" in r.message
+    ]
+    assert len(smearing_warnings) == 3
+    for name in ("inst0", "inst1", "inst2"):
+        assert any(name in msg for msg in smearing_warnings)
+    assert not any("inst3" in msg for msg in smearing_warnings)
+
+    # The fallback really disables smearing: only the valid instrument's
+    # rows land in a width-3 group.
+    groups_by_width = {
+        grid.shape[1]: rows for rows, grid, weights in tr._oversample_groups
+    }
+    assert set(groups_by_width.keys()) == {1, 3}
+    inst3_rows = np.nonzero(tr.inst_map == 3)[0]
+    assert sorted(groups_by_width[3]) == list(inst3_rows)
 
 
 def test_long_exptime_with_ninterp_smooths_ingress_egress(tmp_path_factory):
@@ -156,18 +225,20 @@ def test_long_exptime_with_ninterp_smooths_ingress_egress(tmp_path_factory):
     assert max_slope_smeared < 0.5 * max_slope_instant
 
 
-def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(tmp_path_factory):
+def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(
+    tmp_path_factory,
+):
     """
     Given two transit instruments in one component with different
     exptime/ninterp (inst0: ninterp=1; inst1: exptime=60min, ninterp=3),
     When load_data builds the oversampling groups,
-    Then max_ninterp is the largest ninterp among instruments, and
-    observations are partitioned into one group per distinct ninterp value:
-    inst0's rows form a width-1 group (grid is just each row's own
-    timestamp, weight 1) and inst1's rows form a width-3 group (3
-    evenly-spaced sub-times per row, each weighted 1/3) -- each
-    instrument's own ninterp/exptime is honored, and neither group is
-    padded out to the other's width (no wasted sub-samples).
+    Then observations are partitioned into one group per distinct ninterp
+    value: inst0's rows form a width-1 group (grid is just each row's own
+    timestamp, weight 1) and inst1's rows form a width-3 group (3 midpoint
+    sub-times per row -- EXOFASTv2's (j + 0.5)/n - 0.5 cell centers, so
+    +/- exptime/3 for n=3, never the exposure edges -- each weighted 1/3)
+    -- each instrument's own ninterp/exptime is honored, and neither group
+    is padded out to the other's width (no wasted sub-samples).
     """
     d = tmp_path_factory.mktemp("mixed_ninterp")
     t0 = np.linspace(TC - 0.1, TC + 0.1, 5)
@@ -183,10 +254,10 @@ def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(tmp_path_fac
     system.prepare()
 
     tr = system.transit
-    assert tr.max_ninterp == 3
-
-    groups_by_width = {grid.shape[1]: (rows, grid, weights)
-                        for rows, grid, weights in tr._oversample_groups}
+    groups_by_width = {
+        grid.shape[1]: (rows, grid, weights)
+        for rows, grid, weights in tr._oversample_groups
+    }
     assert set(groups_by_width.keys()) == {1, 3}
 
     inst0_rows = np.nonzero(tr.inst_map == 0)[0]
@@ -201,14 +272,59 @@ def test_mixed_ninterp_across_instruments_is_grouped_per_instrument(tmp_path_fac
     assert sorted(rows1) == list(inst1_rows)
     order1 = np.argsort(rows1)
     exptime_days = 60.0 / 1440.0
-    expected_offsets = np.array([-0.5, 0.0, 0.5]) * exptime_days
+    # Midpoint Riemann cell centers, (j + 0.5)/3 - 0.5: NOT the exposure
+    # edges +/- exptime/2 (EXOFASTv2 parity, exofast_chi2v2.pro).
+    expected_offsets = np.array([-1.0, 0.0, 1.0]) / 3.0 * exptime_days
     np.testing.assert_allclose(weights1, [1 / 3, 1 / 3, 1 / 3])
     np.testing.assert_allclose(
-        grid1[order1], t1[:, None] + expected_offsets[None, :])
+        grid1[order1], t1[:, None] + expected_offsets[None, :]
+    )
+
+
+def test_shared_ninterp_different_exptime_broadcasts_per_observation(
+    tmp_path_factory,
+):
+    """
+    Given two transit instruments sharing ninterp=3 but with different
+    exposure times (inst0: 30 min, inst1: 60 min),
+    When load_data builds the oversampling groups,
+    Then both instruments land in the single width-3 group (grouping keys
+    on ninterp only), and each row's sub-exposure offsets scale with its
+    OWN instrument's exptime (+/- 10 min for inst0, +/- 20 min for inst1
+    at the midpoint (j + 0.5)/3 - 0.5 cell centers) -- pinning the
+    per-observation exptime broadcast inside a shared group, which the
+    mixed-ninterp tests above never exercise.
+    """
+    d = tmp_path_factory.mktemp("shared_ninterp")
+    t0 = np.linspace(TC - 0.1, TC + 0.1, 5)
+    t1 = np.linspace(TC - 0.05, TC + 0.05, 7)
+    lc0 = _write_lc(d / "lc0.dat", t0)
+    lc1 = _write_lc(d / "lc1.dat", t1)
+
+    config = _config(
+        [lc0, lc1],
+        [{"exptime": 30.0, "ninterp": 3}, {"exptime": 60.0, "ninterp": 3}],
+    )
+    system = System(config, user_params=_params())
+    system.prepare()
+
+    tr = system.transit
+    assert len(tr._oversample_groups) == 1
+    rows, grid, weights = tr._oversample_groups[0]
+    assert grid.shape == (12, 3)
+    np.testing.assert_allclose(weights, [1 / 3, 1 / 3, 1 / 3])
+
+    unit_offsets = np.array([-1.0, 0.0, 1.0]) / 3.0  # midpoint cell centers
+    order = np.argsort(rows)
+    times = np.concatenate([t0, t1])
+    exptime_days = np.array([30.0] * 5 + [60.0] * 7) / 1440.0
+    expected = times[:, None] + unit_offsets[None, :] * exptime_days[:, None]
+    np.testing.assert_allclose(grid[order], expected)
 
 
 def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
-        tmp_path_factory):
+    tmp_path_factory,
+):
     """
     Given one mixed-ninterp component (inst0: ninterp=1; inst1: long
     exptime, ninterp=21), both instruments sampling the same fine time grid
@@ -216,7 +332,7 @@ def test_mixed_ninterp_model_flux_matches_instantaneous_only_for_ninterp_one(
     When transit.model_flux is evaluated,
     Then inst0's rows match its own instantaneous (compile_plotters)
     reference to floating-point precision, while inst1's rows do not --
-    proving the padded/weighted oversampling actually reaches the model's
+    proving the grouped oversampling actually reaches the model's
     per-observation output correctly for each instrument independently,
     not just the grid/weight arrays checked in the test above.
     """
@@ -284,10 +400,13 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     baseline = float(np.atleast_1d(tr.baseline.initval)[0])
 
     smeared_decrement = tr._smeared_full_lc(tr.time, 0, *param_values)
-    np.testing.assert_allclose(baseline + smeared_decrement, model_flux, atol=1e-8)
+    np.testing.assert_allclose(
+        baseline + smeared_decrement, model_flux, atol=1e-8
+    )
 
     # Sanity check the matrix-valued plotting entry point (used by
     # plot_phased) agrees with the scalar one (used by plot_unphased).
     smeared_matrix = tr._smeared_lc_matrix(tr.time, 0, *param_values)
     np.testing.assert_allclose(
-        smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10)
+        smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10
+    )

@@ -127,8 +127,32 @@ class Transit(Instrument):
         # off the config like self.files/self.band_names: exptime is the
         # exposure duration in minutes, ninterp the number of sub-samples
         # used to smear the model over that exposure (EXOFASTv2 parity).
-        self.exptime_min = [float(c.get("exptime", 0.0)) for c in self.config]
-        self.ninterp = [int(c.get("ninterp", 1)) for c in self.config]
+        # Invalid combinations (ninterp < 1, a non-positive exptime, or
+        # ninterp > 1 without an exptime to smear over) warn and fall back
+        # to the inert defaults (ninterp=1, exptime=1: no smearing) rather
+        # than crashing in the grid builder or silently smearing over a
+        # made-up exposure time.
+        self.exptime_min = [1.0] * self.n_elements
+        self.ninterp = [1] * self.n_elements
+        for i, c in enumerate(self.config):
+            exptime = float(c.get("exptime", 1.0))
+            ninterp = int(c.get("ninterp", 1))
+            if (
+                ninterp < 1
+                or exptime <= 0
+                or (ninterp > 1 and "exptime" not in c)
+            ):
+                logger.warning(
+                    f"transit {self.names[i]}: invalid exposure smearing "
+                    f"config (exptime={c.get('exptime', '<unset>')} min, "
+                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
+                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
+                    f"exptime > 0. Ignoring -- defaulting to ninterp=1, "
+                    f"exptime=1 (no smearing)."
+                )
+                exptime, ninterp = 1.0, 1
+            self.exptime_min[i] = exptime
+            self.ninterp[i] = ninterp
 
         for i, file in enumerate(self.files):
             df = pd.read_csv(
@@ -181,7 +205,7 @@ class Transit(Instrument):
         across instruments, so instruments may disagree on both. Rather
         than padding every observation out to the largest ninterp among
         the active instruments (which would make build_likelihood evaluate
-        the transit model at max_ninterp sub-samples even for observations
+        the transit model at that many sub-samples even for observations
         whose own instrument needs only 1), observations are partitioned
         by their own instrument's ninterp value into groups: each group's
         sub-exposure time grid is exactly as wide as that group's own
@@ -197,9 +221,6 @@ class Transit(Instrument):
         """
         exptime_days = np.asarray(self.exptime_min, dtype=float) / 1440.0
         ninterp_per_inst = np.asarray(self.ninterp, dtype=int)
-        self.max_ninterp = (
-            int(ninterp_per_inst.max()) if len(ninterp_per_inst) else 1
-        )
 
         ninterp_obs = ninterp_per_inst[self.inst_map]  # (N_obs,)
         exptime_obs = exptime_days[self.inst_map]  # (N_obs,)
@@ -214,9 +235,16 @@ class Transit(Instrument):
                 grid = self.time[rows][:, None]
                 weights = np.ones(1)
             else:
-                # Evenly spaced sub-times from -exptime/2 to +exptime/2.
+                # Midpoint Riemann sub-times: kk equal-width cells across
+                # [-exptime/2, +exptime/2], sampled at each cell's center
+                # (offsets (j + 0.5)/kk - 0.5, never the exposure edges).
+                # This is exactly EXOFASTv2's grid (exofast_chi2v2.pro:
+                # dindgen(ninterp)/ninterp - (ninterp-1)/(2*ninterp)),
+                # chosen there over trapezoid/Simpson: with uniform 1/kk
+                # weights, edge samples would overweight the exposure
+                # boundaries and systematically over-smear.
                 j = np.arange(kk)
-                frac = j / (kk - 1) - 0.5
+                frac = (j + 0.5) / kk - 0.5
                 grid = (
                     self.time[rows][:, None]
                     + frac[None, :] * exptime_obs[rows][:, None]
@@ -414,7 +442,7 @@ class Transit(Instrument):
 
         # 4. Exoplanet-core Transit Model, evaluated once per distinct
         # ninterp group (see _build_oversample_grid) instead of once for
-        # the whole component at max_ninterp: each group's sub-exposure
+        # the whole component at the largest ninterp: each group's sub-exposure
         # axis is exactly that group's own ninterp wide, so a
         # short-cadence (ninterp=1) observation is never evaluated at
         # another instrument's larger ninterp. With ninterp==1 everywhere
@@ -625,16 +653,16 @@ class Transit(Instrument):
 
     def _oversample_offsets(self, inst_idx):
         """Sub-exposure time offsets (days) and averaging weights for this
-        instrument's own ninterp/exptime -- the same evenly-spaced -0.5..
-        +0.5 * exptime grid _build_oversample_grid uses for build_likelihood,
-        so a plot reproduces the smeared model the fit actually optimized
-        against rather than the instantaneous one."""
+        instrument's own ninterp/exptime -- the same midpoint-Riemann grid
+        across [-exptime/2, +exptime/2] that _build_oversample_grid uses
+        for build_likelihood, so a plot reproduces the smeared model the
+        fit actually optimized against rather than the instantaneous one."""
         ninterp = int(self.ninterp[inst_idx])
         if ninterp <= 1:
             return np.zeros(1), np.ones(1)
         exptime_days = float(self.exptime_min[inst_idx]) / 1440.0
         j = np.arange(ninterp)
-        frac = j / (ninterp - 1) - 0.5
+        frac = (j + 0.5) / ninterp - 0.5
         return frac * exptime_days, np.full(ninterp, 1.0 / ninterp)
 
     def _smeared_full_lc(self, t, inst_idx, *param_values):
