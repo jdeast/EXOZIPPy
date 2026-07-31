@@ -12,8 +12,6 @@ from astropy.time import Time
 from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
-solar_system_ephemeris.set("jpl")
-
 # Cache Earth positions keyed on sorted unique times (immutable between MCMC steps).
 _earth_pos_cache = {}
 
@@ -23,6 +21,11 @@ def _earth_xyz_at(times_np):
     times_np = np.asarray(times_np)
     key = hash(times_np.tobytes())
     if key not in _earth_pos_cache:
+        # Set lazily, not at import: the first set downloads the ~115 MB
+        # de430 kernel, and doing that at import time made `import exozippy`
+        # itself require network (and fail suite-wide when JPL was slow).
+        # Same pattern as ephemeris.get_observer_position.
+        solar_system_ephemeris.set("jpl")
         t = Time(times_np, format="jd", scale="tdb")
         _earth_pos_cache[key] = (
             get_body_barycentric("earth", t).xyz.to("au").value.T
