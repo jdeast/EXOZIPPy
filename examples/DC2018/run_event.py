@@ -42,7 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dc18_common as dc
 
 
-def run_mmexofast_step(data_dir, event, name, event_dir, cores=None):
+def run_mmexofast_step(
+    data_dir, event, name, event_dir, cores=None, quick=False, emcee=False
+):
     """Step 1: MMEXOFAST on both bands; returns the cached JSON path.
 
     ``cores`` caps the emcee pool for the binary-lens fits -- the dominant
@@ -62,6 +64,32 @@ def run_mmexofast_step(data_dir, event, name, event_dir, cores=None):
     coords = SkyCoord(ra, dec, unit="deg").to_string(style="hmsdms")
     json_path = Path(event_dir) / f"{name}_mmexofast.json"
     pool = int(cores) if cores else max(2, mp.cpu_count() // 4)
+    # Zero limb darkening matches MMEXOFAST's own DC18 example.
+    options = {
+        "limb_darkening_coeffs_gamma": {"W149": 0.0, "Z087": 0.0},
+        "pool": pool,
+    }
+    if not emcee:
+        # Default: stop after the binary-parameter ESTIMATION. The emcee
+        # polish (fit_binary_lens_models) costs hours on DC18 cadence --
+        # 40 walkers x 1000 steps x a 39k-epoch binary chi2, straggler-
+        # bound at the ensemble barrier because VBBL evaluation time varies
+        # wildly across walker positions -- and EXOZIPPy refits everything
+        # anyway: the seeds only need to land in the right basin, and
+        # initialize_exozippy() falls back to the estimator's solutions
+        # (parameters only, no sigmas -- EXOZIPPy then skips the optional
+        # scale hints). Masks and error factors still come out: the
+        # renormalize stage runs before this cut.
+        options["stop_before"] = "fit_binary_lens:fit_binary_lens_models"
+    elif quick:
+        # Smoke-test emcee: upstream defaults are 40 x 1000 + 500 burn.
+        # NOTE: emcee's stretch move evaluates half the ensemble per batch,
+        # so parallelism beyond n_walkers/2 processes buys nothing.
+        options["emcee_settings"] = {
+            "n_walkers": 40,
+            "n_burn": 100,
+            "n_steps": 200,
+        }
     mmexofast_support.run_or_load(
         json_path,
         list(files.values()),
@@ -69,11 +97,7 @@ def run_mmexofast_step(data_dir, event, name, event_dir, cores=None):
         fit_type="binary_lens",
         renormalize_errors=True,
         no_parallax=True,
-        # Zero limb darkening matches MMEXOFAST's own DC18 example.
-        options={
-            "limb_darkening_coeffs_gamma": {"W149": 0.0, "Z087": 0.0},
-            "pool": pool,
-        },
+        options=options,
     )
     return json_path
 
@@ -211,6 +235,13 @@ def main(argv=None):
         action="store_true",
         help="Skip the fit; just rebuild comparison.csv from existing output",
     )
+    ap.add_argument(
+        "--mmx-emcee",
+        action="store_true",
+        help="Run MMEXOFAST's emcee binary-lens polish (hours; default "
+        "stops after the much faster parameter estimation, which is "
+        "sufficient to seed EXOZIPPy)",
+    )
     args = ap.parse_args(argv)
 
     if args.quick:
@@ -235,7 +266,13 @@ def main(argv=None):
         status_file.write_text("running mmexofast\n")
         try:
             mmx_json = run_mmexofast_step(
-                data_dir, args.event, name, event_dir, cores=args.cores
+                data_dir,
+                args.event,
+                name,
+                event_dir,
+                cores=args.cores,
+                quick=args.quick,
+                emcee=args.mmx_emcee,
             )
         except BaseException:
             status_file.write_text(

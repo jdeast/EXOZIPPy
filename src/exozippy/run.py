@@ -970,7 +970,11 @@ def _format_summary(idata, diag):
             f"Rhat<={diag.get('max_rhat_threshold')}, "
             f"ESS>={diag.get('min_ess_threshold')}"
         )
-    return "\n".join(header) + "\n" + str(df) + "\n"
+    # to_string(), not str(): str(df) elides middle columns ("...") at
+    # narrow terminal widths, silently dropping ess_bulk/ess_tail/r_hat --
+    # the columns downstream tooling (e.g. examples/DC2018's collector)
+    # parses from this file.
+    return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
 def make_corner(model, idata, filename, max_samples=1000):

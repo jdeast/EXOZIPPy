@@ -10,9 +10,14 @@ pipeline, one cluster job per event:
    the fit (multi-seed sampling), its bad-data mask (`excluded_points`)
    drops the flagged points via the generic instrument `mask:` feature,
    and its error factors (`errfacs`) seed each instrument's `err_scale`.
-   (This explicit step is optional in general: a config whose params file
-   lacks microlensing start values triggers the same MMEXOFAST run
-   automatically inside EXOZIPPy's data-driven-hints layer.)
+   By default the run stops after the binary-parameter ESTIMATION
+   (`stop_before` the emcee polish, which costs hours on DC18 cadence and
+   adds nothing EXOZIPPy needs -- the seeds only have to land in the
+   right basin); pass `--mmx-emcee` (job: `EXTRA="--mmx-emcee"`) for the
+   full MMEXOFAST fit. (This explicit step is optional in general: a
+   config whose params file lacks microlensing start values triggers the
+   same MMEXOFAST run automatically inside EXOZIPPy's data-driven-hints
+   layer.)
 2. **EXOZIPPy** samples the 2L1S system (PTDE, EXOFASTv2-parity settings)
    and writes the usual artifacts under `events/<NNN>/fitresults/`.
 3. **Comparison** against the challenge's answer key
@@ -40,6 +45,11 @@ pipeline, one cluster job per event:
   NOTE: the automatic mask/err_scale consumption needs an MMEXOFAST recent
   enough to write `excluded_points`/`jd_offset` in its exozippy-init JSON
   (2026-07 or later). Older versions still work -- seeds only, no masking.
+  This workflow also relies on three 2026-07-31 MMEXOFAST performance/
+  correctness patches (fast outlier rejection, emcee pool support, and the
+  renormalize-after-anomaly-search reorder so the outlier rejection cannot
+  eat the planetary anomaly); until they are merged upstream, install
+  MMEXOFAST from the patched checkout.
 
 ## Quick single-event test (local)
 

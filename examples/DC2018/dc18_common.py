@@ -190,20 +190,31 @@ def read_summary_diagnostics(summary_path):
 
     Returns (overall, per_var): overall = {"rhat_max": float, "ess_bulk_min":
     float, "ess_tail_min": float}, per_var = {varname: (r_hat, ess_bulk,
-    ess_tail)}. Layout: name + 9 numeric columns, last three being ess_bulk,
-    ess_tail, r_hat; banner/header lines are skipped by shape.
+    ess_tail)}. Column POSITIONS vary across arviz versions (hdi vs eti
+    intervals, mcse before or after the ess columns), so the header row --
+    the line naming r_hat/ess_bulk -- drives the mapping; data rows are
+    name + one number per header column, and everything else (banners,
+    repeated headers) is skipped by shape.
     """
     per_var = {}
+    cols = None
     with open(summary_path) as f:
         for line in f:
             tok = line.split()
-            if len(tok) != 10:
+            if "r_hat" in tok and "ess_bulk" in tok:
+                cols = tok
+                continue
+            if cols is None or len(tok) != len(cols) + 1:
                 continue
             try:
-                nums = [float(x) for x in tok[1:]]
+                rec = dict(zip(cols, (float(x) for x in tok[1:])))
             except ValueError:
                 continue
-            per_var[tok[0]] = (nums[-1], nums[-3], nums[-2])
+            per_var[tok[0]] = (
+                rec["r_hat"],
+                rec["ess_bulk"],
+                rec.get("ess_tail", rec["ess_bulk"]),
+            )
     if not per_var:
         return {}, {}
     overall = {
