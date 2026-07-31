@@ -57,7 +57,7 @@ type Selection =
   | { kind: "global" }
   | { kind: "instance"; comp: string; name: string };
 
-const PARAM_FIELDS = ["initval", "lower", "upper", "sigma", "mu", "init_scale"];
+const PARAM_FIELDS = ["initval", "lower", "upper", "sigma", "mu", "bound_scale"];
 
 export default function ConfigTab({ configPath }: { configPath: string | null }) {
   const [schema, setSchema] = useState<Schema | null>(null);
