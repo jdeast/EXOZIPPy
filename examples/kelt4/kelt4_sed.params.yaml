@@ -1,6 +1,5 @@
 #orbit.orbit_b.period:
 #  initval: 2.9895933 # this is the initial value, which impacts the accessible parameter space, but not the likelihood explicitly. Note: this is assumed gaussian prior unless mu is also specified
-#  init_scale: 1e-6 # this is the initial scale. the ideal value is the 1-sigma uncertainty. This impacts the number of tuning steps required for convergence, but not the likelihood explicitly
 #  gaussian_width: 0.001 # this is a gaussian prior, which impacts the likelihood and biases the fit
 #  upper_bound: 3.0 # this is an upper bound, which impacts the likelihood and biases the fit
 #  lower_bound: 2.98 # this is an upper bound, which impacts the likelihood and biases the fit
@@ -72,17 +71,14 @@ star.C.teff:
 # bounds at the 10-day default).
 orbit.BC.logP:
   initval: 4.02      # ~29 yr
-  init_scale: 0.15
 orbit.BC.tc:
   initval: 2456054.5  # the resolved AO epoch
-  init_scale: 1500.0
 # tc is seeded at the AO epoch = conjunction, where the companion sits
 # at PA = bigomega - 90 with projected sep = a*cosi (and the seed RV
 # contribution of the wide orbits is ~0), so bigomega = PA_obs + 90 and
 # a near-face-on cosi keep the seed model on the measured positions.
 orbit.BC.cosi:
   initval: 0.95
-  init_scale: 0.1
 orbit.BC.bigomega:
   initval: 55.2       # PA_obs (325.2) + 90, mod 360
 
@@ -90,13 +86,10 @@ orbit.BC.bigomega:
 # M_A + M_b + M_B + M_C ~ 2.7 Msun -> P ~ 3900 yr.
 orbit.A-BC.logP:
   initval: 6.15       # ~3900 yr
-  init_scale: 0.3
 orbit.A-BC.tc:
   initval: 2456054.5
-  init_scale: 150000.0
 orbit.A-BC.cosi:
   initval: 0.95
-  init_scale: 0.1
 orbit.A-BC.bigomega:
   initval: 118.9      # PA_obs (28.9) + 90
 
@@ -105,31 +98,17 @@ orbit.0.period:
 orbit.0.tc:
   #initval: 2456190.302013
   initval: 2459634.3
-  #init_scale: 0.0055082686
 orbit.0.cosi:
   initval: 0.11996
 planet.0.radius:
   initval: 1.706
-rvinstrument.EXPERT.gamma:
-  #init_scale: 11.1130411925
-rvinstrument.FIES.gamma:
-  init_scale: 8.55538045957
-rvinstrument.HIRES.gamma:
-  #init_scale: 0.84847723031
-rvinstrument.TRES.gamma:
-  #init_scale: 5.3882459687
 rvinstrument.EXPERT.jitter_variance:
-  init_scale: 10
   lower: -100
   upper: 100
 rvinstrument.FIES.jitter_variance:
-  init_scale: 10
   lower: -100
   upper: 100
-rvinstrument.HIRES.jitter_variance:
-  #init_scale: 0.49937616943
 #inst.TRES.jitter_variance:
-#  init_scale: 10
 #  lower: -100
 #  upper: 100
 

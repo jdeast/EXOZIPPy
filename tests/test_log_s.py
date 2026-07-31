@@ -92,19 +92,19 @@ def test_log_s_is_sampled_and_s_is_derived(default_s_system):
 
 
 def test_user_s_initval_seeds_log_s_start(default_s_system):
-    """Given a params entry setting lens.s initval and init_scale, when the
-    relaxation engine runs, then log_s is seeded with log10(s) and its
-    init_scale is the Jacobian-propagated ds/(s ln10)."""
-    s0, scale0 = _DEFAULT_S_ENTRY["initval"], _DEFAULT_S_ENTRY["init_scale"]
+    """Given a params entry setting lens.s initval, when the relaxation
+    engine runs, then log_s is seeded with log10(s).  The entry's obsolete
+    init_scale is stripped (whitening scales are measured at startup), so
+    log_s keeps a finite preliminary scale from defaults."""
+    s0 = _DEFAULT_S_ENTRY["initval"]
     system, _ = default_s_system
 
     np.testing.assert_allclose(system.lens.s.initval, [s0], rtol=1e-9)
     np.testing.assert_allclose(
         system.lens.log_s.initval, [np.log10(s0)], atol=1e-6
     )
-    np.testing.assert_allclose(
-        system.lens.log_s.init_scale, [scale0 / (s0 * np.log(10.0))], rtol=1e-4
-    )
+    log_s_scale = np.atleast_1d(system.lens.log_s.init_scale)
+    assert np.all(np.isfinite(log_s_scale)) and np.all(log_s_scale > 0)
 
 
 def test_user_s_bounds_translate_to_log_s():

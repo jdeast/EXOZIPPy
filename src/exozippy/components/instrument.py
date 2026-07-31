@@ -69,6 +69,9 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # Optional per-file exclusion mask (see _apply_mask). Parsed here so a
+        # malformed spec fails at construction, not mid-load.
+        self.mask_specs = [c.get("mask") for c in self.config]
         self._load_plot_styles()
         self._load_gp_config()
 
@@ -154,6 +157,109 @@ class Instrument(Component):
         if np.all(order == np.arange(len(order))):
             return df  # already sorted: no copy
         return df.iloc[order].reset_index(drop=True)
+
+    def _apply_mask(self, df, i):
+        """Drop excluded rows of file ``i`` per its optional ``mask:`` config.
+
+        Called on each data file right after reading and BEFORE
+        ``_sort_by_time``, so every mask spec refers to the file's own row
+        order as it is on disk (comment lines not counted).  Dropping whole
+        rows here -- before any column is split out or anything is derived
+        from the times -- keeps the observable, errors, detrend columns and
+        every row-aligned side array (observer positions, parallax factors)
+        consistent by construction, exactly like the sort.
+
+        Accepted ``mask:`` forms on an instrument's config entry:
+
+        - a path to a whitespace/newline-delimited file with ONE value per
+          data row (0/1, true/false): nonzero/true means EXCLUDE that row.
+          This is the shape a bad-data flag vector (e.g. from MMEXOFAST)
+          saves to naturally.
+        - a list of booleans, one per data row: True means EXCLUDE.
+        - a list of integers: 0-based row indices to EXCLUDE.
+
+        Absent or ``null`` keeps every point (the default: byte-for-byte the
+        pre-feature behavior).
+        """
+        spec = self.mask_specs[i]
+        if spec is None:
+            return df
+        label = f"{self.prefix}[{self.names[i]}]"
+        n = len(df)
+
+        if isinstance(spec, str):
+            flags = np.loadtxt(spec, dtype=float, comments="#").ravel()
+            if flags.size != n:
+                raise ValueError(
+                    f"[{label}] mask file '{spec}' has {flags.size} entries "
+                    f"but the data file has {n} rows -- one flag per data "
+                    f"row is required."
+                )
+            exclude = flags.astype(bool)
+        elif isinstance(spec, (list, tuple, np.ndarray)):
+            spec = list(spec)
+            if all(isinstance(v, (bool, np.bool_)) for v in spec):
+                if len(spec) != n:
+                    raise ValueError(
+                        f"[{label}] boolean mask has {len(spec)} entries but "
+                        f"the data file has {n} rows."
+                    )
+                exclude = np.asarray(spec, dtype=bool)
+            elif all(
+                isinstance(v, (int, np.integer))
+                and not isinstance(v, (bool, np.bool_))
+                for v in spec
+            ):
+                idx = np.asarray(spec, dtype=int)
+                if idx.size and (idx.min() < 0 or idx.max() >= n):
+                    raise ValueError(
+                        f"[{label}] mask indices must be 0-based row indices "
+                        f"in [0, {n - 1}]; got min {idx.min()}, max "
+                        f"{idx.max()}."
+                    )
+                exclude = np.zeros(n, dtype=bool)
+                exclude[idx] = True
+            else:
+                raise ValueError(
+                    f"[{label}] mask list must be all booleans (per-row "
+                    f"flags) or all integers (row indices to exclude)."
+                )
+        else:
+            raise ValueError(
+                f"[{label}] mask must be a file path or a list; got "
+                f"{type(spec).__name__}."
+            )
+
+        n_masked = int(exclude.sum())
+        if n_masked == n:
+            raise ValueError(
+                f"[{label}] mask excludes every one of the {n} data points."
+            )
+        if n_masked:
+            logger.info(f"[{label}] mask excluded {n_masked}/{n} data points.")
+            df = df.loc[~exclude].reset_index(drop=True)
+        return df
+
+    @staticmethod
+    def _mask_config_schema():
+        """The shared ``mask`` config-schema entry (per-file point exclusion).
+
+        Children append this to their ``config_schema()`` so introspection and
+        a GUI discover the key generically.
+        """
+        return {
+            "key": "mask",
+            "kind": "option",
+            "accepts": None,
+            "required": False,
+            "doc": (
+                "Optional per-file point exclusion, applied to the data "
+                "file's own row order before anything is derived from it: a "
+                "path to a file with one 0/1 flag per data row (nonzero = "
+                "exclude), a list of booleans (one per row, true = exclude), "
+                "or a list of 0-based row indices to exclude."
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Optional per-file Gaussian-process noise (celerite2)

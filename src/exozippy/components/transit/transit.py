@@ -107,6 +107,7 @@ class Transit(Instrument):
                     "instead (bands carry the filter identity)."
                 ),
             },
+            cls._mask_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -127,8 +128,10 @@ class Transit(Instrument):
             df = pd.read_csv(
                 file, sep=r"\s+", engine="c", header=None, comment="#"
             )
-            # One sort per file, before anything is derived from it: keeps the
-            # flux, errors and detrend columns aligned by construction.
+            # Mask (raw row order), then one sort per file, before anything is
+            # derived from it: keeps the flux, errors and detrend columns
+            # aligned by construction.
+            df = self._apply_mask(df, i)
             df = self._sort_by_time(df)
             n_obs = len(df)
             all_times.append(df.iloc[:, 0].values)

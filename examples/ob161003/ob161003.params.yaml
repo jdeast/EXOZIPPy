@@ -8,57 +8,46 @@
 
 lens.SourceA.t_0:
     initval: 2457551.038
-    init_scale: 0.201
 
 lens.SourceB.t_0:
     initval: 2457552.517
-    init_scale: 0.134
 
 lens.SourceA.u_0:
     initval: 0.059
-    init_scale: 0.013
 
 lens.SourceB.u_0:
     initval: 0.135
-    init_scale: 0.006
 
 # t_E is shared by both sources in the published solution (both sources are
 # in the bulge with a common lens); referenced to the TOTAL lens mass.
 lens.SourceA.t_E:
     initval: 28.931
-    init_scale: 0.665
 
 lens.SourceB.t_E:
     initval: 28.931
-    init_scale: 0.665
 
 lens.Lens.s:
     initval: 1.033
-    init_scale: 0.011
 
-# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.
+# alpha: relaxation engine propagates the initval to xalpha/yalpha.
 # Jung et al. 2017 report alpha = 48.243 deg; their convention maps to
 # MulensModel's (used internally) as alpha_MM = 180 - alpha_paper.
 # (Verified by chi2 scan over {±alpha, 180±alpha} × u_0 sign: 131.757 with
 # u_0 > 0 gives chi2/N ~ 1.25; all other combinations are catastrophic.)
 lens.Lens.alpha:
     initval: 131.757
-    init_scale: 0.859
 
 lens.SourceA.rho:
     initval: 0.000451
-    init_scale: 0.0002
 
 lens.SourceB.rho:
     initval: 0.001293
-    init_scale: 0.000161
 
 # q = M_LensB / M_Lens (~1.19: the "companion" is the more massive body).
 # EXOZIPPy's relaxation engine propagates this through the symbolic relation
 # q * M_primary = M_companion to set LensB's mass initval automatically.
 lens.Lens.q:
     initval: 1.188
-    init_scale: 0.039
 
 star.ra:
     initval: 264.10513
@@ -84,7 +73,7 @@ star.feh:
 # lightcurve shape) is derived from radius via calc_rho(radius, distance,
 # theta_E), so floating radius lets the data's rho constraint propagate
 # through to a real physical posterior instead of being clamped at the
-# value back-solved from the seeded rho above.  initval/init_scale still
-# come from that back-solve (via the relaxation engine + Jacobian scale
-# propagation), so the starting point and step size are well-informed;
+# value back-solved from the seeded rho above.  The initval still comes
+# from that back-solve (via the relaxation engine), so the starting point
+# is well-informed (the whitening probe measures the step size);
 # only the hard fix is removed.

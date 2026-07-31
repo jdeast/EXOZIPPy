@@ -17,6 +17,8 @@ from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 
+from . import mmexofast_support
+
 
 def _raw_initval(data, default=None):
     """Read a raw ``user_params`` initval, collapsing a list (P4 multi-seed
@@ -116,6 +118,7 @@ class MulensInstrument(Instrument):
                     "f_blend flux system. Defaults to the first instrument."
                 ),
             },
+            cls._mask_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -160,6 +163,10 @@ class MulensInstrument(Instrument):
 
         self._n_sources = int(system.lens.n_sources)
 
+        # MMEXOFAST integration (masks + error factors + auto seeds) -- must
+        # run before the file loop so excluded points never enter the arrays.
+        self._resolve_mmexofast(system)
+
         # Source RA/Dec (degrees from resolve → radians for projection math)
         source_ndx = int(system.lens.source_map[0])
         n_stars = system.star.n_elements
@@ -196,8 +203,10 @@ class MulensInstrument(Instrument):
             df = pd.read_csv(
                 file, sep=r"\s+", engine="c", header=None, comment="#"
             )
-            # Sort before the observer positions are computed from t, so the
-            # ephemeris rows stay aligned with the photometry.
+            # Mask (raw row order), then sort before the observer positions
+            # are computed from t, so the ephemeris rows stay aligned with
+            # the photometry.
+            df = self._apply_mask(df, i)
             df = self._sort_by_time(df)
             t, m, e = (
                 df.iloc[:, 0].values,
@@ -280,6 +289,98 @@ class MulensInstrument(Instrument):
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
+
+    def _resolve_mmexofast(self, system):
+        """Stage-1a half of the MMEXOFAST integration.
+
+        Three modes, keyed off the lens block's ``mmexofast`` entry:
+
+        - explicit file path: the JSON's bad-data mask (``excluded_points``)
+          and error factors (``errfacs``) are applied to this component's
+          files; the seed hints are pushed by Lens at stage 2 as before.
+        - absent (default) or ``auto``: when the params file lacks start
+          values for the microlensing parameters (or always, for ``auto``),
+          MMEXOFAST is run on the raw light curves -- renormalize_errors on,
+          output cached at ``<prefix>_mmexofast.json`` -- and its seeds,
+          masks and error factors are all consumed here.
+        - ``false``: fully opts out.
+
+        This lives on the instrument rather than Lens because the mask must
+        exist before the photometry is read (load_data), and only this
+        component knows its files; Lens owns the stage-2 seed path for
+        explicit files, and both share mmexofast_support for the translation.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None:
+            return
+        spec = lens.config[0].get("mmexofast") if lens.config else None
+        if spec is False:
+            return
+        is_binary = lens.n_companions >= 1
+        want_rho = bool(any(lens.finite_source))
+
+        if isinstance(spec, str) and spec != "auto":
+            # Explicit JSON: masks + error factors only (Lens pushes seeds).
+            data = mmexofast_support.load_json(spec)
+        else:
+            if spec != "auto" and mmexofast_support.user_hints_sufficient(
+                self.config_manager.user_params, is_binary, want_rho
+            ):
+                return
+            prefix = system.config.get("prefix", "fitresults/planet")
+            json_path = f"{prefix}_mmexofast.json"
+            options = dict(lens.config[0].get("mmexofast_options") or {})
+            data = mmexofast_support.run_or_load(
+                json_path,
+                self.files,
+                coords=self._mmexofast_coords(system),
+                fit_type="binary_lens" if is_binary else "point_lens",
+                options=options,
+            )
+            if data is not None:
+                mmexofast_support.push_seed_hints(
+                    data,
+                    self.config_manager,
+                    want_rho=want_rho,
+                    is_binary=is_binary,
+                    source=json_path,
+                )
+        if data is None:
+            return
+        mmexofast_support.apply_excluded_points(
+            data, self.files, self.mask_specs, self.prefix
+        )
+        mmexofast_support.push_errfac_hints(
+            data, self.files, self.prefix, self.config_manager
+        )
+
+    def _mmexofast_coords(self, system):
+        """Source-star coordinates as an 'hh:mm:ss dd:mm:ss' string, or None.
+
+        Same resolve pathway load_data itself uses for the projection math;
+        harmless under no_parallax (the default for the automatic run) but
+        required if the user opts parallax back in via mmexofast_options.
+        """
+        try:
+            from astropy.coordinates import SkyCoord
+
+            source_ndx = int(system.lens.source_map[0])
+            n_stars = system.star.n_elements
+            ra_deg = self.config_manager.resolve(
+                "star", "ra", shape=(n_stars,)
+            )["initval"][source_ndx]
+            dec_deg = self.config_manager.resolve(
+                "star", "dec", shape=(n_stars,)
+            )["initval"][source_ndx]
+            return SkyCoord(
+                float(ra_deg), float(dec_deg), unit="deg"
+            ).to_string(style="hmsdms")
+        except Exception as e:
+            logger.warning(
+                f"Could not resolve source coordinates for MMEXOFAST: {e}; "
+                f"running without coords."
+            )
+            return None
 
     def _check_data_format(
         self,

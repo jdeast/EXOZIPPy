@@ -11,21 +11,17 @@ star.BulgeTarget.dec:
 # Free parameters to let the prior find its equilibrium
 star.BulgeTarget.mass:
   initval: 0.5
-  init_scale: 0.439
   #sigma: 0.1
 star.BulgeTarget.logmass:
   initval: -0.3
-  init_scale: 0.5698
   #sigma: 0.1
 star.BulgeTarget.distance:
   initval: 8000.0
-  init_scale: 1000
   lower: 1
   upper: 20000
   #sigma: 1000
 star.BulgeTarget.pm_ra:
   initval: -3.0
-  init_scale: 2
   # distance and pm have a strong curved degeneracy.
   # restricting them more than their exceptionally wide default priors is not necessary, but improves efficiency
   lower: -100
@@ -33,13 +29,11 @@ star.BulgeTarget.pm_ra:
   #sigma: 1
 star.BulgeTarget.pm_dec:
   initval: -3.0
-  init_scale: 2
   lower: -100
   upper: 100
   #sigma: 1
 star.BulgeTarget.rv:
   initval: -20000.0
-  init_scale: 100000
   #sigma: 10000
 
 # these aren't constrained and they don't depend on anything, just fix them

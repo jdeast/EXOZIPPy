@@ -189,19 +189,20 @@ def test_extreme_raw_never_produces_runaway_positive_logp():
                 prev = val
 
 
-def test_auditor_handles_partially_frozen_vector_parameters():
+def test_set_whitening_handles_partially_frozen_vector_parameters():
     """
-    Given a vectorized parameter where one element is sampled and another is frozen,
-    When the ModelAuditor extracts the sampler curvatures,
-    Then it should correctly map the compressed PyMC array back to the original shape
-    without throwing an IndexError, placing NaNs in the frozen slots.
+    Given a vectorized parameter where one element is sampled and another is
+    frozen (sigma: 0),
+    When set_whitening applies a probe multiplier (one entry per SAMPLED
+    element, matching the compressed raw vector),
+    Then the sampled element's whitening rescales and the frozen slot is
+    untouched -- the compressed-to-full index mapping must not drift.
     """
 
     # ARRANGE
-    # Override the second star's mass to be completely frozen
     user_params = {
-        "star.0.mass": {"initval": 1.0, "init_scale": 0.1},
-        "star.1.mass": {"initval": 1.0, "init_scale": 0.0},  # Frozen!
+        "star.0.mass": {"initval": 1.0},
+        "star.1.mass": {"initval": 1.0, "sigma": 0.0},  # Frozen!
     }
 
     system = MockSystem(user_params)
@@ -209,37 +210,24 @@ def test_auditor_handles_partially_frozen_vector_parameters():
     system.star = star
 
     with pm.Model() as model:
-        # Build the parameter. PyMC will detect the 0.0 scale and compress
-        # 'star.mass_raw' to a shape of (1,) instead of (2,)
+        # PyMC compresses 'star.mass_raw' to shape (1,): only element 0 samples.
         star.manifest = {"mass": {}}
         star.add_parameter(model=model, param_name="mass", system=system)
 
-    # Mimic the transformed initialization dict created by `system.get_mcmc_init()`
-    transformed_inits = {"star.mass_raw": np.array([0.0])}
+    p = star.mass
+    assert p.raw_initval.size == 1, "expected one sampled element"
+    scale_logits_before = p._whiten_state["sv_scale_logits"].get_value().copy()
 
-    auditor = ModelAuditor(model, system, transformed_inits)
-
-    # ACT
-    # This invokes PyTensor to calculate the gradient, and then expands the result
-    curvatures = auditor.get_curvatures()
+    # ACT: one multiplier per SAMPLED element (the probe's output shape)
+    p.set_whitening(np.array([0.5]))
 
     # ASSERT
-    assert "star.mass" in curvatures
-    curv = curvatures["star.mass"]
-
-    # 1. Did it successfully restore the original shape?
-    assert len(curv) == 2, (
-        "Curvature array was not expanded to match the physical shape!"
+    after = p._whiten_state["sv_scale_logits"].get_value()
+    assert np.isclose(after[0], 0.5 * scale_logits_before[0]), (
+        "The sampled element's whitening scale was not rescaled!"
     )
-
-    # 2. Does the sampled parameter have a real curvature?
-    assert not np.isnan(curv[0]), (
-        "The sampled element's curvature was improperly wiped out!"
-    )
-
-    # 3. Did the frozen parameter safely receive a NaN?
-    assert np.isnan(curv[1]), (
-        "The frozen element did not receive a NaN padding!"
+    assert after[1] == scale_logits_before[1], (
+        "The frozen element's slot must be untouched!"
     )
 
 

@@ -17,28 +17,17 @@ Usage:
     python scripts/mmexofast_to_params.py examples/DC2018_128/mmexofast.json \\
         --lens-name Lens --solution 1 --out examples/DC2018_128/DC2018_128.params.yaml
 
-MMEXOFAST provides initvals and, optionally, estimated uncertainties from a
-quick optimization fit to the data.  The uncertainties are mapped to EXOZIPPy
-init_scales, which only sets the sampler's initial step size without adding any
-logp penalty. They are NOT used as priors, which would double-count the data and
-artificially shrink the posterior.
-
-Uncertainties are optional: MMEXOFAST omits the per-fit ``sigmas`` block for
-solutions that are initial estimates rather than optimized fits, and is
-expected to stop emitting sigmas altogether. Any parameter whose sigma is
-absent simply gets no ``init_scale`` line, leaving EXOZIPPy's own default step
-size in place. Only ``initval`` is required.
-
-MMEXOFAST gives uncertainties in log space for s, q, rho (log_s, log_q,
-log_rho).  Physical init_scale is recovered via first-order propagation:
-    sigma_x_physical = x * sigma_ln_x
+Only MMEXOFAST's initvals are used.  Its estimated uncertainties are neither
+mapped to priors (sigma would double-count the data and artificially shrink
+the posterior) nor to whitening scales: EXOZIPPy measures each parameter's
+whitening scale directly from the data at startup (see exozippy/whitening.py),
+so an ``init_scale`` line would be warn-ignored anyway.
 
 With multiple solutions, ``initval`` becomes a list (one entry per solution,
 in file order) so the relaxation engine solves one mutually-consistent start
 point per entry inside a single prepare() call (see config.py's
-finalize_user_params / _build_seed_overrides). Bounds and init_scale are NOT
-per-seed -- they resolve once, from the first (seed 0) solution -- so this
-script always emits a single scalar init_scale even when initval is a list.
+finalize_user_params / _build_seed_overrides). Bounds are NOT per-seed -- they
+resolve once, from the first (seed 0) solution.
 """
 
 import argparse
@@ -53,36 +42,9 @@ def _fmt(values, spec):
     return "[" + ", ".join(format(v, spec) for v in values) + "]"
 
 
-def _scale(fit, key):
-    """Linear-space init_scale for ``key``, or None when it is unavailable.
-
-    MMEXOFAST omits ``sigmas`` entirely for solutions that are initial
-    estimates rather than optimized fits, and is expected to stop emitting
-    them altogether. init_scale is only a sampler hint, so a missing sigma
-    means "let EXOZIPPy pick the step size", not an error.
-    """
-    return (fit.get("sigmas") or {}).get(key)
-
-
-def _log_scale(fit, log_key, phys_key):
-    """Convert a log-space sigma to a physical init_scale: x * sigma_ln_x.
-
-    Returns None when the sigma is unavailable; see :func:`_scale`.
-    """
-    sigma = _scale(fit, log_key)
-    if sigma is None:
-        return None
-
-    return fit["parameters"][phys_key] * sigma
-
-
-def _param_block(path, initval, scale, scale_spec):
-    """YAML lines for one parameter, omitting init_scale when it is None."""
-    lines = [f"{path}:", f"    initval: {initval}"]
-    if scale is not None:
-        lines.append(f"    init_scale: {format(scale, scale_spec)}")
-
-    return lines
+def _param_block(path, initval):
+    """YAML lines for one parameter (initval only; see module docstring)."""
+    return [f"{path}:", f"    initval: {initval}"]
 
 
 def mmexofast_to_params(
@@ -118,32 +80,28 @@ def mmexofast_to_params(
         f"# Source: {json_path}",
         f"# n_solutions in file: {n}",
         f"#",
-        f"# MMEXOFAST uncertainties are mapped to init_scale, NOT sigma.",
-        f"# init_scale = sampling hint only (no logp penalty).",
-        f"# sigma = Gaussian prior (would double-count the data).",
+        f"# Only initvals are used: MMEXOFAST uncertainties are not mapped to",
+        f"# sigma (a Gaussian prior would double-count the data), and whitening",
+        f"# scales are measured from the data by EXOZIPPy at startup.",
     ]
     if multi:
         lines += [
             f"#",
             f"# initval is list-valued: one mutually-consistent start point per",
             f"# solution above (P4 multi-seed sampling -- see config.py's",
-            f"# finalize_user_params). init_scale/bounds are NOT per-seed and",
-            f"# always come from the first (seed 0) solution.",
+            f"# finalize_user_params). Bounds are NOT per-seed and always come",
+            f"# from the first (seed 0) solution.",
         ]
     lines.append("")
 
     lines += _param_block(
         f"lens.{lens_name}.t_0",
         _fmt([fit["parameters"]["t_0"] for fit in chosen], ".8f"),
-        _scale(chosen[0], "t_0"),
-        ".8f",
     )
     lines.append("")
     lines += _param_block(
         f"lens.{lens_name}.u_0",
         _fmt([fit["parameters"]["u_0"] for fit in chosen], ".8f"),
-        _scale(chosen[0], "u_0"),
-        ".8f",
     )
     lines += [
         f"",
@@ -153,25 +111,19 @@ def mmexofast_to_params(
     lines += _param_block(
         f"lens.{lens_name}.t_E",
         _fmt([fit["parameters"]["t_E"] for fit in chosen], ".8f"),
-        _scale(chosen[0], "t_E"),
-        ".8f",
     )
     lines.append("")
     lines += _param_block(
         f"lens.{lens_name}.s",
         _fmt([fit["parameters"]["s"] for fit in chosen], ".8f"),
-        _log_scale(chosen[0], "log_s", "s"),
-        ".8f",
     )
     lines += [
         f"",
-        f"# alpha: relaxation engine propagates initval/init_scale to xalpha/yalpha.",
+        f"# alpha: relaxation engine propagates the initval to xalpha/yalpha.",
     ]
     lines += _param_block(
         f"lens.{lens_name}.alpha",
         _fmt([fit["parameters"]["alpha"] for fit in chosen], ".8f"),
-        _scale(chosen[0], "alpha"),
-        ".8f",
     )
 
     rhos = [fit["parameters"].get("rho", 0.0) for fit in chosen]
@@ -181,8 +133,6 @@ def mmexofast_to_params(
         lines += _param_block(
             f"lens.{lens_name}.rho",
             _fmt(rhos, ".8e"),
-            _log_scale(chosen[0], "log_rho", "rho"),
-            ".8e",
         )
     else:
         lines += [
@@ -201,8 +151,6 @@ def mmexofast_to_params(
         lines += _param_block(
             f"lens.{lens_name}.q",
             _fmt(qs, ".8e"),
-            _log_scale(chosen[0], "log_q", "q"),
-            ".8e",
         )
 
     text = "\n".join(lines) + "\n"
