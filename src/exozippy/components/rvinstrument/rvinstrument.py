@@ -1,7 +1,6 @@
 import logging
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +81,9 @@ class RVInstrument(Instrument):
                     "'m/s'."
                 ),
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(("time", "rv", "err")),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -98,13 +100,11 @@ class RVInstrument(Instrument):
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # One sort per file, before anything is derived from it: keeps the
+        for i in range(self.n_elements):
+            # Shared reader: columns:, mask:, time_* conversion, then one
+            # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
-            df = self._sort_by_time(df)
+            df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
             n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
             all_times.append(df.iloc[:, 0].values)

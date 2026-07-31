@@ -1,7 +1,6 @@
-from typing import Any, Dict, List
+from typing import Dict
 
 import numpy as np
-import pytensor.tensor as pt
 
 
 class ModelAuditor:
@@ -64,39 +63,6 @@ class ModelAuditor:
 
         return param_logps, other_nodes
 
-    def get_curvatures(self) -> Dict[str, np.ndarray]:
-        """Calculates diagonal curvature in Unity space."""
-        from .run import get_diagonal_curvature  # Keep circular import local
-
-        curvature_map = {}
-        curv_vec = get_diagonal_curvature(self.model, self.transformed_inits)
-
-        # 1. Map raw variables to their compressed curvature arrays
-        idx = 0
-        raw_curvs = {}
-        for var in self.model.value_vars:
-            var_size = self.transformed_inits[var.name].size
-            raw_curvs[var.name] = curv_vec[idx : idx + var_size]
-            idx += var_size
-
-        # 2. Safely expand them back to their full physical shapes
-        for p in self.all_params:
-            n_elements = np.prod(p.shape).astype(int) if p.shape != () else 1
-            full_curv = np.full(n_elements, np.nan)
-            raw_name = f"{p.label}_raw"
-
-            if raw_name in raw_curvs and hasattr(p, "is_sampled"):
-                # Map the compressed curvature vector back to the original indices
-                if np.sum(p.is_sampled) == raw_curvs[raw_name].size:
-                    full_curv[p.is_sampled] = raw_curvs[raw_name]
-                else:
-                    # Fallback safeguard
-                    full_curv[: raw_curvs[raw_name].size] = raw_curvs[raw_name]
-
-            curvature_map[p.label] = full_curv
-
-        return curvature_map
-
     def check_unused_yaml(self):
         """Returns keys in YAML that didn't match any built Parameter."""
         used_keys = set()
@@ -125,6 +91,7 @@ class ModelAuditor:
             "upper",
             "mu",
             "sigma",
+            "bound_scale",
             "derived",
             "unit",
         }

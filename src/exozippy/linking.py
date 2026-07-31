@@ -2,9 +2,9 @@
 """
 User-defined parameter links.
 
-Any of the six numeric fields in a params.yaml entry (initval, mu, sigma,
-lower, upper, init_scale) may be a string expression referencing other
-parameters, with or without algebraic manipulation:
+Any of the five numeric fields in a params.yaml entry (initval, mu, sigma,
+lower, upper) may be a string expression referencing other parameters, with
+or without algebraic manipulation:
 
     star.A.age:    {initval: star.B.age, sigma: 0}          # hard link (derived)
     star.A.age:    {initval: star.B.age, sigma: 1}          # soft link (Gaussian potential)
@@ -26,8 +26,10 @@ Semantics
 - lower/upper link          -> the sampling transform maps into the dynamic
   interval, so the bound can never be violated.  A -log(span) potential
   keeps the implied conditional prior a normalized uniform.
-- sigma / init_scale link   -> evaluated once, numerically, from the
+- sigma link                -> evaluated once, numerically, from the
   relaxation-engine solution (a static snapshot, not a runtime tie).
+  (init_scale is not linkable: it is obsolete user-side -- whitening scales
+  are measured from the data at startup and the key is warn-ignored.)
 
 This module is component-agnostic: it only knows about dotted parameter
 paths and the system config's component keys / instance names.
@@ -42,7 +44,7 @@ from typing import Dict, List
 import numpy as np
 import sympy as sp
 
-LINKABLE_FIELDS = ("initval", "mu", "sigma", "lower", "upper", "init_scale")
+LINKABLE_FIELDS = ("initval", "mu", "sigma", "lower", "upper")
 
 # Tokens like math.pi / np.pi are rewritten to sympy constants before any
 # path matching so they are never mistaken for parameter references.

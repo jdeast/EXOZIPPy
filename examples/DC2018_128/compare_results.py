@@ -26,8 +26,10 @@ import types
 import numpy as np
 
 # ── Monkey-patch mmexofast.config before DC18_classes runs its module-level code ──
+# DC18_classes now reads SAMPLE_DATA_PATH (not the old DATA_PATH) and joins
+# "2018DataChallenge" onto it, so point it at the parent of the data tree.
 _fake_cfg = types.ModuleType("mmexofast.config")
-_fake_cfg.DATA_PATH = "/home/jeastman/python/MMEXOFAST/DC18Test"
+_fake_cfg.SAMPLE_DATA_PATH = "/home/jeastman/python/MMEXOFAST/data"
 sys.modules["mmexofast"] = types.ModuleType("mmexofast")
 sys.modules["mmexofast.config"] = _fake_cfg
 

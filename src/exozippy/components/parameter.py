@@ -48,6 +48,12 @@ Number = Union[int, float, np.floating]
 # numerical time bomb.
 _RAW_CANCELLATION_CLIP = 1.0e4
 
+# Preliminary whitening scale for a sampled bounded element whose
+# defaults.yaml provides no init_scale: this fraction of (upper - lower).
+# It only needs to land within the whitening probe's dynamic range -- the
+# measured rescale (Parameter.set_whitening) replaces it before sampling.
+_PRELIM_SCALE_SPAN_FRACTION = 0.1
+
 
 # ----------------------------
 # Helper functions
@@ -349,7 +355,16 @@ class Parameter:
         None  # this is the internally used unit that simplifies the math
     )
     initval: Optional[Number] = None
-    init_scale: Optional[Number] = 1.0
+    # Preliminary whitening scale (physical units). Optional: None falls back
+    # to a fraction of the bound span in build_pymc; either way the probe-based
+    # rescale (set_whitening) supersedes it before sampling.
+    init_scale: Optional[Number] = None
+    # Optional user override for soft-bound barrier steepness (physical
+    # units): the barrier's transition width is 0.01 * bound_scale.  Only
+    # meaningful on elements that get a soft barrier (derived or half-bounded
+    # sampled, with a finite bound); pins the element against the measured
+    # update (set_barrier_scales).
+    bound_scale: Optional[Number] = None
     force_node: bool = False
     names: Optional[Sequence[str]] = None
     mask: Any = None
@@ -387,6 +402,14 @@ class Parameter:
     # multi-seed start) to raw space using this build's bounds/scale. See
     # raw_from_initval for the dict schema.
     _raw_transform: Optional[dict] = field(default=None, init=False)
+    # Whitening state (set in build_pymc when any element is sampled): the
+    # pytensor.shared handles carrying the whitening scales plus the numpy
+    # context set_whitening needs to update them in place. See set_whitening.
+    _whiten_state: Optional[dict] = field(default=None, init=False)
+    # Soft-bound barrier state (set in build_pymc when any element gets a
+    # barrier): the shared barrier-scale vector plus the pinned/needs masks
+    # set_barrier_scales consults. See set_barrier_scales.
+    _barrier_state: Optional[dict] = field(default=None, init=False)
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
@@ -495,6 +518,7 @@ class Parameter:
         # --- APPLY THE CONVERSION ---
         self.initval = convert(self.initval)
         self.init_scale = convert(self.init_scale)
+        self.bound_scale = convert(self.bound_scale)
         self.lower = convert(self.lower)
         self.upper = convert(self.upper)
         self.mu = convert(self.mu)
@@ -560,6 +584,9 @@ class Parameter:
         All raw variables are N(0,1). init_scale is always in physical units;
         for logit params it is converted to logit-space internally via the
         Jacobian and affects only tuning/conditioning, never the posterior.
+        It is only PRELIMINARY: the whitening scales live in pytensor.shared
+        variables, and set_whitening() replaces them in place with the
+        probe-measured posterior scales before sampling (no rebuild needed).
         """
         import pymc as pm
         import pytensor.tensor as pt
@@ -573,7 +600,7 @@ class Parameter:
         n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
 
         inits = to_vec(self.initval, n_elements, fill=0.0)
-        scales = to_vec(self.init_scale, n_elements, fill=1.0)
+        scales = to_vec(self.init_scale, n_elements, fill=np.nan)
         mus = to_vec(self.mu, n_elements, fill=np.nan)
         sigmas = to_vec(self.sigma, n_elements, fill=np.nan)
         lowers = to_vec(self.lower, n_elements, fill=-np.inf)
@@ -583,6 +610,21 @@ class Parameter:
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
         is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
+
+        # init_scale is a PRELIMINARY whitening scale only (the probe-based
+        # rescale in set_whitening supersedes it), so it is optional: a
+        # missing entry falls back to a fraction of the bound span, or sigma
+        # when unbounded.  Non-sampled elements just need a finite
+        # placeholder (a NaN scale would poison phys_linear via NaN * raw=0).
+        for i in np.where(~np.isfinite(scales))[0]:
+            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
+                scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
+                    uppers[i] - lowers[i]
+                )
+            elif not np.isnan(sigmas[i]) and sigmas[i] > 0:
+                scales[i] = sigmas[i]
+            else:
+                scales[i] = 1.0
 
         # Warn if user tried to fix a derived parameter — sigma=0 has no effect on derived params.
         if np.any(is_derived & (sigmas == 0)):
@@ -738,11 +780,43 @@ class Parameter:
         if expr_raw is not None:
             phys_val = expr_raw() if callable(expr_raw) else expr_raw
         else:
+            # The whitening constants enter the graph as pytensor.shared
+            # variables (not baked constants) when anything is sampled, so
+            # set_whitening can replace the preliminary scales with the
+            # measured ones in place -- every function compiled from this
+            # model picks up the new values without a rebuild.  The posterior
+            # is invariant to these values by construction: section C cancels
+            # the raw N(0,1) prior symbolically for ANY scale, so they affect
+            # conditioning only.
+            if np.any(is_sampled):
+                sv_logit_q_inits = pytensor.shared(
+                    logit_q_inits.astype(float),
+                    name=f"{self.label}_logit_q_init",
+                    shape=logit_q_inits.shape,
+                )
+                sv_scale_logits = pytensor.shared(
+                    init_scale_logits.astype(float),
+                    name=f"{self.label}_scale_logit",
+                    shape=init_scale_logits.shape,
+                )
+                sv_gaussian_scales = pytensor.shared(
+                    gaussian_scales.astype(float),
+                    name=f"{self.label}_gaussian_scale",
+                    shape=gaussian_scales.shape,
+                )
+                self._whiten_state = {
+                    "sv_logit_q_inits": sv_logit_q_inits,
+                    "sv_scale_logits": sv_scale_logits,
+                    "sv_gaussian_scales": sv_gaussian_scales,
+                    "has_sigma_prior": has_sigma_prior.copy(),
+                }
+            else:
+                sv_logit_q_inits = pt.as_tensor_variable(logit_q_inits)
+                sv_scale_logits = pt.as_tensor_variable(init_scale_logits)
+                sv_gaussian_scales = pt.as_tensor_variable(gaussian_scales)
+
             # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
-            lq = (
-                pt.as_tensor_variable(logit_q_inits)
-                + pt.as_tensor_variable(init_scale_logits) * raw_vector
-            )
+            lq = sv_logit_q_inits + sv_scale_logits * raw_vector
             phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
                 uppers - lowers
             ) * pt.sigmoid(pt.clip(lq, -30.0, 30.0))
@@ -750,7 +824,7 @@ class Parameter:
             # Gaussian / linear branch: mu + sigma * raw  (or initval + scale * raw)
             phys_linear = (
                 pt.as_tensor_variable(gaussian_mus)
-                + pt.as_tensor_variable(gaussian_scales) * raw_vector
+                + sv_gaussian_scales * raw_vector
             )
 
             if np.all(use_logit):
@@ -920,9 +994,16 @@ class Parameter:
         #    constraint — no barrier needed.
         #    Fixed params: constant, so barrier adds only a harmless constant — skip.
         needs_barrier = (is_derived | (is_sampled & ~use_logit)) & ~is_fixed
-        if np.any(needs_barrier):
-            # Use init_scale for barrier steepness (falls back to gaussian_scales
-            # for Gaussian params, where gaussian_scales = sigma).
+        has_lower = ~np.isinf(lowers) & needs_barrier
+        has_upper = ~np.isinf(uppers) & needs_barrier
+        if np.any(has_lower | has_upper):
+            # PRELIMINARY barrier steepness from init_scale (falls back to
+            # gaussian_scales for Gaussian params, where gaussian_scales =
+            # sigma).  These are replaced after the whitening rescale by the
+            # measured 1-sigma response of this parameter to unit raw steps
+            # (whitening.measure_barrier_scales -> set_barrier_scales), via
+            # the shared variable below.  A user bound_scale pins an element
+            # (a modeling choice: barrier transition width = 0.01 * scale).
             barrier_scales = np.where(use_logit, scales, gaussian_scales)
             # A missing scale (e.g. a derived vector element the relaxation
             # engine never resolved) must soften the barrier, not poison the
@@ -932,23 +1013,35 @@ class Parameter:
                 barrier_scales,
                 1.0,
             )
+            user_bound = to_vec(self.bound_scale, n_elements, fill=np.nan)
+            pinned = np.isfinite(user_bound) & (user_bound > 0)
+            barrier_scales = np.where(pinned, user_bound, barrier_scales)
 
-            has_lower = ~np.isinf(lowers) & needs_barrier
+            sv_barrier = pytensor.shared(
+                barrier_scales.astype(float),
+                name=f"{self.label}_barrier_scale",
+                shape=barrier_scales.shape,
+            )
+            self._barrier_state = {
+                "sv": sv_barrier,
+                "pinned": pinned,
+                "needs_barrier": (has_lower | has_upper).copy(),
+            }
+
             if np.any(has_lower):
                 mask = pt.as_tensor_variable(has_lower)
                 penalty = soft_lower_bound(
-                    val_flat, pt.as_tensor_variable(lowers), barrier_scales
+                    val_flat, pt.as_tensor_variable(lowers), sv_barrier
                 )
                 pm.Potential(
                     f"low_bound.{self.label}",
                     pm.math.sum(pt.where(mask, penalty, 0.0)),
                 )
 
-            has_upper = ~np.isinf(uppers) & needs_barrier
             if np.any(has_upper):
                 mask = pt.as_tensor_variable(has_upper)
                 penalty = soft_upper_bound(
-                    val_flat, pt.as_tensor_variable(uppers), barrier_scales
+                    val_flat, pt.as_tensor_variable(uppers), sv_barrier
                 )
                 pm.Potential(
                     f"up_bound.{self.label}",
@@ -1192,6 +1285,181 @@ class Parameter:
         # Scalar fallback
         target = getattr(self.unit, "unit", self.unit)
         return float(self.internal_unit.to(target))
+
+    def set_whitening(self, raw_scale):
+        """Rescale the whitening in place from a measured raw-space scale.
+
+        ``raw_scale`` has one entry per SAMPLED element (shaped like
+        ``self.raw_initval``): the distance, in the CURRENT raw coordinate,
+        of the 0.5-nat logp contour along that element (as measured by the
+        whitening probe).  Multiplying the whitening scale by it puts that
+        contour at exactly one raw unit, which is the "curvature = -1"
+        conditioning the old init_scale tuning loop approximated by hand.
+
+        Deliberately does NOT recompute logit_q_inits / q_floors: the start
+        (raw = 0) must stay exactly where the probe measured, so the update
+        is a pure scale change in logit space.  Elements whose raw N(0,1) IS
+        the prior (unbounded with sigma) are never touched -- their scale is
+        the prior sigma, not a whitening choice.  Non-finite or non-positive
+        entries (a failed probe) leave that element's scale unchanged.
+
+        Because the scales live in pytensor.shared variables, every function
+        already compiled from this model sees the new values immediately;
+        anything compiled afterwards (dlogp, JAX/nutpie traces, PTDE worker
+        pools) does too.  ``_raw_transform`` and ``init_scale`` are synced so
+        multi-seed raw starts and diagnostics stay consistent.
+
+        Returns the post-rescale scale of each sampled element in the NEW
+        raw units (1.0 where the multiplier was applied; the measured value
+        where the element is deliberately untouched) -- the per-element
+        dispersion PTDE's chain initialization can use directly instead of
+        re-probing.  Returns None when nothing is sampled.
+        """
+        ws = self._whiten_state
+        tf = self._raw_transform
+        if ws is None or tf is None:
+            return None
+        idx = tf["sampled_idx"]
+        raw_scale = np.asarray(raw_scale, dtype=float).reshape(-1)
+        if raw_scale.size != len(idx):
+            raise ValueError(
+                f"Parameter '{self.label}': set_whitening got {raw_scale.size} "
+                f"scales for {len(idx)} sampled elements."
+            )
+
+        scale_logits = ws["sv_scale_logits"].get_value().copy()
+        gauss_scales = ws["sv_gaussian_scales"].get_value().copy()
+        # Post-rescale scale of each sampled element in the NEW raw units:
+        # 1.0 where the multiplier was applied (the contour now sits at one
+        # raw unit); the measured value where the element is deliberately not
+        # rescaled (Gaussian-prior elements); 1.0 where the probe failed.
+        post = np.ones(len(idx))
+        for j, i in enumerate(idx):
+            m = raw_scale[j]
+            if not np.isfinite(m) or m <= 0:
+                continue
+            if tf["use_logit"][i]:
+                scale_logits[i] *= m
+            elif not ws["has_sigma_prior"][i]:
+                gauss_scales[i] *= m
+            else:
+                post[j] = m
+        self._apply_whitening_state(scale_logits, gauss_scales)
+        return post
+
+    def _apply_whitening_state(self, scale_logits, gauss_scales):
+        """Push new whitening scale vectors into the shared variables and
+        keep every mirror consistent: the frozen forward transform
+        (raw_from_initval / phys_from_raw for multi-seed starts) and the
+        physical-units init_scale used for reporting (diagnostics table,
+        get_mcmc_init) -- dphys/draw at the start, i.e. scale_logit *
+        q_init*(1-q_init)*span for logit elements, the scale itself for
+        linear elements."""
+        ws = self._whiten_state
+        tf = self._raw_transform
+        scale_logits = np.asarray(scale_logits, dtype=float)
+        gauss_scales = np.asarray(gauss_scales, dtype=float)
+        ws["sv_scale_logits"].set_value(scale_logits)
+        ws["sv_gaussian_scales"].set_value(gauss_scales)
+        tf["init_scale_logits"] = scale_logits.copy()
+        tf["gaussian_scales"] = gauss_scales.copy()
+
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
+        )
+        phys_scales = to_vec(self.init_scale, n_elements, fill=1.0)
+        for i in tf["sampled_idx"]:
+            if tf["use_logit"][i]:
+                q_init = 1.0 / (1.0 + np.exp(-tf["logit_q_inits"][i]))
+                span = tf["uppers"][i] - tf["lowers"][i]
+                phys_scales[i] = (
+                    scale_logits[i] * q_init * (1.0 - q_init) * span
+                )
+            else:
+                phys_scales[i] = gauss_scales[i]
+        self.init_scale = (
+            float(phys_scales[0]) if self.shape == () else phys_scales
+        )
+
+    def set_barrier_scales(self, phys_scales):
+        """Replace the soft-bound barrier steepness scales in place.
+
+        ``phys_scales`` is a FULL-length per-element vector in internal
+        units: the measured 1-sigma response of this parameter to unit raw
+        steps (whitening.measure_barrier_scales).  Only elements that have a
+        barrier and are not pinned by a user bound_scale update; non-finite
+        or non-positive entries are skipped.  Unlike the whitening scales,
+        the barrier IS a posterior term -- this replaces the preliminary
+        steepness with the data-driven one before sampling starts.
+        """
+        bs = self._barrier_state
+        if bs is None:
+            return
+        phys_scales = np.asarray(phys_scales, dtype=float).reshape(-1)
+        cur = bs["sv"].get_value().copy()
+        if phys_scales.size != cur.size:
+            raise ValueError(
+                f"Parameter '{self.label}': set_barrier_scales got "
+                f"{phys_scales.size} scales for {cur.size} elements."
+            )
+        ok = (
+            bs["needs_barrier"]
+            & ~bs["pinned"]
+            & np.isfinite(phys_scales)
+            & (phys_scales > 0)
+        )
+        cur[ok] = phys_scales[ok]
+        bs["sv"].set_value(cur)
+
+    def export_whitening(self):
+        """Snapshot the ABSOLUTE whitening/barrier state for persistence.
+
+        Returns None when nothing is sampled and no barrier exists.  The
+        absolute logit-space scales (not the multipliers) are stored so a
+        reload reproduces the sampled trace's raw coordinates exactly, even
+        if the preliminary scales of a rebuilt model were to differ.
+        """
+        out = {}
+        if self._whiten_state is not None:
+            out["scale_logits"] = (
+                self._whiten_state["sv_scale_logits"].get_value().tolist()
+            )
+            out["gaussian_scales"] = (
+                self._whiten_state["sv_gaussian_scales"].get_value().tolist()
+            )
+        if self._barrier_state is not None:
+            out["barrier_scales"] = (
+                self._barrier_state["sv"].get_value().tolist()
+            )
+        return out or None
+
+    def load_whitening(self, state):
+        """Apply a persisted export_whitening snapshot to this build.
+
+        Returns False (leaving the build untouched) on any shape mismatch --
+        the caller should fall back to a fresh probe.
+        """
+        ws = self._whiten_state
+        if "scale_logits" in state:
+            if ws is None:
+                return False
+            sl = np.asarray(state["scale_logits"], dtype=float)
+            gs = np.asarray(state["gaussian_scales"], dtype=float)
+            if (
+                sl.shape != ws["sv_scale_logits"].get_value().shape
+                or gs.shape != ws["sv_gaussian_scales"].get_value().shape
+            ):
+                return False
+            self._apply_whitening_state(sl, gs)
+        if "barrier_scales" in state:
+            bs = self._barrier_state
+            if bs is None:
+                return False
+            b = np.asarray(state["barrier_scales"], dtype=float)
+            if b.shape != bs["sv"].get_value().shape:
+                return False
+            bs["sv"].set_value(b)
+        return True
 
     def raw_from_initval(self, initval_internal):
         """Map an alternate physical initval (internal units) to the raw N(0,1)

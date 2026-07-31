@@ -2,7 +2,6 @@ import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pymc as pm
 import pytensor
 
@@ -107,6 +106,9 @@ class Transit(Instrument):
                     "instead (bands carry the filter identity)."
                 ),
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(("time", "flux", "err")),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -154,13 +156,13 @@ class Transit(Instrument):
             self.exptime_min[i] = exptime
             self.ninterp[i] = ninterp
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # One sort per file, before anything is derived from it: keeps the
+        for i in range(self.n_elements):
+            # Shared reader: columns:, mask:, time_* conversion, then one
+            # sort per file before anything is derived from it, keeping the
             # flux, errors and detrend columns aligned by construction.
-            df = self._sort_by_time(df)
+            df = self._read_data(
+                i, roles=("time", "flux", "err"), detrend=True
+            )
             n_obs = len(df)
             all_times.append(df.iloc[:, 0].values)
             all_fluxes.append(df.iloc[:, 1].values)
