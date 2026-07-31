@@ -4,11 +4,17 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
-import astropy.units as u
 
 from typing import Literal
+import warnings 
 
-from .parse_MIST_EEP_filenames import _generate_MIST_EEP_url, _parse_initfeh_alpha_vvcrit_from_filename
+from exozippy.models.parse_MIST_EEP_filenames import _generate_MIST_EEP_url
+        
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 # -------------------------------------------------------------------
 # MIST File I/O
@@ -35,7 +41,7 @@ def read_mist_eep(filepath):
     col_names_line = None
     data_start = None
 
-    with open(filepath) as f:
+    with open(filepath, encoding="latin-1") as f:
         lines = f.readlines()
 
     for i, line in enumerate(lines):
@@ -108,7 +114,7 @@ def _add_or_grab_solar_values_to_MIST_yaml(EEP_path = EEP_PATH,
 
     # if the key does not exist, we need to compute the solar value and append it to the YAML file
     solar_folder, _ = _generate_MIST_EEP_url(initfeh=0.0, alpha=0.0, vvcrit=0.0, version=version)
-    solar_path = EEP_path / f"MISTv{version}" / solar_folder
+    solar_path = EEP_path / f"MISTv{version}" / "raw_tracks" / solar_folder
 
     # first check if tracks are in a nested "eeps" folder within the solar_path
     nested_folder = solar_path / "eeps"
@@ -116,7 +122,7 @@ def _add_or_grab_solar_values_to_MIST_yaml(EEP_path = EEP_PATH,
         solar_path = nested_folder
 
     # grab any track from the folder
-    filename = next(solar_path.glob("*.eep"))
+    filename = next(solar_path.glob("*.track.eep"))
 
     df_solar = read_mist_eep(filename)
     log_surf_fe_over_x_solar = np.log10(df_solar['surface_fe56'].values[0]) - np.log10(df_solar['surface_h1'].values[0])
@@ -136,7 +142,7 @@ def _add_or_grab_solar_values_to_MIST_yaml(EEP_path = EEP_PATH,
 # Create New DataFrame from MIST EEP Track
 # -------------------------------------------------------------------
 
-def _pad_or_trim_df(df, target_length=808):
+def _pad_or_trim_df(df, target_length=807):
 
     # EEP 808 = low mass stars enter the thermally pulsating asymptotic giant branch (TPAGB)
     # mass loss becomes significant 
@@ -180,9 +186,15 @@ def _add_feh_col(df, new_df):
 
     # grab solar value from the MIST YAML file
     log_surf_fe_over_x_solar = _add_or_grab_solar_values_to_MIST_yaml()
-    log_surf_fe_over_x_star= np.log10(df['surface_fe56']) - np.log10(df['surface_h1'])
+
+    # find values of df['surface_h1'] > 1e-10
+    # avoid division by zero or taking log of very small numbers
+    valid_mask = df['surface_h1'] > 1e-10
+    log_surf_fe_over_x_star= np.log10(df['surface_fe56'][valid_mask]) - np.log10(df['surface_h1'][valid_mask])
+
     feh = log_surf_fe_over_x_star - log_surf_fe_over_x_solar
-    new_df["feh_mist"] = feh
+    new_df["feh_mist"] = np.full(len(df), 30.0) # make all values an arbitrary large number
+    new_df.loc[valid_mask, "feh_mist"] = feh
     return
 
 def _add_radius_col(df, new_df):
@@ -223,7 +235,7 @@ def _add_age_and_turn_back_col(df, new_df):
 
     # ensure unique ages by adding a small increment to duplicates
     # add small increments to duplicates to ensure unique ages
-    add_time = 1 * u.hr.to(u.yr)
+    add_time = 1 # yr
     age[duplicate_bools] += add_time * np.arange(np.sum(duplicate_bools))
     turn_back[duplicate_bools] = 1 + np.arange(np.sum(duplicate_bools))
 
@@ -236,8 +248,7 @@ def _add_deep_dage_col(new_df):
     new_df["dEEP_dage"] = np.gradient(new_df["EEP"], new_df["age_mist"])
     return
 
-
-def generate_new_df(df, target_length=808):
+def generate_new_df(df, target_length=807):
 
     # Define column headers and initialize df
     columns = ["logM", "EEP", "initfeh", 
@@ -263,3 +274,54 @@ def generate_new_df(df, target_length=808):
     _add_deep_dage_col(new_df)
 
     return new_df
+
+# for generating MISTv2.5 only
+EEP_RAW_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/raw_tracks/")
+EEP_PROCESSED_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
+
+def process_eep_directory(eep_dir, pattern="*.track.eep", show_progress=True, save=False, output_path=EEP_PROCESSED_PATH):
+    """
+    Read every MIST EEP track file in `eep_dir` matching `pattern`, transform each with
+    `generate_new_df`, and concatenate into one DataFrame. Optionally save the resulting
+    DataFrame to `output_path` as a parquet file.
+    """
+    filepaths = sorted(p for p in eep_dir.glob(pattern) if not p.name.startswith("._"))
+
+    if not filepaths:
+        warnings.warn(f"No files matching '{pattern}' found in {eep_dir}")
+        return pd.DataFrame()
+
+    iterator = tqdm(filepaths, desc=eep_dir.name, leave=False) if show_progress else filepaths
+
+    frames = [generate_new_df(read_mist_eep(filepath)) for filepath in iterator]
+
+    df = pd.concat(frames, ignore_index=True, copy=False)
+
+    if save:
+        filename = f"{eep_dir.name}.parquet"
+        df.to_parquet(output_path / filename, compression='snappy')
+
+    return df
+
+# -------------------------------------------------------------------
+# Generate New DataFrames for Each MIST EEP Track
+# -------------------------------------------------------------------
+
+EEP_RAW_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/raw_tracks/")
+EEP_PROCESSED_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
+
+def __main__():
+
+    # want to iterate through all subdirectories in the raw EEP path and process each directory
+    for folderpath in EEP_RAW_PATH.iterdir():
+        # first check if the parquet file for this directory already exists
+        parquet_file = EEP_PROCESSED_PATH / f"{folderpath.name}.parquet"
+        if parquet_file.exists():
+            print(f"Parquet file already exists for directory: {folderpath.name}")
+            continue
+        if folderpath.is_dir():
+            print(f"Processing directory: {folderpath.name}")
+            process_eep_directory(folderpath, save=True)
+
+if __name__ == "__main__":
+    __main__()
