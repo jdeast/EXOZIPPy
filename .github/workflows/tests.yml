@@ -95,6 +95,19 @@ jobs:
           path: src/exozippy/components/sed/models/NextGen
           key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
 
+      # The mulensing component sets astropy's solar-system ephemeris to
+      # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
+      # on first use. Same failure mode as the Zenodo spectra above: a slow
+      # JPL server turned into URLError failures across the suite (nightlies
+      # of 2026-07-29 and 2026-07-31). The kernel file never changes, so a
+      # static key is correct; bump it only if the ephemeris name in
+      # ephemeris.py / mulensing/op.py ever moves off de430.
+      - name: Cache the astropy ephemeris kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-de430
+
       # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
       # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
       # building a System and compiling PyTensor graphs. The symptom was never
@@ -158,6 +171,14 @@ jobs:
         with:
           path: src/exozippy/components/sed/models/NextGen
           key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      # Same astropy ephemeris-kernel cache as the matrix job -- see the
+      # comment there.
+      - name: Cache the astropy ephemeris kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-de430
 
       # Saved to a file, not just echoed: the failure report below quotes it,
       # and "which versions did it actually pick" is the first question anyone
