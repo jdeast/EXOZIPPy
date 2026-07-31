@@ -206,7 +206,9 @@ def main(argv=None):
     ap.add_argument("--tune", type=int, default=5000)
     ap.add_argument("--draws", type=int, default=50000)
     ap.add_argument(
-        "--sampler", default="ptde", help="Sampler method (default ptde)"
+        "--sampler",
+        default="ptde_async",
+        help="Sampler method (default ptde_async)",
     )
     ap.add_argument(
         "--finite-source",
