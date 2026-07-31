@@ -67,7 +67,7 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         # the run reaches the first convergence check (100 draws) in seconds
         # instead of minutes, while still exercising the same PTDE code path.
         "cores": 1,
-        "check_curvatures": False,
+        "measure_scales": False,
         "recompute_trace": True,
         "min_ess": 100_000_000,  # unreachable -> never converge
         "max_rhat": 1.0000001,  # unreachable -> never converge
@@ -201,7 +201,8 @@ def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):
         "draws": 1,
         "chains": 1,
         "cores": 1,
-        "check_curvatures": False,
+        # measure_scales deliberately left at its default (True) so one
+        # end-to-end run exercises the startup whitening probe + rescale.
         "recompute_trace": True,
     }
     with open(kelt4_workdir / "noflag.yaml", "w") as fh:

@@ -83,7 +83,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     that reads all parameters at (chain, draw) gets one self-consistent point.
 
     Returns (pairs, good_mask, burnin) where ``good_mask`` and ``burnin`` also
-    describe the pool used, so the caller can compute init_scale over exactly
+    describe the pool used, so a caller can compute statistics over exactly
     the same post-burn-in good draws.
     """
     post = idata["posterior"]
@@ -124,8 +124,10 @@ def mkprior(
     a length-K list of mutually-consistent JOINT posterior draws (seed 0 = the
     MAP; seeds 1..K-1 = random post-burn-in draws from the good chains), which
     the next run consumes as P4 multi-seed starts so its walkers begin already
-    spread across the posterior covariance (notes/todo.txt #3). ``init_scale``
-    and bounds stay scalar (from seed 0), matching config._build_seed_overrides.
+    spread across the posterior covariance (notes/todo.txt #3). Bounds stay
+    scalar (from seed 0), matching config._build_seed_overrides.  No
+    ``init_scale`` is written: whitening scales are measured from the data at
+    startup and the key would be warn-ignored.
 
     Parameters
     ----------
@@ -210,7 +212,7 @@ def mkprior(
     # Only include physically sampled variables (those with a _raw counterpart).
     # Derived Deterministics (e.g. orbit.period from orbit.logP) must be excluded:
     # writing them to params.yaml creates redundant constraints that confuse the
-    # relaxation engine and lead to conflicting init_scale values.
+    # relaxation engine.
     raw_var_names = {v[:-4] for v in posterior.data_vars if v.endswith("_raw")}
     sampled_vars = sorted(v for v in posterior.data_vars if v in raw_var_names)
 
@@ -219,9 +221,8 @@ def mkprior(
     # pair each), so reading every parameter at those indices yields K
     # mutually-consistent start points that span the posterior covariance.
     seed_pairs = [(map_chain, map_draw)]
-    pool_mask, pool_burnin = None, 0
     if n_seeds > 1:
-        extra, pool_mask, pool_burnin = _sample_seed_draws(
+        extra, _pool_mask, _pool_burnin = _sample_seed_draws(
             idata, n_seeds - 1, exclude=(map_chain, map_draw)
         )
         seed_pairs += extra
@@ -242,30 +243,21 @@ def mkprior(
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         da = posterior[var_name]
-        # init_scale is a scalar step hint from the equilibrated posterior: use
-        # the post-burn-in good draws when multi-seed (the transient inflates
-        # std), else all draws (legacy single-seed behavior, unchanged).
-        if pool_mask is not None:
-            pool = da.values[pool_mask][:, pool_burnin:].reshape(
-                -1, *da.shape[2:]
-            )
-        else:
-            pool = da.values.reshape(-1, *da.shape[2:])
-        std_vals = np.atleast_1d(np.std(pool, axis=0))
         # (K, n_elements) joint values across the seed draws.
         seed_vals = np.stack(
             [np.atleast_1d(da.values[c, d]) for (c, d) in seed_pairs]
         )
+        n_elements = seed_vals.shape[1]
 
         instance_names = _get_instance_names(config, comp_key)
 
-        for i, sv in enumerate(std_vals):
+        for i in range(n_elements):
             mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
             mv = mv_list[0]
             if instance_names:
                 name = instance_names[i] if i < len(instance_names) else str(i)
                 out_key = f"{comp_key}.{name}.{param}"
-            elif len(std_vals) == 1:
+            elif n_elements == 1:
                 # Component uses a flat-dict config (no named instances).
                 # Write the 2-part key to match the trace variable name so the
                 # next run can find the entry without hitting a name-lookup crash.
@@ -286,9 +278,10 @@ def mkprior(
             # scalar for single-seed, a length-K list for multi-seed (P4).
             # Preserve mu/sigma/bounds from the existing entry unchanged — mu is
             # the prior center, not the starting point, so it must not move.
+            # No init_scale: whitening scales are measured from the data at
+            # startup, and the key would be warn-ignored anyway.
             entry = {
                 "initval": mv if K == 1 else mv_list,
-                "init_scale": float(np.round(sv, 8)),
             }
             if isinstance(existing_entry, dict):
                 for prior_key in ("mu", "sigma", "lower", "upper"):
@@ -332,10 +325,6 @@ def mkprior(
         for prefix in set(_x_keys) & set(_y_keys):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
-            xs, ys = (
-                output[x_key].get("init_scale", 0.0),
-                output[y_key].get("init_scale", 0.0),
-            )
             # initval may be a scalar (single-seed) or a length-K list
             # (multi-seed): convert every seed's (x, y) to its own angle.
             xv_list = xv if isinstance(xv, list) else [xv]
@@ -344,32 +333,10 @@ def mkprior(
                 float(np.round(np.degrees(np.arctan2(y, x)), 8))
                 for x, y in zip(xv_list, yv_list)
             ]
-            # init_scale is scalar (seed 0), so propagate from the seed-0 (x, y).
-            x0, y0, r_sq = (
-                xv_list[0],
-                yv_list[0],
-                xv_list[0] ** 2 + yv_list[0] ** 2,
-            )
-            sigma_deg = (
-                float(
-                    np.round(
-                        np.degrees(
-                            np.sqrt(
-                                (y0 / r_sq) ** 2 * xs**2
-                                + (x0 / r_sq) ** 2 * ys**2
-                            )
-                        ),
-                        8,
-                    )
-                )
-                if r_sq > 0
-                else 0.0
-            )
             del output[x_key]
             del output[y_key]
             output[f"{prefix}.{angle_name}"] = {
                 "initval": angles[0] if len(angles) == 1 else angles,
-                "init_scale": sigma_deg,
             }
 
     _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
@@ -409,7 +376,7 @@ def mkprior(
             f.write(
                 f"# Multi-seed: initval is a length-{K} list of joint posterior\n"
                 f"# draws (seed 0 = MAP; 1..{K - 1} = random post-burn-in draws\n"
-                f"# from the good chains). init_scale/bounds are scalar (seed 0).\n"
+                f"# from the good chains). Bounds are scalar (seed 0).\n"
             )
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 

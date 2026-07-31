@@ -108,8 +108,6 @@ class System(Component):
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
 
-        self.config_manager.audit_scales()
-
     def build_likelihood(self, model, system):
         pass
 
@@ -237,13 +235,14 @@ class System(Component):
         uniform's 0.0200) because a truncated normal's density is monotone
         toward each bound.
 
-        `raw_scales` holds the probe's per-element 0.5-nat step (ptde._probe_scales)
-        in raw units; it is converted to a physical half-width through this
-        parameter's own transform.  The probe scale is used rather than
-        init_scale because it measures the ACTUAL local posterior width
-        including the likelihood -- for a flat parameter it lands at 0.304*span
-        independent of init_scale, which is exactly what makes the flat case
-        come out uniform.
+        `raw_scales` holds the probe's per-element 0.5-nat step
+        (whitening.probe_scales) in raw units; it is converted to a physical
+        half-width through this parameter's own transform.  The probe scale
+        measures the ACTUAL local posterior width including the likelihood --
+        for a flat parameter it lands at 0.304*span independent of the
+        whitening scale, which is exactly what makes the flat case come out
+        uniform.  (After the startup whitening rescale these steps are ~1 by
+        construction, but PTDE re-probes rather than assuming it.)
 
         Elements without a finite [lower, upper] pair are not logit-transformed
         (their raw -> physical map is linear and unbounded), so they keep plain

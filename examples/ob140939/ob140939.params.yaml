@@ -5,7 +5,6 @@ lens.Lens.t_0:
     initval: 2456836.22
 lens.Lens.u_0:
     initval: 0.922
-    init_scale: 0.0004
 lens.Lens.t_E:
     initval: 22.87
 lens.Lens.pi_E_N:
@@ -21,19 +20,13 @@ lens.Lens.pi_E_E:
 # Negative blending is common for OGLE difference imaging in the crowded Galactic bulge.
 mulensinstrument.OGLE4.q_source:
     initval: 1.199
-    init_scale: 0.05
 
 # From Yee+2014 Table 3: F_S,Spitzer=4.31, F_B,Spitzer=-0.08 → q = 4.31/4.23 = 1.019
 mulensinstrument.Spitzer.q_source:
     initval: 1.019
-    init_scale: 0.05
 
 mulensinstrument.Spitzer.err_scale:
     upper: 1.1
-#mulensinstrument.OGLE4.log_f_total:
-#    init_scale: 0.001
-#mulensinstrument.OGLE4.q_frac:
-#    init_scale: 0.002
 
 # this come from a catalog and only influences the galactic model prior (with course precision)
 # we probably want to link the ra/dec of source/lens within the model

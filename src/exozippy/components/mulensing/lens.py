@@ -182,9 +182,9 @@ class Lens(Component):
         s is now a derived parameter (s = 10**log_s); the sampling bounds live
         on log_s.  A user who constrains lens.s expects the sampler to respect
         it, so translate lower/upper -> log10(bound) onto the log_s entry and
-        drop them from the s entry (initval/init_scale on s are left in place --
-        the relaxation engine translates those through the s <-> log_s
-        relation).  Keys are already standardized to lens.<j>.<param> form.
+        drop them from the s entry (an initval on s is left in place -- the
+        relaxation engine translates it through the s <-> log_s relation).
+        Keys are already standardized to lens.<j>.<param> form.
         """
         up = self.config_manager.user_params
         for j in range(self.n_companions):
@@ -613,17 +613,6 @@ class Lens(Component):
                 self.config_manager.add_hint(
                     f"lens.{j}.log_s", float(np.log10(float(s_val))), rank=40
                 )
-                sc = (
-                    entry.get("init_scale")
-                    if isinstance(entry, dict)
-                    else None
-                )
-                if sc is not None:
-                    # d(log10 s) = ds / (s ln 10)
-                    self.config_manager.add_scale_hint(
-                        f"lens.{j}.log_s",
-                        float(sc) / (float(s_val) * np.log(10.0)),
-                    )
 
         if any(self.finite_source):
             self.manifest["rho"] = per_source("default")

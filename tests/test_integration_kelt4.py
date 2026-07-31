@@ -60,7 +60,7 @@ def kelt4_result(tmp_path_factory):
             "draws": 1,
             "chains": 1,
             "cores": 1,
-            "check_curvatures": False,
+            "measure_scales": False,
             "recompute_trace": True,
         }
 

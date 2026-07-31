@@ -155,13 +155,14 @@ def _param_structure(user_params: Optional[dict]) -> dict:
             except (TypeError, ValueError):
                 pass
         # Expression wiring: any string-valued field is a link (structural).
+        # init_scale is not listed: it is no longer linkable (user entries
+        # are warn-ignored; whitening scales are measured from the data).
         for field in (
             "initval",
             "mu",
             "lower",
             "upper",
             "sigma",
-            "init_scale",
         ):
             if isinstance(spec.get(field), str):
                 entry[f"{field}_link"] = spec[field]

@@ -50,6 +50,8 @@ model  = system.build_model()
 pm.sample(...)
 ```
 
+`run.run_fit(config, user_params=None)` accepts in-memory dicts for both arguments (no YAML files needed; data paths resolve relative to cwd). When `user_params` is omitted it falls back to reading `config["parameter_file"]` from disk.
+
 ### The six lifecycle stages
 
 `System.prepare()` drives stages 1–3; `System.build_model()` drives stages 4–6.
@@ -77,7 +79,7 @@ pm.sample(...)
    - `RANK_DEFAULT = 20` — from `defaults.yaml`
    - rank 30 is used for microlensing distance hints (overrides 10 pc default, yields to user)
 4. Runs a **relaxation engine** (`resolve_and_validate_parameters`): iteratively substitutes known values into the SymPy equations to derive unknowns and detect contradictions.
-5. Propagates `init_scale` via symbolic Jacobians of the solution expressions.
+5. Collects `init_scale` values from defaults, component hints, user sigmas, and the engine's own solved-value sync. These are **preliminary only** (see "Whitening" below): sampled parameters get their real scale from the startup probe, and soft-bound barrier steepness is measured numerically post-whitening (the old sympy forward/backward Jacobian scale passes are deleted). `init_scale` is **not user-facing**: entries in a params file are stripped with a warning at ConfigManager construction.
 
 Components push hints via `config_manager.add_hint(path, value, rank)` during stage 1–2. The hint system is the correct way for components to propose data-driven initial guesses; they are layered in after defaults but before the solver runs.
 
@@ -128,9 +130,18 @@ Design points worth not rediscovering:
 `Parameter` is the universal node wrapper. Key points:
 - All numeric fields (`initval`, `init_scale`, `lower`, `upper`, `mu`, `sigma`) are stored in **internal units** after `__post_init__` applies the unit conversion factor.
 - `unit` is the user-facing unit (from `defaults.yaml` or user override); `internal_unit` is the math unit.
-- `sigma = 0` → parameter is fixed. `sigma > 0` → Gaussian potential applied. No sigma + `init_scale` → uniform prior on `[lower, upper]` via logit transform.
+- `sigma = 0` → parameter is fixed. `sigma > 0` → Gaussian potential applied. No sigma → uniform prior on `[lower, upper]` via logit transform.
 - Symbolic PyTensor nodes passed as `initval` are preserved as-is (no unit conversion applied).
 - `build_pymc()` uses non-centered parameterization: raw `N(0, 1)` mapped to physical space via logit or linear scale + shift.
+
+### Whitening (`whitening.py`)
+
+The whitening scale of every sampled element is **measured from the data at startup**, not hand-tuned. `build_pymc()` builds the model with *preliminary* scales (`defaults.yaml` `init_scale`, optional; missing values fall back to a fraction of the bound span) and stores the whitening constants in `pytensor.shared` variables. `run.py` then compiles logp once and runs `whitening.measure_and_whiten(system, model, raw_start)`: the same bracket+bisect probe PTDE uses for chain initialization, at wider dynamic range, and each `Parameter.set_whitening()` multiplies its shared logit-space scale by the measured 0.5-nat step **in place** — no rebuild, no recompile, and the posterior is provably unchanged (the logit-uniform correction potential cancels the raw N(0,1) prior symbolically for any scale). After the rescale a unit step along any raw direction costs ~0.5 nats — the "curvature = -1" conditioning the retired curvature check asked users to approximate by editing `init_scale`. Sampler-block key `measure_scales: false` skips all of it (keeps preliminary scales). Design points:
+- `set_whitening` deliberately does **not** recompute `logit_q_inits`/`q_floors`: raw = 0 must keep mapping to the exact start the probe measured around; the update is a pure scale change in logit space (and `_raw_transform` is synced for multi-seed starts). It returns the post-rescale raw-unit scales, which run.py hands to PTDE (`raw_scales=`) so `_make_starts` skips its own probe.
+- Elements whose raw N(0,1) **is** the prior (unbounded with sigma) are never rescaled; a flat probe direction (NaN multiplier) keeps its preliminary scale and is flagged after the startup table. A multiplier clipped at the probe's dynamic range (preliminary scale off by >~9 orders of magnitude) is **escalated**: the clipped correction is applied and just those elements are re-probed in the new coordinates; still-clipped elements get a warning naming the defaults.yaml scale to fix.
+- **Soft-bound barrier steepness is measured too** (`whitening.measure_barrier_scales`): with the model whitened, each barrier-carrying element's natural scale is its quadrature response to unit raw steps — n_sampled+1 forward evals of the parameter transform graphs, replacing the old sympy forward-Jacobian scale pass (deleted). Barrier scales live in a `pytensor.shared` per parameter; a user `bound_scale:` (params.yaml or defaults.yaml, physical units, barrier transition width = 0.01 x scale) pins an element against the measured update — this is the *only* user-facing scale knob left, and unlike the old init_scale it is honestly a posterior choice, not conditioning. If updating the barriers moves the start's logp (a bound is active at the start), `measure_and_whiten` re-measures once against the final barriers — otherwise the probe/barrier feedback is exactly zero.
+- The **absolute** whitening + barrier state is persisted to `<prefix>_whitening.json` next to the trace. A reload (`recompute_trace: false` with an existing trace) restores it instead of re-probing — raw draws only decode correctly under the whitening they were sampled with; any model mismatch is detected up front and falls back to a fresh measurement. Physical Deterministics in the idata are unaffected either way.
+- User-side `init_scale` (params.yaml) is stripped with a warning; `mkparam`/`mmexofast_to_params` no longer write it; it is not linkable.
 
 ### User-defined parameter links (`linking.py`)
 
@@ -139,7 +150,7 @@ Any of the six numeric fields in a `params.yaml` entry may be a string expressio
 - `initval` link + `sigma > 0` (or a `mu` link) → soft link: sampled normally plus a Gaussian `pm.Potential` on the difference.
 - `initval` link, no sigma → initialization seeding only (relaxation-engine snapshot, no runtime tie).
 - `lower`/`upper` link → dynamic hard bound: the logit transform maps into the tensor-valued interval; a `-log(span)` potential keeps the conditional prior normalized.
-- `sigma`/`init_scale` link → static numeric snapshot from the relaxation-engine solution.
+- `sigma` link → static numeric snapshot from the relaxation-engine solution. (`init_scale` is not linkable — it is stripped from user params.)
 
 Referenced parameters contribute their values in **their own user units**; the result is read in the **target's user unit**. `ConfigManager` extracts links at construction (`extract_links` strips the strings from `user_params`), the relaxation engine asserts `initval`/`mu` links as directed RANK_USER assignments each iteration, `Component._wire_user_links` builds the PyTensor closures (same-parameter element references are resolved inside `build_pymc` via `set_subtensor`; cross-parameter references use the lazy `add_parameter` recursion), and `graph.py` adds cross-parameter build-order edges. Tests: `tests/test_linked_params.py`.
 
@@ -158,7 +169,7 @@ The registry is a **flat namespace keyed by bare function name** -- there is no 
 1. Create `src/exozippy/components/<name>/` with the four standard files.
 2. Set `comp_key` in `symbolic_physics.py` and `prefix` property in the class to match the YAML key.
 3. Declare `self.manifest` in `register_parameters()`. Manifest values: `None` (free parameter, no expression), `"default"` (use `expressions.default` from `defaults.yaml`), or a dict with `"expr_key"` and optional overrides.
-4. Every sampled (non-derived, non-fixed) parameter **must** have `lower`, `upper`, and `init_scale` in `defaults.yaml`.
+4. Every sampled (non-derived, non-fixed) parameter **must** have `lower` and `upper` in `defaults.yaml`. `init_scale` is recommended but optional (it seeds the whitening probe; missing values fall back to a fraction of the span).
 5. Add the YAML key to example configs to test.
 
 ### Plotting for the GUI (`plot_data`)

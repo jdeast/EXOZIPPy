@@ -66,5 +66,4 @@ sampler:
   tune: 350
   draws: 650
   nthin: 1
-  check_curvatures: False
   recompute_trace: True

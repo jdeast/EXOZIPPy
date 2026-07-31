@@ -93,6 +93,7 @@ def ptde_async_sample(
     initvals=None,
     raw_starts=None,
     seed_indices=None,
+    raw_scales=None,
     gamma=None,
     target_accept=0.20,
     adapt_gamma=True,
@@ -212,7 +213,13 @@ def ptde_async_sample(
             else:
                 raw_starts, seed_indices = [raw_start], [0]
         t1_starts, chain_seed_index = _make_starts(
-            n_chains, raw_starts, logp_fn, rng, seed_indices, system=system
+            n_chains,
+            raw_starts,
+            logp_fn,
+            rng,
+            seed_indices,
+            system=system,
+            raw_scales=raw_scales,
         )
 
     if plot_prefix is not None:
