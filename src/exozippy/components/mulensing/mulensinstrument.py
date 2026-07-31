@@ -3,7 +3,6 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +118,14 @@ class MulensInstrument(Instrument):
                 ),
             },
             cls._mask_config_schema(),
+            cls._columns_config_schema(
+                ("time", "mag", "err"),
+                note=(
+                    "With data_format: flux the observable role is named "
+                    "'flux' instead of 'mag'."
+                ),
+            ),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -199,15 +206,16 @@ class MulensInstrument(Instrument):
         # Median absolute position per instrument (used by Lens to detect parallax)
         self.inst_ref_pos = []
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
+        for i in range(self.n_elements):
+            fmt = self.config[i].get("data_format", "magnitude")
+            # Shared reader: columns:, mask:, time_* conversion, then sort
+            # before the observer positions are computed from t, so the
+            # ephemeris rows stay aligned with the photometry.
+            df = self._read_data(
+                i,
+                roles=("time", "flux" if fmt == "flux" else "mag", "err"),
+                detrend=True,
             )
-            # Mask (raw row order), then sort before the observer positions
-            # are computed from t, so the ephemeris rows stay aligned with
-            # the photometry.
-            df = self._apply_mask(df, i)
-            df = self._sort_by_time(df)
             t, m, e = (
                 df.iloc[:, 0].values,
                 df.iloc[:, 1].values,
@@ -290,6 +298,27 @@ class MulensInstrument(Instrument):
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
 
+    def _reject_time_spec_with_mmexofast(self, spec):
+        """Refuse to mix MMEXOFAST seeding with a per-file time system.
+
+        MMEXOFAST reads the raw data files itself, so its t_0 seeds (and
+        the JSON's excluded_points/errfacs) are expressed in the files' own
+        raw time system.  With a time_offset or a time_scale/time_frame
+        conversion active, the model's times differ from the raw ones and
+        the seeds would start the fit in the wrong time system -- an error
+        that converges to a wrong answer rather than crashing.  Refuse
+        loudly instead.
+        """
+        if self.has_nontrivial_time_spec:
+            raise ValueError(
+                f"[{self.prefix}] time_offset/time_scale/time_frame cannot "
+                f"be combined with MMEXOFAST seeding (mmexofast: {spec!r}): "
+                f"MMEXOFAST reads the raw files, so its t_0 seeds would be "
+                f"in the raw time system, not the converted one. Either "
+                f"pre-convert the data files, or set mmexofast: false and "
+                f"provide start values for the microlensing observables."
+            )
+
     def _resolve_mmexofast(self, system):
         """Stage-1a half of the MMEXOFAST integration.
 
@@ -321,12 +350,14 @@ class MulensInstrument(Instrument):
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors only (Lens pushes seeds).
+            self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
                 self.config_manager.user_params, is_binary, want_rho
             ):
                 return
+            self._reject_time_spec_with_mmexofast(spec)
             prefix = system.config.get("prefix", "fitresults/planet")
             json_path = f"{prefix}_mmexofast.json"
             options = dict(lens.config[0].get("mmexofast_options") or {})

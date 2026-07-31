@@ -2,7 +2,6 @@ import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pymc as pm
 import pytensor
 
@@ -108,6 +107,8 @@ class Transit(Instrument):
                 ),
             },
             cls._mask_config_schema(),
+            cls._columns_config_schema(("time", "flux", "err")),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -124,15 +125,13 @@ class Transit(Instrument):
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
+        for i in range(self.n_elements):
+            # Shared reader: columns:, mask:, time_* conversion, then one
+            # sort per file before anything is derived from it, keeping the
+            # flux, errors and detrend columns aligned by construction.
+            df = self._read_data(
+                i, roles=("time", "flux", "err"), detrend=True
             )
-            # Mask (raw row order), then one sort per file, before anything is
-            # derived from it: keeps the flux, errors and detrend columns
-            # aligned by construction.
-            df = self._apply_mask(df, i)
-            df = self._sort_by_time(df)
             n_obs = len(df)
             all_times.append(df.iloc[:, 0].values)
             all_fluxes.append(df.iloc[:, 1].values)

@@ -75,7 +75,6 @@ aberration are neglected.
 import logging
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +262,16 @@ class AstrometryInstrument(Instrument):
                 "doc": "Reference epoch for the astrometric positions.",
             },
             cls._mask_config_schema(),
+            cls._columns_config_schema(
+                ("time", "..."),
+                detrend=False,
+                note=(
+                    "The roles depend on the file's mode -- gaia: time, w, "
+                    "err, psi; abs: time, ra, dec, err_e, err_n; rel: time, "
+                    "sep, err_sep, pa, err_pa."
+                ),
+            ),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
         ]
 
@@ -285,16 +294,17 @@ class AstrometryInstrument(Instrument):
         ra_cfg = np.atleast_1d(ra_cfg)
         dec_cfg = np.atleast_1d(dec_cfg)
 
-        for i, file in enumerate(self.files):
+        mode_roles = {
+            "gaia": ("time", "w", "err", "psi"),
+            "abs": ("time", "ra", "dec", "err_e", "err_n"),
+            "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
+        }
+        for i in range(self.n_elements):
             mode = self.modes[i]
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # Mask (raw row order), then sort before the parallax factors are
-            # computed from t, so every per-epoch quantity stays aligned
-            # regardless of mode.
-            df = self._apply_mask(df, i)
-            df = self._sort_by_time(df)
+            # Shared reader: columns:, mask:, time_* conversion, then sort
+            # before the parallax factors are computed from t, so every
+            # per-epoch quantity stays aligned regardless of mode.
+            df = self._read_data(i, roles=mode_roles[mode], detrend=False)
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
