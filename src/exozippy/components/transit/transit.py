@@ -2,7 +2,6 @@ import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pymc as pm
 import pytensor
 
@@ -107,6 +106,9 @@ class Transit(Instrument):
                     "instead (bands carry the filter identity)."
                 ),
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(("time", "flux", "err")),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
         ]
@@ -123,13 +125,44 @@ class Transit(Instrument):
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # One sort per file, before anything is derived from it: keeps the
+        # Fixed instrument properties (not fitted parameters), read straight
+        # off the config like self.files/self.band_names: exptime is the
+        # exposure duration in minutes, ninterp the number of sub-samples
+        # used to smear the model over that exposure (EXOFASTv2 parity).
+        # Invalid combinations (ninterp < 1, a non-positive exptime, or
+        # ninterp > 1 without an exptime to smear over) warn and fall back
+        # to the inert defaults (ninterp=1, exptime=1: no smearing) rather
+        # than crashing in the grid builder or silently smearing over a
+        # made-up exposure time.
+        self.exptime_min = [1.0] * self.n_elements
+        self.ninterp = [1] * self.n_elements
+        for i, c in enumerate(self.config):
+            exptime = float(c.get("exptime", 1.0))
+            ninterp = int(c.get("ninterp", 1))
+            if (
+                ninterp < 1
+                or exptime <= 0
+                or (ninterp > 1 and "exptime" not in c)
+            ):
+                logger.warning(
+                    f"transit {self.names[i]}: invalid exposure smearing "
+                    f"config (exptime={c.get('exptime', '<unset>')} min, "
+                    f"ninterp={c.get('ninterp', '<unset>')}): needs "
+                    f"ninterp >= 1 and, when ninterp > 1, an explicit "
+                    f"exptime > 0. Ignoring -- defaulting to ninterp=1, "
+                    f"exptime=1 (no smearing)."
+                )
+                exptime, ninterp = 1.0, 1
+            self.exptime_min[i] = exptime
+            self.ninterp[i] = ninterp
+
+        for i in range(self.n_elements):
+            # Shared reader: columns:, mask:, time_* conversion, then one
+            # sort per file before anything is derived from it, keeping the
             # flux, errors and detrend columns aligned by construction.
-            df = self._sort_by_time(df)
+            df = self._read_data(
+                i, roles=("time", "flux", "err"), detrend=True
+            )
             n_obs = len(df)
             all_times.append(df.iloc[:, 0].values)
             all_fluxes.append(df.iloc[:, 1].values)
@@ -150,6 +183,8 @@ class Transit(Instrument):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.n_total_obs = len(self.time)
 
+        self._build_oversample_grid()
+
         # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
         (
             self.detrend_matrix,
@@ -160,6 +195,66 @@ class Transit(Instrument):
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (relative flux).
         self._prepare_gp(self.time, self.err, self.inst_map)
+
+    def _build_oversample_grid(self):
+        """
+        Build per-ninterp observation groups (self._oversample_groups) used
+        to smear the model over each instrument's exposure time (EXOFASTv2
+        exofast_chi2v2.pro parity: a sub-exposure time grid collapsed with
+        a weighted mean per observation).
+
+        exptime/ninterp are per-instrument, but self.time is concatenated
+        across instruments, so instruments may disagree on both. Rather
+        than padding every observation out to the largest ninterp among
+        the active instruments (which would make build_likelihood evaluate
+        the transit model at that many sub-samples even for observations
+        whose own instrument needs only 1), observations are partitioned
+        by their own instrument's ninterp value into groups: each group's
+        sub-exposure time grid is exactly as wide as that group's own
+        ninterp, so a likelihood evaluation costs exactly the sub-samples
+        each observation's instrument needs, never another instrument's
+        larger ninterp.
+
+        build_likelihood processes groups in np.unique(ninterp) order, not
+        row order, so self._oversample_inverse_order (the argsort of the
+        concatenated group row-indices) is recorded here to gather
+        per-group results back into original observation order afterward
+        with a plain index, instead of a scatter.
+        """
+        exptime_days = np.asarray(self.exptime_min, dtype=float) / 1440.0
+        ninterp_per_inst = np.asarray(self.ninterp, dtype=int)
+
+        ninterp_obs = ninterp_per_inst[self.inst_map]  # (N_obs,)
+        exptime_obs = exptime_days[self.inst_map]  # (N_obs,)
+
+        self._oversample_groups = []
+        row_order = []
+        for kk in np.unique(ninterp_obs):
+            rows = np.nonzero(ninterp_obs == kk)[0]
+            if kk == 1:
+                # A lone sample sits at the timestamp itself; exptime is
+                # irrelevant (matches the original instantaneous model).
+                grid = self.time[rows][:, None]
+                weights = np.ones(1)
+            else:
+                # Midpoint Riemann sub-times: kk equal-width cells across
+                # [-exptime/2, +exptime/2], sampled at each cell's center
+                # (offsets (j + 0.5)/kk - 0.5, never the exposure edges).
+                # This is exactly EXOFASTv2's grid (exofast_chi2v2.pro:
+                # dindgen(ninterp)/ninterp - (ninterp-1)/(2*ninterp)),
+                # chosen there over trapezoid/Simpson: with uniform 1/kk
+                # weights, edge samples would overweight the exposure
+                # boundaries and systematically over-smear.
+                j = np.arange(kk)
+                frac = (j + 0.5) / kk - 0.5
+                grid = (
+                    self.time[rows][:, None]
+                    + frac[None, :] * exptime_obs[rows][:, None]
+                )
+                weights = np.full(kk, 1.0 / kk)
+            self._oversample_groups.append((rows, grid, weights))
+            row_order.append(rows)
+        self._oversample_inverse_order = np.argsort(np.concatenate(row_order))
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -319,108 +414,174 @@ class Transit(Instrument):
         pm.Deterministic(f"{self.prefix}.tau", dur_tau)
         pm.Deterministic(f"{self.prefix}.taus", dur_taus)
 
-        # 2. Orbital Geometry Broadcast
-        t_grid = time[:, None]  # (N_obs, 1)
-        tp = orbits.tp.value[planets.orbit_map][None, :]  # (1, N_planets)
-        n = orbits.n.value[planets.orbit_map][None, :]
-        ecc = ecc_p[None, :]
-        cosw = orbits.cosw.value[planets.orbit_map][None, :]
-        sinw = orbits.sinw.value[planets.orbit_map][None, :]
-        inc = inc_p[None, :]
-
-        M = (t_grid - tp) * n
-        sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
-
-        a_rstar = planets.ar.value[None, :]
-        p_ratio = planets.p.value[None, :]
-
-        r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
-
-        sin_wf = sinw * cosf + cosw * sinf
-        cos_wf = cosw * cosf - sinw * sinf
+        # 2. Orbital elements per planet. These don't depend on the
+        # observation/sub-exposure grid, so they're computed once and
+        # reused by every ninterp group below (see 4.).
+        tp = orbits.tp.value[planets.orbit_map][
+            None, None, :
+        ]  # (1, 1, N_planets)
+        n = orbits.n.value[planets.orbit_map][None, None, :]
+        ecc = ecc_p[None, None, :]
+        cosw = orbits.cosw.value[planets.orbit_map][None, None, :]
+        sinw = orbits.sinw.value[planets.orbit_map][None, None, :]
+        inc = inc_p[None, None, :]
+        a_rstar = ar_p[None, None, :]
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
-
-        b = pt.sqrt(pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i))
-        Z = r_norm * sin_wf * sin_i
 
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
         # manifest has no u2; the quadratic term is then zero.
         band = system.band
-        u1_mapped = band.u1.value[self.obs_band_map_tensor]  # (N_obs,)
-        if "u2" in band.manifest:
-            u2_mapped = band.u2.value[self.obs_band_map_tensor]  # (N_obs,)
-        else:
-            u2_mapped = pt.zeros_like(u1_mapped)
-        # Secondary-eclipse thermal emission (ppm); 0 for every band unless
-        # that band set fitthermal: true (see Band.register_parameters).
-        thermal_mapped = band.thermal.value[
-            self.obs_band_map_tensor
-        ]  # (N_obs,)
+
+        # Secondary-eclipse thermal emission (fitthermal): gate the whole
+        # branch on the resolved parameter state, not the fitthermal
+        # flags -- the manifest "overrides" pin is layered UNDER user
+        # params, so params.yaml can free or set thermal without
+        # fitthermal. When every element is pinned at exactly 0 the
+        # thermal math (a second quad_solution_vector per planet, as
+        # expensive as the transit itself) is skipped entirely, matching
+        # exofast_tran.pro's `if thermal ne 0d0` runtime gate.
+        thermal_active = band.thermal_may_be_nonzero()
 
         # 3b. SED deblending (EXOFASTv2 parity): with more than one
         # modeled star, only the host contributes the transit, so the
         # observed depth is diluted by dil = F_host / sum_j F_j in the
         # instrument's band (host = the band's star_ndx).
-        dil_obs = None
+        dil_inst = None
         if hasattr(system, "sed") and system.star.n_elements > 1:
             dil_inst = self._build_dilution(system)
+
+        # 4. Exoplanet-core Transit Model, evaluated once per distinct
+        # ninterp group (see _build_oversample_grid) instead of once for
+        # the whole component at the largest ninterp: each group's sub-exposure
+        # axis is exactly that group's own ninterp wide, so a
+        # short-cadence (ninterp=1) observation is never evaluated at
+        # another instrument's larger ninterp. With ninterp==1 everywhere
+        # there is exactly one group of width 1, identical to the
+        # original (pre-oversampling) computation.
+        planet_group_decrement = [[] for _ in range(planets.n_elements)]
+        for rows, time_grid_np, weights_np in self._oversample_groups:
+            t_grid = pt.constant(time_grid_np)[:, :, None]  # (n_g, k_g, 1)
+            w_g = pt.constant(weights_np)  # (k_g,)
+
+            M = (t_grid - tp) * n
+            sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
+
+            r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
+
+            sin_wf = sinw * cosf + cosw * sinf
+            cos_wf = cosw * cosf - sinw * sinf
+
+            # (n_g, k_g, N_planets)
+            b = pt.sqrt(
+                pt.sqr(r_norm * cos_wf) + pt.sqr(r_norm * sin_wf * cos_i)
+            )
+            Z = r_norm * sin_wf * sin_i
+
+            u1_mapped = band.u1.value[self.obs_band_map[rows]]  # (n_g,)
+            if "u2" in band.manifest:
+                u2_mapped = band.u2.value[self.obs_band_map[rows]]  # (n_g,)
+            else:
+                u2_mapped = pt.zeros_like(u1_mapped)
+
+            thermal_g = None
+            if thermal_active:
+                # (n_g,) ppm; 0 for any band pinned off (see
+                # Band.register_parameters).
+                thermal_g = band.thermal.value[self.obs_band_map[rows]]
+
+            dil_obs = None
             if dil_inst is not None:
-                dil_obs = dil_inst[self.inst_map_tensor]  # (N_obs,)
-        # exoplanet_core's quad_solution_vector returns s in starry's Green's basis,
-        # not powers of mu. Converting the quadratic law (u1, u2) into that basis
-        # requires the change-of-basis in Agol, Luger & Foreman-Mackey (2020),
-        # matching exoplanet.light_curves.limb_dark.get_cl():
-        #   c0 = 1 - u1 - 1.5*u2, c1 = u1 + 2*u2, c2 = -0.25*u2
-        #   norm = dot(s_off, c) = pi*(c0 + c1/1.5), s_off = [pi, 2pi/3, 0]
-        c0 = 1.0 - u1_mapped - 1.5 * u2_mapped
-        c1 = u1_mapped + 2.0 * u2_mapped
-        c2 = -0.25 * u2_mapped
-        ld_norm = np.pi * (c0 + c1 / 1.5)
+                dil_obs = dil_inst[self.inst_map[rows]]  # (n_g,)
 
-        # 4. Exoplanet-core Transit Model
+            # exoplanet_core's quad_solution_vector returns s in starry's Green's basis,
+            # not powers of mu. Converting the quadratic law (u1, u2) into that basis
+            # requires the change-of-basis in Agol, Luger & Foreman-Mackey (2020),
+            # matching exoplanet.light_curves.limb_dark.get_cl():
+            #   c0 = 1 - u1 - 1.5*u2, c1 = u1 + 2*u2, c2 = -0.25*u2
+            #   norm = dot(s_off, c) = pi*(c0 + c1/1.5), s_off = [pi, 2pi/3, 0]
+            c0 = 1.0 - u1_mapped - 1.5 * u2_mapped
+            c1 = u1_mapped + 2.0 * u2_mapped
+            c2 = -0.25 * u2_mapped
+            ld_norm = np.pi * (c0 + c1 / 1.5)
+
+            for p_idx in range(planets.n_elements):
+                b_p = b[
+                    :, :, p_idx
+                ]  # (n_g, k_g) sky-plane separation in units of R_*
+                Z_p = Z[
+                    :, :, p_idx
+                ]  # (n_g, k_g) line-of-sight coord (+ = planet in front of star)
+                r_p = planets.p.value[p_idx]  # scalar R_p/R_*
+
+                # quad_solution_vector(b, r) -> (n_g, k_g, 3) solution vector s.
+                # Broadcast scalar r_p to (n_g, k_g) following the ops.kepler() pattern.
+                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
+
+                # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
+                # Verified against brute-force disk integration: lc = dot(s, c) / dot(s_off, c)
+                # c0/c1/c2/ld_norm are (n_g,); broadcast against the sub-exposure axis.
+                flux_frac = (
+                    sol[:, :, 0] * c0[:, None]
+                    + sol[:, :, 1] * c1[:, None]
+                    + sol[:, :, 2] * c2[:, None]
+                ) / ld_norm[:, None]  # (n_g, k_g)
+
+                # Fraction of stellar flux blocked (0 off-disk, ~ r^2 at disk centre)
+                blocked = 1.0 - flux_frac
+
+                # Primary transit only; secondary eclipse (planet behind star) has Z < 0
+                blocked = pt.where(Z_p > 0.0, blocked, 0.0)
+
+                # Secondary eclipse / constant thermal emission (fitthermal
+                # -- no phase-curve variation yet, see BEER/PR 1.b). The
+                # band-level thermal is added once per planet, exactly as
+                # EXOFASTv2 does (exofast_chi2v2.pro passes band.thermal
+                # to exofast_tran for every planet), and it lives inside
+                # this group loop so the eclipse gets exposure-smeared on
+                # the same sub-exposure grid as the transit (EXOFASTv2
+                # averages the full model, thermal included).
+                net = blocked
+                if thermal_g is not None:
+                    visible = physics.calc_planet_visible(
+                        b_p, Z_p, r_p
+                    )  # (n_g, k_g)
+                    net = blocked - 1e-6 * thermal_g[:, None] * visible
+
+                if dil_obs is not None:
+                    # One blended-aperture dilution for the whole
+                    # perturbation from unity: EXOFASTv2's
+                    # f0*(model*(1-dilute)+dilute) scales the transit dip
+                    # and the planet's extra flux by the same factor.
+                    net = net * dil_obs[:, None]
+
+                # Weighted mean over this group's own ninterp sub-samples
+                # (weights sum to 1). With ninterp==1 this is a no-op
+                # identity (single column, weight 1).
+                net_avg_g = pt.sum(net * w_g[None, :], axis=1)  # (n_g,)
+                planet_group_decrement[p_idx].append(net_avg_g)
+
         for p_idx in range(planets.n_elements):
-            b_p = b[:, p_idx]  # (N_obs,) sky-plane separation in units of R_*
-            Z_p = Z[
-                :, p_idx
-            ]  # (N_obs,) line-of-sight coord (+ = planet in front of star)
-            r_p = planets.p.value[p_idx]  # scalar R_p/R_*
-
-            # quad_solution_vector(b, r) -> (N_obs, 3) solution vector s.
-            # Broadcast scalar r_p to (N_obs,) following the ops.kepler() pattern.
-            sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
-
-            # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
-            # Verified against brute-force disk integration: lc = dot(s, c) / dot(s_off, c)
-            flux_frac = (
-                sol[:, 0] * c0 + sol[:, 1] * c1 + sol[:, 2] * c2
-            ) / ld_norm
-
-            # Fraction of stellar flux blocked (0 off-disk, ≈ r² at disk centre)
-            blocked = 1.0 - flux_frac
-
-            # Primary transit only; secondary eclipse (planet behind star) has Z < 0
-            blocked = pt.where(Z_p > 0.0, blocked, 0.0)
-            if dil_obs is not None:
-                blocked = blocked * dil_obs
-            lc_model = lc_model - blocked
-
-            # Secondary eclipse / constant thermal emission (fitthermal,
-            # PR 1.a -- no phase-curve variation yet, see BEER/PR 1.b).
-            planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
-            thermal_term = 1e-6 * thermal_mapped * planetvisible
-            if dil_obs is not None:
-                # Same per-term dilution convention as the transit depth
-                # above: the planet's extra flux is diluted by the same
-                # blended-aperture fraction as the light it would otherwise
-                # block.
-                thermal_term = thermal_term * dil_obs
-            lc_model = lc_model + thermal_term
+            # Groups were visited in np.unique(ninterp) order, not row
+            # order; _oversample_inverse_order restores the original
+            # per-observation order after concatenation.
+            net_avg = pt.concatenate(planet_group_decrement[p_idx])[
+                self._oversample_inverse_order
+            ]
+            lc_model = lc_model - net_avg
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
             lc_model += pt.dot(detrend, self.detrend_coeffs.value)
+
+        # Full per-observation model prediction (baseline + detrend +
+        # exposure-averaged transit decrement). Kept as a plain attribute,
+        # not a Deterministic: at (N_obs,) this would add N_obs * draws *
+        # chains floats to every trace (tens of thousands x the size of the
+        # other diagnostics here, which are all (N_planets,)). Tests compile
+        # a one-off pytensor.function from this node directly instead.
+        self._model_flux_node = lc_model
 
         # 5. Likelihood (shared base helper: sqrt(err^2 + jitter_variance)).
         # add_observation_likelihood is the plain Normal unless a light curve
@@ -473,7 +634,11 @@ class Transit(Instrument):
                 u2_inst = band.u2.value[band_idx]
             else:
                 u2_inst = pt.zeros_like(u1_inst)
-            thermal_inst = band.thermal.value[band_idx]  # scalar, 0 unless fitthermal
+            # Same resolved-state gate as build_likelihood: no thermal
+            # graph at all when every band's thermal is pinned at 0.
+            thermal_inst = None
+            if band.thermal_may_be_nonzero():
+                thermal_inst = band.thermal.value[band_idx]  # scalar ppm
             # See build_likelihood for the Green's-basis change-of-basis derivation.
             c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
             c1_inst = u1_inst + 2.0 * u2_inst
@@ -499,14 +664,17 @@ class Transit(Instrument):
                 if dil_node is not None:
                     blocked = blocked * dil_node[inst_idx]
 
-                # Secondary eclipse / constant thermal emission -- same
-                # shared helper build_likelihood uses (physics.py).
-                planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
-                thermal_term = 1e-6 * thermal_inst * planetvisible
-                if dil_node is not None:
-                    thermal_term = thermal_term * dil_node[inst_idx]
+                decrement = -blocked
+                if thermal_inst is not None:
+                    # Secondary eclipse / constant thermal emission -- same
+                    # shared helper build_likelihood uses (physics.py).
+                    visible = physics.calc_planet_visible(b_p, Z_p, r_p)
+                    thermal_term = 1e-6 * thermal_inst * visible
+                    if dil_node is not None:
+                        thermal_term = thermal_term * dil_node[inst_idx]
+                    decrement = decrement + thermal_term
 
-                decrement_matrix_list.append(-blocked + thermal_term)
+                decrement_matrix_list.append(decrement)
 
             lc_matrix = pt.stack(
                 decrement_matrix_list, axis=1
@@ -535,6 +703,47 @@ class Transit(Instrument):
         # Per-file GP conditional-mean evaluators (no-op without a gp: key).
         self._compile_gp_plotters(system)
 
+    def _oversample_offsets(self, inst_idx):
+        """Sub-exposure time offsets (days) and averaging weights for this
+        instrument's own ninterp/exptime -- the same midpoint-Riemann grid
+        across [-exptime/2, +exptime/2] that _build_oversample_grid uses
+        for build_likelihood, so a plot reproduces the smeared model the
+        fit actually optimized against rather than the instantaneous one."""
+        ninterp = int(self.ninterp[inst_idx])
+        if ninterp <= 1:
+            return np.zeros(1), np.ones(1)
+        exptime_days = float(self.exptime_min[inst_idx]) / 1440.0
+        j = np.arange(ninterp)
+        frac = (j + 0.5) / ninterp - 0.5
+        return frac * exptime_days, np.full(ninterp, 1.0 / ninterp)
+
+    def _smeared_full_lc(self, t, inst_idx, *param_values):
+        """Exposure-smeared counterpart of _compiled_full_lc: averages that
+        same compiled (instantaneous) function over this instrument's own
+        sub-exposure offsets, matching build_likelihood's oversampling. A
+        ninterp=1 instrument short-circuits to the plain instantaneous call."""
+        offsets, weights = self._oversample_offsets(inst_idx)
+        if len(offsets) == 1:
+            return self._compiled_full_lc(t, inst_idx, *param_values)
+        acc = np.zeros_like(t, dtype=float)
+        for off, w in zip(offsets, weights):
+            acc += w * self._compiled_full_lc(t + off, inst_idx, *param_values)
+        return acc
+
+    def _smeared_lc_matrix(self, t, inst_idx, *param_values):
+        """Exposure-smeared counterpart of _compiled_lc_matrix (per-planet
+        decrement columns); see _smeared_full_lc."""
+        offsets, weights = self._oversample_offsets(inst_idx)
+        if len(offsets) == 1:
+            return self._compiled_lc_matrix(t, inst_idx, *param_values)
+        acc = None
+        for off, w in zip(offsets, weights):
+            contrib = w * self._compiled_lc_matrix(
+                t + off, inst_idx, *param_values
+            )
+            acc = contrib if acc is None else acc + contrib
+        return acc
+
     # ------------------------------------------------------------------
     # Shared data preparation. The matplotlib plot() path and the GUI
     # plot_data() path both go through these helpers, so the two paths
@@ -551,7 +760,10 @@ class Transit(Instrument):
         The unphased panel shows the model the likelihood actually fits, so
         any GP this light curve requested is included; the phased panels take
         it back out of the data instead (see _phased_lc_arrays). The GP term
-        is zero for a light curve without a gp: key.
+        is zero for a light curve without a gp: key. The transit decrement
+        goes through _smeared_full_lc (not _compiled_full_lc directly) so
+        this shared panel reflects the same exposure-time smearing
+        build_likelihood fit against, not the instantaneous model.
         """
         mask = self.inst_map == i
         t_data = self.time[mask]
@@ -559,7 +771,7 @@ class Transit(Instrument):
             np.float64
         )
         param_values = self._point_to_plot_params(point, system)
-        y_decrement = self._compiled_full_lc(t_pretty, i, *param_values)
+        y_decrement = self._smeared_full_lc(t_pretty, i, *param_values)
         y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
         return t_pretty, self._baseline_for(point, i) + y_decrement + y_gp
 
@@ -567,7 +779,9 @@ class Transit(Instrument):
         """
         One-period phase grid, isolated model decrement for planet p_idx,
         and the baseline-subtracted, other-planet-cleaned flux at the
-        observed times -- shared by plot_phased() and plot_data().
+        observed times -- shared by plot_phased() and plot_data(). Uses
+        _smeared_lc_matrix (see _eval_unphased_lc) so the phased panel
+        matches the exposure-smeared model as well.
         """
         planets = system.planet
         P_ref = float(
@@ -583,11 +797,11 @@ class Transit(Instrument):
         sort_m = np.argsort(phase_model)
 
         param_values = self._point_to_plot_params(point, system)
-        lc_matrix = self._compiled_lc_matrix(t_model, i, *param_values)
+        lc_matrix = self._smeared_lc_matrix(t_model, i, *param_values)
         y_planet = lc_matrix[:, p_idx]
 
         mask = self.inst_map == i
-        data_lc_matrix = self._compiled_lc_matrix(
+        data_lc_matrix = self._smeared_lc_matrix(
             self.time[mask], i, *param_values
         )
         other_mask = np.ones(planets.n_elements, dtype=bool)
@@ -634,7 +848,8 @@ class Transit(Instrument):
             # Plot spaghetti models
             for point in points:
                 try:
-                    # Shared prep: full model light curve (baseline + decrement)
+                    # Shared prep: full model light curve (baseline + decrement),
+                    # already exposure-smeared via _smeared_full_lc.
                     t_pretty, y_full = self._eval_unphased_lc(system, point, i)
 
                     alpha = 0.8 if len(points) == 1 else 0.1

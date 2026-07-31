@@ -148,6 +148,39 @@ class Band(Component):
             thermal_entry["overrides"] = {"sigma": pin.tolist()}
         self.manifest["thermal"] = thermal_entry
 
+    def thermal_may_be_nonzero(self):
+        """True unless every band's thermal is pinned (sigma == 0) at
+        exactly 0 -- the RESOLVED parameter state, after user params.
+
+        Consumers (transit) use this to skip building the thermal graph
+        entirely (a second quad_solution_vector per planet, as expensive
+        as the transit itself) when it can only ever evaluate to zero.
+        Deliberately not `any(self.fitthermal)`: the manifest "overrides"
+        pin is layered UNDER user params, so params.yaml can free thermal
+        (sigma > 0) or fix it at a nonzero value without fitthermal, and
+        the gate must stay open for those. Anything non-numeric (a linked
+        expression, no sigma at all -> uniform prior) counts as active.
+        """
+        param = self.thermal
+
+        def _vec(value, fill):
+            arr = np.atleast_1d(value if value is not None else fill)
+            out = np.full(self.n_elements, np.nan)
+            for i in range(self.n_elements):
+                v = arr[i % len(arr)] if len(arr) else fill
+                try:
+                    out[i] = fill if v is None else float(v)
+                except (TypeError, ValueError):
+                    return None  # non-numeric (e.g. link) -> active
+            return out
+
+        sigmas = _vec(param.sigma, np.nan)
+        inits = _vec(param.initval, 0.0)
+        if sigmas is None or inits is None:
+            return True
+        pinned_at_zero = (sigmas == 0.0) & (inits == 0.0)
+        return not bool(np.all(pinned_at_zero))
+
     def build_likelihood(self, model, system):
         pass
 

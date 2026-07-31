@@ -42,6 +42,7 @@ component that does all three costs nothing extra when no file sets ``gp:``.
 import logging
 
 import numpy as np
+import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
 
@@ -49,6 +50,20 @@ from . import gp as gp_support
 from .component import Component
 
 logger = logging.getLogger(__name__)
+
+# Time-system vocabulary for the per-file time_scale/time_frame keys.
+# Scales are astropy.time scale names ("ut" is accepted as an alias for
+# ut1); frames name where the clock sits: jd = the observatory/geocenter,
+# hjd = heliocenter, bjd = solar-system barycenter.  The astropy
+# light_travel_time "kind" implementing each frame's correction is the
+# mapped value (None = no light-travel correction).
+_TIME_SCALES = ("utc", "tai", "tt", "tdb", "tcb", "tcg", "ut1")
+_TIME_SCALE_ALIASES = {"ut": "ut1"}
+_TIME_FRAMES = {"jd": None, "hjd": "heliocentric", "bjd": "barycentric"}
+# Frame/scale conversion is only meaningful on absolute Julian Dates;
+# anything below this is a truncated time (BJD-2450000, MJD, ...) that
+# needs time_offset first.
+_MIN_ABS_JD = 2_000_000.0
 
 
 class Instrument(Component):
@@ -69,6 +84,19 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # Optional per-file exclusion mask (see _apply_mask). Parsed here so a
+        # malformed spec fails at construction, not mid-load.
+        self.mask_specs = [c.get("mask") for c in self.config]
+        # Optional per-file time system (time_offset/time_scale/time_frame/
+        # time_location/time_ephemeris) and column layout (columns:), both
+        # applied by _read_data.  Parsed here so malformed specs fail at
+        # construction too.
+        self.time_specs = [
+            self._parse_time_spec(c, i) for i, c in enumerate(self.config)
+        ]
+        self.column_specs = [
+            self._parse_columns_spec(c, i) for i, c in enumerate(self.config)
+        ]
         self._load_plot_styles()
         self._load_gp_config()
 
@@ -154,6 +182,561 @@ class Instrument(Component):
         if np.all(order == np.arange(len(order))):
             return df  # already sorted: no copy
         return df.iloc[order].reset_index(drop=True)
+
+    def _apply_mask(self, df, i):
+        """Drop excluded rows of file ``i`` per its optional ``mask:`` config.
+
+        Called on each data file right after reading and BEFORE
+        ``_sort_by_time``, so every mask spec refers to the file's own row
+        order as it is on disk (comment lines not counted).  Dropping whole
+        rows here -- before any column is split out or anything is derived
+        from the times -- keeps the observable, errors, detrend columns and
+        every row-aligned side array (observer positions, parallax factors)
+        consistent by construction, exactly like the sort.
+
+        Accepted ``mask:`` forms on an instrument's config entry:
+
+        - a path to a whitespace/newline-delimited file with ONE value per
+          data row (0/1, true/false): nonzero/true means EXCLUDE that row.
+          This is the shape a bad-data flag vector (e.g. from MMEXOFAST)
+          saves to naturally.
+        - a list of booleans, one per data row: True means EXCLUDE.
+        - a list of integers: 0-based row indices to EXCLUDE.
+
+        Absent or ``null`` keeps every point (the default: byte-for-byte the
+        pre-feature behavior).
+        """
+        spec = self.mask_specs[i]
+        if spec is None:
+            return df
+        label = f"{self.prefix}[{self.names[i]}]"
+        n = len(df)
+
+        if isinstance(spec, str):
+            flags = np.loadtxt(spec, dtype=float, comments="#").ravel()
+            if flags.size != n:
+                raise ValueError(
+                    f"[{label}] mask file '{spec}' has {flags.size} entries "
+                    f"but the data file has {n} rows -- one flag per data "
+                    f"row is required."
+                )
+            exclude = flags.astype(bool)
+        elif isinstance(spec, (list, tuple, np.ndarray)):
+            spec = list(spec)
+            if all(isinstance(v, (bool, np.bool_)) for v in spec):
+                if len(spec) != n:
+                    raise ValueError(
+                        f"[{label}] boolean mask has {len(spec)} entries but "
+                        f"the data file has {n} rows."
+                    )
+                exclude = np.asarray(spec, dtype=bool)
+            elif all(
+                isinstance(v, (int, np.integer))
+                and not isinstance(v, (bool, np.bool_))
+                for v in spec
+            ):
+                idx = np.asarray(spec, dtype=int)
+                if idx.size and (idx.min() < 0 or idx.max() >= n):
+                    raise ValueError(
+                        f"[{label}] mask indices must be 0-based row indices "
+                        f"in [0, {n - 1}]; got min {idx.min()}, max "
+                        f"{idx.max()}."
+                    )
+                exclude = np.zeros(n, dtype=bool)
+                exclude[idx] = True
+            else:
+                raise ValueError(
+                    f"[{label}] mask list must be all booleans (per-row "
+                    f"flags) or all integers (row indices to exclude)."
+                )
+        else:
+            raise ValueError(
+                f"[{label}] mask must be a file path or a list; got "
+                f"{type(spec).__name__}."
+            )
+
+        n_masked = int(exclude.sum())
+        if n_masked == n:
+            raise ValueError(
+                f"[{label}] mask excludes every one of the {n} data points."
+            )
+        if n_masked:
+            logger.info(f"[{label}] mask excluded {n_masked}/{n} data points.")
+            df = df.loc[~exclude].reset_index(drop=True)
+        return df
+
+    @staticmethod
+    def _mask_config_schema():
+        """The shared ``mask`` config-schema entry (per-file point exclusion).
+
+        Children append this to their ``config_schema()`` so introspection and
+        a GUI discover the key generically.
+        """
+        return {
+            "key": "mask",
+            "kind": "option",
+            "accepts": None,
+            "required": False,
+            "doc": (
+                "Optional per-file point exclusion, applied to the data "
+                "file's own row order before anything is derived from it: a "
+                "path to a file with one 0/1 flag per data row (nonzero = "
+                "exclude), a list of booleans (one per row, true = exclude), "
+                "or a list of 0-based row indices to exclude."
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Shared file reading: columns, mask, time system, sort
+    # ------------------------------------------------------------------
+    def _read_data(self, i, roles, detrend=False):
+        """Read data file ``i`` into canonical column order, ready to use.
+
+        One call replaces the read/mask/sort triplet every child used to
+        write, and is the single place the user-facing file conveniences
+        happen, in this order:
+
+        1. ``columns:``   reorder/select columns into the canonical layout
+                          (``_select_columns``);
+        2. ``mask:``      drop excluded rows, in on-disk row order
+                          (``_apply_mask``);
+        3. ``time_*:``    add ``time_offset`` and convert the time column
+                          to BJD_TDB (``_to_bjd_tdb``);
+        4. sort ascending by (converted) time (``_sort_by_time``).
+
+        ``roles`` names the canonical columns in order and must start with
+        ``"time"``; with ``detrend=True`` any detrend columns follow them.
+        The returned DataFrame is indexed positionally: column ``j`` is
+        ``roles[j]``, columns ``len(roles):`` are the detrend columns.
+        With none of the optional keys set this is byte-for-byte the old
+        read (all columns, as-is on disk, sorted by column 0).
+        """
+        if roles[0] != "time":
+            raise ValueError(
+                f"[{self.prefix}] _read_data roles must start with 'time'; "
+                f"got {list(roles)}."
+            )
+        df = pd.read_csv(
+            self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
+        )
+        df = self._select_columns(df, i, roles, detrend)
+        df = self._apply_mask(df, i)
+        t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
+        df[df.columns[0]] = t
+        return self._sort_by_time(df)
+
+    # ------------------------------------------------------------------
+    # Optional per-file column layout (columns:)
+    # ------------------------------------------------------------------
+    def _parse_columns_spec(self, c, i):
+        """Validate one config entry's optional ``columns:`` key (stage 0).
+
+        The value is a mapping from role name to a 0-based column index in
+        the data file, plus an optional ``detrend`` role mapping to a LIST
+        of 0-based column indices.  Role-name validity is checked later, in
+        ``_select_columns``, because only the child knows its roles (and
+        astrometry's depend on the file's mode); the structure is checked
+        here so a malformed spec fails at construction.
+        """
+        spec = c.get("columns")
+        if spec is None:
+            return None
+        label = f"{self.prefix}[{self.names[i]}]"
+        if not isinstance(spec, dict):
+            raise ValueError(
+                f"[{label}] columns must be a mapping of role name to "
+                f"0-based column index (plus optional 'detrend: [i, ...]'); "
+                f"got {type(spec).__name__}."
+            )
+
+        def _col(v):
+            if (
+                isinstance(v, bool)
+                or not isinstance(v, (int, np.integer))
+                or v < 0
+            ):
+                raise ValueError(
+                    f"[{label}] columns entries must be 0-based column "
+                    f"indices (non-negative integers); got {v!r}."
+                )
+            return int(v)
+
+        out = {}
+        for k, v in spec.items():
+            if k == "detrend":
+                if not isinstance(v, (list, tuple)):
+                    raise ValueError(
+                        f"[{label}] columns.detrend must be a list of "
+                        f"0-based column indices; got {v!r}."
+                    )
+                out[k] = [_col(x) for x in v]
+            else:
+                out[k] = _col(v)
+        return out
+
+    def _select_columns(self, df, i, roles, detrend):
+        """Apply file ``i``'s ``columns:`` spec, returning the canonical layout.
+
+        Without a spec the file is returned untouched (the on-disk order IS
+        the canonical order, detrend columns are everything past the named
+        roles).  With a spec, each role defaults to its canonical position
+        and named roles override it; detrend columns are ONLY the ones the
+        spec lists (an explicit layout leaves no 'rest of the columns' to
+        guess at).
+        """
+        spec = self.column_specs[i]
+        label = f"{self.prefix}[{self.names[i]}]"
+        if spec is None:
+            if df.shape[1] < len(roles):
+                raise ValueError(
+                    f"[{label}] data file has {df.shape[1]} columns but "
+                    f"needs at least {len(roles)} ({', '.join(roles)})."
+                )
+            return df
+
+        unknown = sorted(set(spec) - set(roles) - {"detrend"})
+        if unknown:
+            raise ValueError(
+                f"[{label}] columns names unknown role(s) {unknown}; valid "
+                f"roles are {list(roles)}"
+                + (" plus 'detrend'." if detrend else ".")
+            )
+        if "detrend" in spec and not detrend:
+            raise ValueError(
+                f"[{label}] columns.detrend is not supported by this "
+                f"component (it has no detrending)."
+            )
+        idx = [spec.get(role, j) for j, role in enumerate(roles)]
+        det = spec.get("detrend", []) if detrend else []
+        too_big = [c for c in idx + det if c >= df.shape[1]]
+        if too_big:
+            raise ValueError(
+                f"[{label}] columns indices are 0-based and the data file "
+                f"has {df.shape[1]} columns; got {sorted(set(too_big))}."
+            )
+        out = df.iloc[:, idx + det].copy()
+        out.columns = range(out.shape[1])
+        return out
+
+    @staticmethod
+    def _columns_config_schema(roles, detrend=True, note=""):
+        """The shared ``columns`` config-schema entry for the given roles."""
+        extra = (
+            ", plus 'detrend' mapping to a list of column indices to "
+            "detrend against (when columns: is given, detrend columns "
+            "must be listed explicitly)"
+            if detrend
+            else ""
+        )
+        return {
+            "key": "columns",
+            "kind": "option",
+            "accepts": None,
+            "required": False,
+            "doc": (
+                f"Optional column layout: a mapping from role name to "
+                f"0-based column index in the data file. Roles: "
+                f"{', '.join(roles)}{extra}. Unnamed roles keep their "
+                f"default position. Default: the documented column order."
+                + (f" {note}" if note else "")
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Optional per-file time system (time_offset / time_scale / time_frame)
+    # ------------------------------------------------------------------
+    def _parse_time_spec(self, c, i):
+        """Validate one config entry's optional time-system keys (stage 0).
+
+        Returns a dict with ``offset`` (days, added to the raw times
+        first), ``scale`` (astropy time scale of the input), ``frame``
+        (jd/hjd/bjd: where the input's clock sits), ``location`` (observer
+        for the jd frame's light-travel and topocentric-scale terms),
+        ``ephemeris`` (solar-system ephemeris for light_travel_time) and
+        ``needs_conversion``.  The default -- offset 0, scale tdb, frame
+        bjd -- is BJD_TDB in, BJD_TDB out, untouched.
+        """
+        label = f"{self.prefix}[{self.names[i]}]"
+
+        offset = c.get("time_offset", 0.0)
+        if isinstance(offset, bool) or not isinstance(
+            offset, (int, float, np.integer, np.floating)
+        ):
+            raise ValueError(
+                f"[{label}] time_offset must be a number (days, added to "
+                f"every input time); got {offset!r}."
+            )
+
+        scale = c.get("time_scale", "tdb")
+        if not isinstance(scale, str):
+            raise ValueError(
+                f"[{label}] time_scale must be one of {list(_TIME_SCALES)}; "
+                f"got {scale!r}."
+            )
+        scale = _TIME_SCALE_ALIASES.get(scale.lower(), scale.lower())
+        if scale not in _TIME_SCALES:
+            raise ValueError(
+                f"[{label}] time_scale must be one of {list(_TIME_SCALES)} "
+                f"(or 'ut' for ut1); got {c.get('time_scale')!r}."
+            )
+
+        frame = c.get("time_frame", "bjd")
+        if not isinstance(frame, str) or frame.lower() not in _TIME_FRAMES:
+            raise ValueError(
+                f"[{label}] time_frame must be one of "
+                f"{list(_TIME_FRAMES)}; got {frame!r}."
+            )
+        frame = frame.lower()
+
+        location = c.get("time_location")
+        if location is not None:
+            ok = isinstance(location, str) or (
+                isinstance(location, (list, tuple))
+                and len(location) in (2, 3)
+                and all(
+                    isinstance(v, (int, float, np.integer, np.floating))
+                    and not isinstance(v, bool)
+                    for v in location
+                )
+            )
+            if not ok:
+                raise ValueError(
+                    f"[{label}] time_location must be an observatory name "
+                    f"(astropy EarthLocation.of_site) or [lon_deg, lat_deg"
+                    f"(, height_m)]; got {location!r}."
+                )
+
+        ephemeris = c.get("time_ephemeris", "builtin")
+        if not isinstance(ephemeris, str):
+            raise ValueError(
+                f"[{label}] time_ephemeris must be an astropy solar-system "
+                f"ephemeris name ('builtin', 'jpl', 'de440', ...); got "
+                f"{ephemeris!r}."
+            )
+
+        return {
+            "offset": float(offset),
+            "scale": scale,
+            "frame": frame,
+            "location": location,
+            "ephemeris": ephemeris,
+            "needs_conversion": scale != "tdb" or frame != "bjd",
+        }
+
+    @property
+    def has_nontrivial_time_spec(self):
+        """True when any file sets a time offset or a time-system conversion."""
+        return any(
+            s["offset"] != 0.0 or s["needs_conversion"]
+            for s in self.time_specs
+        )
+
+    def _to_bjd_tdb(self, t, i):
+        """Convert file ``i``'s raw times to BJD_TDB, per its time spec.
+
+        ``time_offset`` is added first (so truncated times like
+        BJD-2450000 or MJD become absolute JDs); the scale/frame
+        conversion then runs on absolute JDs only.  The algorithm is the
+        standard one (Eastman, Siverd & Gaudi 2010):
+
+        1. strip the input frame's light-travel correction to recover the
+           observer's JD in the input scale -- ``t = t_obs + ltt(t_obs)``
+           is inverted by fixed-point iteration, which converges below a
+           nanosecond in 3 passes because d(ltt)/dt <= v_earth/c ~ 1e-4;
+        2. convert the time scale to TDB (astropy/erfa: leap seconds for
+           UTC/TAI, the erfa TDB-TT model, IERS tables for UT1);
+        3. add back the barycentric light-travel time in TDB.
+
+        Input already in the bjd frame skips 1 and 3: the barycentric
+        correction appears identically on both sides and cancels exactly,
+        so a scale-only conversion (BJD_UTC -> BJD_TDB) needs no
+        coordinates.
+
+        Accuracy notes (why the remaining terms are out of scope):
+        the observer's position enters through ``time_location`` (omitting
+        it costs up to 21 ms of geocenter-vs-observatory Romer delay);
+        the builtin (erfa) ephemeris is good to a few microseconds of
+        light travel (``time_ephemeris: de440`` reaches ns, needs
+        jplephem); a single float64 JD quantizes at ~40 microseconds
+        anyway, which is the real floor here; TT(BIPM) (~30 us), the
+        Shapiro delay (~us; ~100 us within ~1 deg of the Sun), and
+        proper-motion/parallax evolution of the source direction (~us/yr
+        for mas/yr motions) are all below that floor's usefulness and are
+        not modeled.
+        """
+        spec = self.time_specs[i]
+        if spec["offset"] != 0.0:
+            t = t + spec["offset"]
+        if not spec["needs_conversion"]:
+            return t
+
+        label = f"{self.prefix}[{self.names[i]}]"
+        if t.min() < _MIN_ABS_JD:
+            raise ValueError(
+                f"[{label}] time_scale/time_frame conversion needs absolute "
+                f"Julian Dates, but the smallest time after time_offset is "
+                f"{t.min():.3f}. Set time_offset to restore full JDs (e.g. "
+                f"2450000 for BJD-2450000 data, 2400000.5 for MJD)."
+            )
+
+        # astropy.coordinates is deliberately imported lazily: it is slow to
+        # import and only needed when a file actually opts into conversion.
+        from astropy.time import Time
+
+        location = self._time_location(i)
+
+        if spec["frame"] == "bjd":
+            # Scale-only conversion: the barycentric light-travel term is
+            # identical on both sides and cancels exactly (the TDB-vs-UTC
+            # evaluation epoch of the correction matters at the 0.1 us
+            # level), so no coordinates are needed at all.
+            out = Time(
+                t, format="jd", scale=spec["scale"], location=location
+            ).tdb.jd
+        else:
+            coord = self._time_coord(i, label)
+            kind = _TIME_FRAMES[spec["frame"]]
+            ephemeris = spec["ephemeris"]
+
+            t_obs = t
+            if kind is not None:
+                for _ in range(3):
+                    ltt = Time(
+                        t_obs,
+                        format="jd",
+                        scale=spec["scale"],
+                        location=location,
+                    ).light_travel_time(coord, kind=kind, ephemeris=ephemeris)
+                    t_obs = t - ltt.jd
+            t_tdb = Time(
+                t_obs, format="jd", scale=spec["scale"], location=location
+            ).tdb
+            out = (
+                t_tdb.jd
+                + t_tdb.light_travel_time(
+                    coord, kind="barycentric", ephemeris=ephemeris
+                ).jd
+            )
+        logger.info(
+            "[%s] converted %d times from %s_%s to BJD_TDB "
+            "(median shift %+.3f s).",
+            label,
+            t.size,
+            spec["frame"].upper(),
+            spec["scale"].upper(),
+            float(np.median(out - t)) * 86400.0,
+        )
+        return out
+
+    def _time_coord(self, i, label):
+        """The target ICRS direction for file ``i``'s light-travel terms.
+
+        Reuses the star component's ra/dec exactly as astrometry and mulens
+        do (``star_ndx`` on the file's config entry picks the star, default
+        0; every star in one system is the same direction at the accuracy
+        that matters here).  Requiring ``user_modified`` is deliberate: the
+        defaults.yaml ra/dec are placeholders, and a conversion run against
+        them would corrupt every BJD by up to +/-8 minutes with no error.
+        """
+        star_ndx = int(self.config[i].get("star_ndx", 0))
+        ra = self.config_manager.resolve("star", "ra", element=star_ndx)
+        dec = self.config_manager.resolve("star", "dec", element=star_ndx)
+        if not (ra["user_modified"] and dec["user_modified"]):
+            raise ValueError(
+                f"[{label}] time_scale/time_frame conversion needs the "
+                f"target's coordinates: set star.{star_ndx}.ra and "
+                f"star.{star_ndx}.dec (deg) in the params file."
+            )
+        import astropy.units as u
+        from astropy.coordinates import SkyCoord
+
+        # resolve() returns per-element arrays even for shape=(); take the
+        # single element rather than float()-ing an ndarray (NumPy 2 error).
+        return SkyCoord(
+            ra=float(np.ravel(ra["initval"])[0]) * u.Unit(ra["unit"] or "deg"),
+            dec=float(np.ravel(dec["initval"])[0])
+            * u.Unit(dec["unit"] or "deg"),
+        )
+
+    def _time_location(self, i):
+        """File ``i``'s observer EarthLocation (geocenter when unset)."""
+        import astropy.units as u
+        from astropy.coordinates import EarthLocation
+
+        location = self.time_specs[i]["location"]
+        if location is None:
+            return EarthLocation.from_geocentric(0.0, 0.0, 0.0, unit=u.m)
+        if isinstance(location, str):
+            return EarthLocation.of_site(location)
+        lon, lat = float(location[0]), float(location[1])
+        height = float(location[2]) if len(location) == 3 else 0.0
+        return EarthLocation.from_geodetic(lon, lat, height)
+
+    @staticmethod
+    def _time_config_schema():
+        """The shared time-system config-schema entries; children append them."""
+        return [
+            {
+                "key": "time_offset",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Optional offset in days added to every input time "
+                    "before anything else (e.g. 2450000 for BJD-2450000 "
+                    "data, 2400000.5 for MJD). Default 0."
+                ),
+            },
+            {
+                "key": "time_scale",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Time scale of the input times: utc, tai, tt, tdb, "
+                    "tcb, tcg or ut1 ('ut' is accepted for ut1; ut1 may "
+                    "trigger an IERS table download). Default tdb."
+                ),
+            },
+            {
+                "key": "time_frame",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Reference frame of the input times: jd (observer/"
+                    "geocenter), hjd (heliocentric) or bjd (barycentric). "
+                    "Anything but the default bjd+tdb is converted to "
+                    "BJD_TDB at load time, which requires absolute JDs "
+                    "(see time_offset); jd/hjd also require user-set star "
+                    "ra/dec. Default bjd."
+                ),
+            },
+            {
+                "key": "time_location",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Observer location for the time conversion: an astropy "
+                    "observatory name (EarthLocation.of_site) or [lon_deg, "
+                    "lat_deg(, height_m)]. Default geocenter (up to 21 ms "
+                    "of Romer delay is unmodeled without it)."
+                ),
+            },
+            {
+                "key": "time_ephemeris",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Solar-system ephemeris for the light-travel terms: "
+                    "'builtin' (erfa, ~us accuracy) or a JPL kernel like "
+                    "'de440' (~ns, needs jplephem + download). Default "
+                    "builtin."
+                ),
+            },
+        ]
 
     # ------------------------------------------------------------------
     # Optional per-file Gaussian-process noise (celerite2)

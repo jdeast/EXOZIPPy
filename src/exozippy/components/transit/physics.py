@@ -39,14 +39,15 @@ def calc_planet_visible(b_p, Z_p, r_p):
     exofast_tran.pro:103-107's planetvisible defaulting to 1 and only
     being overwritten for `secondary`.
 
-    b_p, Z_p: (N,) tensors, sky-plane separation and line-of-sight
-    coordinate in units of R_*, as computed for the primary transit.
-    r_p: scalar R_p/R_*.
+    b_p, Z_p: same-shape tensors of any dimensionality (plotting passes
+    (N,), build_likelihood (n_group, ninterp)), sky-plane separation and
+    line-of-sight coordinate in units of R_*, as computed for the primary
+    transit. r_p: scalar R_p/R_*.
     """
     b_swap = b_p / r_p
     r_swap = 1.0 / r_p
-    sol_swap = ops.quad_solution_vector(
-        b_swap, r_swap + pt.zeros_like(b_swap)
-    )
-    occulted_frac = sol_swap[:, 0] / np.pi
-    return pt.where(Z_p > 0.0, 1.0, occulted_frac)
+    sol_swap = ops.quad_solution_vector(b_swap, r_swap + pt.zeros_like(b_swap))
+    # s0/pi is the visible flux fraction of the uniform planetary disk
+    # (1 in the clear, 0 fully occulted).
+    visible_frac = sol_swap[..., 0] / np.pi
+    return pt.where(Z_p > 0.0, 1.0, visible_frac)

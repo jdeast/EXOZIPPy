@@ -75,38 +75,30 @@ orbit.b.cosi:
   initval: 0.11996
 
 rvinstrument.EXPERT.gamma:
-  #init_scale: 11.1130411925
   lower: -1000
   upper: 1000
 rvinstrument.EXPERT.jitter_variance:
-  init_scale: 10
   lower: -1000
   upper: 1000
 
 rvinstrument.FIES.gamma:
-  init_scale: 8.55538045957
   lower: -1000
   upper: 1000
 rvinstrument.FIES.jitter_variance:
-  init_scale: 10
   lower: -100
   upper: 100
 
 rvinstrument.HIRES.gamma:
-  #init_scale: 0.84847723031
   lower: -100
   upper: 100
 rvinstrument.HIRES.jitter_variance:
-  #init_scale: 0.49937616943
   lower: -100
   upper: 100
 
 rvinstrument.TRES.gamma:
-  #init_scale: 5.3882459687
   lower: -100
   upper: 100
 rvinstrument.TRES.jitter_variance:
-#  init_scale: 10
   lower: -1000
   upper: 1000
 

@@ -164,9 +164,11 @@ It makes use of each component's symbolic_physics.py to derive the sampled param
 above, iteratively replacing the lowest ranked parameter with the re-derived value, and updating its weight the 
 average of its constituent weights. 
 
-It repeats the process independently for init_scale, automatically differentiating the relations in 
-symbolic_physics.py to propagate uncertainties, and recognizing that any parameter may have an override for the initval, 
-init_scale, or both.
+It repeats the process for init_scale, automatically differentiating the relations in symbolic_physics.py
+to propagate uncertainties.  These scales are only PRELIMINARY (they seed the whitening probe, which
+measures the real per-parameter scales from the data -- see exozippy/whitening.py) and they set the
+soft-bound barrier steepness on derived parameters.  init_scale is NOT user-facing: entries in a user
+params file are stripped with a warning at construction.
 
 3) warns the user if there are conflicting user-specified constraints that cannot be reconciled.
 
@@ -220,9 +222,11 @@ class ConfigManager:
             self.user_params = self.standardize_param_names(
                 user_params, system_config
             )
+            self._strip_user_init_scales()
             self.links = extract_links(self.user_params, system_config)
         else:
             self.user_params = user_params
+            self._strip_user_init_scales()
 
         self.system_config = system_config or {}
         self.base_defaults = {}
@@ -503,12 +507,14 @@ class ConfigManager:
 
     def add_scale_hint(self, path, scale):
         """
-        Register a context-appropriate init_scale for a parameter.
+        Register a context-appropriate PRELIMINARY init_scale for a parameter.
 
-        Overrides the defaults.yaml init_scale but yields to an explicit
-        init_scale provided by the user in their params file.  Use this to
-        set physically meaningful sampling scales that differ from the generic
-        stellar defaults (e.g. bulge distances need ~500 pc, not 0.1 pc).
+        Overrides the defaults.yaml init_scale.  Use this to set physically
+        meaningful scales that differ from the generic stellar defaults (e.g.
+        bulge distances need ~500 pc, not 0.1 pc).  Sampled parameters get
+        their real scale from the whitening probe at startup regardless; the
+        hint seeds that probe and, via the forward Jacobian pass, sets the
+        soft-bound barrier steepness of derived parameters.
         """
         translated_path = path
         parts = path.split(".")
@@ -624,7 +630,10 @@ class ConfigManager:
         }
 
         tuning_keys = ["initval", "init_scale"]
-        physics_keys = ["lower", "upper", "mu", "sigma"]
+        # bound_scale is a physics key: it sets soft-bound barrier steepness,
+        # a real posterior term (unlike init_scale, which is preliminary
+        # conditioning only and not user-facing).
+        physics_keys = ["lower", "upper", "mu", "sigma", "bound_scale"]
         all_numeric = tuning_keys + physics_keys
 
         for key in all_numeric:
@@ -776,11 +785,11 @@ class ConfigManager:
                         if bool_key in ov:
                             resolved[bool_key] = ov[bool_key]
 
-                    if (
-                        "sigma" in ov
-                        and "init_scale" not in ov
-                        and resolved["sigma"] is not None
-                    ):
+                    # A user-supplied Gaussian prior width doubles as the
+                    # best preliminary scale (user init_scale entries were
+                    # stripped at construction, so sigma is the only user
+                    # signal left).
+                    if "sigma" in ov and resolved["sigma"] is not None:
                         apply_value(
                             "init_scale",
                             resolved.get("init_scale"),
@@ -1092,7 +1101,7 @@ class ConfigManager:
                     existing["derived"] = True
 
         # --- SNAPSHOT USER-LINK EXPRESSIONS FOR STATIC FIELDS ---
-        # sigma / init_scale links are static by design; lower / upper links
+        # sigma links are static by design; lower / upper links
         # additionally need a numeric snapshot so the logit transform can be
         # set up (the dynamic tensor bound replaces it at runtime).
         for target, fields in self.links.items():
@@ -1228,76 +1237,28 @@ class ConfigManager:
                 self.dependencies[node] = []
                 logger.debug(f"[Pruning] Severed dependency cycle at: {node}")
 
-    def audit_scales(self):
-        """
-        Validates that all SAMPLED parameters have a valid init_scale.
-        Warns if the user explicitly provided an init_scale for a DERIVED, FIXED, or AUXILIARY parameter.
-        """
-        missing_scales = []
+    def _strip_user_init_scales(self):
+        """Warn about and drop any init_scale entries in the user's params.
 
-        # 1. Identify which paths the user explicitly provided an init_scale for
-        user_scale_paths = []
-        standardized_user_params = self.standardize_param_names(
-            self.raw_user_params, self.system_config
-        )
-        for k, v in standardized_user_params.items():
+        init_scale is obsolete as a user-facing knob: the whitening scale is
+        measured directly from the data at startup (see exozippy/whitening.py)
+        and any user value would be overwritten anyway.  Old params files keep
+        working -- the key is simply ignored with a warning.  Entries are
+        removed via a rebuilt per-parameter dict so a caller's original dict
+        (raw_user_params) is never mutated.
+        """
+        stripped = []
+        for k, v in list(self.user_params.items()):
             if isinstance(v, dict) and "init_scale" in v:
-                user_scale_paths.append(k)
-
-        # 2. Audit all parameters in the symbol map
-        for path_str in self.master_symbol_map.keys():
-            parts = path_str.split(".")
-            comp_type = parts[0]
-            param_name = parts[-1]
-
-            el = (
-                int(parts[1])
-                if len(parts) == 3 and parts[1].isdigit()
-                else None
-            )
-            cfg = self.resolve(comp_type, param_name, element=el)
-
-            # --- Replicate Parameter.is_sampled logic ---
-            # 1. is_config_present: Internal math variables (logradius, etc.) won't exist in defaults.yaml
-            # 2. is_fixed: Has a hardcoded 'value'
-            # 3. is_derived: Has 'expressions' to calculate it
-            is_config_present = bool(cfg)
-            is_fixed = cfg.get("value") is not None
-            is_derived = bool(cfg.get("expressions"))
-
-            is_sampled = is_config_present and not is_fixed and not is_derived
-
-            # Check for a valid scale
-            scale_val = cfg.get("init_scale")
-            has_scale = scale_val is not None and not np.any(
-                np.isnan(np.atleast_1d(scale_val))
-            )
-
-            # Issue targeted warnings based on exactly why the scale is being ignored
-            if path_str in user_scale_paths:
-                if is_derived:
-                    logger.debug(
-                        f"init_scale for '{path_str}' will be back-propagated to sampled parents."
-                    )
-                elif is_fixed:
-                    logger.warning(
-                        f"init_scale for '{path_str}' ignored — it is FIXED; the sampler will not step here."
-                    )
-                elif not is_config_present:
-                    logger.warning(
-                        f"init_scale for '{path_str}' ignored — it is an internal AUXILIARY variable."
-                    )
-
-            # We ONLY halt if it is a truly sampled parameter missing its scale
-            if is_sampled and not has_scale:
-                missing_scales.append(path_str)
-
-        if missing_scales:
-            raise ValueError(
-                f"\n!!! CRITICAL CONFIGURATION ERROR !!!\n"
-                f"The following SAMPLED parameters lack a valid 'init_scale'.\n"
-                f"Missing: {missing_scales}\n"
-                f"Check 'defaults.yaml' or provide an 'init_scale' in your config file."
+                self.user_params[k] = {
+                    kk: vv for kk, vv in v.items() if kk != "init_scale"
+                }
+                stripped.append(k)
+        if stripped:
+            logger.warning(
+                f"'init_scale' is obsolete and was ignored for: {stripped}. "
+                f"Whitening scales are now measured directly from the data at "
+                f"startup; remove init_scale from your params file."
             )
 
     def _record_diagnostic(self, severity, message, param_paths):
@@ -1537,26 +1498,21 @@ class ConfigManager:
                 resolved_scales[hint_path] = hint_scale
                 scale_provenance[hint_path] = RANK_DERIVED_DATA
 
-        # 1.7 LAYER IN USER-SPECIFIED SCALES (RANK_USER)
-        # When the user provides sigma or init_scale for a parameter, that scale
-        # must propagate via the Jacobian (e.g. mass sigma → logmass init_scale).
-        # The initialization loop records these with RANK_DEFAULT provenance because
-        # it uses the parameter's rank field, not the source of the scale value.
-        # Re-apply them here with RANK_USER so they win over hints and defaults
-        # and their Jacobian derivatives can correctly update dependent parameters.
+        # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (RANK_USER)
+        # A user-supplied Gaussian prior width is also the best available
+        # preliminary scale for that parameter, and the forward Jacobian pass
+        # below propagates it into derived-parameter scales (which set the
+        # soft-bound barrier steepness on derived parameters).  User
+        # init_scale entries no longer exist at this point -- they are
+        # stripped with a warning at construction (whitening scales are
+        # measured from the data instead; see exozippy/whitening.py).
         for path_str in self.master_symbol_map:
             up = self.user_params.get(path_str)
             if not isinstance(up, dict):
                 continue
             parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
-            if "init_scale" in up:
-                factor = self.get_conversion_factor(
-                    c_type, p_name, full_path=path_str
-                )
-                resolved_scales[path_str] = float(up["init_scale"]) * factor
-                scale_provenance[path_str] = RANK_USER
-            elif (
+            if (
                 "sigma" in up
                 and up.get("sigma") is not None
                 and float(up["sigma"]) > 0
@@ -1676,130 +1632,20 @@ class ConfigManager:
 
         logger.info(f"Done solving after {iteration} iterations.")
 
-        # Forward scale pass: propagate scales using the same rank semantics as
-        # initvals — higher rank always wins, regardless of value.  A hint at
-        # rank 60 overrides a default at rank 20; a user override at rank 100
-        # overrides a hint at rank 60.  This fills in derived-parameter scales
-        # (e.g. mass from logmass) that the engine never solved for directly.
-        for eq in self.all_relations:
-            syms = [str(s) for s in eq.free_symbols]
-            if not all(s in resolved for s in syms):
-                continue
-            for target_str in syms:
-                if scale_provenance.get(target_str, 0) >= RANK_USER:
-                    continue
-                inputs = [s for s in syms if s != target_str]
-                if not all(s in resolved_scales for s in inputs):
-                    continue
-                try:
-                    with _sympy_time_limit(2):
-                        sols = sp.solve(
-                            eq,
-                            sp.Symbol(target_str),
-                            simplify=False,
-                            check=False,
-                        )
-                        if not sols:
-                            continue
-                        sol = sols[0]
-                        var = 0.0
-                        active_inputs = []
-                        for inp in inputs:
-                            inp_sym = sp.Symbol(inp)
-                            if not sol.has(inp_sym):
-                                continue
-                            d = float(
-                                sp.diff(sol, inp_sym).evalf(subs=resolved)
-                            )
-                            if np.isfinite(d) and abs(d) < 1e15:
-                                var += (d * resolved_scales[inp]) ** 2
-                                active_inputs.append(inp)
-                    if var <= 0 or not active_inputs:
-                        continue
-                    new_scale = float(np.sqrt(var))
-                    new_rank = sum(
-                        scale_provenance.get(s, 0) for s in active_inputs
-                    ) / len(active_inputs)
-                    if new_rank > scale_provenance.get(target_str, 0):
-                        resolved_scales[target_str] = new_scale
-                        scale_provenance[target_str] = new_rank
-                except SymbolicTimeout:
-                    logger.debug(
-                        f"Forward scale pass timed out solving {eq} for {target_str}; skipped."
-                    )
-                except Exception as e:
-                    pass
-
-        # Backward scale pass: if the user specified init_scale on a derived parameter,
-        # back-propagate it to sampled parents via the inverse Jacobian:
-        #   σ_parent ≈ σ_derived / |∂derived/∂parent|
-        # Rank and update semantics are identical to the initval relaxation engine:
-        # a back-propagated scale gets RANK_DERIVED_USER (one tier below the user's
-        # RANK_USER source), and only wins if its rank exceeds the parent's current rank.
-        for eq in self.all_relations:
-            syms = [str(s) for s in eq.free_symbols]
-            if not all(s in resolved for s in syms):
-                continue
-            for derived_str in syms:
-                if scale_provenance.get(derived_str, 0) < RANK_USER:
-                    continue
-                sigma_derived = resolved_scales.get(derived_str)
-                if sigma_derived is None:
-                    continue
-                new_rank = min(
-                    RANK_DERIVED_USER, scale_provenance[derived_str]
-                )
-                parents = [s for s in syms if s != derived_str]
-                # Skip the expensive sp.solve if no parent can benefit
-                if not any(
-                    scale_provenance.get(p, 0) < RANK_USER
-                    and new_rank > scale_provenance.get(p, 0)
-                    for p in parents
-                ):
-                    continue
-                try:
-                    with _sympy_time_limit(2):
-                        sols = sp.solve(
-                            eq,
-                            sp.Symbol(derived_str),
-                            simplify=False,
-                            check=False,
-                        )
-                        if not sols:
-                            continue
-                        sol = sols[0]
-                        for parent_str in parents:
-                            if (
-                                scale_provenance.get(parent_str, 0)
-                                >= RANK_USER
-                            ):
-                                continue
-                            if new_rank <= scale_provenance.get(parent_str, 0):
-                                continue
-                            parent_sym = sp.Symbol(parent_str)
-                            if not sol.has(parent_sym):
-                                continue
-                            d = float(
-                                sp.diff(sol, parent_sym).evalf(subs=resolved)
-                            )
-                            if not np.isfinite(d) or abs(d) < 1e-15:
-                                continue
-                            implied = sigma_derived / abs(d)
-                            resolved_scales[parent_str] = implied
-                            scale_provenance[parent_str] = new_rank
-                            logger.debug(
-                                f"Scale for {parent_str} informed by {derived_str} "
-                                f"(σ={sigma_derived:.4g} → {implied:.4g})"
-                            )
-                except SymbolicTimeout:
-                    logger.debug(
-                        f"Backward scale pass timed out solving {eq} for {derived_str}; skipped."
-                    )
-                except Exception:
-                    pass
+        # (The old sympy scale passes are gone.  Backward -- inverse-Jacobian
+        # propagation of a user scale on a derived parameter to its sampled
+        # parents -- because sampled scales are only PRELIMINARY now: the
+        # whitening probe measures the real ones from the data, prior sigmas
+        # included.  Forward -- filling derived-parameter scales for their
+        # soft-bound barrier steepness -- because those are now measured
+        # numerically from the whitened model's actual unit-step response
+        # (whitening.measure_barrier_scales), which is both cheaper and more
+        # reliable than per-relation sp.solve with timeouts.  What remains in
+        # resolved_scales: defaults, component hints, user sigmas, and the
+        # engine's own solved-value scale sync.)
 
         # Expose final scales for resolve() to use as a low-priority default
-        # (hints and user init_scale still win; see resolve()).
+        # (component scale hints still win; see resolve()).
         self.propagated_scales = dict(resolved_scales)
 
         # Snapshot provenance/scales/values for export_solution().  In the
@@ -1878,8 +1724,7 @@ class ConfigManager:
         An 'initval' link IS the user's value for the target, so it always
         wins (RANK_USER).  A 'mu' link only seeds the starting point, so it
         yields to an explicit numeric initval (which also carries RANK_USER).
-        Scales propagate through the link Jacobian at RANK_DERIVED_USER so an
-        explicit user init_scale still wins.
+        Scales propagate through the link Jacobian at RANK_DERIVED_USER.
         """
         for target, fld, plink, expr_int in directed_links:
             if pinned_vars and target in pinned_vars:

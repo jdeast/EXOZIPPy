@@ -21,5 +21,4 @@ sampler:
   cores: 1
   init: adapt_diag
   target_accept: 0.99
-  check_curvatures: True
   recompute_trace: True

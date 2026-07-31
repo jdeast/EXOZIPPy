@@ -253,9 +253,7 @@ def _params(thermal_ppm=None):
 def _build(fitthermal, thermal_ppm, tmp_path_factory):
     d = tmp_path_factory.mktemp("transit_thermal")
     lc = _write_lc(d / "lc.dat")
-    system = System(
-        _config(lc, fitthermal), user_params=_params(thermal_ppm)
-    )
+    system = System(_config(lc, fitthermal), user_params=_params(thermal_ppm))
     system.prepare()
     model = system.build_model()
     with model:
@@ -268,20 +266,26 @@ def _flux_at(system, point, times):
     times, via the same compiled evaluator plot_data/plot() use."""
     transit = system.transit
     param_values = transit._point_to_plot_params(point, system)
-    y = transit._compiled_full_lc(np.asarray(times, dtype=float), 0, *param_values)
+    y = transit._compiled_full_lc(
+        np.asarray(times, dtype=float), 0, *param_values
+    )
     baseline = transit._baseline_for(point, 0)
     return baseline + y
 
 
 @pytest.fixture(scope="module")
 def thermal_off_system(tmp_path_factory):
-    return _build(fitthermal=False, thermal_ppm=None, tmp_path_factory=tmp_path_factory)
+    return _build(
+        fitthermal=False, thermal_ppm=None, tmp_path_factory=tmp_path_factory
+    )
 
 
 @pytest.fixture(scope="module")
 def thermal_on_system(tmp_path_factory):
     return _build(
-        fitthermal=True, thermal_ppm=_THERMAL_PPM, tmp_path_factory=tmp_path_factory
+        fitthermal=True,
+        thermal_ppm=_THERMAL_PPM,
+        tmp_path_factory=tmp_path_factory,
     )
 
 
@@ -392,6 +396,46 @@ def test_thermal_pinned_is_not_a_free_parameter(thermal_off_system):
     assert float(np.atleast_1d(system.band.thermal.value.eval())[0]) == 0.0
 
 
+def _count_quad_solution_ops(node):
+    """Number of QuadSolutionVector applies feeding `node` -- one per
+    primary-transit evaluation plus one per thermal planetvisible."""
+    from pytensor.graph.traversal import io_toposort
+
+    return sum(
+        1
+        for apply in io_toposort([], [node])
+        if type(apply.op).__name__ == "QuadSolutionVector"
+    )
+
+
+def test_thermal_off_builds_no_occultation_graph(thermal_off_system):
+    """
+    Given a band without fitthermal (thermal pinned at 0),
+    When the model is built,
+    Then the transit model graph contains exactly one QuadSolutionVector
+    per planet (the primary transit) and none for the thermal
+    planetvisible -- the gate skips the dead branch outright (matching
+    exofast_tran.pro's `if thermal ne 0d0`) instead of relying on the
+    compiler to prune a multiply-by-zero.
+    """
+    system, model, point = thermal_off_system
+    assert not system.band.thermal_may_be_nonzero()
+    assert _count_quad_solution_ops(system.transit._model_flux_node) == 1
+
+
+def test_thermal_on_builds_occultation_graph(thermal_on_system):
+    """
+    Given a band with fitthermal: true,
+    When the model is built,
+    Then the graph carries the second QuadSolutionVector (the swapped-
+    geometry planetvisible) alongside the primary transit's -- the gate
+    stays open for any band whose thermal can be nonzero.
+    """
+    system, model, point = thermal_on_system
+    assert system.band.thermal_may_be_nonzero()
+    assert _count_quad_solution_ops(system.transit._model_flux_node) == 2
+
+
 def test_thermal_off_model_is_flat_away_from_transit(thermal_off_system):
     """
     Given fitthermal is off,
@@ -458,3 +502,46 @@ def test_thermal_on_primary_transit_is_still_a_dip_below_baseline(
     baseline = system.transit._baseline_for(point, 0)
     mid_transit = _flux_at(system, point, [_TC])[0]
     assert mid_transit < baseline
+
+
+def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
+    """
+    Given fitthermal on (5000 ppm, fixed) AND exposure smearing
+    (exptime=60 min, ninterp=21) on a light curve finely sampling the
+    secondary eclipse,
+    When the actual likelihood mu is evaluated,
+    Then it equals the sub-exposure average of the thermal-included
+    instantaneous model (_smeared_full_lc, the plotting path's smearing
+    of the same physics) and NOT the instantaneous model itself --
+    proving the thermal term lives inside the oversampling group loop
+    and gets smeared with the transit, exactly as EXOFASTv2 averages the
+    full model (thermal included) over exofast_chi2v2.pro's grid.
+    """
+    d = tmp_path_factory.mktemp("thermal_smeared")
+    t_sec = _TC + _PERIOD / 2.0
+    t = np.linspace(t_sec - 0.1, t_sec + 0.1, 101)
+    flux = np.ones_like(t)
+    err = np.full_like(t, 1e-3)
+    lc = str(d / "lc.dat")
+    np.savetxt(lc, np.column_stack([t, flux, err]))
+
+    config = _config(lc, fitthermal=True)
+    config["transit"][0]["exptime"] = 60.0
+    config["transit"][0]["ninterp"] = 21
+    system = System(config, user_params=_params(_THERMAL_PPM))
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+
+    mu = _likelihood_mu(system, model, point)
+
+    tr = system.transit
+    param_values = tr._point_to_plot_params(point, system)
+    baseline = tr._baseline_for(point, 0)
+
+    smeared = baseline + tr._smeared_full_lc(t, 0, *param_values)
+    np.testing.assert_allclose(mu, smeared, atol=1e-8)
+
+    instantaneous = baseline + tr._compiled_full_lc(t, 0, *param_values)
+    assert np.max(np.abs(mu - instantaneous)) > 1e-5

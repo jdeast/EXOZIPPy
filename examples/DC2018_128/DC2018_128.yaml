@@ -53,7 +53,7 @@ parameter_file: "DC2018_128.params.yaml"
 #parameter_file: "DC2018_128.params.2.yaml"
 
 sampler:
-  method: ptde            # Differential Evolution + Parallel Tempering (standard for EXOFASTv2)
+  method: ptde_async      # Differential Evolution + Parallel Tempering (async worker pool)
   n_temps: 8              # temperature rungs (EXOFASTv2 parity)
   T_max: 200              # hottest temperature (EXOFASTv2 parity)
   # n_chains: defaults to 2*n_params
@@ -61,6 +61,5 @@ sampler:
   tune: 5000
   draws: 50000
   nthin: 1
-  check_curvatures: False
   recompute_trace: True
   eval_timeout: 10        # VBMicrolensing can hang for some (s, q); reject and move on
