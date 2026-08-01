@@ -142,8 +142,8 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = [
-    "fastapi>=0.140.13,<1.0.0",
-    "uvicorn[standard]>=0.30.0,<1.0.0",
+    "fastapi>=0.141.1,<1.0.0",
+    "uvicorn[standard]>=0.52.1,<1.0.0",
     "websockets>=13.0,<16.0",
     "pywebview>=5.0,<6.0",
     "ruamel-yaml>=0.18.0,<1.0.0",
