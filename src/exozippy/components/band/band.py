@@ -65,12 +65,28 @@ class Band(Component):
                 "required": False,
                 "doc": "Limb-darkening law. Default 'quadratic'.",
             },
+            {
+                "key": "fitthermal",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a constant secondary-eclipse thermal-emission "
+                    "depth (ppm) for this band. Default False, which pins "
+                    "thermal at 0 (transit-only model, unchanged). "
+                    "Phase-curve variation (BEER) is not modeled by this "
+                    "flag; see PR 1.b."
+                ),
+            },
         ]
 
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
         self.star_indices = [c.get("star_ndx", 0) for c in self.config]
         self.ld_laws = [c.get("ld_law", "quadratic") for c in self.config]
+        self.fitthermal = [
+            bool(c.get("fitthermal", False)) for c in self.config
+        ]
 
         # Canonical filter identities via the SED alias table. An
         # unknown name passes through unchanged (the user may already be
@@ -118,6 +134,52 @@ class Band(Component):
             self.manifest = {
                 "u1": None,
             }
+
+        # thermal (secondary-eclipse depth, ppm) is opt-in per band via
+        # fitthermal: true. Bands that don't opt in are pinned at sigma=0
+        # (same "overrides" pattern Instrument._register_gp uses for terms
+        # an element didn't ask for), so thermal.value is exactly 0 and the
+        # transit model is unchanged unless a band explicitly asks for it.
+        off = [i for i in range(self.n_elements) if not self.fitthermal[i]]
+        thermal_entry = {}
+        if off:
+            pin = np.full(self.n_elements, np.nan)
+            pin[off] = 0.0
+            thermal_entry["overrides"] = {"sigma": pin.tolist()}
+        self.manifest["thermal"] = thermal_entry
+
+    def thermal_may_be_nonzero(self):
+        """True unless every band's thermal is pinned (sigma == 0) at
+        exactly 0 -- the RESOLVED parameter state, after user params.
+
+        Consumers (transit) use this to skip building the thermal graph
+        entirely (a second quad_solution_vector per planet, as expensive
+        as the transit itself) when it can only ever evaluate to zero.
+        Deliberately not `any(self.fitthermal)`: the manifest "overrides"
+        pin is layered UNDER user params, so params.yaml can free thermal
+        (sigma > 0) or fix it at a nonzero value without fitthermal, and
+        the gate must stay open for those. Anything non-numeric (a linked
+        expression, no sigma at all -> uniform prior) counts as active.
+        """
+        param = self.thermal
+
+        def _vec(value, fill):
+            arr = np.atleast_1d(value if value is not None else fill)
+            out = np.full(self.n_elements, np.nan)
+            for i in range(self.n_elements):
+                v = arr[i % len(arr)] if len(arr) else fill
+                try:
+                    out[i] = fill if v is None else float(v)
+                except (TypeError, ValueError):
+                    return None  # non-numeric (e.g. link) -> active
+            return out
+
+        sigmas = _vec(param.sigma, np.nan)
+        inits = _vec(param.initval, 0.0)
+        if sigmas is None or inits is None:
+            return True
+        pinned_at_zero = (sigmas == 0.0) & (inits == 0.0)
+        return not bool(np.all(pinned_at_zero))
 
     def build_likelihood(self, model, system):
         pass

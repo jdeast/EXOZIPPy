@@ -434,6 +434,16 @@ class Transit(Instrument):
         # manifest has no u2; the quadratic term is then zero.
         band = system.band
 
+        # Secondary-eclipse thermal emission (fitthermal): gate the whole
+        # branch on the resolved parameter state, not the fitthermal
+        # flags -- the manifest "overrides" pin is layered UNDER user
+        # params, so params.yaml can free or set thermal without
+        # fitthermal. When every element is pinned at exactly 0 the
+        # thermal math (a second quad_solution_vector per planet, as
+        # expensive as the transit itself) is skipped entirely, matching
+        # exofast_tran.pro's `if thermal ne 0d0` runtime gate.
+        thermal_active = band.thermal_may_be_nonzero()
+
         # 3b. SED deblending (EXOFASTv2 parity): with more than one
         # modeled star, only the host contributes the transit, so the
         # observed depth is diluted by dil = F_host / sum_j F_j in the
@@ -450,7 +460,7 @@ class Transit(Instrument):
         # another instrument's larger ninterp. With ninterp==1 everywhere
         # there is exactly one group of width 1, identical to the
         # original (pre-oversampling) computation.
-        planet_group_blocked = [[] for _ in range(planets.n_elements)]
+        planet_group_decrement = [[] for _ in range(planets.n_elements)]
         for rows, time_grid_np, weights_np in self._oversample_groups:
             t_grid = pt.constant(time_grid_np)[:, :, None]  # (n_g, k_g, 1)
             w_g = pt.constant(weights_np)  # (k_g,)
@@ -474,6 +484,12 @@ class Transit(Instrument):
                 u2_mapped = band.u2.value[self.obs_band_map[rows]]  # (n_g,)
             else:
                 u2_mapped = pt.zeros_like(u1_mapped)
+
+            thermal_g = None
+            if thermal_active:
+                # (n_g,) ppm; 0 for any band pinned off (see
+                # Band.register_parameters).
+                thermal_g = band.thermal.value[self.obs_band_map[rows]]
 
             dil_obs = None
             if dil_inst is not None:
@@ -517,25 +533,43 @@ class Transit(Instrument):
 
                 # Primary transit only; secondary eclipse (planet behind star) has Z < 0
                 blocked = pt.where(Z_p > 0.0, blocked, 0.0)
+
+                # Secondary eclipse / constant thermal emission (fitthermal
+                # -- no phase-curve variation yet, see BEER/PR 1.b). The
+                # band-level thermal is added once per planet, exactly as
+                # EXOFASTv2 does (exofast_chi2v2.pro passes band.thermal
+                # to exofast_tran for every planet), and it lives inside
+                # this group loop so the eclipse gets exposure-smeared on
+                # the same sub-exposure grid as the transit (EXOFASTv2
+                # averages the full model, thermal included).
+                net = blocked
+                if thermal_g is not None:
+                    visible = physics.calc_planet_visible(
+                        b_p, Z_p, r_p
+                    )  # (n_g, k_g)
+                    net = blocked - 1e-6 * thermal_g[:, None] * visible
+
                 if dil_obs is not None:
-                    blocked = blocked * dil_obs[:, None]
+                    # One blended-aperture dilution for the whole
+                    # perturbation from unity: EXOFASTv2's
+                    # f0*(model*(1-dilute)+dilute) scales the transit dip
+                    # and the planet's extra flux by the same factor.
+                    net = net * dil_obs[:, None]
 
                 # Weighted mean over this group's own ninterp sub-samples
                 # (weights sum to 1). With ninterp==1 this is a no-op
                 # identity (single column, weight 1).
-                blocked_avg_g = pt.sum(
-                    blocked * w_g[None, :], axis=1
-                )  # (n_g,)
-                planet_group_blocked[p_idx].append(blocked_avg_g)
+                net_avg_g = pt.sum(net * w_g[None, :], axis=1)  # (n_g,)
+                planet_group_decrement[p_idx].append(net_avg_g)
 
         for p_idx in range(planets.n_elements):
             # Groups were visited in np.unique(ninterp) order, not row
             # order; _oversample_inverse_order restores the original
             # per-observation order after concatenation.
-            blocked_avg = pt.concatenate(planet_group_blocked[p_idx])[
+            net_avg = pt.concatenate(planet_group_decrement[p_idx])[
                 self._oversample_inverse_order
             ]
-            lc_model = lc_model - blocked_avg
+            lc_model = lc_model - net_avg
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
@@ -600,6 +634,11 @@ class Transit(Instrument):
                 u2_inst = band.u2.value[band_idx]
             else:
                 u2_inst = pt.zeros_like(u1_inst)
+            # Same resolved-state gate as build_likelihood: no thermal
+            # graph at all when every band's thermal is pinned at 0.
+            thermal_inst = None
+            if band.thermal_may_be_nonzero():
+                thermal_inst = band.thermal.value[band_idx]  # scalar ppm
             # See build_likelihood for the Green's-basis change-of-basis derivation.
             c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
             c1_inst = u1_inst + 2.0 * u2_inst
@@ -624,7 +663,18 @@ class Transit(Instrument):
                 dil_node = getattr(self, "_dilution_node", None)
                 if dil_node is not None:
                     blocked = blocked * dil_node[inst_idx]
-                decrement_matrix_list.append(-blocked)
+
+                decrement = -blocked
+                if thermal_inst is not None:
+                    # Secondary eclipse / constant thermal emission -- same
+                    # shared helper build_likelihood uses (physics.py).
+                    visible = physics.calc_planet_visible(b_p, Z_p, r_p)
+                    thermal_term = 1e-6 * thermal_inst * visible
+                    if dil_node is not None:
+                        thermal_term = thermal_term * dil_node[inst_idx]
+                    decrement = decrement + thermal_term
+
+                decrement_matrix_list.append(decrement)
 
             lc_matrix = pt.stack(
                 decrement_matrix_list, axis=1
