@@ -85,6 +85,13 @@ class Star(Component):
         if in_system("mann"):
             self.manifest.update({"distance": None})
 
+        # Rossiter-McLaughlin: the shared line-broadening terms (macro/beta/
+        # micro) live on the star; vsini + lambda live on orbit (they are
+        # coupled by the sqrt(vsini)cos/sin(lambda) reparameterization).
+        from ..rm import rm_enabled
+        if rm_enabled(system):
+            self.manifest.update({"vmacro": None, "vbeta": None, "vmicro": None})
+
         # Absolute astrometry (gaia/abs modes) constrains the reference
         # position and proper motion; rel-mode data are differential and
         # need only the parallax scale (distance), so those instruments do

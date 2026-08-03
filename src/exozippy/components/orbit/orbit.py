@@ -226,6 +226,19 @@ class Orbit(Component):
                 }
             )
 
+        # Rossiter-McLaughlin: declare the spin-orbit params only when some
+        # rvinstrument enables `rm:`. Samples the decorrelated
+        # sqrt(vsini)cos/sin(lambda) pair and derives vsini/lam from them
+        # (mirrors the secosw/sesinw -> ecc/omega idiom above).
+        from ..rm import rm_enabled
+        if rm_enabled(system):
+            self.manifest.update({
+                "svcoslam": None,
+                "svsinlam": None,
+                "vsini": {"expr_key": "from_sv"},
+                "lam": {"expr_key": "from_sv"},
+            })
+
         # Astrometry constrains the longitude of the ascending node and
         # breaks the i <-> 180-i degeneracy, so sample the node direction
         # vector (xbigomega, ybigomega; each N(0,1) -> uniform marginal on

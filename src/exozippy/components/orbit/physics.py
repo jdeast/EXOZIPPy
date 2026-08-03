@@ -94,3 +94,17 @@ def calc_tp(ecc, sesinw, secosw, tc, n):
     )
     M0 = E0 - ecc * pt.sin(E0)
     return tc - M0 / n
+
+
+# ---- Rossiter-McLaughlin sqrt(vsini)cos/sin(lambda) reparameterization ----
+# Mirror of calc_ecc / calc_omega for the secosw/sesinw pair.
+@register_physics
+def calc_vsini_from_sv(svcoslam, svsinlam):
+    return pt.sqr(svcoslam) + pt.sqr(svsinlam)
+
+
+@register_physics
+def calc_lam_from_sv(svcoslam, svsinlam):
+    v_raw = pt.sqr(svcoslam) + pt.sqr(svsinlam)
+    # At exactly 0 the angle is undefined; pin to 0 (aligned) like calc_omega.
+    return pt.switch(pt.eq(v_raw, 0.0), 0.0, pt.arctan2(svsinlam, svcoslam))
