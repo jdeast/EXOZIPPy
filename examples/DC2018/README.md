@@ -10,11 +10,11 @@ pipeline, one cluster job per event:
    the fit (multi-seed sampling), its bad-data mask (`excluded_points`)
    drops the flagged points via the generic instrument `mask:` feature,
    and its error factors (`errfacs`) seed each instrument's `err_scale`.
-   By default the run stops after the binary-parameter ESTIMATION
-   (`stop_before` the emcee polish, which costs hours on DC18 cadence and
-   adds nothing EXOZIPPy needs -- the seeds only have to land in the
-   right basin); pass `--mmx-emcee` (job: `EXTRA="--mmx-emcee"`) for the
-   full MMEXOFAST fit. (This explicit step is optional in general: a
+   By default the run includes MMEXOFAST's emcee polish (hours on DC18
+   cadence, but the grid estimator's raw solutions can miss badly --
+   e.g. rho collapsing to ~0 on finite-source events); pass
+   `--no-mmx-emcee` (job: `EXTRA="--no-mmx-emcee"`) to stop after the
+   much faster binary-parameter estimation. (This explicit step is optional in general: a
    config whose params file lacks microlensing start values triggers the
    same MMEXOFAST run automatically inside EXOZIPPy's data-driven-hints
    layer.)

@@ -43,7 +43,7 @@ import dc18_common as dc
 
 
 def run_mmexofast_step(
-    data_dir, event, name, event_dir, cores=None, quick=False, emcee=False
+    data_dir, event, name, event_dir, cores=None, quick=False, emcee=True
 ):
     """Step 1: MMEXOFAST on both bands; returns the cached JSON path.
 
@@ -70,16 +70,18 @@ def run_mmexofast_step(
         "pool": pool,
     }
     if not emcee:
-        # Default: stop after the binary-parameter ESTIMATION. The emcee
-        # polish (fit_binary_lens_models) costs hours on DC18 cadence --
-        # 40 walkers x 1000 steps x a 39k-epoch binary chi2, straggler-
+        # --no-mmx-emcee: stop after the binary-parameter ESTIMATION. The
+        # emcee polish (fit_binary_lens_models) costs hours on DC18 cadence
+        # -- 40 walkers x 1000 steps x a 39k-epoch binary chi2, straggler-
         # bound at the ensemble barrier because VBBL evaluation time varies
-        # wildly across walker positions -- and EXOZIPPy refits everything
-        # anyway: the seeds only need to land in the right basin, and
-        # initialize_exozippy() falls back to the estimator's solutions
-        # (parameters only, no sigmas -- EXOZIPPy then skips the optional
-        # scale hints). Masks and error factors still come out: the
-        # renormalize stage runs before this cut.
+        # wildly across walker positions. initialize_exozippy() then falls
+        # back to the estimator's raw solutions (parameters only, no sigmas
+        # -- EXOZIPPy skips the optional scale hints). Beware: those raw
+        # estimates can miss badly -- on DC18 event 128 the estimator gave
+        # rho ~ 1e-6 and s = 0.86 where the polished fit gives rho = 0.0054
+        # and s = 0.98 -- which is why the polish is the default. Masks and
+        # error factors still come out: the renormalize stage runs before
+        # this cut.
         options["stop_before"] = "fit_binary_lens:fit_binary_lens_models"
     elif quick:
         # Smoke-test emcee: upstream defaults are 40 x 1000 + 500 burn.
@@ -239,10 +241,13 @@ def main(argv=None):
     )
     ap.add_argument(
         "--mmx-emcee",
-        action="store_true",
-        help="Run MMEXOFAST's emcee binary-lens polish (hours; default "
-        "stops after the much faster parameter estimation, which is "
-        "sufficient to seed EXOZIPPy)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run MMEXOFAST's emcee binary-lens polish (default: on). The "
+        "grid estimator's raw solutions can miss badly (e.g. rho "
+        "collapsing to ~0 on finite-source events), so the polished "
+        "solutions are worth the extra runtime; --no-mmx-emcee stops "
+        "after the much faster parameter estimation",
     )
     args = ap.parse_args(argv)
 
