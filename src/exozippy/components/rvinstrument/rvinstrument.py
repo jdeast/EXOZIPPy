@@ -24,6 +24,22 @@ class RVInstrument(Instrument):
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
         self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
+        # Rossiter-McLaughlin: a file may set `rm: <orbit_name>` to add the
+        # in-transit RM distortion of that orbit to this instrument's RV
+        # model (off by default -> the RV likelihood is unchanged). Optional
+        # `rm_band: <band_name>` selects the limb darkening; else defaults.
+        self.rm_orbit = [c.get("rm") for c in self.config]
+        self.rm_band = [c.get("rm_band") for c in self.config]
+        # `rm_model: hirano2010 | hirano2011` (default hirano2011). hirano2010 is
+        # the fast closed-form series; hirano2011 the disk integral.
+        self.rm_model = [c.get("rm_model", "hirano2011") for c in self.config]
+        _valid_rm = {"hirano2010", "hirano2011"}
+        for m in self.rm_model:
+            if m not in _valid_rm:
+                raise ValueError(
+                    f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
+                    f"{sorted(_valid_rm)}."
+                )
         self.total_detrend_cols = 0
 
     @property
@@ -228,6 +244,22 @@ class RVInstrument(Instrument):
             orbits.get_radial_velocity(time, K_vec, omap), axis=1
         )
 
+        # 1b. Rossiter-McLaughlin in-transit distortion. No-op unless a file
+        # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
+        # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
+        # the internal RV unit (solRad/d) and add only to that file's rows.
+        if any(self.rm_orbit):
+            from ..rm import compute_rm_rv, resolve_rm_indices
+            rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
+            for i, oname in enumerate(self.rm_orbit):
+                if not oname:
+                    continue
+                oidx, pidx, bidx = resolve_rm_indices(system, oname, self.rm_band[i])
+                rm_ms = compute_rm_rv(system, time, oidx, pidx, bidx,
+                                      model=self.rm_model[i])  # (N_obs,) m/s
+                rm_internal = rm_ms / rv_ms_per_internal
+                rv_model += pt.switch(pt.eq(self.inst_map_tensor, i), rm_internal, 0.0)
+
         # detrending
         if self.total_detrend_cols > 0:
             detrend = pm.Data("rv_detrend", self.detrend_matrix)
@@ -260,6 +292,30 @@ class RVInstrument(Instrument):
 
             # The matrix of shape (N_times, N_member_orbits)
             rv_matrix_node = orbits.get_radial_velocity(t_input, K_vec, omap)
+
+            # Rossiter-McLaughlin: fold the in-transit distortion into the
+            # plotted model (it is part of the model the likelihood fits), so
+            # the RM anomaly shows in BOTH the unphased (full) and phased
+            # (per-orbit) RV panels. Added to the RM orbit's own matrix column.
+            # No-op unless a file set `rm:`.
+            if any(self.rm_orbit):
+                from ..rm import compute_rm_rv, resolve_rm_indices
+                rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
+                omap_list = list(omap)
+                seen = set()
+                for i, oname in enumerate(self.rm_orbit):
+                    if not oname or oname in seen:
+                        continue
+                    seen.add(oname)
+                    oidx, pidx, bidx = resolve_rm_indices(system, oname, self.rm_band[i])
+                    if oidx not in omap_list:
+                        continue
+                    col = omap_list.index(oidx)
+                    rm_col = compute_rm_rv(system, t_input, oidx, pidx, bidx,
+                                           model=self.rm_model[i]) / rv_ms_per_internal
+                    rv_matrix_node = pt.set_subtensor(
+                        rv_matrix_node[:, col], rv_matrix_node[:, col] + rm_col)
+
             rv_full_node = pt.sum(rv_matrix_node, axis=1)
 
             # Retain the symbolic nodes and their time input so plot_data
