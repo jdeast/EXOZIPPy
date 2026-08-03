@@ -128,6 +128,7 @@ class MulensInstrument(Instrument):
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
+            cls._likelihood_config_schema(),
         ]
 
     def _reference_index(self):
@@ -297,6 +298,7 @@ class MulensInstrument(Instrument):
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
+        self._prepare_robust(self.err, self.inst_map)
 
     def _reject_time_spec_with_mmexofast(self, spec):
         """Refuse to mix MMEXOFAST seeding with a per-file time system.
@@ -767,6 +769,7 @@ class MulensInstrument(Instrument):
         # Multiplicative per-instrument error scale (shared base helper).
         self._register_noise(self.manifest)
         self._register_gp(self.manifest)
+        self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {

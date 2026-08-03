@@ -37,6 +37,17 @@ calling ``_prepare_gp`` at the end of ``load_data``, ``_register_gp`` in
 ``register_parameters``, and ``add_observation_likelihood`` in place of their
 final ``pm.Normal``; a component that does none of these is unaffected, and a
 component that does all three costs nothing extra when no file sets ``gp:``.
+
+Robust observation likelihoods are optional in exactly the same shape.  A
+data file carrying a ``likelihood:`` key (``hogg`` or ``studentt`` -- see
+components/likelihood.py) swaps its plain ``pm.Normal`` for a marginalized
+inlier/outlier mixture or a Student-t; every other file is untouched.  The
+same three hooks carry it (``_prepare_robust``, ``_register_robust``, and the
+shared ``add_observation_likelihood`` dispatcher), the parameters are
+full-length pinned vectors like the GP hyperparameters, and a file cannot set
+both ``gp:`` and ``likelihood:`` (celerite2's closed-form marginal is
+Gaussian-only).  Off by default everywhere: with no ``likelihood:`` key the
+model is byte-for-byte what it was before this feature existed.
 """
 
 import logging
@@ -47,6 +58,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from . import gp as gp_support
+from . import likelihood as robust_support
 from .component import Component
 
 logger = logging.getLogger(__name__)
@@ -78,6 +90,11 @@ class Instrument(Component):
     # reject the ``gp:`` key outright rather than silently ignoring it.
     supports_gp = True
 
+    # Same switch for the robust `likelihood:` hooks (hogg mixture needs a
+    # single out_scale unit per file, so astrometry's two-observable files
+    # opt out for the same reason they opt out of GPs).
+    supports_robust_likelihood = True
+
     def __init__(self, component_config, config_manager):
         super().__init__(component_config, config_manager)
         # Every instrument reads its data from per-element files and tracks a
@@ -99,6 +116,7 @@ class Instrument(Component):
         ]
         self._load_plot_styles()
         self._load_gp_config()
+        self._load_likelihood_config()
 
     # ------------------------------------------------------------------
     # Per-instrument plot styling (config, not Parameters -- no sampling)
@@ -791,19 +809,27 @@ class Instrument(Component):
 
     @classmethod
     def shared_parameter_names(cls):
-        """The GP hyperparameters, declared at the root of components/defaults.yaml.
+        """The GP and robust-likelihood parameters, declared at the root of
+        components/defaults.yaml.
 
-        Only the amplitudes are redeclared per component (their unit is the
-        data's), so introspection needs this list to report the rest.
-        Components that opt out of GP support declare none.
+        Only the scale-carrying ones are redeclared per component (their unit
+        is the data's), so introspection needs this list to report the rest.
+        Components that opt out of a feature declare none of its names.
         """
-        if not cls.supports_gp:
-            return []
-        return [
-            name
-            for kind in gp_support.GP_TERMS
-            for name in gp_support.GP_TERM_PARAMS[kind]
-        ]
+        names = []
+        if cls.supports_gp:
+            names += [
+                name
+                for kind in gp_support.GP_TERMS
+                for name in gp_support.GP_TERM_PARAMS[kind]
+            ]
+        if cls.supports_robust_likelihood:
+            names += [
+                name
+                for kind in robust_support.LIKELIHOOD_KINDS
+                for name in robust_support.LIKELIHOOD_PARAMS[kind]
+            ]
+        return names
 
     def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
         """Stage 1a: index and seed the GP terms from the loaded data.
@@ -931,36 +957,44 @@ class Instrument(Component):
         return gp_support.build_kernel(self.gp_terms[i], params_by_kind)
 
     def add_observation_likelihood(self, name, mu, sigma, observed):
-        """Stage 6: the observational likelihood, with or without GPs.
+        """Stage 6: the observational likelihood, with or without GPs and
+        robust families.
 
         Drop-in replacement for the ``pm.Normal(name, mu, sigma, observed)``
-        each child used to write.  With no ``gp:`` key anywhere it *is* that
-        call, unchanged.  Otherwise the observations split by instrument: the
-        non-GP files keep one shared Normal, and each GP file gets a celerite2
-        marginal likelihood whose mean is the same physical model ``mu`` and
-        whose diagonal is the same ``sigma`` (data error plus jitter), so the
-        GP describes only what the noise model left over.
+        each child used to write.  With no ``gp:`` or ``likelihood:`` key
+        anywhere it *is* that call, unchanged.  Otherwise the observations
+        split by instrument: the plain files keep one shared Normal, each GP
+        file gets a celerite2 marginal likelihood, and each robust file gets
+        its mixture Potential or Student-t -- all around the same physical
+        model ``mu`` and the same ``sigma`` (data error plus jitter/err_scale,
+        which stays the inlier scale under the mixture).
 
         ``mu``, ``sigma`` and ``observed`` are (n_total_obs,) tensors in the
         concatenated order the child built; the per-file sort recorded by
         ``_prepare_gp`` is applied here.
         """
-        if not self.has_gp:
+        if not (self.has_gp or self.has_robust_likelihood):
             return pm.Normal(name, mu=mu, sigma=sigma, observed=observed)
 
-        if self._gp_time is None:
+        if self.has_gp and self._gp_time is None:
             raise RuntimeError(
                 f"[{self.prefix}] a 'gp:' key is configured but load_data "
                 f"never called _prepare_gp; the GP times are unknown."
             )
+        if self.has_robust_likelihood and not self._robust_obs_index:
+            raise RuntimeError(
+                f"[{self.prefix}] a 'likelihood:' key is configured but "
+                f"load_data never called _prepare_robust; the per-file "
+                f"observation indices are unknown."
+            )
 
-        self._build_gp_deterministics()
-
-        gp_obs = np.zeros(self.n_total_obs, dtype=bool)
+        special = np.zeros(self.n_total_obs, dtype=bool)
         for idx in self._gp_obs_index.values():
-            gp_obs[idx] = True
+            special[idx] = True
+        for idx in self._robust_obs_index.values():
+            special[idx] = True
 
-        plain = np.flatnonzero(~gp_obs)
+        plain = np.flatnonzero(~special)
         if plain.size:
             pm.Normal(
                 name,
@@ -969,6 +1003,12 @@ class Instrument(Component):
                 observed=observed[plain],
             )
 
+        self._add_robust_likelihoods(name, mu, sigma, observed)
+
+        if not self.has_gp:
+            return
+
+        self._build_gp_deterministics()
         for i in sorted(self._gp_obs_index):
             idx = self._gp_obs_index[i]
             t = gp_support.check_sorted(
@@ -1071,6 +1111,219 @@ class Instrument(Component):
         return np.asarray(
             self._gp_pred_on_grid[i](t_grid, *values), dtype=float
         )
+
+    # ------------------------------------------------------------------
+    # Optional per-file robust likelihood (hogg mixture / Student-t)
+    # ------------------------------------------------------------------
+    def _load_likelihood_config(self):
+        """Read the per-instrument ``likelihood:`` key (stage 0, in __init__).
+
+        Populates ``self.likelihood_kinds[i]`` -- ``""`` (plain Gaussian, the
+        default for every file) or a key from
+        ``likelihood.LIKELIHOOD_KINDS`` -- and ``self.has_robust_likelihood``.
+        Runs after ``_load_gp_config`` so the gp/likelihood conflict is
+        caught at construction.
+        """
+        self.likelihood_kinds = []
+        for i, c in enumerate(self.config):
+            label = f"{self.prefix}[{self.names[i]}]"
+            kind = robust_support.parse_likelihood_spec(
+                c.get("likelihood"), context=label
+            )
+            if kind and not self.supports_robust_likelihood:
+                raise NotImplementedError(
+                    f"[{label}] a robust likelihood is not supported by this "
+                    f"component: it models more than one observable per data "
+                    f"file (with different units), so a single outlier scale "
+                    f"is ambiguous. Remove the 'likelihood:' key."
+                )
+            if kind and self.gp_terms[i]:
+                raise ValueError(
+                    f"[{label}] 'gp:' and 'likelihood:' cannot be combined "
+                    f"on one file: celerite2's closed-form marginal "
+                    f"likelihood is Gaussian-only, so a robust observation "
+                    f"model cannot be marginalized through it. Choose one."
+                )
+            self.likelihood_kinds.append(kind)
+        self.has_robust_likelihood = any(self.likelihood_kinds)
+
+        # Element index -> indices into the concatenated observation arrays
+        # (filled by _prepare_robust), the per-file symbolic outlier log-odds
+        # (filled by _add_robust_likelihoods), their lazily compiled
+        # evaluators, and the linear values of log-sampled parameters.
+        self._robust_obs_index = {}
+        self._hogg_logodds = {}
+        self._hogg_prob_fns = None
+        self._robust_linear = {}
+
+    def _robust_elements(self, kind):
+        """Element indices that requested likelihood family ``kind``."""
+        return [i for i, k in enumerate(self.likelihood_kinds) if k == kind]
+
+    @staticmethod
+    def _likelihood_config_schema():
+        """The shared ``likelihood`` config-schema entry; children append it."""
+        return robust_support.likelihood_config_schema_entry()
+
+    def _prepare_robust(self, err, inst_map, user_factor=1.0):
+        """Stage 1a: index the robust files and seed the mixture scale.
+
+        Call at the end of ``load_data``, right next to ``_prepare_gp``.
+        Records each opted-in element's indices into the concatenated
+        observation arrays (no sort needed -- both families are per-point
+        independent), and pushes a data-driven hint for the hogg background
+        scale: ``10 x median(err)``, i.e. well clear of the inlier scatter,
+        so the two mixture components start separated and cannot swap roles
+        during tuning.  Seeding from the observations' own scatter would
+        instead measure the physical signal (the same reasoning as the GP
+        amplitude seed).
+
+        ``user_factor`` converts the error from the internal unit the caller
+        holds it in to the user unit ``out_scale`` is declared in.
+        """
+        if not self.has_robust_likelihood:
+            return
+
+        err = np.asarray(err, dtype=float)
+        inst_map = np.asarray(inst_map, dtype=int)
+
+        for i, kind in enumerate(self.likelihood_kinds):
+            if not kind:
+                continue
+            sel = np.flatnonzero(inst_map == i)
+            if sel.size == 0:
+                raise ValueError(
+                    f"[{self.prefix}[{self.names[i]}]] a 'likelihood:' key "
+                    f"is set but the file contributed no observations."
+                )
+            self._robust_obs_index[i] = sel
+
+            scale_param = robust_support.LIKELIHOOD_SCALE_PARAM.get(kind)
+            if scale_param is None:
+                continue
+            scale = 10.0 * float(np.median(err[sel])) * user_factor
+            if not np.isfinite(scale) or scale <= 0.0:
+                # Degenerate (zero/absent) errors: keep the defaults.yaml
+                # start rather than pinning the logit against its bound.
+                continue
+            path = f"{self.prefix}.{i}.{scale_param}"
+            self.config_manager.add_hint(path, scale)
+            self.config_manager.add_scale_hint(path, scale)
+
+    def _register_robust(self, manifest):
+        """Stage 2: add this component's robust-likelihood parameters.
+
+        Same shape as ``_register_gp``: every parameter is a full-length
+        (``n_elements``) vector so user paths resolve by instrument name, and
+        elements that did not opt into a family are pinned fixed
+        (``sigma: 0``) through ``internal_overrides`` -- free to the sampler,
+        still user-overridable.  Returns ``manifest`` for chaining.
+        """
+        if not self.has_robust_likelihood:
+            return manifest
+
+        for kind in robust_support.LIKELIHOOD_KINDS:
+            on = set(self._robust_elements(kind))
+            if not on:
+                continue
+            off = [i for i in range(self.n_elements) if i not in on]
+            entry = {}
+            if off:
+                pin = np.full(self.n_elements, np.nan)
+                pin[off] = 0.0
+                entry["overrides"] = {"sigma": pin.tolist()}
+            for param in robust_support.LIKELIHOOD_PARAMS[kind]:
+                manifest[param] = dict(entry)
+        return manifest
+
+    def _build_robust_deterministics(self):
+        """Record the linear value of every log-sampled robust parameter.
+
+        ``t_log_nu`` is sampled in log10 (see components/likelihood.py); this
+        exposes ``t_nu`` as a Deterministic so posterior tables report the
+        degrees of freedom the likelihood actually uses.
+        """
+        self._robust_linear = {}
+        for log_name, lin_name in robust_support.LIKELIHOOD_LOG_PARAMS.items():
+            param = getattr(self, log_name, None)
+            if param is None or param.value is None:
+                continue
+            self._robust_linear[lin_name] = pm.Deterministic(
+                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
+            )
+
+    def _add_robust_likelihoods(self, name, mu, sigma, observed):
+        """Add each robust file's likelihood term (from the dispatcher)."""
+        if not self.has_robust_likelihood:
+            return
+
+        self._build_robust_deterministics()
+        for i in sorted(self._robust_obs_index):
+            idx = self._robust_obs_index[i]
+            kind = self.likelihood_kinds[i]
+            if kind == "hogg":
+                resid = observed[idx] - mu[idx]
+                logp = robust_support.hogg_logp(
+                    resid,
+                    sigma[idx],
+                    self.out_frac.value[i],
+                    self.out_scale.value[i],
+                )
+                pm.Potential(f"{name}.hogg.{self.names[i]}", pt.sum(logp))
+                self._hogg_logodds[i] = robust_support.hogg_outlier_logodds(
+                    resid,
+                    sigma[idx],
+                    self.out_frac.value[i],
+                    self.out_scale.value[i],
+                )
+            else:  # "studentt"
+                pm.StudentT(
+                    f"{name}.t.{self.names[i]}",
+                    nu=self._robust_linear["t_nu"][i],
+                    mu=mu[idx],
+                    sigma=sigma[idx],
+                    observed=observed[idx],
+                )
+            logger.info(
+                "[%s] %s: %s likelihood on %d observations.",
+                self.prefix,
+                self.names[i],
+                kind,
+                idx.size,
+            )
+
+    def outlier_prob_at_data(self, system, point):
+        """Posterior outlier probability of every observation, at ``point``.
+
+        Returns an ``(n_total_obs,)`` array in the concatenated data order:
+        ``sigmoid`` of the hogg mixture's per-point log-odds for observations
+        from hogg files, and zero everywhere else, so a caller can threshold
+        or color by it unconditionally.  This is the auditable replacement
+        for a hard bad-data mask -- evaluate it per posterior draw (it is
+        compiled lazily against ``system.plot_params``, like the GP
+        evaluators) and report the average.
+        """
+        out = np.zeros(self.n_total_obs, dtype=float)
+        if not self._hogg_logodds:
+            return out
+        if self._hogg_prob_fns is None:
+            import pytensor
+
+            param_symbols = [p.value for p in system.plot_params]
+            self._hogg_prob_fns = {
+                i: pytensor.function(
+                    inputs=param_symbols,
+                    outputs=pt.sigmoid(node),
+                    on_unused_input="ignore",
+                )
+                for i, node in self._hogg_logodds.items()
+            }
+        values = self._point_to_plot_params(point, system)
+        for i, fn in self._hogg_prob_fns.items():
+            out[self._robust_obs_index[i]] = np.asarray(
+                fn(*values), dtype=float
+            )
+        return out
 
     # NOTE: a GP imposes NO sampler constraint, so this class deliberately
     # does not override sampler_requirements().  celerite2 ships a JAX
