@@ -133,6 +133,28 @@ def test_disabled_reporter_writes_nothing(tmp_path):
     assert not os.path.exists(str(prefix) + "_gui_snapshot")
 
 
+def test_terminal_error_records_cause(tmp_path):
+    """
+    Given an enabled GuiReporter,
+    When terminal("error", error=<traceback text>) is written,
+    Then status.json carries the cause in its "error" field (and a plain
+    terminal("done") writes no such field).
+    """
+    prefix = tmp_path / "run" / "planet"
+    reporter = GuiReporter(prefix, enabled=True)
+
+    reporter.terminal("error", error="Traceback: boom in wrap-up")
+
+    doc = json.load(open(str(prefix) + "_gui_status.json"))
+    assert doc["phase"] == "error"
+    assert doc["error"] == "Traceback: boom in wrap-up"
+
+    reporter.terminal("done")
+    doc = json.load(open(str(prefix) + "_gui_status.json"))
+    assert doc["phase"] == "done"
+    assert "error" not in doc
+
+
 def test_snapshot_is_thinned_and_atomic(tmp_path):
     """
     Given 500 stored draws/chain and a 200-draw snapshot cap,

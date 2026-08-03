@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import signal
 import time
+import traceback
 from pathlib import Path
 
 import arviz as az
@@ -123,7 +124,10 @@ def run_fit(config, user_params=None):
         gui.terminal("stopped")
         raise
     except BaseException:
-        gui.terminal("error")
+        # Record the traceback in the status file: the interpreter is gone by
+        # the time a monitor sees phase "error", so this is the only place the
+        # cause survives (e.g. a wrap-up crash after a graceful stop).
+        gui.terminal("error", error=traceback.format_exc())
         raise
     gui.terminal("done")
     return result
