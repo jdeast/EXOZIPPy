@@ -40,8 +40,8 @@
 # Optional overrides (qsub -v NAME=value, comma-separated for several):
 #   BANDS=Z087            fit only the sparse Z087 curve (fast; default W149,Z087)
 #   EXTRA="--quick"       any extra run_event.py flags (--quick = smoke test;
-#                         --no-mmx-emcee = skip MMEXOFAST's emcee polish,
-#                         much faster but the raw estimator seeds can miss)
+#                         --mmx-emcee = MMEXOFAST's emcee polish, hours --
+#                         off by default, PTDE is the polish)
 #   DC18_DATA=...         data tree, if not at $HOME/python/MMEXOFAST/data/2018DataChallenge
 #
 # Re-running a task reuses the cached MMEXOFAST JSON (delete

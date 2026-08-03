@@ -43,7 +43,7 @@ import dc18_common as dc
 
 
 def run_mmexofast_step(
-    data_dir, event, name, event_dir, cores=None, quick=False, emcee=True
+    data_dir, event, name, event_dir, cores=None, quick=False, emcee=False
 ):
     """Step 1: MMEXOFAST on both bands; returns the cached JSON path.
 
@@ -70,18 +70,22 @@ def run_mmexofast_step(
         "pool": pool,
     }
     if not emcee:
-        # --no-mmx-emcee: stop after the binary-parameter ESTIMATION. The
-        # emcee polish (fit_binary_lens_models) costs hours on DC18 cadence
-        # -- 40 walkers x 1000 steps x a 39k-epoch binary chi2, straggler-
-        # bound at the ensemble barrier because VBBL evaluation time varies
-        # wildly across walker positions. initialize_exozippy() then falls
-        # back to the estimator's raw solutions (parameters only, no sigmas
-        # -- EXOZIPPy skips the optional scale hints). Beware: those raw
-        # estimates can miss badly -- on DC18 event 128 the estimator gave
-        # rho ~ 1e-6 and s = 0.86 where the polished fit gives rho = 0.0054
-        # and s = 0.98 -- which is why the polish is the default. Masks and
-        # error factors still come out: the renormalize stage runs before
-        # this cut.
+        # Default: stop after the binary-parameter ESTIMATION. The emcee
+        # polish (fit_binary_lens_models) costs hours on DC18 cadence -- 40
+        # walkers x 1000 steps x a 39k-epoch binary chi2, straggler-bound at
+        # the ensemble barrier -- and EXOZIPPy's tempered multi-seed PTDE is
+        # itself the polish: the seeds only have to land in the right basin.
+        # They do, now that renormalization no longer eats the peak: the
+        # once-alarming "estimator gives rho ~ 1e-6 where the polished fit
+        # gives 0.0054" was an artifact of the outlier-rejection bug clipping
+        # the finite-source peak (fixed in MMEXOFAST PR#7); on the fixed code
+        # the raw estimator's primary solution for event 128 is s = 0.977,
+        # rho = 0.0075, q = 9.4e-4 vs the polished 0.979/0.0054/1.1e-3, with
+        # the alternate-basin s = 0.86 solution second in the multi-seed
+        # list. initialize_exozippy() falls back to the estimator's raw
+        # solutions (parameters only, no sigmas -- EXOZIPPy skips the
+        # optional scale hints). Masks and error factors still come out: the
+        # renormalize stage runs before this cut.
         options["stop_before"] = "fit_binary_lens:fit_binary_lens_models"
     elif quick:
         # Smoke-test emcee: upstream defaults are 40 x 1000 + 500 burn.
@@ -138,8 +142,9 @@ def build_config(name, files, prefix, mmx_json, args):
                 "data_format": "flux",
                 "observer_location": "roman_simulated_2018dc",
                 "band": b,
-                # Hogg inlier/outlier mixture on every light curve: residual
-                # junk that survives MMEXOFAST's hard mask lands in the wide
+                # Hogg inlier/outlier mixture on every light curve. This
+                # supersedes MMEXOFAST's hard mask (excluded_points are not
+                # propagated for hogg files): junk lands in the wide
                 # background component instead of dragging the fit, and the
                 # per-point outlier probabilities are auditable afterwards
                 # (Instrument.outlier_prob_at_data).
@@ -248,12 +253,13 @@ def main(argv=None):
     ap.add_argument(
         "--mmx-emcee",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run MMEXOFAST's emcee binary-lens polish (default: on). The "
-        "grid estimator's raw solutions can miss badly (e.g. rho "
-        "collapsing to ~0 on finite-source events), so the polished "
-        "solutions are worth the extra runtime; --no-mmx-emcee stops "
-        "after the much faster parameter estimation",
+        default=False,
+        help="Run MMEXOFAST's emcee binary-lens polish (default: off -- "
+        "EXOZIPPy's tempered multi-seed PTDE is the polish, and with "
+        "the peak-protection fix the raw estimator seeds land in the "
+        "right basin; the old rho-collapse was a renormalization "
+        "clipping artifact). --mmx-emcee turns the hours-long polish "
+        "back on",
     )
     args = ap.parse_args(argv)
 
