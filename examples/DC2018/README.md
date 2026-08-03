@@ -20,6 +20,12 @@ pipeline, one cluster job per event:
    layer.)
 2. **EXOZIPPy** samples the 2L1S system (PTDE, EXOFASTv2-parity settings)
    and writes the usual artifacts under `events/<NNN>/fitresults/`.
+   Every light curve fits with `likelihood: hogg` -- the marginalized
+   inlier/outlier mixture -- so residual junk that survives MMEXOFAST's
+   hard mask lands in the wide background component instead of dragging
+   the fit, at the cost of two extra parameters per curve (`out_frac`,
+   `out_scale`). Per-point posterior outlier probabilities are available
+   afterwards via `Instrument.outlier_prob_at_data`.
 3. **Comparison** against the challenge's answer key
    (`Answers/master_file.txt`, positional lookup, t_0 origin JD 2458234)
    is written to `events/<NNN>/comparison.csv`.

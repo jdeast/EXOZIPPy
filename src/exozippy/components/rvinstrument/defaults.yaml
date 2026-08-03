@@ -43,6 +43,16 @@ rvinstrument:
     init_scale: 2.0
     unit: "m/s"
     internal_unit: "solRad/d"
+  # Optional hogg-mixture outlier scatter (components/defaults.yaml holds the
+  # rest of the robust-likelihood blueprint; only the scale is
+  # instrument-specific, because "outlier scatter" is an RV here).
+  out_scale:
+    lower: 0.0
+    upper: 100000.0
+    initval: 100.0
+    init_scale: 30.0
+    unit: "m/s"
+    internal_unit: "solRad/d"
   detrend_coeffs:
     initval: 0.0
     init_scale: 0.1

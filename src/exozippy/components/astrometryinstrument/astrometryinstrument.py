@@ -106,6 +106,10 @@ class AstrometryInstrument(Instrument):
     # only that mode would make the `gp:` key silently mean different things
     # per dataset.  Instrument._load_gp_config raises on `gp:` here instead.
     supports_gp = False
+    # Same reasoning for the robust `likelihood:` key: the hogg mixture's
+    # out_scale is one scale in the data's own unit, and these files carry
+    # two observables in different units.  _load_likelihood_config raises.
+    supports_robust_likelihood = False
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)

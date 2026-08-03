@@ -138,6 +138,12 @@ def build_config(name, files, prefix, mmx_json, args):
                 "data_format": "flux",
                 "observer_location": "roman_simulated_2018dc",
                 "band": b,
+                # Hogg inlier/outlier mixture on every light curve: residual
+                # junk that survives MMEXOFAST's hard mask lands in the wide
+                # background component instead of dragging the fit, and the
+                # per-point outlier probabilities are auditable afterwards
+                # (Instrument.outlier_prob_at_data).
+                "likelihood": "hogg",
             }
             for b in bands
         ],

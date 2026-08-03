@@ -102,6 +102,7 @@ class RVInstrument(Instrument):
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
+            cls._likelihood_config_schema(),
         ]
 
     def load_data(self, system):
@@ -166,6 +167,13 @@ class RVInstrument(Instrument):
             self.inst_map,
             user_factor=(u.solRad / u.d).to(u.m / u.s),
         )
+        # Optional per-file robust likelihood (no-op unless `likelihood:` is
+        # set).  Same unit conversion: out_scale is declared in m/s.
+        self._prepare_robust(
+            self.err,
+            self.inst_map,
+            user_factor=(u.solRad / u.d).to(u.m / u.s),
+        )
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -181,6 +189,7 @@ class RVInstrument(Instrument):
         self.manifest = {"gamma": "default"}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
+        self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {
@@ -250,15 +259,21 @@ class RVInstrument(Instrument):
         # the internal RV unit (solRad/d) and add only to that file's rows.
         if any(self.rm_orbit):
             from ..rm import compute_rm_rv, resolve_rm_indices
+
             rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
-                oidx, pidx, bidx = resolve_rm_indices(system, oname, self.rm_band[i])
-                rm_ms = compute_rm_rv(system, time, oidx, pidx, bidx,
-                                      model=self.rm_model[i])  # (N_obs,) m/s
+                oidx, pidx, bidx = resolve_rm_indices(
+                    system, oname, self.rm_band[i]
+                )
+                rm_ms = compute_rm_rv(
+                    system, time, oidx, pidx, bidx, model=self.rm_model[i]
+                )  # (N_obs,) m/s
                 rm_internal = rm_ms / rv_ms_per_internal
-                rv_model += pt.switch(pt.eq(self.inst_map_tensor, i), rm_internal, 0.0)
+                rv_model += pt.switch(
+                    pt.eq(self.inst_map_tensor, i), rm_internal, 0.0
+                )
 
         # detrending
         if self.total_detrend_cols > 0:
@@ -300,6 +315,7 @@ class RVInstrument(Instrument):
             # No-op unless a file set `rm:`.
             if any(self.rm_orbit):
                 from ..rm import compute_rm_rv, resolve_rm_indices
+
                 rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
                 omap_list = list(omap)
                 seen = set()
@@ -307,14 +323,26 @@ class RVInstrument(Instrument):
                     if not oname or oname in seen:
                         continue
                     seen.add(oname)
-                    oidx, pidx, bidx = resolve_rm_indices(system, oname, self.rm_band[i])
+                    oidx, pidx, bidx = resolve_rm_indices(
+                        system, oname, self.rm_band[i]
+                    )
                     if oidx not in omap_list:
                         continue
                     col = omap_list.index(oidx)
-                    rm_col = compute_rm_rv(system, t_input, oidx, pidx, bidx,
-                                           model=self.rm_model[i]) / rv_ms_per_internal
+                    rm_col = (
+                        compute_rm_rv(
+                            system,
+                            t_input,
+                            oidx,
+                            pidx,
+                            bidx,
+                            model=self.rm_model[i],
+                        )
+                        / rv_ms_per_internal
+                    )
                     rv_matrix_node = pt.set_subtensor(
-                        rv_matrix_node[:, col], rv_matrix_node[:, col] + rm_col)
+                        rv_matrix_node[:, col], rv_matrix_node[:, col] + rm_col
+                    )
 
             rv_full_node = pt.sum(rv_matrix_node, axis=1)
 

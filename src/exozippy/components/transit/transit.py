@@ -111,6 +111,7 @@ class Transit(Instrument):
             *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
+            cls._likelihood_config_schema(),
         ]
 
     def load_data(self, system):
@@ -195,6 +196,7 @@ class Transit(Instrument):
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (relative flux).
         self._prepare_gp(self.time, self.err, self.inst_map)
+        self._prepare_robust(self.err, self.inst_map)
 
     def _build_oversample_grid(self):
         """
@@ -261,6 +263,7 @@ class Transit(Instrument):
         self.manifest = {"baseline": {"initval": self.baseline_init}}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
+        self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {

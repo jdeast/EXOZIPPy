@@ -247,6 +247,15 @@ mulensinstrument:
     init_scale: 0.01
     unit: "mag"
     internal_unit: "mag"
+  # Optional hogg-mixture outlier scatter, in magnitudes (the rest of the
+  # robust-likelihood blueprint lives in components/defaults.yaml).
+  out_scale:
+    lower: 0.0
+    upper: 10.0
+    initval: 0.2
+    init_scale: 0.1
+    unit: "mag"
+    internal_unit: "mag"
   log_f_total:
     initval: -6
     init_scale: 3e-4
