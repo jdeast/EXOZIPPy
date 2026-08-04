@@ -59,6 +59,29 @@ sampler will not: it builds worker pools with multiprocessing's `fork` start
 method, which does not exist on Windows. See `notes/todo.txt` if you want to
 pick this up -- patches welcome.
 
+The practical route on a Windows machine is WSL2, where an Ubuntu distro is
+simply the supported Linux platform above -- runtime requirements, PTDE
+sampler and all. Open an administrator PowerShell (from the Start menu, type
+"powershell", then click "Run as administrator") and run:
+
+```
+wsl --install -d Ubuntu-24.04
+```
+
+Reboot if prompted, open the Ubuntu app once to create a Unix user, and then
+inside Ubuntu (whose default python3 is 3.12):
+
+```
+sudo apt update
+sudo apt install g++ python3-dev python3-venv
+python3 -m venv ~/exozippy-env
+source ~/exozippy-env/bin/activate
+pip install --pre exozippy
+```
+
+Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
+runtime compilation (MSVC will not do), which we have never tested.
+
 Intel macOS is untested here and needs a C++ compiler: exoplanet-core publishes
 wheels for CPython 3.12-3.14 on Linux (glibc 2.28+), Apple Silicon macOS and
 Windows, but not Intel macOS, so it builds from source there.
