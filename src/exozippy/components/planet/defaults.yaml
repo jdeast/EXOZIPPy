@@ -111,14 +111,14 @@ planet:
         deps: ["ar", "p"]
 
   # PR 1.b (BEER): Doppler beaming amplitude, in ppm (EXOFASTv2's
-  # ss.planet[i].beam). Off by default (pinned to 0 unless fitbeam or
-  # derivebeam is set; see Planet.register_parameters), like thermal/
-  # reflect/ellipsoidal on Band. Unlike those three, beam is an odd
+  # ss.planet[i].beam). Off by default (pinned to 0 unless beam_free or
+  # beam_constrains_mass is set; see Planet.register_parameters), like
+  # thermal/reflect/ellipsoidal on Band. Unlike those three, beam is an odd
   # (sine) function of orbital phase -- it tracks the star's directional
   # line-of-sight velocity, not a magnitude -- so unlike their lower: 0.0,
-  # beam is allowed either sign; only derivebeam's K-derived expression
-  # (always >= 0, since K itself is a non-negative amplitude) picks a
-  # definite sign in practice.
+  # beam is allowed either sign; only beam_constrains_mass's K-derived
+  # expression (always >= 0, since K itself is a non-negative amplitude)
+  # picks a definite sign in practice.
   beam:
     lower: -1.0e6
     upper: 1.0e6

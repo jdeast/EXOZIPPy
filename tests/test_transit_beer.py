@@ -9,9 +9,10 @@ variations), building on fitthermal (PR 1.a).
     encoding a plausible transcription bug, so a future edit that breaks
     the phase/period shape fails loudly rather than silently.
   - planet/physics.py's calc_beam_from_K: unit/magnitude sanity for the
-    derivebeam formula.
-  - Band/Planet manifest wiring: fitreflect/fitellip/fitbeam/derivebeam
-    parsing and the opt-in pinning gate (mirrors fitthermal's).
+    beam_constrains_mass formula.
+  - Band/Planet manifest wiring: fitreflect/fitellip/beam_free/
+    beam_constrains_mass parsing and the opt-in pinning gate (mirrors
+    fitthermal's).
   - Integration: planetvisible gates thermal/reflect but not ellipsoidal,
     verified through the actual build_likelihood mu at secondary eclipse.
   - Backward compatibility: reflect/ellipsoidal/beam all pinned at exactly
@@ -309,7 +310,7 @@ def test_beam_regression_cosine_would_move_the_zero_crossings():
 
 
 # ---------------------------------------------------------------------------
-# Pure-function test: calc_beam_from_K (derivebeam)
+# Pure-function test: calc_beam_from_K (beam_constrains_mass)
 # ---------------------------------------------------------------------------
 
 
@@ -366,14 +367,14 @@ def test_band_reflect_ellip_pinned_when_not_opted_in():
 
 
 # ---------------------------------------------------------------------------
-# Planet manifest wiring: fitbeam / derivebeam
+# Planet manifest wiring: beam_free / beam_constrains_mass
 # ---------------------------------------------------------------------------
 
 
-def test_planet_fitbeam_derivebeam_default_false():
+def test_planet_beam_free_beam_constrains_mass_default_false():
     planet = _make_planet([{"name": "b"}])
-    assert planet.fitbeam == [False]
-    assert planet.derivebeam == [False]
+    assert planet.beam_free == [False]
+    assert planet.beam_constrains_mass == [False]
 
 
 def test_planet_beam_pinned_when_neither_set():
@@ -382,28 +383,36 @@ def test_planet_beam_pinned_when_neither_set():
     assert planet.manifest["beam"]["overrides"]["sigma"] == [0.0]
 
 
-def test_planet_beam_free_with_fitbeam():
-    planet = _make_planet([{"name": "b", "fitbeam": True}])
+def test_planet_beam_free_with_beam_free():
+    planet = _make_planet([{"name": "b", "beam_free": True}])
     planet.register_parameters(system=_FakeSystemNoOrbit())
     assert planet.manifest["beam"] == {}
 
 
-def test_planet_beam_uses_expression_with_derivebeam():
-    planet = _make_planet([{"name": "b", "derivebeam": True}])
+def test_planet_beam_uses_expression_with_beam_constrains_mass():
+    planet = _make_planet([{"name": "b", "beam_constrains_mass": True}])
     planet.register_parameters(system=_FakeSystemWithOrbit())
     assert planet.manifest["beam"] == "default"
 
 
-def test_planet_fitbeam_and_derivebeam_together_raises():
+def test_planet_beam_free_and_beam_constrains_mass_together_derives():
+    """
+    Given both beam_free and beam_constrains_mass set on the same planet,
+    When register_parameters runs,
+    Then beam_constrains_mass wins: beam is still derived from K via the
+    "default" expression rather than fit freely. Per EXOFASTv2's
+    step2pars.pro (~line 256) the two flags are not mutually exclusive --
+    beam is computed whenever either is set.
+    """
     planet = _make_planet(
-        [{"name": "b", "fitbeam": True, "derivebeam": True}]
+        [{"name": "b", "beam_free": True, "beam_constrains_mass": True}]
     )
-    with pytest.raises(ValueError, match="mixed per-planet beam modes"):
-        planet.register_parameters(system=_FakeSystemWithOrbit())
+    planet.register_parameters(system=_FakeSystemWithOrbit())
+    assert planet.manifest["beam"] == "default"
 
 
-def test_derivebeam_without_orbit_raises():
-    planet = _make_planet([{"name": "b", "derivebeam": True}])
+def test_beam_constrains_mass_without_orbit_raises():
+    planet = _make_planet([{"name": "b", "beam_constrains_mass": True}])
     with pytest.raises(ValueError, match="requires an orbit component"):
         planet.register_parameters(system=_FakeSystemNoOrbit())
 
@@ -426,10 +435,10 @@ def test_beam_off_does_not_require_K_no_orbit_config():
     When the system is prepared and the model is built,
     Then it builds successfully and planet.beam evaluates to exactly 0 --
     beam must never require K to exist just because K is beam's
-    expression dependency in the *derivebeam* case.
+    expression dependency in the *beam_constrains_mass* case.
 
     Regression test for a real bug found in review: Planet.register_
-    parameters's off/fitbeam manifest entries are dicts with no explicit
+    parameters's off/beam_free manifest entries are dicts with no explicit
     "expr_key" ({} or {"overrides": ...}), which is supposed to mean "no
     expression" -- but graph.py's build-order step had a bug (see
     graph.py's determine_pymc_build_order) that treated any non-None dict
@@ -438,8 +447,8 @@ def test_beam_off_does_not_require_K_no_orbit_config():
     beam pinned off. This never surfaced for thermal/reflect/ellipsoidal
     because they have no `expressions` block in defaults.yaml at all --
     beam is the first opt-in ppm term that also has a real expression
-    (calc_beam_from_K, for derivebeam), which is what exposed it. The
-    Planet-only tests above (test_planet_beam_pinned_when_neither_set
+    (calc_beam_from_K, for beam_constrains_mass), which is what exposed it.
+    The Planet-only tests above (test_planet_beam_pinned_when_neither_set
     etc.) use a fake system and call register_parameters directly, so
     they never exercised graph.py's build-order step at all -- this is
     the one that would have caught it.
@@ -596,7 +605,7 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
 def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     """
     Given a band with no fitreflect/fitellip and a planet with no
-    fitbeam/derivebeam,
+    beam_free/beam_constrains_mass,
     When the model is built,
     Then band.reflect, band.ellipsoidal, and planet.beam all evaluate to
     exactly 0 -- the same guarantee already established for thermal.

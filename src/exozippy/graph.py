@@ -47,7 +47,7 @@ def determine_pymc_build_order(active_components, config_manager):
             # never create -- harmless for parameters with no `expressions`
             # block at all (e.g. thermal/reflect/ellipsoidal), but a real
             # bug for planet.beam: its {"overrides": ...}-shaped "off"/
-            # fitbeam manifest entries were wrongly treated as requesting
+            # beam_free manifest entries were wrongly treated as requesting
             # the "default" expression (calc_beam_from_K, deps: ["K"]),
             # so any orbit-less config (no RV, no K) failed to build even
             # with beaming off. See tests/test_transit_beer.py's

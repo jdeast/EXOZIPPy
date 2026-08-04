@@ -19,9 +19,11 @@ class Planet(Component):
         # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
         # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
         # thermal/reflect/ellipsoidal which are ss.band[i].*).
-        self.fitbeam = [bool(c.get("fitbeam", False)) for c in self.config]
-        self.derivebeam = [
-            bool(c.get("derivebeam", False)) for c in self.config
+        self.beam_free = [
+            bool(c.get("beam_free", False)) for c in self.config
+        ]
+        self.beam_constrains_mass = [
+            bool(c.get("beam_constrains_mass", False)) for c in self.config
         ]
 
     @property
@@ -32,7 +34,7 @@ class Planet(Component):
     def config_schema(cls):
         return [
             {
-                "key": "fitbeam",
+                "key": "beam_free",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -40,14 +42,13 @@ class Planet(Component):
                     "Fit a Doppler beaming amplitude (ppm) for this planet "
                     "directly from the photometry, independent of the RV "
                     "semi-amplitude K -- does not constrain planet mass. "
-                    "Default False, which pins beam at 0. Mutually "
-                    "exclusive with derivebeam across all planets in a "
-                    "system (PR 1.b doesn't support mixed per-planet beam "
-                    "modes yet)."
+                    "Default False, which pins beam at 0. If "
+                    "beam_constrains_mass is also set, beam_constrains_mass "
+                    "wins and beam is derived from K instead of fit freely."
                 ),
             },
             {
-                "key": "derivebeam",
+                "key": "beam_constrains_mass",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
@@ -91,32 +92,32 @@ class Planet(Component):
             )
 
         # BEER (PR 1.b): beam is either (a) derived from K for every planet
-        # (derivebeam), (b) free-fit for every planet (fitbeam), or (c)
-        # pinned at 0 everywhere (neither set -- transit model unchanged).
+        # (beam_constrains_mass), (b) free-fit for every planet (beam_free),
+        # or (c) pinned at 0 everywhere (neither set -- transit model
+        # unchanged). The two flags are not mutually exclusive: per
+        # EXOFASTv2's step2pars.pro (~line 256), beam is computed whenever
+        # either is set, and beam_constrains_mass takes priority -- when
+        # both are set, beam is still derived from K, not fit freely.
         # Unlike thermal/reflect/ellipsoidal's per-band opt-in, this is a
         # single mode for the whole component: Component.add_parameter
         # resolves one manifest entry as either a whole-component expression
         # ("default") or a whole-component free/fixed tensor (via per-element
         # sigma), never a mix of the two within one parameter -- so a
         # per-planet mix of derived/free/off beam isn't supported yet.
-        any_derivebeam = any(self.derivebeam)
-        any_fitbeam = any(self.fitbeam)
-        if any_derivebeam and any_fitbeam:
+        any_beam_constrains_mass = any(self.beam_constrains_mass)
+        any_beam_free = any(self.beam_free)
+        if any_beam_constrains_mass and not has_orbit:
             raise ValueError(
-                f"[{self.prefix}] fitbeam and derivebeam cannot both be set "
-                f"in the same run (PR 1.b doesn't support mixed per-planet "
-                f"beam modes yet)."
+                f"[{self.prefix}] beam_constrains_mass requires an orbit "
+                f"component (beam is derived from K, which requires the "
+                f"orbital elements)."
             )
-        if any_derivebeam and not has_orbit:
-            raise ValueError(
-                f"[{self.prefix}] derivebeam requires an orbit component "
-                f"(beam is derived from K, which requires the orbital "
-                f"elements)."
-            )
-        if any_derivebeam:
+        if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
-        elif any_fitbeam:
-            off = [i for i in range(self.n_elements) if not self.fitbeam[i]]
+        elif any_beam_free:
+            off = [
+                i for i in range(self.n_elements) if not self.beam_free[i]
+            ]
             entry = {}
             if off:
                 pin = np.full(self.n_elements, np.nan)

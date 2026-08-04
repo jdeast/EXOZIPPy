@@ -67,10 +67,11 @@ def calc_max_ecc(ar, p):
 
 # Bolometric approximation of the Doppler beaming factor (Faigler & Mazeh
 # 2011, eq. 1: A_beam = (4-alpha)*K/c, with the bandpass-dependent spectral
-# index alpha set to 0). This is a placeholder pending confirmation of
-# Jason's exact convention -- no live implementation of derivebeam's K
-# formula was found anywhere in EXOFASTv2 to verify against (see PR 1.b
-# design discussion).
+# index alpha set to 0). Confirmed against EXOFASTv2's step2pars.pro line
+# 260, which uses beam = 4*K/c -- i.e. alpha_beam=1, not alpha=0 as the
+# 2011 paper's bolometric case would give. alpha_beam's true value runs
+# 0.8-1.2 depending on bandpass, but EXOFASTv2 fixes it at 1 (factor of 4),
+# so we match that rather than the paper's exact bolometric limit.
 BEAM_FACTOR = 4.0
 
 
