@@ -181,7 +181,7 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
     return len(seed_sets)
 
 
-def apply_excluded_points(data, files, mask_specs, context):
+def apply_excluded_points(data, files, mask_specs, context, robust_kinds=None):
     """Merge the JSON's ``excluded_points`` into an instrument's mask specs.
 
     MMEXOFAST keys each dataset by file basename and reports 0-based indices
@@ -189,6 +189,16 @@ def apply_excluded_points(data, files, mask_specs, context):
     ``Instrument._apply_mask`` accepts. An explicit user ``mask:`` on a file
     wins: only entries whose spec is still None are filled. Returns the
     updated list (mutated in place too).
+
+    ``robust_kinds`` is the instrument's per-file ``likelihood_kinds`` list;
+    a file that opted into a robust likelihood (hogg mixture or Student-t)
+    is skipped: the robust likelihood supersedes the hard mask -- it refits
+    the outlier verdict at every posterior draw instead of freezing
+    MMEXOFAST's, and keeps the points auditable via
+    ``Instrument.outlier_prob_at_data``. MMEXOFAST still used the exclusions
+    internally (protecting its own chi2-based anomaly search), and the
+    errfacs remain consumed either way -- only the propagation of the hard
+    mask into EXOZIPPy is dropped. A user's own ``mask:`` still applies.
     """
     excluded = data.get("excluded_points") or {}
     if not excluded:
@@ -204,6 +214,15 @@ def apply_excluded_points(data, files, mask_specs, context):
             continue
         indices = list(info.get("indices") or [])
         if not indices:
+            continue
+        if robust_kinds is not None and robust_kinds[i]:
+            logger.info(
+                f"[{context}] file '{label}' has likelihood: "
+                f"{robust_kinds[i]}; leaving its {len(indices)} "
+                f"mmexofast-excluded point(s) unmasked -- the robust "
+                f"likelihood handles them (and reports their posterior "
+                f"outlier probabilities)."
+            )
             continue
         if mask_specs[i] is not None:
             logger.info(

@@ -221,6 +221,36 @@ def test_excluded_points_unknown_label_warns_and_skips(caplog):
     assert any("other.txt" in rec.message for rec in caplog.records)
 
 
+def test_excluded_points_skip_files_with_a_robust_likelihood(caplog):
+    """
+    Given one file that opted into the hogg mixture and one that did not,
+    When excluded_points name both,
+    Then the robust file's points stay unmasked (the mixture supersedes the
+    frozen hard mask, with a log line saying so) while the plain file's mask
+    fills as before.
+    """
+    data = {
+        "excluded_points": {
+            "n1.W149.WFIRST18.128.txt": {"indices": [3, 17], "times": []},
+            "n1.Z087.WFIRST18.128.txt": {"indices": [5], "times": []},
+        }
+    }
+    with caplog.at_level("INFO"):
+        specs = mmx.apply_excluded_points(
+            data,
+            FILES,
+            [None, None],
+            "mulens",
+            robust_kinds=["hogg", ""],
+        )
+    assert specs[0] is None  # hogg file: left unmasked
+    assert specs[1] == [5]  # plain file: masked as before
+    assert any(
+        "likelihood: hogg" in rec.message and "unmasked" in rec.message
+        for rec in caplog.records
+    )
+
+
 def test_excluded_points_empty_indices_leave_spec_none():
     """
     Given a dataset entry whose index list is empty (nothing excluded),

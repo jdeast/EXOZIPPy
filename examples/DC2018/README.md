@@ -10,22 +10,28 @@ pipeline, one cluster job per event:
    the fit (multi-seed sampling), its bad-data mask (`excluded_points`)
    drops the flagged points via the generic instrument `mask:` feature,
    and its error factors (`errfacs`) seed each instrument's `err_scale`.
-   By default the run includes MMEXOFAST's emcee polish (hours on DC18
-   cadence, but the grid estimator's raw solutions can miss badly --
-   e.g. rho collapsing to ~0 on finite-source events); pass
-   `--no-mmx-emcee` (job: `EXTRA="--no-mmx-emcee"`) to stop after the
-   much faster binary-parameter estimation. (This explicit step is optional in general: a
-   config whose params file lacks microlensing start values triggers the
-   same MMEXOFAST run automatically inside EXOZIPPy's data-driven-hints
-   layer.)
+   By default the run stops after the fast binary-parameter ESTIMATION:
+   EXOZIPPy's tempered multi-seed PTDE is itself the polish, and with
+   the renormalization peak-protection fix the raw estimator seeds land
+   in the right basin (on event 128: s = 0.977, rho = 0.0075 vs the
+   polished 0.979/0.0054 -- the once-alarming "rho collapses to ~1e-6"
+   was an artifact of outlier rejection eating the finite-source peak).
+   Pass `--mmx-emcee` (job: `EXTRA="--mmx-emcee"`) to turn MMEXOFAST's
+   hours-long emcee polish back on. (This explicit step is optional in
+   general: a config whose params file lacks microlensing start values
+   triggers the same MMEXOFAST run automatically inside EXOZIPPy's
+   data-driven-hints layer.)
 2. **EXOZIPPy** samples the 2L1S system (PTDE, EXOFASTv2-parity settings)
    and writes the usual artifacts under `events/<NNN>/fitresults/`.
    Every light curve fits with `likelihood: hogg` -- the marginalized
-   inlier/outlier mixture -- so residual junk that survives MMEXOFAST's
-   hard mask lands in the wide background component instead of dragging
-   the fit, at the cost of two extra parameters per curve (`out_frac`,
-   `out_scale`). Per-point posterior outlier probabilities are available
-   afterwards via `Instrument.outlier_prob_at_data`.
+   inlier/outlier mixture -- which supersedes MMEXOFAST's hard bad-data
+   mask: `excluded_points` are NOT propagated for hogg files (MMEXOFAST
+   still rejects internally to protect its own anomaly search, and its
+   errfacs still seed `err_scale`), so every point stays in the fit,
+   junk lands in the wide background component instead of dragging the
+   solution, and per-point posterior outlier probabilities are available
+   afterwards via `Instrument.outlier_prob_at_data` -- at the cost of
+   two extra parameters per curve (`out_frac`, `out_scale`).
 3. **Comparison** against the challenge's answer key
    (`Answers/master_file.txt`, positional lookup, t_0 origin JD 2458234)
    is written to `events/<NNN>/comparison.csv`.
