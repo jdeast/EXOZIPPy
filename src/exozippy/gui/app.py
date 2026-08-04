@@ -37,6 +37,8 @@ Tune tab (G10):
     POST /api/tune/solve      -- solve + compile the evaluator in a worker proc
     GET  /api/tune/status     -- poll the solve phase (solving/compiling/live)
     GET  /api/tune/result     -- solved parameters + base PlotSpecs
+    GET  /api/tune/plots/data -- data-only PlotSpecs (available from the
+                                 "compiling" phase, before the solve is live)
     POST /api/tune/eval       -- move one parameter, get updated model curves
     GET  /api/tune/hash       -- structural hash of the open doc (staleness)
 """
@@ -518,6 +520,22 @@ def create_app(project_dir=None, initial_config=None):
 
     @app.post("/api/doc/open")
     def doc_open(req: OpenDocRequest):
+        # Re-opening the file that is already open must NOT clobber unsaved
+        # edits: several tabs call open on mount, so a naive reload-from-disk
+        # here silently reverted every edit (and its undo stack) on any tab
+        # switch. A dirty same-path doc is returned as-is; a clean one is
+        # reloaded so external file edits are picked up.
+        current = state["doc"]
+        if (
+            current is not None
+            and current.dirty
+            and current.config_path is not None
+            and Path(req.config_path).resolve()
+            == current.config_path.resolve()
+        ):
+            payload = current.to_json()
+            payload["recovery"] = current.autosave_recovery()
+            return JSONResponse(payload)
         try:
             doc = ProjectDocument.open(
                 req.config_path, params_path=req.params_path
@@ -929,8 +947,16 @@ def create_app(project_dir=None, initial_config=None):
                 "error": None,
                 "structural_hash": None,
                 "has_result": False,
+                "has_data_plots": False,
             }
         return JSONResponse(session.status())
+
+    @app.get("/api/tune/plots/data")
+    def tune_data_plots():
+        """Data-only plots for the in-flight solve (drawable pre-live)."""
+        session = tune_state.get("session")
+        plots = session.data_plots if session is not None else None
+        return JSONResponse({"plots": plots or []})
 
     @app.get("/api/tune/result")
     def tune_result():

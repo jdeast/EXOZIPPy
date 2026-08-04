@@ -1,6 +1,5 @@
 import logging
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
 import pytensor
@@ -782,7 +781,7 @@ class Transit(Instrument):
         """
         One-period phase grid, isolated model decrement for planet p_idx,
         and the baseline-subtracted, other-planet-cleaned flux at the
-        observed times -- shared by plot_phased() and plot_data(). Uses
+        observed times -- used by plot_data() (and via it plot()). Uses
         _smeared_lc_matrix (see _eval_unphased_lc) so the phased panel
         matches the exposure-smeared model as well.
         """
@@ -830,122 +829,14 @@ class Transit(Instrument):
         }
 
     def plot(self, system, points, filename_prefix="debug"):
-        self.plot_unphased(system, points, filename_prefix=filename_prefix)
-        self.plot_phased(system, points, filename_prefix=filename_prefix)
+        """Render the unphased + phased LC PDFs from plot_data specs.
 
-    def plot_unphased(self, system, points, filename_prefix="debug"):
-        if isinstance(points, dict):
-            points = [points]
-        if len(points) == 0:
-            return
+        The specs are the single description of these plots -- the GUI draws
+        the same ones via plotly (see plotrender.py's module docstring).
+        """
+        from exozippy.plotrender import plot_via_specs
 
-        for i in range(self.n_elements):
-            plt.figure(figsize=(12, 5))
-            mask = self.inst_map == i
-            t_data, f_data, e_data = (
-                self.time[mask],
-                self.flux[mask],
-                self.err[mask],
-            )
-
-            # Plot spaghetti models
-            for point in points:
-                try:
-                    # Shared prep: full model light curve (baseline + decrement),
-                    # already exposure-smeared via _smeared_full_lc.
-                    t_pretty, y_full = self._eval_unphased_lc(system, point, i)
-
-                    alpha = 0.8 if len(points) == 1 else 0.1
-                    plt.plot(
-                        t_pretty, y_full, "r-", lw=1.5, alpha=alpha, zorder=2
-                    )
-                except Exception as e:
-                    logger.warning(f"LC model eval failed: {e}")
-                    continue
-
-            # Plot raw data
-            plt.errorbar(
-                t_data,
-                f_data,
-                yerr=e_data,
-                fmt="k.",
-                alpha=0.5,
-                zorder=1,
-                label=self.names[i],
-            )
-
-            plt.xlabel("Time [BJD]")
-            plt.ylabel("Relative Flux")
-            plt.title(f"Transit Photometry: {self.names[i]}")
-            plt.tight_layout()
-            plt.savefig(f"{filename_prefix}_LC_unphased_{self.names[i]}.pdf")
-            plt.close()
-
-    def plot_phased(self, system, points, filename_prefix="debug"):
-        planets = system.planet
-        if isinstance(points, dict):
-            points = [points]
-
-        for p_idx in range(planets.n_elements):
-            for i in range(self.n_elements):
-                plt.figure(figsize=(10, 6))
-                ref_point = points[0]
-
-                # 1. Spaghetti models
-                prep = None
-                for point in points:
-                    try:
-                        p_prep = self._phased_lc_arrays(
-                            system, point, p_idx, i
-                        )
-                    except Exception as e:
-                        logger.warning(f"LC phased model eval failed: {e}")
-                        continue
-                    if point is ref_point:
-                        prep = p_prep
-                    alpha = 0.8 if len(points) == 1 else 0.1
-                    plt.plot(
-                        p_prep["x_model"],
-                        p_prep["y_model"],
-                        "r-",
-                        alpha=alpha,
-                        lw=1,
-                        zorder=2,
-                    )
-
-                # 2. Clean and phase the data (reference point)
-                if prep is None:
-                    plt.close()
-                    continue
-                P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
-
-                plt.errorbar(
-                    prep["x_data"],
-                    prep["y_data"],
-                    yerr=self.err[self.inst_map == i],
-                    fmt="k.",
-                    alpha=0.5,
-                    zorder=1,
-                    label=self.names[i],
-                )
-
-                t14_raw = ref_point.get(f"{self.prefix}.t14")
-                if t14_raw is not None:
-                    t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
-                    plt.xlim(-t14_ref, t14_ref)
-
-                plt.axhline(0, color="gray", linestyle=":", alpha=0.5)
-                plt.xlabel(f"Time from Mid-Transit [d] (P = {P_ref:.5f} d)")
-                plt.ylabel("Flux − Baseline")
-                plt.title(
-                    f"Phased LC: {planets.names[p_idx]} — {self.names[i]}"
-                )
-                plt.legend(loc="best", fontsize="small")
-                plt.tight_layout()
-                plt.savefig(
-                    f"{filename_prefix}_LC_phased_{self.names[i]}_{planets.names[p_idx]}.pdf"
-                )
-                plt.close()
+        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
 
     def plot_data(self, system, point=None):
         """
@@ -964,24 +855,42 @@ class Transit(Instrument):
             getattr(self, "_lc_matrix_node", None), system
         )
 
+        # The baseline enters both panels in numpy (_baseline_for), not
+        # through the symbolic nodes, so the graph walk cannot see it --
+        # without this dep a baseline slider would never refresh these
+        # charts in the GUI.
+        baseline_label = getattr(
+            getattr(self, "baseline", None), "label", None
+        )
+        if baseline_label:
+            if baseline_label not in full_deps:
+                full_deps = full_deps + [baseline_label]
+            if baseline_label not in matrix_deps:
+                matrix_deps = matrix_deps + [baseline_label]
+
         # ---- Unphased: flux vs time, per instrument -------------------
         for i in range(self.n_elements):
             mask = self.inst_map == i
             traces = []
             deps = []
             if point is not None:
-                t_pretty, y_full = self._eval_unphased_lc(system, point, i)
-                deps = full_deps
-                traces.append(
-                    Trace(
-                        name="model",
-                        role="model",
-                        kind="line",
-                        x=t_pretty,
-                        y=y_full,
-                        node=getattr(self, "_lc_full_node", None),
+                # A failed model eval keeps the data-only panel (matching the
+                # per-point tolerance of the old hand-drawn loop).
+                try:
+                    t_pretty, y_full = self._eval_unphased_lc(system, point, i)
+                    deps = full_deps
+                    traces.append(
+                        Trace(
+                            name="model",
+                            role="model",
+                            kind="line",
+                            x=t_pretty,
+                            y=y_full,
+                            node=getattr(self, "_lc_full_node", None),
+                        )
                     )
-                )
+                except Exception as e:  # noqa: BLE001 - bad point/draw
+                    logger.warning(f"LC model eval failed: {e}")
             traces.append(
                 Trace(
                     name=self.names[i],
@@ -990,7 +899,13 @@ class Transit(Instrument):
                     x=self.time[mask],
                     y=self.flux[mask],
                     yerr=self.err[mask],
-                    style=self._data_trace_style(i),
+                    # Black-dot default (the historical PDF look); a user
+                    # plot: color/marker still wins via _data_trace_style.
+                    style={
+                        "color": "k",
+                        "marker": ".",
+                        **self._data_trace_style(i),
+                    },
                 )
             )
             specs.append(
@@ -1005,7 +920,12 @@ class Transit(Instrument):
                     ylabel="Relative Flux",
                     traces=traces,
                     param_deps=deps,
-                    meta={"phase_folded": False, "instrument": self.names[i]},
+                    meta={
+                        "phase_folded": False,
+                        "instrument": self.names[i],
+                        "file_tag": f"LC_unphased_{self.names[i]}",
+                        "figsize": (12, 5),
+                    },
                 )
             )
 
@@ -1014,7 +934,13 @@ class Transit(Instrument):
             planets = system.planet
             for p_idx in range(planets.n_elements):
                 for i in range(self.n_elements):
-                    prep = self._phased_lc_arrays(system, point, p_idx, i)
+                    # A failed prep skips this panel, exactly as the old
+                    # hand-drawn loop skipped its figure.
+                    try:
+                        prep = self._phased_lc_arrays(system, point, p_idx, i)
+                    except Exception as e:  # noqa: BLE001 - bad point/draw
+                        logger.warning(f"LC phased model eval failed: {e}")
+                        continue
                     mask = self.inst_map == i
                     traces = [
                         Trace(
@@ -1024,6 +950,7 @@ class Transit(Instrument):
                             x=prep["x_model"],
                             y=prep["y_model"],
                             node=getattr(self, "_lc_matrix_node", None),
+                            style={"lw": 1.0},
                         ),
                         Trace(
                             name=self.names[i],
@@ -1032,10 +959,34 @@ class Transit(Instrument):
                             x=prep["x_data"],
                             y=prep["y_data"],
                             yerr=self.err[mask],
-                            style=self._data_trace_style(i),
+                            style={
+                                "color": "k",
+                                "marker": ".",
+                                **self._data_trace_style(i),
+                            },
                         ),
                     ]
                     pname = planets.names[p_idx]
+                    meta = {
+                        "phase_folded": True,
+                        "planet": pname,
+                        "instrument": self.names[i],
+                        "period": prep["P_ref"],
+                        "tc": prep["tc_ref"],
+                        "file_tag": (f"LC_phased_{self.names[i]}_{pname}"),
+                        "figsize": (10, 6),
+                        "hline_y": 0.0,
+                        # The phased DATA re-folds with tc/P and its cleaning
+                        # subtracts the baseline, other planets and any GP --
+                        # all point-dependent, so live evals must re-ship it.
+                        "dynamic_data": True,
+                    }
+                    # Zoom to +/- t14 around mid-transit when the point
+                    # carries a transit duration for this planet.
+                    t14_raw = point.get(f"{self.prefix}.t14")
+                    if t14_raw is not None:
+                        t14_ref = float(np.atleast_1d(t14_raw)[p_idx])
+                        meta["x_range"] = [-t14_ref, t14_ref]
                     specs.append(
                         PlotSpec(
                             id=f"{self.prefix}.phased.{self.names[i]}.{pname}",
@@ -1048,13 +999,7 @@ class Transit(Instrument):
                             ylabel="Flux - Baseline",
                             traces=traces,
                             param_deps=matrix_deps,
-                            meta={
-                                "phase_folded": True,
-                                "planet": pname,
-                                "instrument": self.names[i],
-                                "period": prep["P_ref"],
-                                "tc": prep["tc_ref"],
-                            },
+                            meta=meta,
                         )
                     )
 

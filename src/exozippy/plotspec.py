@@ -92,6 +92,9 @@ class Trace:
         The curve's abscissa/ordinate in the spec's axis units.
     yerr : array-like, optional
         Symmetric ``(N,)`` or asymmetric ``(2, N)`` vertical errors.
+    xerr : array-like, optional
+        Symmetric ``(N,)`` or asymmetric ``(2, N)`` horizontal errors
+        (sky-plane astrometry has uncertainties on both axes).
     node : object, optional
         The symbolic pytensor node behind a model curve, kept for G5's
         compiled re-evaluation.  Not serialized by ``to_json``.
@@ -110,6 +113,7 @@ class Trace:
     x: Any
     y: Any
     yerr: Optional[Any] = None
+    xerr: Optional[Any] = None
     node: Any = field(default=None, repr=False, compare=False)
     style: Optional[dict] = None
 
@@ -123,6 +127,8 @@ class Trace:
         }
         if self.yerr is not None:
             d["yerr"] = _array_to_list(self.yerr)
+        if self.xerr is not None:
+            d["xerr"] = _array_to_list(self.xerr)
         if self.style is not None:
             d["style"] = _jsonify(self.style)
         return d

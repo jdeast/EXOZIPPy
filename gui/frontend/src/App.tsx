@@ -2,17 +2,17 @@ import { useEffect, useState } from "react";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import LogTerminal from "./components/LogTerminal";
-import WelcomeTab from "./components/WelcomeTab";
 import ConfigTab from "./components/ConfigTab";
-import DataTab from "./components/DataTab";
 import TuneTab from "./components/TuneTab";
-import RunTab from "./components/RunTab";
 import ToolsTab from "./components/ToolsTab";
+import RunControl from "./components/RunControl";
 import { api, type ProjectListing, type FileEntry } from "./api";
 
 // Application shell: top bar + left sidebar + center tabbed workspace + bottom
-// log terminal. G7 shipped Welcome; G8 adds Config. Later prompts register
-// Data, Tune, Run, Canvas, and Results tabs into the same workspace.
+// log terminal. Landing: Tune when the app knows which config to run (explicit
+// file on the command line, or a project with exactly one config) -- the Tune
+// tab auto-Solves, so the first thing on screen is the data with the model
+// over it. Otherwise Config, whose empty state doubles as the welcome screen.
 
 // Shared context each tab's render receives, so a tab can read the open project,
 // attach the bottom terminal to a log file it cares about, and (Config tab) edit
@@ -22,6 +22,7 @@ interface TabContext {
   setLogFile: (file: string | null) => void;
   configPath: string | null;
   setActiveTab: (id: string) => void;
+  active: boolean;
 }
 
 interface Tab {
@@ -32,24 +33,11 @@ interface Tab {
 
 const TABS: Tab[] = [
   {
-    id: "welcome",
-    label: "Welcome",
-    render: (ctx) => (
-      <WelcomeTab configPath={ctx.configPath} setActiveTab={ctx.setActiveTab} />
-    ),
+    id: "config",
+    label: "Config",
+    render: (ctx) => <ConfigTab configPath={ctx.configPath} active={ctx.active} />,
   },
-  { id: "config", label: "Config", render: (ctx) => <ConfigTab configPath={ctx.configPath} /> },
   { id: "tune", label: "Tune", render: (ctx) => <TuneTab configPath={ctx.configPath} /> },
-  {
-    id: "data",
-    label: "Data",
-    render: (ctx) => <DataTab listing={ctx.listing} configPath={ctx.configPath} />,
-  },
-  {
-    id: "run",
-    label: "Run",
-    render: (ctx) => <RunTab listing={ctx.listing} setLogFile={ctx.setLogFile} />,
-  },
   {
     id: "tools",
     label: "Tools",
@@ -62,9 +50,24 @@ export default function App() {
   const [projectError, setProjectError] = useState<string | null>(null);
   const [logFile, setLogFile] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>(TABS[0].id);
+  // Tabs stay mounted once visited (hidden via CSS, not unmounted) so their
+  // state -- config selection, tune plots, scroll -- survives tab switches.
+  const [visited, setVisited] = useState<Set<string>>(new Set([TABS[0].id]));
   // The config file the Config tab edits. null -> fall back to the project's
   // first config; a sidebar click on a config file sets it explicitly.
   const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
+
+  const activateTab = (id: string) => {
+    setVisited((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+    setActiveTab(id);
+  };
+
+  // Plotly sizes charts at render time; a chart drawn (or resized) while its
+  // tab was hidden has a stale size, so poke a resize when the tab reappears.
+  useEffect(() => {
+    const t = setTimeout(() => window.dispatchEvent(new Event("resize")), 50);
+    return () => clearTimeout(t);
+  }, [activeTab]);
 
   const openProject = async (path: string) => {
     try {
@@ -72,24 +75,29 @@ export default function App() {
       const result = await api.openProject(path);
       setListing(result);
       setSelectedConfig(null); // let the new project pick its own default config
+      return result;
     } catch (e) {
       setProjectError(String(e instanceof Error ? e.message : e));
       setListing(null);
+      return null;
     }
   };
 
-  // On load, auto-open the project the server was launched with, if any. If
-  // it was launched with a specific config file (`exozippy-gui kelt4.yaml`),
-  // pre-select that file in the Config tab once the listing is in, and jump
-  // straight to it -- otherwise leave the Welcome tab as the default landing.
+  // On load, auto-open the project the server was launched with, if any.
+  // Landing: when the app knows which config to run -- an explicit file on the
+  // command line (`exozippy-gui kelt4.yaml`) or a project with exactly one
+  // config -- go straight to the Tune tab, which auto-Solves it. A project
+  // with several configs (or none) lands on Config so the user picks/builds
+  // one first.
   useEffect(() => {
     api.config().then(async (cfg) => {
-      if (cfg.initial_project) {
-        await openProject(cfg.initial_project);
-        if (cfg.initial_config) {
-          setSelectedConfig(cfg.initial_config);
-          setActiveTab("config");
-        }
+      if (!cfg.initial_project) return;
+      const result = await openProject(cfg.initial_project);
+      if (cfg.initial_config) {
+        setSelectedConfig(cfg.initial_config);
+        activateTab("tune");
+      } else if (result && result.configs.length === 1) {
+        activateTab("tune");
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,14 +108,13 @@ export default function App() {
   const onSelectFile = (entry: FileEntry) => {
     if (entry.kind === "config") {
       setSelectedConfig(entry.path);
-      setActiveTab("config");
+      activateTab("config");
     } else {
       setLogFile(entry.path);
     }
   };
 
   const projectName = listing ? listing.dir.split("/").pop() || listing.dir : null;
-  const current = TABS.find((t) => t.id === activeTab) || TABS[0];
   // The Config tab edits the clicked config, else the project's first config.
   const configPath =
     selectedConfig ??
@@ -119,7 +126,12 @@ export default function App() {
       <div className="app-body">
         <Sidebar
           listing={listing}
-          onOpen={openProject}
+          onOpen={async (path) => {
+            // Same landing rule as startup: one config -> Tune (auto-Solve),
+            // otherwise Config to pick/build one.
+            const result = await openProject(path);
+            if (result) activateTab(result.configs.length === 1 ? "tune" : "config");
+          }}
           onSelectFile={onSelectFile}
           error={projectError}
         />
@@ -129,15 +141,32 @@ export default function App() {
               <button
                 key={t.id}
                 className={`tab ${t.id === activeTab ? "active" : ""}`}
-                onClick={() => setActiveTab(t.id)}
+                onClick={() => activateTab(t.id)}
               >
                 {t.label}
               </button>
             ))}
           </nav>
-          <div className="tab-content">
-            {current.render({ configPath, listing, setLogFile, setActiveTab })}
-          </div>
+          {TABS.filter((t) => visited.has(t.id)).map((t) => (
+            <div
+              key={t.id}
+              className="tab-content"
+              style={t.id === activeTab ? undefined : { display: "none" }}
+            >
+              {t.render({
+                configPath,
+                listing,
+                setLogFile,
+                setActiveTab: activateTab,
+                active: t.id === activeTab,
+              })}
+            </div>
+          ))}
+          <RunControl
+            configPath={configPath}
+            listing={listing}
+            setLogFile={setLogFile}
+          />
         </main>
       </div>
       <LogTerminal file={logFile} />

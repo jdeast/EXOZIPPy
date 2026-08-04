@@ -820,8 +820,80 @@ class SED(Component):
         plot_cls = getattr(module, plot_cls_str)
         return plot_cls(system, points)
 
+    @staticmethod
+    def _identity_styles(plot_obj):
+        """
+        Fixed-order categorical identity -> color/marker/linestyle maps
+        (dataviz: assign hues by identity, never cycle by position).
+        Stars take the first nstars palette slots (star_names order); any
+        additional multi-star combination measured in the data (e.g.
+        "B+C") takes the next slot, in order of first appearance -- so a
+        given identity's spectrum curve and data-point marker always
+        share one color/style, and up to 8 distinct identities never
+        collide (beyond 8 they wrap, matching the palette's design cap).
+        Shared by plot() and plot_data() so the saved PDF and the GUI
+        charts always style an identity the same way.
+        """
+        identities = list(plot_obj.star_names)
+        for combo in plot_obj.unique_combos:
+            if combo not in identities:
+                identities.append(combo)
+        n_colors = len(plot_obj.colors_obs)
+        n_markers = len(plot_obj.markers)
+        n_lines = len(plot_obj.linetypes)
+        id_color = {
+            name: plot_obj.colors_obs[i % n_colors]
+            for i, name in enumerate(identities)
+        }
+        id_marker = {
+            name: plot_obj.markers[i % n_markers]
+            for i, name in enumerate(identities)
+        }
+        id_line = {
+            name: plot_obj.linetypes[i % n_lines]
+            for i, name in enumerate(identities)
+        }
+        return id_color, id_marker, id_line
+
+    @staticmethod
+    def _sub_combos(plot_obj):
+        """
+        Multi-star combinations the data actually measure (e.g. "B+C"
+        from an "A-(B+C)" differential row), excluding the full nstars
+        set (that one is plotted as "Total" and isn't duplicated here).
+        Returns (label, sorted star-index list) pairs, size >= 2 only.
+        Shared by plot() and plot_data().
+        """
+        all_idx = frozenset(range(plot_obj.nstars))
+        sub_combos = []
+        seen_combos = set()
+        for row in range(plot_obj.nfilters):
+            bm = plot_obj.blend_matrix[row]
+            for idx in (np.where(bm > 0)[0], np.where(bm < 0)[0]):
+                combo = frozenset(idx)
+                if (
+                    len(combo) >= 2
+                    and combo != all_idx
+                    and combo not in seen_combos
+                ):
+                    seen_combos.add(combo)
+                    combo_idx = sorted(combo)
+                    label = "+".join(plot_obj.star_names[i] for i in combo_idx)
+                    sub_combos.append((label, combo_idx))
+        return sub_combos
+
     # ------------------------------------------------------------------
     # 7) plot — observed mag vs predicted mag per filter, per SED.
+    #
+    # Deliberately NOT delegated to plotrender.plot_via_specs: the SED
+    # PDF is a single TWO-axes figure (spectra+photometry on top, the
+    # magnitude-residual subplot below, sharex, 3:1 height ratio) with
+    # per-identity linestyles and a paired line+marker legend -- none of
+    # which the one-axes PlotSpec meta/style vocabulary can express.
+    # The arrays and the identity styling still come from the same
+    # helpers plot_data() uses (_make_plot_obj, _identity_styles,
+    # _sub_combos), so the hand-drawn PDF and the GUI charts cannot
+    # drift apart on content.
     # ------------------------------------------------------------------
     def plot(self, system, points, filename_prefix="debug"):
         if isinstance(points, dict):
@@ -854,55 +926,15 @@ class SED(Component):
         )
         plt.subplots_adjust(wspace=0, hspace=0.05)
 
-        n_colors = len(plot_obj.colors_obs)
-        n_markers = len(plot_obj.markers)
-        n_lines = len(plot_obj.linetypes)
-
-        # ---- fixed-order categorical identity -> color/marker/linestyle ----
-        # (dataviz: assign hues by identity, never cycle by position).
-        # Stars take the first nstars palette slots (star_names order); any
-        # additional multi-star combination measured in the data (e.g.
-        # "B+C") takes the next slot, in order of first appearance -- so a
-        # given identity's spectrum curve and data-point marker always
-        # share one color/style, and up to 8 distinct identities never
-        # collide (beyond 8 they wrap, matching the palette's design cap).
-        identities = list(plot_obj.star_names)
-        for combo in plot_obj.unique_combos:
-            if combo not in identities:
-                identities.append(combo)
-        id_color = {
-            name: plot_obj.colors_obs[i % n_colors]
-            for i, name in enumerate(identities)
-        }
-        id_marker = {
-            name: plot_obj.markers[i % n_markers]
-            for i, name in enumerate(identities)
-        }
-        id_line = {
-            name: plot_obj.linetypes[i % n_lines]
-            for i, name in enumerate(identities)
-        }
+        # fixed-order categorical identity -> color/marker/linestyle
+        # (shared with plot_data; see _identity_styles)
+        id_color, id_marker, id_line = self._identity_styles(plot_obj)
 
         # ---- model spectra: one line per star, plus the blended total, ----
         # ---- plus any other multi-star combination the data measure    ----
         # ---- (e.g. "B+C" from an "A-(B+C)" differential row); the full  ----
         # ---- nstars set is "Total" and isn't duplicated here.           ----
-        all_idx = frozenset(range(plot_obj.nstars))
-        sub_combos = []  # (label, sorted star-index list); size >= 2, not the full set
-        seen_combos = set()
-        for row in range(plot_obj.nfilters):
-            bm = plot_obj.blend_matrix[row]
-            for idx in (np.where(bm > 0)[0], np.where(bm < 0)[0]):
-                combo = frozenset(idx)
-                if (
-                    len(combo) >= 2
-                    and combo != all_idx
-                    and combo not in seen_combos
-                ):
-                    seen_combos.add(combo)
-                    combo_idx = sorted(combo)
-                    label = "+".join(plot_obj.star_names[i] for i in combo_idx)
-                    sub_combos.append((label, combo_idx))
+        sub_combos = self._sub_combos(plot_obj)
 
         alpha_spec = 0.7 if plot_obj.ndraws == 1 else 0.15
         x_spec = plot_obj.df_wave["wavelength_micron"]
@@ -1198,17 +1230,24 @@ class SED(Component):
             plot_obj.df_wave["wavelength_angstrom"], dtype=float
         )
 
+        # same fixed identity -> color/marker mapping the PDF uses (the
+        # PDF's per-identity LINESTYLES have no PlotSpec style key, so
+        # every model curve renders solid here)
+        id_color, id_marker, _id_line = self._identity_styles(plot_obj)
+
         traces = []
         # per-star model spectra: lambda * F_lambda at Earth, from the shared helper
         for nstar in range(plot_obj.nstars):
+            name = plot_obj.star_names[nstar]
             traces.append(
                 Trace(
-                    name=f"Star {plot_obj.star_names[nstar]}",
+                    name=f"Star {name}",
                     role="model",
                     kind="line",
                     x=wave_micron,
                     y=_log10(plot_obj.flux_model_draws[0][nstar] * wave_ang),
                     node=getattr(self, "_sed_mag_node", None),
+                    style={"color": id_color[name]},
                 )
             )
         if plot_obj.nstars > 1:
@@ -1222,25 +1261,54 @@ class SED(Component):
                         np.sum(plot_obj.flux_model_draws[0], axis=0) * wave_ang
                     ),
                     node=getattr(self, "_sed_mag_node", None),
+                    style={"color": "#001219", "lw": 1.2},
+                )
+            )
+        # any other multi-star combination the data measure (e.g. "B+C"
+        # from an "A-(B+C)" differential row), matching the PDF's curves
+        for label, combo_idx in self._sub_combos(plot_obj):
+            traces.append(
+                Trace(
+                    name=label,
+                    role="model",
+                    kind="line",
+                    x=wave_micron,
+                    y=_log10(
+                        np.sum(plot_obj.flux_model_draws[0][combo_idx], axis=0)
+                        * wave_ang
+                    ),
+                    node=getattr(self, "_sed_mag_node", None),
+                    style={"color": id_color[label], "lw": 1.0},
                 )
             )
 
-        # observed photometry points (one per plot point; angstrom -> micron).
-        # Error bars are asymmetric in log space; the flux limits carry the +/-.
+        # observed photometry points (one per plot point; angstrom -> micron),
+        # one trace per star combination so each keeps its identity
+        # color/marker. Error bars are asymmetric in log space; the flux
+        # limits carry the +/-. xerr spans the filter bandwidth.
         wave_obs = plot_obj.wave_filter * ANG_TO_MICRON_CONST
+        xerr_obs = plot_obj.wave_err * ANG_TO_MICRON_CONST
         log_yobs = _log10(plot_obj.flux_obs * plot_obj.wave_filter)
         y_lim = _log10(plot_obj.f_limits_from_err * plot_obj.wave_filter)
         yerr = np.vstack([log_yobs - y_lim[0], y_lim[1] - log_yobs])
-        traces.append(
-            Trace(
-                name="observed",
-                role="data",
-                kind="scatter",
-                x=wave_obs,
-                y=log_yobs,
-                yerr=yerr,
+        point_labels = np.asarray(plot_obj.point_labels)
+        for combo in plot_obj.unique_combos:
+            mask = point_labels == combo
+            traces.append(
+                Trace(
+                    name=combo,
+                    role="data",
+                    kind="scatter",
+                    x=wave_obs[mask],
+                    y=log_yobs[mask],
+                    yerr=yerr[:, mask],
+                    xerr=xerr_obs[:, mask],
+                    style={
+                        "color": id_color[combo],
+                        "marker": id_marker[combo],
+                    },
+                )
             )
-        )
 
         # Focus the y-axis on the observed data (same window matplotlib uses):
         # the model spectra tail off to ~1e-78 at the far UV/IR edges, so letting
@@ -1258,10 +1326,19 @@ class SED(Component):
                 param_deps=deps,
                 meta={
                     "x_log": True,
+                    # same wavelength window the PDF's shared x-axis uses
+                    "x_range": [5e-2, 30.0],
                     "y_range": [
                         float(plot_obj.y_lower),
                         float(plot_obj.y_upper),
                     ],
+                    # Presentation keys for the PlotSpec renderers. plot()
+                    # itself stays hand-drawn (two-axes figure; see the
+                    # comment above plot()), but file_tag records the PDF
+                    # basename it saves ({prefix}_SED.pdf) and figsize its
+                    # per-filter width.
+                    "file_tag": "SED",
+                    "figsize": (max(6, 0.6 * plot_obj.nfilters + 2), 6),
                 },
             )
         ]

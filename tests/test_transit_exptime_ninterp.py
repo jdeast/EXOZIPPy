@@ -78,7 +78,7 @@ T14 = 0.0696  # days; total transit duration at the _params() geometry
 
 def _plot_param_values(system):
     """Reproduce transit.py's own plot_params -> compiled-function argument
-    conversion (see Transit.plot_unphased), so we can call the untouched
+    conversion (see Transit.plot_data), so we can call the untouched
     compile_plotters path (no oversampling) as an independent reference."""
     return [
         float(np.squeeze(np.asarray(p.initval)))
@@ -375,7 +375,7 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
     Given a transit instrument with a long exptime and ninterp>1 (Jason's
     PR #20 review, point 2: plots must use the smeared model),
     When Transit._smeared_full_lc/_smeared_lc_matrix -- the functions
-    plot_unphased/plot_phased actually call -- are evaluated at the data's
+    plot()/plot_data actually call -- are evaluated at the data's
     own timestamps,
     Then they match transit.model_flux (the likelihood's own smeared
     model) to floating-point precision, unlike the raw instantaneous
@@ -404,8 +404,8 @@ def test_plotted_model_matches_likelihood_model(tmp_path_factory):
         baseline + smeared_decrement, model_flux, atol=1e-8
     )
 
-    # Sanity check the matrix-valued plotting entry point (used by
-    # plot_phased) agrees with the scalar one (used by plot_unphased).
+    # Sanity check the matrix-valued plotting entry point (used by the
+    # phased plot_data specs) agrees with the scalar one (unphased specs).
     smeared_matrix = tr._smeared_lc_matrix(tr.time, 0, *param_values)
     np.testing.assert_allclose(
         smeared_matrix.sum(axis=1), smeared_decrement, atol=1e-10

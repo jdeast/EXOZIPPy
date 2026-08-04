@@ -298,6 +298,36 @@ def test_doc_open_command_undo_save_flow(client, rvonly_project):
     assert "6300" in params_file.read_text()
 
 
+def test_doc_reopen_same_path_keeps_unsaved_edits(client, rvonly_project):
+    """Given a dirty open document, When the same config is opened again (as
+    every tab does on mount), Then the in-memory edits and undo stack survive;
+    and Given a clean document, When reopened, Then it reloads from disk."""
+    config_path = str(rvonly_project / "kelt4_rvonly.yaml")
+    client.post("/api/doc/open", json={"config_path": config_path})
+    client.post(
+        "/api/doc/command",
+        json={
+            "op": "set_param_field",
+            "args": {"path": "star.A.teff", "field": "initval", "value": 6300},
+        },
+    )
+
+    # Re-open (e.g. a tab remount): the dirty doc must be returned untouched.
+    resp = client.post("/api/doc/open", json={"config_path": config_path})
+    body = resp.json()
+    assert body["dirty"] is True
+    assert body["undo_depth"] == 1
+    assert body["params"]["star.A.teff"]["initval"] == 6300
+
+    # After save the doc is clean; a re-open now reloads from disk.
+    client.post("/api/doc/save")
+    resp = client.post("/api/doc/open", json={"config_path": config_path})
+    body = resp.json()
+    assert body["dirty"] is False
+    assert body["undo_depth"] == 0
+    assert body["params"]["star.A.teff"]["initval"] == 6300
+
+
 def test_doc_command_bad_op_is_400(client, rvonly_project):
     """Given an open doc, When an unknown command op is posted, Then 400."""
     client.post(

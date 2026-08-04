@@ -116,6 +116,19 @@ function FileGroup({
 export default function Sidebar({ listing, onOpen, onSelectFile, error }: Props) {
   const [path, setPath] = useState("");
   const [picking, setPicking] = useState(false);
+  // Backend health line (lived on the old Welcome tab; the sidebar is the
+  // one place that is always visible).
+  const [backend, setBackend] = useState<string>("checking backend...");
+
+  useEffect(() => {
+    api
+      .schema()
+      .then((s) => {
+        const n = Object.keys((s.components || {}) as object).length;
+        setBackend(`backend connected -- ${n} components`);
+      })
+      .catch((e) => setBackend(`backend error: ${String(e)}`));
+  }, []);
 
   return (
     <aside className="sidebar">
@@ -157,6 +170,7 @@ export default function Sidebar({ listing, onOpen, onSelectFile, error }: Props)
           <FileGroup label="Other" files={listing.other} onSelectFile={onSelectFile} />
         </div>
       )}
+      <div className="sidebar-backend muted">{backend}</div>
     </aside>
   );
 }

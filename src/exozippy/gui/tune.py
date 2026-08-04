@@ -50,12 +50,35 @@ def _round_list(arr):
     return _array_to_list(arr)
 
 
+def _data_only_plots(system):
+    """Data-only PlotSpec JSON from every data-bearing component.
+
+    ``plot_data(point=None)`` is valid right after ``prepare()``, before any
+    model exists -- so the GUI can draw the observations while the
+    seconds-scale compile runs, with the model traces patched in at "live".
+    """
+    plots = []
+    for comp in system.active_components.values():
+        try:
+            comp_specs = comp.plot_data(system, None)
+        except Exception as exc:  # noqa: BLE001 - a component may lack data
+            logger.warning(
+                "tune: data-only plot_data failed for %s: %s",
+                getattr(comp, "prefix", comp),
+                exc,
+            )
+            continue
+        plots.extend(spec.to_json() for spec in comp_specs)
+    return plots
+
+
 def _do_solve(state, msg, resp_q):
     """Build System + model + Evaluator; return the panel + plot payload.
 
-    Emits a ``{"progress": "compiling"}`` message once the relaxation engine
-    (the "solving" half) has finished and the model build begins, so the
-    parent can advance its phase indicator.
+    Emits a ``{"progress": "compiling", "data_plots": [...]}`` message once
+    the relaxation engine (the "solving" half) has finished and the model
+    build begins, so the parent can advance its phase indicator and render
+    the data-only plots while the compile runs.
     """
     from exozippy.evaluator import compile_evaluator, structural_hash
     from exozippy.system import System
@@ -82,8 +105,11 @@ def _do_solve(state, msg, resp_q):
         system = System(config, user_params=params)
         system.prepare()
         export = system.config_manager.export_solution()
-        # Relaxation done; the seconds-scale compile begins now.
-        resp_q.put({"progress": "compiling"})
+        # Relaxation done; the seconds-scale compile begins now. Ship the
+        # data-only plots along so the GUI has something to draw meanwhile.
+        resp_q.put(
+            {"progress": "compiling", "data_plots": _data_only_plots(system)}
+        )
         model = system.build_model()
         base_raw = system.get_raw_start(model)
         ev = compile_evaluator(system, model, base_raw)
@@ -126,13 +152,17 @@ def _do_eval(state, msg):
 
     state["raw"] = new_raw
     out = ev.eval_plots(new_raw, changed_label=label)
-    plots = {
-        pid: {
-            name: {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
-            for name, xy in traces.items()
-        }
-        for pid, traces in out.items()
-    }
+    plots = {}
+    for pid, traces in out.items():
+        packed = {}
+        for name, xy in traces.items():
+            entry = {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
+            # dynamic_data specs re-ship their data traces, whose errors can
+            # move too (the mulens flux alignment is nonlinear in magnitude).
+            if xy.get("yerr") is not None:
+                entry["yerr"] = _round_list(xy["yerr"])
+            packed[name] = entry
+        plots[pid] = packed
     return {"plots": plots}
 
 
@@ -239,7 +269,10 @@ class EvaluatorWorker:
             msg = self._resp_q.get()
             if "progress" in msg:
                 if on_progress:
-                    on_progress(msg["progress"])
+                    # The full message: phase string plus any payload riding
+                    # along (data_plots). TuneSession._progress also accepts a
+                    # bare phase string for simpler worker stubs.
+                    on_progress(msg)
                 continue
             if not msg.get("ok"):
                 raise RuntimeError(msg.get("error", "worker error"))
@@ -279,6 +312,9 @@ class TuneSession:
         self.error: Optional[str] = None
         self.structural_hash: Optional[str] = None
         self.result: Optional[dict] = None  # {parameters, seeds, plots}
+        # Data-only PlotSpec JSON, available from the "compiling" phase on so
+        # the GUI can draw the observations before the evaluator is live.
+        self.data_plots: Optional[list] = None
 
     def _ensure_worker(self):
         """Return a live worker subprocess, (re)spawning only if needed.
@@ -320,14 +356,22 @@ class TuneSession:
         """Blocking solve (call from a background thread). Sets phase/result."""
         self.phase = "solving"
         self.error = None
+        self.data_plots = None
         try:
             # Brief lock only around (re)spawn, not the seconds-long solve, so a
             # concurrent prewarm can't double-spawn but eval is never blocked.
             with self._lock:
                 worker = self._ensure_worker()
 
-            def _progress(state):
-                self.phase = state
+            def _progress(update):
+                # The real worker forwards the full progress message (phase +
+                # optional data_plots); test stubs may send a bare string.
+                if isinstance(update, dict):
+                    self.phase = update.get("progress", self.phase)
+                    if update.get("data_plots") is not None:
+                        self.data_plots = update["data_plots"]
+                else:
+                    self.phase = update
 
             res = worker.solve(config, params, workdir, on_progress=_progress)
             self.result = {
@@ -356,6 +400,7 @@ class TuneSession:
             "error": self.error,
             "structural_hash": self.structural_hash,
             "has_result": self.result is not None,
+            "has_data_plots": self.data_plots is not None,
         }
 
     def close(self):
