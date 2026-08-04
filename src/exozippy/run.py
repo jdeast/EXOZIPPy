@@ -112,6 +112,13 @@ def run_fit(config, user_params=None):
     extra.
     """
     from exozippy.gui.status import GuiReporter
+    from exozippy.pytensor_fallback import ensure_usable_backend
+
+    # Probe the C toolchain before anything compiles: a missing g++ or
+    # missing Python.h otherwise surfaces as a CompileError deep inside the
+    # first pytensor.function call. Falls back to the (much slower)
+    # pure-Python backend with a loud banner naming the fix.
+    ensure_usable_backend()
 
     gui = GuiReporter.from_config(config)
     gui.phase("preparing")

@@ -115,12 +115,13 @@ conda activate exozippy
 pip install --pre exozippy       # or the Poetry development setup above
 ```
 
-If you cannot get a compiler or headers at all, PyTensor can fall back to its
-much slower pure-Python mode -- usable as a smoke test, not for a real fit:
-
-```
-PYTENSOR_FLAGS="blas__ldflags=,cxx="
-```
+If the toolchain is broken anyway (no g++, or g++ without `Python.h`),
+`exozippy` detects it at startup, prints a warning naming the fix, and falls
+back automatically to PyTensor's much slower pure-Python mode -- usable as a
+smoke test, not for a real fit. (Setting `PYTENSOR_FLAGS="cxx="` by hand is
+not enough: models with more than ~31 likelihood terms then die on numpy's
+32-operand ufunc limit; the automatic fallback also installs the graph
+rewrite that works around it.)
 
 ## Running a fit
 
