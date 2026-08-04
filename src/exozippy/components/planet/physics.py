@@ -1,7 +1,13 @@
 import numpy as np
 import pytensor.tensor as pt
 
-from ...constants import DENSITY_CONST, KEPLER_CONST, LOGG_CONST
+from ...constants import (
+    C_MPS,
+    DENSITY_CONST,
+    KEPLER_CONST,
+    LOGG_CONST,
+    SOLRAD_PER_DAY_TO_MPS,
+)
 from ...physics_registry import register_physics
 
 # Sphere geometry is not planet-specific, and PHYSICS_REGISTRY is a flat
@@ -57,3 +63,23 @@ def calc_K(mass, m_total, ecc, arsun, sini, period):
 @register_physics
 def calc_max_ecc(ar, p):
     return 1.0 - 1.0 / ar - p / ar
+
+
+# Bolometric approximation of the Doppler beaming factor (Faigler & Mazeh
+# 2011, eq. 1: A_beam = (4-alpha)*K/c, with the bandpass-dependent spectral
+# index alpha set to 0). This is a placeholder pending confirmation of
+# Jason's exact convention -- no live implementation of derivebeam's K
+# formula was found anywhere in EXOFASTv2 to verify against (see PR 1.b
+# design discussion).
+BEAM_FACTOR = 4.0
+
+
+@register_physics
+def calc_beam_from_K(K):
+    """Doppler beaming amplitude (ppm) from the RV semi-amplitude K.
+
+    K arrives in its internal unit (solRad/d, see planet/defaults.yaml);
+    converted to m/s before forming the dimensionless K/c ratio.
+    """
+    k_mps = K * SOLRAD_PER_DAY_TO_MPS
+    return BEAM_FACTOR * (k_mps / C_MPS) * 1e6

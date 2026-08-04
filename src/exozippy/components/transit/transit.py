@@ -252,6 +252,7 @@ class Transit(Instrument):
         esinw_p = orbits.esinw.value[planets.orbit_map]
         inc_p = orbits.inc.value[planets.orbit_map]
         period_p = orbits.period.value[planets.orbit_map]
+        tc_p = orbits.tc.value[planets.orbit_map]
         ar_p = planets.ar.value
         p_p = planets.p.value
 
@@ -358,6 +359,10 @@ class Transit(Instrument):
         thermal_mapped = band.thermal.value[
             self.obs_band_map_tensor
         ]  # (N_obs,)
+        # BEER (PR 1.b): reflection and ellipsoidal variation, same
+        # per-band opt-in gating as thermal (fitreflect/fitellip).
+        reflect_mapped = band.reflect.value[self.obs_band_map_tensor]
+        ellip_mapped = band.ellipsoidal.value[self.obs_band_map_tensor]
 
         # 3b. SED deblending (EXOFASTv2 parity): with more than one
         # modeled star, only the host contributes the transit, so the
@@ -386,6 +391,8 @@ class Transit(Instrument):
                 :, p_idx
             ]  # (N_obs,) line-of-sight coord (+ = planet in front of star)
             r_p = planets.p.value[p_idx]  # scalar R_p/R_*
+            tc_this = tc_p[p_idx]  # scalar, this planet's time of conjunction
+            period_this = period_p[p_idx]
 
             # quad_solution_vector(b, r) -> (N_obs, 3) solution vector s.
             # Broadcast scalar r_p to (N_obs,) following the ops.kepler() pattern.
@@ -407,16 +414,49 @@ class Transit(Instrument):
             lc_model = lc_model - blocked
 
             # Secondary eclipse / constant thermal emission (fitthermal,
-            # PR 1.a -- no phase-curve variation yet, see BEER/PR 1.b).
+            # PR 1.a).
             planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
             thermal_term = 1e-6 * thermal_mapped * planetvisible
+
+            # BEER (PR 1.b): reflection shares planetvisible with thermal
+            # (both come off the planet's disk) and is diluted the same way
+            # -- both are pre-dilution terms in exofast_tran.pro (thermal:
+            # 111, reflect: 128, both before the dilution block at 134).
+            reflect_term = physics.calc_reflect_term(
+                time, tc_this, period_this, reflect_mapped, planetvisible
+            )
+            additive_term = thermal_term + reflect_term
             if dil_obs is not None:
                 # Same per-term dilution convention as the transit depth
                 # above: the planet's extra flux is diluted by the same
                 # blended-aperture fraction as the light it would otherwise
                 # block.
-                thermal_term = thermal_term * dil_obs
-            lc_model = lc_model + thermal_term
+                additive_term = additive_term * dil_obs
+            lc_model = lc_model + additive_term
+
+            # Beaming and ellipsoidal (PR 1.b) are both *post*-dilution
+            # terms in the reference (exofast_tran.pro:138-152, after the
+            # dilution block at 134) -- unlike thermal/reflect, neither is
+            # scaled by dil_obs here, matching that placement. Both are
+            # stellar effects (the star's own RV motion / tidal shape), not
+            # gated by planetvisible either, since they're present
+            # regardless of the planet's occultation state.
+            beam_p = planets.beam.value[p_idx]  # scalar, ppm
+            beam_term = physics.calc_beam_term(
+                time, tc_this, period_this, beam_p
+            )
+            lc_model = lc_model + beam_term
+
+            # Ellipsoidal is multiplicative (exofast_tran.pro:143), applied
+            # to the running lc_model (baseline + this planet's transit/
+            # eclipse/thermal/reflect/beam so far). With >1 planet sharing
+            # a band, each planet's factor multiplies in turn -- order-
+            # dependent for N>1, exact for the single-planet case this PR
+            # targets.
+            ellip_factor = physics.calc_ellipsoidal_factor(
+                time, tc_this, period_this, ellip_mapped
+            )
+            lc_model = lc_model * ellip_factor
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
@@ -474,6 +514,9 @@ class Transit(Instrument):
             else:
                 u2_inst = pt.zeros_like(u1_inst)
             thermal_inst = band.thermal.value[band_idx]  # scalar, 0 unless fitthermal
+            reflect_inst = band.reflect.value[band_idx]  # scalar, 0 unless fitreflect
+            ellip_inst = band.ellipsoidal.value[band_idx]  # scalar, 0 unless fitellip
+            baseline_inst = self.baseline.value[inst_idx]  # scalar
             # See build_likelihood for the Green's-basis change-of-basis derivation.
             c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
             c1_inst = u1_inst + 2.0 * u2_inst
@@ -485,6 +528,8 @@ class Transit(Instrument):
                 b_p = b[:, p_idx]  # (N_times,)
                 Z_p = Z[:, p_idx]
                 r_p = planets.p.value[p_idx]
+                tc_this = orbits.tc.value[planets.orbit_map][p_idx]
+                period_this = orbits.period.value[planets.orbit_map][p_idx]
 
                 sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
                 flux_frac = (
@@ -499,14 +544,44 @@ class Transit(Instrument):
                 if dil_node is not None:
                     blocked = blocked * dil_node[inst_idx]
 
-                # Secondary eclipse / constant thermal emission -- same
-                # shared helper build_likelihood uses (physics.py).
+                # Secondary eclipse / constant thermal emission + reflection
+                # -- same shared helpers build_likelihood uses (physics.py).
+                # Both are pre-dilution terms, like the transit depth above.
                 planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
                 thermal_term = 1e-6 * thermal_inst * planetvisible
+                reflect_term = physics.calc_reflect_term(
+                    t_input, tc_this, period_this, reflect_inst, planetvisible
+                )
+                additive_term = thermal_term + reflect_term
                 if dil_node is not None:
-                    thermal_term = thermal_term * dil_node[inst_idx]
+                    additive_term = additive_term * dil_node[inst_idx]
 
-                decrement_matrix_list.append(-blocked + thermal_term)
+                # Beaming (post-dilution, undiluted, not gated by
+                # planetvisible -- same placement as build_likelihood).
+                beam_p = planets.beam.value[p_idx]
+                beam_term = physics.calc_beam_term(
+                    t_input, tc_this, period_this, beam_p
+                )
+
+                # Ellipsoidal is multiplicative, applied to the running
+                # total *including baseline* (exofast_tran.pro:143). Since
+                # this function's contract is "decrement from baseline"
+                # (baseline is added back separately by callers -- see
+                # _eval_unphased_lc), fold baseline in locally so the
+                # multiplication is exact, then subtract it back out:
+                #   decrement = (baseline + additive)*ellip_factor - baseline
+                # Reduces to the plain additive decrement when ellip_factor
+                # == 1 (fitellip off). Only exact for a single planet per
+                # band; with >1 planet sharing a band, each gets its own
+                # fold-in, same simplification noted in build_likelihood.
+                ellip_factor = physics.calc_ellipsoidal_factor(
+                    t_input, tc_this, period_this, ellip_inst
+                )
+                planet_decrement = -blocked + additive_term + beam_term
+                decrement_matrix_list.append(
+                    (baseline_inst + planet_decrement) * ellip_factor
+                    - baseline_inst
+                )
 
             lc_matrix = pt.stack(
                 decrement_matrix_list, axis=1

@@ -16,10 +16,50 @@ class Planet(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
+        # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
+        # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
+        # thermal/reflect/ellipsoidal which are ss.band[i].*).
+        self.fitbeam = [bool(c.get("fitbeam", False)) for c in self.config]
+        self.derivebeam = [
+            bool(c.get("derivebeam", False)) for c in self.config
+        ]
 
     @property
     def prefix(self):
         return "planet"
+
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "fitbeam",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a Doppler beaming amplitude (ppm) for this planet "
+                    "directly from the photometry, independent of the RV "
+                    "semi-amplitude K -- does not constrain planet mass. "
+                    "Default False, which pins beam at 0. Mutually "
+                    "exclusive with derivebeam across all planets in a "
+                    "system (PR 1.b doesn't support mixed per-planet beam "
+                    "modes yet)."
+                ),
+            },
+            {
+                "key": "derivebeam",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Compute this planet's Doppler beaming amplitude from "
+                    "the RV semi-amplitude K (Faigler & Mazeh 2011 eq. 1, "
+                    "bolometric approximation) instead of fitting it "
+                    "freely -- ties the photometric beaming signal to the "
+                    "same mass/K driving the RV model. Default False."
+                ),
+            },
+        ]
 
     def build_maps(self):
         """Stage 1b: Define logical Numpy arrays. (Base class auto-converts to Tensors)."""
@@ -49,6 +89,44 @@ class Planet(Component):
                     "max_ecc": "default",
                 }
             )
+
+        # BEER (PR 1.b): beam is either (a) derived from K for every planet
+        # (derivebeam), (b) free-fit for every planet (fitbeam), or (c)
+        # pinned at 0 everywhere (neither set -- transit model unchanged).
+        # Unlike thermal/reflect/ellipsoidal's per-band opt-in, this is a
+        # single mode for the whole component: Component.add_parameter
+        # resolves one manifest entry as either a whole-component expression
+        # ("default") or a whole-component free/fixed tensor (via per-element
+        # sigma), never a mix of the two within one parameter -- so a
+        # per-planet mix of derived/free/off beam isn't supported yet.
+        any_derivebeam = any(self.derivebeam)
+        any_fitbeam = any(self.fitbeam)
+        if any_derivebeam and any_fitbeam:
+            raise ValueError(
+                f"[{self.prefix}] fitbeam and derivebeam cannot both be set "
+                f"in the same run (PR 1.b doesn't support mixed per-planet "
+                f"beam modes yet)."
+            )
+        if any_derivebeam and not has_orbit:
+            raise ValueError(
+                f"[{self.prefix}] derivebeam requires an orbit component "
+                f"(beam is derived from K, which requires the orbital "
+                f"elements)."
+            )
+        if any_derivebeam:
+            self.manifest["beam"] = "default"
+        elif any_fitbeam:
+            off = [i for i in range(self.n_elements) if not self.fitbeam[i]]
+            entry = {}
+            if off:
+                pin = np.full(self.n_elements, np.nan)
+                pin[off] = 0.0
+                entry["overrides"] = {"sigma": pin.tolist()}
+            self.manifest["beam"] = entry
+        else:
+            self.manifest["beam"] = {
+                "overrides": {"sigma": [0.0] * self.n_elements}
+            }
 
         # Data-driven estimate: Initialize 'K' directly from the RV data variance
         rv_comps = [

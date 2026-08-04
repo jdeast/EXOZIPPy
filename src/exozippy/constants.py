@@ -9,6 +9,8 @@ G = const.G.to(u.R_sun**3 / (u.M_sun * u.day**2)).value
 
 RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
 KEPLER_CONST = (G / (4.0 * np.pi**2)) ** (1.0 / 3.0)
+C_MPS = const.c.to(u.m / u.s).value
+SOLRAD_PER_DAY_TO_MPS = (1.0 * u.R_sun / u.day).to(u.m / u.s).value
 LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (
     (const.L_sun / const.sigma_sb / const.R_sun**2).cgs.value / (4.0 * np.pi)
