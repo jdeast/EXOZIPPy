@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
+  type DirListing,
   type DocCommand,
   type DocState,
   type Diagnostic,
@@ -59,7 +60,13 @@ type Selection =
 
 const PARAM_FIELDS = ["initval", "lower", "upper", "sigma", "mu", "bound_scale"];
 
-export default function ConfigTab({ configPath }: { configPath: string | null }) {
+export default function ConfigTab({
+  configPath,
+  active = true,
+}: {
+  configPath: string | null;
+  active?: boolean;
+}) {
   const [schema, setSchema] = useState<Schema | null>(null);
   const [doc, setDoc] = useState<DocState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,7 +82,9 @@ export default function ConfigTab({ configPath }: { configPath: string | null })
       .catch((e) => setError(String(e)));
   }, []);
 
-  // Open the document whenever the selected config file changes.
+  // Open the document whenever the selected config file changes. The server
+  // keeps a dirty doc's unsaved edits on a same-path re-open, so a remount
+  // cannot revert them.
   useEffect(() => {
     if (!configPath) return;
     api
@@ -86,6 +95,17 @@ export default function ConfigTab({ configPath }: { configPath: string | null })
       })
       .catch((e) => setError(String(e)));
   }, [configPath]);
+
+  // When the tab is revealed, resync with the server's in-memory document (a
+  // GET -- no disk reload) so edits made from other tabs (Tune slider commits)
+  // are reflected here.
+  useEffect(() => {
+    if (!active || !configPath) return;
+    api
+      .doc()
+      .then(setDoc)
+      .catch(() => {});
+  }, [active, configPath]);
 
   const runCommand = useCallback(async (cmd: DocCommand) => {
     try {
@@ -140,8 +160,13 @@ export default function ConfigTab({ configPath }: { configPath: string | null })
       if (!mod) return;
       const key = e.key.toLowerCase();
       if (key === "s") {
+        // Save works from any tab (the doc is shared server-side).
         e.preventDefault();
         save();
+      } else if (!active) {
+        // Undo/redo only while this tab is visible -- other tabs have their
+        // own text inputs where Ctrl+Z must keep its native meaning.
+        return;
       } else if (key === "z" && !e.shiftKey) {
         e.preventDefault();
         undo();
@@ -152,7 +177,7 @@ export default function ConfigTab({ configPath }: { configPath: string | null })
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [save, undo, redo]);
+  }, [save, undo, redo, active]);
 
   const instancesByType = useMemo(() => buildTree(doc), [doc]);
 
@@ -356,6 +381,78 @@ function GlobalForm({
   );
 }
 
+// Project-rooted file picker for datafile config keys (the old Data tab's
+// association flow, folded into the form). Lists /api/files (sandboxed to
+// the open project); picking a file stores its project-relative path via
+// the undoable associate_datafile command.
+function FilePickerModal({
+  onPick,
+  onClose,
+}: {
+  onPick: (relPath: string) => void;
+  onClose: () => void;
+}) {
+  const [root, setRoot] = useState<string | null>(null);
+  const [dir, setDir] = useState<DirListing | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = (path?: string | null) => {
+    api
+      .files(path)
+      .then((d) => {
+        setDir(d);
+        setRoot((r) => r ?? d.dir);
+        setError(null);
+      })
+      .catch((e) => setError(String(e instanceof Error ? e.message : e)));
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Config datafile paths are relative to the project (= config) directory.
+  const relOf = (abs: string) =>
+    root && abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs;
+
+  return (
+    <div className="folderpicker-backdrop" onClick={onClose}>
+      <div className="folderpicker" onClick={(e) => e.stopPropagation()}>
+        <div className="folderpicker-head">
+          <span className="folderpicker-path" title={dir?.dir}>
+            {dir?.dir ?? "..."}
+          </span>
+          <button className="folderpicker-close" onClick={onClose}>
+            x
+          </button>
+        </div>
+        {error && <div className="sidebar-error">{error}</div>}
+        <ul className="folderpicker-list">
+          {dir?.parent && (
+            <li>
+              <button className="folderpicker-row" onClick={() => load(dir.parent)}>
+                <span className="kind-dot kind-dir" /> ..
+              </button>
+            </li>
+          )}
+          {dir?.entries.map((e) => (
+            <li key={e.path}>
+              <button
+                className="folderpicker-row"
+                onClick={() => (e.is_dir ? load(e.path) : onPick(relOf(e.path)))}
+              >
+                <span className={`kind-dot ${e.is_dir ? "kind-dir" : "kind-data"}`} />
+                {e.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 function InstanceForm({
   schema,
   doc,
@@ -377,6 +474,8 @@ function InstanceForm({
   const idx = instanceIndex(doc, comp, name);
   const block = doc.config[comp];
   const instance: any = Array.isArray(block) ? block[idx] : block;
+  // Which datafile key the picker is currently browsing for (null = closed).
+  const [pickingKey, setPickingKey] = useState<string | null>(null);
 
   const diagFor = (paramPath: string) =>
     diagnostics.filter((d) => (d.param_paths || []).includes(paramPath));
@@ -425,11 +524,30 @@ function InstanceForm({
                       args: { path: `${comp}.${idx}.${ck.key}`, value: v },
                     })
                   }
+                  onBrowse={() => setPickingKey(ck.key)}
                 />
               ))}
             </tbody>
           </table>
         </section>
+      )}
+
+      {pickingKey && (
+        <FilePickerModal
+          onClose={() => setPickingKey(null)}
+          onPick={(rel) => {
+            run({
+              op: "associate_datafile",
+              args: {
+                comp_type: comp,
+                name,
+                key: pickingKey,
+                path: rel,
+              },
+            });
+            setPickingKey(null);
+          }}
+        />
       )}
 
       {/* Per-parameter fields (initval / bounds / sigma) from params.yaml. */}
@@ -499,19 +617,27 @@ function ConfigKeyRow({
   value,
   doc,
   onSet,
+  onBrowse,
 }: {
   ck: ConfigKey;
   value: any;
   doc: DocState;
   onSet: (v: unknown) => void;
+  onBrowse?: () => void;
 }) {
   let control: JSX.Element;
   if (ck.kind === "datafile") {
-    // Read-only path with a Browse hook reserved for G9's file manager.
+    // Read-only path + Browse: picking a project file associates it via the
+    // undoable associate_datafile command (the old Data tab's job).
     control = (
       <div className="datafile-field">
         <input readOnly value={value ?? ""} placeholder="(no file)" title={String(value ?? "")} />
-        <button className="browse-btn" disabled title="File browser arrives in G9">
+        <button
+          className="browse-btn"
+          disabled={!onBrowse}
+          title="Pick a data file from the project"
+          onClick={onBrowse}
+        >
           Browse
         </button>
       </div>

@@ -89,7 +89,13 @@ class _StubWorker:
 
     def solve(self, config, params, workdir, on_progress=None):
         if on_progress:
-            on_progress("compiling")
+            # The real worker forwards the full progress dict (phase +
+            # data-only plots); exercise that path here.
+            data_only = {
+                "id": _STUB_PLOT["id"],
+                "traces": [_STUB_PLOT["traces"][0]],
+            }
+            on_progress({"progress": "compiling", "data_plots": [data_only]})
         return {
             "parameters": {
                 "orbit.b.logP": {
@@ -168,6 +174,35 @@ def test_tune_eval_round_trip_with_stubbed_worker(client, monkeypatch):
     assert ev.status_code == 200
     body = ev.json()
     assert body["plots"]["rv.unphased"]["model"] == [0.6, 1.2]
+
+
+def test_tune_data_plots_available_from_compiling(client, monkeypatch):
+    """
+    Given a stubbed worker that ships data-only plots with its progress
+    message, When a solve runs, Then /api/tune/plots/data serves them and the
+    status advertises has_data_plots (the plots persist after live so a
+    late-arriving client can still fetch them).
+    """
+    # With no session yet the endpoint is empty, not an error.
+    assert client.get("/api/tune/plots/data").json() == {"plots": []}
+    assert client.get("/api/tune/status").json()["has_data_plots"] is False
+
+    monkeypatch.setattr("exozippy.gui.tune.EvaluatorWorker", _StubWorker)
+    client.post(
+        "/api/tune/solve",
+        json={
+            "config": {"star": [{"name": "A"}]},
+            "params": {},
+            "workdir": None,
+        },
+    )
+    st = _wait_live(client)
+    assert st["phase"] == "live", st
+    assert st["has_data_plots"] is True
+
+    plots = client.get("/api/tune/plots/data").json()["plots"]
+    assert plots[0]["id"] == "rv.unphased"
+    assert [t["role"] for t in plots[0]["traces"]] == ["data"]
 
 
 def test_tune_eval_before_solve_is_409(client):

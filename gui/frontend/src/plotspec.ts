@@ -6,13 +6,27 @@
 export type TraceRole = "data" | "model" | "residual";
 export type TraceKind = "scatter" | "line";
 
+// Style identity + optional overrides (mirrors plotspec.py's Trace.style):
+// series_index drives the fixed categorical color; color/marker/lw are user
+// or component overrides; legend forces a legend entry on a model trace.
+export interface TraceStyle {
+  series_index?: number;
+  color?: string;
+  marker?: string;
+  lw?: number;
+  legend?: boolean;
+}
+
 export interface Trace {
   name: string;
   role: TraceRole;
   kind: TraceKind;
   x: number[];
   y: number[];
-  yerr?: number[] | null;
+  // Symmetric (N,) or asymmetric (2, N) errors.
+  yerr?: number[] | number[][] | null;
+  xerr?: number[] | number[][] | null;
+  style?: TraceStyle | null;
 }
 
 export interface PlotSpec {
