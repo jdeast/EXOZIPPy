@@ -319,3 +319,45 @@ def test_run_or_load_uses_cached_json(tmp_path):
     cached.write_text('{"fits": [], "errfacs": {}}')
     data = mmx.run_or_load(cached, ["a.txt"])
     assert data == {"fits": [], "errfacs": {}}
+
+
+# ---------------------------------------------------------------------------
+# ConfigManager.seed_start_value: user-unit view of the seed hints
+# ---------------------------------------------------------------------------
+
+
+def test_seed_start_value_returns_user_units():
+    """
+    Given seed hints pushed through the real ConfigManager (which stores
+    internal units -- alpha in radians),
+    When seed_start_value reads them back,
+    Then the values come back in USER units (alpha in degrees), matching what
+    a raw user_params entry would hold, so stage-1 consumers (the mulens flux
+    bootstrap) can use either source interchangeably.
+    """
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager({}, system_config={"lens": [{"name": "Lens"}]})
+    cm.add_seed_hints(
+        [
+            {
+                "lens.0.t_0": 2458554.82,
+                "lens.0.u_0": 0.131,
+                "lens.0.t_E": 19.16,
+                "lens.0.log_s": -0.066,
+                "lens.0.alpha": -50.37,
+                "lens.0.q": 9.26e-4,
+            },
+            {"lens.0.alpha": -50.47},
+        ]
+    )
+
+    stored = cm.seed_hint_sets[0]["lens.0.alpha"]
+    assert np.isclose(stored, np.deg2rad(-50.37))  # internal storage: rad
+
+    assert np.isclose(cm.seed_start_value("lens.0.alpha"), -50.37)
+    assert np.isclose(cm.seed_start_value("lens.0.t_0"), 2458554.82)
+    assert np.isclose(cm.seed_start_value("lens.0.log_s"), -0.066)
+    assert np.isclose(cm.seed_start_value("lens.0.alpha", seed=1), -50.47)
+    assert cm.seed_start_value("lens.0.rho") is None  # never pushed
+    assert cm.seed_start_value("lens.0.t_0", seed=5) is None  # no such seed

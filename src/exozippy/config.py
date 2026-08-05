@@ -505,6 +505,29 @@ class ConfigManager:
         if rank is not None:
             self.seed_hint_rank = rank
 
+    def seed_start_value(self, path, seed=0):
+        """Seed-hint start value for ``path`` in USER units, or None.
+
+        ``add_seed_hints`` stores values in index-form paths and INTERNAL
+        units (via ``_translate_and_scale``).  Stage-1 consumers that read
+        raw ``user_params`` entries -- which are still in user units before
+        ``finalize_user_params`` runs -- use this as the matching-unit
+        fallback (e.g. the mulens flux bootstrap needs alpha in degrees,
+        the MulensModel convention, not the internal radians).
+        """
+        sets = self.seed_hint_sets or []
+        if seed >= len(sets):
+            return None
+        tpath, _ = self._translate_and_scale(path, 0.0)
+        if tpath not in sets[seed]:
+            return None
+        parts = tpath.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        val = float(sets[seed][tpath])
+        return val / factor if factor else val
+
     def add_scale_hint(self, path, scale):
         """
         Register a context-appropriate PRELIMINARY init_scale for a parameter.

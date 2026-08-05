@@ -175,16 +175,9 @@ class MulensInstrument(Instrument):
         self._resolve_mmexofast(system)
 
         # Source RA/Dec (degrees from resolve → radians for projection math)
-        source_ndx = int(system.lens.source_map[0])
-        n_stars = system.star.n_elements
-        ra_deg = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
-            "initval"
-        ][source_ndx]
-        dec_deg = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
-            "initval"
-        ][source_ndx]
-        ra_rad = float(ra_deg) * np.pi / 180.0
-        dec_rad = float(dec_deg) * np.pi / 180.0
+        ra_deg, dec_deg = self._resolve_source_radec_deg(system)
+        ra_rad = ra_deg * np.pi / 180.0
+        dec_rad = dec_deg * np.pi / 180.0
 
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
@@ -350,9 +343,23 @@ class MulensInstrument(Instrument):
         want_rho = bool(any(lens.finite_source))
 
         if isinstance(spec, str) and spec != "auto":
-            # Explicit JSON: masks + error factors only (Lens pushes seeds).
+            # Explicit JSON: masks + error factors, and the seed hints too.
+            # Lens re-pushes the same seeds at stage 2 (harmless, identical
+            # content); pushing them HERE as well makes them visible to this
+            # component's flux bootstrap (_estimate_flux_components), which
+            # runs later in this same load_data call -- stage 2 would be too
+            # late and the per-band flux decomposition would silently fall
+            # back to median-flux / q_source=0.95.
             self._reject_time_spec_with_mmexofast(spec)
             data = mmexofast_support.load_json(spec)
+            if data is not None:
+                mmexofast_support.push_seed_hints(
+                    data,
+                    self.config_manager,
+                    want_rho=want_rho,
+                    is_binary=is_binary,
+                    source=spec,
+                )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
                 self.config_manager.user_params, is_binary, want_rho
@@ -390,6 +397,44 @@ class MulensInstrument(Instrument):
             data, self.files, self.prefix, self.config_manager
         )
 
+    def _resolve_source_radec_deg(self, system):
+        """Source star's sky position in degrees.
+
+        Falls back to the (primary) lens star's ra/dec when the user never
+        explicitly set the source's own -- source and lens are angularly
+        coincident by construction, so params.yaml only needs to state the
+        target coordinates once, on the lens.
+        """
+        source_ndx = int(system.lens.source_map[0])
+        n_stars = system.star.n_elements
+        ra_all = self.config_manager.resolve("star", "ra", shape=(n_stars,))[
+            "initval"
+        ]
+        dec_all = self.config_manager.resolve("star", "dec", shape=(n_stars,))[
+            "initval"
+        ]
+
+        star_names = getattr(system.star, "names", None)
+        keys = [f"star.{source_ndx}.ra", "star.ra"]
+        if star_names:
+            keys.append(f"star.{star_names[source_ndx]}.ra")
+        user_set_source = any(k in self.config_manager.user_params for k in keys)
+
+        ndx = source_ndx
+        if not user_set_source:
+            primary_lens_idx = next(
+                (
+                    idx
+                    for (ctype, idx) in system.lens.lens_bodies[0]
+                    if ctype == "star"
+                ),
+                None,
+            )
+            if primary_lens_idx is not None:
+                ndx = primary_lens_idx
+
+        return float(ra_all[ndx]), float(dec_all[ndx])
+
     def _mmexofast_coords(self, system):
         """Source-star coordinates as an 'hh:mm:ss dd:mm:ss' string, or None.
 
@@ -400,17 +445,10 @@ class MulensInstrument(Instrument):
         try:
             from astropy.coordinates import SkyCoord
 
-            source_ndx = int(system.lens.source_map[0])
-            n_stars = system.star.n_elements
-            ra_deg = self.config_manager.resolve(
-                "star", "ra", shape=(n_stars,)
-            )["initval"][source_ndx]
-            dec_deg = self.config_manager.resolve(
-                "star", "dec", shape=(n_stars,)
-            )["initval"][source_ndx]
-            return SkyCoord(
-                float(ra_deg), float(dec_deg), unit="deg"
-            ).to_string(style="hmsdms")
+            ra_deg, dec_deg = self._resolve_source_radec_deg(system)
+            return SkyCoord(ra_deg, dec_deg, unit="deg").to_string(
+                style="hmsdms"
+            )
         except Exception as e:
             logger.warning(
                 f"Could not resolve source coordinates for MMEXOFAST: {e}; "
@@ -524,6 +562,11 @@ class MulensInstrument(Instrument):
         Parallax is intentionally ignored (flux scales only).
         """
         s_val = _get("lens.0.s")
+        if s_val is None:
+            # MMEXOFAST seeds carry log_s (the sampled coordinate), not s.
+            log_s = _get("lens.0.log_s")
+            if log_s is not None:
+                s_val = 10.0 ** float(log_s)
         q_val = _get("lens.0.q")
         alpha = _get("lens.0.alpha")
         if s_val is None or q_val is None or alpha is None:
@@ -593,7 +636,16 @@ class MulensInstrument(Instrument):
         n_src = getattr(self, "_n_sources", 1)
 
         def _get(key, default=None):
-            return _raw_initval(cm.user_params.get(key), default)
+            # User params first (they outrank everything), then the seed-0
+            # MMEXOFAST hints in user units. Without the seed fallback the
+            # automated workflow -- whose params file deliberately omits the
+            # microlensing start values -- never sees a geometry here and
+            # every band degrades to the median-flux / q_source=0.95 guess,
+            # which badly mis-normalizes multi-band fits.
+            val = _raw_initval(cm.user_params.get(key), None)
+            if val is None:
+                val = cm.seed_start_value(key)
+            return default if val is None else val
 
         def _get_flux(param):
             # user_params keys are normalized to index form by standardize_param_names
