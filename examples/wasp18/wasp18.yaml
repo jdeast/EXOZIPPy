@@ -25,6 +25,7 @@ torres:
 
 planet:
   - name: "b"
+    beam_free: true
 
 orbit:
   - name: "b"
@@ -49,6 +50,8 @@ band:
   - name: "TESS"
     filter: "TESS"
     fitthermal: true
+    fitreflect: true
+    fitellip: true
 
 rvinstrument:
   - name: "CORALIE"
