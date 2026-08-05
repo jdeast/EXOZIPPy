@@ -73,7 +73,10 @@ RUNAWAY_RAW = {
     "mulensinstrument.q_source_raw": [-101671.55477455864],
     "planet.mass_raw": [195576323.76112023],
     "star.distance_raw": [-5303.75771384, -8672.6901092],
-    "star.logmass_raw": [3950.28058978, -76714.41614803],
+    # star.1 (Source) is a pure microlensing source: star.py now pins its
+    # mass (nothing in mulensing physics consumes a source's mass), so only
+    # star.0 (Lens)'s historical raw value remains sampled.
+    "star.logmass_raw": [3950.28058978],
     "star.pm_dec_raw": [3.12510181e05, 1.57096079e08],
     "star.pm_ra_raw": [-3.34082488e08, -4.12501179e07],
     "star.rv_raw": [2201.98526294, -691.32034664],
@@ -95,7 +98,8 @@ GOOD_RAW = {
     "mulensinstrument.q_source_raw": [-0.31134542581872854],
     "planet.mass_raw": [-0.9441505502539654],
     "star.distance_raw": [-345.90821049, 91.83850293],
-    "star.logmass_raw": [87.18591661, 0.50417452],
+    # star.1 (Source)'s mass is now pinned (see RUNAWAY_RAW's comment above).
+    "star.logmass_raw": [87.18591661],
     "star.pm_dec_raw": [-5.27994699, 0.40483486],
     "star.pm_ra_raw": [2.99778494, 1.37559868],
     "star.rv_raw": [2.36402842, -1.05406419],
