@@ -1,15 +1,15 @@
 run:
   name: "hat3"
 
-prefix: "fitresults/HAT-P-3b_numpyro"
+prefix: "fitresults/HAT-P-3b"
 
 star:
   - name: "A"
     mist: False
     sed: "NextGen" # or name model: "NextGen" [MISTv1, MISTv2]
 
-parameter_file: "hat3.params.yaml"
-#parameter_file: "hat3.params.2.yaml"
+parameter_file: "hat3_staronly.params.yaml"
+#parameter_file: "hat3_staronly.params.2.yaml"
 
 sed:
   path: "*.sed.*"

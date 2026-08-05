@@ -25,9 +25,3 @@ star.av:
 star.parallax:
     initval: 7.45278
     sigma: 0.01745
-
-planet.b.tc:
-    initval: 2454218.76016 
-
-planet.b.period:
-    initval: 2.8997360 
