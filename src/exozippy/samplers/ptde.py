@@ -111,6 +111,66 @@ def _geometric_ladder(n_temps, T_max):
     return T_max ** (np.arange(n_temps) / (n_temps - 1))
 
 
+def resolve_n_temps(n_temps, n_params, T_max):
+    """Resolve the sampler-config ``n_temps``, including ``"auto"``.
+
+    ``auto`` sizes the ladder a priori for adjacent-rung energy overlap on
+    a D-dimensional target: between rungs the mean logp shifts by
+    ~(D/2)*ln(r) while fluctuating ~sqrt(D/2), so geometric spacing wants
+    ln(r) ~ sqrt(2/D), i.e. n = ceil(sqrt(D/2) * ln(T_max)) rungs (floored
+    at the historical EXOFASTv2-parity 8). This is an a priori estimate;
+    the definitive, problem-specific check is the measured communication
+    barrier logged by ladder_health_report at the end of every run -- the
+    DEO schedule tolerates ladders leaner than this formula, and heavy
+    tails or multimodality can demand more than it.
+    """
+    if isinstance(n_temps, str):
+        if n_temps.strip().lower() != "auto":
+            raise ValueError(
+                f"n_temps must be an integer or 'auto', got {n_temps!r}"
+            )
+        n = max(8, int(np.ceil(np.sqrt(n_params / 2.0) * np.log(T_max))))
+        logger.info(
+            f"n_temps: auto -> {n} rungs "
+            f"(D={n_params}, T_max={T_max:g}, sqrt(D/2)*ln(T_max))"
+        )
+        return n
+    return int(n_temps)
+
+
+def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
+    """Log the measured communication barrier; warn if the ladder chokes.
+
+    Lambda = sum over adjacent-rung pairs of their swap REJECTION rates --
+    the empirical global communication barrier of Syed et al. 2022 (JRSS-B).
+    Under the non-reversible DEO schedule the T_max<->T=1 round-trip rate
+    approaches 1/(2 + 2*Lambda) once n_temps is comfortably above Lambda;
+    with n_temps - 1 < ~2*Lambda the ladder itself is the mixing
+    bottleneck, and the fix is more rungs (sampler config n_temps -- or
+    n_temps: auto), not more draws.
+    """
+    n_temps = len(temperatures)
+    prop = np.asarray(n_swap_propose, dtype=float)
+    if n_temps < 2 or prop.sum() <= 0:
+        return None
+    rej = 1.0 - np.asarray(n_swap_accept, dtype=float) / np.maximum(prop, 1.0)
+    lam = float(np.sum(np.clip(rej, 0.0, 1.0)))
+    logger.info(
+        f"PT ladder health: communication barrier Lambda={lam:.2f} with "
+        f"n_temps={n_temps} (DEO round-trip ceiling ~ 1/(2+2*Lambda) = "
+        f"{1.0 / (2.0 + 2.0 * lam):.3f} per swap round)"
+    )
+    recommended = int(np.ceil(2.0 * lam)) + 1
+    if (n_temps - 1) < 2.0 * lam:
+        logger.warning(
+            f"PT ladder is communication-limited: n_temps={n_temps} is "
+            f"below ~2*Lambda+1 = {recommended}. Round trips between T_max "
+            f"and T=1 -- not draws -- are the mixing bottleneck; raise "
+            f"n_temps to ~{recommended} (or set n_temps: auto) and rerun."
+        )
+    return lam
+
+
 # The chain-initialization probe lives in exozippy.whitening now (it is also
 # the engine behind the data-driven whitening rescale done at model setup);
 # PTDE re-probes the already-whitened model, where every scale is ~1, so the
@@ -622,7 +682,12 @@ def ptde_sample(
     model : PyMC model (from system.build_model())
     system : EXOZIPPy System (MAP start + raw→physical conversion)
     draws, tune : int
-    n_temps : int   — temperature rungs (default 8, EXOFASTv2 parity)
+    n_temps : int | "auto"  — temperature rungs (default 8, EXOFASTv2
+               parity); "auto" → max(8, ceil(sqrt(D/2)·ln(T_max))), sized
+               for adjacent-rung energy overlap (see resolve_n_temps).
+               Every run also logs the measured communication barrier and
+               warns when the ladder is the mixing bottleneck
+               (ladder_health_report).
     T_max : float   — hottest temperature (default 200, EXOFASTv2 parity)
     n_chains : int | None  — chains per temperature rung;
                None → 2 × n_params (standard DE minimum for good mixing)
@@ -715,6 +780,13 @@ def ptde_sample(
         )
 
     rng = np.random.default_rng(seed)
+
+    # parameter bookkeeping -- before the ladder, since n_temps may be
+    # "auto" (sized from the parameter count; see resolve_n_temps).
+    raw_start = system.get_raw_start(model)
+    model_keys = list(raw_start.keys())
+    n_params = sum(v.size for v in raw_start.values())
+    n_temps = resolve_n_temps(n_temps, n_params, T_max)
     temperatures = _geometric_ladder(n_temps, T_max)
 
     _rung_thin_factor = max(1, int(rung_thin_factor))
@@ -771,10 +843,6 @@ def ptde_sample(
     raw_var_names = [v.name for v in model.free_RVs]  # ordered input names
     out_var_names = [v.name for v in output_vars]  # ordered output names
 
-    # parameter bookkeeping
-    raw_start = system.get_raw_start(model)
-    model_keys = list(raw_start.keys())
-    n_params = sum(v.size for v in raw_start.values())
     if n_chains is None:
         n_chains = 2 * n_params  # standard DE minimum for good mixing
     if gamma is None:
@@ -1420,6 +1488,9 @@ def ptde_sample(
             else ""
         )
     )
+    # Post-tune swap counters (window resets stop when tuning ends), so this
+    # measures the FINAL ladder's communication barrier.
+    ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
 
     if collect_rung_timing:
         logger.info("PTDE per-rung logp timing (seconds):")

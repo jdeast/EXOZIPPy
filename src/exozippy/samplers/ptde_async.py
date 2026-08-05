@@ -75,6 +75,8 @@ from exozippy.samplers.ptde import (
     _record_round_trips,
     _safe_progress,
     _worker_init,
+    ladder_health_report,
+    resolve_n_temps,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +154,13 @@ def ptde_async_sample(
     _ptde._PTDE_COLLECT_TIMING = collect_rung_timing
 
     rng = np.random.default_rng(seed)
+
+    # parameter bookkeeping -- before the ladder, since n_temps may be
+    # "auto" (sized from the parameter count; see ptde.resolve_n_temps).
+    raw_start = system.get_raw_start(model)
+    model_keys = list(raw_start.keys())
+    n_params = sum(v.size for v in raw_start.values())
+    n_temps = resolve_n_temps(n_temps, n_params, T_max)
     temperatures = _geometric_ladder(n_temps, T_max)
 
     # compile logp ONCE; store in ptde.py's module global BEFORE forking
@@ -187,10 +196,6 @@ def ptde_async_sample(
     raw_var_names = [v.name for v in model.free_RVs]
     out_var_names = [v.name for v in output_vars]
 
-    # parameter bookkeeping
-    raw_start = system.get_raw_start(model)
-    model_keys = list(raw_start.keys())
-    n_params = sum(v.size for v in raw_start.values())
     if n_chains is None:
         n_chains = 2 * n_params
     if gamma is None:
@@ -748,6 +753,9 @@ def ptde_async_sample(
             else ""
         )
     )
+    # Async never resets the swap counters, so these stats span tune+draw;
+    # still the right order of magnitude for the barrier check.
+    ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
 
     if collect_rung_timing:
         logger.info("PTDE-async per-rung logp timing (seconds):")
