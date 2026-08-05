@@ -130,11 +130,13 @@ def transit_evaluator():
 
 
 def _unphased_id(ev):
-    return [s.id for s in ev.specs if "unphased" in s.id][0]
+    return [s.id for s in ev.specs if ".unphased" in s.id][0]
 
 
 def _phased_id(ev):
-    return [s.id for s in ev.specs if "phased" in s.id][0]
+    # NOT a bare "phased" substring test: "rvinstrument.unphased" contains
+    # "phased" too, which used to make this return the unphased spec.
+    return [s.id for s in ev.specs if ".phased" in s.id][0]
 
 
 def _period_and_logP(system, model, raw):
@@ -239,6 +241,77 @@ def test_changed_label_filter_skips_unrelated_components(rvonly_evaluator):
     filtered = ev.eval_plots(base_raw, changed_label=label)
 
     assert uid in filtered
+
+
+@pytest.mark.timeout(900)
+def test_tc_shift_reships_refolded_phased_data(rvonly_evaluator):
+    """
+    Given a compiled RV-only evaluator,
+    When tc moves by a quarter period,
+    Then the phased spec's payload includes its DATA traces (dynamic_data)
+        with re-folded x values -- the phased MODEL curve is tc-invariant by
+        construction (its grid moves with tc), so without the data re-ship
+        the panel looks frozen under a tc slider.
+    """
+    system, model, ev, base_raw, _ = rvonly_evaluator
+    pid = _phased_id(ev)
+
+    base = ev.eval_plots(base_raw)
+    data_names = [n for n in base[pid] if n != "model"]
+    assert data_names, "phased spec must re-ship its dynamic data traces"
+    dn = data_names[0]
+    x0 = np.asarray(base[pid][dn]["x"])
+
+    period0, _ = _period_and_logP(system, model, base_raw)
+    ip = system.get_internal_point(model, base_raw)
+    tc0 = float(np.atleast_1d(ip[system.orbit.tc.label])[0])
+    shifted_raw = ev.set_value("orbit.b.tc", tc0 + 0.25 * period0, base_raw)
+    shifted = ev.eval_plots(
+        shifted_raw, changed_label=ev.label_for_path("orbit.b.tc")
+    )
+
+    # tc reaches the phased spec through param_deps (not skipped) ...
+    assert pid in shifted
+    # ... the data re-folds ...
+    x1 = np.asarray(shifted[pid][dn]["x"])
+    assert not np.allclose(x0, x1)
+    # ... while the model's phase grid is tc-anchored and does not move.
+    mx0 = np.asarray(base[pid]["model"]["x"])
+    mx1 = np.asarray(shifted[pid]["model"]["x"])
+    np.testing.assert_allclose(mx1, mx0, rtol=0, atol=1e-12)
+
+
+@pytest.mark.timeout(900)
+def test_gamma_shift_moves_unphased_data(rvonly_evaluator):
+    """
+    Given a compiled RV-only evaluator,
+    When one instrument's gamma moves by +50 m/s,
+    Then the unphased spec still recomputes under gamma's changed_label
+        (gamma is applied to the data in numpy, invisible to the symbolic
+        graph walk -- it is an explicit extra dep) and that instrument's
+        data trace drops by exactly 50 m/s.
+    """
+    system, model, ev, base_raw, _ = rvonly_evaluator
+    uid = _unphased_id(ev)
+    rv = system.active_components["rvinstrument"]
+
+    base = ev.eval_plots(base_raw)
+    dn = rv.names[0]
+    assert dn in base[uid], "unphased spec must re-ship its data traces"
+    y0 = np.asarray(base[uid][dn]["y"])
+
+    ip = system.get_internal_point(model, base_raw)
+    g0_user = float(np.atleast_1d(ip[rv.gamma.label])[0]) * rv._rv_factor()
+    shifted_raw = ev.set_value(
+        "rvinstrument.0.gamma", g0_user + 50.0, base_raw
+    )
+    shifted = ev.eval_plots(
+        shifted_raw, changed_label=ev.label_for_path("rvinstrument.0.gamma")
+    )
+
+    assert uid in shifted
+    y1 = np.asarray(shifted[uid][dn]["y"])
+    np.testing.assert_allclose(y0 - y1, 50.0, rtol=0, atol=1e-6)
 
 
 @pytest.mark.timeout(900)

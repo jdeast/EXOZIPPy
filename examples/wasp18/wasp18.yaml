@@ -40,7 +40,8 @@ transit:
     file: "n20180823.TESS.TESS.WASP-18.S02.0120.SPOC.dat"
     band: "TESS"
     exptime: 2.0 # exposure time in minutes
-    ninterp: 1.0 # model points per data point for cadence smearing
+    ninterp: 1   # model points per data point for cadence smearing
+                 # (1 = no smearing; fine at 2-min cadence)
 
 # WASP-18b has one of the strongest known secondary eclipses (~400 ppm in
 # TESS per wasp18.priors.2's thermal_0) -- fitthermal: true fits that depth
@@ -65,6 +66,5 @@ sampler:
   draws: 4000
   init: adapt_diag
   target_accept: 0.95
-  check_curvatures: False
   recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling
   profile: False

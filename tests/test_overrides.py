@@ -28,11 +28,12 @@ def test_instrument_name_override_resolves_correctly():
     assert inst.config[0]["name"] == "HIRES"
 
 
-def test_gaussian_prior_scale_override_applies_correctly():
+def test_user_init_scale_is_ignored_and_sigma_seeds_the_scale():
     """
-    Given a user configuration that provides a specific init_scale alongside a Gaussian sigma,
+    Given a user configuration that provides an init_scale alongside a Gaussian sigma,
     When the parameter is built,
-    Then it should respect the explicit init_scale rather than defaulting to the sigma width.
+    Then the obsolete init_scale is stripped (whitening scales are measured
+    from the data at startup) and sigma seeds the preliminary scale instead.
     """
     # ARRANGE
     label = "star.A.radius_test3"
@@ -56,7 +57,7 @@ def test_gaussian_prior_scale_override_applies_correctly():
         star.add_parameter(model=model, param_name="radius_test3", system=None)
 
     # ASSERT
-    assert np.isclose(star.radius_test3.init_scale[0], 0.00085)
+    assert np.isclose(star.radius_test3.init_scale[0], 0.05)
 
 
 @patch("exozippy.diagnostics.ModelAuditor.get_aggregated_logps")
@@ -87,7 +88,7 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
     from exozippy.run import inspect_start
 
     with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {}, {}, {}, calc_curvature=False)
+        inspect_start(model, system, {}, {}, {})
 
     # ASSERT
     assert "sigm" in caplog.text
@@ -120,7 +121,7 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
     import logging
 
     with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {}, {}, {}, calc_curvature=False)
+        inspect_start(model, system, {}, {}, {})
 
     # ASSERT
     assert "star.A.radiuss" in caplog.text
@@ -240,11 +241,14 @@ def test_derived_parameter_correctly_registers_gaussian_potential():
     assert p.mu is not None and p.mu[0] == 10.0
 
 
-def test_explicit_init_scale_overrides_default_sigma_scaling():
+def test_init_scale_no_longer_decouples_from_sigma():
     """
-    Given a parameter with a defined Gaussian prior (mu, sigma) AND an explicit init_scale,
+    Given a parameter with a Gaussian prior (mu, sigma) AND an obsolete
+    explicit init_scale,
     When the parameter is built,
-    Then the tuning scale (init_scale) should decouple from the physics prior (sigma).
+    Then the init_scale is stripped and the preliminary scale is sigma --
+    the sampler-facing decoupling now happens via the whitening probe, not
+    a user knob.
     """
     # ARRANGE
     label = "star.A.radius_custom"
@@ -271,7 +275,7 @@ def test_explicit_init_scale_overrides_default_sigma_scaling():
     # ASSERT
     p = star.radius_custom
     assert p.mu is not None and np.isclose(p.mu[0], 1.0)
-    assert np.isclose(p.init_scale[0], 0.001)
+    assert np.isclose(p.init_scale[0], 0.05)
 
 
 def test_vectorized_overrides_apply_to_correct_indices():

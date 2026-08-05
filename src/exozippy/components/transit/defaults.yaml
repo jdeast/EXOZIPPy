@@ -44,6 +44,15 @@ transit:
     init_scale: 0.001
     unit: ""
     internal_unit: ""
+  # Optional hogg-mixture outlier scatter, in relative flux (the rest of the
+  # robust-likelihood blueprint lives in components/defaults.yaml).
+  out_scale:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.01
+    init_scale: 0.005
+    unit: ""
+    internal_unit: ""
   detrend_coeffs:
     initval: 0.0
     init_scale: 1.0

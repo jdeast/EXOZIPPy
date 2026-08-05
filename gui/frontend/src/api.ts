@@ -193,6 +193,7 @@ export interface TuneStatus {
   error: string | null;
   structural_hash: string | null;
   has_result: boolean;
+  has_data_plots?: boolean;
 }
 
 export interface TuneResult {
@@ -201,12 +202,20 @@ export interface TuneResult {
   plots: PlotSpec[];
 }
 
-// One eval response: updated model-trace x/y-arrays per plot (a component's
-// plot_data recomputed at the new point -- both axes can move, e.g. a phased
-// curve's x-grid when period is tuned), OR a signal that a full re-solve is
+// One eval response: updated trace arrays per plot (a component's plot_data
+// recomputed at the new point -- both axes can move, e.g. a phased curve's
+// x-grid when period is tuned). Model traces always; data traces too on
+// dynamic_data specs (phase folds, gamma offsets, mulens flux alignment --
+// where the errors can also move). OR a signal that a full re-solve is
 // required (linked/dynamic bounds, fixed/derived element).
+export interface TuneEvalTrace {
+  x: (number | null)[];
+  y: (number | null)[];
+  yerr?: number[] | number[][];
+}
+
 export interface TuneEvalResult {
-  plots?: Record<string, Record<string, { x: (number | null)[]; y: (number | null)[] }>>;
+  plots?: Record<string, Record<string, TuneEvalTrace>>;
   needs_resolve?: boolean;
   out_of_bounds?: boolean;
   reason?: string;
@@ -284,6 +293,8 @@ export const api = {
   tuneSolve: () => postJson<TuneStatus>("/api/tune/solve", {}),
   tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
   tuneResult: () => getJson<TuneResult>("/api/tune/result"),
+  // Data-only plots for the in-flight solve (drawable before "live").
+  tuneDataPlots: () => getJson<{ plots: PlotSpec[] }>("/api/tune/plots/data"),
   tuneEval: (path: string, value: number) =>
     postJson<TuneEvalResult>("/api/tune/eval", { path, value }),
   tuneHash: () => getJson<TuneHash>("/api/tune/hash"),

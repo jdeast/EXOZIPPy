@@ -1,9 +1,7 @@
 import logging
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +14,8 @@ from scipy.optimize import nnls
 from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
+
+from . import mmexofast_support
 
 
 def _raw_initval(data, default=None):
@@ -116,8 +116,18 @@ class MulensInstrument(Instrument):
                     "f_blend flux system. Defaults to the first instrument."
                 ),
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(
+                ("time", "mag", "err"),
+                note=(
+                    "With data_format: flux the observable role is named "
+                    "'flux' instead of 'mag'."
+                ),
+            ),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
+            cls._likelihood_config_schema(),
         ]
 
     def _reference_index(self):
@@ -160,6 +170,10 @@ class MulensInstrument(Instrument):
 
         self._n_sources = int(system.lens.n_sources)
 
+        # MMEXOFAST integration (masks + error factors + auto seeds) -- must
+        # run before the file loop so excluded points never enter the arrays.
+        self._resolve_mmexofast(system)
+
         # Source RA/Dec (degrees from resolve → radians for projection math)
         source_ndx = int(system.lens.source_map[0])
         n_stars = system.star.n_elements
@@ -192,13 +206,16 @@ class MulensInstrument(Instrument):
         # Median absolute position per instrument (used by Lens to detect parallax)
         self.inst_ref_pos = []
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # Sort before the observer positions are computed from t, so the
+        for i in range(self.n_elements):
+            fmt = self.config[i].get("data_format", "magnitude")
+            # Shared reader: columns:, mask:, time_* conversion, then sort
+            # before the observer positions are computed from t, so the
             # ephemeris rows stay aligned with the photometry.
-            df = self._sort_by_time(df)
+            df = self._read_data(
+                i,
+                roles=("time", "flux" if fmt == "flux" else "mag", "err"),
+                detrend=True,
+            )
             t, m, e = (
                 df.iloc[:, 0].values,
                 df.iloc[:, 1].values,
@@ -280,6 +297,126 @@ class MulensInstrument(Instrument):
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
+        self._prepare_robust(self.err, self.inst_map)
+
+    def _reject_time_spec_with_mmexofast(self, spec):
+        """Refuse to mix MMEXOFAST seeding with a per-file time system.
+
+        MMEXOFAST reads the raw data files itself, so its t_0 seeds (and
+        the JSON's excluded_points/errfacs) are expressed in the files' own
+        raw time system.  With a time_offset or a time_scale/time_frame
+        conversion active, the model's times differ from the raw ones and
+        the seeds would start the fit in the wrong time system -- an error
+        that converges to a wrong answer rather than crashing.  Refuse
+        loudly instead.
+        """
+        if self.has_nontrivial_time_spec:
+            raise ValueError(
+                f"[{self.prefix}] time_offset/time_scale/time_frame cannot "
+                f"be combined with MMEXOFAST seeding (mmexofast: {spec!r}): "
+                f"MMEXOFAST reads the raw files, so its t_0 seeds would be "
+                f"in the raw time system, not the converted one. Either "
+                f"pre-convert the data files, or set mmexofast: false and "
+                f"provide start values for the microlensing observables."
+            )
+
+    def _resolve_mmexofast(self, system):
+        """Stage-1a half of the MMEXOFAST integration.
+
+        Three modes, keyed off the lens block's ``mmexofast`` entry:
+
+        - explicit file path: the JSON's bad-data mask (``excluded_points``)
+          and error factors (``errfacs``) are applied to this component's
+          files; the seed hints are pushed by Lens at stage 2 as before.
+        - absent (default) or ``auto``: when the params file lacks start
+          values for the microlensing parameters (or always, for ``auto``),
+          MMEXOFAST is run on the raw light curves -- renormalize_errors on,
+          output cached at ``<prefix>_mmexofast.json`` -- and its seeds,
+          masks and error factors are all consumed here.
+        - ``false``: fully opts out.
+
+        This lives on the instrument rather than Lens because the mask must
+        exist before the photometry is read (load_data), and only this
+        component knows its files; Lens owns the stage-2 seed path for
+        explicit files, and both share mmexofast_support for the translation.
+        """
+        lens = getattr(system, "lens", None)
+        if lens is None:
+            return
+        spec = lens.config[0].get("mmexofast") if lens.config else None
+        if spec is False:
+            return
+        is_binary = lens.n_companions >= 1
+        want_rho = bool(any(lens.finite_source))
+
+        if isinstance(spec, str) and spec != "auto":
+            # Explicit JSON: masks + error factors only (Lens pushes seeds).
+            self._reject_time_spec_with_mmexofast(spec)
+            data = mmexofast_support.load_json(spec)
+        else:
+            if spec != "auto" and mmexofast_support.user_hints_sufficient(
+                self.config_manager.user_params, is_binary, want_rho
+            ):
+                return
+            self._reject_time_spec_with_mmexofast(spec)
+            prefix = system.config.get("prefix", "fitresults/planet")
+            json_path = f"{prefix}_mmexofast.json"
+            options = dict(lens.config[0].get("mmexofast_options") or {})
+            data = mmexofast_support.run_or_load(
+                json_path,
+                self.files,
+                coords=self._mmexofast_coords(system),
+                fit_type="binary_lens" if is_binary else "point_lens",
+                options=options,
+            )
+            if data is not None:
+                mmexofast_support.push_seed_hints(
+                    data,
+                    self.config_manager,
+                    want_rho=want_rho,
+                    is_binary=is_binary,
+                    source=json_path,
+                )
+        if data is None:
+            return
+        mmexofast_support.apply_excluded_points(
+            data,
+            self.files,
+            self.mask_specs,
+            self.prefix,
+            robust_kinds=self.likelihood_kinds,
+        )
+        mmexofast_support.push_errfac_hints(
+            data, self.files, self.prefix, self.config_manager
+        )
+
+    def _mmexofast_coords(self, system):
+        """Source-star coordinates as an 'hh:mm:ss dd:mm:ss' string, or None.
+
+        Same resolve pathway load_data itself uses for the projection math;
+        harmless under no_parallax (the default for the automatic run) but
+        required if the user opts parallax back in via mmexofast_options.
+        """
+        try:
+            from astropy.coordinates import SkyCoord
+
+            source_ndx = int(system.lens.source_map[0])
+            n_stars = system.star.n_elements
+            ra_deg = self.config_manager.resolve(
+                "star", "ra", shape=(n_stars,)
+            )["initval"][source_ndx]
+            dec_deg = self.config_manager.resolve(
+                "star", "dec", shape=(n_stars,)
+            )["initval"][source_ndx]
+            return SkyCoord(
+                float(ra_deg), float(dec_deg), unit="deg"
+            ).to_string(style="hmsdms")
+        except Exception as e:
+            logger.warning(
+                f"Could not resolve source coordinates for MMEXOFAST: {e}; "
+                f"running without coords."
+            )
+            return None
 
     def _check_data_format(
         self,
@@ -635,6 +772,7 @@ class MulensInstrument(Instrument):
         # Multiplicative per-instrument error scale (shared base helper).
         self._register_noise(self.manifest)
         self._register_gp(self.manifest)
+        self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {
@@ -911,6 +1049,12 @@ class MulensInstrument(Instrument):
         A_eff = model_flux / f_total_inst
         model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))
 
+        # Retained symbolically so plot_data can walk the graph for
+        # param_deps (the evaluator skips components whose specs declare no
+        # dependency on a moved slider -- empty deps would freeze the GUI's
+        # microlensing charts in live mode).
+        self._delta_mag_node = model_delta_mag
+
         self._compiled_delta_mag = pytensor.function(
             inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
             outputs=model_delta_mag,
@@ -937,32 +1081,33 @@ class MulensInstrument(Instrument):
         # Per-file GP conditional-mean evaluators (no-op without a gp: key).
         self._compile_gp_plotters(system)
 
-    def plot(self, system, points, filename_prefix="debug"):
-        if isinstance(points, dict):
-            points = [points]
-        if len(points) == 0:
-            return
+    # ------------------------------------------------------------------
+    # Shared data preparation. The matplotlib plot() path (via
+    # plotrender.plot_via_specs) and the GUI both consume plot_data(), so
+    # there is a single description of the lightcurve chart.
+    # ------------------------------------------------------------------
+    def _seed_param(self, base_param):
+        """t_0/t_E seed from the solved config (for the model time grid).
 
-        # Model time grid: ±5 tE around t_0 when known, else full data span
+        Tries the numeric index form first (user-provided params), then the
+        name form (derived params stored by finalize_user_params under the
+        name key).
+        """
         cm = self.config_manager
-        _lens_name = (cm.system_config.get("lens") or [{}])[0].get("name", "0")
+        lens_name = (cm.system_config.get("lens") or [{}])[0].get("name", "0")
+        for key in (
+            f"lens.0.{base_param}",
+            f"lens.{lens_name}.{base_param}",
+        ):
+            d = cm.user_params.get(key)
+            if d is not None:
+                return d.get("initval") if isinstance(d, dict) else float(d)
+        return None
 
-        def _get_param(base_param):
-            # Try numeric index form first (user-provided params), then name form
-            # (derived params stored by finalize_user_params under the name key).
-            for key in (
-                f"lens.0.{base_param}",
-                f"lens.{_lens_name}.{base_param}",
-            ):
-                d = cm.user_params.get(key)
-                if d is not None:
-                    return (
-                        d.get("initval") if isinstance(d, dict) else float(d)
-                    )
-            return None
-
-        t0 = _get_param("t_0")
-        tE = _get_param("t_E")
+    def _model_time_grid(self):
+        """(t_model, t0, tE): +/-5 tE around t_0 when known, else data span."""
+        t0 = self._seed_param("t_0")
+        tE = self._seed_param("t_E")
         if t0 is not None and tE is not None:
             t_model = np.linspace(t0 - 5.0 * tE, t0 + 5.0 * tE, 2000).astype(
                 np.float64
@@ -971,17 +1116,16 @@ class MulensInstrument(Instrument):
             t_model = np.linspace(
                 self.time.min(), self.time.max(), 2000
             ).astype(np.float64)
+        return t_model, t0, tE
 
-        # Each instrument gets its own color.  Model lines are one per unique
-        # observer_location: multiple earth instruments share one model curve
-        # (parallax between terrestrial sites is negligible unless lat/lon is
-        # explicitly specified, in which case each site is a distinct string).
-        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        inst_color = {
-            i: colors[i % len(colors)] for i in range(self.n_elements)
-        }
+    def _observer_groups(self):
+        """Unique observer_location strings and their instrument mapping.
 
-        # Map unique observer_location strings to the first instrument with that location.
+        Model lines are one per unique observer_location: multiple earth
+        instruments share one model curve (parallax between terrestrial sites
+        is negligible unless lat/lon is explicitly specified, in which case
+        each site is a distinct string).
+        """
         unique_observers = []
         obs_to_inst = {}
         for i in range(self.n_elements):
@@ -989,159 +1133,254 @@ class MulensInstrument(Instrument):
             if obs_loc not in obs_to_inst:
                 unique_observers.append(obs_loc)
                 obs_to_inst[obs_loc] = i
-
-        # Absolute barycentric positions for each unique observer over the model grid.
-        # Both the symbolic PSPL path and the MulensModel Op expect absolute barycentric AU;
-        # get_magnification converts internally to geocentric deviations as needed.
-        obs_model_pos = {
-            obs_loc: self.get_observer_position(
-                t_model, observer_location=obs_loc
-            )
-            for obs_loc in unique_observers
-        }
         inst_obs_loc = {
             i: self.config[i].get("observer_location", "earth")
             for i in range(self.n_elements)
         }
+        return unique_observers, obs_to_inst, inst_obs_loc
 
-        def _point_values(point):
-            return [
-                (
-                    float(
-                        np.squeeze(np.asarray(point.get(p.label, p.initval)))
-                    )
-                    if getattr(p.value, "ndim", 0) == 0
-                    else np.atleast_1d(point.get(p.label, p.initval))
-                )
-                for p in system.plot_params
-            ]
+    def _flux_alignment(self, param_values):
+        """Reference flux system and the magnitude aligner onto it.
 
-        # Peg everything to the reference data set's flux system (the first
-        # instrument by default, or one flagged 'reference: true').  Each
-        # instrument fits its own f_source/f_blend, so a raw delta-mag per
-        # instrument puts data on N scales.  Instead we recover each point's
-        # magnification with that instrument's own (f_source_i, f_blend_i) and
-        # re-inject it into the reference system (f_source_ref, f_blend_ref):
-        #   A_obs = (F_i - f_blend_i) / f_source_i
-        #   F_aln = f_source_ref * A_obs + f_blend_ref
-        # so all data lands on the reference delta-mag scale, matching the model
-        # (also drawn in the reference system).  Errors are propagated through
-        # the same affine flux transform (asymmetric in magnitudes).  Using the
-        # plotted point's fitted fluxes (first point when several are drawn)
-        # keeps the alignment tied to the model rather than a stage-1 estimate.
+        Peg everything to the reference data set's flux system (the first
+        instrument by default, or one flagged 'reference: true').  Each
+        instrument fits its own f_source/f_blend, so a raw delta-mag per
+        instrument puts data on N scales.  Instead we recover each point's
+        magnification with that instrument's own (f_source_i, f_blend_i) and
+        re-inject it into the reference system (f_source_ref, f_blend_ref):
+          A_obs = (F_i - f_blend_i) / f_source_i
+          F_aln = f_source_ref * A_obs + f_blend_ref
+        so all data lands on the reference delta-mag scale, matching the model
+        (also drawn in the reference system).  Errors are propagated through
+        the same affine flux transform (asymmetric in magnitudes).  Using the
+        plotted point's fitted fluxes keeps the alignment tied to the model
+        rather than a stage-1 estimate.
+        """
         ref_idx = self._reference_index()
-        ref_values = _point_values(points[0])
-        fs_vec, fb_vec = self._compiled_flux(*ref_values)
+        fs_vec, fb_vec = self._compiled_flux(*param_values)
         fs_vec = np.atleast_1d(np.asarray(fs_vec, dtype=np.float64))
         fb_vec = np.atleast_1d(np.asarray(fb_vec, dtype=np.float64))
         fs_ref = max(float(fs_vec[ref_idx]), 1e-30)
         fb_ref = float(fb_vec[ref_idx])
         baseline_ref = -2.5 * np.log10(max(fs_ref + fb_ref, 1e-30))
 
-        def _align_mag(mag_arr, i):
+        def align(mag_arr, i):
             """Map instrument-i magnitudes onto the reference flux system."""
             fs_i = max(float(fs_vec[i]), 1e-30)
             fb_i = float(fb_vec[i])
-            F = 10.0 ** (-0.4 * mag_arr)
+            F = 10.0 ** (-0.4 * np.asarray(mag_arr, dtype=np.float64))
             A_obs = (F - fb_i) / fs_i
             F_aln = np.maximum(fs_ref * A_obs + fb_ref, 1e-30)
             return -2.5 * np.log10(F_aln) - baseline_ref
 
-        def draw(ax):
+        return {
+            "ref_idx": ref_idx,
+            "fs_vec": fs_vec,
+            "fb_vec": fb_vec,
+            "align": align,
+        }
+
+    def plot_data(self, system, point=None):
+        """GUI/PDF plot specs: the aligned delta-mag lightcurve, plus a zoom
+        copy (x_range +/-3 tE) when t_0/t_E seeds are known.
+
+        With point=None each instrument's raw magnitudes are returned in its
+        own system (no fitted fluxes exist to align them onto one scale).
+        See Component.plot_data and plotspec.PlotSpec.
+        """
+        from exozippy.plotspec import PlotSpec, Trace
+
+        comp_id = {"yaml_key": self.prefix, "instance": None}
+        sysname = getattr(system, "name", "")
+        title = f"Microlensing photometry: {sysname}"
+
+        def _data_style(i):
+            # The historical plot used small dots for the (typically dense)
+            # photometry; keep that unless the user configured a marker.
+            style = self._data_trace_style(i)
+            style.setdefault("marker", ".")
+            return style
+
+        if point is None:
+            traces = []
             for i in range(self.n_elements):
                 mask = self.inst_map == i
-                mag_i = self.mag[mask]
-                err_i = self.err[mask]
-                delta_mag = _align_mag(mag_i, i)
-                # Brighter (mag - err) -> smaller aligned mag (lower error bar).
-                lo = delta_mag - _align_mag(mag_i - err_i, i)
-                hi = _align_mag(mag_i + err_i, i) - delta_mag
-                ax.errorbar(
-                    self.time[mask],
-                    delta_mag,
+                traces.append(
+                    Trace(
+                        name=self.names[i],
+                        role="data",
+                        kind="scatter",
+                        x=self.time[mask],
+                        y=self.mag[mask],
+                        yerr=self.err[mask],
+                        style=_data_style(i),
+                    )
+                )
+            return [
+                PlotSpec(
+                    id=f"{self.prefix}.lightcurve",
+                    component=comp_id,
+                    title=title,
+                    xlabel="Time [BJD]",
+                    ylabel="mag",
+                    traces=traces,
+                    meta={
+                        "y_inverted": True,
+                        "file_tag": "mulens",
+                        "figsize": (12, 6),
+                    },
+                )
+            ]
+
+        t_model, t0, tE = self._model_time_grid()
+        unique_observers, obs_to_inst, inst_obs_loc = self._observer_groups()
+        # Absolute barycentric positions for each unique observer over the
+        # model grid. Both the symbolic PSPL path and the MulensModel Op
+        # expect absolute barycentric AU; get_magnification converts
+        # internally to geocentric deviations as needed.
+        obs_model_pos = {
+            obs_loc: self.get_observer_position(
+                t_model, observer_location=obs_loc
+            )
+            for obs_loc in unique_observers
+        }
+        param_values = self._point_to_plot_params(point, system)
+        aln = self._flux_alignment(param_values)
+        align, ref_idx = aln["align"], aln["ref_idx"]
+        fs_vec, fb_vec = aln["fs_vec"], aln["fb_vec"]
+
+        node = getattr(self, "_delta_mag_node", None)
+        deps = self._model_trace_param_deps(node, system)
+
+        traces = []
+        for obs_loc in unique_observers:
+            i = obs_to_inst[obs_loc]
+            try:
+                # ref_idx: reference flux system, this observer's
+                # magnification (parallax between sites is preserved).
+                y_model = self._compiled_delta_mag(
+                    t_model, obs_model_pos[obs_loc], ref_idx, *param_values
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Model eval failed for observer '{obs_loc}': {e}"
+                )
+                continue
+            traces.append(
+                Trace(
+                    name=(
+                        f"model ({obs_loc})"
+                        if len(unique_observers) > 1
+                        else "model"
+                    ),
+                    role="model",
+                    kind="line",
+                    x=t_model,
+                    y=y_model,
+                    node=node,
+                    style={"series_index": int(i)},
+                )
+            )
+
+        # One "physical + GP" curve per light curve that requested a GP.
+        # The GP is additive in that instrument's own magnitudes, so it is
+        # added there and the sum is then mapped onto the reference flux
+        # system -- adding it to an already-aligned curve would be wrong,
+        # since the aligner is nonlinear in magnitude.
+        for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
+            obs_pretty = obs_model_pos.get(inst_obs_loc[i])
+            if obs_pretty is None:
+                continue
+            fs_i = max(float(fs_vec[i]), 1e-30)
+            baseline_i = -2.5 * np.log10(max(fs_i + float(fb_vec[i]), 1e-30))
+            try:
+                delta_i = self._compiled_delta_mag(
+                    t_model, obs_pretty, i, *param_values
+                )
+                gp_i = self.gp_mean_on_grid(system, point, i, t_model)
+                y_gp = align(delta_i + baseline_i + gp_i, i)
+            except Exception as e:
+                logger.warning(
+                    f"GP model eval failed for '{self.names[i]}': {e}"
+                )
+                continue
+            traces.append(
+                Trace(
+                    name=f"{self.names[i]} model+GP",
+                    role="model",
+                    kind="line",
+                    x=t_model,
+                    y=y_gp,
+                    style={"series_index": int(i), "lw": 1.0},
+                )
+            )
+
+        for i in range(self.n_elements):
+            mask = self.inst_map == i
+            mag_i = self.mag[mask]
+            err_i = self.err[mask]
+            delta_mag = align(mag_i, i)
+            # Brighter (mag - err) -> smaller aligned mag (lower error bar).
+            lo = delta_mag - align(mag_i - err_i, i)
+            hi = align(mag_i + err_i, i) - delta_mag
+            traces.append(
+                Trace(
+                    name=self.names[i],
+                    role="data",
+                    kind="scatter",
+                    x=self.time[mask],
+                    y=delta_mag,
                     yerr=np.vstack([lo, hi]),
-                    fmt=".",
-                    color=inst_color[i],
-                    alpha=0.6,
-                    zorder=1,
-                    label=self.names[i],
+                    style=_data_style(i),
                 )
-            for obs_loc in unique_observers:
-                i = obs_to_inst[obs_loc]
-                obs_pretty = obs_model_pos[obs_loc]
-                for point in points:
-                    param_values = _point_values(point)
-                    try:
-                        # ref_idx: reference flux system, this observer's
-                        # magnification (parallax between sites is preserved).
-                        y_model = self._compiled_delta_mag(
-                            t_model, obs_pretty, ref_idx, *param_values
-                        )
-                        alpha = 0.8 if len(points) == 1 else 0.1
-                        ax.plot(
-                            t_model,
-                            y_model,
-                            "-",
-                            color=inst_color[i],
-                            lw=1.5,
-                            alpha=alpha,
-                            zorder=2,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Model eval failed for observer '{obs_loc}': {e}"
-                        )
+            )
 
-            # One "physical + GP" curve per light curve that requested a GP.
-            # The GP is additive in that instrument's own magnitudes, so it is
-            # added there and the sum is then mapped onto the reference flux
-            # system -- adding it to an already-aligned curve would be wrong,
-            # since _align_mag is nonlinear in magnitude.
-            for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
-                obs_pretty = obs_model_pos.get(inst_obs_loc[i])
-                if obs_pretty is None:
-                    continue
-                fs_i = max(float(fs_vec[i]), 1e-30)
-                baseline_i = -2.5 * np.log10(
-                    max(fs_i + float(fb_vec[i]), 1e-30)
-                )
-                for point in points:
-                    param_values = _point_values(point)
-                    try:
-                        delta_i = self._compiled_delta_mag(
-                            t_model, obs_pretty, i, *param_values
-                        )
-                        gp_i = self.gp_mean_on_grid(system, point, i, t_model)
-                        y_gp = _align_mag(delta_i + baseline_i + gp_i, i)
-                        alpha = 0.8 if len(points) == 1 else 0.1
-                        ax.plot(
-                            t_model,
-                            y_gp,
-                            "-",
-                            color=inst_color[i],
-                            lw=1.0,
-                            alpha=alpha,
-                            zorder=3,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"GP model eval failed for '{self.names[i]}': {e}"
-                        )
-            ax.set_xlabel("Time [BJD]")
-            ax.set_ylabel("mag − mag$_0$")
-            ax.invert_yaxis()
-            ax.legend()
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        draw(ax)
-        fig.tight_layout()
-        fig.savefig(f"{filename_prefix}_mulens.pdf")
-        plt.close(fig)
-
+        meta = {
+            "y_inverted": True,
+            "file_tag": "mulens",
+            "figsize": (12, 6),
+            # The data traces are re-aligned onto the reference flux system
+            # with the point's fitted f_source/f_blend (values AND asymmetric
+            # errors), so live evals must re-ship them along with the models.
+            "dynamic_data": True,
+        }
+        specs = [
+            PlotSpec(
+                id=f"{self.prefix}.lightcurve",
+                component=comp_id,
+                title=title,
+                xlabel="Time [BJD]",
+                ylabel="mag - mag$_0$",
+                traces=traces,
+                param_deps=deps,
+                meta=meta,
+            )
+        ]
         if t0 is not None and tE is not None:
-            fig_z, ax_z = plt.subplots(figsize=(12, 6))
-            draw(ax_z)
-            ax_z.set_xlim(t0 - 3.0 * tE, t0 + 3.0 * tE)
-            fig_z.tight_layout()
-            fig_z.savefig(f"{filename_prefix}_mulens_zoom.pdf")
-            plt.close(fig_z)
+            specs.append(
+                PlotSpec(
+                    id=f"{self.prefix}.lightcurve_zoom",
+                    component=comp_id,
+                    title=f"{title} (zoom)",
+                    xlabel="Time [BJD]",
+                    ylabel="mag - mag$_0$",
+                    traces=traces,
+                    param_deps=deps,
+                    meta=dict(
+                        meta,
+                        file_tag="mulens_zoom",
+                        x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
+                    ),
+                )
+            )
+        return specs
+
+    def plot(self, system, points, filename_prefix="debug"):
+        """Render the lightcurve (+zoom) PDFs from plot_data specs.
+
+        The specs are the single description of these plots -- the GUI draws
+        the same ones via plotly (see plotrender.py's module docstring).
+        """
+        from exozippy.plotrender import plot_via_specs
+
+        plot_via_specs(self, system, points, filename_prefix=filename_prefix)

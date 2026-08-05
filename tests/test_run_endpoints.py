@@ -96,7 +96,7 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         "T_max": 5.0,
         "n_chains": 4,
         "cores": 1,
-        "check_curvatures": False,
+        "measure_scales": False,
         "recompute_trace": True,
         "min_ess": 100_000_000,
         "max_rhat": 1.0000001,
@@ -341,7 +341,8 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             )
 
         assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), (
-            "run never reported n_draws>=100 during sampling"
+            "run never reported n_draws>=100 during sampling; last status: "
+            f"{client.get('/api/run/status').json()}"
         )
 
         status = client.get("/api/run/status").json()
@@ -355,8 +356,14 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
         stopped = client.post("/api/run/stop", json={"force": False})
         assert stopped.status_code == 200
 
+        # Keep the last full status doc so a failure message carries the
+        # child's recorded error/traceback, not just the bare phase name.
+        final_status = {}
+
         def _terminal():
             st = client.get("/api/run/status").json()
+            final_status.clear()
+            final_status.update(st)
             return st["phase"] if st.get("phase") in TERMINAL_PHASES else None
 
         final_phase = _poll_until(_terminal, timeout=600.0)
@@ -369,4 +376,4 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
     assert final_phase in {
         "stopped",
         "done",
-    }, f"non-terminal end: {final_phase}"
+    }, f"non-terminal end: {final_phase}; status: {final_status}"

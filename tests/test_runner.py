@@ -67,7 +67,7 @@ def _write_ptde_config(work_dir, out_prefix, *, draws=100_000):
         # the run reaches the first convergence check (100 draws) in seconds
         # instead of minutes, while still exercising the same PTDE code path.
         "cores": 1,
-        "check_curvatures": False,
+        "measure_scales": False,
         "recompute_trace": True,
         "min_ess": 100_000_000,  # unreachable -> never converge
         "max_rhat": 1.0000001,  # unreachable -> never converge
@@ -131,6 +131,28 @@ def test_disabled_reporter_writes_nothing(tmp_path):
 
     assert not os.path.exists(str(prefix) + "_gui_status.json")
     assert not os.path.exists(str(prefix) + "_gui_snapshot")
+
+
+def test_terminal_error_records_cause(tmp_path):
+    """
+    Given an enabled GuiReporter,
+    When terminal("error", error=<traceback text>) is written,
+    Then status.json carries the cause in its "error" field (and a plain
+    terminal("done") writes no such field).
+    """
+    prefix = tmp_path / "run" / "planet"
+    reporter = GuiReporter(prefix, enabled=True)
+
+    reporter.terminal("error", error="Traceback: boom in wrap-up")
+
+    doc = json.load(open(str(prefix) + "_gui_status.json"))
+    assert doc["phase"] == "error"
+    assert doc["error"] == "Traceback: boom in wrap-up"
+
+    reporter.terminal("done")
+    doc = json.load(open(str(prefix) + "_gui_status.json"))
+    assert doc["phase"] == "done"
+    assert "error" not in doc
 
 
 def test_snapshot_is_thinned_and_atomic(tmp_path):
@@ -201,7 +223,8 @@ def test_run_without_flag_writes_no_status(kelt4_workdir, tmp_path):
         "draws": 1,
         "chains": 1,
         "cores": 1,
-        "check_curvatures": False,
+        # measure_scales deliberately left at its default (True) so one
+        # end-to-end run exercises the startup whitening probe + rescale.
         "recompute_trace": True,
     }
     with open(kelt4_workdir / "noflag.yaml", "w") as fh:

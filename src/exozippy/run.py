@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import signal
 import time
+import traceback
 from pathlib import Path
 
 import arviz as az
@@ -57,6 +58,7 @@ from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
+from .whitening import load_whitening, measure_and_whiten, save_whitening
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ KNOWN_SAMPLER_KEYS = {
     "n_chains",
     "recompute_trace",
     "nthin",
-    "check_curvatures",
+    "measure_scales",
     "profile",
     "min_ess",
     "max_rhat",
@@ -90,8 +92,15 @@ KNOWN_SAMPLER_KEYS = {
 }
 
 
-def run_fit(config):
+def run_fit(config, user_params=None):
     """The main library entry point to run an orbital fit.
+
+    ``config`` is the system-config dict (what the CLI loads from the YAML
+    file). ``user_params`` optionally supplies the parameter overrides as an
+    in-memory dict; when omitted, ``config["parameter_file"]`` is read from
+    disk as before. Data-file paths inside ``config`` are resolved relative
+    to the current working directory, so a dict caller should chdir first
+    (the same contract as solve_api).
 
     Thin wrapper around ``_run_fit`` that guarantees the GUI status file (when
     enabled via config["gui"]["snapshot"] or EXOZIPPY_GUI_SNAPSHOT=1) is left
@@ -103,11 +112,18 @@ def run_fit(config):
     extra.
     """
     from exozippy.gui.status import GuiReporter
+    from exozippy.pytensor_fallback import ensure_usable_backend
+
+    # Probe the C toolchain before anything compiles: a missing g++ or
+    # missing Python.h otherwise surfaces as a CompileError deep inside the
+    # first pytensor.function call. Falls back to the (much slower)
+    # pure-Python backend with a loud banner naming the fix.
+    ensure_usable_backend()
 
     gui = GuiReporter.from_config(config)
     gui.phase("preparing")
     try:
-        result = _run_fit(config, gui)
+        result = _run_fit(config, gui, user_params=user_params)
     except KeyboardInterrupt:
         # PTDE/NUTS raise KeyboardInterrupt for a during-tune or second-signal
         # abort; a graceful during-draws stop instead returns partial draws and
@@ -115,13 +131,16 @@ def run_fit(config):
         gui.terminal("stopped")
         raise
     except BaseException:
-        gui.terminal("error")
+        # Record the traceback in the status file: the interpreter is gone by
+        # the time a monitor sees phase "error", so this is the only place the
+        # cause survives (e.g. a wrap-up crash after a graceful stop).
+        gui.terminal("error", error=traceback.format_exc())
         raise
     gui.terminal("done")
     return result
 
 
-def _run_fit(config, gui):
+def _run_fit(config, gui, user_params=None):
     """
     The main library entry point to run an orbital fit.
     """
@@ -155,7 +174,11 @@ def _run_fit(config, gui):
     n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
     recompute_trace = sampler_cfg.get("recompute_trace", False)
     nthin = int(sampler_cfg.get("nthin", 1))
-    check_curvatures = sampler_cfg.get("check_curvatures", True)
+    # Data-driven whitening: probe each raw element's true local scale from
+    # the start and rescale the model's whitening in place before sampling.
+    # On by default; 'measure_scales: false' keeps the preliminary scales
+    # (defaults.yaml init_scale or the span-fraction fallback).
+    measure_scales = sampler_cfg.get("measure_scales", True)
     profile = sampler_cfg.get("profile", False)
     _min_ess_raw = sampler_cfg.get("min_ess", 1000)
     min_ess = int(_min_ess_raw) if _min_ess_raw is not None else None
@@ -187,7 +210,7 @@ def _run_fit(config, gui):
         )
 
     # 3. Build the stellar system into a PyMC Graph
-    system = System(config)
+    system = System(config, user_params=user_params)
     system.prepare()  # this triggers I/O
     gui.phase("compiling")  # build_model + get_mcmc_init compile the graph
     model = system.build_model()
@@ -220,7 +243,42 @@ def _run_fit(config, gui):
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
     with model:
-        # 1. Get your starting dictionaries
+        # Build the raw starting point explicitly: 0 for logit params,
+        # (initval - mu)/sigma for Gaussian-path params, so the physical
+        # start is always our initval.
+        raw_start = system.get_raw_start(model)
+
+        # Data-driven whitening: measure every raw element's true local
+        # scale from the relaxation-engine start and rescale the model's
+        # whitening in place (Parameter.set_whitening), then measure the
+        # soft-bound barrier steepness scales the same way.  After this, a
+        # unit step along any raw direction costs ~0.5 nats -- the
+        # "curvature = -1" conditioning the retired curvature check used to
+        # ask users to approximate by hand-tuning init_scale.
+        #
+        # The state is persisted next to the trace: a reload
+        # (recompute_trace: false with an existing trace) restores the exact
+        # scales the trace was sampled with instead of re-probing -- raw
+        # draws only decode correctly under the whitening they were sampled
+        # under.  Any model mismatch falls back to a fresh measurement.
+        trace_path = str(prefix) + "_trace.nc"
+        whitening_path = str(prefix) + "_whitening.json"
+        reusing_trace = os.path.exists(trace_path) and not recompute_trace
+        whiten_report = None
+        if measure_scales:
+            loaded = (
+                reusing_trace
+                and os.path.exists(whitening_path)
+                and load_whitening(system, whitening_path)
+            )
+            if not loaded:
+                whiten_report = measure_and_whiten(system, model, raw_start)
+                save_whitening(
+                    system, whitening_path, map_lp=whiten_report["map_lp"]
+                )
+
+        # 1. Get your starting dictionaries (after the rescale, so the
+        # diagnostic table reports the measured scales)
         nuts_scales, phys_scales, phys_inits, transformed_inits = (
             system.get_mcmc_init(model)
         )
@@ -230,13 +288,8 @@ def _run_fit(config, gui):
             transformed_inits,
             phys_inits,
             phys_scales,
-            check_curvatures,
+            whiten_report=whiten_report,
         )
-
-        # Build the raw starting point explicitly: 0 for logit params,
-        # (initval - mu)/sigma for Gaussian-path params, so the physical
-        # start is always our initval.
-        raw_start = system.get_raw_start(model)
 
         # Multi-seed starts (P4): a list of raw start dicts (one per solved
         # seed) plus their original seed indices. seed 0 == raw_start above;
@@ -262,14 +315,12 @@ def _run_fit(config, gui):
         ###################
         # ipdb.set_trace()
 
-        trace_path = str(prefix) + "_trace.nc"
-        if os.path.exists(trace_path) and not recompute_trace:
+        if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
             idata = az.from_netcdf(trace_path)
         else:
             # do the sampling and save the results
             gui.phase("sampling")
-            nuts_scales = np.array(nuts_scales).flatten()
             if method in ("numpyro", "blackjax", "nutpie"):
                 try:
                     importlib.import_module(method)
@@ -292,6 +343,9 @@ def _run_fit(config, gui):
                     cores=cores,
                     raw_starts=raw_starts,
                     seed_indices=seed_indices,
+                    raw_scales=(
+                        whiten_report["raw_scales"] if whiten_report else None
+                    ),
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,
@@ -323,6 +377,9 @@ def _run_fit(config, gui):
                     cores=cores,
                     raw_starts=raw_starts,
                     seed_indices=seed_indices,
+                    raw_scales=(
+                        whiten_report["raw_scales"] if whiten_report else None
+                    ),
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,
@@ -348,12 +405,14 @@ def _run_fit(config, gui):
                 chain_method = sampler_cfg.get("chain_method", "parallel")
                 # jitter=False: the JAX samplers default to jittering each
                 # chain by U(-1, 1) in raw (whitened) space, i.e. +/- one
-                # init_scale per parameter.  We deliberately construct the
-                # start from the relaxation-engine solution; when an
-                # init_scale is much wider than the posterior (common for
-                # conservative user scales), the jitter launches chains at
-                # logp ~ -1e6 and the step size collapses to zero (100%
-                # divergences).  Opt back in with 'jitter: true'.
+                # whitening scale per parameter.  We deliberately construct
+                # the start from the relaxation-engine solution.  With
+                # measured scales the historical failure mode (a scale much
+                # wider than the posterior launching chains at logp ~ -1e6,
+                # collapsing the step size to zero) mostly goes away, but
+                # with 'measure_scales: false' the preliminary scales bring
+                # it right back -- so the default stays off.  Opt back in
+                # with 'jitter: true'.
                 idata = sample_jax_nuts(
                     draws=draws,
                     tune=tune,
@@ -564,12 +623,33 @@ def inspect_start(
     transformed_inits,
     phys_inits,
     phys_scales,
-    calc_curvature=True,
+    whiten_report=None,
 ):
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
-    curvature_map = auditor.get_curvatures() if calc_curvature else {}
     unused_yaml = auditor.check_unused_yaml()
+
+    # Map the whitening probe's measured multipliers (one per SAMPLED element,
+    # keyed by raw-variable name) back to full per-parameter element vectors.
+    # Used only for flat detection: NaN marks a direction the probe found
+    # flat (logp ignores it), which keeps its preliminary scale and earns a
+    # warning after the table.
+    mult_map = {}
+    if whiten_report is not None:
+        multipliers = whiten_report.get("multipliers", {})
+        for p in auditor.all_params:
+            m = multipliers.get(f"{p.label}_raw")
+            if m is None:
+                continue
+            n_elements = np.prod(p.shape).astype(int) if p.shape != () else 1
+            full = np.full(n_elements, np.nan)
+            m = np.asarray(m, dtype=float).reshape(-1)
+            is_sampled = np.atleast_1d(getattr(p, "is_sampled", False))
+            if is_sampled.size == n_elements and np.sum(is_sampled) == m.size:
+                full[is_sampled] = m
+            elif m.size <= n_elements:
+                full[: m.size] = m
+            mult_map[p.label] = full
 
     # Dynamic Width Logic
     display_labels = [
@@ -583,34 +663,37 @@ def inspect_start(
         + [24]
     )
 
-    table_width = 127
+    header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | Priors & Bounds (*=user) |"
+    table_width = len(header)
+
+    def _banner(text):
+        # Pad each caption line so its trailing dashes line up with the
+        # table's horizontal rules, whatever max_label_len came out to.
+        line = f"-----   {text}"
+        return line + " " * max(table_width - len(line) - 5, 1) + "-----"
+
     logger.info("-" * table_width)
     logger.info(
-        "--------           Starting points and penalties (Physical Space) with Sampler Curvature (Unity Space)                 --------"
+        _banner(
+            "Starting points and penalties (Physical Space) with measured whitening scales"
+        )
     )
     logger.info(
-        "--------           Ideal curvature=-1.0. Tune by changing init_scale = Scale/sqrt(abs(Curv)) in param.yaml             --------"
+        _banner(
+            "Scale is the data-driven 1-sigma step measured from the start (the 0.5-nat logp contour);"
+        )
     )
     logger.info(
-        "--------           The deviation from ideal primarily impacts tuning efficiency.                                       --------"
+        _banner(
+            "the sampler steps in units of it.  N/A marks parameters that are not sampled (fixed/derived)."
+        )
     )
     logger.info(
-        "--------           It can easily tolerate factors of 10,000+ from ideal with a longer tuning phase.                    --------"
-    )
-    logger.info(
-        "--------           However, the initial scale does impact the steepness of bounds on derived parameters.               --------"
-    )
-    logger.info(
-        "--------           Scales that are too large will create softer bounds that might introduce real biases.               --------"
-    )
-    logger.info(
-        "--------           Scales that are too small will create harder bounds that lead to divergences.                       --------"
-    )
-    logger.info(
-        "--------           Log-Prob for parameters includes summed penalties from bounds and priors.                           --------"
+        _banner(
+            "Log-Prob for parameters includes summed penalties from bounds and priors."
+        )
     )
     logger.info("-" * table_width)
-    header = f"{'Parameter':>{max_label_len}} | {'Value':>15} | {'Scale':>10} | {'Units':>12} | {'Log-Prob':>10} | {'Unity Curv':>10} | Priors & Bounds (*=user) |"
     logger.info(header)
     logger.info("-" * table_width)
 
@@ -660,10 +743,8 @@ def inspect_start(
             continue
 
         v_phys = np.atleast_1d(raw_v)
-        s_phys = np.atleast_1d(raw_s)
-        c_phys = np.atleast_1d(
-            curvature_map.get(p.label, [np.nan] * len(v_phys))
-        )
+        s_phys = np.atleast_1d(raw_s if raw_s is not None else np.nan)
+        m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
@@ -729,7 +810,8 @@ def inspect_start(
 
                 abs_v = abs(val)
                 # Use scientific notation if it's outside the "clean" range
-                if abs_v < 1e-4 or abs_v > 1e6:
+                # (below 1e-3 the Scale column's 3 decimals round to 0.000)
+                if abs_v < 1e-3 or abs_v > 1e6:
                     precision = max(0, width - 7)
                     return f"{val:>{width}.{precision}e}"
 
@@ -738,30 +820,34 @@ def inspect_start(
                 return f"{val:>{width}.{precision}f}"
 
             val_str = smart_format(val_out, width=15)
-            scale_str = smart_format(scale_out, width=10)
 
-            is_fixed = (
-                p.sigma is not None and np.atleast_1d(p.sigma)[i] == 0
-            ) or p.expression is not None
-            raw_c = c_phys[i]
+            # Only sampled elements were probed; everything else (fixed,
+            # derived) has no whitening scale to report.
+            sampled_arr = np.atleast_1d(getattr(p, "is_sampled", False))
+            elem_sampled = (
+                bool(sampled_arr[i]) if i < sampled_arr.size else False
+            )
+            scale_str = (
+                smart_format(scale_out, width=10)
+                if elem_sampled
+                else f"{'N/A':>10}"
+            )
 
-            # Curvature Warning and Display Logic
-            if is_fixed or not calc_curvature:
-                c_str = "N/A"
-            elif np.isnan(raw_c) or np.isinf(raw_c) or raw_c == 0.0:
-                c_str = "NaN (WARN)"
-                flat_warnings.append(
-                    f"{row_label} (NaN/Inf)"
-                )  # Tag it in the warning list below
-            else:
-                c_str = f"{raw_c:.5f}"
-                if abs(raw_c) < 1e-4:
-                    flat_warnings.append(row_label)
+            # A NaN multiplier on a sampled element means the probe found
+            # logp flat along it (it keeps its preliminary scale) -- warn
+            # after the table.
+            raw_m = m_phys[i] if i < len(m_phys) else np.nan
+            if (
+                whiten_report is not None
+                and elem_sampled
+                and (np.isnan(raw_m) or np.isinf(raw_m))
+            ):
+                flat_warnings.append(row_label)
 
             prior_str = p.get_prior_str(i, latex=False)
 
             logger.info(
-                f"{row_label:>{max_label_len}} | {val_str} | {scale_str} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {c_str:>10} | {prior_str}{user_flag}"
+                f"{row_label:>{max_label_len}} | {val_str} | {scale_str} | {p.get_unit_str(i):>12} | {param_logps.get(p.label, 0.0):10.2f} | {prior_str}{user_flag}"
             )
 
     # --- 2. Potentials & Likelihoods ---
@@ -814,7 +900,7 @@ def inspect_start(
                     p_info = parent.get_prior_str(latex=False)
 
             logger.info(
-                f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {'N/A':>10} | {p_info}{' *' if is_user else ''}"
+                f"{node:>{max_label_len}} | {'N/A':>15} | {'N/A':>10} | {'---':>12} | {lp:10.2f} | {p_info}{' *' if is_user else ''}"
             )
     logger.info("-" * table_width)
 
@@ -844,7 +930,8 @@ def inspect_start(
     if flat_warnings:
         logger.warning(
             "?" * 60 + "\n"
-            f"WARNING: No curvature detected for: {flat_warnings}. Check your bounds/initialization.\n"
+            f"WARNING: logp is flat along: {flat_warnings}. Check your bounds/initialization.\n"
+            "These parameters keep their preliminary whitening scale.\n"
             "Even a single unconstrained parameter will destroy HMC efficiency.\n"
             + "?"
             * 60
@@ -894,7 +981,11 @@ def _format_summary(idata, diag):
             f"Rhat<={diag.get('max_rhat_threshold')}, "
             f"ESS>={diag.get('min_ess_threshold')}"
         )
-    return "\n".join(header) + "\n" + str(df) + "\n"
+    # to_string(), not str(): str(df) elides middle columns ("...") at
+    # narrow terminal widths, silently dropping ess_bulk/ess_tail/r_hat --
+    # the columns downstream tooling (e.g. examples/DC2018's collector)
+    # parses from this file.
+    return "\n".join(header) + "\n" + df.to_string() + "\n"
 
 
 def make_corner(model, idata, filename, max_samples=1000):
@@ -1364,69 +1455,3 @@ def _emit_per_mode_outputs(system, model, idata, mode_report, prefix):
             f"Per-mode outputs for {suffix} (weight={m.weight:.3f}, "
             f"n_draws={m.n_draws}) written in {time.time() - t0:.1f}s"
         )
-
-
-def get_diagonal_curvature(model, point):
-    import pytensor.gradient as ptg
-
-    logp_node = model.logp()
-    vars_to_check = model.value_vars
-    curvatures = []
-
-    free_vars = [var.name for var in model.value_vars]
-    filtered_point = {k: point[k] for k in free_vars if k in point}
-
-    n_vars = len(vars_to_check)
-    logger.info(
-        f"Computing sampler curvature for {n_vars} parameter group(s) "
-        f"(this compiles one gradient graph per group and can take a while)..."
-    )
-    t_start = time.time()
-
-    for i, var in enumerate(vars_to_check):
-        grad = ptg.grad(logp_node, var)
-
-        try:
-            curv = ptg.grad(grad.sum(), var)
-            fn = model.compile_fn(curv, on_unused_input="ignore")
-            val = np.atleast_1d(fn(filtered_point))
-        except ValueError:
-            # Some physics ops (e.g. exoplanet_core's limb-darkening solution-vector
-            # op used by the transit component) only implement a first-order
-            # pullback, so a second nested ptg.grad() through them raises
-            # "Backpropagation is only supported for the solution vector".
-            # Fall back to a central-difference estimate of the Hessian diagonal
-            # built from the (working) first-order gradient function.
-            logger.info(
-                f"  [{i + 1}/{n_vars}] {var.name}: exact 2nd derivative "
-                f"unsupported by an op in the graph, falling back to "
-                f"finite differences"
-            )
-            grad_fn = model.compile_fn(grad, on_unused_input="ignore")
-            x0 = np.atleast_1d(
-                np.asarray(filtered_point[var.name], dtype=float)
-            )
-            orig_shape = np.asarray(filtered_point[var.name]).shape
-            val = np.empty(x0.size)
-            eps = 1e-5 * np.maximum(np.abs(x0), 1.0)
-            for j in range(x0.size):
-                xp, xm = x0.copy(), x0.copy()
-                xp[j] += eps[j]
-                xm[j] -= eps[j]
-                pt_plus = dict(
-                    filtered_point, **{var.name: xp.reshape(orig_shape)}
-                )
-                pt_minus = dict(
-                    filtered_point, **{var.name: xm.reshape(orig_shape)}
-                )
-                gp = np.atleast_1d(grad_fn(pt_plus)).sum()
-                gm = np.atleast_1d(grad_fn(pt_minus)).sum()
-                val[j] = (gp - gm) / (2 * eps[j])
-
-        curvatures.append(val)
-        elapsed = time.time() - t_start
-        logger.info(
-            f"  [{i + 1}/{n_vars}] {var.name} done ({elapsed:.1f}s elapsed)"
-        )
-
-    return np.concatenate(curvatures)

@@ -1,12 +1,10 @@
 import logging
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 import astropy.units as u
-import matplotlib.pyplot as plt
 import pymc as pm
 import pytensor
 import pytensor.tensor as pt
@@ -25,6 +23,22 @@ class RVInstrument(Instrument):
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
         self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
+        # Rossiter-McLaughlin: a file may set `rm: <orbit_name>` to add the
+        # in-transit RM distortion of that orbit to this instrument's RV
+        # model (off by default -> the RV likelihood is unchanged). Optional
+        # `rm_band: <band_name>` selects the limb darkening; else defaults.
+        self.rm_orbit = [c.get("rm") for c in self.config]
+        self.rm_band = [c.get("rm_band") for c in self.config]
+        # `rm_model: hirano2010 | hirano2011` (default hirano2011). hirano2010 is
+        # the fast closed-form series; hirano2011 the disk integral.
+        self.rm_model = [c.get("rm_model", "hirano2011") for c in self.config]
+        _valid_rm = {"hirano2010", "hirano2011"}
+        for m in self.rm_model:
+            if m not in _valid_rm:
+                raise ValueError(
+                    f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
+                    f"{sorted(_valid_rm)}."
+                )
         self.total_detrend_cols = 0
 
     @property
@@ -82,8 +96,12 @@ class RVInstrument(Instrument):
                     "'m/s'."
                 ),
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(("time", "rv", "err")),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
             cls._gp_config_schema(),
+            cls._likelihood_config_schema(),
         ]
 
     def load_data(self, system):
@@ -98,13 +116,11 @@ class RVInstrument(Instrument):
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
-        for i, file in enumerate(self.files):
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # One sort per file, before anything is derived from it: keeps the
+        for i in range(self.n_elements):
+            # Shared reader: columns:, mask:, time_* conversion, then one
+            # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
-            df = self._sort_by_time(df)
+            df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
             n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
             all_times.append(df.iloc[:, 0].values)
@@ -150,6 +166,13 @@ class RVInstrument(Instrument):
             self.inst_map,
             user_factor=(u.solRad / u.d).to(u.m / u.s),
         )
+        # Optional per-file robust likelihood (no-op unless `likelihood:` is
+        # set).  Same unit conversion: out_scale is declared in m/s.
+        self._prepare_robust(
+            self.err,
+            self.inst_map,
+            user_factor=(u.solRad / u.d).to(u.m / u.s),
+        )
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -165,6 +188,7 @@ class RVInstrument(Instrument):
         self.manifest = {"gamma": "default"}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
+        self._register_robust(self.manifest)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {
@@ -228,6 +252,28 @@ class RVInstrument(Instrument):
             orbits.get_radial_velocity(time, K_vec, omap), axis=1
         )
 
+        # 1b. Rossiter-McLaughlin in-transit distortion. No-op unless a file
+        # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
+        # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
+        # the internal RV unit (solRad/d) and add only to that file's rows.
+        if any(self.rm_orbit):
+            from ..rm import compute_rm_rv, resolve_rm_indices
+
+            rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
+            for i, oname in enumerate(self.rm_orbit):
+                if not oname:
+                    continue
+                oidx, pidx, bidx = resolve_rm_indices(
+                    system, oname, self.rm_band[i]
+                )
+                rm_ms = compute_rm_rv(
+                    system, time, oidx, pidx, bidx, model=self.rm_model[i]
+                )  # (N_obs,) m/s
+                rm_internal = rm_ms / rv_ms_per_internal
+                rv_model += pt.switch(
+                    pt.eq(self.inst_map_tensor, i), rm_internal, 0.0
+                )
+
         # detrending
         if self.total_detrend_cols > 0:
             detrend = pm.Data("rv_detrend", self.detrend_matrix)
@@ -244,7 +290,7 @@ class RVInstrument(Instrument):
         )
 
     def compile_plotters(self, model, system):
-        """Compiles the fast PyTensor functions used by plot_unphased and plot_phased."""
+        """Compiles the fast PyTensor functions used by the plot_data specs."""
         # 1. We need a time grid input
         t_input = pt.vector("t_input")
 
@@ -260,6 +306,43 @@ class RVInstrument(Instrument):
 
             # The matrix of shape (N_times, N_member_orbits)
             rv_matrix_node = orbits.get_radial_velocity(t_input, K_vec, omap)
+
+            # Rossiter-McLaughlin: fold the in-transit distortion into the
+            # plotted model (it is part of the model the likelihood fits), so
+            # the RM anomaly shows in BOTH the unphased (full) and phased
+            # (per-orbit) RV panels. Added to the RM orbit's own matrix column.
+            # No-op unless a file set `rm:`.
+            if any(self.rm_orbit):
+                from ..rm import compute_rm_rv, resolve_rm_indices
+
+                rv_ms_per_internal = float((u.solRad / u.d).to(u.m / u.s))
+                omap_list = list(omap)
+                seen = set()
+                for i, oname in enumerate(self.rm_orbit):
+                    if not oname or oname in seen:
+                        continue
+                    seen.add(oname)
+                    oidx, pidx, bidx = resolve_rm_indices(
+                        system, oname, self.rm_band[i]
+                    )
+                    if oidx not in omap_list:
+                        continue
+                    col = omap_list.index(oidx)
+                    rm_col = (
+                        compute_rm_rv(
+                            system,
+                            t_input,
+                            oidx,
+                            pidx,
+                            bidx,
+                            model=self.rm_model[i],
+                        )
+                        / rv_ms_per_internal
+                    )
+                    rv_matrix_node = pt.set_subtensor(
+                        rv_matrix_node[:, col], rv_matrix_node[:, col] + rm_col
+                    )
+
             rv_full_node = pt.sum(rv_matrix_node, axis=1)
 
             # Retain the symbolic nodes and their time input so plot_data
@@ -358,7 +441,7 @@ class RVInstrument(Instrument):
         """
         Phase grid, isolated model curve, and the per-observation
         background (all other member orbits' signal) for one member
-        orbit -- shared by plot_phased() and plot_data().
+        orbit -- used by plot_data() (and via it plot()).
         """
         factor = self._rv_factor()
         P_ref = float(
@@ -397,163 +480,14 @@ class RVInstrument(Instrument):
         }
 
     def plot(self, system, points, filename_prefix="debug"):
-        self.plot_unphased(system, points, filename_prefix=filename_prefix)
-        self.plot_phased(system, points, filename_prefix=filename_prefix)
+        """Render the unphased + per-orbit phased PDFs from plot_data specs.
 
-    def plot_unphased(self, system, points, filename_prefix="debug"):
+        The specs are the single description of these plots -- the GUI draws
+        the same ones via plotly (see plotrender.py's module docstring).
         """
-        Generates a non-phased RV plot (spaghetti or single model).
-        Saves to {filename_prefix}_RV_unphased.pdf
-        """
+        from exozippy.plotrender import plot_via_specs
 
-        if isinstance(points, dict):
-            points = [points]
-        if len(points) == 0:
-            logger.warning("No points provided for plotting.")
-            return
-
-        plt.figure(figsize=(12, 6))
-
-        factor = self._rv_factor()
-
-        # 1. Plot the Model Ensemble (The Spaghetti)
-        for idx, point in enumerate(points):
-            try:
-                # Shared prep: summed RV across all orbits, already in m/s
-                t_pretty, y_model = self._eval_unphased_model(system, point)
-
-                # Transparency: Solid for one point, faint for spaghetti
-                alpha = 0.8 if len(points) == 1 else 0.1
-                plt.plot(
-                    t_pretty, y_model, "r-", lw=1.5, alpha=alpha, zorder=2
-                )
-
-                # One "physical + GP" curve per GP instrument, drawn per draw
-                # so the spaghetti shows the GP's own uncertainty too.
-                for i, t_gp, y_gp in self._eval_unphased_gp_models(
-                    system, point
-                ):
-                    plt.plot(
-                        t_gp,
-                        y_gp,
-                        "-",
-                        lw=1.0,
-                        alpha=alpha,
-                        zorder=3,
-                        color=f"C{i}",
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to evaluate model for draw {idx}: {e}")
-                continue
-
-        # 2. Plot the Actual Data per Instrument
-        # We center the plot by the reference instrument's gamma from the first point
-        ref_point = points[0]
-        for i in range(self.n_elements):
-            mask = self.inst_map == i
-
-            # Extract Gamma for this specific instrument
-            g = self._instrument_gamma(ref_point, i)
-
-            plt.errorbar(
-                self.time[mask],
-                (self.rv[mask] - g) * factor,
-                yerr=self.err[mask] * factor,
-                fmt="o",
-                label=self.names[i],
-                alpha=0.6,
-                zorder=1,
-            )
-
-        plt.xlabel("Time [BJD]")
-        plt.ylabel("Relative RV [m/s]")
-        plt.title(f"Unphased RV Model: {system.name}")
-        plt.legend(loc="best", fontsize="small")
-        plt.tight_layout()
-
-        # 3. Save to PDF
-        pdf_path = f"{filename_prefix}_RV_unphased.pdf"
-        plt.savefig(pdf_path)
-        plt.close()
-
-    def plot_phased(self, system, points, filename_prefix="debug"):
-        """
-        Generates a phased RV plot for each orbit the observed star is a
-        body of, isolating that orbit's signal from the rest.
-        """
-        if isinstance(points, dict):
-            points = [points]
-
-        omap = self._plot_orbit_map
-
-        # Iterate over the member orbits (columns of the compiled matrix)
-        for col, o_idx in enumerate(omap):
-            plt.figure(figsize=(10, 6))
-
-            # 1. Setup Phase Grid using the reference point (first draw)
-            ref_point = points[0]
-
-            # Shared prep (phase grid, isolated model, per-obs background)
-            prep = self._phased_arrays(system, ref_point, col, o_idx)
-            P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
-            factor = prep["factor"]
-
-            # 2. Plot Model Spaghetti
-            for idx, point in enumerate(points):
-                p_prep = (
-                    prep
-                    if point is ref_point
-                    else self._phased_arrays(system, point, col, o_idx)
-                )
-                alpha = 0.8 if len(points) == 1 else 0.1
-                plt.plot(
-                    p_prep["phase_model"],
-                    p_prep["y_model"],
-                    "r-",
-                    alpha=alpha,
-                    lw=1,
-                    zorder=2,
-                )
-
-            # 3. Plot Phased Data (Isolating the planet)
-            other_signals = prep["other_signals"]
-
-            for i in range(self.n_elements):
-                mask = self.inst_map == i
-
-                # Subtract Gamma and other planet signals
-                g = self._instrument_gamma(ref_point, i)
-                cleaned_rv = self.rv[mask] - g - other_signals[mask]
-
-                # Phase the actual data points
-                data_phases = np.mod(
-                    (self.time[mask] - tc_ref) / P_ref + 0.25, 1.0
-                )
-
-                plt.errorbar(
-                    data_phases,
-                    cleaned_rv * factor,
-                    yerr=self.err[mask] * factor,
-                    fmt="o",
-                    label=self.names[i],
-                    alpha=0.6,
-                    zorder=1,
-                )
-
-            plt.axhline(0, color="black", linestyle=":", alpha=0.5)
-            plt.xlabel(f"Phase (P = {P_ref:.5f} d, $T_c$ at 0.25)")
-            plt.ylabel("Isolated RV [m/s]")
-            plt.title(
-                f"Phased RV: {system.orbit.names[o_idx]} ({system.name})"
-            )
-            plt.legend(loc="best", fontsize="small")
-            plt.tight_layout()
-
-            pdf_path = (
-                f"{filename_prefix}_RV_phased_{system.orbit.names[o_idx]}.pdf"
-            )
-            plt.savefig(pdf_path)
-            plt.close()
+        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
 
     def plot_data(self, system, point=None):
         """
@@ -599,7 +533,7 @@ class RVInstrument(Instrument):
                         kind="line",
                         x=t_gp,
                         y=y_gp,
-                        style={"series_index": int(i)},
+                        style={"series_index": int(i), "lw": 1.0},
                     )
                 )
         for i in range(self.n_elements):
@@ -617,16 +551,28 @@ class RVInstrument(Instrument):
                     style=self._data_trace_style(i),
                 )
             )
+        # The data traces are gamma-subtracted, so they move with the point
+        # too (dynamic_data) and the gamma slider must reach this component
+        # through param_deps -- gamma is applied in numpy, not through the
+        # symbolic model node, so the graph walk alone would miss it.
+        gamma_label = getattr(getattr(self, "gamma", None), "label", None)
+        if point is not None and gamma_label and gamma_label not in model_deps:
+            model_deps = model_deps + [gamma_label]
         specs.append(
             PlotSpec(
                 id=f"{self.prefix}.unphased",
                 component={"yaml_key": self.prefix, "instance": None},
-                title=f"Unphased RV: {getattr(system, 'name', '')}",
+                title=f"Unphased RV Model: {getattr(system, 'name', '')}",
                 xlabel="Time [BJD]",
                 ylabel="Relative RV [m/s]",
                 traces=traces,
                 param_deps=model_deps,
-                meta={"phase_folded": False},
+                meta={
+                    "phase_folded": False,
+                    "file_tag": "RV_unphased",
+                    "figsize": (12, 6),
+                    "dynamic_data": True,
+                },
             )
         )
 
@@ -636,6 +582,12 @@ class RVInstrument(Instrument):
             deps = self._model_trace_param_deps(
                 getattr(self, "_rv_matrix_node", None), system
             )
+            # The phased DATA moves with the point too: the fold uses tc/P,
+            # and the cleaning subtracts gamma + the other orbits' signal
+            # (all applied in numpy) -- hence dynamic_data below and the
+            # explicit gamma dep the graph walk cannot see.
+            if gamma_label and gamma_label not in deps:
+                deps = deps + [gamma_label]
             for col, o_idx in enumerate(omap):
                 prep = self._phased_arrays(system, point, col, o_idx)
                 P_ref, tc_ref = prep["P_ref"], prep["tc_ref"]
@@ -674,7 +626,10 @@ class RVInstrument(Instrument):
                     PlotSpec(
                         id=f"{self.prefix}.phased.{oname}",
                         component={"yaml_key": self.prefix, "instance": None},
-                        title=f"Phased RV: {oname}",
+                        title=(
+                            f"Phased RV: {oname} "
+                            f"({getattr(system, 'name', '')})"
+                        ),
                         xlabel=f"Phase (P = {P_ref:.5f} d, Tc at 0.25)",
                         ylabel="Isolated RV [m/s]",
                         traces=otraces,
@@ -684,6 +639,10 @@ class RVInstrument(Instrument):
                             "orbit": oname,
                             "period": P_ref,
                             "tc": tc_ref,
+                            "file_tag": f"RV_phased_{oname}",
+                            "figsize": (10, 6),
+                            "hline_y": 0.0,
+                            "dynamic_data": True,
                         },
                     )
                 )

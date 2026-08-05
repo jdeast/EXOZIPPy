@@ -75,7 +75,6 @@ aberration are neglected.
 import logging
 
 import numpy as np
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +106,10 @@ class AstrometryInstrument(Instrument):
     # only that mode would make the `gp:` key silently mean different things
     # per dataset.  Instrument._load_gp_config raises on `gp:` here instead.
     supports_gp = False
+    # Same reasoning for the robust `likelihood:` key: the hogg mixture's
+    # out_scale is one scale in the data's own unit, and these files carry
+    # two observables in different units.  _load_likelihood_config raises.
+    supports_robust_likelihood = False
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -262,6 +265,17 @@ class AstrometryInstrument(Instrument):
                 "required": False,
                 "doc": "Reference epoch for the astrometric positions.",
             },
+            cls._mask_config_schema(),
+            cls._columns_config_schema(
+                ("time", "..."),
+                detrend=False,
+                note=(
+                    "The roles depend on the file's mode -- gaia: time, w, "
+                    "err, psi; abs: time, ra, dec, err_e, err_n; rel: time, "
+                    "sep, err_sep, pa, err_pa."
+                ),
+            ),
+            *cls._time_config_schema(),
             cls._plot_style_config_schema(),
         ]
 
@@ -284,14 +298,17 @@ class AstrometryInstrument(Instrument):
         ra_cfg = np.atleast_1d(ra_cfg)
         dec_cfg = np.atleast_1d(dec_cfg)
 
-        for i, file in enumerate(self.files):
+        mode_roles = {
+            "gaia": ("time", "w", "err", "psi"),
+            "abs": ("time", "ra", "dec", "err_e", "err_n"),
+            "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
+        }
+        for i in range(self.n_elements):
             mode = self.modes[i]
-            df = pd.read_csv(
-                file, sep=r"\s+", engine="c", header=None, comment="#"
-            )
-            # Sort before the parallax factors are computed from t, so every
+            # Shared reader: columns:, mask:, time_* conversion, then sort
+            # before the parallax factors are computed from t, so every
             # per-epoch quantity stays aligned regardless of mode.
-            df = self._sort_by_time(df)
+            df = self._read_data(i, roles=mode_roles[mode], detrend=False)
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
@@ -733,10 +750,15 @@ class AstrometryInstrument(Instrument):
 
         # Photocenter orbit (summed over the star's member orbits), per
         # gaia/abs instrument (beta varies); None when nothing moves the star.
+        # The symbolic (dE, dN) node pairs are retained so plot_data can
+        # derive param_deps by walking the graph (see
+        # Component._model_trace_param_deps).
         self._compiled_photo = []
+        self._photo_nodes = []
         for i in range(self.n_elements):
             if self.modes[i] == "rel":
                 self._compiled_photo.append(None)
+                self._photo_nodes.append(None)
                 continue
             beta = self._sed_beta_node(system, i)
             a_phot, omap = self._photocenter_terms(
@@ -744,14 +766,18 @@ class AstrometryInstrument(Instrument):
             )
             if a_phot is None:
                 self._compiled_photo.append(None)
+                self._photo_nodes.append(None)
                 continue
             dE_orb, dN_orb = system.orbit.get_sky_position(
                 t_input, a_phot, omap
             )
+            dE_node = pt.sum(dE_orb, axis=1)
+            dN_node = pt.sum(dN_orb, axis=1)
+            self._photo_nodes.append((dE_node, dN_node))
             self._compiled_photo.append(
                 pytensor.function(
                     inputs=[t_input] + param_symbols,
-                    outputs=[pt.sum(dE_orb, axis=1), pt.sum(dN_orb, axis=1)],
+                    outputs=[dE_node, dN_node],
                     on_unused_input="ignore",
                 )
             )
@@ -759,11 +785,14 @@ class AstrometryInstrument(Instrument):
         # Relative model per rel instrument (nested photocenter terms
         # included; matches the likelihood graph exactly)
         self._compiled_rel = []
+        self._rel_nodes = []
         for i in range(self.n_elements):
             if self.modes[i] != "rel":
                 self._compiled_rel.append(None)
+                self._rel_nodes.append(None)
                 continue
             dE, dN = self._rel_model(system, i, t_input)
+            self._rel_nodes.append((dE, dN))
             self._compiled_rel.append(
                 pytensor.function(
                     inputs=[t_input] + param_symbols,
@@ -840,95 +869,224 @@ class AstrometryInstrument(Instrument):
         dN = (dec - d["dec_ref"]) * RAD2MAS + pm_dec * dt_yr + plx * d["P_N"]
         return dE, dN
 
+    def _node_pair_deps(self, nodes, system):
+        """Union of param_deps over a retained (dE, dN) node pair (or None)."""
+        if not nodes:
+            return []
+        deps = []
+        for node in nodes:
+            for label in self._model_trace_param_deps(node, system):
+                if label not in deps:
+                    deps.append(label)
+        return deps
+
     def plot(self, system, points, filename_prefix="debug"):
+        """Render the per-dataset PDFs from plot_data specs, then the
+        hand-drawn two-panel sky diagnostics for gaia/abs datasets.
+
+        The specs are the single description of the per-dataset plots --
+        the GUI draws the same ones via plotly (see plotrender.py's module
+        docstring).  plot_sky stays hand-drawn: its arrows and node
+        annotations are outside the PlotSpec vocabulary.
+        """
         if not hasattr(self, "_compiled_photo") and not hasattr(
             self, "_compiled_rel"
         ):
             return
+        from exozippy.plotrender import plot_via_specs
+
+        plot_via_specs(self, system, points, filename_prefix=filename_prefix)
+
         if isinstance(points, dict):
             points = [points]
         if len(points) == 0:
-            logger.warning("No points provided for plotting.")
             return
         ref_point = points[0]
-
         for i, d in enumerate(self.datasets):
-            t = d["time"]
-            t_pretty = np.linspace(t.min(), t.max(), 2000)
-            plt.figure(figsize=(12, 6))
+            if d["mode"] in ("gaia", "abs"):
+                self.plot_sky(system, ref_point, i, filename_prefix)
 
-            if d["mode"] == "gaia":
-                # Along-scan residuals about the linear (pm+plx) model
-                dE_lin, dN_lin = self._linear_terms(d, t, ref_point, system)
-                for idx, point in enumerate(points):
+    def plot_data(self, system, point=None):
+        """
+        GUI plot specs for the astrometry instrument: one chart per
+        dataset (along-scan vs time for gaia mode, sky-plane for abs/rel).
+        With point=None only the observed data traces are returned (raw
+        preview, usable right after load_data, before build_model); with a
+        point, model traces are added via the compiled plotters.  See
+        Component.plot_data and plotspec.PlotSpec.
+        """
+        from exozippy.plotspec import PlotSpec, Trace
+
+        sysname = getattr(system, "name", "")
+        photo_nodes = getattr(self, "_photo_nodes", None)
+        rel_nodes = getattr(self, "_rel_nodes", None)
+        rel_fns = getattr(self, "_compiled_rel", None)
+
+        specs = []
+        for i, d in enumerate(self.datasets):
+            name = d["name"]
+            t = d["time"]
+            mode = d["mode"]
+            traces = []
+            deps = []
+            meta = {
+                "file_tag": f"astrometry_{name}",
+                "figsize": (12, 6),
+            }
+
+            if mode == "gaia":
+                # Along-scan data; the model (when a point is given) is the
+                # full pm+plx+orbit prediction at the DATA times, drawn as
+                # red points (kind "scatter") like the old "r." markers.
+                traces.append(
+                    Trace(
+                        name="",
+                        role="data",
+                        kind="scatter",
+                        x=t,
+                        y=d["w"],
+                        yerr=d["err"],
+                        style=self._data_trace_style(i),
+                    )
+                )
+                if point is not None:
+                    dE_lin, dN_lin = self._linear_terms(d, t, point, system)
                     vals = self._point_values(system, point)
                     dE_orb, dN_orb = self._eval_photo(i, t, vals)
                     w_model = (dE_lin + dE_orb) * d["sin_psi"] + (
                         dN_lin + dN_orb
                     ) * d["cos_psi"]
-                    alpha = 0.8 if len(points) == 1 else 0.1
-                    plt.plot(t, w_model, "r.", alpha=alpha, zorder=2)
-                plt.errorbar(
-                    t, d["w"], yerr=d["err"], fmt="o", alpha=0.6, zorder=1
-                )
-                plt.xlabel("Time [BJD_TDB]")
-                plt.ylabel("Along-scan position [mas]")
-                plt.title(f"Epoch astrometry: {d['name']} ({system.name})")
+                    deps = self._node_pair_deps(
+                        photo_nodes[i] if photo_nodes else None, system
+                    )
+                    traces.append(
+                        Trace(
+                            name="model",
+                            role="model",
+                            kind="scatter",
+                            x=t,
+                            y=w_model,
+                        )
+                    )
+                xlabel = "Time [BJD_TDB]"
+                ylabel = "Along-scan position [mas]"
+                title = f"Epoch astrometry: {name} ({sysname})"
 
-            elif d["mode"] == "abs":
-                dE_lin, dN_lin = self._linear_terms(d, t, ref_point, system)
-                vals = self._point_values(system, ref_point)
-                dE_orb, dN_orb = self._eval_photo(i, t, vals)
-                plt.errorbar(
-                    d["dE_obs"] - dE_lin,
-                    d["dN_obs"] - dN_lin,
-                    xerr=d["err_E"],
-                    yerr=d["err_N"],
-                    fmt="o",
-                    alpha=0.6,
-                    zorder=1,
-                    label="data - (pm+plx)",
+            elif mode == "abs":
+                # Sky-plane: data minus the linear (pm+plx) model when a
+                # point supplies it; the raw offsets otherwise (a valid
+                # data-only preview).
+                if point is not None:
+                    dE_lin, dN_lin = self._linear_terms(d, t, point, system)
+                    x_data = d["dE_obs"] - dE_lin
+                    y_data = d["dN_obs"] - dN_lin
+                    data_name = "data - (pm+plx)"
+                else:
+                    x_data = d["dE_obs"]
+                    y_data = d["dN_obs"]
+                    data_name = "data"
+                traces.append(
+                    Trace(
+                        name=data_name,
+                        role="data",
+                        kind="scatter",
+                        x=x_data,
+                        y=y_data,
+                        xerr=d["err_E"],
+                        yerr=d["err_N"],
+                        style=self._data_trace_style(i),
+                    )
                 )
-                t_lin_pretty = np.linspace(t.min(), t.max(), 2000)
-                dE_p, dN_p = self._eval_photo(i, t_lin_pretty, vals)
-                plt.plot(
-                    dE_p, dN_p, "r-", lw=1, zorder=2, label="photocenter orbit"
-                )
-                plt.gca().invert_xaxis()  # East to the left
-                plt.gca().set_aspect("equal", adjustable="datalim")
-                plt.xlabel(r"$\Delta\alpha^*$ [mas]")
-                plt.ylabel(r"$\Delta\delta$ [mas]")
-                plt.title(f"Absolute astrometry: {d['name']} ({system.name})")
-                plt.legend(loc="best", fontsize="small")
+                if point is not None:
+                    vals = self._point_values(system, point)
+                    t_pretty = np.linspace(t.min(), t.max(), 2000)
+                    dE_p, dN_p = self._eval_photo(i, t_pretty, vals)
+                    deps = self._node_pair_deps(
+                        photo_nodes[i] if photo_nodes else None, system
+                    )
+                    traces.append(
+                        Trace(
+                            name="photocenter orbit",
+                            role="model",
+                            kind="line",
+                            x=dE_p,
+                            y=dN_p,
+                            style={"legend": True, "lw": 1},
+                        )
+                    )
+                meta["x_inverted"] = True  # East to the left
+                meta["aspect_equal"] = True
+                # The data trace subtracts the point's pm+plx linear terms,
+                # so live evals must re-ship it along with the model.
+                meta["dynamic_data"] = True
+                xlabel = r"$\Delta\alpha^*$ [mas]"
+                ylabel = r"$\Delta\delta$ [mas]"
+                title = f"Absolute astrometry: {name} ({sysname})"
 
             else:  # rel
-                vals = self._point_values(system, ref_point)
-                dE_m, dN_m = self._compiled_rel[i](
-                    t_pretty.astype(np.float64), *vals
+                traces.append(
+                    Trace(
+                        name="data",
+                        role="data",
+                        kind="scatter",
+                        x=d["sep"] * np.sin(d["pa"]),
+                        y=d["sep"] * np.cos(d["pa"]),
+                        style=self._data_trace_style(i),
+                    )
                 )
-                plt.errorbar(
-                    d["sep"] * np.sin(d["pa"]),
-                    d["sep"] * np.cos(d["pa"]),
-                    fmt="o",
-                    alpha=0.6,
-                    zorder=1,
-                    label="data",
+                if point is not None and rel_fns and rel_fns[i] is not None:
+                    vals = self._point_values(system, point)
+                    t_pretty = np.linspace(t.min(), t.max(), 2000)
+                    dE_m, dN_m = rel_fns[i](t_pretty.astype(np.float64), *vals)
+                    deps = self._node_pair_deps(
+                        rel_nodes[i] if rel_nodes else None, system
+                    )
+                    traces.append(
+                        Trace(
+                            name="model",
+                            role="model",
+                            kind="line",
+                            x=dE_m,
+                            y=dN_m,
+                            style={"legend": True, "lw": 1},
+                        )
+                    )
+                    # Primary star at the origin (a static annotation,
+                    # expressed as a one-point scatter "model" trace).
+                    traces.append(
+                        Trace(
+                            name="primary",
+                            role="model",
+                            kind="scatter",
+                            x=np.array([0.0]),
+                            y=np.array([0.0]),
+                            style={
+                                "color": "k",
+                                "marker": "*",
+                                "legend": False,
+                            },
+                        )
+                    )
+                meta["x_inverted"] = True  # East to the left
+                meta["aspect_equal"] = True
+                xlabel = r"$\Delta\alpha^*$ [mas]"
+                ylabel = r"$\Delta\delta$ [mas]"
+                title = f"Relative astrometry: {name} ({sysname})"
+
+            specs.append(
+                PlotSpec(
+                    id=f"{self.prefix}.{name}",
+                    component={"yaml_key": self.prefix, "instance": name},
+                    title=title,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    traces=traces,
+                    param_deps=deps,
+                    meta=meta,
                 )
-                plt.plot(dE_m, dN_m, "r-", lw=1, zorder=2, label="model")
-                plt.plot(0, 0, "k*", markersize=12)
-                plt.gca().invert_xaxis()
-                plt.gca().set_aspect("equal", adjustable="datalim")
-                plt.xlabel(r"$\Delta\alpha^*$ [mas]")
-                plt.ylabel(r"$\Delta\delta$ [mas]")
-                plt.title(f"Relative astrometry: {d['name']} ({system.name})")
-                plt.legend(loc="best", fontsize="small")
+            )
 
-            plt.tight_layout()
-            plt.savefig(f"{filename_prefix}_astrometry_{d['name']}.pdf")
-            plt.close()
-
-            if d["mode"] in ("gaia", "abs"):
-                self.plot_sky(system, ref_point, i, filename_prefix)
+        return specs
 
     def plot_sky(self, system, point, i, filename_prefix="debug"):
         """

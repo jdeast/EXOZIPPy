@@ -84,3 +84,71 @@ def calc_beam_from_K(K):
     """
     k_mps = K * SOLRAD_PER_DAY_TO_MPS
     return BEAM_FACTOR * (k_mps / C_MPS) * 1e6
+
+
+# --- Chen & Kipping 2017 mass-radius relation -------------------------------
+# Ported from EXOFASTv2's massradius_chen.pro (Chen & Kipping 2017, ApJ 834,
+# 17, Table 2).
+# https://ui.adsabs.harvard.edu/abs/2017ApJ...834...17C/abstract
+# A continuous broken power law R(M) in Earth units: the segment
+# normalizations chain so adjacent segments meet at the break masses.
+# Segments: Terran worlds (<= 2.04 Mearth) / Neptunian worlds (<= 0.414
+# Mjup) / Jovian worlds (<= 0.08 Msun) / Stars.
+
+CHEN_MASS_BREAKS = (2.04, 131.58079, 26644.8321)  # Mearth
+CHEN_EXPONENTS = (0.279, 0.589, -0.044, 0.881)
+# Per-segment scatter, as a fraction of the predicted radius.
+CHEN_RP_FRAC = (0.0403, 0.1460, 0.0737, 0.0443)
+
+_CHEN_T1, _CHEN_T2, _CHEN_T3 = CHEN_MASS_BREAKS
+_CHEN_S1, _CHEN_S2, _CHEN_S3, _CHEN_S4 = CHEN_EXPONENTS
+_CHEN_N1 = 1.0
+_CHEN_N2 = _CHEN_T1 ** (_CHEN_S1 - _CHEN_S2)
+_CHEN_N3 = _CHEN_N2 * _CHEN_T2 ** (_CHEN_S2 - _CHEN_S3)
+_CHEN_N4 = _CHEN_N3 * _CHEN_T3 ** (_CHEN_S3 - _CHEN_S4)
+
+
+@register_physics
+def calc_chen_radius(mpearth):
+    """Chen & Kipping 2017 predicted radius (Rearth) from mass (Mearth).
+
+    mpearth must be positive: every switch branch (and its gradient) is
+    evaluated for every input, and a non-integer power of a negative mass
+    is NaN.  Callers clip first (EXOFASTv2 uses mpearth > 1d-10).
+    """
+    return pt.switch(
+        mpearth <= _CHEN_T1,
+        _CHEN_N1 * mpearth**_CHEN_S1,
+        pt.switch(
+            mpearth <= _CHEN_T2,
+            _CHEN_N2 * mpearth**_CHEN_S2,
+            pt.switch(
+                mpearth <= _CHEN_T3,
+                _CHEN_N3 * mpearth**_CHEN_S3,
+                _CHEN_N4 * mpearth**_CHEN_S4,
+            ),
+        ),
+    )
+
+
+@register_physics
+def calc_chen_radius_sigma(mpearth):
+    """Scatter (Rearth) of the Chen & Kipping prediction at mass mpearth.
+
+    Fractional per segment, so it scales with the prediction.  Same
+    positive-mass requirement as calc_chen_radius.
+    """
+    frac = pt.switch(
+        mpearth <= _CHEN_T1,
+        CHEN_RP_FRAC[0],
+        pt.switch(
+            mpearth <= _CHEN_T2,
+            CHEN_RP_FRAC[1],
+            pt.switch(
+                mpearth <= _CHEN_T3,
+                CHEN_RP_FRAC[2],
+                CHEN_RP_FRAC[3],
+            ),
+        ),
+    )
+    return calc_chen_radius(mpearth) * frac

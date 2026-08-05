@@ -3,6 +3,7 @@ import {
   api,
   type DocCommand,
   type PlotSpec,
+  type TuneEvalTrace,
   type TuneParam,
   type TuneResult,
   type TuneStatus,
@@ -57,6 +58,7 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [staleReason, setStaleReason] = useState<string | null>(null);
+  const [docDirty, setDocDirty] = useState(false);
 
   // Filters
   const [search, setSearch] = useState("");
@@ -71,11 +73,18 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   const ensureDoc = useCallback(async () => {
     if (!configPath) return;
     try {
-      await api.doc();
+      const d = await api.doc();
+      setDocDirty(d.dirty);
     } catch {
-      await api.docOpen(configPath);
+      const d = await api.docOpen(configPath);
+      setDocDirty(d.dirty);
     }
   }, [configPath]);
+
+  // One data-plots fetch per solve: the worker ships data-only specs with its
+  // "compiling" progress message so the observations render while the model
+  // compiles; this ref stops the 400 ms poll from refetching them.
+  const dataPlotsLoaded = useRef(false);
 
   // Poll solve status until it leaves the transient phases.
   const startPolling = useCallback(() => {
@@ -84,6 +93,23 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
       try {
         const st = await api.tuneStatus();
         setStatus(st);
+        if (
+          st.has_data_plots &&
+          !dataPlotsLoaded.current &&
+          (st.phase === "solving" || st.phase === "compiling")
+        ) {
+          dataPlotsLoaded.current = true;
+          try {
+            const dp = await api.tuneDataPlots();
+            // Only fill an empty canvas: during a re-Solve the previous full
+            // (data+model) plots are better than a data-only downgrade.
+            if (dp.plots.length) {
+              setSpecs((prev) => (prev.length ? prev : dp.plots));
+            }
+          } catch {
+            dataPlotsLoaded.current = false; // transient; retry next poll
+          }
+        }
         if (st.phase === "live" && st.has_result) {
           if (pollTimer.current) window.clearInterval(pollTimer.current);
           pollTimer.current = null;
@@ -110,11 +136,26 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     []
   );
 
+  const solve = useCallback(async () => {
+    setError(null);
+    dataPlotsLoaded.current = false;
+    await ensureDoc();
+    try {
+      const st = await api.tuneSolve();
+      setStatus(st);
+      startPolling();
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }, [ensureDoc, startPolling]);
+
   // Restore from the server-side session on (re)mount. The solve runs in a
   // background thread on the server; its phase/result/hash outlive this
   // component, so switching tabs mid-solve must NOT lose it. We pick an
-  // in-flight solve back up, re-hydrate a finished one, or (when idle) prewarm
-  // the evaluator worker so the eventual first Solve is faster.
+  // in-flight solve back up, re-hydrate a finished one, or -- when idle with a
+  // config open -- kick the first Solve off automatically: the Tune tab is the
+  // landing page, and the natural first render is the data with the solved
+  // model over it, not an empty pane waiting for a button.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -147,23 +188,24 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         }
       } else if (st.phase === "error") {
         setError(st.error || "solve failed");
-      } else {
-        // idle: warm the worker subprocess now so the first Solve is faster.
-        api.tunePrewarm().catch(() => {});
+      } else if (configPath) {
+        // idle + a config to work with: auto-run the first Solve.
+        solve();
       }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ensureDoc, startPolling]);
+  }, [ensureDoc, startPolling, solve, configPath]);
 
-  // Once a solve populates parameters, auto-select the first slider-tunable one
-  // so the detail panel shows a working slider immediately -- otherwise the
-  // right pane just says "Select a parameter" and it is not obvious that
-  // clicking a row in the tree is how you tune.
+  // Once a solve populates parameters, auto-select the first slider-tunable
+  // one so a working slider shows immediately -- otherwise it is not obvious
+  // that clicking a row in the tree is how you tune. Once only: clicking the
+  // active row deselects it, and re-auto-selecting would fight that.
+  const autoSelected = useRef(false);
   useEffect(() => {
-    if (!result || selected) return;
+    if (!result || selected || autoSelected.current) return;
     const first = Object.entries(result.parameters).find(
       ([, p]) =>
         !p.derived &&
@@ -172,25 +214,17 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         p.upper != null &&
         p.upper > p.lower
     );
-    if (first) setSelected(first[0]);
-  }, [result, selected]);
-
-  const solve = useCallback(async () => {
-    setError(null);
-    await ensureDoc();
-    try {
-      const st = await api.tuneSolve();
-      setStatus(st);
-      startPolling();
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+    if (first) {
+      autoSelected.current = true;
+      setSelected(first[0]);
     }
-  }, [ensureDoc, startPolling]);
+  }, [result, selected]);
 
   // Send a document command (undoable, RANK_USER) then refresh staleness.
   const runCommand = useCallback(async (cmd: DocCommand, structural: boolean) => {
     try {
-      await api.docCommand(cmd);
+      const next = await api.docCommand(cmd);
+      setDocDirty(next.dirty);
       if (structural) {
         const h = await api.tuneHash();
         setStale(h.stale);
@@ -201,21 +235,26 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     }
   }, []);
 
-  // Live eval: patch the affected model traces (both x and y -- a phased
-  // curve's x-grid moves too when period/tc is tuned) into the current specs.
+  // Live eval: patch the affected traces (both x and y -- a phased curve's
+  // x-grid moves too when period/tc is tuned) into the current specs. The
+  // payload carries model traces always, and data traces (with their errors)
+  // for dynamic_data specs -- phase folds, gamma offsets, flux alignment --
+  // so those panels track the slider instead of freezing.
   const applyEval = useCallback(
-    (updated: Record<string, Record<string, { x: (number | null)[]; y: (number | null)[] }>>) => {
+    (updated: Record<string, Record<string, TuneEvalTrace>>) => {
       setSpecs((prev) =>
         prev.map((s) => {
           const upd = updated[s.id];
           if (!upd) return s;
           return {
             ...s,
-            traces: s.traces.map((t) =>
-              t.role === "model" && upd[t.name] !== undefined
-                ? { ...t, x: upd[t.name].x as number[], y: upd[t.name].y as number[] }
-                : t
-            ),
+            traces: s.traces.map((t) => {
+              const u = upd[t.name];
+              if (u === undefined) return t;
+              const next = { ...t, x: u.x as number[], y: u.y as number[] };
+              if (u.yerr !== undefined) next.yerr = u.yerr;
+              return next;
+            }),
           };
         })
       );
@@ -302,6 +341,25 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         <span className={`tune-phase phase-${status?.phase || "idle"}`}>
           {phaseText[status?.phase || "idle"]}
         </span>
+        <button
+          className="save-btn"
+          disabled={!docDirty}
+          title="Write the tuned values to the params file"
+          onClick={async () => {
+            try {
+              const d = await api.docSave();
+              setDocDirty(d.dirty);
+            } catch (e) {
+              setError(String(e instanceof Error ? e.message : e));
+            }
+          }}
+        >
+          Save
+        </button>
+        <span
+          className={`dirty-dot ${docDirty ? "on" : ""}`}
+          title={docDirty ? "Unsaved changes" : "Saved"}
+        />
         <ProvenanceLegend />
         {error && <span className="tune-error">{error}</span>}
       </div>
@@ -314,7 +372,9 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
       )}
 
       <div className="tune-body">
-        {/* LEFT: searchable parameter tree */}
+        {/* LEFT: searchable parameter tree; the selected row expands into
+            the detail editor (slider/bounds/prior) right below itself, so
+            the rest of the window is all plots. */}
         <div className="tune-tree">
           <div className="tune-filters">
             <input
@@ -350,32 +410,51 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
           </div>
           {!result ? (
             <div className="muted tune-tree-empty">
-              Press Solve to populate parameters.
+              {status?.phase === "solving" || status?.phase === "compiling"
+                ? "Solving -- parameters appear when it finishes."
+                : "Press Solve to populate parameters."}
             </div>
           ) : (
             grouped.map(([key, paths]) => (
               <div key={key} className="tune-tree-group">
                 <div className="tune-tree-comp">{key}</div>
                 {paths.map((path) => (
-                  <ParamRow
-                    key={path}
-                    path={path}
-                    param={parameters[path]}
-                    active={selected === path}
-                    stale={stale}
-                    onClick={() => setSelected(path)}
-                  />
+                  <div key={path}>
+                    <ParamRow
+                      path={path}
+                      param={parameters[path]}
+                      active={selected === path}
+                      stale={stale}
+                      onClick={() =>
+                        setSelected(selected === path ? null : path)
+                      }
+                    />
+                    {selected === path && (
+                      <DetailPanel
+                        path={path}
+                        param={parameters[path]}
+                        live={live}
+                        stale={stale}
+                        onEval={doEval}
+                        onCommand={runCommand}
+                      />
+                    )}
+                  </div>
                 ))}
               </div>
             ))
           )}
         </div>
 
-        {/* CENTER: plots, highlighted by dependency on the selected param */}
+        {/* RIGHT: the plot grid, highlighted by dependency on the selected
+            parameter. A grid (instead of one wide column) keeps several
+            panels visible at once. */}
         <div className="tune-plots">
           {specs.length === 0 ? (
             <div className="muted tune-plots-empty">
-              Model plots appear here after Solve.
+              {status?.phase === "solving"
+                ? "Loading data..."
+                : "Plots appear here after Solve."}
             </div>
           ) : (
             specs.map((spec) => {
@@ -394,24 +473,6 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
                 </div>
               );
             })
-          )}
-        </div>
-
-        {/* RIGHT: detail panel for the selected parameter */}
-        <div className="tune-detail">
-          {selected && parameters[selected] ? (
-            <DetailPanel
-              path={selected}
-              param={parameters[selected]}
-              live={live}
-              stale={stale}
-              onEval={doEval}
-              onCommand={runCommand}
-            />
-          ) : (
-            <div className="muted tune-detail-empty">
-              Select a parameter to edit its value, bounds, and prior.
-            </div>
           )}
         </div>
       </div>

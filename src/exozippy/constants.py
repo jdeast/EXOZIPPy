@@ -25,6 +25,11 @@ FROM_V_D_TO_PM = 1.0 / FROM_PM_D_TO_V  # = 0.211 - opposite unit conversion:
 PC_TO_RSUN_CONST = u.pc.to(u.R_sun)
 ANG_TO_MICRON_CONST = u.Angstrom.to(u.micron)
 
+# Internal planet units are solar; the Chen & Kipping relation is in Earth
+# units.  IAU 2015 Resolution B3 nominal values via astropy.
+MSUN_TO_MEARTH = (1.0 * u.M_sun).to(u.M_earth).value
+RSUN_TO_REARTH = (1.0 * u.R_sun).to(u.R_earth).value
+
 # --- 4. MICROLENSING CONSTANTS ---
 # Kappa: 4G / (c^2 * au) in units of mas / M_sun
 KAPPA = (

@@ -313,6 +313,30 @@ def test_transit_model_trace_matches_shared_helper(transit_built):
     np.testing.assert_allclose(model_trace.y, y_expected)
 
 
+def test_transit_spec_meta_carries_pdf_file_tags(transit_built):
+    """
+    Given the built transit system and a start point,
+    When plot_data returns its specs,
+    Then every spec's meta carries the file_tag that reproduces the
+    historical PDF filenames: LC_unphased_{inst} for the unphased chart
+    and LC_phased_{inst}_{planet} for each phased chart.
+    """
+    system, model, point = transit_built
+
+    specs = system.transit.plot_data(system, point)
+
+    unphased = [s for s in specs if not s.meta["phase_folded"]]
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert len(unphased) >= 1 and len(phased) >= 1
+    for s in unphased:
+        assert s.meta["file_tag"] == f"LC_unphased_{s.meta['instrument']}"
+    for s in phased:
+        assert "file_tag" in s.meta
+        assert s.meta["file_tag"] == (
+            f"LC_phased_{s.meta['instrument']}_{s.meta['planet']}"
+        )
+
+
 def test_transit_data_only_without_model(transit_built):
     """
     Given the transit system,
@@ -354,6 +378,11 @@ def test_sed_plot_data_returns_serializable_specs(sed_built):
     assert len(model_traces) >= 1
     for t in model_traces:
         assert np.all(np.isfinite(t.y))
+
+    # the spec's file_tag names the PDF the hand-drawn plot() saves
+    # ({prefix}_SED.pdf), keeping the two descriptions tied together
+    sed_spec = [s for s in specs if s.id == "sed.sed"][0]
+    assert sed_spec.meta["file_tag"] == "SED"
 
     # model spectra match the shared _make_plot_obj helper. The GUI spec plots
     # log10(lambda * F_lambda) (the standard SED representation, matching the

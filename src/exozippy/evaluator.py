@@ -155,13 +155,14 @@ def _param_structure(user_params: Optional[dict]) -> dict:
             except (TypeError, ValueError):
                 pass
         # Expression wiring: any string-valued field is a link (structural).
+        # init_scale is not listed: it is no longer linkable (user entries
+        # are warn-ignored; whitening scales are measured from the data).
         for field in (
             "initval",
             "mu",
             "lower",
             "upper",
             "sigma",
-            "init_scale",
         ):
             if isinstance(spec.get(field), str):
                 entry[f"{field}_link"] = spec[field]
@@ -295,11 +296,26 @@ class Evaluator:
                 )
                 continue
             for spec in comp_specs:
-                traces = {
-                    tr.name: {"x": tr.x, "y": tr.y}
-                    for tr in spec.traces
-                    if tr.role == "model"
-                }
+                # Model traces always move with the point. Data traces
+                # normally never do (raw observations), EXCEPT on specs whose
+                # meta declares dynamic_data: phase-folded panels re-fold the
+                # observations with tc/P, RV panels subtract the per-
+                # instrument gamma, and mulens panels re-align every data set
+                # onto the reference flux system -- all point-dependent.
+                # Those specs' data traces (x, y, and yerr, which the mulens
+                # alignment also changes) are re-shipped so the GUI can patch
+                # them; otherwise a tc slider moves the model but leaves the
+                # fold visibly frozen.
+                dynamic = bool((spec.meta or {}).get("dynamic_data"))
+                traces = {}
+                for tr in spec.traces:
+                    if tr.role == "model":
+                        traces[tr.name] = {"x": tr.x, "y": tr.y}
+                    elif dynamic and tr.role == "data":
+                        entry = {"x": tr.x, "y": tr.y}
+                        if tr.yerr is not None:
+                            entry["yerr"] = tr.yerr
+                        traces[tr.name] = entry
                 if traces:
                     out[spec.id] = traces
         return out

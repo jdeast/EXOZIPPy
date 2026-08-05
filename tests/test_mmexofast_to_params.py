@@ -48,9 +48,10 @@ def _write_without_sigmas(tmp_path, keep=None):
     return path
 
 
-def test_sigmas_present_emit_init_scale(tmp_path):
-    """Given a file with sigmas, every parameter block carries an
-    init_scale alongside its initval."""
+def test_sigmas_present_are_not_emitted(tmp_path):
+    """Given a file with sigmas, no init_scale is written -- whitening
+    scales are measured from the data by EXOZIPPy at startup, so the key
+    would only trigger the warn-and-ignore path."""
     parsed = yaml.safe_load(
         mmexofast_to_params(MMX_PATH, out_path=tmp_path / "out.yaml")
     )
@@ -58,7 +59,7 @@ def test_sigmas_present_emit_init_scale(tmp_path):
     assert sorted(parsed) == sorted(PARAM_PATHS)
     for path in PARAM_PATHS:
         assert "initval" in parsed[path], path
-        assert "init_scale" in parsed[path], path
+        assert "init_scale" not in parsed[path], path
 
 
 def test_missing_sigmas_still_converts(tmp_path):
@@ -77,9 +78,9 @@ def test_missing_sigmas_still_converts(tmp_path):
         assert "init_scale" not in entry, name
 
 
-def test_partial_sigmas_emit_init_scale_only_where_known(tmp_path):
-    """A sigma present for some parameters and absent for others is not
-    all-or-nothing: each block is decided independently."""
+def test_partial_sigmas_also_not_emitted(tmp_path):
+    """Sigmas present for only some parameters still produce no init_scale
+    anywhere (the field is retired)."""
     path = _write_without_sigmas(tmp_path, keep=["t_0", "log_q"])
 
     parsed = yaml.safe_load(
@@ -89,7 +90,7 @@ def test_partial_sigmas_emit_init_scale_only_where_known(tmp_path):
     with_scale = {
         name for name, entry in parsed.items() if "init_scale" in entry
     }
-    assert with_scale == {"lens.Lens.t_0", "lens.Lens.q"}
+    assert with_scale == set()
 
 
 @pytest.mark.parametrize("solution_index", [None, 0, 1])

@@ -122,7 +122,7 @@ class GuiReporter:
 
     # -- status.json ------------------------------------------------------
 
-    def _write_status(self, phase, state):
+    def _write_status(self, phase, state, error=None):
         doc = {
             "phase": phase,
             "pid": os.getpid(),
@@ -130,11 +130,13 @@ class GuiReporter:
             "started_at": self._t_start,
             "updated_at": time.time(),
         }
+        if error is not None:
+            doc["error"] = str(error)
         _atomic_write_text(
             self.status_path, json.dumps(doc, default=_json_default, indent=2)
         )
 
-    def phase(self, phase, state=None):
+    def phase(self, phase, state=None, error=None):
         """Write status.json at a phase transition.
 
         `state` defaults to the last progress state seen, so a phase change
@@ -148,7 +150,7 @@ class GuiReporter:
         else:
             self._last_state = {k: state.get(k) for k in _SUMMARY_KEYS}
         try:
-            self._write_status(phase, state)
+            self._write_status(phase, state, error=error)
         except Exception:
             logger.warning(
                 "GuiReporter: failed to write status file %s",
@@ -156,17 +158,20 @@ class GuiReporter:
                 exc_info=True,
             )
 
-    def terminal(self, phase):
+    def terminal(self, phase, error=None):
         """Force a terminal phase (done/stopped/error), reusing the last state.
 
         Called on every exit path from run_fit so a reader never finds the
-        file stuck on a non-terminal phase after the process is gone.
+        file stuck on a non-terminal phase after the process is gone. `error`
+        (a string, typically the formatted traceback) is recorded in the
+        document so a monitor can report WHY a run ended in "error" -- the
+        process is usually gone by the time anyone looks.
         """
         if phase not in TERMINAL_PHASES:
             raise ValueError(
                 f"terminal phase must be one of {sorted(TERMINAL_PHASES)}"
             )
-        self.phase(phase, self._last_state)
+        self.phase(phase, self._last_state, error=error)
 
     # -- progress callback (passed to the samplers) -----------------------
 

@@ -41,7 +41,7 @@ useful to scripting too; the server just exposes them over HTTP/JSON:
 | `exozippy/solve_api.py` | `solve()` (values/bounds/priors + provenance), `validate()` (structured diagnostics) | the Tune-tab Solve button + Config validation |
 | `exozippy/plotspec.py` | `PlotSpec` contract; `Component.plot_data(system, point=None)` | all charts (data-only previews + model traces) |
 | `exozippy/evaluator.py` | `compile_evaluator()`, `Evaluator.set_value/eval_plots/structural_hash` | millisecond live-slider plot updates |
-| `exozippy/gui/runner.py` + `status.py` | subprocess fit launch, status/snapshot files, graceful stop | the Run tab |
+| `exozippy/gui/runner.py` + `status.py` | subprocess fit launch, status/snapshot files, graceful stop | the pinned RunControl |
 
 If you are tempted to write component logic in the server or frontend, stop and
 push it into one of these contracts instead.
@@ -106,6 +106,10 @@ Core (G7):
 Config document (G8): `POST /api/doc/open`, `GET /api/doc`,
 `POST /api/doc/{command,undo,redo,save,autosave}`, `POST /api/doc/validate`
 (async: returns a job id) + `GET /api/doc/validate/{job_id}`.
+`doc/open` is edit-preserving: re-opening the path that is already open
+returns the dirty in-memory document unchanged (tabs call open on mount, and
+a naive reload-from-disk silently reverted unsaved edits on tab switches); a
+clean same-path doc IS reloaded so external file edits are picked up.
 
 Data manager (G9): `GET /api/files`, `POST /api/files/eligible`,
 `GET /api/files/associations`, `POST /api/preview`.
@@ -117,7 +121,11 @@ exact config/params into the output dir as `.used.*` for reproducibility),
 realpath+commonpath), `POST /api/utilities/run`.
 
 Tune (G10): `POST /api/tune/solve`, `GET /api/tune/status`,
-`GET /api/tune/result`, `POST /api/tune/eval`, `GET /api/tune/hash`.
+`GET /api/tune/result`, `POST /api/tune/eval`, `GET /api/tune/hash`,
+`GET /api/tune/plots/data` (data-only PlotSpecs, available from the
+"compiling" phase on -- the worker builds them right after `prepare()` via
+`plot_data(point=None)` and ships them with its progress message, so the
+Tune tab draws the observations while the model compiles).
 
 ## Frontend (`gui/frontend/`)
 
@@ -128,29 +136,67 @@ dependency. See `gui/frontend/README.md` for the dev/build loop.
 - `src/main.tsx` -- entry; mounts `App`.
 - `src/App.tsx` -- the shell: top bar + left sidebar + center tabbed workspace
   + bottom log terminal. Tabs are registered in the `TABS` array; each tab's
-  `render` receives a shared `TabContext` `{listing, setLogFile, configPath}`.
-  Current tabs: Welcome, Config, Data, Tune, Run, Tools.
+  `render` receives a shared `TabContext`
+  `{listing, setLogFile, configPath, setActiveTab, active}`.
+  Current tabs: Config, Tune, Tools (no Welcome tab -- the backend-health
+  line lives at the bottom of the sidebar and the Config empty state is the
+  "open a project" landing; no Data tab -- its association flow is the
+  Config form's working Browse button, wired to the undoable
+  `associate_datafile` command, and data previews are the Tune landing; no
+  Run tab -- a pinned bottom-right `RunControl` saves the open document and
+  then launches the fit, so the run is always THE CONFIGURATION ON SCREEN,
+  with progress/Stop inline and the log attached to the bottom terminal).
+  **Landing rule** (startup and
+  sidebar project-open alike): when the app knows which config to run -- an
+  explicit file on the command line, or a project with exactly one config --
+  it lands on Tune, which AUTO-RUNS the first Solve, so the first screen is
+  the data with the solved model over it; several configs (or none) land on
+  Config. Tabs stay MOUNTED once visited
+  (hidden with `display: none`, and a window resize is dispatched on reveal so
+  plotly recomputes sizes) -- unmount-on-switch would discard tab state; the
+  `active` flag tells a tab it is the visible one (ConfigTab resyncs from
+  `GET /api/doc` on reveal so edits from other tabs show up).
 - `src/api.ts` -- the single typed client for every endpoint, plus
   `openLogSocket(file)` and `runImageUrl(path)`.
 - `src/plotspec.ts` -- TypeScript mirror of `plotspec.py`'s PlotSpec.
 - `src/plotly-adapter.ts` -- the ONE place PlotSpec trace roles map to plotly
-  encodings (data = markers+error bars, model = line). Every plotting surface
-  goes through it so charts render identically.
+  encodings (data = markers+error bars, model = line unless kind "scatter").
+  It is the GUI half of a two-renderer pair: `src/exozippy/plotrender.py`
+  renders the SAME specs with matplotlib for the saved PDFs, and the two
+  share a meta/style vocabulary (see plotrender.py's module docstring) --
+  extend both together. Plots draw on WHITE figure cards with matplotlib's
+  tab10 colors by fixed `series_index`, red model curves, and matched
+  legend/reference-line conventions, so a GUI chart looks like its PDF.
+  The dark app chrome around the cards is styled separately in styles.css.
 - `src/components/PlotView.tsx` -- thin wrapper over `plotly.js-dist-min`
   (`Plotly.react`, no react-plotly.js) so repeated renders patch in place.
-- `src/components/` -- shell parts (`TopBar`, `Sidebar`, `LogTerminal`) and the
-  tab bodies (`WelcomeTab`, `ConfigTab`, `DataTab`, `TuneTab`, `RunTab`,
+- `src/components/` -- shell parts (`TopBar`, `Sidebar`, `LogTerminal`, the
+  pinned `RunControl`) and the tab bodies (`ConfigTab`, `TuneTab`,
   `ToolsTab`).
 
 ## The signature interaction: Solve, then live sliders (G10)
 
-Hybrid model. Press **Solve** -> the server runs `solve()` (relaxation engine,
-seconds) then `compile_evaluator()` (pytensor compile, seconds) in the tune
-worker process; the panel fills with values + provenance and plots render at
-the solved start point, and the app enters LIVE mode. Slider drags then call
+Hybrid model. The first Solve runs AUTOMATICALLY when the Tune tab mounts
+with a config open (it is the landing page; re-Solves stay manual) -> the
+server runs `solve()` (relaxation engine, seconds) then `compile_evaluator()`
+(pytensor compile, seconds) in the tune worker process; the data-only plots
+render as soon as the relaxation finishes (see `/api/tune/plots/data`), then
+the panel fills with values + provenance, the model traces land at the solved
+start point, and the app enters LIVE mode. Slider drags then call
 `POST /api/tune/eval` (debounced ~50 ms) -> `Evaluator.set_value` (inverts the
-slider's user-unit value into a new raw point) + `eval_plots` -> updated model
-traces patched into the charts in milliseconds. `eval_plots` re-renders by
+slider's user-unit value into a new raw point) + `eval_plots` -> updated
+traces patched into the charts in milliseconds. Model traces always; DATA
+traces too (with errors) on specs whose meta declares `dynamic_data` --
+phase-folded panels re-fold the observations with tc/P, RV panels subtract
+gamma, mulens panels re-align onto the reference flux system -- otherwise a
+tc slider moves nothing visible (the phased model grid is tc-anchored) and
+the panel looks frozen. Components whose data prep uses point values in
+numpy must also list those params explicitly in `param_deps` (rv gamma,
+transit baseline): the graph walk cannot see them, and a missing dep means
+the `changed_label` filter skips the component entirely.
+The Tune layout is a two-column split: the parameter tree (the selected row
+expands into the slider/bounds/prior editor inline, right below itself) and
+a responsive plot GRID (as many ~420px panels as fit). `eval_plots` re-renders by
 calling each affected component's own `plot_data(system, point)` again at the
 new point -- the SAME code that built the base specs and that the CLI's
 matplotlib `plot()` reuses -- rather than a second, parallel plotting
@@ -164,7 +210,9 @@ affine-calibrated-pytensor fast path could not recover either.
 Any structural change (bound/prior/fixed edit, add/remove component) flips the
 `structural_hash`; the UI shows a "Config changed -- re-Solve" banner and
 freezes the live plots until the next Solve. Slider/bound/prior edits are still
-real G8 `set_param_field` commands (undoable, RANK_USER, saved to params.yaml).
+real G8 `set_param_field` commands (undoable, RANK_USER, saved to params.yaml);
+the Tune toolbar has its own Save button (the shared document's dirty flag)
+so tuned values can be written to disk without leaving the tab.
 
 ## Invariants (do not break these)
 
@@ -210,10 +258,9 @@ running the targeted GUI tests.
 Implemented: Phase 1 backend contracts (G1-G6) and Phase 2 core GUI (G7 shell,
 G8 config editor, G9 data manager, G10 tune panel, G11 run controls).
 
-Known unwired seams (polish backlog): the Run button's doc-dirty / save-before-
-run gating (G11 shipped a `docReady=true` stub before G8 merged), cross-tab
-sharing of one server document between the Config/Data/Tune tabs, and the Tools
-tab's "associate produced file" affordance (a G9 stub).
+Known unwired seams (polish backlog): the Tools tab's "associate produced
+file" affordance (a G9 stub). (The old Run-button doc-dirty gating seam is
+gone: RunControl saves the document before every launch.)
 
 Not yet built (Phase 3): G12 node canvas (React Flow view over the G8
 document), G13 results browser, G14 run queue + settings + packaging.

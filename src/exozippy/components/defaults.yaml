@@ -1,16 +1,20 @@
 # Root-level defaults shared by every instrument component.
 #
 # ConfigManager.resolve() layers `base_defaults[<param>]` (this file) under
-# `base_defaults[<component>][<param>]`, so these are the generic blueprint for
-# the optional celerite2 Gaussian-process noise terms (see components/gp.py and
-# the `gp:` key on any instrument data file).  Each instrument overrides only
-# what is genuinely instrument-specific in its own defaults.yaml -- in practice
-# just the amplitude's unit and bounds, since "GP amplitude" means m/s for RVs,
-# relative flux for a light curve, and magnitudes for a microlensing curve.
+# `base_defaults[<component>][<param>]`, so these are the generic blueprints
+# for the optional celerite2 Gaussian-process noise terms (see components/gp.py
+# and the `gp:` key on any instrument data file) and for the optional robust
+# observation likelihoods (see components/likelihood.py and the `likelihood:`
+# key).  Each instrument overrides only what is genuinely instrument-specific
+# in its own defaults.yaml -- in practice just the scale-carrying parameters'
+# unit and bounds, since "GP amplitude" or "outlier scatter" means m/s for
+# RVs, relative flux for a light curve, and magnitudes for a microlensing
+# curve.
 #
-# Only files with a `gp:` key register these at all; a fit with no GP has zero
-# extra parameters.  Elements of an instrument that did not opt in are pinned
-# fixed (sigma: 0) by Instrument._register_gp and never sampled.
+# Only files with the corresponding key register these at all; a fit with
+# neither has zero extra parameters.  Elements of an instrument that did not
+# opt in are pinned fixed (sigma: 0) by Instrument._register_gp /
+# _register_robust and never sampled.
 
 # --- RotationTerm: two SHO modes at P and P/2 (stellar rotation) -------------
 
@@ -110,3 +114,47 @@ gp_sho_log_q:
   internal_unit: ""
   latex: "\\log{Q_{\\rm GP}}"
   description: "log10 GP SHO-term quality factor"
+
+# --- Robust observation likelihoods (`likelihood:` on any data file) ---------
+
+out_frac:
+  # Outlier fraction of the hogg mixture (Hogg, Bovy & Lang 2010): each point
+  # is background with this probability.  Capped at 0.5 -- above one half the
+  # "outlier" population is the majority and the components swap roles.
+  lower: 0.0
+  upper: 0.5
+  initval: 0.01
+  init_scale: 0.05
+  unit: ""
+  internal_unit: ""
+  latex: "P_{\\rm out}"
+  description: "Outlier fraction of the mixture likelihood"
+
+out_scale:
+  # Extra scatter of the background component, added in quadrature to the
+  # inlier sigma.  Overridden per component with the data's own unit; the
+  # initval and init_scale here are superseded by a data-driven hint
+  # (10 x the median error bar) whenever the component supplies one.
+  lower: 0.0
+  upper: 1.0e6
+  initval: 1.0
+  init_scale: 0.5
+  unit: ""
+  internal_unit: ""
+  latex: "\\sigma_{\\rm out}"
+  description: "Outlier extra scatter of the mixture likelihood"
+
+t_log_nu:
+  # log10 of the Student-t degrees of freedom.  Sampled in the log because nu
+  # spans decades and only its order of magnitude matters; the linear t_nu is
+  # reported as a Deterministic by Instrument.  Range 1 -- 1000 (nu ~ 2 is
+  # very heavy-tailed; nu >~ 50 is Gaussian for practical purposes), starting
+  # at nu = 4.
+  lower: 0.0
+  upper: 3.0
+  initval: 0.602
+  init_scale: 0.2
+  unit: ""
+  internal_unit: ""
+  latex: "\\log{\\nu}"
+  description: "log10 Student-t likelihood degrees of freedom"

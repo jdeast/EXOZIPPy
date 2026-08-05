@@ -3,7 +3,7 @@
 With n_seeds > 1, mkprior writes list-valued initvals -- K mutually-consistent
 JOINT posterior draws -- that the next run consumes as P4 multi-seed starts, so
 walkers begin spread across the posterior covariance instead of clustered at a
-single point. seed 0 stays the MAP; init_scale/bounds stay scalar (seed 0).
+single point. seed 0 stays the MAP; bounds stay scalar (seed 0).
 """
 
 from pathlib import Path
@@ -82,11 +82,12 @@ def test_multi_seed_emits_length_k_lists(tmp_path):
         n_seeds=3,
     )
     params = yaml.safe_load(out.read_text())
-    # Then each sampled initval is a length-3 list and init_scale stays scalar
+    # Then each sampled initval is a length-3 list (and no obsolete
+    # init_scale is written -- whitening scales are measured at startup)
     for key in ("lens.L.t_0", "star.A.mass", "star.B.mass"):
         iv = params[key]["initval"]
         assert isinstance(iv, list) and len(iv) == 3, key
-        assert isinstance(params[key]["init_scale"], float), key
+        assert "init_scale" not in params[key], key
 
 
 def test_multi_seed_lists_share_one_length(tmp_path):
