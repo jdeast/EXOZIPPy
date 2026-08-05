@@ -670,6 +670,72 @@ def test_logit_prior_is_flat_in_physical_space():
     )
 
 
+def test_logit_saturation_guard_is_inert_inside_and_quadratic_outside():
+    """
+    Given a bounded sampled parameter with no sigma,
+    When the logp is evaluated at raw values mapping inside and beyond the
+    sigmoid's +/-30 saturation clip,
+    Then inside the clip the logp exactly matches the analytic flat-prior
+      pushforward (the guard contributes nothing -- posterior unchanged),
+      and beyond it the logp additionally falls by k*(|lq|-30)^2 (the
+      confinement that keeps unconstrained directions off the degenerate
+      plateau, where every raw maps to the identical clipped physical value).
+    """
+    from exozippy.components.parameter import (
+        _LOGIT_SATURATION_LQ,
+        _LOGIT_SATURATION_PENALTY_K,
+    )
+
+    # ARRANGE: q0 = 0.5, span = 10, init_scale = 1 -> lq = 0.4 * raw,
+    # so raw = 75 sits exactly at the clip and raw = 100 well beyond it.
+    initval, lower, upper, init_scale = 5.0, 0.0, 10.0, 1.0
+    with pm.Model() as model:
+        p = Parameter(
+            label="p",
+            initval=initval,
+            init_scale=init_scale,
+            lower=lower,
+            upper=upper,
+        )
+        p.build_pymc()
+        logp_fn = model.compile_logp()
+
+    span = upper - lower
+    q0 = (initval - lower) / span
+    c = init_scale / (q0 * (1 - q0) * span)  # d(lq)/d(raw) = 0.4
+
+    def expected_shape(raw):
+        # logp up to a raw-independent constant: the exact log-Jacobian
+        # (softplus form, matching build_pymc) plus the saturation guard.
+        # The N(0,1) prior is cancelled by the +raw^2/2 correction term.
+        lq = c * raw
+        log_jac = -np.logaddexp(0.0, lq) - np.logaddexp(0.0, -lq)
+        excess = max(abs(lq) - _LOGIT_SATURATION_LQ, 0.0)
+        return log_jac - _LOGIT_SATURATION_PENALTY_K * excess**2
+
+    # ACT: measure logp differences against raw = 0 (constant drops out)
+    lp0 = float(logp_fn({"p_raw": np.array([0.0])}))
+    raws = [-100.0, -80.0, -74.0, -3.0, 3.0, 74.0, 80.0, 100.0]
+    measured = [
+        float(logp_fn({"p_raw": np.array([r])})) - lp0 for r in raws
+    ]
+    predicted = [expected_shape(r) - expected_shape(0.0) for r in raws]
+
+    # ASSERT
+    assert np.allclose(measured, predicted, atol=1e-6), (
+        f"logp shape deviates from analytic flat-prior + saturation guard:\n"
+        f"raws      = {raws}\nmeasured  = {measured}\npredicted = {predicted}"
+    )
+    # And the guard is strictly confining: logp decreases monotonically
+    # outward beyond the clip.
+    lp_74, lp_80, lp_100 = (
+        measured[raws.index(74.0)],
+        measured[raws.index(80.0)],
+        measured[raws.index(100.0)],
+    )
+    assert lp_74 > lp_80 > lp_100
+
+
 def test_bounded_sigma_param_logp_matches_truncated_normal():
     """
     Given a bounded sampled parameter with mu/sigma,
