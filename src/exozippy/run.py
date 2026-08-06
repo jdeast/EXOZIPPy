@@ -89,6 +89,7 @@ KNOWN_SAMPLER_KEYS = {
     "rung_thin_start",
     "collect_rung_timing",
     "swap_schedule",
+    "seed_polish",
 }
 
 
@@ -303,6 +304,28 @@ def _run_fit(config, gui, user_params=None):
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
         raw_starts, seed_indices = system.get_raw_starts(model)
 
+        # Per-seed T=1 DE polish (sampler-config `seed_polish`): "auto"
+        # (default) polishes SOLUTION-ESTIMATE seeds -- MMEXOFAST fits,
+        # which can start hundreds of nats below their own basin's optimum
+        # and lose their chains to better-looking basins during tuning --
+        # but never posterior-draw seed sets (params.2 initval lists),
+        # which are already at equilibrium and would all polish to the
+        # same point per basin. `on`/`off`/int force it; int = step count.
+        _polish_raw = sampler_cfg.get("seed_polish", "auto")
+        _DEFAULT_POLISH_STEPS = 150
+        if isinstance(_polish_raw, str) and _polish_raw.lower() == "auto":
+            seed_polish_steps = (
+                _DEFAULT_POLISH_STEPS
+                if getattr(system.config_manager, "seed_hint_sets", None)
+                else 0
+            )
+        elif _polish_raw in (True, "on"):
+            seed_polish_steps = _DEFAULT_POLISH_STEPS
+        elif _polish_raw in (False, None, "off"):
+            seed_polish_steps = 0
+        else:
+            seed_polish_steps = max(0, int(_polish_raw))
+
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
@@ -353,6 +376,7 @@ def _run_fit(config, gui, user_params=None):
                     raw_scales=(
                         whiten_report["raw_scales"] if whiten_report else None
                     ),
+                    seed_polish_steps=seed_polish_steps,
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,
@@ -387,6 +411,7 @@ def _run_fit(config, gui, user_params=None):
                     raw_scales=(
                         whiten_report["raw_scales"] if whiten_report else None
                     ),
+                    seed_polish_steps=seed_polish_steps,
                     plot_prefix=str(prefix),
                     min_ess=min_ess,
                     max_rhat=max_rhat,
