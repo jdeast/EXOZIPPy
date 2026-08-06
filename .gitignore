@@ -30,3 +30,4 @@ src/exozippy/components/evolutionarymodel/missing_grid_points_afe0_vvcrit0.csv
 scripts/update_processed_MIST_parquet.py
 src/exozippy/components/evolutionarymodel/missing_grid_points_afe0_vvcrit0_interpolatable.csv
 src/exozippy/models/find_interpolatable_missing_grid_points.py
+/src/exozippy/models/MIST/MISTv2.5/EEPs/MissingGridPoints
