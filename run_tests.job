@@ -1,0 +1,31 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 8
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N exozippy_tests
+#$ -o run_tests.$JOB_ID.log
+#
+# One-off job to run the full pytest suite on a compute node instead of
+# the login node. Submit with: qsub run_tests.job
+
+module purge
+module load tools/python/3.13
+
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+# PyTensor's C-module compile cache uses fcntl.flock() for its lock file.
+# ~/.pytensor's default location is under NFS-mounted $HOME, and this
+# cluster's NFS client doesn't honor advisory locks reliably (ENOLCK /
+# ESTALE mid-compile). Point it at the job's local-disk scratch dir instead.
+export PYTENSOR_FLAGS="base_compiledir=${TMPDIR:-/tmp}/pytensor"
+
+cd $HOME/python/EXOZIPPy
+
+which python
+python -m pytest

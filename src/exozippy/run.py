@@ -168,7 +168,14 @@ def _run_fit(config, gui, user_params=None):
     method = sampler_cfg.get(
         "method", None
     )  # None → auto-select after system is built
-    n_temps = int(sampler_cfg.get("n_temps", 8))
+    # "auto" passes through to the sampler, which sizes the ladder from the
+    # parameter count once the model is built (ptde.resolve_n_temps).
+    _n_temps_raw = sampler_cfg.get("n_temps", 8)
+    n_temps = (
+        _n_temps_raw
+        if isinstance(_n_temps_raw, str)
+        else int(_n_temps_raw)
+    )
     T_max = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw = sampler_cfg.get("n_chains", None)
     n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None

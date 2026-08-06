@@ -1,6 +1,37 @@
+import numpy as np
+
 from exozippy.components.component import Component
 
 from . import physics
+
+
+def _microlensing_only_star_indices(system):
+    """Star indices that are exclusively a microlensing source body.
+
+    Nothing in the mulensing physics reads a source star's mass/teff/feh/
+    radius (only the lens-side bodies' masses feed t_E; see
+    mulensing/symbolic_physics.py's dead `source_mass`/`source_radius`
+    symbol-map entries -- declared, never used in a RELATIONS equation), so
+    these are dynamically irrelevant whenever a star is a source and never
+    also a lens body.
+    """
+    lens = getattr(system, "lens", None)
+    if lens is None or not getattr(lens, "source_bodies", None):
+        return set()
+
+    source_idx = {
+        idx
+        for event in lens.source_bodies
+        for (ctype, idx) in event
+        if ctype == "star"
+    }
+    lens_idx = {
+        idx
+        for event in lens.lens_bodies
+        for (ctype, idx) in event
+        if ctype == "star"
+    }
+    return source_idx - lens_idx
 
 
 class Star(Component):
@@ -124,6 +155,56 @@ class Star(Component):
 
         if "distance" in self.manifest:
             self.manifest.update({"parallax": "default", "fbol": "default"})
+
+        # Pure microlensing-source stars: pin the parameters nothing in this
+        # topology consumes, instead of requiring every microlensing
+        # params.yaml to fix them by hand (see run_event.py's old
+        # build_user_params, which did exactly this per-event).
+        ml_source_idx = _microlensing_only_star_indices(system)
+        if ml_source_idx:
+            relation_idx = set()
+            for relation in ("mann", "torres"):
+                comp = getattr(system, relation, None)
+                if comp is not None:
+                    relation_idx |= set(comp.star_indices)
+
+            sed_idx = set()
+            sed = getattr(system, "sed", None)
+            blend_matrix = getattr(sed, "blend_matrix", None)
+            if blend_matrix is not None:
+                sed_idx = set(np.nonzero((blend_matrix != 0).any(axis=0))[0])
+
+            abs_astrom_idx = set()
+            astrom = getattr(system, "astrometryinstrument", None)
+            if astrom is not None:
+                modes = getattr(astrom, "modes", None)
+                star_map = getattr(astrom, "star_map", None)
+                if modes is not None and star_map is not None:
+                    abs_astrom_idx = {
+                        int(star_map[i])
+                        for i, m in enumerate(modes)
+                        if m in ("gaia", "abs")
+                    }
+
+            def _pin_sigma(param_name, skip_idx):
+                idx_list = sorted(ml_source_idx - skip_idx)
+                if not idx_list or param_name not in self.manifest:
+                    return
+                entry = self.manifest[param_name]
+                entry = dict(entry) if isinstance(entry, dict) else {}
+                pin = np.full(self.n_elements, np.nan)
+                pin[idx_list] = 0.0
+                overrides = dict(entry.get("overrides", {}))
+                overrides["sigma"] = pin.tolist()
+                entry["overrides"] = overrides
+                self.manifest[param_name] = entry
+
+            _pin_sigma("logmass", relation_idx)
+            _pin_sigma("teff", relation_idx | sed_idx)
+            _pin_sigma("feh", relation_idx | sed_idx)
+            _pin_sigma("radius", relation_idx | sed_idx)
+            _pin_sigma("ra", abs_astrom_idx)
+            _pin_sigma("dec", abs_astrom_idx)
 
     def build_likelihood(self, model, system):
         # Explicit pass-through!

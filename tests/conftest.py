@@ -43,6 +43,11 @@ class _DummyConfigManager:
     def add_scale_hint(self, *args, **kwargs):
         pass
 
+    def seed_start_value(self, path, seed=0):
+        # No seed hints in the stub (the real ConfigManager returns None for
+        # a path no seed set carries).
+        return None
+
 
 class _DummyComponent:
     """Stub component whose only observable property is n_elements."""

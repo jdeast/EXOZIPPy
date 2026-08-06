@@ -48,6 +48,36 @@ Number = Union[int, float, np.floating]
 # numerical time bomb.
 _RAW_CANCELLATION_CLIP = 1.0e4
 
+# phys_logit clips the sigmoid's argument to +/-30: sigmoid(30) = 1 - 9.4e-14,
+# closer to 1.0 than float64 can distinguish for any practical downstream use.
+# Every raw value that pushes |lq| past this is therefore physically identical
+# to the boundary value already -- no additional posterior mass lives out
+# there that isn't already accounted for at the boundary itself. Section C
+# adds a penalty beyond this same threshold (_LOGIT_SATURATION_PENALTY_K
+# below) so a data-unconstrained direction's chain can't wander arbitrarily
+# far into that degenerate, numerically-unsafe plateau -- without touching
+# the exact-uniform correction anywhere inside it.
+_LOGIT_SATURATION_LQ = 30.0
+
+# Quadratic-in-excess coefficient for the above penalty: -k*(|lq|-30)**2.
+# Picked to bite gently (a few nats) just past the threshold -- consistent
+# with ordinary sampling noise -- and overwhelmingly (thousands of nats) by
+# |lq| ~ 100, so it stops a runaway without shifting probability mass on
+# the representable [-30, 30] interior it leaves untouched.
+#
+# Tempering note: PTDE tempers the FULL logp (ptde.py accepts on
+# dlogp / T), so a rung at temperature T sees this wall softened to a
+# Gaussian of width sigma_lq = sqrt(T / (2k)) past the clip. The quadratic
+# (not linear) growth is what makes the guard survive tempering at all --
+# a bounded-slope penalty just rescales under 1/T. With k = 0.5 the
+# hottest default rung (T_max = 200) stays within |lq| ~ 70, comparable to
+# the +/-30 interior; if T_max is ever pushed to O(10^4), scale k with it
+# (k ~ T_max / 400 keeps the 3-sigma excursion at the interior width).
+# Raising k costs nothing statistically -- the posterior-invariance
+# argument is k-independent (the wall lives entirely where phys is the
+# same clipped value) -- so when in doubt, larger is safe.
+_LOGIT_SATURATION_PENALTY_K = 0.5
+
 # Preliminary whitening scale for a sampled bounded element whose
 # defaults.yaml provides no init_scale: this fraction of (upper - lower).
 # It only needs to land within the whitening probe's dynamic range -- the
@@ -819,7 +849,9 @@ class Parameter:
             lq = sv_logit_q_inits + sv_scale_logits * raw_vector
             phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
                 uppers - lowers
-            ) * pt.sigmoid(pt.clip(lq, -30.0, 30.0))
+            ) * pt.sigmoid(
+                pt.clip(lq, -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
+            )
 
             # Gaussian / linear branch: mu + sigma * raw  (or initval + scale * raw)
             phys_linear = (
@@ -881,7 +913,11 @@ class Parameter:
                     else pt.constant(uppers[i])
                 )
                 span_t = pt.maximum(up_t - lo_t, 1e-12)
-                q_i = pt.sigmoid(pt.clip(lq[i], -30.0, 30.0))
+                q_i = pt.sigmoid(
+                    pt.clip(
+                        lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ
+                    )
+                )
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
                 if is_sampled[i]:
                     # Normalize the conditional uniform: p(val | bounds) = 1/span.
@@ -1076,9 +1112,29 @@ class Parameter:
             raw_cancel_safe = pt.clip(
                 raw_vector, -_RAW_CANCELLATION_CLIP, _RAW_CANCELLATION_CLIP
             )
+            # Saturation guard: log_jac's restoring slope approaches a
+            # constant (not a growing one) as |lq| -> infinity, so a
+            # data-unconstrained direction (whitening sets a large scale_logit
+            # for it) can push |lq| far past _LOGIT_SATURATION_LQ before
+            # feeling much resistance -- even though phys_logit has already
+            # clipped there, so no distinguishable physical state, and no
+            # posterior mass, lives beyond it. This adds a quadratic-in-excess
+            # penalty only past that threshold: exactly zero (and the
+            # correction above stays an exact uniform prior) on the
+            # representable interior, growing sharply beyond it so the raw
+            # coordinate can't wander into that degenerate, numerically
+            # unsafe plateau. Independent of scale_logit and of any
+            # component's physics -- keyed on lq, the same coordinate
+            # phys_logit's clip already uses.
+            saturation_excess = pt.maximum(
+                pt.abs(lq) - _LOGIT_SATURATION_LQ, 0.0
+            )
+            saturation_penalty = -_LOGIT_SATURATION_PENALTY_K * pt.sqr(
+                saturation_excess
+            )
             correction = pt.where(
                 logit_mask,
-                log_jac + 0.5 * pt.sqr(raw_cancel_safe),
+                log_jac + 0.5 * pt.sqr(raw_cancel_safe) + saturation_penalty,
                 pt.zeros_like(raw_vector),
             )
             pm.Potential(
@@ -1541,7 +1597,16 @@ class Parameter:
                     tf["logit_q_inits"][i]
                     + tf["init_scale_logits"][i] * raw[j]
                 )
-                q = 1.0 / (1.0 + np.exp(-np.clip(lq, -30.0, 30.0)))
+                q = 1.0 / (
+                    1.0
+                    + np.exp(
+                        -np.clip(
+                            lq,
+                            -_LOGIT_SATURATION_LQ,
+                            _LOGIT_SATURATION_LQ,
+                        )
+                    )
+                )
                 out[i] = (
                     tf["lowers"][i] + (tf["uppers"][i] - tf["lowers"][i]) * q
                 )

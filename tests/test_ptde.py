@@ -689,3 +689,67 @@ def test_shutdown_pool_kills_workers_that_ignore_sigterm():
         assert pool2.apply_async(abs, (-3,)).get(timeout=10) == 3
     finally:
         _shutdown_pool(pool2)
+
+
+# ---------------------------------------------------------------------------
+# n_temps: "auto" resolution and ladder-health reporting
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_n_temps_auto_scales_with_dimension():
+    """
+    Given the "auto" n_temps mode,
+    When resolved for targets of increasing dimension,
+    Then the ladder size follows max(8, ceil(sqrt(D/2)*ln(T_max))) -- the
+      adjacent-rung energy-overlap rule -- and an explicit integer passes
+      through untouched.
+    """
+    from exozippy.samplers.ptde import resolve_n_temps
+
+    assert resolve_n_temps("auto", 5, 200.0) == 9
+    assert resolve_n_temps("auto", 27, 200.0) == 20
+    # tiny problems keep the EXOFASTv2-parity floor of 8
+    assert resolve_n_temps("auto", 2, 200.0) == 8
+    # explicit values (int or numeric string) are honored verbatim
+    assert resolve_n_temps(8, 27, 200.0) == 8
+    assert resolve_n_temps(12, 5, 200.0) == 12
+    with pytest.raises(ValueError, match="auto"):
+        resolve_n_temps("automagic", 27, 200.0)
+
+
+def test_ladder_health_report_warns_only_when_communication_limited(caplog):
+    """
+    Given end-of-run swap statistics,
+    When the ladder health report runs,
+    Then Lambda equals the summed adjacent-pair rejection rates, a healthy
+      ladder logs no warning, a choked one warns with the ~2*Lambda+1
+      recommendation, and degenerate inputs (no swaps) return None.
+    """
+    import logging
+
+    from exozippy.samplers.ptde import ladder_health_report
+
+    temps = _geometric_ladder(8, 200.0)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        lam = ladder_health_report(
+            temps, np.full(7, 90.0), np.full(7, 100.0)
+        )
+        assert np.isclose(lam, 0.7)
+        assert not caplog.records
+
+        lam = ladder_health_report(
+            temps, np.full(7, 20.0), np.full(7, 100.0)
+        )
+        assert np.isclose(lam, 5.6)
+        assert any(
+            "communication-limited" in r.message for r in caplog.records
+        )
+        # recommendation is ceil(2*Lambda)+1
+        assert any("~13" in r.message for r in caplog.records)
+
+    assert ladder_health_report(temps, np.zeros(7), np.zeros(7)) is None
+    assert (
+        ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1))
+        is None
+    )
