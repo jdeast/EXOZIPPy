@@ -72,19 +72,51 @@ def _next_versioned_path(param_path):
     return p.parent / f"{base}.{n + 1}{suffix}"
 
 
+def _mode_seed_quotas(weights, n):
+    """Allocate ``n`` seeds across modes: every mode gets at least one seed
+    (a restart must never erase a discovered mode), the rest go by weight
+    (largest remainder). With more modes than seeds, the top-n by weight
+    get one each."""
+    order = np.argsort(weights)[::-1]
+    if n <= len(weights):
+        quotas = np.zeros(len(weights), dtype=int)
+        quotas[order[:n]] = 1
+        return quotas
+    w = np.asarray(weights, dtype=float)
+    w = w / w.sum()
+    remaining = n - len(w)
+    ideal = w * remaining
+    quotas = np.ones(len(w), dtype=int) + np.floor(ideal).astype(int)
+    shortfall = n - int(quotas.sum())
+    if shortfall > 0:
+        frac_order = np.argsort(ideal - np.floor(ideal))[::-1]
+        quotas[frac_order[:shortfall]] += 1
+    return quotas
+
+
 def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
 
-    Draws are taken from the GOOD chains and the POST-BURN-IN region only
-    (samplers.convergence.find_burnin drops the initial transient and any
-    stuck chain), so every seed is a real point in the equilibrated posterior
-    and the set spans the true covariance. Whole draws are returned (a chain
-    and draw index), never per-parameter marginals, so a downstream consumer
-    that reads all parameters at (chain, draw) gets one self-consistent point.
+    When the trace is multimodal (outputs.modes.identify_modes finds more
+    than one mode), the draws are STRATIFIED BY MODE -- every mode gets at
+    least one seed and the rest are allocated by mode weight -- so a restart
+    can never launder a multimodal posterior into a single-basin start set.
+    (The old good-chain pooling did exactly that: good_chain_mask is a
+    stuck-chain detector, and against a multimodal trace it classifies mode
+    membership as sickness -- on DC2018 event 128 it flagged the 52
+    majority-branch chains as bad because the 2 true-branch chains' lp was
+    582 nats higher.)
 
-    Returns (pairs, good_mask, burnin) where ``good_mask`` and ``burnin`` also
-    describe the pool used, so a caller can compute statistics over exactly
-    the same post-burn-in good draws.
+    Within a mode (and in the unimodal fall-back path) draws are taken from
+    the POST-BURN-IN region of the good chains, so every seed is a real
+    point in the equilibrated posterior. Whole draws are returned (a chain
+    and draw index), never per-parameter marginals, so a downstream consumer
+    that reads all parameters at (chain, draw) gets one self-consistent
+    point.
+
+    Returns (pairs, good_mask, burnin) where ``good_mask`` and ``burnin``
+    also describe the pool used, so a caller can compute statistics over
+    exactly the same post-burn-in good draws.
     """
     post = idata["posterior"]
     var_names = convergence.default_var_names(post)
@@ -98,9 +130,53 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     burnin, good_mask = diag["burnin"], diag["good_mask"]
     good_chains = np.nonzero(good_mask)[0]
     n_draws = int(post.sizes["draw"])
-
     rng = np.random.default_rng(rng_seed)
     draw_lo = min(burnin, max(0, n_draws - 1))
+
+    # ---- mode-stratified path -------------------------------------------
+    labels = None
+    try:
+        from exozippy.outputs.modes import identify_modes
+
+        report = identify_modes(idata, attach=False)
+        if report.n_modes > 1:
+            labels = report.labels  # (chain, draw); -1 = invalid/unassigned
+            weights = [m.weight for m in report.modes]
+    except Exception as e:  # never let mode analysis break seed emission
+        logger.warning(
+            f"mkprior: mode identification failed ({e}); falling back to "
+            f"unstratified seed draws."
+        )
+
+    if labels is not None:
+        quotas = _mode_seed_quotas(weights, n)
+        logger.info(
+            "mkprior: multimodal trace -- stratifying %d seeds across %d "
+            "modes (quotas %s, weights %s)",
+            n,
+            len(quotas),
+            quotas.tolist(),
+            [f"{w:.3f}" for w in weights],
+        )
+        pairs, seen = [], {tuple(exclude)}
+        for m, quota in enumerate(quotas):
+            cs, ds = np.nonzero(labels == m)
+            post_burn = ds >= draw_lo
+            if post_burn.sum() >= quota:  # prefer equilibrated draws
+                cs, ds = cs[post_burn], ds[post_burn]
+            idx = rng.permutation(len(cs))
+            taken = 0
+            for j in idx:
+                if taken >= quota:
+                    break
+                pair = (int(cs[j]), int(ds[j]))
+                if pair not in seen:
+                    seen.add(pair)
+                    pairs.append(pair)
+                    taken += 1
+        return pairs, good_mask, burnin
+
+    # ---- unimodal / fallback path ---------------------------------------
     pairs, seen = [], {tuple(exclude)}
     attempts = 0
     while len(pairs) < n and attempts < 50 * max(n, 1):
