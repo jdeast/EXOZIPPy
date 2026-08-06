@@ -96,6 +96,7 @@ def ptde_async_sample(
     raw_starts=None,
     seed_indices=None,
     raw_scales=None,
+    seed_polish_steps=0,
     gamma=None,
     target_accept=0.20,
     adapt_gamma=True,
@@ -225,6 +226,7 @@ def ptde_async_sample(
             seed_indices,
             system=system,
             raw_scales=raw_scales,
+            polish_steps=seed_polish_steps,
         )
 
     if plot_prefix is not None:

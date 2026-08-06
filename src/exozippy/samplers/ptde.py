@@ -190,6 +190,93 @@ from exozippy.whitening import (
 )
 
 
+def polish_seed_starts(
+    raw_starts,
+    logp_fn,
+    rng,
+    scales,
+    n_steps=150,
+    pop_size=None,
+    gamma=None,
+):
+    """T=1 differential-evolution polish of each seed's raw start.
+
+    For each seed: spawn a small population jittered at ONE scale unit
+    around the seed (staying inside its own basin -- this is a local
+    refiner, not a search), run ``n_steps`` of DE-MC at T=1 (Metropolis
+    acceptance on difference-vector proposals, the same move the sampler
+    itself uses), and return the best-lp point visited as the new seed.
+
+    Rationale: an unpolished solution-estimate seed (e.g. a raw MMEXOFAST
+    fit) can start hundreds of nats below its own basin's optimum, and
+    chains rationally defect to whichever basin LOOKS best at
+    initialization -- on DC2018 event 128, 26 of 27 chains abandoned the
+    true branch (ultimately 500 nats better once refined) because its seed
+    started ~100 nats below the wrong branch's seed. Gradient-free by
+    construction (the binary-lens magnification Op has no analytic
+    gradient). Greedy DE optimizers converge similarly but collapse the
+    population to a point; Metropolis-at-T=1 costs the same and the caller
+    only takes the best point anyway, with _make_starts re-jittering
+    chains around it as usual.
+
+    Returns (polished_starts, dlp_per_seed).
+    """
+    if isinstance(raw_starts, dict):
+        raw_starts = [raw_starts]
+    keys = list(raw_starts[0].keys())
+    n_params = sum(np.asarray(v).size for v in raw_starts[0].values())
+    if pop_size is None:
+        pop_size = int(max(8, min(2 * n_params, 64)))
+    if gamma is None:
+        gamma = 2.38 / np.sqrt(2 * max(n_params, 1))
+
+    polished, dlps = [], []
+    for s, center in enumerate(raw_starts):
+        pop = [{k: np.array(v, dtype=float) for k, v in center.items()}]
+        for _ in range(pop_size - 1):
+            pop.append(
+                {
+                    k: center[k]
+                    + scales[k] * rng.standard_normal(np.shape(center[k]))
+                    for k in keys
+                }
+            )
+        lps = np.array([float(logp_fn(p)) for p in pop])
+        # Non-finite members re-center (a jitter may cross a hard bound).
+        for i in np.nonzero(~np.isfinite(lps))[0]:
+            pop[i] = {k: np.array(v, dtype=float) for k, v in center.items()}
+            lps[i] = lps[0]
+        best_i = int(np.nanargmax(lps))
+        best = {k: v.copy() for k, v in pop[best_i].items()}
+        best_lp = float(lps[best_i])
+        lp0 = float(lps[0])  # the seed's own lp (member 0 = exact center)
+
+        for _ in range(int(n_steps)):
+            for i in range(pop_size):
+                j1, j2 = _pick_two(rng, pop_size, i)
+                prop = {
+                    k: pop[i][k]
+                    + gamma * (pop[j1][k] - pop[j2][k])
+                    + 1e-4 * scales[k] * rng.standard_normal(
+                        np.shape(pop[i][k])
+                    )
+                    for k in keys
+                }
+                lp = float(logp_fn(prop))
+                if np.isfinite(lp) and np.log(rng.random()) < lp - lps[i]:
+                    pop[i], lps[i] = prop, lp
+                    if lp > best_lp:
+                        best_lp = lp
+                        best = {k: v.copy() for k, v in prop.items()}
+        polished.append(best)
+        dlps.append(best_lp - lp0)
+        logger.info(
+            f"PTDE seed polish: seed {s} lp {lp0:.1f} -> {best_lp:.1f} "
+            f"(dlp=+{best_lp - lp0:.1f}, {n_steps} steps x {pop_size} pop)"
+        )
+    return polished, dlps
+
+
 def _make_starts(
     n_chains,
     raw_starts,
@@ -198,6 +285,7 @@ def _make_starts(
     seed_indices=None,
     system=None,
     raw_scales=None,
+    polish_steps=0,
 ):
     """Generate n_chains starting points near one or more seeds (P4).
 
@@ -253,6 +341,16 @@ def _make_starts(
     n_params = sum(v.size for v in raw_starts[0].values())
     factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
     max_iter = 1000
+
+    # Optional per-seed T=1 DE polish (run.py gates this on seed
+    # provenance: solution-estimate seeds only, never posterior-draw
+    # seed sets, which are already at their basin's equilibrium).
+    if polish_steps and int(polish_steps) > 0:
+        raw_starts, _dlps = polish_seed_starts(
+            raw_starts, logp_fn, rng, scales, n_steps=int(polish_steps)
+        )
+        map_lp = float(logp_fn(raw_starts[0]))
+
     _jitter = (
         getattr(system, "jitter_raw_start", None)
         if system is not None
@@ -271,16 +369,33 @@ def _make_starts(
     starts = []
     chain_seed_index = []
     seed_seen = set()
+    # Cap the number of chains that start EXACTLY at a seed. With K ~
+    # n_chains (a params.2-style posterior-draw seed set), every chain
+    # would otherwise start at a previous-run posterior draw with zero
+    # jitter -- and since the DE population's spread IS the proposal
+    # generator, the restart could then never explore beyond the previous
+    # posterior, entrenching whatever that run missed. At least half the
+    # chains always get the factor-scaled jitter.
+    max_exact = max(1, n_chains // 2)
+    n_exact = 0
+    if K > max_exact:
+        logger.info(
+            f"PTDE init: {K} seeds > {max_exact} exact-start budget "
+            f"(half the {n_chains} chains); the rest start jittered around "
+            f"their seed to keep restart overdispersion."
+        )
     for j in range(n_chains):
         s = j % K
         center = raw_starts[s]
-        # First chain of each seed group starts exactly at the solved seed.
-        if s not in seed_seen:
+        # First chain of each seed group starts exactly at the solved seed
+        # (up to the overdispersion budget above).
+        if s not in seed_seen and n_exact < max_exact:
             lp0 = float(logp_fn(center))
             if np.isfinite(lp0):
                 starts.append({k: v.copy() for k, v in center.items()})
                 chain_seed_index.append(seed_indices[s])
                 seed_seen.add(s)
+                n_exact += 1
                 logger.debug(
                     f"PTDE init chain {j}: exact seed {seed_indices[s]} "
                     f"(lp={lp0:.1f})"
@@ -654,6 +769,7 @@ def ptde_sample(
     raw_starts=None,
     seed_indices=None,
     raw_scales=None,
+    seed_polish_steps=0,
     gamma=None,
     target_accept=0.20,
     adapt_gamma=True,
@@ -875,6 +991,7 @@ def ptde_sample(
             seed_indices,
             system=system,
             raw_scales=raw_scales,
+            polish_steps=seed_polish_steps,
         )
 
     # ensemble start plots (T=1 starts only; raw→physical via the batched fn)

@@ -753,3 +753,69 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1))
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Seed polish and exact-start overdispersion cap
+# ---------------------------------------------------------------------------
+
+
+def _quad_logp_factory(center):
+    def logp(point):
+        return -0.5 * float(
+            sum(np.sum((v - center[k]) ** 2) for k, v in point.items())
+        )
+
+    return logp
+
+
+def test_polish_seed_starts_climbs_to_basin_optimum():
+    """
+    Given a seed displaced ~5 sigma from its basin's optimum (a rough
+      solution estimate, like an unpolished MMEXOFAST fit),
+    When polish_seed_starts runs a T=1 DE polish,
+    Then the returned start's logp improves by nearly the full deficit and
+      the reported per-seed dlp matches.
+    """
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    rng = np.random.default_rng(3)
+    center = {"a": np.array([5.0, -3.0]), "b": np.array([2.0])}
+    logp = _quad_logp_factory(center)
+    seed = {"a": np.zeros(2), "b": np.zeros(1)}  # lp = -19
+    scales = {k: np.ones_like(v) for k, v in seed.items()}
+
+    polished, dlps = polish_seed_starts(
+        [seed], logp, rng, scales, n_steps=200
+    )
+
+    assert logp(polished[0]) > -0.5  # from -19 to (near) 0
+    assert dlps[0] > 18.0
+
+
+def test_make_starts_caps_exact_seed_chains():
+    """
+    Given a params.2-style seed set nearly as large as the chain count,
+    When _make_starts builds the chain starts,
+    Then at most half the chains start exactly at a seed (the rest are
+      jittered), so a restart keeps overdispersed exploration power instead
+      of freezing the population at the previous run's posterior draws.
+    """
+    rng = np.random.default_rng(5)
+    logp = _quad_logp_factory({"a": np.zeros(2)})
+    K, n_chains = 10, 12
+    seeds = [{"a": np.array([float(k), float(-k)])} for k in range(K)]
+    scales = {"a": np.ones(2)}
+
+    starts, chain_seed_index = _make_starts(
+        n_chains, seeds, logp, rng, raw_scales=scales
+    )
+
+    assert len(starts) == n_chains
+    n_exact = sum(
+        any(np.array_equal(st["a"], sd["a"]) for sd in seeds)
+        for st in starts
+    )
+    assert n_exact <= n_chains // 2
+    # every seed still contributes a chain (round-robin unchanged)
+    assert set(chain_seed_index) == set(range(K))

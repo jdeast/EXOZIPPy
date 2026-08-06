@@ -50,6 +50,19 @@ DEFAULT_LP_ABS_MAX = 1e12
 # runaways pinned at bounds (observed values: 1e3..1e27 vs bulk ~1e2).
 DEFAULT_Z_MAX = 50.0
 
+# lp exemption from the raw-z filter: a draw far outside the bulk in raw
+# space but with lp this close to (or better than) the z-passing bulk's
+# median is a CANDIDATE MODE, not a runaway, and is routed into clustering
+# instead of being invalidated.  Every genuine runaway population observed
+# to date sat >~1000 nats below the bulk (saturated-plateau states;
+# lp-insane states are caught by DEFAULT_LP_ABS_MAX separately), while a
+# real minority mode can sit ABOVE the bulk -- DC2018 event 128's true
+# s~0.98 branch was found by 2/54 chains at +500 nats and was discarded as
+# 'raw-z invalid', reporting the wrong branch as a clean unimodal fit.  A
+# genuinely-real mode more than this many nats BELOW the dominant one
+# carries e^-50 of its mass and loses nothing by staying flagged.
+DEFAULT_LP_EXEMPT_MARGIN = 50.0
+
 # With the runaway-lp cancellation bug fixed, ONLY a model or sampler bug
 # should produce invalid draws.  Above this fraction of the trace, run.py
 # refuses to emit final tables (evidence -- trace + mode report -- is written
@@ -401,6 +414,7 @@ def identify_modes(
     max_modes: int = 8,
     z_max: float = DEFAULT_Z_MAX,
     lp_abs_max: float = DEFAULT_LP_ABS_MAX,
+    lp_exempt_margin: float = DEFAULT_LP_EXEMPT_MARGIN,
     merge_ratio: float = 0.5,
     subsample: int = 20000,
     seed: int = 20260711,
@@ -420,6 +434,9 @@ def identify_modes(
     max_modes : upper limit for the BIC scan.
     z_max : robust z-score threshold for the invalid-draw filter.
     lp_abs_max : |lp| above this marks a draw invalid (numerically broken).
+    lp_exempt_margin : a draw beyond z_max whose lp is within this many
+        nats of the z-passing bulk's median (or better) is exempted from
+        raw-z invalidation and clustered as a candidate mode.
     merge_ratio : density-dip merge threshold; higher merges more eagerly.
     subsample : cluster on at most this many draws (assignment of the rest
         is by nearest center); keeps k selection fast on huge traces.
@@ -486,6 +503,29 @@ def identify_modes(
         scale = np.where(mad > 0, mad, 1.0)
         z = np.abs((X - med) / scale)
         z_ok = np.nan_to_num(z, nan=np.inf).max(axis=1) <= z_max
+        # lp exemption: a z-failing draw whose lp is within
+        # lp_exempt_margin of the z-PASSING bulk's median (or better) is a
+        # candidate mode, not a runaway -- route it into clustering.  Real
+        # runaways (saturated-plateau states) sit >~1000 nats below the
+        # bulk; a true minority mode can sit ABOVE it (see
+        # DEFAULT_LP_EXEMPT_MARGIN).  Skipped when lp is unavailable.
+        if has_lp and (valid & z_ok).any():
+            lp_bulk_med = np.median(lp[valid & z_ok])
+            exempt = (
+                valid
+                & ~z_ok
+                & np.nan_to_num(lp >= lp_bulk_med - lp_exempt_margin)
+            )
+            n_exempt = int(exempt.sum())
+            if n_exempt:
+                notes.append(
+                    f"{n_exempt} draws beyond raw-z {z_max:g} kept as "
+                    f"candidate modes: their lp is within "
+                    f"{lp_exempt_margin:g} nats of the in-bulk median "
+                    f"({lp_bulk_med:.2f}) or better -- a displaced basin, "
+                    f"not a runaway."
+                )
+                z_ok |= exempt
         valid &= z_ok
         reasons[(reasons == "") & ~z_ok] = "raw-z"
 
