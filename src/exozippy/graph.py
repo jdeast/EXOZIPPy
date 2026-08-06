@@ -34,10 +34,24 @@ def determine_pymc_build_order(active_components, config_manager):
                 expr_key = raw.get("expr_key")  # explicit key or None
             else:
                 expr_key = None  # None → free parameter, no expression
-            # Fall back to "default" only when the manifest explicitly requested it
-            # via the "default" string shorthand.  A bare None means free parameter.
-            if expr_key is None:
-                expr_key = "default" if raw is not None else None
+            # NOTE: no further fallback here. A dict manifest value with no
+            # explicit "expr_key" (e.g. {"overrides": {...}} used to pin a
+            # per-element free/fixed parameter, as Band/Planet do for their
+            # opt-in ppm terms) means "no expression" -- matching
+            # Component.add_parameter's actual behavior exactly
+            # (`expr_key = options.pop("expr_key", None)`, no dict-truthiness
+            # fallback). A prior version of this function inferred
+            # expr_key="default" from any non-None raw value regardless of
+            # whether an "expr_key" was actually present, which silently
+            # added a build-order dependency add_parameter itself would
+            # never create -- harmless for parameters with no `expressions`
+            # block at all (e.g. thermal/reflect/ellipsoidal), but a real
+            # bug for planet.beam: its {"overrides": ...}-shaped "off"/
+            # beam_free manifest entries were wrongly treated as requesting
+            # the "default" expression (calc_beam_from_K, deps: ["K"]),
+            # so any orbit-less config (no RV, no K) failed to build even
+            # with beaming off. See tests/test_transit_beer.py's
+            # test_beam_off_does_not_require_K_no_orbit_config.
             expressions_dict = cfg.get("expressions", {})
 
             if expr_key is not None and expr_key in expressions_dict:

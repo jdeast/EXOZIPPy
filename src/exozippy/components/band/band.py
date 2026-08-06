@@ -75,7 +75,34 @@ class Band(Component):
                     "depth (ppm) for this band. Default False, which pins "
                     "thermal at 0 (transit-only model, unchanged). "
                     "Phase-curve variation (BEER) is not modeled by this "
-                    "flag; see PR 1.b."
+                    "flag; see fitreflect/fitellip (PR 1.b)."
+                ),
+            },
+            {
+                "key": "fitreflect",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a reflected-light phase-curve amplitude (ppm) for "
+                    "this band, peaking at secondary eclipse and zero at "
+                    "primary transit. Default False, which pins reflect at "
+                    "0. Set alongside fitthermal only with real full-orbit "
+                    "phase coverage -- with eclipse-only data the two are "
+                    "degenerate and only their sum is measurable."
+                ),
+            },
+            {
+                "key": "fitellip",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit an ellipsoidal-variation amplitude (ppm) for this "
+                    "band: a half-orbital-period brightness modulation from "
+                    "the star's tidal distortion, dimmest at both "
+                    "conjunctions and brightest at both quadratures. "
+                    "Default False, which pins ellipsoidal at 0."
                 ),
             },
         ]
@@ -87,6 +114,10 @@ class Band(Component):
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
         ]
+        self.fitreflect = [
+            bool(c.get("fitreflect", False)) for c in self.config
+        ]
+        self.fitellip = [bool(c.get("fitellip", False)) for c in self.config]
 
         # Canonical filter identities via the SED alias table. An
         # unknown name passes through unchanged (the user may already be
@@ -135,18 +166,30 @@ class Band(Component):
                 "u1": None,
             }
 
-        # thermal (secondary-eclipse depth, ppm) is opt-in per band via
-        # fitthermal: true. Bands that don't opt in are pinned at sigma=0
-        # (same "overrides" pattern Instrument._register_gp uses for terms
-        # an element didn't ask for), so thermal.value is exactly 0 and the
-        # transit model is unchanged unless a band explicitly asks for it.
-        off = [i for i in range(self.n_elements) if not self.fitthermal[i]]
-        thermal_entry = {}
+        # thermal/reflect/ellipsoidal (all ppm) are opt-in per band via
+        # fitthermal/fitreflect/fitellip. Bands that don't opt in are pinned
+        # at sigma=0 (same "overrides" pattern Instrument._register_gp uses
+        # for terms an element didn't ask for), so the parameter's value is
+        # exactly 0 and the transit model is unchanged unless a band
+        # explicitly asks for it.
+        self.manifest["thermal"] = self._pinned_manifest_entry(self.fitthermal)
+        self.manifest["reflect"] = self._pinned_manifest_entry(self.fitreflect)
+        self.manifest["ellipsoidal"] = self._pinned_manifest_entry(
+            self.fitellip
+        )
+
+    def _pinned_manifest_entry(self, opt_in_flags):
+        """A manifest entry that's free where opt_in_flags is True, and
+        pinned to sigma=0 (fixed at its default initval, 0) elsewhere.
+        Shared by thermal/reflect/ellipsoidal's identical opt-in gating.
+        """
+        off = [i for i in range(self.n_elements) if not opt_in_flags[i]]
+        entry = {}
         if off:
             pin = np.full(self.n_elements, np.nan)
             pin[off] = 0.0
-            thermal_entry["overrides"] = {"sigma": pin.tolist()}
-        self.manifest["thermal"] = thermal_entry
+            entry["overrides"] = {"sigma": pin.tolist()}
+        return entry
 
     def thermal_may_be_nonzero(self):
         """True unless every band's thermal is pinned (sigma == 0) at
@@ -162,6 +205,39 @@ class Band(Component):
         expression, no sigma at all -> uniform prior) counts as active.
         """
         param = self.thermal
+
+        def _vec(value, fill):
+            arr = np.atleast_1d(value if value is not None else fill)
+            out = np.full(self.n_elements, np.nan)
+            for i in range(self.n_elements):
+                v = arr[i % len(arr)] if len(arr) else fill
+                try:
+                    out[i] = fill if v is None else float(v)
+                except (TypeError, ValueError):
+                    return None  # non-numeric (e.g. link) -> active
+            return out
+
+        sigmas = _vec(param.sigma, np.nan)
+        inits = _vec(param.initval, 0.0)
+        if sigmas is None or inits is None:
+            return True
+        pinned_at_zero = (sigmas == 0.0) & (inits == 0.0)
+        return not bool(np.all(pinned_at_zero))
+
+    def reflect_may_be_nonzero(self):
+        """True unless every band's reflect is pinned (sigma == 0) at
+        exactly 0 -- the RESOLVED parameter state, after user params.
+
+        Consumers (transit) use this to skip building the reflection graph
+        entirely (a planetvisible evaluation, as expensive as the transit
+        itself) when it can only ever evaluate to zero.
+        Deliberately not `any(self.fitreflect)`: the manifest "overrides"
+        pin is layered UNDER user params, so params.yaml can free reflect
+        (sigma > 0) or fix it at a nonzero value without fitreflect, and
+        the gate must stay open for those. Anything non-numeric (a linked
+        expression, no sigma at all -> uniform prior) counts as active.
+        """
+        param = self.reflect
 
         def _vec(value, fill):
             arr = np.atleast_1d(value if value is not None else fill)
