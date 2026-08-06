@@ -26,3 +26,7 @@ src/exozippy/components/evolutionarymodel/massradius_mann.py
 src/exozippy/components/evolutionarymodel/massradius_mist.py
 src/exozippy/components/evolutionarymodel/MISTv2.5_duplicate_ages.txt
 src/exozippy/models/MISTv2.5/EEPs/MISTv2.5.grid.backup.yaml
+src/exozippy/components/evolutionarymodel/missing_grid_points_afe0_vvcrit0.csv
+scripts/update_processed_MIST_parquet.py
+src/exozippy/components/evolutionarymodel/missing_grid_points_afe0_vvcrit0_interpolatable.csv
+src/exozippy/models/find_interpolatable_missing_grid_points.py

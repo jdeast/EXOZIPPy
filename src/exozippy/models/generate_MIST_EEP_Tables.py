@@ -164,11 +164,11 @@ def _pad_or_trim_df(df, target_length=807):
         padded_df.attrs = df.attrs.copy()
         return padded_df
 
-def _add_logM_col(df, new_df):
+def _add_mass_col(df, new_df):
     
     nrows = len(df)
-    new_df["logM"] = np.full(nrows, np.log10(df.attrs["meta"]["initial_mass"]))
-    return
+    new_df["mass"] = np.full(nrows, df.attrs["meta"]["initial_mass"])
+    return 
 
 def _add_EEP_col(df, new_df):
     
@@ -215,32 +215,43 @@ def _add_astroseismic_cols(df, new_df):
     new_df["nu_max"] = df["nu_max"].values
     return
 
-def _add_age_and_turn_back_col(df, new_df):
+def _add_age_and_here_be_dragons_col(df, new_df):
 
     age = df["star_age"].values
-    turn_back = np.zeros(len(age))
+    here_be_dragons = np.zeros(len(age))
 
     # Find values that appear more than once
     vals, counts = np.unique(age, return_counts=True)
     repeated_vals = vals[counts > 1]
 
-    # if no repeated values, just return the age array
-    if repeated_vals.size == 0:
+    # Find if any feh values are equal to 30 (indicating invalid or placeholder values)
+    feh_values = new_df["feh_mist"].values
+    invalid_feh_mask = feh_values == 30.0
+
+    # if no repeated values or no invalid feh values, just return the age array
+    if repeated_vals.size == 0 or not np.any(invalid_feh_mask):
         new_df["age_mist"] = age
-        new_df["turn_back"] = turn_back
+        new_df["here_be_dragons"] = here_be_dragons
         return
     
-    # Get indices for all occurrences of those repeated values
-    duplicate_bools = np.isin(age, repeated_vals)
+    # Get indices for all occurrences of those repeated ages
+    duplicate_indices = np.isin(age, repeated_vals)
 
     # ensure unique ages by adding a small increment to duplicates
     # add small increments to duplicates to ensure unique ages
     add_time = 1 # yr
-    age[duplicate_bools] += add_time * np.arange(np.sum(duplicate_bools))
-    turn_back[duplicate_bools] = 1 + np.arange(np.sum(duplicate_bools))
+    age[duplicate_indices] += add_time * np.arange(np.sum(duplicate_indices))
+
+    # flag all indices from the first invalid feh value onward, since this indicates
+    # problematic ages that need adjustment -- not just the ones with duplicate ages
+    first_invalid_feh_index = np.argmax(invalid_feh_mask)
+    problematic_indices = np.arange(len(age)) >= first_invalid_feh_index
+
+    # mark the problematic indices in the "here_be_dragons" column
+    here_be_dragons[problematic_indices] = 1 + np.arange(np.sum(problematic_indices))
 
     new_df["age_mist"] = age
-    new_df["turn_back"] = turn_back
+    new_df["here_be_dragons"] = here_be_dragons
     return
 
 def _add_deep_dage_col(new_df):
@@ -251,10 +262,10 @@ def _add_deep_dage_col(new_df):
 def generate_new_df(df, target_length=807):
 
     # Define column headers and initialize df
-    columns = ["logM", "EEP", "initfeh", 
+    columns = ["mass", "EEP", "initfeh", 
                "feh_mist", "radius_mist", 
                "teff_mist", "delta_nu", "nu_max",
-               "age_mist","dEEP_dage", "turn_back",
+               "age_mist","dEEP_dage", "here_be_dragons",
                ]
     
     new_df = pd.DataFrame(columns=columns)
@@ -263,14 +274,14 @@ def generate_new_df(df, target_length=807):
     pad_or_trim_df = _pad_or_trim_df(df, target_length=target_length)
 
     # fill in all the new columns
-    _add_logM_col(pad_or_trim_df, new_df)
+    _add_mass_col(pad_or_trim_df, new_df)
     _add_EEP_col(pad_or_trim_df, new_df)
     _add_initfeh_col(pad_or_trim_df, new_df)
     _add_feh_col(pad_or_trim_df, new_df)
     _add_radius_col(pad_or_trim_df, new_df)
     _add_teff_col(pad_or_trim_df, new_df)
     _add_astroseismic_cols(pad_or_trim_df, new_df)
-    _add_age_and_turn_back_col(pad_or_trim_df, new_df)
+    _add_age_and_here_be_dragons_col(pad_or_trim_df, new_df)
     _add_deep_dage_col(new_df)
 
     return new_df
