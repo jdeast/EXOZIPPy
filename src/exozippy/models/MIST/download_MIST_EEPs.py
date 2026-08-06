@@ -30,7 +30,7 @@ def download_tarfiles(url, dest_folder="temp_files"):
 # Download All MISTv2.5 EEP Tracks
 # -------------------------------------------------------------------
 
-EEP_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5") # change path to where you want to store the EEP tracks
+EEP_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/raw_tracks/") # change path to where you want to store the EEP tracks
 
 def __main__():
 

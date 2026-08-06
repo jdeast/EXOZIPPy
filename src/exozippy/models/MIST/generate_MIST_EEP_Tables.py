@@ -292,7 +292,7 @@ def generate_new_df(df, target_length=807):
 
     return new_df
 
-def process_eep_directory(eep_dir, pattern="*.track.eep", show_progress=True, save=False, output_path=EEP_PROCESSED_PATH_DEFAULT):
+def process_eep_directory(eep_dir, pattern="*.track.eep", show_progress=True, save=False, output_path=EEP_PROCESSED_TRACKS_PATH_DEFAULT):
     """
     Read every MIST EEP track file in `eep_dir` matching `pattern`, transform each with
     `generate_new_df`, and concatenate into one DataFrame. Optionally save the resulting
