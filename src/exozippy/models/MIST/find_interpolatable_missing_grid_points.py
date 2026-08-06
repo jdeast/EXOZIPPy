@@ -35,8 +35,8 @@ except NameError:
 # define where things are/should be saved by default
 
 EEP_PROCESSED_TRACKS_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-EEP_GRID_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-MISSING_GRID_POINTS_PATH_DEFAULT = current_dir / "EEPs" / "MissingGridPoints" 
+EEP_GRID_PATH_DEFAULT = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
+MISSING_GRID_POINTS_PATH_DEFAULT = current_dir / "MISTv2.5"/ "EEPs" / "MissingGridPoints" 
 
 
 # -------------------------------------------------------------------
@@ -232,8 +232,8 @@ def find_interpolatable_points(alpha, missing_df, points, mass_grid):
 # -------------------------------------------------------------------
 
 EEP_PROCESSED_TRACKS_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-EEP_GRID_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/processed_tracks/")
-MISSING_GRID_POINTS_PATH = current_dir / "EEPs" / "MissingGridPoints" 
+EEP_GRID_PATH = Path("/Volumes/Data/EEP_Tracks/MISTv2.5/grids/")
+MISSING_GRID_POINTS_PATH = current_dir / "MISTv2.5" / "EEPs" / "MissingGridPoints" 
 
 
 def main():
