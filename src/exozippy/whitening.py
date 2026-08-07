@@ -214,6 +214,21 @@ def _param_for_raw(lookup, key):
     return lookup.get(name)
 
 
+def _refetch_raw_start(system, model, fallback):
+    """The current canonical raw start, re-read after a rescale.
+
+    set_whitening anchors raw = 0 and re-expresses a nonzero raw_initval (a
+    pre-whitening seed polish moved the start off the anchor) in the new
+    coordinates, so any raw-start dict captured BEFORE a rescale is stale
+    afterwards unless it was all zeros -- which it was, historically,
+    making this a no-op for unpolished runs.  Systems without get_raw_start
+    (test stubs) keep the fallback."""
+    getter = getattr(system, "get_raw_start", None)
+    if getter is None:
+        return fallback
+    return getter(model)
+
+
 def _probe_selected(raw_start, logp_fn, elems):
     """Re-probe only the given (raw_name, flat_index) elements."""
     map_lp = float(logp_fn(raw_start))
@@ -318,6 +333,11 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
             np.asarray(post, dtype=float) == 1.0
         )
 
+    # The rescale above re-expressed a polished (nonzero) start in the new
+    # raw coordinates; re-read it so the escalation re-probe measures
+    # around the same physical point.
+    raw_start = _refetch_raw_start(system, model, raw_start)
+
     # Escalation: re-probe elements whose multiplier was clipped by the
     # probe's dynamic range.
     for round_i in range(_ESCALATION_ROUNDS):
@@ -350,6 +370,7 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
                     mult2[i] = m
                     multipliers[key].flat[i] *= m
             par.set_whitening(mult2)
+        raw_start = _refetch_raw_start(system, model, raw_start)
 
     still = [
         f"{key}[{i}]: cumulative={multipliers[key].flat[i]:.3g}"
@@ -465,6 +486,10 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
         logp_fn = model.compile_logp()
 
     report = apply_measured_whitening(system, model, raw_start, logp_fn)
+    # Each rescale re-expresses a polished (nonzero) start in the new raw
+    # coordinates -- re-read it before evaluating or probing there again
+    # (a no-op for the historical all-zeros start).
+    raw_start = _refetch_raw_start(system, model, raw_start)
     lp_before = float(logp_fn(raw_start))
     measure_barrier_scales(system, model, raw_start)
     lp_after = float(logp_fn(raw_start))
@@ -476,6 +501,7 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
             f"the start); re-measuring scales against the final barriers."
         )
         report2 = apply_measured_whitening(system, model, raw_start, logp_fn)
+        raw_start = _refetch_raw_start(system, model, raw_start)
         # Fold the correction into the cumulative multipliers for reporting.
         for key, m2 in report2["multipliers"].items():
             m1 = report["multipliers"].get(key)
