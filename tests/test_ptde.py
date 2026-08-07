@@ -408,17 +408,18 @@ def test_probe_step_1d_lands_on_the_target_drop():
         assert eval_delta(sign * step) == pytest.approx(0.5, abs=0.05)
 
 
-def test_probe_scale_takes_nearer_contour_when_start_is_off_mode():
+def test_probe_scale_measures_curvature_when_start_is_off_mode():
     """
     Given a Gaussian logp probed from a start offset from its mode,
     When _probe_scales probes it,
-    Then the scale is the NEARER 0.5-nat contour, not the average of the two.
+    Then the scale is the curvature width sigma, NOT the one-sided 0.5-nat
+      drop distance (0.5/gradient) an off-mode start contaminates.
 
-    EXOFASTv2 averages the two directions because it probes from an AMOEBA best
-    fit, where they are near-symmetric.  Off the mode they are not: the uphill
-    direction only turns over on the far side, and averaging it in inflates the
-    scale enough to jitter chains past the logit transform's saturation walls,
-    starting them pinned at the bounds.
+    The symmetric second difference cancels the gradient term identically,
+    so the probe returns sigma from any start.  The old nearer-contour rule
+    returned sqrt(10)-3 ~ 0.16 here (and ~1e-3 sigma on ob140939's start
+    5900 nats below the posterior, whose mass matrix then re-widened the
+    raw posterior into parameter.py's _RAW_CANCELLATION_CLIP wall).
     """
     # ARRANGE: mode at 3.0, unit width, start 3 sigma away at 0.0
     start = {"x": np.zeros(1)}
@@ -430,15 +431,9 @@ def test_probe_scale_takes_nearer_contour_when_start_is_off_mode():
     _, scales = _probe_scales(start, logp_fn)
     s = float(scales["x"][0])
 
-    # ASSERT: logp(0) - logp(x) = 0.5 at (x-3)^2 = 10, so the contours are at
-    # x = 3 - sqrt(10) (near) and x = 3 + sqrt(10) (far).  Take the near one.
-    assert s == pytest.approx(np.sqrt(10.0) - 3.0, rel=0.05)
-
-    # ASSERT: still far looser than the old quadratic extrapolation, which
-    # collapsed to sqrt(0.5*|dp|/g) at the smallest rung of its probe ladder.
-    old = 0.003 * np.sqrt(0.5 / (3.0 * 0.003))
-    assert old < 0.03
-    assert s > 5 * old
+    # ASSERT: the local (and global) Gaussian width is 1.0 regardless of the
+    # 3-sigma displacement.
+    assert s == pytest.approx(1.0, rel=0.05)
 
 
 def test_probe_scale_linear_logp_is_not_extrapolated_quadratically():
@@ -732,15 +727,11 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     temps = _geometric_ladder(8, 200.0)
 
     with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
-        lam = ladder_health_report(
-            temps, np.full(7, 90.0), np.full(7, 100.0)
-        )
+        lam = ladder_health_report(temps, np.full(7, 90.0), np.full(7, 100.0))
         assert np.isclose(lam, 0.7)
         assert not caplog.records
 
-        lam = ladder_health_report(
-            temps, np.full(7, 20.0), np.full(7, 100.0)
-        )
+        lam = ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
         assert np.isclose(lam, 5.6)
         assert any(
             "communication-limited" in r.message for r in caplog.records
@@ -750,8 +741,7 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
 
     assert ladder_health_report(temps, np.zeros(7), np.zeros(7)) is None
     assert (
-        ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1))
-        is None
+        ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1)) is None
     )
 
 
@@ -785,9 +775,7 @@ def test_polish_seed_starts_climbs_to_basin_optimum():
     seed = {"a": np.zeros(2), "b": np.zeros(1)}  # lp = -19
     scales = {k: np.ones_like(v) for k, v in seed.items()}
 
-    polished, dlps = polish_seed_starts(
-        [seed], logp, rng, scales, n_steps=200
-    )
+    polished, dlps = polish_seed_starts([seed], logp, rng, scales, n_steps=200)
 
     assert logp(polished[0]) > -0.5  # from -19 to (near) 0
     assert dlps[0] > 18.0
@@ -813,8 +801,7 @@ def test_make_starts_caps_exact_seed_chains():
 
     assert len(starts) == n_chains
     n_exact = sum(
-        any(np.array_equal(st["a"], sd["a"]) for sd in seeds)
-        for st in starts
+        any(np.array_equal(st["a"], sd["a"]) for sd in seeds) for st in starts
     )
     assert n_exact <= n_chains // 2
     # every seed still contributes a chain (round-robin unchanged)
