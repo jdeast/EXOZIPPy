@@ -1820,7 +1820,11 @@ class ConfigManager:
         if not isinstance(eq, sp.Eq):
             return False
 
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+        # Sorted: free_symbols is a set of Symbols whose hashes include the
+        # PYTHONHASHSEED-randomized name string, so bare iteration order
+        # varies per process.  The July-2026 init_scale flakiness came from
+        # exactly this in the (since-deleted) scale passes.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         # 1. Gatekeeper: Skip if equation contains undefined variables
         if not all(s in self.master_symbol_map for s in symbols_in_eq):
@@ -2085,8 +2089,11 @@ class ConfigManager:
         if len(valid_solutions) == 1:
             valid_val, valid_sol = valid_solutions[0]
         else:
+            # Sorted by value: sp.solve's root order is not contractual, and
+            # the strict < below means equal-score roots go to whichever came
+            # first -- break that tie by value, not arrival order.
             best_val, best_sol, best_score = None, None, float("inf")
-            for val, sol in valid_solutions:
+            for val, sol in sorted(valid_solutions, key=lambda vs: vs[0]):
                 temp = {**resolved, target_str: val}
                 score = 0.0
                 for other_eq in self.all_relations:
