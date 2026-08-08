@@ -52,8 +52,12 @@ sampler:
   # tempering also lets chains cross between the degenerate basins;
   # outputs/modes.py then reports each mode separately.
   method: ptde_async
-  tune: 4000              # generally need longer tuning for mulensing
-  draws: 5000
+  # PTDE: no separate tuning phase needed -- the seeds are polished to
+  # their basin optima before sampling and burn-in is trimmed at wrap-up
+  # (convergence.find_burnin); long draws instead, for round trips
+  # between the four degenerate basins.
+  tune: 0
+  draws: 50000
   recompute_trace: True
   # The seeds are literature solution estimates, not posterior draws,
   # so force the pre-whitening polish, which 'auto' skips for hint-less
