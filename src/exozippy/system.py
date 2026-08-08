@@ -388,6 +388,70 @@ class System(Component):
         )
         return starts, seed_indices
 
+    def apply_polished_starts(self, polished_raws, seed_indices):
+        """Adopt polished raw starts (polish.polish_raw_starts) as the
+        canonical starts.
+
+        Seed 0 is written into each Parameter's ``raw_initval`` -- which
+        get_raw_start, get_mcmc_init, and the sampler initvals all read --
+        and its physical values into ``Parameter.initval`` so the startup
+        table and diagnostics report the polished start.  set_whitening
+        keeps a nonzero raw_initval pinned to the same physical point
+        through later rescales.  Seeds k > 0 are written back into
+        config_manager.seed_resolved as physical (internal-unit) values, so
+        get_raw_starts re-derives them through the frozen transform in
+        whatever raw coordinates are current.
+        """
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+
+        for s, raw in enumerate(polished_raws):
+            for key, vec in raw.items():
+                name = key[: -len("_raw")] if key.endswith("_raw") else key
+                par = lookup.get(name)
+                tf = (
+                    getattr(par, "_raw_transform", None)
+                    if par is not None
+                    else None
+                )
+                if tf is None:
+                    continue
+                new_raw = np.asarray(vec, dtype=float).reshape(-1)
+                if new_raw.size != len(tf["sampled_idx"]):
+                    continue
+                phys = np.asarray(par.phys_from_raw(new_raw), dtype=float)
+
+                if s == 0:
+                    par.raw_initval = new_raw.copy()
+                    n_elements = (
+                        int(np.prod(par.shape))
+                        if par.shape not in ((), None)
+                        else 1
+                    )
+                    iv = np.asarray(
+                        to_vec(par.initval, n_elements, fill=np.nan),
+                        dtype=float,
+                    )
+                    for i in tf["sampled_idx"]:
+                        iv[i] = phys[i]
+                    par.initval = (
+                        float(iv[0]) if par.shape in ((), None) else iv
+                    )
+                else:
+                    k = seed_indices[s]
+                    if (
+                        not seed_resolved
+                        or k >= len(seed_resolved)
+                        or seed_resolved[k] is None
+                    ):
+                        continue
+                    comp_type = par.label.split(".")[0]
+                    param_name = par.label.split(".", 1)[1]
+                    for i in tf["sampled_idx"]:
+                        seed_resolved[k][f"{comp_type}.{i}.{param_name}"] = (
+                            float(phys[i])
+                        )
+
     def _seed_initvals_for(self, par, resolved):
         """Internal-unit initval vector for one Parameter under one seed's solved
         state, or None if that seed does not touch any of its elements."""

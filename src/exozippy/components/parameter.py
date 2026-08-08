@@ -1350,12 +1350,17 @@ class Parameter:
         contour at exactly one raw unit, which is the "curvature = -1"
         conditioning the old init_scale tuning loop approximated by hand.
 
-        Deliberately does NOT recompute logit_q_inits / q_floors: the start
-        (raw = 0) must stay exactly where the probe measured, so the update
-        is a pure scale change in logit space.  Elements whose raw N(0,1) IS
-        the prior (unbounded with sigma) are never touched -- their scale is
-        the prior sigma, not a whitening choice.  Non-finite or non-positive
-        entries (a failed probe) leave that element's scale unchanged.
+        Deliberately does NOT recompute logit_q_inits / q_floors: the
+        anchor (raw = 0) stays exactly where build_pymc placed it, so the
+        update is a pure scale change in logit space.  A NONZERO
+        ``raw_initval`` (a pre-whitening seed polish moved the start off the
+        anchor) is rescaled by 1/multiplier in the same pass -- lq = lq0 +
+        scale*raw is invariant under (scale, raw) -> (scale*m, raw/m) -- so
+        the start stays the same PHYSICAL point the probe measured around.
+        Elements whose raw N(0,1) IS the prior (unbounded with sigma) are
+        never touched -- their scale is the prior sigma, not a whitening
+        choice.  Non-finite or non-positive entries (a failed probe) leave
+        that element's scale unchanged.
 
         Because the scales live in pytensor.shared variables, every function
         already compiled from this model sees the new values immediately;
@@ -1388,16 +1393,30 @@ class Parameter:
         # raw unit); the measured value where the element is deliberately not
         # rescaled (Gaussian-prior elements); 1.0 where the probe failed.
         post = np.ones(len(idx))
+        rescaled = np.zeros(len(idx), dtype=bool)
         for j, i in enumerate(idx):
             m = raw_scale[j]
             if not np.isfinite(m) or m <= 0:
                 continue
             if tf["use_logit"][i]:
                 scale_logits[i] *= m
+                rescaled[j] = True
             elif not ws["has_sigma_prior"][i]:
                 gauss_scales[i] *= m
+                rescaled[j] = True
             else:
                 post[j] = m
+
+        # Keep a polished (nonzero) raw start pinned to the same physical
+        # point through the rescale.  Historically raw_initval was always 0
+        # for rescaled elements, making this a silent no-op.
+        if self.raw_initval is not None:
+            ri = np.asarray(self.raw_initval, dtype=float).reshape(-1).copy()
+            if ri.size == len(idx):
+                for j in np.nonzero(rescaled)[0]:
+                    ri[j] /= raw_scale[j]
+                self.raw_initval = ri
+
         self._apply_whitening_state(scale_logits, gauss_scales)
         return post
 
@@ -1422,9 +1441,20 @@ class Parameter:
             int(np.prod(self.shape)) if self.shape not in ((), None) else 1
         )
         phys_scales = to_vec(self.init_scale, n_elements, fill=1.0)
-        for i in tf["sampled_idx"]:
+        raw_init = (
+            np.asarray(self.raw_initval, dtype=float).reshape(-1)
+            if self.raw_initval is not None
+            else None
+        )
+        for j, i in enumerate(tf["sampled_idx"]):
             if tf["use_logit"][i]:
-                q_init = 1.0 / (1.0 + np.exp(-tf["logit_q_inits"][i]))
+                # Evaluate dphys/draw at the START (anchor + scale*raw_init):
+                # identical to the anchor historically (raw_init 0), but a
+                # polished start sits off the anchor.
+                lq = tf["logit_q_inits"][i]
+                if raw_init is not None and raw_init.size > j:
+                    lq = lq + scale_logits[i] * raw_init[j]
+                q_init = 1.0 / (1.0 + np.exp(-np.clip(lq, -100.0, 100.0)))
                 span = tf["uppers"][i] - tf["lowers"][i]
                 phys_scales[i] = (
                     scale_logits[i] * q_init * (1.0 - q_init) * span

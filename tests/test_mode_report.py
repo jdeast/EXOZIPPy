@@ -604,3 +604,57 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
     text = tmpl_path.read_text()
     assert "5 draws" in text
     assert "model or sampler bug" in text
+
+
+# ----------------------------------------------------------------------
+# raw-z lp exemption: displaced high-lp basins are modes, not runaways
+# ----------------------------------------------------------------------
+
+
+def test_displaced_high_lp_minority_is_a_mode_not_invalid():
+    """
+    Given a minority cluster (one chain's worth) displaced far beyond the
+      raw-z threshold but with lp ABOVE the bulk's median (the DC2018 event
+      128 scenario: 2/54 chains found the true s-branch at +500 nats and
+      were discarded as 'raw-z invalid'),
+    When identify_modes runs,
+    Then those draws are exempted from invalidation and reported as a
+      second mode, with no invalid draws at all.
+    """
+    rng = np.random.default_rng(7)
+    a = rng.normal(0.0, 0.001, N)  # razor-tight bulk: huge robust z for any offset
+    lp = rng.normal(1000.0, 3.0, N)
+    minority = slice(0, N_DRAW)  # chain 0 entirely in the displaced basin
+    a[minority] = rng.normal(5.0, 0.001, N_DRAW)  # z ~ 5000 sigma_bulk
+    lp[minority] = rng.normal(1500.0, 3.0, N_DRAW)  # +500 nats: better fit
+
+    rep = identify_modes(_make_idata({"a_raw": a}, lp))
+
+    assert rep.n_invalid == 0
+    assert rep.n_modes == 2
+    assert any("candidate modes" in n for n in rep.notes)
+    # the displaced basin is the best mode (delta_lp_max = 0 by definition
+    # of the best); the majority mode trails by ~500 nats
+    lp_maxes = sorted((m.lp_max for m in rep.modes), reverse=True)
+    assert lp_maxes[0] - lp_maxes[1] > 400
+
+
+def test_displaced_low_lp_cluster_stays_invalid():
+    """
+    Given a cluster equally far beyond the raw-z threshold but with lp
+      ~1000 nats BELOW the bulk (the runaway/saturated-plateau signature),
+    When identify_modes runs,
+    Then the lp exemption does not fire and the draws stay invalid.
+    """
+    rng = np.random.default_rng(11)
+    a = rng.normal(0.0, 0.001, N)
+    lp = rng.normal(1000.0, 3.0, N)
+    runaway = slice(0, 300)
+    a[runaway] = rng.normal(5.0, 0.001, 300)
+    lp[runaway] = rng.normal(0.0, 3.0, 300)  # -1000 nats: degraded
+
+    rep = identify_modes(_make_idata({"a_raw": a}, lp))
+
+    assert rep.n_invalid == 300
+    assert rep.invalid_reason_counts == {"raw-z": 300}
+    assert rep.n_modes == 1

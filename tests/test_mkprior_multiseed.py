@@ -154,3 +154,51 @@ def test_multi_seed_seed0_is_map(tmp_path):
     assert params["lens.L.t_0"]["initval"][0] == pytest.approx(
         map_t0, abs=1e-6
     )
+
+
+def _make_bimodal_trace(tmp_path, nchain=6, ndraw=400, seed=0):
+    """Trace where chains 0-4 sit in one tight mode and chain 5 in another,
+    displaced far beyond the raw-z threshold, with HIGHER lp (the DC2018
+    event 128 topology). Without mode stratification, good_chain_mask
+    drops the five majority chains (their lp never reaches the best
+    chain's median) or the fallback pools by occupancy."""
+    rng = np.random.default_rng(seed)
+    t0_raw = 0.001 * rng.standard_normal((nchain, ndraw))
+    t0_raw[5] += 8.0  # minority mode, ~8000 robust-z away
+    lp = 1000.0 + 3.0 * rng.standard_normal((nchain, ndraw))
+    lp[5] += 500.0  # minority mode fits better
+    post = {
+        "lens.t_0": 2000.0 + t0_raw,
+        "lens.t_0_raw": t0_raw,
+    }
+    idata = az.from_dict({"posterior": post, "sample_stats": {"lp": lp}})
+    trace_path = tmp_path / "run_trace.nc"
+    idata.to_netcdf(str(trace_path))
+    return trace_path
+
+
+def test_multi_seed_stratifies_across_modes(tmp_path):
+    """
+    Given a bimodal trace (5 chains in one basin, 1 chain in a displaced,
+      better-lp basin),
+    When mkprior emits 8 seeds,
+    Then the initval list contains draws from BOTH basins -- a restart can
+      never launder a multimodal posterior into a single-basin seed set.
+    """
+    trace_path = _make_bimodal_trace(tmp_path)
+    out = mkprior(
+        {"prefix": "run", "lens": [{"name": "L"}]},
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        n_seeds=8,
+    )
+    params = yaml.safe_load(Path(out).read_text())
+
+    t0_seeds = np.asarray(params["lens.L.t_0"]["initval"], dtype=float)
+    assert len(t0_seeds) == 8
+    in_minority = t0_seeds > 2004.0  # displaced basin sits at ~2008
+    in_majority = t0_seeds < 2004.0
+    assert in_minority.any(), f"no minority-mode seeds: {t0_seeds}"
+    assert in_majority.any(), f"no majority-mode seeds: {t0_seeds}"
+    # seed 0 is the global MAP, which lives in the better-lp minority basin
+    assert t0_seeds[0] > 2004.0

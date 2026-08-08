@@ -58,6 +58,7 @@ from .logger import setup_logging
 from .mkparam import mkprior
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
+from .polish import polish_raw_starts, resolve_polish_steps
 from .whitening import load_whitening, measure_and_whiten, save_whitening
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ KNOWN_SAMPLER_KEYS = {
     "rung_thin_start",
     "collect_rung_timing",
     "swap_schedule",
+    "seed_polish",
 }
 
 
@@ -269,6 +271,42 @@ def _run_fit(config, gui, user_params=None):
         trace_path = str(prefix) + "_trace.nc"
         whitening_path = str(prefix) + "_whitening.json"
         reusing_trace = os.path.exists(trace_path) and not recompute_trace
+
+        # Pre-whitening seed polish (sampler-config `seed_polish`): promote
+        # each solution-estimate start to its basin's optimum BEFORE the
+        # whitening probe measures scales around it.  A start far below its
+        # optimum makes the probe gradient-dominated (scales come out
+        # orders of magnitude too tight -- examples/ob140939 measured
+        # ~1000x tight from a start ~5900 nats low and diverged on 86% of
+        # its draws), freezes the barrier steepness against dishonest unit
+        # steps, and starts every sampler outside the typical set.  'auto'
+        # (default) polishes the canonical single start and MMEXOFAST seed
+        # sets, never multi-seed posterior-draw restart sets (already at
+        # equilibrium; polishing would collapse their overdispersion);
+        # on/off/int override (int = step count).  L-BFGS on logp+grad
+        # when the model is differentiable, the PR #56 T=1 DE polish
+        # otherwise.  Skipped when reusing an existing trace (nothing will
+        # be sampled).  This supersedes the PTDE-internal seed polish,
+        # which ran after the probe and only under PTDE.
+        if not reusing_trace:
+            raw_starts_pre, seed_indices_pre = system.get_raw_starts(model)
+            polish_steps = resolve_polish_steps(
+                sampler_cfg.get("seed_polish", "auto"),
+                n_seeds=len(raw_starts_pre),
+                has_seed_hints=bool(
+                    getattr(system.config_manager, "seed_hint_sets", None)
+                ),
+            )
+            if polish_steps:
+                polished, _dlps, _pmethod = polish_raw_starts(
+                    model,
+                    raw_starts_pre,
+                    n_steps=polish_steps,
+                    seed_indices=seed_indices_pre,
+                )
+                system.apply_polished_starts(polished, seed_indices_pre)
+                raw_start = system.get_raw_start(model)
+
         whiten_report = None
         if measure_scales:
             loaded = (
@@ -281,6 +319,10 @@ def _run_fit(config, gui, user_params=None):
                 save_whitening(
                     system, whitening_path, map_lp=whiten_report["map_lp"]
                 )
+                # The rescale re-expressed a polished (nonzero) start in
+                # the new raw coordinates; re-read it for every consumer
+                # below (a no-op for an unpolished all-zeros start).
+                raw_start = system.get_raw_start(model)
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
@@ -299,6 +341,8 @@ def _run_fit(config, gui, user_params=None):
         # Multi-seed starts (P4): a list of raw start dicts (one per solved
         # seed) plus their original seed indices. seed 0 == raw_start above;
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
+        # After a polish, seed 0 comes from the polished raw_initval and
+        # seeds k>0 are re-derived from their polished physical values.
         raw_starts, seed_indices = system.get_raw_starts(model)
 
         # convert raw starting point to the internal starting point

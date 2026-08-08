@@ -154,7 +154,11 @@ def build_config(name, files, prefix, mmx_json, args):
         ],
         "sampler": {
             "method": args.sampler,
-            "n_temps": 8,
+            "n_temps": (
+                args.n_temps
+                if str(args.n_temps).lower() == "auto"
+                else int(args.n_temps)
+            ),
             "T_max": 200,
             "cores": args.cores,
             "tune": args.tune,
@@ -163,6 +167,12 @@ def build_config(name, files, prefix, mmx_json, args):
             "recompute_trace": bool(args.recompute),
             "eval_timeout": 10,
         },
+        # Degenerate events routinely leave chains split across solution
+        # branches with no inter-mode mixing; occupancy weights then reflect
+        # initialization, not posterior mass (event 128: 52/54 chains in a
+        # branch 500 nats WORSE than the one the other 2 found). Per-mode
+        # bridge-sampling evidence weights are the designed remedy.
+        "modes": {"weights": "evidence"},
     }
     return config
 
@@ -230,6 +240,13 @@ def main(argv=None):
         "--finite-source",
         action="store_true",
         help="Model finite-source effects (default off, as in DC2018_128)",
+    )
+    ap.add_argument(
+        "--n-temps",
+        default="8",
+        help="PT temperature rungs: an integer or 'auto' "
+        "(max(8, ceil(sqrt(D/2)*ln(T_max))); use when the ladder-health "
+        "warning reports a communication-limited ladder)",
     )
     ap.add_argument(
         "--recompute",
