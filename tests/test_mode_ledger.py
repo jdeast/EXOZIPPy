@@ -117,9 +117,9 @@ def test_matching_assigns_survivor_and_rejects_the_missing_mode():
 
     # ASSERT
     assert ledger[0].matched_mode == 0
-    assert ledger[0].match_distance < 1.0
+    assert ledger[0].match_distance < 1.0  # fraction of threshold
     assert ledger[1].matched_mode is None
-    assert ledger[1].match_distance > 10.0
+    assert ledger[1].match_distance > 1.0  # beyond every criterion
     assert rejected_records(ledger) == [ledger[1]]
 
 
@@ -186,3 +186,44 @@ def test_no_rejected_seeds_writes_nothing(tmp_path):
     # ASSERT
     assert csv_path.read_text() == "header\n"
     assert not wrote
+
+
+def test_matching_uses_the_modes_marginal_scale():
+    """
+    Given a mode whose center (a posterior MEDIAN) sits ~20 of the seed's
+      conditional widths from the basin peak but within the mode's own
+      marginal spread,
+    When the ledger is matched,
+    Then the seed still matches (no false rejection) -- while a seed
+      genuinely far away in BOTH scales stays rejected.
+
+    Regression: on ob140939 all four seeds were falsely rejected because
+    correlated posteriors put marginal medians tens of conditional sigmas
+    from the polished peaks.
+    """
+    # ARRANGE
+    model, p = _two_basin_model()
+    raw0 = np.asarray(p.raw_from_initval(np.array([2.0])), dtype=float)
+    raw7 = np.asarray(p.raw_from_initval(np.array([7.0])), dtype=float)
+    ledger = build_seed_ledger(
+        _StubSystem([p]),
+        model,
+        [{"toy.x_raw": raw0}, {"toy.x_raw": raw7}],
+        [0, 1],
+    )
+    sep = abs(float(raw7[0]) - float(raw0[0]))
+    # mode center displaced sep/6 from the peak (tens of the seed's tiny
+    # conditional widths) with a marginal scale sep/12 -- the median sits
+    # 2 marginal sigmas from the peak, and the other basin 10 away
+    center = (
+        float(raw0[0]) + np.sign(float(raw7[0]) - float(raw0[0])) * sep / 6.0
+    )
+    report = _fake_report([center], "toy.x_raw")
+    report.modes[0].center_scale = {"toy.x_raw": sep / 12.0}
+
+    # ACT
+    match_ledger_to_modes(ledger, report)
+
+    # ASSERT
+    assert ledger[0].matched_mode == 0  # matched despite 20 seed-widths
+    assert ledger[1].matched_mode is None  # other basin: still rejected

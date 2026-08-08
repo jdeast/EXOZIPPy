@@ -140,6 +140,14 @@ class ModeInfo:
     center: dict = field(
         default_factory=dict
     )  # feature var -> center (raw units)
+    center_scale: dict = field(
+        default_factory=dict
+    )  # feature var -> robust per-dim MARGINAL scale of the mode's own
+    # draws (raw units). The seed ledger's matching normalizes by this:
+    # a seed's curvature widths are CONDITIONAL scales, and on correlated
+    # posteriors the marginal median sits tens of conditional sigmas from
+    # the basin peak, so normalizing by the seed widths alone falsely
+    # rejects seeds whose basins plainly survived.
     # Optional evidence-weighting fields (populated by
     # outputs.evidence.apply_evidence_weighting when modes: {weights: evidence}
     # is requested and every mode's bridge estimate is trustworthy).  weight is
@@ -627,9 +635,15 @@ def identify_modes(
             [(row == m).sum() / max((row >= 0).sum(), 1) for row in labels_2d]
         )
         center_raw = {}
+        center_scale_raw = {}
         sel_v = labels_valid == order[m]
         for jn, name in enumerate(dim_names):
-            center_raw[name] = float(np.median(Xv[sel_v, jn]))
+            col = Xv[sel_v, jn]
+            center_raw[name] = float(np.median(col))
+            # 1.4826 * MAD: robust marginal sigma of this mode along jn
+            center_scale_raw[name] = float(
+                1.4826 * np.median(np.abs(col - np.median(col)))
+            )
         modes.append(
             ModeInfo(
                 index=m,
@@ -642,6 +656,7 @@ def identify_modes(
                 ),
                 per_chain_weight=per_chain,
                 center=center_raw,
+                center_scale=center_scale_raw,
             )
         )
 
