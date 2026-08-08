@@ -31,6 +31,7 @@ def build_mode_reports(
     force=False,
     raise_on_invalid=True,
     evidence_weights=False,
+    seed_ledger=None,
 ):
     """Identify posterior modes, distribute the posterior, write tables.
 
@@ -77,6 +78,15 @@ def build_mode_reports(
         the occupancy weights and provenance on ``mode_report`` in place, so
         the LaTeX/CSV output below picks the new weights up automatically.
         Self-diagnosing: a single refused mode falls back to occupancy.
+    seed_ledger : list of outputs.ledger.SeedRecord, optional
+        The multi-seed "considered and rejected" ledger built by run.py
+        after the seed polish (outputs.ledger.build_seed_ledger). When
+        given, each record is matched to a surviving posterior mode or
+        marked rejected; the ledger section is appended to
+        <prefix>_modes.txt, rejected solutions get Laplace rows in the
+        CSV and a standalone <prefix>_rejected_modes.tex table. Absent for
+        single-seed fits and for the trace-reprocessing CLI (the seeds no
+        longer exist there).
 
     Returns
     -------
@@ -163,6 +173,41 @@ def build_mode_reports(
                 exc_info=True,
             )
 
+    # Seeded-solution ledger: match every (polished) seed to a surviving
+    # mode or mark it rejected, and report the rejected ones -- the
+    # "considered and rejected" record that pure T=1 occupancy loses.
+    # Appended AFTER any evidence-weighting rewrite of the mode report.
+    if seed_ledger:
+        try:
+            from .ledger import (
+                ledger_to_text,
+                match_ledger_to_modes,
+                rejected_records,
+                write_rejected_latex,
+            )
+
+            match_ledger_to_modes(seed_ledger, mode_report)
+            text = ledger_to_text(seed_ledger)
+            if modes_path is None:
+                modes_path = Path(str(prefix) + "_modes.txt")
+            with open(modes_path, "a", encoding="utf-8") as f:
+                f.write(text)
+            n_rej = len(rejected_records(seed_ledger))
+            if n_rej:
+                write_rejected_latex(
+                    seed_ledger, str(prefix) + "_rejected_modes.tex"
+                )
+                logger.info(
+                    f"Seed ledger: {n_rej} seeded solution(s) rejected by "
+                    f"the posterior; Laplace characterization in "
+                    f"{modes_path} and {prefix}_rejected_modes.tex"
+                )
+        except Exception:
+            logger.warning(
+                "Seed-ledger reporting failed; continuing without it",
+                exc_info=True,
+            )
+
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
 
@@ -179,5 +224,15 @@ def build_mode_reports(
         csv_filename=str(prefix) + "_results.csv",
         mode_report=mode_report,
     )
+    if seed_ledger:
+        try:
+            from .ledger import append_ledger_csv
+
+            append_ledger_csv(seed_ledger, str(prefix) + "_results.csv")
+        except Exception:
+            logger.warning(
+                "Seed-ledger CSV rows failed; continuing without them",
+                exc_info=True,
+            )
 
     return mode_report
