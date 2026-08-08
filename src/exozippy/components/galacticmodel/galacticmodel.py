@@ -208,13 +208,26 @@ class GalacticModel(Component):
         y_bar = -x * sin_bar + y * cos_bar
 
         # 1. Compute Disk Likelihood (Spatial + Kinematic)
+        # Galactic rotation is AZIMUTHAL: the circular-speed offset belongs
+        # on v_phi (paired with the azimuthal dispersion sigma_V) and the
+        # radial component v_r is zero-centered (sigma_U). These centers
+        # were swapped until 2026-08: the prior penalized an EXACTLY
+        # circular co-rotating orbit by ~49 nats and was maximized by a
+        # star plunging radially at the rotation speed (pinned by
+        # tests/test_galactic_model.py). On examples/ob140939 the swap
+        # gave the anti-rotation parallax solution +5 nats and flipped the
+        # mode weights to 0.98/0.02 AGAINST the Yee et al. 2015 proper-
+        # motion-preferred solution. Sign convention: v_phi as computed by
+        # get_polar_velocity is positive for co-rotation at every position
+        # (verified against astropy Galactocentric), so the center is
+        # +DISK_ROTATION_VELOCITY.
         log_dens_disk = (-1.0 / DISK_SCALE_LENGTH) * r + (
             -1.0 / DISK_SCALE_HEIGHT
         ) * z_smooth
         log_vel_disk = (
-            (-0.5 / DISK_VELOCITY_SIGMA_U**2)
-            * (v_r - DISK_ROTATION_VELOCITY) ** 2
-            + (-0.5 / DISK_VELOCITY_SIGMA_V**2) * v_phi**2
+            (-0.5 / DISK_VELOCITY_SIGMA_U**2) * v_r**2
+            + (-0.5 / DISK_VELOCITY_SIGMA_V**2)
+            * (v_phi - DISK_ROTATION_VELOCITY) ** 2
             + (-0.5 / DISK_VELOCITY_SIGMA_W**2) * v_z**2
         )
         L_disk = log_dens_disk + log_vel_disk
@@ -226,10 +239,11 @@ class GalacticModel(Component):
             + (z / BULGE_DENSITY_Z_0) ** 2
         )
         log_dens_bulge = -0.5 * r_bulge_coord
+        # Bulge cylindrical rotation is azimuthal too (same fix as above).
         bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r
         log_vel_bulge = (
-            (-0.5 / BULGE_VELOCITY_SIGMA_1**2) * (v_r - bulge_rot) ** 2
-            + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * v_phi**2
+            (-0.5 / BULGE_VELOCITY_SIGMA_1**2) * v_r**2
+            + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * (v_phi - bulge_rot) ** 2
             + (-0.5 / BULGE_VELOCITY_SIGMA_3**2) * v_z**2
         )
         L_bulge = log_dens_bulge + log_vel_bulge
