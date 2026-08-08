@@ -345,6 +345,32 @@ def _run_fit(config, gui, user_params=None):
         # seeds k>0 are re-derived from their polished physical values.
         raw_starts, seed_indices = system.get_raw_starts(model)
 
+        # Seeded-solution ledger (multi-seed fits only): a Laplace record
+        # of every polished seed -- peak logp and curvature widths at the
+        # basin optimum -- measured NOW, while the seeds exist, so the
+        # final report can distinguish "considered and rejected at
+        # delta lp = X" from "never looked" even for modes the T=1
+        # posterior abandons entirely. Costs n_seeds x n_params x O(15)
+        # logp calls on the freshly whitened model. Disable with config
+        # `modes: {ledger: false}`.
+        # (Skipped when reusing an existing trace: the polish was skipped
+        # there too, so seed lp would be a start value, not a basin peak.)
+        seed_ledger = None
+        _ledger_on = (config.get("modes", {}) or {}).get("ledger", True)
+        if len(raw_starts) > 1 and _ledger_on and not reusing_trace:
+            from .outputs.ledger import build_seed_ledger
+
+            try:
+                seed_ledger = build_seed_ledger(
+                    system, model, raw_starts, seed_indices
+                )
+            except Exception:
+                logger.warning(
+                    "Seed ledger measurement failed; final report will "
+                    "not carry rejected-mode records",
+                    exc_info=True,
+                )
+
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
 
@@ -598,6 +624,7 @@ def _run_fit(config, gui, user_params=None):
         raise_on_invalid=True,
         evidence_weights=str(modes_cfg.get("weights", "")).lower()
         == "evidence",
+        seed_ledger=seed_ledger,
     )
 
     summary_path = Path(str(prefix) + "_summary.txt")
