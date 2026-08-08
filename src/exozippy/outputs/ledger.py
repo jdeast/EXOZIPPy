@@ -325,3 +325,165 @@ def write_rejected_latex(ledger, filename):
         f.write("\n".join(lines) + "\n")
     logger.info(f"Ledger: wrote rejected-mode table {filename}")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Hot-chain mode discovery (PTDE store_hot_chains)
+# ---------------------------------------------------------------------------
+
+# A hot draw whose UNtempered lp is within this many nats of the best lp
+# seen anywhere in the hot set is "near-viable": worth clustering as a
+# candidate mode. Matches the spirit of modes.DEFAULT_LP_EXEMPT_MARGIN --
+# a genuinely real mode more than 50 nats down carries e^-50 of the mass
+# and loses nothing by being ignored.
+HOT_LP_MARGIN = 50.0
+
+# Fewer near-viable points than this cannot support a cluster.
+HOT_MIN_POINTS = 25
+
+
+def discover_hot_modes(
+    system,
+    model,
+    hot,
+    seed_ledger=None,
+    margin_nats=HOT_LP_MARGIN,
+    min_points=HOT_MIN_POINTS,
+    max_modes=8,
+    subsample=20000,
+    seed=20260711,
+    polish_steps=150,
+):
+    """Find posterior-suppressed modes in the thinned hot-rung draws.
+
+    ``hot`` is the ``posterior_hot`` group written by
+    ptde_async_sample(store_hot_chains=...): raw variables + UNtempered
+    ``lp`` with dims (chain, draw). Hot draws are DETECTORS only -- a
+    T-tempered mode is ~sqrt(T) too wide, so nothing here uses their
+    spread. The pipeline is: filter to near-viable draws (lp within
+    ``margin_nats`` of the best), cluster them (the same BIC k-means +
+    density-dip merge the T=1 mode identification uses), take each
+    cluster's best-lp draw as a candidate, POLISH it to its basin optimum
+    (polish.polish_raw_starts), Laplace-characterize it
+    (build_seed_ledger), and append it to ``seed_ledger`` unless an
+    existing record already sits in the same basin.
+
+    Appended records carry source='hot-chain' and seed indices continuing
+    after the seeded ones. Returns the (possibly extended) ledger list.
+    match_ledger_to_modes then classifies them against the surviving T=1
+    modes like any other record -- a hot-chain record matching a surviving
+    mode is simply confirmation; an unmatched one is a mode the T=1
+    posterior never held.
+    """
+    from .modes import _dip_merge, _kmeans_bic
+
+    ledger = list(seed_ledger) if seed_ledger else []
+
+    raw_keys = [str(v) for v in hot.data_vars if str(v) != "lp"]
+    if not raw_keys or "lp" not in hot.data_vars:
+        return ledger
+    lp = np.asarray(hot["lp"].values, dtype=float).reshape(-1)
+
+    cols, names, shapes = [], [], {}
+    for key in raw_keys:
+        arr = np.asarray(hot[key].values, dtype=float)
+        n_chain, n_draw = arr.shape[0], arr.shape[1]
+        arr = arr.reshape(n_chain * n_draw, -1)
+        shapes[key] = arr.shape[1]
+        for j in range(arr.shape[1]):
+            cols.append(arr[:, j])
+        names.extend(_flat_names(key, arr.shape[1]))
+    X = np.column_stack(cols)
+
+    good = np.isfinite(lp) & np.all(np.isfinite(X), axis=1)
+    if not good.any():
+        return ledger
+    viable = good & (lp >= np.nanmax(lp[good]) - margin_nats)
+    n_viable = int(viable.sum())
+    if n_viable < min_points:
+        logger.info(
+            f"Hot-chain discovery: only {n_viable} near-viable hot draws "
+            f"(need {min_points}); nothing to cluster."
+        )
+        return ledger
+    Xv, lpv = X[viable], lp[viable]
+
+    rng = np.random.default_rng(seed)
+    if Xv.shape[0] > subsample:
+        keep = rng.choice(Xv.shape[0], size=subsample, replace=False)
+        Xv, lpv = Xv[keep], lpv[keep]
+
+    # Standardize for clustering (hot spreads are wide but finite).
+    mu = np.median(Xv, axis=0)
+    sig = np.maximum(np.std(Xv, axis=0), 1e-12)
+    Z = (Xv - mu) / sig
+    labels, centers = _kmeans_bic(Z, max_modes=max_modes, seed=seed)
+    # iterate the density-dip merge to a fixed point, as identify_modes does
+    while True:
+        labels, centers, changed = _dip_merge(
+            Z, labels, centers, merge_ratio=0.5
+        )
+        if not changed:
+            break
+    n_clusters = len(np.unique(labels[labels >= 0]))
+    logger.info(
+        f"Hot-chain discovery: {n_viable} near-viable draws -> "
+        f"{n_clusters} cluster(s)."
+    )
+
+    from ..polish import polish_raw_starts
+
+    next_index = max((r.seed_index for r in ledger), default=-1) + 1
+    for c in np.unique(labels[labels >= 0]):
+        sel = labels == c
+        best = int(np.argmax(lpv[sel]))
+        x_best = Xv[sel][best]
+        # rebuild the raw dict for this candidate
+        cand, ofs = {}, 0
+        for key in raw_keys:
+            n = shapes[key]
+            cand[key] = np.array(x_best[ofs : ofs + n], dtype=float)
+            ofs += n
+
+        polished, _dlps, _method = polish_raw_starts(
+            model, [cand], n_steps=polish_steps
+        )
+        recs = build_seed_ledger(system, model, polished, [next_index])
+        rec = recs[0]
+        rec.source = "hot-chain"
+
+        # Dedup: an existing record already sitting in this basin (within
+        # MATCH_SIGMA of the polished point, in the new record's own
+        # widths) makes this a rediscovery, not a discovery.
+        dup = False
+        for other in ledger:
+            ds = []
+            for key in raw_keys:
+                a = np.asarray(rec.raw_point[key], dtype=float).reshape(-1)
+                b = np.asarray(
+                    other.raw_point.get(key, np.full_like(a, np.nan)),
+                    dtype=float,
+                ).reshape(-1)
+                s = np.asarray(rec.raw_scales[key], dtype=float).reshape(-1)
+                if b.shape != a.shape or not np.all(np.isfinite(b)):
+                    ds = []
+                    break
+                ds.extend(np.abs(a - b) / np.maximum(s, 1e-300))
+            if ds and max(ds) <= MATCH_SIGMA:
+                dup = True
+                break
+        if dup:
+            continue
+        ledger.append(rec)
+        next_index += 1
+        logger.info(
+            f"Hot-chain discovery: new basin at lp={rec.lp_max:.2f} "
+            f"recorded as ledger entry {rec.seed_index} (hot-chain)."
+        )
+
+    # delta_lp is relative to the best record across the WHOLE ledger.
+    if ledger:
+        best_lp = max(r.lp_max for r in ledger)
+        for r in ledger:
+            r.delta_lp = best_lp - r.lp_max
+    return ledger

@@ -112,6 +112,7 @@ def ptde_async_sample(
     eval_timeout=None,
     collect_rung_timing=False,
     progress_callback=None,
+    store_hot_chains=False,
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -142,6 +143,21 @@ def ptde_async_sample(
                Invoked at each geometric convergence check; exceptions are
                logged and swallowed (_safe_progress) so it can never abort the
                fit.
+
+    Returns
+    -------
+    store_hot_chains : False | True | int -- keep THINNED draws from the
+               hot rungs (T > 1) as an extra ``posterior_hot`` group on the
+               returned InferenceData: every int-th post-tune iteration of
+               each hot chain (True -> 20), with its UNtempered logp and a
+               per-chain ``temperature`` coordinate. Hot draws are not
+               posterior draws -- a T-tempered mode is ~sqrt(T) too wide --
+               but they visit posterior-suppressed basins (occupancy
+               ~exp(-dlp/T)) that the T=1 chains abandon, so they are the
+               mode DETECTOR for outputs.ledger.discover_hot_modes, which
+               polishes and Laplace-characterizes anything they find.
+               Memory: n_raw_elements x (n_temps-1) x n_chains x
+               (draws/thin) float64.
 
     Returns
     -------
@@ -314,6 +330,25 @@ def ptde_async_sample(
     }
     stored_lp = np.zeros((n_chains, draws))
     per_chain_draws = np.zeros(n_chains, dtype=int)
+
+    # Optional thinned hot-rung storage (store_hot_chains): detector data
+    # for post-hoc discovery of posterior-suppressed modes; see the
+    # parameter docstring. UNtempered logp is stored (current_lp holds the
+    # raw logp; tempering happens in the acceptance rule), so hot lp values
+    # are directly comparable to T=1.
+    hot_thin = 0
+    if store_hot_chains and n_temps > 1:
+        hot_thin = (
+            20 if store_hot_chains is True else max(1, int(store_hot_chains))
+        )
+    hot_cap = max(1, draws // hot_thin) if hot_thin else 0
+    if hot_thin:
+        stored_hot_raw = {
+            k: np.zeros((n_temps - 1, n_chains, hot_cap) + raw_start[k].shape)
+            for k in model_keys
+        }
+        stored_hot_lp = np.full((n_temps - 1, n_chains, hot_cap), np.nan)
+        per_hot_draws = np.zeros((n_temps - 1, n_chains), dtype=int)
 
     n_accept = np.zeros(n_temps)
     n_propose = np.zeros(n_temps)
@@ -608,6 +643,22 @@ def ptde_async_sample(
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
+                # thinned hot-rung storage (see store_hot_chains)
+                if (
+                    hot_thin
+                    and k >= 1
+                    and iter_count[k][i] > tune
+                    and iter_count[k][i] % hot_thin == 0
+                    and per_hot_draws[k - 1, i] < hot_cap
+                ):
+                    d = per_hot_draws[k - 1, i]
+                    for key in model_keys:
+                        stored_hot_raw[key][k - 1, i, d] = current_state[k][i][
+                            key
+                        ]
+                    stored_hot_lp[k - 1, i, d] = current_lp[k][i]
+                    per_hot_draws[k - 1, i] = d + 1
+
             n_completed_total[0] += 1
 
             if n_completed_total[0] % swap_interval == 0:
@@ -731,6 +782,51 @@ def ptde_async_sample(
     # Multi-seed provenance (P4): which solved seed each T=1 chain started from.
     # TODO(P4): surface in outputs/modes.py ModeReport; per-chain attr for now.
     idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
+
+    if hot_thin:
+        import xarray as xr
+
+        # Rectangular cut at the shortest hot chain (rungs run at slightly
+        # different speeds); rungs x chains flatten into one 'chain' dim
+        # with a per-chain temperature coordinate, which round-trips
+        # through netcdf.
+        n_hot = int(per_hot_draws.min())
+        if n_hot > 0:
+            n_hot_chains = (n_temps - 1) * n_chains
+            data_vars = {}
+            for key in model_keys:
+                arr = stored_hot_raw[key][:, :, :n_hot].reshape(
+                    (n_hot_chains, n_hot) + raw_start[key].shape
+                )
+                dims = ("chain", "draw") + tuple(
+                    f"{key}_dim_{j}" for j in range(arr.ndim - 2)
+                )
+                data_vars[str(key)] = (dims, arr)
+            data_vars["lp"] = (
+                ("chain", "draw"),
+                stored_hot_lp[:, :, :n_hot].reshape(n_hot_chains, n_hot),
+            )
+            idata["posterior_hot"] = xr.Dataset(
+                data_vars,
+                coords={
+                    "chain": np.arange(n_hot_chains),
+                    "draw": np.arange(n_hot),
+                    "temperature": (
+                        "chain",
+                        np.repeat(np.asarray(temperatures[1:]), n_chains),
+                    ),
+                },
+            )
+            logger.info(
+                f"PTDE-async: stored {n_hot} thinned hot draws/chain from "
+                f"{n_temps - 1} rungs x {n_chains} chains "
+                f"(store_hot_chains={store_hot_chains}, thin={hot_thin})"
+            )
+        else:
+            logger.warning(
+                "PTDE-async: store_hot_chains was set but no hot draws "
+                "accumulated (draws too small for the thinning factor?)"
+            )
     if len(set(chain_seed_index)) > 1:
         logger.info(
             f"PTDE-async multi-seed provenance (chain -> seed): "
