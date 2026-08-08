@@ -46,10 +46,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLISH_STEPS = 150
 
-# L-BFGS stopping: loose on purpose (see module docstring).  ftol is in
-# nats; gtol is nats per raw unit -- one preliminary whitening scale, so
-# 0.01 nat/unit is deep inside the flat top of the basin.
-_LBFGS_FTOL = 1e-3
+# L-BFGS stopping: terminate on the GRADIENT (plus the maxiter cap),
+# never on per-iteration improvement. scipy's `ftol` fires on the FIRST
+# iteration whose gain is small -- and it is RELATIVE to |f|, so the old
+# 1e-3 quit whenever an iteration gained < 1e-3*|lp| (~2 nats at
+# lp ~ 1900), stranding ob140939's seeds ~15 nats below their basin
+# peaks; even an absolute per-iteration threshold dies on a slow first
+# bend of a curved valley (measured: iteration 1 gains 0.004 nats, the
+# remaining 2.0 arrive over the next 33). ftol is therefore disabled.
+# gtol is nats per raw unit -- one preliminary whitening scale, so
+# 0.01 nat/unit is deep inside the flat top of the basin. maxiter stays
+# as the guard against hierarchical-MAP collapse (scale-like parameters
+# can run toward degenerate corners if polished without bound).
+_LBFGS_FTOL = 1e-12  # effectively off; gtol + maxiter terminate
 _LBFGS_GTOL = 1e-2
 # Non-finite logp guard: L-BFGS line searches handle inf poorly, so a
 # non-finite evaluation returns this plateau plus a quadratic pull back
