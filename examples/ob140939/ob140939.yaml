@@ -58,11 +58,16 @@ sampler:
   # between the four degenerate basins.
   tune: 0
   draws: 50000
-  # Size the tempering ladder from the measured communication barrier
-  # (the fixed default of 8 was communication-limited here: Lambda ~ 6.4
-  # wants ~14 rungs; without them the occupancy mode weights lose their
-  # validation).
-  n_temps: auto
+  # Densified tempering ladder, validated empirically: auto (17 rungs)
+  # left adjacent-swap acceptance at 5-7% and 3 round trips -- the
+  # ladder froze below T ~ 75 and the mode weights were initialization
+  # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
+  # with margin) swap acceptance is 50-65%, round trips flow, and the
+  # per-rung basin-occupancy profile is smooth equilibrium from T=200
+  # (50/50) to T=1 (~98/2) -- the mode weights become a real posterior
+  # statement (u0,-,- ~ 98%, agreeing with the ledger's Laplace
+  # estimate and Yee+2015's proper-motion argument).
+  n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
   # nobody seeded still show up as "considered and rejected".
