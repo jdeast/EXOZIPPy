@@ -231,13 +231,16 @@ class Orbit(Component):
         # sqrt(vsini)cos/sin(lambda) pair and derives vsini/lam from them
         # (mirrors the secosw/sesinw -> ecc/omega idiom above).
         from ..rm import rm_enabled
+
         if rm_enabled(system):
-            self.manifest.update({
-                "svcoslam": None,
-                "svsinlam": None,
-                "vsini": {"expr_key": "from_sv"},
-                "lam": {"expr_key": "from_sv"},
-            })
+            self.manifest.update(
+                {
+                    "svcoslam": None,
+                    "svsinlam": None,
+                    "vsini": {"expr_key": "from_sv"},
+                    "lam": {"expr_key": "from_sv"},
+                }
+            )
 
         # Astrometry constrains the longitude of the ascending node and
         # breaks the i <-> 180-i degeneracy, so sample the node direction

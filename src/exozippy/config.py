@@ -1314,8 +1314,16 @@ class ConfigManager:
             return "solved"
         return "default"
 
-    def export_solution(self):
+    def export_solution(self, derived_params=None):
         """Export the resolved parameter solution as JSON-friendly dicts.
+
+        `derived_params`, when given, is the set of `(component_prefix,
+        param_name)` pairs the built manifests actually derive
+        (`System.derived_params()`).  Pass it whenever a System is in scope:
+        the fallback -- "this parameter has an expressions: block in its
+        defaults.yaml" -- is only an approximation, since a component may
+        declare the same parameter free in one topology and derived in
+        another (see planet.mass's linear vs log_q coordinate).
 
         Returns a dict with:
           - "parameters": {user_path: {value, unit, internal_unit, lower,
@@ -1405,7 +1413,10 @@ class ConfigManager:
                 value = _clean(self._last_resolved[internal_path] / factor)
             else:
                 value = _first("initval")
-            derived = bool(cfg.get("expressions"))
+            if derived_params is None:
+                derived = bool(cfg.get("expressions"))
+            else:
+                derived = (c_type, p_name) in derived_params
             # A parameter is fixed when it has a hardcoded value or sigma == 0.
             fixed = (cfg.get("value") is not None) or (
                 sigma is not None and sigma == 0
@@ -1457,6 +1468,88 @@ class ConfigManager:
             result["seeds"] = seeds
 
         return result
+
+    def probe_derivable(self, paths, tolerance=1e-3):
+        """Which of `paths` the relaxation engine can pin down from what is
+        known now, as opposed to falling back on a bare defaults.yaml value.
+
+        Runs the engine on a snapshot and rolls every mutation back, so this
+        is a read-only question: `finalize_user_params` still does the real
+        solve later, from the same inputs plus whatever stages 1-2 add.
+
+        The test is on **provenance**, not on presence: the engine's "default
+        armor" step seeds every mapped path from defaults.yaml, so almost
+        everything comes back resolved.  A rank above RANK_DEFAULT means the
+        value traces back to a user entry or a component hint rather than to
+        a default -- i.e. someone actually told us, directly or through a
+        relation.
+
+        Called at stage 1a (before most hints exist), so a False here means
+        "not derivable *yet*"; callers that must decide early -- notably the
+        MMEXOFAST trigger -- get the conservative answer.
+        """
+        flat = {}
+        for upath, data in self.user_params.items():
+            sym = self.master_symbol_map.get(upath)
+            if sym is None:
+                continue
+            val = data.get("initval") if isinstance(data, dict) else data
+            if val is None and isinstance(data, dict):
+                val = data.get("mu")
+            if isinstance(val, (list, tuple)):
+                val = val[0] if len(val) else None
+            if val is None:
+                continue
+            c_type, p_name = upath.split(".")[0], upath.split(".")[-1]
+            factor = (
+                self.get_conversion_factor(c_type, p_name, full_path=upath)
+                or 1.0
+            )
+            flat[str(sym)] = float(val) * factor
+
+        # The engine writes back init_scale into user_params, appends
+        # diagnostics, and refreshes the export snapshots.  None of that may
+        # leak out of a probe.
+        saved = (
+            copy.deepcopy(self.user_params),
+            list(self.diagnostics),
+            dict(self.propagated_scales),
+            dict(self._last_provenance),
+            dict(self._last_scale_provenance),
+            dict(self._last_resolved),
+            dict(self._last_solved_by),
+        )
+        prev_level = logger.level
+        try:
+            logger.setLevel(logging.WARNING)
+            self.resolve_and_validate_parameters(flat, tolerance)
+            ranks = dict(self._last_provenance)
+        except Exception as e:
+            # A probe must never break a run that would otherwise work; the
+            # caller's fallback is simply "not derivable".
+            logger.debug(f"Derivability probe failed ({e}); assuming unknown.")
+            ranks = {}
+        finally:
+            logger.setLevel(prev_level)
+            (
+                self.user_params,
+                self.diagnostics,
+                self.propagated_scales,
+                self._last_provenance,
+                self._last_scale_provenance,
+                self._last_resolved,
+                self._last_solved_by,
+            ) = (
+                saved[0],
+                saved[1],
+                saved[2],
+                saved[3],
+                saved[4],
+                saved[5],
+                saved[6],
+            )
+
+        return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
 
     def resolve_and_validate_parameters(
         self, user_provided_params, tolerance=1e-3

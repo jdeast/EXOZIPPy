@@ -58,39 +58,60 @@ def load_json(path):
         return None
 
 
-def user_hints_sufficient(user_params, is_binary, want_rho):
-    """True when the user supplied a start value for every microlensing
-    observable this topology needs (t_0, u_0, t_E; rho when finite-source;
-    s-or-log_s, alpha, q when a lens companion exists).
+def user_hints_sufficient(config_manager, is_binary, want_rho):
+    """True when every microlensing observable this topology needs (t_0, u_0,
+    t_E; rho when finite-source; s-or-log_s, alpha, q when a lens companion
+    exists) was either given outright or can be **derived** from what was.
 
-    ``user_params`` is the ConfigManager's standardized dict, so lens paths
-    are already in ``lens.0.<param>`` form. Bounds-only entries do not count:
-    the point of the check is whether the relaxation engine has a START, and
-    only initval (or a fixed mu) provides one.
+    Derivability, not literal presence, is the right question, because
+    several of these are derived parameters a params file legitimately never
+    names.  The case that matters is a restart file written by mkparam: it
+    carries only sampled coordinates, so `lens.q` (derived from the body
+    masses) and `lens.t_E` (from theta_E / mu_rel) are both absent -- yet
+    both are fully determined by the `planet.log_q`/`planet.mass`,
+    `star.logmass`, distance and proper-motion entries it does carry.
+    Scanning for literal keys therefore declared a complete restart file
+    "insufficient" and re-ran MMEXOFAST on every second-iteration fit.
+
+    So ask the relaxation engine (`ConfigManager.probe_derivable`), which
+    follows exactly the relations that will set these values for real at
+    stage 3.  Bounds-only entries still do not count: a bound is not a start.
+
+    A literal entry for every observable short-circuits the probe: naming a
+    value outright makes it RANK_USER, which is derivable by definition, so
+    the engine cannot change the answer.  That keeps the common hand-written
+    params file on the old zero-cost path and spends the extra solve only
+    where the literal scan would have been wrong.
     """
-
-    def has_start(*paths):
-        for p in paths:
-            entry = user_params.get(p)
-            if isinstance(entry, dict) and (
-                entry.get("initval") is not None or entry.get("mu") is not None
-            ):
-                return True
-        return False
-
-    ok = (
-        has_start("lens.0.t_0")
-        and has_start("lens.0.u_0")
-        and has_start("lens.0.t_E")
-    )
+    required = ["lens.0.t_0", "lens.0.u_0", "lens.0.t_E"]
     if want_rho:
-        ok = ok and has_start("lens.0.rho")
+        required.append("lens.0.rho")
     if is_binary:
-        ok = (
-            ok
-            and has_start("lens.0.log_s", "lens.0.s")
-            and has_start("lens.0.alpha")
-            and has_start("lens.0.q")
+        required += ["lens.0.alpha", "lens.0.q"]
+
+    def named(path):
+        entry = config_manager.user_params.get(path)
+        return isinstance(entry, dict) and (
+            entry.get("initval") is not None or entry.get("mu") is not None
+        )
+
+    # s and log_s are one fact in two coordinates; either satisfies it.
+    if all(named(p) for p in required) and (
+        not is_binary or named("lens.0.s") or named("lens.0.log_s")
+    ):
+        return True
+
+    derivable = config_manager.probe_derivable(
+        required + ["lens.0.s", "lens.0.log_s"]
+    )
+    ok = all(p in derivable for p in required)
+    if is_binary:
+        ok = ok and ("lens.0.s" in derivable or "lens.0.log_s" in derivable)
+    if not ok:
+        missing = [p for p in required if p not in derivable]
+        logger.debug(
+            f"MMEXOFAST trigger: {missing} cannot be derived from the "
+            f"supplied parameters; a fit is needed."
         )
     return ok
 

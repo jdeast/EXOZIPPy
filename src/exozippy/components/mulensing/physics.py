@@ -21,7 +21,16 @@ def calc_theta_E(mass_lens, pi_rel):
     # but we must return a finite value so downstream parameters (rho, pi_E) don't
     # propagate NaN into the Op.  The lens.build_likelihood potentials penalise
     # this unphysical configuration so the sampler rejects it.
-    return pt.sqrt(KAPPA * mass_lens * pt.maximum(pi_rel, 0.0))
+    #
+    # mass_lens is guarded for the same reason: a lens body sampling a linear
+    # mass may go negative (planet.mass allows it), and mlens_total is a plain
+    # sum, so sqrt() would return NaN -- which build_likelihood then feeds to
+    # log(theta_E), poisoning the logp and its gradient over a whole region
+    # instead of penalising it.  The theta_E_singularity soft bound there does
+    # the penalising once the value is finite.
+    return pt.sqrt(
+        KAPPA * pt.maximum(mass_lens, 1e-12) * pt.maximum(pi_rel, 0.0)
+    )
 
 
 @register_physics

@@ -30,10 +30,10 @@ toy-model dead end). The real draw sidesteps both problems.
 
 Note: the "good" draw's lp is pinned to the CURRENT model's value, not the
 historical stored lp (~2982.18) -- the model has legitimately changed since
-that trace (log_s sampling, pinned source mass).  The check used to be
-finite-only because System.prepare() was not deterministic across process
-runs; that turned out to be PYTHONHASHSEED-ordered iteration of
-eq.free_symbols in the relaxation engine's (since-deleted) sympy scale
+that trace (log_s sampling, pinned source mass, planet log_q default).  The
+check used to be finite-only because System.prepare() was not deterministic
+across process runs; that turned out to be PYTHONHASHSEED-ordered iteration
+of eq.free_symbols in the relaxation engine's (since-deleted) sympy scale
 passes, scattering init_scale by orders of magnitude and with it the
 raw->physical map.  The whitening refactor removed the broken passes and
 config.py now sorts every free_symbols walk, so the build is bit-for-bit
@@ -129,6 +129,18 @@ def dc2018_128_logp(tmp_path_factory):
             config = yaml.safe_load(f)
         with open("DC2018_128.params.yaml") as f:
             user_params = yaml.safe_load(f)
+
+        # The historical draws below were recorded when the planet mass was
+        # sampled linearly; a lens body now defaults to log_q.  Unlike the
+        # s -> log_s rename, the raw values cannot be carried across: the
+        # runaway value pins the logit at an upper bound that means 260000
+        # Mjup in one coordinate and q = 10 in the other, and the good draw
+        # sits mid-range, where the two coordinates share nothing.  Pin the
+        # coordinate the draws came from -- what this file regression-tests
+        # (the unclipped raw**2 in the logit-uniform prior correction) lives
+        # in Parameter.build_pymc and is the same in either parameterization.
+        for entry in config.get("planet", []):
+            entry.setdefault("mass_parameterization", "linear")
 
         system = System(config, user_params)
         system.prepare()
