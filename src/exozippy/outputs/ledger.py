@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 # false rejections.
 MATCH_SIGMA = 10.0
 
+# Marginal-scale matching threshold (criterion (b) in match_ledger_to_modes):
+# a mode's own median lies within ~2 of its marginal sigmas by construction,
+# and the density-dip merge keeps distinct modes much farther apart.
+_MATCH_MARGINAL_SIGMA = 3.0
+
 
 @dataclass
 class SeedRecord:
@@ -182,17 +187,38 @@ def match_ledger_to_modes(ledger, mode_report, match_sigma=MATCH_SIGMA):
             for j, nm in enumerate(_flat_names(key, flat_v.size)):
                 elems[nm] = (flat_v[j], max(flat_s[j], 1e-300))
         for m in mode_report.modes:
-            ds = [
-                abs(elems[nm][0] - c) / elems[nm][1]
-                for nm, c in m.center.items()
-                if nm in elems
-            ]
-            if not ds:
+            # Two complementary criteria, either suffices:
+            # (a) within `match_sigma` of the mode center in the seed's own
+            #     CONDITIONAL (curvature) widths -- catches a center right
+            #     at the polished peak;
+            # (b) within _MATCH_MARGINAL_SIGMA of the center in the mode's
+            #     per-dim MARGINAL scale (ModeInfo.center_scale) -- the mode
+            #     center is a posterior MEDIAN, which on correlated
+            #     posteriors sits tens of conditional sigmas from the basin
+            #     peak, so (a) alone falsely rejects surviving basins
+            #     (observed on ob140939: all four seeds rejected, two of
+            #     them sitting inside the two surviving modes). A mode
+            #     always holds its own median within ~2 marginal sigmas,
+            #     while the density-dip merge guarantees OTHER basins sit
+            #     much farther, so 3 is not delicate.
+            scales = getattr(m, "center_scale", {}) or {}
+            ds_cond, ds_marg = [], []
+            for nm, c in m.center.items():
+                if nm not in elems:
+                    continue
+                delta = abs(elems[nm][0] - c)
+                ds_cond.append(delta / elems[nm][1])
+                ds_marg.append(delta / max(scales.get(nm, 0.0), 1e-300))
+            if not ds_cond:
                 continue
-            d = max(ds)
+            # effective distance: fraction of whichever threshold is closer
+            d = min(
+                max(ds_cond) / match_sigma,
+                max(ds_marg) / _MATCH_MARGINAL_SIGMA,
+            )
             if d < best_d:
                 best_mode, best_d = m.index, d
-        if best_mode is not None and best_d <= match_sigma:
+        if best_mode is not None and best_d <= 1.0:
             rec.matched_mode = best_mode
             rec.match_distance = best_d
         else:
@@ -223,7 +249,7 @@ def ledger_to_text(ledger):
         lines.append("")
         status = (
             f"survived as mode {r.matched_mode + 1} "
-            f"(match distance {r.match_distance:.1f} sigma)"
+            f"(match distance {r.match_distance:.2f} of threshold)"
             if r.matched_mode is not None
             else "REJECTED: no surviving posterior mode at this solution"
         )
