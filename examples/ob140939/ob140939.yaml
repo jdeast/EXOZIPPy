@@ -46,11 +46,16 @@ mulensinstrument:
 parameter_file: "ob140939.params.yaml"
 
 sampler:
-  method: nuts
+  # ptde_async: the params file seeds all FOUR Yee+2015 degenerate
+  # solutions (initval lists), and only PTDE round-robins its chains
+  # across seeds -- nuts would start every chain at seed 0. PTDE's
+  # tempering also lets chains cross between the degenerate basins;
+  # outputs/modes.py then reports each mode separately.
+  method: ptde_async
   tune: 4000              # generally need longer tuning for mulensing
   draws: 5000
-  chains: 4
-  cores: 4
-  init: adapt_diag
-  target_accept: 0.99
   recompute_trace: True
+  # The seeds are literature solution estimates, not posterior draws,
+  # so force the pre-whitening polish, which 'auto' skips for hint-less
+  # multi-seed sets.
+  seed_polish: on
