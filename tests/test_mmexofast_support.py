@@ -37,11 +37,45 @@ class _RecordingConfigManager:
 # ---------------------------------------------------------------------------
 
 
+# The check now asks the relaxation engine whether each observable can be
+# DERIVED, not whether the params file happens to name it, so these tests
+# drive a real ConfigManager over a real lens topology.
+_PSPL_CONFIG = {
+    "star": [{"name": "Lens"}, {"name": "Source"}],
+    "lens": [{"name": "Lens", "lenses": ["star.0"], "sources": ["star.1"]}],
+}
+_BINARY_CONFIG = {
+    "star": [{"name": "Lens"}, {"name": "Source"}],
+    "planet": [{"name": "b"}],
+    "lens": [
+        {
+            "name": "Lens",
+            "lenses": ["star.0", "planet.0"],
+            "sources": ["star.1"],
+        }
+    ],
+}
+
+
+def _cm(params, config=None):
+    from exozippy.config import ConfigManager
+
+    return ConfigManager(params, system_config=config or _PSPL_CONFIG)
+
+
 def _full_pspl_params():
     return {
-        "lens.0.t_0": {"initval": 2458554.9},
-        "lens.0.u_0": {"initval": 0.14},
-        "lens.0.t_E": {"initval": 18.2},
+        "lens.Lens.t_0": {"initval": 2458554.9},
+        "lens.Lens.u_0": {"initval": 0.14},
+        "lens.Lens.t_E": {"initval": 18.2},
+    }
+
+
+def _binary_geometry():
+    return {
+        "lens.Lens.alpha": {"initval": -52.0},
+        "lens.Lens.q": {"initval": 1.1e-3},
+        "lens.Lens.s": {"initval": 0.98},
     }
 
 
@@ -52,20 +86,20 @@ def test_sufficiency_pspl_complete():
     Then the hints are sufficient (no MMEXOFAST run needed).
     """
     assert mmx.user_hints_sufficient(
-        _full_pspl_params(), is_binary=False, want_rho=False
+        _cm(_full_pspl_params()), is_binary=False, want_rho=False
     )
 
 
 def test_sufficiency_missing_t_E_is_insufficient():
     """
-    Given user initvals lacking t_E,
+    Given user initvals lacking t_E and nothing to derive it from,
     When sufficiency is checked,
     Then the hints are insufficient.
     """
     params = _full_pspl_params()
-    del params["lens.0.t_E"]
+    del params["lens.Lens.t_E"]
     assert not mmx.user_hints_sufficient(
-        params, is_binary=False, want_rho=False
+        _cm(params), is_binary=False, want_rho=False
     )
 
 
@@ -73,16 +107,16 @@ def test_sufficiency_binary_needs_geometry():
     """
     Given a binary lens whose params cover only the PSPL trio,
     When sufficiency is checked,
-    Then the hints are insufficient until s (or log_s), alpha and q appear.
+    Then the hints are insufficient until s, alpha and q appear.
     """
     params = _full_pspl_params()
     assert not mmx.user_hints_sufficient(
-        params, is_binary=True, want_rho=False
+        _cm(params, _BINARY_CONFIG), is_binary=True, want_rho=False
     )
-    params["lens.0.s"] = {"initval": 0.98}
-    params["lens.0.alpha"] = {"initval": -52.0}
-    params["lens.0.q"] = {"initval": 1.1e-3}
-    assert mmx.user_hints_sufficient(params, is_binary=True, want_rho=False)
+    params.update(_binary_geometry())
+    assert mmx.user_hints_sufficient(
+        _cm(params, _BINARY_CONFIG), is_binary=True, want_rho=False
+    )
 
 
 def test_sufficiency_accepts_log_s_for_s():
@@ -92,10 +126,12 @@ def test_sufficiency_accepts_log_s_for_s():
     Then log_s satisfies the separation requirement.
     """
     params = _full_pspl_params()
-    params["lens.0.log_s"] = {"initval": -0.01}
-    params["lens.0.alpha"] = {"initval": -52.0}
-    params["lens.0.q"] = {"initval": 1.1e-3}
-    assert mmx.user_hints_sufficient(params, is_binary=True, want_rho=False)
+    params.update(_binary_geometry())
+    params["lens.Lens.log_s"] = params.pop("lens.Lens.s")
+    params["lens.Lens.log_s"] = {"initval": -0.01}
+    assert mmx.user_hints_sufficient(
+        _cm(params, _BINARY_CONFIG), is_binary=True, want_rho=False
+    )
 
 
 def test_sufficiency_bounds_only_entry_does_not_count():
@@ -105,9 +141,9 @@ def test_sufficiency_bounds_only_entry_does_not_count():
     Then the entry does not count as a start value.
     """
     params = _full_pspl_params()
-    params["lens.0.t_E"] = {"lower": 1.0, "upper": 100.0}
+    params["lens.Lens.t_E"] = {"lower": 1.0, "upper": 100.0}
     assert not mmx.user_hints_sufficient(
-        params, is_binary=False, want_rho=False
+        _cm(params), is_binary=False, want_rho=False
     )
 
 
@@ -118,8 +154,75 @@ def test_sufficiency_finite_source_needs_rho():
     Then the hints are insufficient.
     """
     assert not mmx.user_hints_sufficient(
-        _full_pspl_params(), is_binary=False, want_rho=True
+        _cm(_full_pspl_params()), is_binary=False, want_rho=True
     )
+
+
+def test_sufficiency_accepts_a_derived_q_from_body_masses():
+    """
+    Given a binary lens whose params name the BODY MASSES rather than q --
+    the shape every mkparam restart file has, since lens.q is derived and so
+    is never written --
+    When sufficiency is checked,
+    Then q is recognized as derivable and MMEXOFAST is not re-run.
+
+    This is the regression: the old literal-key scan called a complete
+    restart file insufficient, re-ran MMEXOFAST on every second-iteration
+    fit, and then died inside it with "Parameter q has to be larger than 0".
+    """
+    params = _full_pspl_params()
+    params.update(_binary_geometry())
+    del params["lens.Lens.q"]
+    params["planet.b.mass"] = {"initval": 0.35}
+    params["star.Lens.logmass"] = {"initval": -0.4}
+
+    assert mmx.user_hints_sufficient(
+        _cm(params, _BINARY_CONFIG), is_binary=True, want_rho=False
+    )
+
+
+def test_literal_params_skip_the_engine_probe():
+    """
+    Given a params file that names every required observable outright,
+    When sufficiency is checked,
+    Then the answer comes from the cheap scan and the relaxation engine is
+    never run -- naming a value makes it RANK_USER, so the probe could not
+    change the answer, and every ordinary mulens fit would otherwise pay for
+    an extra solve.
+    """
+    params = _full_pspl_params()
+    params.update(_binary_geometry())
+    cm = _cm(params, _BINARY_CONFIG)
+
+    calls = []
+    real = cm.probe_derivable
+    cm.probe_derivable = lambda *a, **k: (calls.append(1), real(*a, **k))[1]
+
+    assert mmx.user_hints_sufficient(cm, is_binary=True, want_rho=False)
+    assert calls == [], "the probe ran despite every observable being named"
+
+
+def test_probe_derivable_leaves_no_trace():
+    """
+    Given a ConfigManager,
+    When the derivability probe runs,
+    Then user_params, diagnostics and the export snapshots are unchanged --
+    the probe must not pre-empt the real solve at stage 3.
+    """
+    import copy
+
+    cm = _cm(_full_pspl_params(), _BINARY_CONFIG)
+    before = (
+        copy.deepcopy(cm.user_params),
+        list(cm.diagnostics),
+        dict(cm._last_resolved),
+    )
+
+    cm.probe_derivable(["lens.0.t_E"])
+
+    assert cm.user_params == before[0]
+    assert cm.diagnostics == before[1]
+    assert cm._last_resolved == before[2]
 
 
 # ---------------------------------------------------------------------------

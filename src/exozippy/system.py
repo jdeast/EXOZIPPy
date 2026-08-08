@@ -108,6 +108,30 @@ class System(Component):
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
 
+    def derived_params(self):
+        """`(component_prefix, param_name)` pairs the manifests actually derive.
+
+        The static `expressions:` block in a defaults.yaml is not the answer:
+        a component may declare the same parameter free in one topology and
+        derived in another (planet.mass is sampled linearly when RV or
+        astrometry measures it, and derived from log_q otherwise). This
+        mirrors `Component.add_parameter`'s rule -- a manifest value that is a
+        string, or a dict carrying an "expr_key", names an expression; a bare
+        None is a free parameter.  Valid after stage 2.
+        """
+        out = set()
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                if isinstance(raw, str):
+                    derived = True
+                elif isinstance(raw, dict):
+                    derived = raw.get("expr_key") is not None
+                else:
+                    derived = False
+                if derived:
+                    out.add((comp.prefix, name))
+        return out
+
     def build_likelihood(self, model, system):
         pass
 

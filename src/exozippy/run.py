@@ -172,9 +172,7 @@ def _run_fit(config, gui, user_params=None):
     # parameter count once the model is built (ptde.resolve_n_temps).
     _n_temps_raw = sampler_cfg.get("n_temps", 8)
     n_temps = (
-        _n_temps_raw
-        if isinstance(_n_temps_raw, str)
-        else int(_n_temps_raw)
+        _n_temps_raw if isinstance(_n_temps_raw, str) else int(_n_temps_raw)
     )
     T_max = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw = sampler_cfg.get("n_chains", None)

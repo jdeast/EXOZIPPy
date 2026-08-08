@@ -28,12 +28,18 @@ vectors), and an isolated single-parameter toy model does not reproduce the
 cancellation at all (see git history of this file/commit message for the
 toy-model dead end). The real draw sidesteps both problems.
 
-Note: the "good" draw's lp is checked only for ordinary magnitude, not an
-exact historical match -- System.prepare()'s symbolic relaxation engine
-turned out to not be perfectly deterministic across process runs (a
-*derived* bound can differ enough between two fresh builds of the identical
-model to shift lp by ~1e5-1e6), a separate pre-existing issue found while
-building this test. See test_good_draw_logp_is_ordinary's docstring.
+Note: the "good" draw's lp is pinned to the CURRENT model's value, not the
+historical stored lp (~2982.18) -- the model has legitimately changed since
+that trace (log_s sampling, pinned source mass, planet log_q default).  The
+check used to be finite-only because System.prepare() was not deterministic
+across process runs; that turned out to be PYTHONHASHSEED-ordered iteration
+of eq.free_symbols in the relaxation engine's (since-deleted) sympy scale
+passes, scattering init_scale by orders of magnitude and with it the
+raw->physical map.  The whitening refactor removed the broken passes and
+config.py now sorts every free_symbols walk, so the build is bit-for-bit
+reproducible and the value check is back.  If a deliberate model change
+moves the value, re-measure it at this exact raw point and update
+GOOD_EXPECTED_LP.
 
 Marked 'slow' (builds a full System + compiles PyTensor graphs).
 """
@@ -124,6 +130,18 @@ def dc2018_128_logp(tmp_path_factory):
         with open("DC2018_128.params.yaml") as f:
             user_params = yaml.safe_load(f)
 
+        # The historical draws below were recorded when the planet mass was
+        # sampled linearly; a lens body now defaults to log_q.  Unlike the
+        # s -> log_s rename, the raw values cannot be carried across: the
+        # runaway value pins the logit at an upper bound that means 260000
+        # Mjup in one coordinate and q = 10 in the other, and the good draw
+        # sits mid-range, where the two coordinates share nothing.  Pin the
+        # coordinate the draws came from -- what this file regression-tests
+        # (the unclipped raw**2 in the logit-uniform prior correction) lives
+        # in Parameter.build_pymc and is the same in either parameterization.
+        for entry in config.get("planet", []):
+            entry.setdefault("mass_parameterization", "linear")
+
         system = System(config, user_params)
         system.prepare()
         model = system.build_model()
@@ -138,27 +156,33 @@ def _point(raw_dict):
     return {k: np.asarray(v, dtype=float) for k, v in raw_dict.items()}
 
 
-def test_good_draw_logp_is_finite(dc2018_128_logp):
+# Measured at this exact raw point on a deterministic build (2026-08-07,
+# post free_symbols-sort hardening).  Differs from the historical stored lp
+# (~2982.18) because the model itself has changed since that trace; see the
+# module docstring.
+GOOD_EXPECTED_LP = -936.526
+
+
+def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
     """
     Given the DC2018_128 model,
     When logp is evaluated at the last ordinary (pre-runaway) raw-space state
     of chain 23,
-    Then it is finite, confirming GOOD_RAW is read correctly against this
-    model's free_RVs.
-
-    This does NOT check the value is close to the historical stored lp
-    (~2982.18), and deliberately doesn't bound its magnitude either:
-    System.prepare()'s symbolic relaxation engine turned out, while building
-    this test, to not be perfectly deterministic across process runs -- a
-    *derived* bound (e.g. lens.q's) can differ enough between two fresh
-    builds of the identical model (same YAML+params) to shift lp by as much
-    as ~1e6. That's a separate, pre-existing bug, out of scope for the PTDE
-    cancellation fix this file otherwise regression-tests; the finite-only
-    check here just confirms the point evaluates at all.
+    Then it reproduces the pinned value of a deterministic build -- both
+    confirming GOOD_RAW is read correctly against this model's free_RVs and
+    regression-guarding System.prepare()'s run-to-run reproducibility
+    (this check was finite-only while the relaxation engine's deleted sympy
+    scale passes made init_scale, and with it the raw->physical map,
+    PYTHONHASHSEED-dependent).
     """
     logp_fn = dc2018_128_logp
     val = float(np.asarray(logp_fn(_point(GOOD_RAW))))
-    assert np.isfinite(val), f"expected a finite lp, got {val}"
+    assert abs(val - GOOD_EXPECTED_LP) < 5.0, (
+        f"lp at the good draw moved: got {val:.4f}, expected "
+        f"{GOOD_EXPECTED_LP} +/- 5. Either build reproducibility broke "
+        f"(PYTHONHASHSEED sensitivity) or the model changed deliberately -- "
+        f"if the latter, re-measure and update GOOD_EXPECTED_LP."
+    )
 
 
 def test_runaway_draw_no_longer_produces_large_positive_logp(dc2018_128_logp):

@@ -104,7 +104,9 @@ def _do_solve(state, msg, resp_q):
 
         system = System(config, user_params=params)
         system.prepare()
-        export = system.config_manager.export_solution()
+        export = system.config_manager.export_solution(
+            derived_params=system.derived_params()
+        )
         # Relaxation done; the seconds-scale compile begins now. Ship the
         # data-only plots along so the GUI has something to draw meanwhile.
         resp_q.put(

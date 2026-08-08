@@ -362,7 +362,7 @@ class MulensInstrument(Instrument):
                 )
         else:
             if spec != "auto" and mmexofast_support.user_hints_sufficient(
-                self.config_manager.user_params, is_binary, want_rho
+                self.config_manager, is_binary, want_rho
             ):
                 return
             self._reject_time_spec_with_mmexofast(spec)
@@ -418,7 +418,9 @@ class MulensInstrument(Instrument):
         keys = [f"star.{source_ndx}.ra", "star.ra"]
         if star_names:
             keys.append(f"star.{star_names[source_ndx]}.ra")
-        user_set_source = any(k in self.config_manager.user_params for k in keys)
+        user_set_source = any(
+            k in self.config_manager.user_params for k in keys
+        )
 
         ndx = source_ndx
         if not user_set_source:

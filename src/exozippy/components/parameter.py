@@ -914,9 +914,7 @@ class Parameter:
                 )
                 span_t = pt.maximum(up_t - lo_t, 1e-12)
                 q_i = pt.sigmoid(
-                    pt.clip(
-                        lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ
-                    )
+                    pt.clip(lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
                 )
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
                 if is_sampled[i]:
