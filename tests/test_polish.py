@@ -283,3 +283,36 @@ def test_polished_start_survives_measure_and_whiten():
     assert p.phys_from_raw(raw_now)[0] == pytest.approx(7.5, abs=0.01)
     _, scales = probe_scales(get_raw_start(model), model.compile_logp())
     assert scales["toy.x_raw"][0] == pytest.approx(1.0, rel=0.15)
+
+
+def test_polish_reaches_the_peak_when_lp_is_large_in_magnitude():
+    """
+    Given a curved valley whose logp carries a large constant offset
+      (|lp| ~ 2000, like a real fit's likelihood normalization),
+    When polish_raw_starts runs,
+    Then the polished point reaches the true optimum to within a nat.
+
+    Regression: scipy's ftol is RELATIVE to |f|, so a bare 1e-3 stopped
+    the polish whenever an iteration gained < 1e-3*|lp| (~2 nats at
+    lp ~ -2000) -- on ob140939 that stranded seeds ~15 nats below their
+    basin peaks while hot-chain candidates reached the true optima.
+    The tolerance is now an absolute 0.01 nats per iteration.
+    """
+    # ARRANGE: Rosenbrock-flavored curved valley, optimum at (1, 1) with
+    # lp_max = -2000 exactly.
+    with pm.Model() as model:
+        x = pm.Flat("x")
+        y = pm.Flat("y")
+        pm.Potential(
+            "like",
+            -2000.0 - 0.5 * ((y - x**2) ** 2 / 0.01 + (x - 1.0) ** 2),
+        )
+    start = {"x": np.array(-1.0), "y": np.array(1.0)}
+
+    # ACT
+    polished, dlps, method = polish_raw_starts(model, [start], n_steps=500)
+
+    # ASSERT
+    assert method == "lbfgs"
+    lp_fn = model.compile_logp()
+    assert float(lp_fn(polished[0])) == pytest.approx(-2000.0, abs=1.0)
