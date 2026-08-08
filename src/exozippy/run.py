@@ -91,6 +91,7 @@ KNOWN_SAMPLER_KEYS = {
     "collect_rung_timing",
     "swap_schedule",
     "seed_polish",
+    "store_hot_chains",
 }
 
 
@@ -197,6 +198,10 @@ def _run_fit(config, gui, user_params=None):
     eval_timeout = (
         float(_eval_timeout_raw) if _eval_timeout_raw is not None else None
     )
+    # Thinned hot-rung retention (ptde_async only): detector data for
+    # post-hoc discovery of posterior-suppressed modes; see
+    # outputs.ledger.discover_hot_modes. False | True (thin 20) | int thin.
+    store_hot_chains = sampler_cfg.get("store_hot_chains", False)
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -446,6 +451,7 @@ def _run_fit(config, gui, user_params=None):
                     system,
                     draws,
                     tune,
+                    store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
                     n_chains=n_chains,
@@ -597,6 +603,25 @@ def _run_fit(config, gui, user_params=None):
     # the fix for the DC2018_128 pathology (notes/todo.txt): the reported
     # summary previously discarded zero burn-in even though a likelihood-flat
     # degenerate direction drifted for ~half the run.
+    # Hot-chain mode discovery (store_hot_chains): cluster the thinned
+    # hot-rung draws, polish each new basin's best point, and append
+    # Laplace records to the seed ledger -- so a mode the T=1 posterior
+    # never held still shows up as "considered and rejected" in the final
+    # report. Runs BEFORE burn-in trimming (hot draws are detectors; no
+    # burn-in semantics) and tolerates a missing/empty group.
+    if hasattr(idata, "posterior_hot"):
+        try:
+            from .outputs.ledger import discover_hot_modes
+
+            seed_ledger = discover_hot_modes(
+                system, model, idata.posterior_hot, seed_ledger
+            )
+        except Exception:
+            logger.warning(
+                "Hot-chain mode discovery failed; continuing without it",
+                exc_info=True,
+            )
+
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
     )
