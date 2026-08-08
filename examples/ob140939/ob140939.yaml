@@ -58,6 +58,15 @@ sampler:
   # between the four degenerate basins.
   tune: 0
   draws: 50000
+  # Size the tempering ladder from the measured communication barrier
+  # (the fixed default of 8 was communication-limited here: Lambda ~ 6.4
+  # wants ~14 rungs; without them the occupancy mode weights lose their
+  # validation).
+  n_temps: auto
+  # Keep thinned hot-rung draws: they detect posterior-suppressed modes
+  # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
+  # nobody seeded still show up as "considered and rejected".
+  store_hot_chains: true
   recompute_trace: True
   # The seeds are literature solution estimates, not posterior draws,
   # so force the pre-whitening polish, which 'auto' skips for hint-less
