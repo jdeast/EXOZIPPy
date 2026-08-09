@@ -18,7 +18,6 @@ pytestmark = pytest.mark.slow
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
     VBMDirectMagOp,
-    _earth_xyz_at,
 )
 
 _COORDS = "268.0d -29.0d"
@@ -51,7 +50,13 @@ _ORDER = [
 
 
 def _times_and_obs(n=400, span=150.0):
-    """Times plus an L2-like satellite observer (absolute barycentric AU).
+    """Times plus Skowron+2011 geocentric deviations for an L2-like observer.
+
+    Both Ops consume the same deviation array, so a smooth annual-scale
+    curve (Earth's orbit departs quadratically-then-worse from the linear
+    reference, reaching O(1) AU over a season) plus a constant satellite
+    offset exercises the parallax projection without any ephemeris or
+    network dependency.
 
     The default span reaches u ~ 8 Einstein radii in the wings, past the
     far-field point-source guard boundary in VBMDirectMagOp._magnify, so the
@@ -59,8 +64,16 @@ def _times_and_obs(n=400, span=150.0):
     dispatch paths.
     """
     times = np.linspace(_T0_PAR - span, _T0_PAR + span, n)
+    phase = 2.0 * np.pi * (times - _T0_PAR) / 365.25
+    dev = np.column_stack(
+        [
+            0.5 * (1.0 - np.cos(phase)),
+            0.5 * (np.sin(phase) - phase),
+            0.2 * (1.0 - np.cos(phase)),
+        ]
+    )
     offset = np.array([0.009, 0.004, 0.002])
-    return times, _earth_xyz_at(times) + offset[None, :]
+    return times, dev + offset[None, :]
 
 
 def _compile(op):

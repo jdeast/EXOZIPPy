@@ -120,15 +120,15 @@ def build_pvec_fn(config):
         labels,
         coords,
         inst.time,
-        inst.observer_pos_abs,
+        inst.observer_pos,
         bandpass,
     )
 
 
-def trajectory(op, p, labels, times, obs_pos_abs):
+def trajectory(op, p, labels, times, obs_pos):
     """Numpy trajectory (x, y) plus (s, q, rho, u1) for a binary-lens event."""
     vals = dict(zip(labels, p))
-    dN, dE = op._deltas(times, obs_pos_abs)
+    dN, dE = op._deltas(obs_pos)
     t0, u0, tE = vals["t_0"], vals["u_0"], vals["t_E"]
     piN, piE = vals["pi_E_N"], vals["pi_E_E"]
     u0 = np.sign(u0) * max(abs(u0), 1e-9) if u0 != 0 else 1e-9
@@ -185,7 +185,7 @@ def main():
         use_rho=("rho" in labels),
         bandpass=bandpass,
     )
-    op._deltas(times, obs)  # warm the parallax-offset cache
+    op._deltas(obs)  # warm the parallax-offset cache
 
     for i, ev in enumerate(events):
         raw = ev["raw_params"]

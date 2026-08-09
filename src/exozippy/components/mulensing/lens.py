@@ -806,36 +806,20 @@ class Lens(Component):
             "alpha": alpha_deg,
         }
 
-    def get_magnification(self, times, obs_pos_abs, system, index=0):
+    def get_magnification(self, times, obs_pos, system, index=0):
         """Symbolic Paczynski magnification including parallax (PSPL only).
 
         ``index`` is the SOURCE slot (one trajectory per source body).
 
-        obs_pos_abs : (N, 3) absolute barycentric positions in AU — the same
-        convention as MulensModel's satellite_skycoord, so this function and
-        the MulensModel Op are interchangeable callers.
-
-        Internally converts to Skowron+2011 geocentric deviations using the
-        reference constants stored on the MulensInstrument.  When no
-        instrument is present (e.g. unit tests with zero positions) the
-        positions are treated as already-centered deviations (no parallax).
+        obs_pos : (N, 3) Skowron+2011 geocentric deviations in AU --
+        the observer's offset from the linear Earth trajectory anchored at
+        t0_par (MulensInstrument._abs_to_delta).  The MulensModel Op path
+        consumes the exact same array (fed as satellite_skycoord), so the
+        two paths are interchangeable.  Zero rows mean no parallax.
         """
         source_ndx = self.source_map[index]
         ra = system.star.ra.value[source_ndx]
         dec = system.star.dec.value[source_ndx]
-
-        instr = getattr(system, "mulensinstrument", None)
-        if instr is not None:
-            # Convert absolute barycentric → Skowron+2011 geocentric deviations:
-            #   delta(t) = xyz_obs(t) - [xyz_earth(t0_par) + v_earth(t0_par)*(t - t0_par)]
-            t_delta = times - instr._t0_par  # (N,)
-            ref = (
-                instr._earth_pos_ref[None, :]  # (1, 3) constant
-                + instr._earth_vel_ref[None, :] * t_delta[:, None]
-            )  # (N, 3)
-            obs_pos = obs_pos_abs - ref
-        else:
-            obs_pos = obs_pos_abs
 
         x, y, z = obs_pos[:, 0], obs_pos[:, 1], obs_pos[:, 2]
         delta_e = -x * pt.sin(ra) + y * pt.cos(ra)
@@ -866,9 +850,8 @@ class Lens(Component):
         Event-level property (the lens bodies and finite_source flag are shared
         by all sources), so ``index`` is ignored beyond backward compatibility.
 
-        Callers use this to decide which obs_pos convention to pass:
-        - True  → absolute barycentric AU (MulensModel satellite_skycoord)
-        - False → Skowron+2011 geocentric deviations (symbolic get_magnification)
+        Both paths take the same obs_pos convention (Skowron+2011 geocentric
+        deviations); callers use this only to pick a sampler-compatible path.
         """
         n_lenses = self.n_lens_bodies[0]
         use_rho = self.finite_source[0]
@@ -912,11 +895,11 @@ class Lens(Component):
         through it without the O(N_params) numerical-gradient overhead of
         _MagGradOp.
 
-        obs_pos convention is caller's responsibility and must match:
-        - Symbolic path: Skowron+2011 geocentric deviations (AU)
-        - Op path:       absolute barycentric positions (AU); the Op
-          converts them to geocentric (satellite - earth_actual) before
-          passing to MulensModel, which expects geocentric input.
+        obs_pos: (N, 3) Skowron+2011 geocentric deviations in AU
+        (MulensInstrument._abs_to_delta) for BOTH paths -- the symbolic
+        formula projects them directly, and the Op path feeds them to
+        MulensModel as satellite_skycoord (whose satellite channel then
+        carries all parallax, annual + satellite).
 
         u1/bandpass: when finite_source is True and a Band component is wired,
         u1 (a PyTensor scalar) and bandpass (str) are passed so the Op can call

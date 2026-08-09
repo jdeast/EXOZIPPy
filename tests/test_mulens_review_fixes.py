@@ -14,42 +14,36 @@ from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     _build_binary_model,
     _build_pspl_model,
-    _get_sat_coord,
+    _dev_skycoord,
 )
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
 COORDS = "270.0d -28.0d"
 
 
-def test_sat_coord_cache_distinguishes_same_length_arrays():
+def test_dev_skycoord_cache_distinguishes_same_length_arrays():
     """
-    Given two observer-position arrays with the same number of epochs but
-      different positions (e.g. Earth and a satellite over one model grid),
+    Given two observer-deviation arrays with the same number of epochs but
+      different positions (e.g. ground and a satellite over one model grid),
     When both are passed through the same coordinate cache,
     Then each gets its own SkyCoord (the old length-keyed cache silently
       returned the first observer's coordinates for the second).
     """
     # Arrange
     cache = {}
-    times_np = np.linspace(2450000.0, 2450004.0, 5)
-    earth = np.zeros((5, 3))
+    ground = np.zeros((5, 3))
     satellite = np.ones((5, 3))
 
-    # Mock Earth ephemeris so the test doesn't require network / JPL file access.
-    with patch(
-        "exozippy.components.mulensing.op._earth_xyz_at",
-        return_value=np.zeros((5, 3)),
-    ):
-        # Act
-        coord_earth = _get_sat_coord(earth, times_np, cache)
-        coord_sat = _get_sat_coord(satellite, times_np, cache)
+    # Act
+    coord_ground = _dev_skycoord(ground, cache)
+    coord_sat = _dev_skycoord(satellite, cache)
 
-        # Assert
-        assert not np.allclose(
-            coord_earth.cartesian.xyz.value, coord_sat.cartesian.xyz.value
-        )
-        assert _get_sat_coord(earth, times_np, cache) is coord_earth
-        assert _get_sat_coord(satellite, times_np, cache) is coord_sat
+    # Assert
+    assert not np.allclose(
+        coord_ground.cartesian.xyz.value, coord_sat.cartesian.xyz.value
+    )
+    assert _dev_skycoord(ground, cache) is coord_ground
+    assert _dev_skycoord(satellite, cache) is coord_sat
 
 
 def test_pspl_model_floors_nonpositive_rho():
@@ -544,6 +538,86 @@ def test_pspl_finite_source_requires_ptde():
     reqs = lens.sampler_requirements()
     assert "nuts" in reqs.get("incompatible", set())
     assert reqs.get("recommended") == "ptde"
+
+
+# ---------------------------------------------------------------------------
+# t0_par re-resolution in load_data (2026-08-08 review item 1.11)
+# ---------------------------------------------------------------------------
+
+
+class _T0ParConfigManager(_DummyConfigManager):
+    def __init__(self, user_params=None, seed_t0=None):
+        self.user_params = user_params or {}
+        self._seed_t0 = seed_t0
+
+    def seed_start_value(self, path, seed=0):
+        return self._seed_t0 if path == "lens.0.t_0" else None
+
+
+def _t0_par_fixture(user_params=None, seed_t0=None, lens_config=None):
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config_manager = _T0ParConfigManager(user_params, seed_t0)
+    system = _DummySystem()
+    system.lens = _DummySystem()
+    system.lens.config = [lens_config or {}]
+    return inst, system
+
+
+def test_t0_par_explicit_config_wins():
+    """
+    Given an explicit lens t0_par alongside a user t_0 and a seed,
+    When the final t0_par is resolved in load_data,
+    Then the explicit config value wins.
+    """
+    inst, system = _t0_par_fixture(
+        user_params={"lens.0.t_0": {"initval": 2458800.0}},
+        seed_t0=2458700.0,
+        lens_config={"t0_par": 2458554.89},
+    )
+    times = np.linspace(2458500.0, 2458600.0, 11)
+    assert inst._resolve_t0_par_final(system, times) == 2458554.89
+
+
+def test_t0_par_user_t0_beats_seed():
+    """
+    Given both a user lens.0.t_0 initval and an MMEXOFAST seed,
+    When the final t0_par is resolved,
+    Then the user's value wins (seeds sit below RANK_USER).
+    """
+    inst, system = _t0_par_fixture(
+        user_params={"lens.0.t_0": {"initval": 2458800.0}},
+        seed_t0=2458700.0,
+    )
+    times = np.linspace(2458500.0, 2458600.0, 11)
+    assert inst._resolve_t0_par_final(system, times) == 2458800.0
+
+
+def test_t0_par_uses_mmexofast_seed():
+    """
+    Given no explicit t0_par and no user t_0 (the automated MMEXOFAST
+      workflow deliberately omits the microlensing start values),
+    When the final t0_par is resolved after the seeds arrived,
+    Then the seed t_0 is used -- NOT the 2450000.0 construction-time default
+      that parked the Skowron reference epoch ~8300 days before the data
+      (2026-08-08 review item 1.11).
+    """
+    inst, system = _t0_par_fixture(seed_t0=2458554.89)
+    times = np.linspace(2458500.0, 2458600.0, 11)
+    assert inst._resolve_t0_par_final(system, times) == 2458554.89
+
+
+def test_t0_par_falls_back_to_median_data_time():
+    """
+    Given no explicit t0_par, no user t_0, and no seeds,
+    When the final t0_par is resolved,
+    Then the median data time anchors the frame (keeps the linear Earth
+      extrapolation within the season) instead of a fixed ancient epoch.
+    """
+    inst, system = _t0_par_fixture()
+    times = np.linspace(2458500.0, 2458600.0, 11)
+    assert inst._resolve_t0_par_final(system, times) == pytest.approx(
+        2458550.0
+    )
 
 
 # ---------------------------------------------------------------------------
