@@ -368,8 +368,11 @@ class Transit(Instrument):
         denom_plus = pt.clip(1.0 + esinw_p, _GEOM_EPS, np.inf)
         sini_ar = pt.clip(pt.abs(sini_p * ar_p), _GEOM_EPS, np.inf)
 
-        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
-        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
+        # Winn 2010 eqs 7-8: the primary transit happens at true anomaly
+        # pi/2 - omega (see calc_tp), where r = a(1-e^2)/(1 + esinw); the
+        # secondary sits at the opposite conjunction, r = a(1-e^2)/(1 - esinw).
+        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
+        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
 
         def _arcsin_term(p_offset_sq, dur_bx):
             radicand = pt.clip(p_offset_sq - pt.sqr(dur_bx), 0.0, np.inf)
@@ -378,34 +381,43 @@ class Transit(Instrument):
             )
             return pt.arcsin(arg)
 
+        # Winn 2010 eqs 14-16: the duration's eccentricity correction is
+        # sqrt(1-e^2)/(1 + esinw) for the primary and sqrt(1-e^2)/(1 - esinw)
+        # for the secondary.
         dur_t14 = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 + p_p), dur_b)
             * ecc_factor
-            / denom_minus
+            / denom_plus
         )
         dur_t14s = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 + p_p), dur_bs)
             * ecc_factor
-            / denom_plus
+            / denom_minus
         )
 
-        dur_tfwhm = (
+        # The (1-p)^2 arcsin term is Winn 2010's t23 (full-occultation
+        # duration, 2nd to 3rd contact); the FWHM is (t14 + t23)/2 and the
+        # ingress/egress duration tau is (t14 - t23)/2 (EXOFASTv2
+        # derivepars.pro convention).
+        dur_t23 = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 - p_p), dur_b)
             * ecc_factor
-            / denom_minus
+            / denom_plus
         )
-        dur_tfwhms = (
+        dur_t23s = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 - p_p), dur_bs)
             * ecc_factor
-            / denom_plus
+            / denom_minus
         )
 
-        dur_tau = (dur_t14 - dur_tfwhm) / 2.0
-        dur_taus = (dur_t14s - dur_tfwhms) / 2.0
+        dur_tfwhm = (dur_t14 + dur_t23) / 2.0
+        dur_tfwhms = (dur_t14s + dur_t23s) / 2.0
+        dur_tau = (dur_t14 - dur_t23) / 2.0
+        dur_taus = (dur_t14s - dur_t23s) / 2.0
 
         pm.Deterministic(f"{self.prefix}.b", dur_b)
         pm.Deterministic(f"{self.prefix}.bs", dur_bs)
