@@ -48,6 +48,28 @@ def calc_mu_rel_mag(mu_ra_rel, mu_dec_rel):
     return pt.sqrt(pt.sqr(mu_ra_rel) + pt.sqr(mu_dec_rel))
 
 
+# Heliocentric -> geocentric frame conversion (Gould 2004):
+#   mu_geo = mu_helio - pi_rel * v_earth_perp(t0_par) / AU
+# The star pm_ra/pm_dec are barycentric observables (what the galactic
+# kinematic prior and any Gaia prior constrain), but the light-curve
+# trajectory is in the Skowron+2011 GEOCENTRIC convention (Earth's position
+# AND velocity at t0_par define the frame; see MulensInstrument), so t_E and
+# the pi_E direction must use the geocentric relative proper motion.
+# earth_vperp_* are Earth's velocity at t0_par projected on the sky
+# (East, North) in AU/yr -- context constants injected by Lens.add_parameter
+# (pi_rel in mas makes the product mas/yr).  The SIGN is pinned numerically
+# against the trajectory formula in tests/test_mu_rel_geo.py: the flipped
+# sign changes t_E by tens of percent at pi_rel ~ 0.35 mas.
+@register_physics
+def calc_mu_ra_rel_geo(mu_ra_rel, pi_rel, earth_vperp_e):
+    return mu_ra_rel - pi_rel * earth_vperp_e
+
+
+@register_physics
+def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
+    return mu_dec_rel - pi_rel * earth_vperp_n
+
+
 @register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E

@@ -49,6 +49,10 @@ class Lens(Component):
         source_ndx: 1
     """
 
+    # Deps satisfied by context-node injection in add_parameter (constants,
+    # not manifest parameters); graph.py skips them when ordering the build.
+    context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Lens Parameters"
@@ -516,6 +520,9 @@ class Lens(Component):
             "mu_ra_rel": per_source("default"),
             "mu_dec_rel": per_source("default"),
             "mu_rel_mag": per_source("default"),
+            "mu_ra_rel_geo": per_source("default"),
+            "mu_dec_rel_geo": per_source("default"),
+            "mu_rel_geo_mag": per_source("default"),
             "t_E": per_source("default"),
             "pi_E_N": per_source("default"),
             "pi_E_E": per_source("default"),
@@ -712,14 +719,65 @@ class Lens(Component):
                         f"star.{l_idx}.logmass", scale
                     )
 
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Inject the Earth-velocity context constants for the mu_rel_geo
+        chain (see context_dep_names); everything else is generic."""
+        if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
+            context_nodes = dict(context_nodes or {})
+            if "earth_vperp_e" not in context_nodes:
+                vperp_e, vperp_n = self._earth_vperp_en(system)
+                context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
+                context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
+        return super().add_parameter(model, param_name, system, context_nodes)
+
+    def _earth_vperp_en(self, system):
+        """Earth's velocity at t0_par projected on the sky, (East, North),
+        in AU/yr (numerically 1/yr once divided by the 1-AU baseline --
+        multiplying by pi_rel in mas gives mas/yr).
+
+        This is the Gould (2004) mu_helio -> mu_geo conversion constant:
+        mu_geo = mu_helio - pi_rel * v_perp / AU.  The velocity and the
+        (ra, dec) used for the projection come from MulensInstrument -- the
+        SAME anchor epoch and sky position its Skowron deltas use, so the
+        conversion and the trajectory share one frame by construction.
+        Without microlensing data there is no t0_par to anchor the frame;
+        the term is dropped (mu_geo == mu_helio) with a warning.
+        """
+        inst = getattr(system, "mulensinstrument", None)
+        vel = getattr(inst, "_earth_vel_ref", None)
+        radec = getattr(inst, "_source_radec_rad", None)
+        if vel is None or radec is None:
+            logger.warning(
+                f"[{self.prefix}] No microlensing data to anchor t0_par; "
+                "mu_rel_geo falls back to the heliocentric value (Earth-"
+                "velocity term dropped)."
+            )
+            return 0.0, 0.0
+        v = np.asarray(vel, dtype=float) * 365.25  # AU/day -> AU/yr
+        ra, dec = radec
+        e_hat = np.array([-np.sin(ra), np.cos(ra), 0.0])
+        n_hat = np.array(
+            [
+                -np.cos(ra) * np.sin(dec),
+                -np.sin(ra) * np.sin(dec),
+                np.cos(dec),
+            ]
+        )
+        return float(v @ e_hat), float(v @ n_hat)
+
     def build_likelihood(self, model, system):
         """Stage 6: Observational penalties on the lensing geometry."""
-        mu_rel = self.mu_rel_mag.value
+        # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
+        # in the frame the event is observed in (rp.py used the geocentric
+        # value at t0_par; Batista+2011's rate is in the frame of the
+        # measured t_E), and it is also the divisor of t_E/pi_E, so the
+        # singularity guard belongs on it.
+        mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
 
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
-            pt.sum(pt.log(mu_rel) + pt.log(theta_E)),
+            pt.sum(pt.log(mu_rel_geo) + pt.log(theta_E)),
         )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and
@@ -736,7 +794,7 @@ class Lens(Component):
 
         pm.Potential(
             f"{self.prefix}.mu_rel_singularity",
-            pt.sum(soft_lower_bound(mu_rel, 1e-6, scale=1e-5)),
+            pt.sum(soft_lower_bound(mu_rel_geo, 1e-6, scale=1e-5)),
         )
 
         pm.Potential(

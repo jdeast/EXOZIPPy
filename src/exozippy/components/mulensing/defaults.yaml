@@ -15,17 +15,20 @@ lens:
     internal_unit: ""
     latex: "u_0"
     description: "Impact parameter (Einstein radii)"
+  # t_E and the pi_E direction live in the light curve's GEOCENTRIC frame
+  # (Skowron+2011 t0_par anchor), so they derive from mu_rel_geo, not from
+  # the heliocentric pm difference.
   t_E:
     lower: 0.0
     unit: "d"
     internal_unit: "d"
     latex: "t_E"
-    description: "Einstein crossing time"
+    description: "Einstein crossing time (geocentric at t0_par)"
     debug_print: true
     expressions:
       default:
         func_name: "calc_t_E"
-        deps: [ "theta_E", "mu_rel_mag" ]
+        deps: [ "theta_E", "mu_rel_geo_mag" ]
   pi_E_N:
     initval: 0.0
     unit: ""
@@ -36,7 +39,7 @@ lens:
     expressions:
       default:
         func_name: "calc_pi_E_N"
-        deps: [ "pi_rel", "theta_E", "mu_dec_rel", "mu_rel_mag" ]
+        deps: [ "pi_rel", "theta_E", "mu_dec_rel_geo", "mu_rel_geo_mag" ]
   pi_E_E:
     initval: 0.0
     unit: ""
@@ -47,7 +50,7 @@ lens:
     expressions:
       default:
         func_name: "calc_pi_E_E"
-        deps: [ "pi_rel", "theta_E", "mu_ra_rel", "mu_rel_mag" ]
+        deps: [ "pi_rel", "theta_E", "mu_ra_rel_geo", "mu_rel_geo_mag" ]
   pi_rel:
     lower: 0.0
     upper: 10000
@@ -70,13 +73,17 @@ lens:
       default:
         func_name: "calc_theta_E"
         deps: [ "star.mass[lens_map]", "pi_rel" ]
+  # mu_ra_rel / mu_dec_rel / mu_rel_mag are HELIOCENTRIC: differences of the
+  # stars' barycentric proper motions (the frame the galactic kinematic
+  # prior and Gaia priors constrain).  The *_geo trio below converts to the
+  # geocentric frame at t0_par for the light-curve chain.
   mu_ra_rel:
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{\\alpha,rel}"
-    description: "Relative lens-source proper motion (RA)"
+    latex: "\\mu_{\\alpha,rel,helio}"
+    description: "Relative lens-source proper motion (RA, heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_ra_rel"
@@ -86,8 +93,8 @@ lens:
     upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{\\delta,rel}"
-    description: "Relative lens-source proper motion (Dec)"
+    latex: "\\mu_{\\delta,rel,helio}"
+    description: "Relative lens-source proper motion (Dec, heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_dec_rel"
@@ -97,12 +104,49 @@ lens:
     upper: 10000
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{rel}"
-    description: "Relative lens-source proper motion"
+    latex: "\\mu_{rel,helio}"
+    description: "Relative lens-source proper motion (heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel", "mu_dec_rel"]
+  # Geocentric (t0_par frame, Gould 2004): mu_geo = mu_helio -
+  # pi_rel * v_earth_perp(t0_par)/AU.  earth_vperp_e/n are context
+  # constants injected by Lens.add_parameter (Earth's velocity at t0_par
+  # projected on East/North, AU/yr), declared in Lens.context_dep_names.
+  mu_ra_rel_geo:
+    lower: -10000.0
+    upper: 10000.0
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha,rel,geo}"
+    description: "Relative lens-source proper motion (RA, geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_ra_rel_geo"
+        deps: [ "mu_ra_rel", "pi_rel", "earth_vperp_e" ]
+  mu_dec_rel_geo:
+    lower: -10000.0
+    upper: 10000.0
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\delta,rel,geo}"
+    description: "Relative lens-source proper motion (Dec, geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_dec_rel_geo"
+        deps: [ "mu_dec_rel", "pi_rel", "earth_vperp_n" ]
+  mu_rel_geo_mag:
+    lower: 0.0
+    upper: 10000
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{rel,geo}"
+    description: "Relative lens-source proper motion (geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_rel_mag"
+        deps: ["mu_ra_rel_geo", "mu_dec_rel_geo"]
   rho:
     # Soft upper barrier only: real events have rho <~ 0.5, and rho >~ a few
     # both erases the microlensing signal (A -> 1) and drives VBM's
