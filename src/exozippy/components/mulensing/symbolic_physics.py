@@ -145,7 +145,14 @@ RELATIONS = [
     sp.Eq(theta_E**2, KAPPA * lens_mass_total * pi_rel),
     # Relative Parallax (dist in pc -> pi in mas)
     sp.Eq(pi_rel, (1000 / lens_distance) - (1000 / source_distance)),
-    # Einstein Time (mu in mas/yr -> t_E in days)
+    # Einstein Time (mu in mas/yr -> t_E in days).  SEEDING APPROXIMATION:
+    # the runtime graph derives t_E from mu_rel_GEO (= mu_rel_helio -
+    # pi_rel * v_earth_perp(t0_par)/AU, Gould 2004), but t0_par and Earth's
+    # velocity are resolved at stage 1a -- after these relations are
+    # constructed -- so the engine seeds through the heliocentric value.
+    # Starts land a few percent off for large-pi_rel events; the samplers
+    # absorb that.  (MMEXOFAST t_E seeds are geocentric, so the back-solved
+    # pms are helio-approximate too.)
     sp.Eq(t_E, theta_E / (mu_rel_mag / 365.25)),
     # Relative Motion Magnitude
     sp.Eq(mu_rel_mag**2, mu_ra_rel**2 + mu_dec_rel**2),

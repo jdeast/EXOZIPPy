@@ -49,7 +49,14 @@ def determine_pymc_build_order(active_components, config_manager):
                     if manifest_deps is not None
                     else expressions_dict[expr_key].get("deps", [])
                 )
+                # Deps a component declares in context_dep_names are
+                # satisfied by context-node injection in its add_parameter
+                # override (constants, not manifest parameters) -- they are
+                # excluded from the build-order graph.
+                context_deps = getattr(comp, "context_dep_names", frozenset())
                 for d in dep_names:
+                    if d in context_deps:
+                        continue
                     if "." in d:
                         # Strip off any bracket indicators to get the raw structural key (e.g., "star.mass")
                         clean_dep = d.split("[")[0] if "[" in d else d

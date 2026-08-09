@@ -173,10 +173,14 @@ class MulensInstrument(Instrument):
         # run before the file loop so excluded points never enter the arrays.
         self._resolve_mmexofast(system)
 
-        # Source RA/Dec (degrees from resolve → radians for projection math)
+        # Source RA/Dec (degrees from resolve → radians for projection math).
+        # Stashed for Lens._earth_vperp_en: the mu_helio -> mu_geo conversion
+        # must project Earth's velocity with the same (ra, dec) the Skowron
+        # deltas are projected with.
         ra_deg, dec_deg = self._resolve_source_radec_deg(system)
         ra_rad = ra_deg * np.pi / 180.0
         dec_rad = dec_deg * np.pi / 180.0
+        self._source_radec_rad = (ra_rad, dec_rad)
 
         # Pass 1: read every file.  The raw times must exist before the
         # Skowron reference frame is anchored below (t0_par can fall back to
