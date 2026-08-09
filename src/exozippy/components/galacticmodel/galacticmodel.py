@@ -7,6 +7,7 @@ from astropy.coordinates import Galactocentric, SkyCoord
 from exozippy.components.component import Component
 from exozippy.constants import (
     BULGE_BAR_ANGLE,
+    BULGE_DENSITY_RHO0,
     BULGE_DENSITY_X_0,
     BULGE_DENSITY_Y_0,
     BULGE_DENSITY_Z_0,
@@ -15,6 +16,7 @@ from exozippy.constants import (
     BULGE_VELOCITY_SIGMA_1,
     BULGE_VELOCITY_SIGMA_2,
     BULGE_VELOCITY_SIGMA_3,
+    DISK_DENSITY_RHO0,
     DISK_ROTATION_VELOCITY,
     DISK_SCALE_HEIGHT,
     DISK_SCALE_LENGTH,
@@ -230,7 +232,20 @@ class GalacticModel(Component):
             * (v_phi - DISK_ROTATION_VELOCITY) ** 2
             + (-0.5 / DISK_VELOCITY_SIGMA_W**2) * v_z**2
         )
-        L_disk = log_dens_disk + log_vel_disk
+        # Each mixture branch must carry its own normalization: constants
+        # cancel within a single Potential but NOT across the logsumexp.
+        # Velocity Gaussians contribute -log(sigma1*sigma2*sigma3) (the
+        # shared (2*pi)^(3/2) is identical in both branches and dropped);
+        # without it the bulge's ~(120*100*80)/(30*30*30) wider ellipsoid
+        # was over-weighted by ~3.6 nats.  The density zero points
+        # log(rho0) set the physical disk:bulge count ratio (both in
+        # Msun/pc^3, see constants.py).
+        log_norm_disk = np.log(DISK_DENSITY_RHO0) - np.log(
+            DISK_VELOCITY_SIGMA_U
+            * DISK_VELOCITY_SIGMA_V
+            * DISK_VELOCITY_SIGMA_W
+        )
+        L_disk = log_dens_disk + log_vel_disk + log_norm_disk
 
         # 2. Compute Bulge Likelihood (Spatial + Kinematic)
         r_bulge_coord = pt.sqrt(
@@ -246,15 +261,31 @@ class GalacticModel(Component):
             + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * (v_phi - bulge_rot) ** 2
             + (-0.5 / BULGE_VELOCITY_SIGMA_3**2) * v_z**2
         )
-        L_bulge = log_dens_bulge + log_vel_bulge
+        log_norm_bulge = np.log(BULGE_DENSITY_RHO0) - np.log(
+            BULGE_VELOCITY_SIGMA_1
+            * BULGE_VELOCITY_SIGMA_2
+            * BULGE_VELOCITY_SIGMA_3
+        )
+        L_bulge = log_dens_bulge + log_vel_bulge + log_norm_bulge
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
+
+        # The velocity Gaussians are evaluated in km/s while the sampled
+        # coordinates are (pm_ra, pm_dec, rv); the change of variables
+        # v = M_rot @ (K*pm_ra*d, K*pm_dec*d, rv/1e3) + v0 needs
+        # |det dv/d(pm_ra, pm_dec, rv)| = (K*d)^2 * 1e-3 (M_rot is a pure
+        # rotation, det = 1; the constant 1e-3 from m/s -> km/s is
+        # dropped).  Without the +2*log(d) the intended prior
+        # rho * d^2 * f(v) * (K*d)^2 was applied as rho * d^2 * f(v),
+        # under-weighting large distances by d^2.
+        velocity_jacobian = 2.0 * pt.log(K_VEL_CONVERSION * distance)
 
         # 3. Combine them using LogSumExp
         # This effectively does: log(exp(L_disk) + exp(L_bulge))
         kinematic_penalty = pt.sum(
             pm.math.logsumexp(pt.stack([L_disk, L_bulge]), axis=0)
             + volume_element
+            + velocity_jacobian
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 

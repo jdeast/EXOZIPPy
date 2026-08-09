@@ -89,6 +89,30 @@ SUN_VELOCITY_X = -12.7  # in km/s
 SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s
 SUN_VELOCITY_Z = 7.25  # in km/s
 
+# --- 8. GALACTIC DENSITY ZERO POINTS (Msun/pc^3) ---
+# The disk/bulge mixture in components/galacticmodel needs each branch's
+# density on a COMMON absolute scale -- only the ratio matters for the
+# mixture weight, but a physical anchor keeps each rho0 auditable.  Both
+# are stellar MASS densities; using them as per-star (number) weights
+# assumes comparable mean stellar mass in the two populations, good to
+# ~10s of percent for two old populations with the same IMF.
+#
+# Disk: single exponential rho0 * exp(-r/L - |z|/H), anchored to the
+# local stellar mass density rho(R_sun, 0) ~ 0.04 Msun/pc^3 (Bovy 2017).
+DISK_DENSITY_RHO0 = 0.04 * np.exp(SUN_GC_DISTANCE / DISK_SCALE_LENGTH)
+# Bulge/bar: rho0 * exp(-r_s/2) with the Zhu+17 ellipsoid axes above,
+# anchored to a total bar stellar mass of 1.8e10 Msun (Portail+ 2015).
+# The profile integral is 64*pi*x0*y0*z0 (substitute u = r_s/2:
+# 4*pi*int s^2 exp(-s/2) ds = 64*pi); the 1e9 converts kpc^3 -> pc^3.
+BULGE_DENSITY_RHO0 = 1.8e10 / (
+    64.0
+    * np.pi
+    * BULGE_DENSITY_X_0
+    * BULGE_DENSITY_Y_0
+    * BULGE_DENSITY_Z_0
+    * 1e9
+)
+
 # IAU 2015, Resolution B2 zero point values
 LSUN = 1 * u.Lsun
 M_BOL_SUN = LSUN.to(u.M_bol).value

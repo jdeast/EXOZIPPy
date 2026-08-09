@@ -215,8 +215,10 @@ def test_kinematic_prior_prefers_corotation_over_radial_plunge():
 
     # ASSERT: margins allow for the logsumexp bulge branch, whose ~110 km/s
     # dispersions partially absorb any velocity direction and floor the
-    # disk-term penalty (measured: corot beats radial by 7.9 nats and
-    # counter-rotation by 14.3; before the fix corot LOST to radial by 43).
+    # disk-term penalty (measured: corot beats radial by 11.6 nats and
+    # counter-rotation by 18.0; before the fix corot LOST to radial by 43.
+    # The 2026-08 mixture normalization down-weighted the bulge branch by
+    # ~3.9 nats, which widened these margins from 7.9/14.3).
     assert lps["corot"] > lps["radial"] + 5.0
     assert lps["corot"] > lps["counter"] + 10.0
 
@@ -249,7 +251,152 @@ def test_kinematic_prior_corotating_star_pays_no_velocity_penalty():
     lp_fast = lp_at(DISK_ROTATION_VELOCITY + 3.0 * DISK_VELOCITY_SIGMA_V)
     lp_slow = lp_at(DISK_ROTATION_VELOCITY - 3.0 * DISK_VELOCITY_SIGMA_V)
 
-    # Margins again reflect bulge-branch flooring (measured: +1.4 and +2.5
-    # nats for +/-3 sigma; the disk term alone would give 4.5).
+    # Margins again reflect bulge-branch flooring (measured: +4.1 and +4.3
+    # nats for +/-3 sigma after the 2026-08 mixture normalization weakened
+    # the floor, up from +1.4/+2.5; the disk term alone would give 4.5).
     assert lp_circ > lp_fast + 1.0
     assert lp_circ > lp_slow + 1.0
+
+
+# ---------------------------------------------------------------------------
+# Normalization: velocity Jacobian + mixture branch normalization
+# ---------------------------------------------------------------------------
+
+
+def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
+    """Independent numpy reference of the kinematic prior for one star at
+    the mock RA/Dec, with astropy doing the full (nonlinearized) velocity
+    transform.  Pins the 2026-08 normalization fixes:
+      - the pm -> velocity change-of-variables Jacobian +2*log(K*d)
+        (velocity Gaussians in km/s, sampled coordinates in mas/yr),
+      - per-branch velocity normalization -log(sigma1*sigma2*sigma3),
+      - per-branch density zero points log(rho0_disk) / log(rho0_bulge).
+    """
+    import astropy.units as u
+    from astropy.coordinates import Galactocentric, SkyCoord
+
+    from exozippy.constants import (
+        BULGE_BAR_ANGLE,
+        BULGE_DENSITY_RHO0,
+        BULGE_DENSITY_X_0,
+        BULGE_DENSITY_Y_0,
+        BULGE_DENSITY_Z_0,
+        BULGE_ROTATION_ANGULAR_VELOCITY,
+        BULGE_VELOCITY_SIGMA_1,
+        BULGE_VELOCITY_SIGMA_2,
+        BULGE_VELOCITY_SIGMA_3,
+        DISK_DENSITY_RHO0,
+        DISK_ROTATION_VELOCITY,
+        DISK_SCALE_HEIGHT,
+        DISK_SCALE_LENGTH,
+        DISK_VELOCITY_SIGMA_U,
+        DISK_VELOCITY_SIGMA_V,
+        DISK_VELOCITY_SIGMA_W,
+        K_VEL_CONVERSION,
+        SUN_GC_DISTANCE,
+    )
+
+    sc = SkyCoord(ra=_RA_RAD * u.rad, dec=_DEC_RAD * u.rad)
+    l_rad, b_rad = sc.galactic.l.rad, sc.galactic.b.rad
+    d = max(d_pc, 1e-3) / 1e3  # kpc, same floor as the model
+
+    # Position in the model's own convention (Sun at x = +SUN_GC_DISTANCE)
+    x = SUN_GC_DISTANCE - d * np.cos(l_rad) * np.cos(b_rad)
+    y = d * np.sin(l_rad) * np.cos(b_rad)
+    z = d * np.sin(b_rad)
+    z_smooth = np.sqrt(z**2 + 1e-6)
+    r = np.sqrt(x**2 + y**2 + 1e-6)
+
+    # Velocity via astropy's exact transform.  The model linearizes at
+    # d = 1 kpc, but the map is exactly linear in (K*pm*d, rv), so the
+    # two agree to float precision.
+    gal = SkyCoord(
+        ra=_RA_RAD * u.rad,
+        dec=_DEC_RAD * u.rad,
+        distance=d * u.kpc,
+        pm_ra_cosdec=pm_ra * u.mas / u.yr,
+        pm_dec=pm_dec * u.mas / u.yr,
+        radial_velocity=(rv_ms / 1e3) * u.km / u.s,
+    ).transform_to(Galactocentric())
+    v_x = gal.v_x.to_value(u.km / u.s)
+    v_y = gal.v_y.to_value(u.km / u.s)
+    v_z = gal.v_z.to_value(u.km / u.s)
+    v_r = v_y * (y / r) + v_x * (x / r)
+    v_phi = v_y * (x / r) - v_x * (y / r)
+
+    cos_bar, sin_bar = np.cos(BULGE_BAR_ANGLE), np.sin(BULGE_BAR_ANGLE)
+    x_bar = x * cos_bar + y * sin_bar
+    y_bar = -x * sin_bar + y * cos_bar
+
+    L_disk = (
+        -r / DISK_SCALE_LENGTH
+        - z_smooth / DISK_SCALE_HEIGHT
+        - 0.5 * (v_r / DISK_VELOCITY_SIGMA_U) ** 2
+        - 0.5 * ((v_phi - DISK_ROTATION_VELOCITY) / DISK_VELOCITY_SIGMA_V) ** 2
+        - 0.5 * (v_z / DISK_VELOCITY_SIGMA_W) ** 2
+        + np.log(DISK_DENSITY_RHO0)
+        - np.log(
+            DISK_VELOCITY_SIGMA_U
+            * DISK_VELOCITY_SIGMA_V
+            * DISK_VELOCITY_SIGMA_W
+        )
+    )
+    r_s = np.sqrt(
+        (x_bar / BULGE_DENSITY_X_0) ** 2
+        + (y_bar / BULGE_DENSITY_Y_0) ** 2
+        + (z / BULGE_DENSITY_Z_0) ** 2
+    )
+    L_bulge = (
+        -0.5 * r_s
+        - 0.5 * (v_r / BULGE_VELOCITY_SIGMA_1) ** 2
+        - 0.5
+        * (
+            (v_phi - BULGE_ROTATION_ANGULAR_VELOCITY * r)
+            / BULGE_VELOCITY_SIGMA_2
+        )
+        ** 2
+        - 0.5 * (v_z / BULGE_VELOCITY_SIGMA_3) ** 2
+        + np.log(BULGE_DENSITY_RHO0)
+        - np.log(
+            BULGE_VELOCITY_SIGMA_1
+            * BULGE_VELOCITY_SIGMA_2
+            * BULGE_VELOCITY_SIGMA_3
+        )
+    )
+    return (
+        np.logaddexp(L_disk, L_bulge)
+        + 2.0 * np.log(d * 1e3)
+        + 2.0 * np.log(K_VEL_CONVERSION * d)
+    )
+
+
+@pytest.mark.parametrize(
+    "d_pc, pm_ra, pm_dec, rv_ms",
+    [
+        (8000.0, 0.0, 0.0, 0.0),  # bulge-like, at rest on the sky
+        (2500.0, -2.0, -4.0, 1.5e4),  # disk-lens-like, moving
+        (1000.0, 5.0, 3.0, -2.0e4),  # nearby, fast
+        (5000.0, -1.0, -6.0, 8.0e4),  # intermediate
+    ],
+)
+def test_kinematic_prior_matches_independent_reference(
+    d_pc, pm_ra, pm_dec, rv_ms
+):
+    """
+    Given a star with the given distance, proper motion, and RV,
+    When the kinematic_prior Potential is evaluated,
+    Then it matches an independent numpy/astropy implementation of the
+      normalized mixture prior -- including the +2*log(K*d) velocity
+      Jacobian and the per-branch -log(sigma^3) + log(rho0) terms, whose
+      omission previously tilted distances low by d^2 and over-weighted
+      the bulge branch by ~3.9 nats.
+
+    Spanning 1-8 kpc makes the test sensitive to any wrong power of
+    distance, and the disk/bulge mix shifts across the points so a
+    missing branch normalization cannot cancel.
+    """
+    lp_model = _kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms)
+    lp_ref = _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms)
+    assert np.isclose(lp_model, lp_ref, rtol=0.0, atol=1e-6), (
+        f"model {lp_model} != reference {lp_ref}"
+    )

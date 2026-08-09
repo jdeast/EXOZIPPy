@@ -160,7 +160,12 @@ def _point(raw_dict):
 # post free_symbols-sort hardening).  Differs from the historical stored lp
 # (~2982.18) because the model itself has changed since that trace; see the
 # module docstring.
-GOOD_EXPECTED_LP = -934.604  # re-measured 2026-08-08: Op-path annual parallax fix (review 1.1) moved the mulens likelihood
+# Re-measured 2026-08-08 twice: the Op-path annual parallax fix (review 1.1)
+# moved the mulens likelihood (-934.604), then the galacticmodel prior
+# normalization (reviews 1.3/1.4: pm->velocity Jacobian + mixture branch
+# normalization) shifted it by -17.47 (two stars x [-log(sigma^3 rho0
+# branch norm) + 2*log(K*d)]).
+GOOD_EXPECTED_LP = -952.076
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
