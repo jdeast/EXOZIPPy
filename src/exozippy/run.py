@@ -242,7 +242,7 @@ def _run_fit(config, gui, user_params=None):
     if method is None:
         method = next(iter(_recommended)) if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = next(iter(_recommended)) if _recommended else "ptde"
+        rec_str = next(iter(_recommended)) if _recommended else "ptde_async"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )
@@ -438,14 +438,13 @@ def _run_fit(config, gui, user_params=None):
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
-                # EXPERIMENTAL (hpc_optimization.txt PROMPT 13): a separate,
-                # non-blocking PTDE dispatch loop -- see
-                # exozippy/samplers/ptde_async.py's module docstring for the
-                # statistical caveat around stale DE partner states before
-                # using this for a production posterior. rung_thin_factor/
-                # rung_thin_start are ptde-only (thinning addresses the
-                # blocking problem that async dispatch removes outright) and
-                # are not forwarded here.
+                # The non-blocking PTDE dispatch loop (hpc_optimization.txt
+                # PROMPT 13) -- the recommended default for Op-based models;
+                # see exozippy/samplers/ptde_async.py's module docstring for
+                # the stale-DE-partner caveat and how swaps stay rigorous.
+                # rung_thin_factor/rung_thin_start are ptde-only (thinning
+                # addresses the blocking problem that async dispatch removes
+                # outright) and are not forwarded here.
                 idata = ptde_async_sample(
                     model,
                     system,

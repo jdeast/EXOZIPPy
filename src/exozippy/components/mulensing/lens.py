@@ -863,7 +863,10 @@ class Lens(Component):
 
         Binary/finite-source lenses use the MulensModel Op, which is not
         differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
-        will produce invalid results; PTDE is required.
+        will produce invalid results; PTDE is required.  The asynchronous
+        dispatch loop (ptde_async) is recommended: near-caustic evaluations
+        concentrate in the hot rungs and stall the synchronous sampler's
+        every step behind the slowest proposal (samplers/ptde_async.py).
 
         PSPL lenses use a symbolic PyTensor formula and are NUTS-compatible,
         so no constraints are returned.
@@ -871,7 +874,7 @@ class Lens(Component):
         if any(self.uses_op(i) for i in range(len(self.n_lens_bodies))):
             return {
                 "incompatible": {"nuts", "numpyro", "blackjax"},
-                "recommended": "ptde",
+                "recommended": "ptde_async",
                 "reason": (
                     "binary/finite-source microlensing uses the MulensModel Op, "
                     "which is not differentiable — gradient-based samplers produce "
