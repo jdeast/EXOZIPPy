@@ -56,6 +56,12 @@ BULGE_DENSITY_X_0 = 1.590  # in kpc, bulge density axis X in kpc from Zhu+17
 BULGE_DENSITY_Y_0 = 0.424  # in kpc, bulge density axis Y in kpc from Zhu+17
 BULGE_DENSITY_Z_0 = 0.424  # in kpc, bulge density axis Z in kpc from Zhu+17
 BULGE_GAMMA = -2.0  # see Koshimoto and Bennett 2020 Sec. 3.4
+# Outer cylindrical cutoff of the bar (genulens: Rc, srob).  Beyond
+# R = BULGE_RC the bar density is multiplied by a Gaussian of width
+# BULGE_RC_WIDTH in R -- without it the shallow exp(-r_s/2) profile
+# leaks bulge stars all the way to the Sun (0.9% of central at R0).
+BULGE_RC = 2.632  # in kpc, Koshimoto+ 2021 E-model Rc (genulens rc)
+BULGE_RC_WIDTH = 0.5  # in kpc (genulens srob)
 BULGE_VELOCITY_SIGMA_1 = (
     120.0  # in km/s, basedon on Koshimoto & Bennett 2020 tab. 1
 )
@@ -70,48 +76,62 @@ BULGE_ROTATION_ANGULAR_VELOCITY = (
 )
 
 # --- 6. DISK CONSTANTS ---
-DISK_SCALE_LENGTH = (
-    3.5  # disk density scale length from Koshimoto & Bennett 2020; in kpc
-)
-DISK_SCALE_HEIGHT = (
-    0.325  # disk density scale height from Koshimoto & Bennett 2020; in kpc
-)
-DISK_ROTATION_VELOCITY = 220.0  # in km/s
-DISK_VELOCITY_SIGMA_U = 30.0  # in km/s, rough guess
-DISK_VELOCITY_SIGMA_V = 30.0  # in km/s, rough guess
-DISK_VELOCITY_SIGMA_W = 30.0  # in km/s, rough guess
+# Thin disk structure from Koshimoto, Bennett & Suzuki 2021 (genulens):
+# Rd = 2.6 kpc with the density held CONSTANT inside R = 5.3 kpc (their
+# DISK=2 "hole"/plateau -- the inner disk does not keep rising toward
+# the GC), vertical exp with 325 pc (their age bins span 61-445 pc
+# sech^2; one exp layer is our simplification).
+DISK_SCALE_LENGTH = 2.6  # in kpc, thin disk Rd (genulens Rd[1])
+DISK_RDBREAK = 5.3  # in kpc, density flat inside this R (genulens Rdbreak)
+DISK_SCALE_HEIGHT = 0.325  # in kpc, thin disk vertical scale
+# Thick disk (genulens Rd[2], zd[7]): exp in both R (same plateau) and z.
+THICK_DISK_SCALE_LENGTH = 2.2  # in kpc
+THICK_DISK_SCALE_HEIGHT = 0.903  # in kpc
+# Disk kinematics: the analytic (non-Shu) branch genulens itself provides
+# (its B14disk mode, Bennett et al. 2014): mean rotation and fixed
+# dispersions per component.  These replace the old "rough guess"
+# (220; 30,30,30).
+DISK_ROTATION_VELOCITY = 218.0  # in km/s, thin disk mean v_phi
+DISK_VELOCITY_SIGMA_U = 39.9  # in km/s, thin disk radial
+DISK_VELOCITY_SIGMA_V = 27.9  # in km/s, thin disk azimuthal
+DISK_VELOCITY_SIGMA_W = 19.1  # in km/s, thin disk vertical
+THICK_DISK_ROTATION_VELOCITY = 170.0  # in km/s (asymmetric drift included)
+THICK_DISK_VELOCITY_SIGMA_U = 67.0  # in km/s
+THICK_DISK_VELOCITY_SIGMA_V = 51.0  # in km/s
+THICK_DISK_VELOCITY_SIGMA_W = 42.0  # in km/s
 KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
 SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
 
 # --- 7. SUN CONSTANTS ---
-SUN_GC_DISTANCE = 8.3
-SUN_VELOCITY_X = -12.7  # in km/s
-SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s
-SUN_VELOCITY_Z = 7.25  # in km/s
+SUN_GC_DISTANCE = 8.16  # in kpc (genulens/Koshimoto+21 R0 = 8160 pc)
+SUN_Z_OFFSET = 0.025  # in kpc, Sun's height above the plane (genulens zsun)
+# Solar velocity in the galactocentric frame, genulens convention
+# (vxsun toward the GC, vysun in the rotation direction, vzsun up):
+SUN_GALCEN_V = (10.0, 243.0, 7.0)  # in km/s
+SUN_VELOCITY_X = -12.7  # in km/s (legacy, rp.py convention)
+SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s (legacy)
+SUN_VELOCITY_Z = 7.25  # in km/s (legacy)
 
-# --- 8. GALACTIC DENSITY ZERO POINTS (Msun/pc^3) ---
-# The disk/bulge mixture in components/galacticmodel needs each branch's
-# density on a COMMON absolute scale -- only the ratio matters for the
-# mixture weight, but a physical anchor keeps each rho0 auditable.  Both
-# are stellar MASS densities; using them as per-star (number) weights
-# assumes comparable mean stellar mass in the two populations, good to
-# ~10s of percent for two old populations with the same IMF.
+# --- 8. GALACTIC POPULATION NUMBER DENSITIES (stars/pc^3, MS+BD) ---
+# Branch weights for the disk/thick/bulge mixture in
+# components/galacticmodel.  These are genulens's own NUMBER-density
+# channel (n0MS* in its run_context.hpp) -- the channel it uses to decide
+# which population a star belongs to -- so no mean-stellar-mass caveat
+# applies.  Only ratios matter for the mixture; the absolute scale is
+# arbitrary but kept physical for auditability.
 #
-# Disk: single exponential rho0 * exp(-r/L - |z|/H), anchored to the
-# local stellar mass density rho(R_sun, 0) ~ 0.04 Msun/pc^3 (Bovy 2017).
-DISK_DENSITY_RHO0 = 0.04 * np.exp(SUN_GC_DISTANCE / DISK_SCALE_LENGTH)
-# Bulge/bar: rho0 * exp(-r_s/2) with the Zhu+17 ellipsoid axes above,
-# anchored to a total bar stellar mass of 1.8e10 Msun (Portail+ 2015).
-# The profile integral is 64*pi*x0*y0*z0 (substitute u = r_s/2:
-# 4*pi*int s^2 exp(-s/2) ds = 64*pi); the 1e9 converts kpc^3 -> pc^3.
-BULGE_DENSITY_RHO0 = 1.8e10 / (
-    64.0
-    * np.pi
-    * BULGE_DENSITY_X_0
-    * BULGE_DENSITY_Y_0
-    * BULGE_DENSITY_Z_0
-    * 1e9
-)
+# Thin disk local (R0, midplane): sum of the 7 thin-disk age bins' n0MSd.
+DISK_LOCAL_NUMBER_DENSITY = 0.1633
+# Thick disk local: n0MSd[7].
+THICK_DISK_LOCAL_NUMBER_DENSITY = 7.91e-3
+# Bar central: derived with genulens's VVV-box budget applied to OUR bar
+# profile (exp(-r_s/2), Zhu+17 axes, BULGE_RC cutoff):
+#   rho0b = (frho0b * M_VVV(P17) - M_disk_in_box) / int_box(profile)
+#         = (0.839015 * 1.32e10 - 1.312e9) / 9.307e9 pc^3
+#         = 1.049 Msun/pc^3   (Portail+ 2017 box |xb|<2.2,|yb|<1.4,|z|<1.2)
+#   n0   = rho0b * fb_MS * m2nb_MS = rho0b * (1.62/2.07) / 0.227943
+# Pinned by tests/test_galactic_model.py, which recomputes the integral.
+BULGE_CENTRAL_NUMBER_DENSITY = 3.60
 
 # IAU 2015, Resolution B2 zero point values
 LSUN = 1 * u.Lsun

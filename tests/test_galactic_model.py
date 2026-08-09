@@ -138,14 +138,19 @@ def test_imf_salpeter_branch_does_not_crash():
 
 def _pm_rv_for_velocity(ra_deg, dec_deg, d_kpc, v_gal):
     """ICRS (pm_ra_cosdec [mas/yr], pm_dec [mas/yr], rv [m/s]) of a star at
-    the given position with the given astropy-Galactocentric velocity."""
+    the given position with the given galactocentric velocity, in the
+    component's own frame (R0/z_sun/vsun-consistent with the densities)."""
     import astropy.units as u
-    from astropy.coordinates import ICRS, Galactocentric, SkyCoord
+    from astropy.coordinates import ICRS, SkyCoord
+
+    from exozippy.components.galacticmodel.galacticmodel import (
+        GALACTOCENTRIC_FRAME,
+    )
 
     sc = SkyCoord(
         ra=ra_deg * u.deg, dec=dec_deg * u.deg, distance=d_kpc * u.kpc
     )
-    gc = sc.transform_to(Galactocentric())
+    gc = sc.transform_to(GALACTOCENTRIC_FRAME)
     star = SkyCoord(
         x=gc.x,
         y=gc.y,
@@ -153,7 +158,7 @@ def _pm_rv_for_velocity(ra_deg, dec_deg, d_kpc, v_gal):
         v_x=v_gal[0] * u.km / u.s,
         v_y=v_gal[1] * u.km / u.s,
         v_z=v_gal[2] * u.km / u.s,
-        frame=Galactocentric(),
+        frame=GALACTOCENTRIC_FRAME,
     ).transform_to(ICRS())
     return (
         float(star.pm_ra_cosdec.to_value(u.mas / u.yr)),
@@ -213,12 +218,12 @@ def test_kinematic_prior_prefers_corotation_over_radial_plunge():
         # ACT
         lps[tag] = _kinematic_lp(d_kpc * 1e3, pm_ra, pm_dec, rv)
 
-    # ASSERT: margins allow for the logsumexp bulge branch, whose ~110 km/s
-    # dispersions partially absorb any velocity direction and floor the
-    # disk-term penalty (measured: corot beats radial by 11.6 nats and
-    # counter-rotation by 18.0; before the fix corot LOST to radial by 43.
-    # The 2026-08 mixture normalization down-weighted the bulge branch by
-    # ~3.9 nats, which widened these margins from 7.9/14.3).
+    # ASSERT: margins allow for the logsumexp bulge/thick branches, whose
+    # hotter dispersions partially absorb any velocity direction and floor
+    # the thin-disk penalty (measured: corot beats radial by 16.5 nats and
+    # counter-rotation by 33.1; before the fix corot LOST to radial by 43.
+    # The 2026-08 mixture normalization + bar cutoff + genulens kinematics
+    # widened these margins from 7.9/14.3).
     assert lps["corot"] > lps["radial"] + 5.0
     assert lps["corot"] > lps["counter"] + 10.0
 
@@ -251,9 +256,10 @@ def test_kinematic_prior_corotating_star_pays_no_velocity_penalty():
     lp_fast = lp_at(DISK_ROTATION_VELOCITY + 3.0 * DISK_VELOCITY_SIGMA_V)
     lp_slow = lp_at(DISK_ROTATION_VELOCITY - 3.0 * DISK_VELOCITY_SIGMA_V)
 
-    # Margins again reflect bulge-branch flooring (measured: +4.1 and +4.3
-    # nats for +/-3 sigma after the 2026-08 mixture normalization weakened
-    # the floor, up from +1.4/+2.5; the disk term alone would give 4.5).
+    # Margins again reflect mixture flooring by the hotter branches
+    # (measured: +4.4 and +3.9 nats for +/-3 sigma after the 2026-08
+    # normalization + fidelity upgrade, up from +1.4/+2.5; the thin-disk
+    # term alone would give 4.5).
     assert lp_circ > lp_fast + 1.0
     assert lp_circ > lp_slow + 1.0
 
@@ -266,26 +272,36 @@ def test_kinematic_prior_corotating_star_pays_no_velocity_penalty():
 def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
     """Independent numpy reference of the kinematic prior for one star at
     the mock RA/Dec, with astropy doing the full (nonlinearized) velocity
-    transform.  Pins the 2026-08 normalization fixes:
+    transform.  Pins the 2026-08 normalization fixes and the genulens-
+    fidelity upgrade:
       - the pm -> velocity change-of-variables Jacobian +2*log(K*d)
         (velocity Gaussians in km/s, sampled coordinates in mas/yr),
       - per-branch velocity normalization -log(sigma1*sigma2*sigma3),
-      - per-branch density zero points log(rho0_disk) / log(rho0_bulge).
+      - per-branch number-density anchors (thin/thick local, bulge central),
+      - the inner-disk plateau (R < DISK_RDBREAK) and the bar's outer
+        cylindrical cutoff (beyond BULGE_RC),
+      - the thick-disk branch and the R0/z_sun-consistent frame.
     """
     import astropy.units as u
-    from astropy.coordinates import Galactocentric, SkyCoord
+    from astropy.coordinates import SkyCoord
 
+    from exozippy.components.galacticmodel.galacticmodel import (
+        GALACTOCENTRIC_FRAME,
+    )
     from exozippy.constants import (
         BULGE_BAR_ANGLE,
-        BULGE_DENSITY_RHO0,
+        BULGE_CENTRAL_NUMBER_DENSITY,
         BULGE_DENSITY_X_0,
         BULGE_DENSITY_Y_0,
         BULGE_DENSITY_Z_0,
+        BULGE_RC,
+        BULGE_RC_WIDTH,
         BULGE_ROTATION_ANGULAR_VELOCITY,
         BULGE_VELOCITY_SIGMA_1,
         BULGE_VELOCITY_SIGMA_2,
         BULGE_VELOCITY_SIGMA_3,
-        DISK_DENSITY_RHO0,
+        DISK_LOCAL_NUMBER_DENSITY,
+        DISK_RDBREAK,
         DISK_ROTATION_VELOCITY,
         DISK_SCALE_HEIGHT,
         DISK_SCALE_LENGTH,
@@ -294,22 +310,35 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         DISK_VELOCITY_SIGMA_W,
         K_VEL_CONVERSION,
         SUN_GC_DISTANCE,
+        SUN_Z_OFFSET,
+        THICK_DISK_LOCAL_NUMBER_DENSITY,
+        THICK_DISK_ROTATION_VELOCITY,
+        THICK_DISK_SCALE_HEIGHT,
+        THICK_DISK_SCALE_LENGTH,
+        THICK_DISK_VELOCITY_SIGMA_U,
+        THICK_DISK_VELOCITY_SIGMA_V,
+        THICK_DISK_VELOCITY_SIGMA_W,
     )
+
+    def hinge(t):  # same smooth max(t, 0) as the model
+        return 0.5 * (t + np.sqrt(t * t + 0.0025))
 
     sc = SkyCoord(ra=_RA_RAD * u.rad, dec=_DEC_RAD * u.rad)
     l_rad, b_rad = sc.galactic.l.rad, sc.galactic.b.rad
     d = max(d_pc, 1e-3) / 1e3  # kpc, same floor as the model
 
-    # Position in the model's own convention (Sun at x = +SUN_GC_DISTANCE)
+    # Position in the model's own convention (Sun at x = +SUN_GC_DISTANCE,
+    # z tilted by bsun = z_sun/R0 so d=0 lands at z = +z_sun)
     x = SUN_GC_DISTANCE - d * np.cos(l_rad) * np.cos(b_rad)
     y = d * np.sin(l_rad) * np.cos(b_rad)
-    z = d * np.sin(b_rad)
+    bsun = SUN_Z_OFFSET / SUN_GC_DISTANCE
+    z = d * np.sin(b_rad) * np.cos(bsun) + x * np.sin(bsun)
     z_smooth = np.sqrt(z**2 + 1e-6)
     r = np.sqrt(x**2 + y**2 + 1e-6)
 
-    # Velocity via astropy's exact transform.  The model linearizes at
-    # d = 1 kpc, but the map is exactly linear in (K*pm*d, rv), so the
-    # two agree to float precision.
+    # Velocity via astropy's exact transform in the component's frame.
+    # The model linearizes at d = 1 kpc, but the map is exactly linear in
+    # (K*pm*d, rv), so the two agree to float precision.
     gal = SkyCoord(
         ra=_RA_RAD * u.rad,
         dec=_DEC_RAD * u.rad,
@@ -317,7 +346,7 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         pm_ra_cosdec=pm_ra * u.mas / u.yr,
         pm_dec=pm_dec * u.mas / u.yr,
         radial_velocity=(rv_ms / 1e3) * u.km / u.s,
-    ).transform_to(Galactocentric())
+    ).transform_to(GALACTOCENTRIC_FRAME)
     v_x = gal.v_x.to_value(u.km / u.s)
     v_y = gal.v_y.to_value(u.km / u.s)
     v_z = gal.v_z.to_value(u.km / u.s)
@@ -328,17 +357,36 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
     x_bar = x * cos_bar + y * sin_bar
     y_bar = -x * sin_bar + y * cos_bar
 
-    L_disk = (
-        -r / DISK_SCALE_LENGTH
+    r_plateau = hinge(r - DISK_RDBREAK) - (SUN_GC_DISTANCE - DISK_RDBREAK)
+    L_thin = (
+        np.log(DISK_LOCAL_NUMBER_DENSITY)
+        - r_plateau / DISK_SCALE_LENGTH
         - z_smooth / DISK_SCALE_HEIGHT
         - 0.5 * (v_r / DISK_VELOCITY_SIGMA_U) ** 2
         - 0.5 * ((v_phi - DISK_ROTATION_VELOCITY) / DISK_VELOCITY_SIGMA_V) ** 2
         - 0.5 * (v_z / DISK_VELOCITY_SIGMA_W) ** 2
-        + np.log(DISK_DENSITY_RHO0)
         - np.log(
             DISK_VELOCITY_SIGMA_U
             * DISK_VELOCITY_SIGMA_V
             * DISK_VELOCITY_SIGMA_W
+        )
+    )
+    L_thick = (
+        np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
+        - r_plateau / THICK_DISK_SCALE_LENGTH
+        - z_smooth / THICK_DISK_SCALE_HEIGHT
+        - 0.5 * (v_r / THICK_DISK_VELOCITY_SIGMA_U) ** 2
+        - 0.5
+        * (
+            (v_phi - THICK_DISK_ROTATION_VELOCITY)
+            / THICK_DISK_VELOCITY_SIGMA_V
+        )
+        ** 2
+        - 0.5 * (v_z / THICK_DISK_VELOCITY_SIGMA_W) ** 2
+        - np.log(
+            THICK_DISK_VELOCITY_SIGMA_U
+            * THICK_DISK_VELOCITY_SIGMA_V
+            * THICK_DISK_VELOCITY_SIGMA_W
         )
     )
     r_s = np.sqrt(
@@ -347,7 +395,9 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         + (z / BULGE_DENSITY_Z_0) ** 2
     )
     L_bulge = (
-        -0.5 * r_s
+        np.log(BULGE_CENTRAL_NUMBER_DENSITY)
+        - 0.5 * r_s
+        - 0.5 * (hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
         - 0.5 * (v_r / BULGE_VELOCITY_SIGMA_1) ** 2
         - 0.5
         * (
@@ -356,15 +406,17 @@ def _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms):
         )
         ** 2
         - 0.5 * (v_z / BULGE_VELOCITY_SIGMA_3) ** 2
-        + np.log(BULGE_DENSITY_RHO0)
         - np.log(
             BULGE_VELOCITY_SIGMA_1
             * BULGE_VELOCITY_SIGMA_2
             * BULGE_VELOCITY_SIGMA_3
         )
     )
+    branches = np.array([L_thin, L_thick, L_bulge])
+    m = branches.max()
     return (
-        np.logaddexp(L_disk, L_bulge)
+        m
+        + np.log(np.exp(branches - m).sum())
         + 2.0 * np.log(d * 1e3)
         + 2.0 * np.log(K_VEL_CONVERSION * d)
     )
@@ -399,4 +451,76 @@ def test_kinematic_prior_matches_independent_reference(
     lp_ref = _reference_kinematic_lp(d_pc, pm_ra, pm_dec, rv_ms)
     assert np.isclose(lp_model, lp_ref, rtol=0.0, atol=1e-6), (
         f"model {lp_model} != reference {lp_ref}"
+    )
+
+
+def test_bulge_number_density_matches_vvv_box_budget():
+    """
+    Given the bar profile the component actually uses (exp(-r_s/2), Zhu+17
+      axes, BULGE_RC cutoff),
+    When its central density is derived with genulens's VVV-box budget
+      (rho0b = (frho0b * M_VVV(Portail+17) - M_disk_in_box)/box integral,
+      then mass -> MS+BD number via fb_MS/mean-MS-mass),
+    Then it reproduces the hard-coded BULGE_CENTRAL_NUMBER_DENSITY --
+      guarding the constant's derivation against silent drift in either
+      the profile or the disk constants it subtracts.
+    """
+    from exozippy.constants import (
+        BULGE_CENTRAL_NUMBER_DENSITY,
+        BULGE_DENSITY_X_0,
+        BULGE_DENSITY_Y_0,
+        BULGE_DENSITY_Z_0,
+        BULGE_RC,
+        BULGE_RC_WIDTH,
+        DISK_RDBREAK,
+        DISK_SCALE_HEIGHT,
+        DISK_SCALE_LENGTH,
+        SUN_GC_DISTANCE,
+        THICK_DISK_SCALE_HEIGHT,
+        THICK_DISK_SCALE_LENGTH,
+    )
+
+    # ARRANGE: Portail+17 VVV box, bar frame, in kpc
+    xmax, ymax, zmax = 2.2, 1.4, 1.2
+    n = 200
+    xg = np.linspace(0.0, xmax, n)
+    yg = np.linspace(0.0, ymax, n)
+    zg = np.linspace(0.0, zmax, n)
+    X, Y = np.meshgrid(xg, yg, indexing="ij")
+    R = np.hypot(X, Y)
+    cut = np.exp(-0.5 * (np.maximum(R - BULGE_RC, 0.0) / BULGE_RC_WIDTH) ** 2)
+    box_integral = 0.0  # kpc^3
+    for zz in zg:
+        r_s = np.sqrt(
+            (X / BULGE_DENSITY_X_0) ** 2
+            + (Y / BULGE_DENSITY_Y_0) ** 2
+            + (zz / BULGE_DENSITY_Z_0) ** 2
+        )
+        box_integral += (np.exp(-0.5 * r_s) * cut).sum()
+    box_integral *= 8 * (xg[1] - xg[0]) * (yg[1] - yg[0]) * (zg[1] - zg[0])
+
+    # Disk mass in the box (all R < BULGE_RC < DISK_RDBREAK -> plateau).
+    # Local MASS densities incl. WDs (genulens rho0d): thin 0.0501,
+    # thick 0.00228 Msun/pc^3 -- the box subtraction is a mass budget,
+    # unlike the number-density branch weights.
+    area_pc2 = (2 * xmax * 1e3) * (2 * ymax * 1e3)
+
+    def vertical(h_kpc):
+        h = h_kpc * 1e3
+        return 2 * h * (1 - np.exp(-zmax * 1e3 / h))
+
+    plateau = SUN_GC_DISTANCE - DISK_RDBREAK
+    m_disk_box = 0.050095 * np.exp(plateau / DISK_SCALE_LENGTH) * area_pc2 * (
+        vertical(DISK_SCALE_HEIGHT)
+    ) + 0.002282 * np.exp(plateau / THICK_DISK_SCALE_LENGTH) * area_pc2 * (
+        vertical(THICK_DISK_SCALE_HEIGHT)
+    )
+
+    # ACT: genulens normalization (frho0b, M_VVV, fb_MS, mean MS mass)
+    rho0b = (0.839014514507754 * 1.32e10 - m_disk_box) / (box_integral * 1e9)
+    n0_msb = rho0b * (1.62 / 2.07) / 0.227943
+
+    # ASSERT: 1% covers the box-integral grid resolution
+    assert np.isclose(n0_msb, BULGE_CENTRAL_NUMBER_DENSITY, rtol=0.01), (
+        f"recomputed {n0_msb:.4f} vs constant {BULGE_CENTRAL_NUMBER_DENSITY}"
     )

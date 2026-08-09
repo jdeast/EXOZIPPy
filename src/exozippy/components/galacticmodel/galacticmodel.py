@@ -2,21 +2,24 @@ import astropy.units as u
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
-from astropy.coordinates import Galactocentric, SkyCoord
+from astropy.coordinates import CartesianDifferential, Galactocentric, SkyCoord
 
 from exozippy.components.component import Component
 from exozippy.constants import (
     BULGE_BAR_ANGLE,
-    BULGE_DENSITY_RHO0,
+    BULGE_CENTRAL_NUMBER_DENSITY,
     BULGE_DENSITY_X_0,
     BULGE_DENSITY_Y_0,
     BULGE_DENSITY_Z_0,
     BULGE_GAMMA,
+    BULGE_RC,
+    BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
     BULGE_VELOCITY_SIGMA_1,
     BULGE_VELOCITY_SIGMA_2,
     BULGE_VELOCITY_SIGMA_3,
-    DISK_DENSITY_RHO0,
+    DISK_LOCAL_NUMBER_DENSITY,
+    DISK_RDBREAK,
     DISK_ROTATION_VELOCITY,
     DISK_SCALE_HEIGHT,
     DISK_SCALE_LENGTH,
@@ -26,15 +29,48 @@ from exozippy.constants import (
     K_VEL_CONVERSION,
     KROUPA_IMF_SLOPE,
     SALPETER_IMF_SLOPE,
+    SUN_GALCEN_V,
     SUN_GC_DISTANCE,
+    SUN_Z_OFFSET,
+    THICK_DISK_LOCAL_NUMBER_DENSITY,
+    THICK_DISK_ROTATION_VELOCITY,
+    THICK_DISK_SCALE_HEIGHT,
+    THICK_DISK_SCALE_LENGTH,
+    THICK_DISK_VELOCITY_SIGMA_U,
+    THICK_DISK_VELOCITY_SIGMA_V,
+    THICK_DISK_VELOCITY_SIGMA_W,
 )
 
 """
-This class implements a mixture model of the bulge and disk, enforcing the kinematics and density of the galaxy 
-It's a simplified version of the model defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract. 
-and codified here https://github.com/nkoshimoto/genulens 
+This class implements a mixture model of the thin disk, thick disk, and
+bulge/bar, enforcing the kinematics and density of the galaxy.
+It's a simplified version of the model defined in https://ui.adsabs.harvard.edu/abs/2021ApJ...917...78K/abstract.
+and codified here https://github.com/nkoshimoto/genulens
 This class distills genulens's core functionality into a component for EXOZIPPy
+
+Fidelity notes (vs genulens, reviewed 2026-08): the thin disk collapses
+genulens's 7 age bins into one exponential layer with its B14disk-mode
+(Bennett et al. 2014) kinematics instead of the Shu DF; the bar keeps a
+plain-ellipsoid exp(-r_s/2) profile (not the K21 super-ellipsoid + X-shape)
+but carries genulens's outer cylindrical cutoff and VVV-box-budget
+normalization; NSD, stellar halo, and the bar's spatial sigma gradients /
+streaming motion are omitted.  All three branch weights are genulens's
+NUMBER-density channel on one absolute scale, so the logsumexp mixture
+weight is physical.  The event-rate selection factor (theta_E * mu_rel) is
+deliberately NOT here -- it lives in the lens component, so this prior
+stays microlensing-agnostic.
 """
+
+# One consistent galactocentric frame for the velocity transform, matching
+# the density grid's R0/z_sun (genulens: R0 = 8160 pc, zsun = 25 pc,
+# vsun = (10, 243, 7) km/s toward-GC/rotation/up).  Astropy's default
+# Galactocentric (R0 = 8.122 kpc) would put the velocities in a slightly
+# different frame than the densities.
+GALACTOCENTRIC_FRAME = Galactocentric(
+    galcen_distance=SUN_GC_DISTANCE * u.kpc,
+    z_sun=SUN_Z_OFFSET * u.kpc,
+    galcen_v_sun=CartesianDifferential(list(SUN_GALCEN_V) * (u.km / u.s)),
+)
 
 
 class GalacticModel(Component):
@@ -104,10 +140,10 @@ class GalacticModel(Component):
                 radial_velocity=1 * u.km / u.s,
             )
 
-            gal0 = sc0.transform_to(Galactocentric())
-            gal1 = sc1.transform_to(Galactocentric())
-            gal2 = sc2.transform_to(Galactocentric())
-            gal3 = sc3.transform_to(Galactocentric())
+            gal0 = sc0.transform_to(GALACTOCENTRIC_FRAME)
+            gal1 = sc1.transform_to(GALACTOCENTRIC_FRAME)
+            gal2 = sc2.transform_to(GALACTOCENTRIC_FRAME)
+            gal3 = sc3.transform_to(GALACTOCENTRIC_FRAME)
 
             v0_arr = np.array([gal0.v_x.value, gal0.v_y.value, gal0.v_z.value])
             v1 = (
@@ -151,9 +187,14 @@ class GalacticModel(Component):
             return v0 + v_gal_offset
 
         def get_galactic_xyz(dist):
+            # genulens Dlb2xyz: the Sun sits SUN_Z_OFFSET above the plane,
+            # handled as a small rotation of z by bsun = z_sun/R0 (so a
+            # star at d=0 lands at z = +z_sun).  x and y keep the flat
+            # convention (Sun at x = +R0, GC at the origin).
             x = SUN_GC_DISTANCE - dist * cosl_cosb
             y = dist * sinl_cosb
-            z = dist * sinb
+            bsun = SUN_Z_OFFSET / SUN_GC_DISTANCE
+            z = dist * sinb * np.cos(bsun) + x * np.sin(bsun)
             return x, y, z
 
         def get_polar_velocity(x, y, r, v_x, v_y):
@@ -209,7 +250,23 @@ class GalacticModel(Component):
         x_bar = x * cos_bar + y * sin_bar
         y_bar = -x * sin_bar + y * cos_bar
 
-        # 1. Compute Disk Likelihood (Spatial + Kinematic)
+        def hinge(t):
+            # Smooth max(t, 0) (C-infinity), transition width ~50 pc in
+            # kpc units -- keeps the plateau/cutoff kinks differentiable.
+            return 0.5 * (t + pt.sqrt(t * t + 0.0025))
+
+        # Each mixture branch must carry its own normalization: constants
+        # cancel within a single Potential but NOT across the logsumexp.
+        # Velocity Gaussians contribute -log(sigma1*sigma2*sigma3) (the
+        # shared (2*pi)^(3/2) is identical in all branches and dropped);
+        # the density anchors (stars/pc^3, genulens's number-density
+        # channel, see constants.py) set the physical population ratios.
+
+        # 1. Thin disk (Spatial + Kinematic)
+        # Radial profile: exponential with Rd = 2.6 kpc, held FLAT inside
+        # R = DISK_RDBREAK (genulens's DISK=2 inner plateau) -- a plain
+        # exponential over-weights near-GC disk lenses by ~3x at R = 1
+        # kpc.  Anchored to the local (R0, midplane) number density.
         # Galactic rotation is AZIMUTHAL: the circular-speed offset belongs
         # on v_phi (paired with the azimuthal dispersion sigma_V) and the
         # radial component v_r is zero-centered (sigma_U). These centers
@@ -223,37 +280,69 @@ class GalacticModel(Component):
         # get_polar_velocity is positive for co-rotation at every position
         # (verified against astropy Galactocentric), so the center is
         # +DISK_ROTATION_VELOCITY.
-        log_dens_disk = (-1.0 / DISK_SCALE_LENGTH) * r + (
-            -1.0 / DISK_SCALE_HEIGHT
-        ) * z_smooth
-        log_vel_disk = (
+        r_beyond_sun = SUN_GC_DISTANCE - DISK_RDBREAK
+        log_dens_thin = (
+            np.log(DISK_LOCAL_NUMBER_DENSITY)
+            - (hinge(r - DISK_RDBREAK) - r_beyond_sun) / DISK_SCALE_LENGTH
+            - z_smooth / DISK_SCALE_HEIGHT
+        )
+        log_vel_thin = (
             (-0.5 / DISK_VELOCITY_SIGMA_U**2) * v_r**2
             + (-0.5 / DISK_VELOCITY_SIGMA_V**2)
             * (v_phi - DISK_ROTATION_VELOCITY) ** 2
             + (-0.5 / DISK_VELOCITY_SIGMA_W**2) * v_z**2
         )
-        # Each mixture branch must carry its own normalization: constants
-        # cancel within a single Potential but NOT across the logsumexp.
-        # Velocity Gaussians contribute -log(sigma1*sigma2*sigma3) (the
-        # shared (2*pi)^(3/2) is identical in both branches and dropped);
-        # without it the bulge's ~(120*100*80)/(30*30*30) wider ellipsoid
-        # was over-weighted by ~3.6 nats.  The density zero points
-        # log(rho0) set the physical disk:bulge count ratio (both in
-        # Msun/pc^3, see constants.py).
-        log_norm_disk = np.log(DISK_DENSITY_RHO0) - np.log(
-            DISK_VELOCITY_SIGMA_U
-            * DISK_VELOCITY_SIGMA_V
-            * DISK_VELOCITY_SIGMA_W
+        L_thin = (
+            log_dens_thin
+            + log_vel_thin
+            - np.log(
+                DISK_VELOCITY_SIGMA_U
+                * DISK_VELOCITY_SIGMA_V
+                * DISK_VELOCITY_SIGMA_W
+            )
         )
-        L_disk = log_dens_disk + log_vel_disk + log_norm_disk
 
-        # 2. Compute Bulge Likelihood (Spatial + Kinematic)
+        # 2. Thick disk (Spatial + Kinematic) -- same plateau, its own
+        # scale length/height; kinematics include the asymmetric drift
+        # (mean rotation 170 km/s) and hotter dispersions.
+        log_dens_thick = (
+            np.log(THICK_DISK_LOCAL_NUMBER_DENSITY)
+            - (hinge(r - DISK_RDBREAK) - r_beyond_sun)
+            / THICK_DISK_SCALE_LENGTH
+            - z_smooth / THICK_DISK_SCALE_HEIGHT
+        )
+        log_vel_thick = (
+            (-0.5 / THICK_DISK_VELOCITY_SIGMA_U**2) * v_r**2
+            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_V**2)
+            * (v_phi - THICK_DISK_ROTATION_VELOCITY) ** 2
+            + (-0.5 / THICK_DISK_VELOCITY_SIGMA_W**2) * v_z**2
+        )
+        L_thick = (
+            log_dens_thick
+            + log_vel_thick
+            - np.log(
+                THICK_DISK_VELOCITY_SIGMA_U
+                * THICK_DISK_VELOCITY_SIGMA_V
+                * THICK_DISK_VELOCITY_SIGMA_W
+            )
+        )
+
+        # 3. Bulge/bar (Spatial + Kinematic), anchored at its center.
+        # The Gaussian cylindrical cutoff beyond BULGE_RC (genulens Rc/
+        # srob) is what confines the bar: without it the shallow
+        # exp(-r_s/2) profile is still 9% of central at a 4-kpc lens
+        # distance (vs ~4e-6 in genulens), flooding the disk range with
+        # spurious bulge stars.
         r_bulge_coord = pt.sqrt(
             (x_bar / BULGE_DENSITY_X_0) ** 2
             + (y_bar / BULGE_DENSITY_Y_0) ** 2
             + (z / BULGE_DENSITY_Z_0) ** 2
         )
-        log_dens_bulge = -0.5 * r_bulge_coord
+        log_dens_bulge = (
+            np.log(BULGE_CENTRAL_NUMBER_DENSITY)
+            - 0.5 * r_bulge_coord
+            - 0.5 * (hinge(r - BULGE_RC) / BULGE_RC_WIDTH) ** 2
+        )
         # Bulge cylindrical rotation is azimuthal too (same fix as above).
         bulge_rot = BULGE_ROTATION_ANGULAR_VELOCITY * r
         log_vel_bulge = (
@@ -261,12 +350,15 @@ class GalacticModel(Component):
             + (-0.5 / BULGE_VELOCITY_SIGMA_2**2) * (v_phi - bulge_rot) ** 2
             + (-0.5 / BULGE_VELOCITY_SIGMA_3**2) * v_z**2
         )
-        log_norm_bulge = np.log(BULGE_DENSITY_RHO0) - np.log(
-            BULGE_VELOCITY_SIGMA_1
-            * BULGE_VELOCITY_SIGMA_2
-            * BULGE_VELOCITY_SIGMA_3
+        L_bulge = (
+            log_dens_bulge
+            + log_vel_bulge
+            - np.log(
+                BULGE_VELOCITY_SIGMA_1
+                * BULGE_VELOCITY_SIGMA_2
+                * BULGE_VELOCITY_SIGMA_3
+            )
         )
-        L_bulge = log_dens_bulge + log_vel_bulge + log_norm_bulge
 
         volume_element = 2.0 * pt.log(distance * 1000.0)
 
@@ -280,10 +372,10 @@ class GalacticModel(Component):
         # under-weighting large distances by d^2.
         velocity_jacobian = 2.0 * pt.log(K_VEL_CONVERSION * distance)
 
-        # 3. Combine them using LogSumExp
-        # This effectively does: log(exp(L_disk) + exp(L_bulge))
+        # 4. Combine them using LogSumExp
+        # log(exp(L_thin) + exp(L_thick) + exp(L_bulge))
         kinematic_penalty = pt.sum(
-            pm.math.logsumexp(pt.stack([L_disk, L_bulge]), axis=0)
+            pm.math.logsumexp(pt.stack([L_thin, L_thick, L_bulge]), axis=0)
             + volume_element
             + velocity_jacobian
         )
