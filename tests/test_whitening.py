@@ -285,13 +285,14 @@ def test_make_starts_skips_probe_when_raw_scales_given(monkeypatch):
     Then the probe is never called (the model was whitened against the
     same start) and the provided scales disperse the chains.
     """
-    # Arrange
-    from exozippy.samplers import ptde
+    # Arrange -- patch the probe where _make_starts actually resolves it
+    # (samplers._common, the shared scaffolding module; ptde re-exports it).
+    from exozippy.samplers import _common, ptde
 
     def _boom(*a, **k):
         raise AssertionError("probe should not run")
 
-    monkeypatch.setattr(ptde, "_probe_scales", _boom)
+    monkeypatch.setattr(_common, "_probe_scales", _boom)
     rng = np.random.default_rng(0)
     start = {"a": np.zeros(2)}
 

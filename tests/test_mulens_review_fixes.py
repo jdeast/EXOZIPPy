@@ -510,7 +510,7 @@ def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
     Given a binary lens (two lens bodies — uses the MulensModel Op),
     When sampler_requirements is called,
     Then the returned dict marks 'nuts', 'numpyro', and 'blackjax' as
-      incompatible and recommends 'ptde', because the Op is not
+      incompatible and recommends 'ptde_async', because the Op is not
       differentiable and gradient-based samplers produce invalid results.
     """
     lens = Lens(
@@ -522,14 +522,15 @@ def test_binary_lens_requires_ptde_and_rejects_gradient_samplers():
 
     assert "incompatible" in reqs
     assert {"nuts", "numpyro", "blackjax"} <= reqs["incompatible"]
-    assert reqs.get("recommended") == "ptde"
+    assert reqs.get("recommended") == "ptde_async"
 
 
 def test_pspl_finite_source_requires_ptde():
     """
     Given a PSPL lens with finite_source: True (also uses the MulensModel Op),
     When sampler_requirements is called,
-    Then gradient-based samplers are marked incompatible and 'ptde' is recommended.
+    Then gradient-based samplers are marked incompatible and 'ptde_async'
+      is recommended.
     """
     lens = Lens(
         [{"lenses": ["star.0"], "sources": ["star.1"], "finite_source": True}],
@@ -537,7 +538,7 @@ def test_pspl_finite_source_requires_ptde():
     )
     reqs = lens.sampler_requirements()
     assert "nuts" in reqs.get("incompatible", set())
-    assert reqs.get("recommended") == "ptde"
+    assert reqs.get("recommended") == "ptde_async"
 
 
 # ---------------------------------------------------------------------------

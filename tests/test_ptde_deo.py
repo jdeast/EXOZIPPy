@@ -158,17 +158,25 @@ def test_deo_pairs_odd_ladder_drops_dangling_rung():
     assert _deo_pairs(0, 7) == [(0, 1), (2, 3), (4, 5)]
 
 
-def test_deo_pairs_skips_thinned_inactive_rungs():
+def test_deo_pairs_ignore_rung_thinning():
     """
-    Given a set of active rungs that excludes some thinned (inactive) rungs,
-    When _deo_pairs is called with active_rungs,
-    Then any pair touching an inactive rung is dropped rather than reverting
-      to a random pairing (preserving the non-reversible index flow).
+    Given a rung-thinned sampler configuration,
+    When the DEO swap schedule is generated,
+    Then every adjacent pair is still attempted -- swaps exchange cached
+      (state, logp) pairs and need no fresh evaluation, so thinning must
+      never filter them. Filtering by the thinning activity pattern used to
+      permanently disconnect the ladder because the DEO round parity is
+      deterministically coupled to the step counter (e.g. thin_factor=2,
+      swap_interval=1, n_temps=8, thin_start=4 never attempted (3,4) or
+      (5,6)) -- notes/code_review_20260808.txt bug 1.14.
     """
-    # Only rungs 0-3 active: on an even round, (4,5) and (6,7) must drop.
-    assert _deo_pairs(0, 8, active_rungs={0, 1, 2, 3}) == [(0, 1), (2, 3)]
-    # A pair with only one active endpoint is also dropped.
-    assert _deo_pairs(0, 8, active_rungs={0, 1, 2}) == [(0, 1)]
+    import inspect
+
+    # The schedule generator has no filtering hook at all any more.
+    assert "active_rungs" not in inspect.signature(_deo_pairs).parameters
+    # Over any two consecutive rounds, every adjacent pair is attempted.
+    attempted = set(_deo_pairs(0, 8)) | set(_deo_pairs(1, 8))
+    assert attempted == {(k, k + 1) for k in range(7)}
 
 
 def test_deo_pair_sequence_even_pairs_before_odd():

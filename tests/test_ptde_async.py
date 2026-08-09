@@ -1,11 +1,11 @@
 """Tests for the asynchronous PTDE sampler (ptde_async.py, hpc_optimization.txt PROMPT 13).
 
 Mirrors tests/test_ptde.py's structure and toy model so the two samplers'
-behavior can be compared directly. ptde_async is experimental (see its module
-docstring's statistical caveat on stale DE partners); these tests validate
-that it (a) produces well-formed output, (b) recovers known posterior
-moments on a toy model, and (c) survives edge cases (single core, eval
-timeouts, rung timing) without crashing or deadlocking.
+behavior can be compared directly. ptde_async is the recommended default for
+Op-based models (see its module docstring for the stale-DE-partner caveat);
+these tests validate that it (a) produces well-formed output, (b) recovers
+known posterior moments on a toy model, and (c) survives edge cases (single
+core, eval timeouts, rung timing) without crashing or deadlocking.
 """
 
 import multiprocessing as mp
@@ -273,3 +273,74 @@ def test_ptde_async_early_stop_via_maxtime():
     )
     assert idata.posterior.sizes["draw"] >= 1
     assert idata.posterior.sizes["draw"] <= 5000
+
+
+def test_ptde_async_warns_once_when_t1_lp_exceeds_plausibility_ceiling(
+    caplog,
+):
+    """
+    Given a plausibility ceiling set far below any lp this model can
+    legitimately reach,
+    When ptde_async_sample runs and a T=1 chain's accepted lp exceeds it,
+    Then a single loud warning is logged (not one per evaluation) naming the
+      offending chain and lp -- the same runaway-lp early-detection guard
+      the synchronous sampler has (the two used to drift here: sync had the
+      check, async silently lacked it; code_review_20260808.txt 1.15/sec 4).
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("WARNING", logger="exozippy.samplers.ptde_async"):
+        ptde_async_sample(
+            model,
+            system,
+            draws=20,
+            tune=20,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=1,
+            log_interval=100,
+            lp_plausibility_ceiling=0.1,
+        )
+    warnings = [
+        r.message
+        for r in caplog.records
+        if "plausibility ceiling" in r.message
+    ]
+    assert len(warnings) == 1, (
+        f"expected exactly one plausibility-ceiling warning, got "
+        f"{len(warnings)}: {warnings}"
+    )
+    assert "T=1 chain" in warnings[0]
+
+
+def test_ptde_async_freezes_gamma_when_first_chain_starts_recording(caplog):
+    """
+    Given adapt_gamma=True (the default) and asynchronous per-chain pacing,
+    When the first T=1 chain finishes its tune phase,
+    Then gamma is frozen (logged once) so recorded draws never come from a
+      kernel that slower chains' tune-phase proposals are still mutating
+      (code_review_20260808.txt 1.15c).
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("INFO", logger="exozippy.samplers.ptde_async"):
+        ptde_async_sample(
+            model,
+            system,
+            draws=30,
+            tune=30,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=2,
+            log_interval=1000,
+        )
+    freeze_msgs = [
+        r.message for r in caplog.records if "gamma: frozen at" in r.message
+    ]
+    assert len(freeze_msgs) == 1, (
+        f"expected exactly one gamma-freeze message, got {freeze_msgs}"
+    )
