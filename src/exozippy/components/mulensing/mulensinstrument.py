@@ -166,7 +166,6 @@ class MulensInstrument(Instrument):
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         self._raw_time_list = []
         all_obspos = []
-        all_obspos_abs = []
 
         self._n_sources = int(system.lens.n_sources)
 
@@ -179,26 +178,10 @@ class MulensInstrument(Instrument):
         ra_rad = ra_deg * np.pi / 180.0
         dec_rad = dec_deg * np.pi / 180.0
 
-        # Geocentric reference (Skowron+2011 convention): Earth's position and
-        # velocity at t_0_par define the inertial frame.  All observer positions
-        # are stored as deviations from this linear Earth trajectory so that
-        # t_0/u_0 remain geocentric parameters.
-        self._t0_par = float(system.lens.t0_par[0])
-        self._earth_pos_ref = self.get_observer_position(
-            np.array([self._t0_par]), "earth"
-        )[0]  # (3,) AU
-        _dt = 0.5  # days for finite-difference velocity
-        _ep = self.get_observer_position(
-            np.array([self._t0_par + _dt]), "earth"
-        )[0]
-        _em = self.get_observer_position(
-            np.array([self._t0_par - _dt]), "earth"
-        )[0]
-        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
-
-        # Median absolute position per instrument (used by Lens to detect parallax)
-        self.inst_ref_pos = []
-
+        # Pass 1: read every file.  The raw times must exist before the
+        # Skowron reference frame is anchored below (t0_par can fall back to
+        # the median data time).
+        per_file = []
         for i in range(self.n_elements):
             fmt = self.config[i].get("data_format", "magnitude")
             # Shared reader: columns:, mask:, time_* conversion, then sort
@@ -215,20 +198,51 @@ class MulensInstrument(Instrument):
                 df.iloc[:, 2].values,
             )
 
-            if self.config[i].get("data_format", "magnitude") == "flux":
+            if fmt == "flux":
                 # Convert normalized flux to instrumental magnitudes.
                 # mag = -2.5*log10(flux);  err = (2.5/ln10) * flux_err/flux
                 safe_f = np.maximum(m, 1e-30)
                 e = (2.5 / np.log(10)) * np.maximum(e, 0.0) / safe_f
                 m = -2.5 * np.log10(safe_f)
 
+            per_file.append((t, m, e, df))
+
+        # Geocentric reference (Skowron+2011 convention): Earth's position and
+        # velocity at t_0_par define the inertial frame.  All observer positions
+        # are stored as deviations from this linear Earth trajectory so that
+        # t_0/u_0 remain geocentric parameters.  Re-resolved here rather than
+        # taken from Lens.__init__: MMEXOFAST seeds arrive in stage 1a (via
+        # _resolve_mmexofast above), after the Lens snapshotted user_params,
+        # and a reference epoch far from the data makes the linear Earth
+        # extrapolation diverge (O(100) AU after ~20 yr), shearing tau/u by
+        # O(deviation x pi_E).
+        self._t0_par = self._resolve_t0_par_final(
+            system, np.concatenate([f[0] for f in per_file])
+        )
+        system.lens.t0_par[0] = self._t0_par
+        self._earth_pos_ref = self.get_observer_position(
+            np.array([self._t0_par]), "earth"
+        )[0]  # (3,) AU
+        _dt = 0.5  # days for finite-difference velocity
+        _ep = self.get_observer_position(
+            np.array([self._t0_par + _dt]), "earth"
+        )[0]
+        _em = self.get_observer_position(
+            np.array([self._t0_par - _dt]), "earth"
+        )[0]
+        self._earth_vel_ref = (_ep - _em) / (2.0 * _dt)  # AU/day
+
+        # Median absolute position per instrument (used by Lens to detect parallax)
+        self.inst_ref_pos = []
+
+        # Pass 2: observer positions, flux bootstraps, and sanity checks.
+        for i, (t, m, e, df) in enumerate(per_file):
             obs_loc = self.config[i].get("observer_location", "earth")
             xyz_abs = self.get_observer_position(t, observer_location=obs_loc)
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
             all_obspos.append(xyz_delta)
-            all_obspos_abs.append(xyz_abs)
 
             f_total, q_source, q_flux = self._estimate_flux_components(
                 t, m, xyz_delta, ra_rad, dec_rad, i
@@ -274,10 +288,7 @@ class MulensInstrument(Instrument):
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.observer_pos = np.vstack(all_obspos).astype(
             float
-        )  # geocentric deviations
-        self.observer_pos_abs = np.vstack(all_obspos_abs).astype(
-            float
-        )  # absolute barycentric (for get_magnification_op)
+        )  # Skowron geocentric deviations (both magnification paths)
         self.n_total_obs = len(self.time)
 
         # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
@@ -291,6 +302,37 @@ class MulensInstrument(Instrument):
         # Errors are already in the amplitude parameter's unit (mag).
         self._prepare_gp(self.time, self.err, self.inst_map)
         self._prepare_robust(self.err, self.inst_map)
+
+    def _resolve_t0_par_final(self, system, all_times):
+        """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
+
+        Lens.__init__ resolves t0_par from the lens config and user_params
+        only; MMEXOFAST seeds arrive later (stage 1a, add_seed_hints), so
+        the automated workflow -- whose params file deliberately omits the
+        microlensing start values -- used to fall through to the 2450000.0
+        default, parking the reference epoch decades before the data.
+
+        Priority: explicit lens ``t0_par`` > user ``lens.0.t_0`` initval >
+        MMEXOFAST seed t_0 > median data time.  Any of these keeps the
+        linear Earth extrapolation within the season it is a good
+        approximation for.
+        """
+        lens_config = system.lens.config[0]
+        if "t0_par" in lens_config:
+            return float(lens_config["t0_par"])
+        cm = self.config_manager
+        val = _raw_initval(cm.user_params.get("lens.0.t_0"))
+        if val is None:
+            val = cm.seed_start_value("lens.0.t_0")
+        if val is not None:
+            return float(val)
+        t_med = float(np.median(all_times))
+        logger.info(
+            f"[{self.prefix}] No t0_par, lens t_0, or MMEXOFAST seed found; "
+            f"anchoring the parallax reference epoch at the median data "
+            f"time ({t_med:.2f})."
+        )
+        return t_med
 
     def _reject_time_spec_with_mmexofast(self, spec):
         """Refuse to mix MMEXOFAST seeding with a per-file time system.
@@ -884,9 +926,10 @@ class MulensInstrument(Instrument):
         obs_mag = pm.Data("mu_obs_mag", self.mag)
         obs_err = pm.Data("mu_obs_err", self.err)
 
-        # 2. Magnification — both symbolic and Op paths take absolute barycentric AU.
-        #    get_magnification_op dispatches: PSPL→symbolic (NUTS-friendly),
-        #    binary/finite-source→MulensModel Op (use Metropolis).
+        # 2. Magnification — both symbolic and Op paths take Skowron+2011
+        #    geocentric deviations (AU).  get_magnification_op dispatches:
+        #    PSPL→symbolic (NUTS-friendly), binary/finite-source→MulensModel
+        #    Op (use Metropolis).
         #
         #    When finite source is active, pass u1 and bandpass from the connected
         #    Band component.  Multiple distinct bands across instruments are not yet
@@ -920,7 +963,7 @@ class MulensInstrument(Instrument):
             A_per_source.append(
                 system.lens.get_magnification_op(
                     t,
-                    self.observer_pos_abs,
+                    self.observer_pos,
                     system,
                     index=j,
                     u1=u1,
@@ -1288,13 +1331,13 @@ class MulensInstrument(Instrument):
 
         t_model, t0, tE = self._model_time_grid()
         unique_observers, obs_to_inst, inst_obs_loc = self._observer_groups()
-        # Absolute barycentric positions for each unique observer over the
-        # model grid. Both the symbolic PSPL path and the MulensModel Op
-        # expect absolute barycentric AU; get_magnification converts
-        # internally to geocentric deviations as needed.
+        # Skowron geocentric deviations for each unique observer over the
+        # model grid -- the single obs_pos convention both the symbolic PSPL
+        # path and the MulensModel/VBM Ops consume.
         obs_model_pos = {
-            obs_loc: self.get_observer_position(
-                t_model, observer_location=obs_loc
+            obs_loc: self._abs_to_delta(
+                t_model,
+                self.get_observer_position(t_model, observer_location=obs_loc),
             )
             for obs_loc in unique_observers
         }

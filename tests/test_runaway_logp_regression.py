@@ -160,7 +160,7 @@ def _point(raw_dict):
 # post free_symbols-sort hardening).  Differs from the historical stored lp
 # (~2982.18) because the model itself has changed since that trace; see the
 # module docstring.
-GOOD_EXPECTED_LP = -942.995  # re-measured 2026-08: kinematic-prior rotation fix (v_phi centering) moved every lp
+GOOD_EXPECTED_LP = -934.604  # re-measured 2026-08-08: Op-path annual parallax fix (review 1.1) moved the mulens likelihood
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
