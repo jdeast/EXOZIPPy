@@ -80,7 +80,9 @@ def calc_sini(inc):
 
 @register_physics
 def calc_b(ar, cosi, ecc, esinw):
-    return ar * cosi * (1.0 - pt.sqr(ecc)) / (1.0 - esinw)
+    # Primary-transit impact parameter, Winn 2010 eq 7: the transit is at
+    # true anomaly pi/2 - omega, where r = a(1-e^2)/(1 + esinw).
+    return ar * cosi * (1.0 - pt.sqr(ecc)) / (1.0 + esinw)
 
 
 # Stable Tc -> Tp logic
