@@ -469,6 +469,183 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
     assert np.isclose(parallax_entry["sigma"], 0.01745, rtol=1e-6)
 
 
+def test_angle_entry_takes_map_initval_and_keeps_prior(tmp_path):
+    """
+    Given an existing lens.L.alpha entry carrying a Gaussian prior
+      (initval + sigma, no explicit mu) and a trace whose xalpha/yalpha MAP
+      direction is a different angle,
+    When mkprior runs,
+    Then the written alpha entry has the NEW MAP angle as initval, keeps
+      sigma, and promotes the stale initval to mu (the prior center must not
+      follow the MAP).
+
+    Regression (review 1.17): alpha/bigomega are synthesized from the sampled
+    x/y pair AFTER the main loop, so they were never in consumed_existing.
+    The pass-through loop then overwrote the fresh MAP angle with the stale
+    entry, so restart files violated the "initval at the trace MAP" contract.
+    """
+    import yaml
+
+    existing_params = {"lens.L.alpha": {"initval": 12.0, "sigma": 5.0}}
+    param_file = tmp_path / "ob.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(1, 0) = +90 deg
+    trace = _make_idata(
+        {"lens.xalpha": 0.0, "lens.yalpha": 1.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/ob",
+        "parameter_file": "ob.params.yaml",
+        "lens": [{"name": "L"}],
+    }
+
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    entry = result["lens.L.alpha"]
+
+    assert entry["initval"] == pytest.approx(90.0, abs=1e-6), (
+        "alpha initval must be the trace MAP angle, not the stale entry"
+    )
+    assert entry["sigma"] == pytest.approx(5.0), "user prior must survive"
+    assert entry["mu"] == pytest.approx(12.0, abs=1e-6), (
+        "stale initval promoted to mu -- the prior center must not move"
+    )
+    assert not any(k.endswith(("xalpha", "yalpha")) for k in result)
+
+
+def test_angle_entry_index_notation_merges_without_duplicate(tmp_path):
+    """
+    Given an existing orbit.0.bigomega entry written in index notation with an
+      explicit mu + sigma, and a trace whose xbigomega/ybigomega MAP is a
+      different angle,
+    When mkprior runs,
+    Then exactly one bigomega entry is written, under the name notation, with
+      the MAP initval and the explicit mu/sigma untouched.
+    """
+    import yaml
+
+    existing_params = {"orbit.0.bigomega": {"mu": 30.0, "sigma": 10.0}}
+    param_file = tmp_path / "kelt4.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(0, -1) = 180 deg
+    trace = _make_idata(
+        {"orbit.xbigomega": -1.0, "orbit.ybigomega": 0.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "orbit": [{"name": "b"}],
+    }
+
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+
+    assert "orbit.0.bigomega" not in result, (
+        "stale index-notation entry must be consumed, not passed through"
+    )
+    entry = result["orbit.b.bigomega"]
+    assert entry["initval"] == pytest.approx(180.0, abs=1e-6)
+    assert entry["mu"] == pytest.approx(30.0, abs=1e-6), (
+        "explicit mu must be preserved exactly"
+    )
+    assert entry["sigma"] == pytest.approx(10.0)
+
+
+def test_angle_entry_keeps_bounds_and_adds_no_mu(tmp_path):
+    """
+    Given an existing lens.L.alpha entry carrying only bounds (a constraint,
+      so the pass-through loop used to keep it and clobber the angle),
+    When mkprior runs,
+    Then the bounds survive, initval is the MAP angle, and no mu is invented
+      (bounds are not a Gaussian prior center).
+    """
+    import yaml
+
+    existing_params = {"lens.L.alpha": {"lower": -180.0, "upper": 180.0}}
+    param_file = tmp_path / "ob.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(-1, 0) = -90 deg
+    trace = _make_idata(
+        {"lens.xalpha": 0.0, "lens.yalpha": -1.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/ob",
+        "parameter_file": "ob.params.yaml",
+        "lens": [{"name": "L"}],
+    }
+
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    entry = result["lens.L.alpha"]
+
+    assert entry["initval"] == pytest.approx(-90.0, abs=1e-6)
+    assert entry["lower"] == pytest.approx(-180.0)
+    assert entry["upper"] == pytest.approx(180.0)
+    assert "mu" not in entry, "bounds are not a prior center"
+
+
+def test_uncentered_sigma_in_params_file_is_fatal(tmp_path):
+    """
+    Given an existing params file with sigma > 0 and no mu/initval,
+    When mkprior runs,
+    Then it raises and names the offending file.
+
+    mkprior reads the params file directly (bypassing ConfigManager), and its
+    pass-through loop copies constraint-bearing entries verbatim -- so without
+    this check it would launder an uncentered Gaussian prior into the restart
+    file, where the prior ends up centered on a data-derived start value.
+    """
+    import yaml
+
+    existing_params = {"star.Host.teff": {"sigma": 100.0}}
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        mkprior(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+        )
+
+    msg = str(exc.value)
+    assert "star.Host.teff" in msg
+    assert "star.params.yaml" in msg, "the input file must be named"
+
+
 def test_standardize_param_names_flat_dict_component_no_crash(tmp_path):
     """
     Regression: standardize_param_names crashed with AttributeError when a

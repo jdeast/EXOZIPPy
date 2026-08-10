@@ -363,12 +363,16 @@ def test_sigma_link_snapshots_numerically():
     Given star.A.age with sigma = "0.5 * star.B.age" and star.B.age = 4.0,
     When finalize_user_params runs,
     Then sigma resolves to the static numeric snapshot 2.0.
+
+    The explicit mu is required: a linked sigma is still a Gaussian prior, and
+    validate_sigma_has_center refuses a prior with no stated center (it would
+    otherwise be centered on a possibly data-derived start value).
     """
     # ARRANGE
     config = {"star": [{"name": "A"}, {"name": "B"}]}
     user_params = {
         "star.B.age": {"initval": 4.0},
-        "star.A.age": {"sigma": "0.5 * star.B.age"},
+        "star.A.age": {"mu": 3.0, "sigma": "0.5 * star.B.age"},
     }
     cm = ConfigManager(user_params, system_config=config)
 

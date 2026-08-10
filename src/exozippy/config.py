@@ -126,6 +126,92 @@ def validate_instance_names(system_config):
                 )
 
 
+def _sigma_is_zero(value):
+    """True only if ``value`` is definitively zero (scalar or all-zero list).
+
+    Anything unparseable -- a link expression string, None-free junk -- returns
+    False, i.e. "treat as a real prior width", which is the conservative answer
+    for validate_sigma_has_center.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        try:
+            return all(float(v) == 0.0 for v in value)
+        except (TypeError, ValueError):
+            return False
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_sigma_has_center(user_params, links=None, source=None):
+    """Fatal-error check: a Gaussian prior must have an explicit center.
+
+    ``sigma > 0`` on a user parameter asks for a Gaussian prior.  When neither
+    ``mu`` nor ``initval`` is given, Parameter.build_pymc centers that prior on
+    whatever start value the system resolved (``prior_mus = np.where(~isnan(mus),
+    mus, inits)``) -- and that start is frequently DERIVED FROM THE DATA: a
+    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or an
+    mkprior MAP.  A prior centered on the data's own best fit double-counts the
+    data, so there is no configuration in which it is what the user meant.  We
+    refuse to run rather than silently produce it.
+
+    Legitimate, and NOT flagged:
+      - ``sigma: 0`` (any all-zero form) -- a fixed pin, not a prior.  It means
+        "hold this at whatever it resolves to", which double-counts nothing.
+      - a LINK expression in ``mu`` or ``initval`` -- a center is specified, it
+        is just computed from another parameter.
+
+    A ``sigma`` that is itself a link expression still requires a center: its
+    width is dynamic but its center is no less obliged to be independent.
+
+    Parameters
+    ----------
+    user_params : dict
+        Standardized user params.  Entries that are not dicts are skipped.
+    links : dict, optional
+        ``{target_path: {field: ParamLink}}`` from ``extract_links``, which
+        DELETES the link string from the entry -- so a linked mu/sigma is
+        invisible in ``user_params`` and must be read from here instead.
+    source : str, optional
+        File the params came from, quoted in the error message.
+    """
+    links = links or {}
+    offenders = []
+    for key, entry in (user_params or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        entry_links = links.get(key, {})
+        sigma_linked = "sigma" in entry_links
+        sigma_val = entry.get("sigma")
+        if not sigma_linked and ("sigma" not in entry or sigma_val is None):
+            continue  # no sigma at all (an absent or null sigma is not a prior)
+        if not sigma_linked and _sigma_is_zero(sigma_val):
+            continue  # fixed pin, not a Gaussian prior
+        if {"mu", "initval"} & (set(entry) | set(entry_links)):
+            continue  # a center is specified (numerically or via a link)
+        offenders.append(key)
+
+    if offenders:
+        where = f" in {source}" if source else ""
+        raise ValueError(
+            f"Gaussian prior with no center{where}: "
+            f"{', '.join(sorted(offenders))}. "
+            f"A 'sigma' greater than 0 asks for a Gaussian prior, but with "
+            f"neither 'mu' nor 'initval' given the prior is centered on "
+            f"whatever start value the system resolves -- and that start is "
+            f"frequently derived FROM THE DATA (a component's data hint, a "
+            f"relaxation-engine solution, or an mkprior MAP). A prior "
+            f"centered on the data's own best fit double-counts that data, "
+            f"so it can never be justified. "
+            f"Fix: give an explicit 'mu' (the independent prior center you "
+            f"actually mean), or use 'sigma: 0' to hold the parameter fixed "
+            f"at its resolved value (a pin, which applies no prior)."
+        )
+
+
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
 RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
@@ -227,6 +313,12 @@ class ConfigManager:
         else:
             self.user_params = user_params
             self._strip_user_init_scales()
+
+        # Must run AFTER extract_links: that call deletes the link string from
+        # the entry, so a linked mu/initval is only visible in self.links.  In
+        # the no-system_config branch extract_links never ran and the link
+        # strings are still in the entries, which the same check accepts.
+        validate_sigma_has_center(self.user_params, self.links)
 
         self.system_config = system_config or {}
         self.base_defaults = {}
