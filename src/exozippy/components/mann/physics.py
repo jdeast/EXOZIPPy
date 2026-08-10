@@ -15,7 +15,17 @@ import pytensor.tensor as pt
 
 from ...physics_registry import register_physics
 
-# Mann+2015 Table 1: radius from absolute Ks.
+# Mann+2015 Table 1: radius from absolute Ks.  The [Fe/H] term is the last
+# entry of the eq-5 tuple and enters *multiplicatively*, as (1 + f*[Fe/H]) --
+# Table 1's note, and the paper's stated reason for the form ("linear changes
+# in [Fe/H] result in fractional changes in R*").  f is positive: the sign is
+# +0.04458 in both the arXiv version and the 2016 erratum (ApJ 819, 87) that
+# reissued Tables 1-3; the minus sign visible in the f column of the 2015
+# print run is part of the press error that erratum exists to correct (the
+# same table block also shows spurious trailing zeros, -11.59280, 0.45650).
+# Refitting eq 5 to the paper's own 177-star Table 5/6 data recovers
+# a,b,c,f = 1.9321, -0.3471, 0.01650, +0.0454, and reproduces the published
+# 2.70% scatter with f = +0.04458 (3.32% with f = -0.04458, worse than eq 4).
 _R_COEFF_NOFEH = (1.9515, -0.3520, 0.01680)  # eq 4
 _R_COEFF_FEH = (1.9305, -0.3466, 0.01647, 0.04458)  # eq 5
 
@@ -48,12 +58,12 @@ def _poly(x, coeff):
 def calc_mann_radius(absks, feh=None):
     """Stellar radius (solRad) from absolute Ks (mag), optionally [Fe/H] (dex).
 
-    feh=None selects Mann+2015 eq 4; otherwise eq 5, which adds a linear
-    metallicity term to the same quadratic in Ks.
+    feh=None selects Mann+2015 eq 4; otherwise eq 5, which scales the same
+    quadratic in Ks by a linear metallicity factor.
     """
     if feh is None:
         return _poly(absks, _R_COEFF_NOFEH)
-    return _poly(absks, _R_COEFF_FEH[:3]) + _R_COEFF_FEH[3] * feh
+    return _poly(absks, _R_COEFF_FEH[:3]) * (1.0 + _R_COEFF_FEH[3] * feh)
 
 
 @register_physics
