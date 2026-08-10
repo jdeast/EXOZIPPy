@@ -267,3 +267,27 @@ def test_parallax_latex_labels_are_well_formed():
     # Assert
     assert params["pi_E_N"]["latex"] == r"\pi_{\rm E,N}"
     assert params["pi_E_E"]["latex"] == r"\pi_{\rm E,E}"
+
+
+def test_star_mass_declares_no_bounds_but_logmass_does():
+    """
+    Given the star component schema,
+    When the mass and logmass entries are inspected,
+    Then only logmass carries lower/upper.
+
+    logmass is the SAMPLED coordinate and mass is derived from it
+    (mass = 10**logmass), so logmass's bounds are the hard support, enforced
+    exactly by the logit transform.  Bounds on mass could only be soft
+    barriers duplicating it -- and the two disagreed by eight orders of
+    magnitude until 2026-08.
+    """
+    # Act
+    params = introspect.component_schema("star")["parameters"]
+
+    # Assert
+    assert params["mass"]["derived"] is True
+    assert "lower" not in params["mass"]
+    assert "upper" not in params["mass"]
+    assert params["logmass"]["lower"] == -9.0
+    assert params["logmass"]["upper"] == 2.5
+    assert params["logmass"]["sampled"] is True

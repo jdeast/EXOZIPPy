@@ -55,7 +55,12 @@ def _build_star_mass(user_params, model_name, system_config=CONFIG):
     cm = ConfigManager(user_params, system_config=system_config)
     star = Star(CONFIG["star"], cm)
     with pm.Model(name=model_name) as model:
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
     p = star.mass
     return model, _Sys(cm, [p]), p
