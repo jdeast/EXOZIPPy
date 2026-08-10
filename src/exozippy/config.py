@@ -879,6 +879,17 @@ class ConfigManager:
 
         After this function, self.user_params contains only indexed or flat-dict
         keys internally.  The 2-part form is purely a user convenience.
+
+        EVERY pass deepcopies the entry.  The returned dict must share no object
+        with the caller's, because downstream code writes through these entries
+        in place: extract_links deletes the link-expression fields, and
+        finalize_user_params' inject-back sets initval/derived.  Aliasing them
+        would (a) strip a caller's link strings out of their own dict, so a
+        second ConfigManager built from it sees no links and a hard link
+        silently degrades to a fixed parameter, and (b) feed the previous
+        solve's answer back in as RANK_USER input.  Pass 2 additionally needs
+        the copy per broadcast instance, so the last instance's write does not
+        clobber all the others (e.g. per-source radii solved from rho).
         """
         if not user_params:
             return {}
@@ -903,9 +914,8 @@ class ConfigManager:
 
             comp_list = config[comp_type]
             if not isinstance(comp_list, list):
-                standardized[key] = (
-                    val  # flat-dict component 3-part key: keep as-is
-                )
+                # flat-dict component 3-part key: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
             try:
@@ -914,11 +924,12 @@ class ConfigManager:
                     for i, c in enumerate(comp_list)
                     if isinstance(c, dict) and c.get("name") == comp_name
                 )
-                standardized[f"{comp_type}.{idx}.{param_name}"] = val
-            except StopIteration:
-                standardized[key] = (
-                    val  # numeric index or unknown name: keep as-is
+                standardized[f"{comp_type}.{idx}.{param_name}"] = (
+                    copy.deepcopy(val)
                 )
+            except StopIteration:
+                # numeric index or unknown name: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
 
         # Pass 2: expand 2-part keys for list components.
         # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
@@ -931,25 +942,19 @@ class ConfigManager:
             comp_list = config.get(comp_type)
 
             if not isinstance(comp_list, list):
-                standardized[key] = (
-                    val  # flat-dict or unknown component: keep as-is
-                )
+                # flat-dict or unknown component: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
             for i in range(len(comp_list)):
                 indexed_key = f"{comp_type}.{i}.{param_name}"
                 if indexed_key not in standardized:
-                    # Each instance must get its OWN dict: downstream code
-                    # (finalize_user_params inject-back, init_scale sync)
-                    # mutates these entries per-instance, and a shared object
-                    # would let the last instance's write clobber all others
-                    # (e.g. per-source radii solved from rho).
                     standardized[indexed_key] = copy.deepcopy(val)
 
         # Pass 3: 1-part and other unhandled keys (e.g. 'run').
         for key, val in user_params.items():
             if "." not in key and key not in standardized:
-                standardized[key] = val
+                standardized[key] = copy.deepcopy(val)
 
         return standardized
 
@@ -1271,8 +1276,10 @@ class ConfigManager:
         measured directly from the data at startup (see exozippy/whitening.py)
         and any user value would be overwritten anyway.  Old params files keep
         working -- the key is simply ignored with a warning.  Entries are
-        removed via a rebuilt per-parameter dict so a caller's original dict
-        (raw_user_params) is never mutated.
+        removed via a rebuilt per-parameter dict; the caller's original dict
+        (raw_user_params) is already insulated by standardize_param_names,
+        which deepcopies every entry, so this is belt and braces for the
+        no-config path that skips standardization.
         """
         stripped = []
         for k, v in list(self.user_params.items()):

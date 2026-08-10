@@ -13,6 +13,8 @@ Unit convention: referenced parameters contribute their values in their own
 user units; the expression result is interpreted in the target's user unit.
 """
 
+import copy
+
 import numpy as np
 import pymc as pm
 import pytest
@@ -370,3 +372,90 @@ def test_circular_hard_links_raise():
     }
     with pytest.raises(ValueError, match="[Cc]ircular"):
         _build_star_param(user_params, ["age"])
+
+
+# ----------------------------------------------------------------------
+# The caller's params dict is never mutated (review item 1.10)
+# ----------------------------------------------------------------------
+
+
+def test_construction_does_not_mutate_callers_params_dict():
+    """
+    Given a params dict holding a hard link,
+    When a ConfigManager is constructed from it,
+    Then the caller's dict still holds the link expression.
+
+    extract_links strips the link strings out of the entries it scans.  Those
+    entries must be copies: standardize_param_names deepcopies every one, so
+    the strip lands on ConfigManager's own dict, not the caller's.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+    user_params = {
+        "star.B.age": {"initval": 4.0},
+        "star.A.age": {"initval": "star.B.age", "sigma": 0},
+    }
+    before = copy.deepcopy(user_params)
+
+    # ACT
+    ConfigManager(user_params, system_config=config)
+
+    # ASSERT
+    assert user_params == before
+
+
+def test_links_survive_a_second_configmanager_from_the_same_dict():
+    """
+    Given a params dict already used to build one ConfigManager,
+    When a second ConfigManager is built from the same dict,
+    Then it finds the same links.
+
+    A lost link is silent and changes the posterior: the target stops tracking
+    its expression and is fixed at its default/solved value instead.  Bites any
+    in-process reuse -- run_fit twice, solve_api.solve() twice (documented as
+    safe to repeat), a shared test fixture.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+    user_params = {
+        "star.B.age": {"initval": 4.0},
+        "star.A.age": {"initval": "star.B.age", "sigma": 0},
+    }
+    first = ConfigManager(user_params, system_config=config)
+
+    # ACT
+    second = ConfigManager(user_params, system_config=config)
+
+    # ASSERT
+    assert set(second.links) == set(first.links) == {"star.0.age"}
+    assert set(second.links["star.0.age"]) == {"initval"}
+    assert (
+        second.links["star.0.age"]["initval"].expr_str
+        == first.links["star.0.age"]["initval"].expr_str
+    )
+
+
+def test_solve_does_not_inject_results_into_callers_params_dict():
+    """
+    Given a params dict driving a full finalize_user_params solve,
+    When the relaxation engine injects its solution back,
+    Then the caller's dict is unchanged.
+
+    finalize_user_params writes initval/derived into the entries it resolved.
+    Were those shared, a reused dict would come back carrying the previous
+    solve's answer at RANK_USER.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+    user_params = {
+        "star.A.teff": {"initval": 5800.0},
+        "star.A.radius": {"initval": 1.0},
+    }
+    before = copy.deepcopy(user_params)
+    cm = ConfigManager(user_params, system_config=config)
+
+    # ACT
+    cm.finalize_user_params()
+
+    # ASSERT
+    assert user_params == before
