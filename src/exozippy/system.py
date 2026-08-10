@@ -52,17 +52,6 @@ class System(Component):
             with open(str(user_params_file), "r") as f:
                 self.user_params = yaml.safe_load(f)
 
-        # Structural fingerprint of the inputs, taken NOW -- before
-        # ConfigManager standardizes/strips them and before prepare() lets
-        # components push hints back into the config, so the same inputs
-        # always fingerprint the same way regardless of lifecycle stage.
-        # Stamped into the saved trace and checked on every reload
-        # (exozippy.trace_meta).
-        self._structural_payload = structural_payload(
-            self.config, self.user_params
-        )
-        self._structural_hash = structural_hash(self.config, self.user_params)
-
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
@@ -101,14 +90,32 @@ class System(Component):
             for idx, name in enumerate(comp.names):
                 entity_directory[name] = (comp, idx)
 
+        # Structural fingerprint of the inputs, snapshotted HERE: after the
+        # components have normalized their own config blocks (Mann/Torres
+        # derive `name:` from their `star:` key in __init__), and before
+        # prepare() runs.  Both halves of that placement were measured, not
+        # assumed -- see the note on mkprior's own recomputation in
+        # mkparam.mkprior.  Taking it any earlier fingerprints a config
+        # spelling that exists only for the first few lines of __init__, so
+        # a fingerprint recomputed later would never match; taking it later
+        # would fold in whatever stages 1-6 might one day write.  The params
+        # half is safe at either point: ConfigManager deepcopies before it
+        # standardizes keys, strips links and injects solved initvals, so
+        # self.user_params stays exactly the file that was read.
+        self._structural_payload = structural_payload(
+            self.config, self.user_params
+        )
+        self._structural_hash = structural_hash(self.config, self.user_params)
+
     def structural_fingerprint(self):
         """``(hash, payload)`` of the config + params this System was built from.
 
         The hash is ``evaluator.structural_hash``; the payload is the dict it
         was taken over, kept so a mismatch can name what changed.  Both are
-        snapshotted in ``__init__`` because the inputs are mutated afterwards
-        (ConfigManager standardizes keys and strips link strings; the solver
-        injects resolved initvals back in).
+        snapshotted at the END of ``__init__`` -- after the components have
+        normalized their own config blocks, before ``prepare()`` -- so that a
+        fingerprint recomputed from the same inputs later in the run
+        (mkparam.mkprior) reproduces it exactly.
         """
         return self._structural_hash, self._structural_payload
 

@@ -497,33 +497,67 @@ def test_mkprior_proceeds_on_an_unstamped_trace(tmp_path, caplog):
     assert "UNVERIFIABLE TRACE" in caplog.text
 
 
-def test_mkprior_uses_a_caller_supplied_fingerprint(tmp_path):
+# ---------------------------------------------------------------------------
+# The snapshot must survive components normalizing their own config blocks.
+# ---------------------------------------------------------------------------
+
+_RELATION_CONFIG = {
+    "star": [{"name": "A"}, {"name": "B"}],
+    "torres": [{"star": "A", "constrain": ["mass"]}],
+    "mann": [{"star": "B", "constrain": ["mass", "radius"]}],
+}
+
+
+def test_fingerprint_survives_component_config_normalization():
     """
-    Given a trace stamped by a System whose config differs from the dict
-      handed to mkprior,
-    When the caller passes that System's fingerprint explicitly (what run.py
-      does at the end of a fit),
-    Then mkprior checks against it rather than recomputing one, and accepts.
+    Given a config whose components rewrite their own blocks while the
+      System is being constructed (Mann/Torres derive `name:` from `star:`),
+    When the fingerprint is recomputed from that config dict afterwards, the
+      way mkprior does,
+    Then it reproduces the System's snapshot exactly.
 
-    This is what keeps the automatic end-of-run call from refusing a trace
-    it just wrote, should the lifecycle have written into the config dict.
+    Measured regression, not a hypothetical: the snapshot was originally
+    taken before the component-instantiation loop, so a mann/torres config
+    fingerprinted its instances as '0'/'1' at snapshot time and 'B'/'C'
+    afterwards. Every kelt4-style fit would then have refused to write its
+    own restart file. Verified against
+    examples/kelt4/kelt4_rv+transit+sed.yaml, whose config is mutated in
+    exactly three places, all inside System.__init__ -- stages 1-6 mutate it
+    zero times.
     """
-    from exozippy.mkparam import mkprior
+    config = copy.deepcopy(_RELATION_CONFIG)
+    params = {"star.A.teff": {"initval": 5800.0}}
 
-    sampled = dict(_MKPRIOR_CONFIG)
-    sampled["star"] = [{"name": "Host"}, {"name": "Companion"}]
-    fingerprint = _FakeSystem(sampled, {}).structural_fingerprint()
-    trace = _mkprior_trace(tmp_path, stamp_source=_FakeSystem(sampled, {}))
+    system = System(config, user_params=copy.deepcopy(params))
+    recomputed = structural_hash(config, params)
 
-    out = mkprior(
-        dict(_MKPRIOR_CONFIG),
-        base_dir=tmp_path,
-        trace_path=trace,
-        output_path=tmp_path / "out.yaml",
-        structural_fingerprint=fingerprint,
-    )
+    # The normalization really did happen (else this proves nothing).
+    assert config["mann"][0]["name"] == "B"
+    assert config["torres"][0]["name"] == "A"
+    assert system.structural_fingerprint()[0] == recomputed
 
-    assert out.exists()
+
+def test_fingerprint_tracks_which_star_a_relation_constrains():
+    """
+    Given two configs whose Mann relation constrains different stars,
+    When each is fingerprinted through a System,
+    Then the hashes differ.
+
+    Falls out of snapshotting after the component loop: the relation
+    components key on `star:`, which _component_skeleton cannot see, but the
+    `name:` they derive from it is exactly the missing information. Before
+    the fix both spelled their instance '0' and swapping the constrained
+    star was invisible.
+    """
+    config_b = copy.deepcopy(_RELATION_CONFIG)
+    config_a = copy.deepcopy(_RELATION_CONFIG)
+    config_a["mann"][0]["star"] = "A"
+    config_a["torres"][0]["star"] = "B"
+
+    hash_b = System(config_b, user_params={}).structural_fingerprint()[0]
+    hash_a = System(config_a, user_params={}).structural_fingerprint()[0]
+
+    assert hash_a != hash_b
 
 
 # ---------------------------------------------------------------------------

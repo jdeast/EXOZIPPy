@@ -224,12 +224,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
 
 
 def mkprior(
-    config,
-    base_dir=None,
-    trace_path=None,
-    output_path=None,
-    n_seeds=None,
-    structural_fingerprint=None,
+    config, base_dir=None, trace_path=None, output_path=None, n_seeds=None
 ):
     """
     Write a params.yaml seeded from a previous trace.
@@ -258,13 +253,6 @@ def mkprior(
     n_seeds : int, optional
         Number of multi-seed start points to emit. When None, read from
         ``config['mkprior']['n_seeds']`` (default 1 = legacy scalar behavior).
-    structural_fingerprint : tuple, optional
-        ``System.structural_fingerprint()`` of the model the trace belongs
-        to.  run.py passes its live System's, so the automatic end-of-run
-        call compares against exactly what was stamped rather than
-        recomputing it from a config dict the lifecycle may since have
-        written into.  When omitted it is computed from ``config`` plus the
-        ``parameter_file`` on disk (the standalone scripts/mkprior.py path).
 
     Returns
     -------
@@ -311,18 +299,34 @@ def mkprior(
     # The restart file this writes IS the next fit's start, so seeding it
     # from a trace sampled under a different model corrupts that fit
     # silently.  This load most often fires automatically at the end of a
-    # run, where the trace was just written by the same System and the check
-    # is a formality -- so the mismatch case is genuinely exceptional and
-    # worth failing on rather than papering over.  A trace with no
-    # fingerprint (written before this metadata existed) only warns.
-    if structural_fingerprint is None:
-        from .evaluator import structural_hash, structural_payload
+    # run, where the trace was just written by the same System -- so the
+    # mismatch case is genuinely exceptional and worth failing on rather
+    # than papering over.  A trace with no fingerprint (written before this
+    # metadata existed) only warns.
+    #
+    # The fingerprint is recomputed here from the same two inputs the output
+    # file is built from -- this `config` and the parameter_file on disk --
+    # rather than being handed down from the live System.  That is
+    # deliberate and measured: across kelt4 (RV-only and rv+transit+sed),
+    # ob08092 and ob140939, the config dict is mutated ZERO times by stages
+    # 1-6, so the recomputation reproduces System's snapshot exactly.  (The
+    # one mutation that does exist -- Mann/Torres deriving `name:` from
+    # their `star:` key -- happens inside System.__init__, which is why the
+    # snapshot is taken at the END of __init__.)  Should some future
+    # component start writing into config during load_data, the raise here
+    # would be CORRECT, not spurious: existing_params and config are what
+    # this function merges the MAP into, so if they are not what was
+    # fitted, the restart file is wrong no matter what the trace says.
+    from .evaluator import structural_hash, structural_payload
 
-        structural_fingerprint = (
+    check_trace_freshness(
+        idata,
+        (
             structural_hash(config, existing_params),
             structural_payload(config, existing_params),
-        )
-    check_trace_freshness(idata, structural_fingerprint, trace_path)
+        ),
+        trace_path,
+    )
 
     # Find the MAP draw. lp is present for NUTS and for Metropolis traces saved
     # after the fix that persists it right after pm.sample(). Fall back to the
