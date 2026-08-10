@@ -481,6 +481,32 @@ class Lens(Component):
                         f"star.<name>.logmass."
                     )
 
+            # A body cannot lens itself.  pi_rel = 1000/d_L - 1000/d_S is
+            # then identically 0, so theta_E collapses onto its floor and
+            # the likelihood is NaN at the very first evaluation -- which
+            # today surfaces as a baffling sampler-initialization failure
+            # far from the config line that caused it.  Both spellings are
+            # covered for free: the legacy lens_ndx/source_ndx keys are
+            # normalized into lens_bodies/source_bodies in __init__, so
+            # comparing those two lists catches `lens_ndx: 0, source_ndx: 0`
+            # as well as an explicit overlap between the lists (including a
+            # body repeated across a multi-source 2S list).
+            shared = [
+                b for b in self.lens_bodies[i] if b in self.source_bodies[i]
+            ]
+            if shared:
+                shared_txt = ", ".join(f"'{t}.{n}'" for t, n in shared)
+                raise ValueError(
+                    f"lens.{i}: {shared_txt} is listed as BOTH a lens body "
+                    f"and a source body.  A lens and its source must be "
+                    f"distinct objects at different distances: with the same "
+                    f"body on both sides, pi_rel = 1000/d_L - 1000/d_S is "
+                    f"identically 0, so theta_E is 0 and the likelihood is "
+                    f"NaN from the first evaluation.  Give the lens and the "
+                    f"source separate entries (via 'lenses:'/'sources:', or "
+                    f"distinct 'lens_ndx:'/'source_ndx:' values)."
+                )
+
     # ------------------------------------------------------------------
     # Lifecycle stages
     # ------------------------------------------------------------------
@@ -491,6 +517,25 @@ class Lens(Component):
         source_map has one entry per SOURCE BODY (not per event): it drives the
         shapes of the per-source parameter chain (pi_rel, t_E, rho, ...) via the
         star.<param>[source_map] dependency slices.
+
+        lens_map carries TWO conceptually different roles that happen to
+        share one index:
+
+          1. the LENSING MASS -- star.mass[lens_map] feeds theta_E;
+          2. the KINEMATIC HOST -- star.distance[lens_map] and
+             star.pm_ra/pm_dec[lens_map] feed pi_rel and mu_rel.
+
+        They coincide only because the primary lens body is always a star,
+        which _validate_bodies now enforces.  The conflation is exactly what
+        let the silent planet-primary bug through: a planet has a mass but
+        no distance or proper motion of its own, so a planet primary
+        resolved role 1 to the planet (had the deps been typed) and role 2
+        to whatever star sat at the same index.  Splitting the two would
+        mean inventing a "kinematic host star" for a body that by
+        definition has no host -- which is why planet-as-lens was abandoned
+        in favor of declaring a low-mass lens as a star.  Under the guards
+        the roles can never diverge, so this stays one index; the note is
+        here so the next reader does not have to rediscover why.
         """
         _, l_ndxs = zip(
             *[self._primary_lens(i) for i in range(self.n_elements)]

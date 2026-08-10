@@ -391,6 +391,94 @@ def test_omitted_sources_key_with_one_star_is_caught_not_silent():
     assert "star.1" in str(excinfo.value)
 
 
+def test_lens_rejects_a_body_that_is_both_lens_and_source():
+    """
+    Given a config listing the same star as both the lens and the source,
+    When the body references are validated,
+    Then a ValueError explains that they must be distinct objects and why.
+
+    pi_rel = 1000/d_L - 1000/d_S is identically 0 for one body, so theta_E
+    collapses onto its floor and the likelihood is NaN from the first
+    evaluation -- which otherwise surfaces as a baffling sampler-init
+    failure far from the config line that caused it.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="BOTH a lens body") as excinfo:
+        lens._validate_bodies(system)
+    message = str(excinfo.value)
+    assert "star.0" in message
+    assert "pi_rel" in message and "NaN" in message
+
+
+def test_lens_rejects_self_lensing_via_the_legacy_ndx_keys():
+    """
+    Given the legacy spelling lens_ndx == source_ndx,
+    When the body references are validated,
+    Then the same error is raised -- the legacy keys normalize into
+      lens_bodies/source_bodies in __init__, so one check covers both
+      spellings.
+    """
+    # Arrange
+    lens = Lens([{"lens_ndx": 0, "source_ndx": 0}], _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="BOTH a lens body"):
+        lens._validate_bodies(system)
+
+
+def test_lens_rejects_overlap_with_a_second_source_body():
+    """
+    Given a binary-source (2S) config where the lens star also appears in
+      the SECOND source slot,
+    When the body references are validated,
+    Then the overlap is caught: the check compares the whole lists, not
+      just the primary slots.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2", "star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="'star.0' is listed as BOTH"):
+        lens._validate_bodies(system)
+
+
+def test_distinct_lens_and_source_bodies_are_accepted():
+    """
+    Given ordinary configs (single-star PSPL by legacy default, an explicit
+      binary lens, and a 2S source list) where no body is shared,
+    When the body references are validated,
+    Then nothing is raised.
+    """
+    # Arrange
+    system = _DummySystem()
+    system.star = _DummyComponent(4)
+    system.planet = _DummyComponent(1)
+    configs = [
+        {},  # legacy defaults: lens_ndx 0, source_ndx 1
+        {"lenses": ["star.0", "planet.0"], "sources": ["star.1"]},
+        {"lenses": ["star.0"], "sources": ["star.1", "star.2"]},
+    ]
+
+    # Act / Assert
+    for cfg in configs:
+        Lens([cfg], _DummyConfigManager())._validate_bodies(system)
+
+
 def test_lens_rejects_malformed_body_reference():
     """
     Given a body reference without an index ('planet' instead of 'planet.0'),
