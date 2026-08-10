@@ -304,4 +304,19 @@ markers = [
     "slow: tests that build a full System + compile PyTensor graphs (~30s+ each); skip with -m 'not slow'",
 ]
 timeout = 300
-timeout_method = "thread"
+# "signal" (SIGALRM), NOT "thread".  pytest-timeout's thread method ends in
+# os._exit(1): the xdist worker vanishes without sending workerfinished, so the
+# controller reports only "[gwN] node down: Not properly terminated".  Worse,
+# execnet dup2's /dev/null onto the worker's fd 1, so the "+++ Timeout +++"
+# banner and stack dump -- written to stdout -- are DISCARDED.  A timeout under
+# -n therefore produced no test name, no traceback, and (via a downstream
+# xdist loadscope KeyError on worker replacement) no summary line at all.
+# Reproduce the old behavior in 11 s with three files of time.sleep(20):
+#   pytest -q -n6 --dist loadfile --timeout=6 --timeout-method=thread .
+# The signal method raises inside the test instead, so the run reports
+#   FAILED tests/test_x.py::test_y - Failed: Timeout (>300.0s) ...
+# and the session survives.  Tradeoff: SIGALRM cannot interrupt code blocked in
+# a C extension that never returns to the interpreter; such a hang now stalls
+# rather than being killed.  That is the better failure -- a stalled run can be
+# diagnosed, a silently truncated one cannot.
+timeout_method = "signal"
