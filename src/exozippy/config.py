@@ -1089,8 +1089,12 @@ class ConfigManager:
                     if c_type == comp_type and str(i) == str(idx):
                         final_path = f"{comp_type}.{c_name}.{param}"
                         break
+                # `path` (index form), not `final_path` (name form): a user
+                # `unit:` override lives under the standardized index key, so
+                # looking it up by name silently falls back to the default
+                # unit and the injected start is off by that factor.
                 factor = self.get_conversion_factor(
-                    comp_type, param, full_path=final_path
+                    comp_type, param, full_path=path
                 )
                 user_val = val / factor
             else:
@@ -1584,7 +1588,12 @@ class ConfigManager:
             )
 
             if path_str not in resolved and cfg.get("initval") is not None:
-                factor = self.get_conversion_factor(c_type, p_name)
+                # resolve() returns the initval in USER units, so the factor
+                # must honor a user `unit:` override -- pass full_path, the
+                # same way the init_scale conversion below does.
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
                 resolved[path_str] = to_scalar(cfg["initval"]) * factor
                 provenance[path_str] = param_rank
 
