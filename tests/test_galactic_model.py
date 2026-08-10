@@ -13,12 +13,21 @@ _RA_RAD = np.deg2rad(270.0)
 _DEC_RAD = np.deg2rad(-29.0)
 
 
-class _MockParam:
-    """Minimal Parameter stand-in with initval (numpy) and value (PyTensor tensor)."""
+# star/defaults.yaml hard bounds on the sampled log10 mass (dex solMass);
+# they are the support the power-law IMF prior normalizes over.
+_LOGMASS_LOWER = -9.0
+_LOGMASS_UPPER = 2.5
 
-    def __init__(self, initval):
+
+class _MockParam:
+    """Minimal Parameter stand-in with initval (numpy), value (PyTensor
+    tensor) and the optional hard bounds a power-law prior integrates over."""
+
+    def __init__(self, initval, lower=None, upper=None):
         self.initval = np.atleast_1d(np.asarray(initval, dtype=np.float64))
         self.value = pt.as_tensor_variable(self.initval)
+        self.lower = lower
+        self.upper = upper
 
 
 class _MockStar:
@@ -27,7 +36,9 @@ class _MockStar:
     def __init__(self):
         self.ra = _MockParam(_RA_RAD)
         self.dec = _MockParam(_DEC_RAD)
-        self.logmass = _MockParam(np.log10(0.5))  # 0.5 M_sun
+        self.logmass = _MockParam(
+            np.log10(0.5), lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER
+        )  # 0.5 M_sun
         self.distance = _MockParam(8000.0)  # pc  (8 kpc, bulge distance)
         self.pm_ra = _MockParam(0.0)  # mas/yr
         self.pm_dec = _MockParam(0.0)  # mas/yr
@@ -120,7 +131,7 @@ def test_imf_prior_is_negative_for_star_above_chabrier_peak():
     assert expected_chabrier < 0
 
 
-@pytest.mark.parametrize("imf", ["Salpeter", "Kroupa", "chabier"])
+@pytest.mark.parametrize("imf", ["Kroupa", "kroupa", "chabier", "salpetre"])
 def test_unimplemented_imf_raises_instead_of_being_ignored(imf):
     """
     Given a GalacticModel configured with an IMF that is not implemented,
@@ -130,21 +141,25 @@ def test_unimplemented_imf_raises_instead_of_being_ignored(imf):
     The power-law options used to be accepted and then silently ignored:
     imf_slope was computed and consumed only by commented-out code, so the
     prior was always the Chabrier lognormal no matter what the user asked
-    for.
+    for.  Kroupa is still unsupported -- it is a broken power law, not a
+    single slope.
     """
     # Act / Assert
     with pytest.raises(ValueError, match="not implemented"):
         _make_gm(config=[{"IMF": imf}])
 
 
-def test_chabrier_imf_is_accepted_case_insensitively():
+@pytest.mark.parametrize(
+    "imf", ["Chabrier", "chabrier", "Salpeter", "SALPETER"]
+)
+def test_supported_imfs_are_accepted_case_insensitively(imf):
     """
-    Given a GalacticModel configured with the implemented IMF,
+    Given a GalacticModel configured with an implemented IMF, in any case,
     When build_likelihood runs,
     Then the IMF potential is added (the option is live, not decorative).
     """
     # Arrange
-    gm = _make_gm(config=[{"IMF": "Chabrier"}])
+    gm = _make_gm(config=[{"IMF": imf}])
 
     # Act
     with pm.Model() as model:
@@ -152,6 +167,173 @@ def test_chabrier_imf_is_accepted_case_insensitively():
 
     # Assert
     assert "galacticmodel.imf_prior" in model.named_vars
+
+
+# ---------------------------------------------------------------------------
+# Salpeter IMF: the change of variables into the sampled log10-mass coordinate
+# ---------------------------------------------------------------------------
+
+
+def _imf_lp(masses, config=None):
+    """The imf_prior Potential for stars of the given masses (M_sun)."""
+    gm = _make_gm(config=config or [{}])
+    system = _MockSystem()
+    system.star.logmass = _MockParam(
+        np.log10(masses), lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER
+    )
+    with pm.Model() as model:
+        gm.build_likelihood(model, system)
+    return float(model["galacticmodel.imf_prior"].eval())
+
+
+def _salpeter_analytic(logmass):
+    """log p(log10 M) for dN/dM ~ M^-2.35, normalized over the logmass
+    bounds -- derived here independently of the implementation.
+
+    p(x) dx with x = log10(M): dN/dx = (dN/dM)(dM/dx) = M^-a * M ln10, so
+    p(x) ~ 10^((1-a)x) with (1-a) = -1.35, and
+    Z = int 10^(kx) dx = (10^(k*up) - 10^(k*lo)) / (k ln10).
+    """
+    k = 1.0 - 2.35
+    ln10 = np.log(10.0)
+    log_z = np.log(
+        (10.0 ** (k * _LOGMASS_UPPER) - 10.0 ** (k * _LOGMASS_LOWER))
+        / (k * ln10)
+    )
+    return k * ln10 * np.asarray(logmass) - log_z
+
+
+def test_salpeter_imf_logp_matches_the_analytic_power_law():
+    """
+    Given the Salpeter IMF selected on the galacticmodel block,
+    When the IMF prior is evaluated for stars of 0.3 and 1.0 M_sun,
+    Then it equals the analytic normalized log density in the SAMPLED
+      coordinate, (1 - alpha) * ln10 * log10(M) - log(Z).
+
+    The change of variables is the whole point: dN/dM ~ M^-2.35 is a density
+    in M, but the potential is applied to star.logmass, so the Jacobian
+    dM/dlog10(M) = M ln10 turns the exponent -2.35 into a slope of -1.35 in
+    the sampled coordinate.  Dropping it would tilt the prior by a full dex
+    per dex.
+    """
+    # Arrange
+    masses = [0.3, 1.0]
+    expected = float(np.sum(_salpeter_analytic(np.log10(masses))))
+
+    # Act
+    got = _imf_lp(masses, config=[{"IMF": "Salpeter"}])
+
+    # Assert
+    assert got == pytest.approx(expected, rel=1e-12)
+
+
+def test_salpeter_imf_slope_is_the_mass_space_exponent_plus_one():
+    """
+    Given two stars one dex apart in mass,
+    When the Salpeter IMF prior is evaluated for each,
+    Then the logp difference is exactly (SALPETER_IMF_SLOPE + 1) * ln10 per
+      dex -- i.e. -1.35 * ln10, not -2.35 * ln10.
+
+    This is normalization-independent, so it isolates the constant that is
+    easy to get wrong: SALPETER_IMF_SLOPE is the signed MASS-space exponent
+    (-alpha), not an already-converted log-space slope.
+    """
+    # Arrange
+    from exozippy.constants import SALPETER_IMF_SLOPE
+
+    cfg = [{"IMF": "salpeter"}]
+
+    # Act
+    lp_lo = _imf_lp([0.1], config=cfg)
+    lp_hi = _imf_lp([1.0], config=cfg)
+
+    # Assert
+    assert SALPETER_IMF_SLOPE == -2.35
+    assert lp_hi - lp_lo == pytest.approx(
+        (SALPETER_IMF_SLOPE + 1.0) * np.log(10.0), rel=1e-12
+    )
+
+
+def test_salpeter_imf_prior_is_normalized_over_the_logmass_bounds():
+    """
+    Given the Salpeter IMF prior for a single star,
+    When exp(logp) is integrated over the sampled logmass support,
+    Then the integral is 1: the branch is a proper normalized density, so
+      its logp is not offset by an arbitrary constant.
+    """
+    # Arrange
+    grid = np.linspace(_LOGMASS_LOWER, _LOGMASS_UPPER, 200001)
+    cfg = [{"IMF": "salpeter"}]
+    gm = _make_gm(config=cfg)
+    system = _MockSystem()
+    system.star.logmass = _MockParam(
+        grid, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER
+    )
+
+    # Act
+    with pm.Model() as model:
+        gm.build_likelihood(model, system)
+    # The Potential sums over stars; rebuild the per-element vector from the
+    # analytic form the previous test pinned against the implementation.
+    dens = np.exp(_salpeter_analytic(grid))
+    integral = np.trapezoid(dens, grid)
+    total = float(model["galacticmodel.imf_prior"].eval())
+
+    # Assert
+    assert integral == pytest.approx(1.0, rel=1e-6)
+    assert total == pytest.approx(float(np.sum(_salpeter_analytic(grid))))
+
+
+def test_salpeter_imf_gradient_is_finite():
+    """
+    Given the Salpeter IMF prior,
+    When its gradient w.r.t. the sampled log10 mass is evaluated,
+    Then it is finite and equals the constant slope (1 - alpha) * ln10.
+    """
+    # Arrange
+    gm = _make_gm(config=[{"IMF": "salpeter"}])
+    system = _MockSystem()
+    logmass = pt.dvector("logmass")
+    system.star.logmass = _MockParam(
+        [np.log10(0.3), np.log10(1.0)],
+        lower=_LOGMASS_LOWER,
+        upper=_LOGMASS_UPPER,
+    )
+    system.star.logmass.value = logmass
+
+    # Act
+    with pm.Model() as model:
+        gm.build_likelihood(model, system)
+    node = model["galacticmodel.imf_prior"]
+    grad = pt.grad(pt.sum(node), logmass).eval(
+        {logmass: np.array([np.log10(0.3), np.log10(1.0)])}
+    )
+
+    # Assert
+    assert np.all(np.isfinite(grad))
+    assert np.allclose(grad, (1.0 - 2.35) * np.log(10.0))
+
+
+def test_chabrier_remains_the_default_and_is_bit_for_bit_unchanged():
+    """
+    Given a galacticmodel block with no IMF key,
+    When both potentials are evaluated for the standard mock star,
+    Then they equal the values measured before the IMF option was wired up
+      (the default must not move when a new option is added).
+    """
+    # Arrange
+    gm = _make_gm()
+
+    # Act
+    with pm.Model() as model:
+        gm.build_likelihood(model, _MockSystem())
+    imf = float(model["galacticmodel.imf_prior"].eval())
+    kinematic = float(model["galacticmodel.kinematic_prior"].eval())
+
+    # Assert: baselines captured from master before the change
+    assert gm.imf == "chabrier"
+    assert imf == -0.19563864866861083
+    assert kinematic == 10.09330069291524
 
 
 def test_multiple_galacticmodel_blocks_raise():

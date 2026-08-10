@@ -1,3 +1,5 @@
+import logging
+
 import astropy.units as u
 import numpy as np
 import pymc as pm
@@ -27,6 +29,7 @@ from exozippy.constants import (
     DISK_VELOCITY_SIGMA_V,
     DISK_VELOCITY_SIGMA_W,
     K_VEL_CONVERSION,
+    SALPETER_IMF_SLOPE,
     SUN_GALCEN_V,
     SUN_GC_DISTANCE,
     SUN_Z_OFFSET,
@@ -59,6 +62,8 @@ deliberately NOT here -- it lives in the lens component, so this prior
 stays microlensing-agnostic.
 """
 
+logger = logging.getLogger(__name__)
+
 # One consistent galactocentric frame for the velocity transform, matching
 # the density grid's R0/z_sun (genulens: R0 = 8160 pc, zsun = 25 pc,
 # vsun = (10, 243, 7) km/s toward-GC/rotation/up).  Astropy's default
@@ -71,15 +76,55 @@ GALACTOCENTRIC_FRAME = Galactocentric(
 )
 
 
+def _power_law_log_norm(k, param):
+    """log of the normalizer of p(x) ~ 10^(k x) over x in [lower, upper].
+
+    ``param`` is the sampled log10-mass Parameter; its hard bounds are the
+    support, so
+
+        Z = int_lo^hi 10^(k x) dx = (10^(k hi) - 10^(k lo)) / (k ln10)
+
+    which is finite for any k as long as both bounds are.  Evaluated as
+    logdiffexp(., .) - log(|k| ln10) so the exponentials never overflow
+    (10^(k*lo) is 1e12 already at the defaults.yaml floor of -9 dex).
+
+    Returns 0.0 (unnormalized, with a warning) when the bounds are missing,
+    non-finite, or symbolic -- a constant offset never changes the sampling,
+    so a bound the component cannot read is not worth failing a fit over.
+    """
+    try:
+        lower = np.asarray(param.lower, dtype=float)
+        upper = np.asarray(param.upper, dtype=float)
+    except (AttributeError, TypeError, ValueError):
+        lower = upper = np.asarray(np.nan)
+
+    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+        logger.warning(
+            "[galacticmodel] Cannot read finite log10-mass bounds; the "
+            "power-law IMF prior is left unnormalized (harmless for "
+            "sampling, but its logp is offset by an unknown constant)."
+        )
+        return 0.0
+
+    if k == 0.0:  # uniform in log10 M
+        return np.log(upper - lower)
+
+    ln10 = np.log(10.0)
+    a, b = k * upper * ln10, k * lower * ln10
+    hi, lo = np.maximum(a, b), np.minimum(a, b)
+    return hi + np.log1p(-np.exp(lo - hi)) - np.log(abs(k) * ln10)
+
+
 class GalacticModel(Component):
     # The only mass function implemented below.  ``IMF:`` is validated
-    # against this in __init__ rather than silently ignored: the key used to
-    # select KROUPA_IMF_SLOPE / SALPETER_IMF_SLOPE for a power-law prior that
-    # has not been applied since the Chabrier lognormal replaced it (the
-    # power law is flat in the sampled log10 mass -- no curvature for NUTS --
-    # and improper without mass cutoffs), so every `IMF: Salpeter` in a
-    # config was a no-op.
-    SUPPORTED_IMFS = ("chabrier",)
+    # against this in __init__ rather than silently ignored: the key selected
+    # KROUPA_IMF_SLOPE / SALPETER_IMF_SLOPE for a power-law prior that had
+    # not been applied since the Chabrier lognormal replaced it, so every
+    # `IMF: Salpeter` in a config was a no-op.  Kroupa is still unsupported:
+    # it is a BROKEN power law (alpha = 1.3 below 0.5 Msun, 2.3 above) and
+    # needs a piecewise, continuity-matched density, not a single slope --
+    # KROUPA_IMF_SLOPE is only its low-mass segment.
+    SUPPORTED_IMFS = ("chabrier", "salpeter")
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -96,15 +141,16 @@ class GalacticModel(Component):
                 f"sight shared by every star; use 'anchor_idx' to choose "
                 f"which star's (ra, dec) defines it."
             )
-        self.imf = self.config[0].get("IMF", "chabrier")
-        if str(self.imf).lower() not in self.SUPPORTED_IMFS:
+        imf = str(self.config[0].get("IMF", "chabrier")).lower()
+        if imf not in self.SUPPORTED_IMFS:
             raise ValueError(
-                f"galacticmodel IMF '{self.imf}' is not implemented.  "
-                f"Supported: {', '.join(self.SUPPORTED_IMFS)} (Chabrier 2003 "
-                f"system IMF, a lognormal in log10 mass).  Power-law options "
-                f"('Kroupa', 'Salpeter') were accepted but silently ignored "
-                f"before 2026-08."
+                f"galacticmodel IMF '{self.config[0].get('IMF')}' is not "
+                f"implemented.  Supported: {', '.join(self.SUPPORTED_IMFS)} "
+                f"('chabrier' = Chabrier 2003 system IMF, a lognormal in "
+                f"log10 mass; 'salpeter' = Salpeter 1955 power law).  "
+                f"'Kroupa' was accepted but silently ignored before 2026-08."
             )
+        self.imf = imf
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
 
     @property
@@ -120,9 +166,12 @@ class GalacticModel(Component):
                 "accepts": list(cls.SUPPORTED_IMFS),
                 "required": False,
                 "doc": (
-                    "Initial mass function for the lens/source mass prior. "
-                    "Only 'chabrier' (Chabrier 2003 system IMF, a lognormal "
-                    "in log10 mass) is implemented; anything else raises."
+                    "Initial mass function for the stellar mass prior "
+                    "(default 'chabrier'): 'chabrier' is the Chabrier 2003 "
+                    "system IMF, a lognormal in log10 mass; 'salpeter' is "
+                    "the Salpeter 1955 power law dN/dM ~ M^-2.35, "
+                    "normalized over the sampled logmass bounds.  Anything "
+                    "else raises."
                 ),
             },
             {
@@ -228,27 +277,49 @@ class GalacticModel(Component):
             v_phi = v_y * cos_phi - v_x * sin_phi
             return v_r, v_phi
 
-        # match the IMF.  Only the Chabrier lognormal is implemented; the
-        # config key is validated in __init__, so nothing to branch on here.
-        # A power law dN/dM ~ M^slope would be
-        #   log_m_weight = (slope + 1) * ln(10) * logmass   (sampled log10 M)
-        #   log_m_weight = slope * log(mass)                (sampled M)
-        # but it is flat in the sampled log10 mass -- no curvature for NUTS
-        # to follow -- and improper without explicit mass cutoffs, which is
-        # why it was replaced rather than kept as an option.
+        # match the IMF.  The key is validated in __init__, so every branch
+        # here is a supported option.  BOTH are densities in the SAMPLED
+        # coordinate x = log10(M), not in M, and both are summed over every
+        # modeled star (lens and source alike).
+        if self.imf == "salpeter":
+            # Salpeter (1955): dN/dM ~ M^-alpha, alpha = 2.35.  Change of
+            # variables to x = log10(M)  (M = 10^x, dM/dx = M ln10):
+            #   dN/dx = (dN/dM)(dM/dx) = M^-alpha * M ln10
+            #         = ln10 * M^(1-alpha) = ln10 * 10^((1-alpha)x)
+            #   log p(x) = (1 - alpha) * ln10 * x + const
+            # SALPETER_IMF_SLOPE is the SIGNED MASS-SPACE exponent (-alpha),
+            # NOT an already-converted log-space slope, so the slope in the
+            # sampled coordinate is SALPETER_IMF_SLOPE + 1 = -1.35, i.e.
+            # -1.35*ln10 = -3.108 nats per dex of mass.  A linear tilt is
+            # fine for NUTS now that the bounded-coordinate transform is
+            # sound, and the support IS bounded (star.logmass carries hard
+            # lower/upper), so the density is proper and normalizable.
+            k = SALPETER_IMF_SLOPE + 1.0
+            imf_logp = k * np.log(10.0) * stars.logmass.value - (
+                _power_law_log_norm(k, stars.logmass)
+            )
+        else:
+            ### Chabrier 2003 System IMF parameters
+            log_Mc = np.log10(0.22)
+            sigma_imf = 0.57
 
-        ### Chabrier 2003 System IMF parameters
-        log_Mc = np.log10(0.22)
-        sigma_imf = 0.57
+            # This provides beautiful, constant curvature (-1 / sigma^2) for
+            # NUTS.  For high mass ( > 1 M_sun), you smoothly match it to a
+            # Salpeter tail but the low-mass end is usually where the
+            # unconstrained NUTS particles fall into the abyss.
+            #
+            # Deliberately NOT normalized: the truncated-lognormal constant
+            #   log(sigma*sqrt(2pi)*(Phi((up-mu)/sigma) - Phi((lo-mu)/sigma)))
+            # is dropped, so this branch's logp carries an arbitrary offset
+            # and is NOT comparable with the (normalized) Salpeter branch's.
+            # Adding it would shift every archived logp for the default
+            # configuration; do that as its own change if cross-IMF logp
+            # comparison is ever wanted.
+            imf_logp = -0.5 * pt.sqr(
+                (stars.logmass.value - log_Mc) / sigma_imf
+            )
 
-        # This provides beautiful, constant curvature (-1 / sigma^2) for NUTS
-        chabrier_logp = -0.5 * pt.sqr(
-            (stars.logmass.value - log_Mc) / sigma_imf
-        )
-
-        # For high mass ( > 1 M_sun), you smoothly match it to a Salpeter tail
-        # but the low-mass end is usually where the unconstrained NUTS particles fall into the abyss.
-        pm.Potential(f"{self.prefix}.imf_prior", pt.sum(chabrier_logp))
+        pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
         ######
 
         # even though non-physical values will be rejected
