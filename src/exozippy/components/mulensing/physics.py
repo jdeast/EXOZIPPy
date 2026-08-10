@@ -4,6 +4,15 @@ import pytensor.tensor as pt
 from ...constants import KAPPA, RSUN_TO_AU
 from ...physics_registry import register_physics
 
+# Positive floors for the two quantities whose logarithm the event-rate prior
+# takes (lens.build_likelihood).  Both are ~6 orders of magnitude below the
+# 1e-6 turn-on of the matching soft bounds there, so the barrier is already
+# fully engaged wherever the floor bites and no reachable posterior region is
+# affected -- the floors only replace a -inf/NaN wall with a finite plateau
+# the soft bounds can push off of.
+THETA_E_FLOOR = 1e-12  # mas
+MU_REL_FLOOR = 1e-12  # mas/yr
+
 
 @register_physics
 def calc_pi_rel(dist_lens, dist_source):
@@ -28,9 +37,16 @@ def calc_theta_E(mass_lens, pi_rel):
     # log(theta_E), poisoning the logp and its gradient over a whole region
     # instead of penalising it.  The theta_E_singularity soft bound there does
     # the penalising once the value is finite.
-    return pt.sqrt(
-        KAPPA * pt.maximum(mass_lens, 1e-12) * pt.maximum(pi_rel, 0.0)
-    )
+    #
+    # The whole radicand is floored at THETA_E_FLOOR**2 rather than clipping
+    # theta_E afterwards: sqrt'(0) is infinite, and pt.maximum's zero gradient
+    # on the clamped side then makes 0 * inf = NaN, so log(theta_E) had a NaN
+    # gradient over the entire pi_rel <= 0 region even with a floor applied
+    # downstream.  Flooring the argument keeps sqrt' finite, so the gradient
+    # is a clean zero there and the source_behind_lens bound supplies the
+    # restoring force.
+    radicand = KAPPA * pt.maximum(mass_lens, 1e-12) * pt.maximum(pi_rel, 0.0)
+    return pt.sqrt(pt.maximum(radicand, THETA_E_FLOOR**2))
 
 
 @register_physics
@@ -45,7 +61,14 @@ def calc_mu_dec_rel(pm_dec_lens, pm_dec_source):
 
 @register_physics
 def calc_mu_rel_mag(mu_ra_rel, mu_dec_rel):
-    return pt.sqrt(pt.sqr(mu_ra_rel) + pt.sqr(mu_dec_rel))
+    # Floored for the same reason as calc_theta_E's radicand: the two
+    # components start equal (star pm_ra/pm_dec share one default), so an
+    # exactly-zero relative proper motion is reachable, and sqrt'(0) = inf
+    # poisons log(mu_rel_geo) in the event-rate prior -- and every
+    # mu_*_rel / mu_rel_mag ratio -- with a NaN gradient.
+    return pt.sqrt(
+        pt.maximum(pt.sqr(mu_ra_rel) + pt.sqr(mu_dec_rel), MU_REL_FLOOR**2)
+    )
 
 
 # Heliocentric -> geocentric frame conversion (Gould 2004):

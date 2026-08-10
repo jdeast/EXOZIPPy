@@ -14,6 +14,7 @@ from exozippy.potentials import soft_lower_bound
 
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
+from .physics import MU_REL_FLOOR, THETA_E_FLOOR
 
 logger = logging.getLogger(__name__)
 
@@ -775,9 +776,18 @@ class Lens(Component):
         mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
 
+        # Both logs are floored (belt and braces -- calc_theta_E and
+        # calc_mu_rel_mag already floor their radicands, see physics.py).  A
+        # bare log(0) is a -inf wall with no gradient for NUTS to follow,
+        # which is exactly what the soft bounds below exist to avoid; the
+        # floors are ~6 decades below their 1e-6 turn-on, so the prior is
+        # untouched wherever it was already finite.
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
-            pt.sum(pt.log(mu_rel_geo) + pt.log(theta_E)),
+            pt.sum(
+                pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
+                + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
+            ),
         )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and
