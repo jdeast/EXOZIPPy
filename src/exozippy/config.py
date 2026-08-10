@@ -212,6 +212,35 @@ def validate_sigma_has_center(user_params, links=None, source=None):
         )
 
 
+def canonical_param_key(key, system_config):
+    """Canonical (index-form) spelling of a user-facing parameter key.
+
+    ``star.A.mass`` -> ``star.0.mass`` when the config's ``star`` list has an
+    entry named ``A``.  This is the ONE place the name -> index translation
+    lives: ``standardize_param_names`` uses it to store ``user_params``, and
+    anything looking a key up in ``user_params`` must go through it too --
+    otherwise the lookup silently depends on whether the user named their
+    instances.
+
+    Keys that are not 3-part, that name a flat-dict (non-list) component, or
+    that name an instance the config does not define are returned unchanged,
+    which is exactly how ``standardize_param_names`` stores them.
+    """
+    parts = key.split(".", 2)
+    if len(parts) != 3:
+        return key
+
+    comp_type, comp_name, param_name = parts
+    comp_list = (system_config or {}).get(comp_type)
+    if not isinstance(comp_list, list):
+        return key
+
+    for idx, entry in enumerate(comp_list):
+        if isinstance(entry, dict) and entry.get("name") == comp_name:
+            return f"{comp_type}.{idx}.{param_name}"
+    return key
+
+
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
 RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
@@ -953,6 +982,16 @@ class ConfigManager:
         except Exception:
             return 1.0
 
+    def canonical_key(self, key):
+        """Index-form spelling of ``key`` under THIS manager's system config.
+
+        Thin instance wrapper around :func:`canonical_param_key`, for callers
+        that hold a ConfigManager and need to look a user-facing (possibly
+        name-form) path up in ``self.user_params``, which is stored in index
+        form.
+        """
+        return canonical_param_key(key, self.system_config)
+
     @staticmethod
     def standardize_param_names(user_params, config):
         """
@@ -1010,18 +1049,10 @@ class ConfigManager:
                 standardized[key] = copy.deepcopy(val)
                 continue
 
-            try:
-                idx = next(
-                    i
-                    for i, c in enumerate(comp_list)
-                    if isinstance(c, dict) and c.get("name") == comp_name
-                )
-                standardized[f"{comp_type}.{idx}.{param_name}"] = (
-                    copy.deepcopy(val)
-                )
-            except StopIteration:
-                # numeric index or unknown name: keep the key as-is
-                standardized[key] = copy.deepcopy(val)
+            # Numeric index or unknown name: canonical_param_key returns the
+            # key unchanged and it is stored as-is.  deepcopy so broadcast
+            # instances never share one dict (see the aliasing fix in #76).
+            standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
         # Pass 2: expand 2-part keys for list components.
         # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
