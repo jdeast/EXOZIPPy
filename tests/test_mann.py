@@ -29,16 +29,21 @@ def _call(fn, absks, feh=None):
     return float(out.eval(point))
 
 
-# Reference values produced by the numpy translation of EXOFASTv2's
+# Masses are the values produced by the numpy translation of EXOFASTv2's
 # massradius_mann.pro that used to live in
 # exozippy/evolutionary_model/massradius_mann.py, captured before that
 # orphan was removed in favour of the PyTensor implementation here.
+#
+# The eq-5 radii are hand-computed from Mann+2015 Table 1 with the [Fe/H]
+# term applied multiplicatively, (a + b*Mks + c*Mks^2)*(1 + f*[Fe/H]) -- the
+# form Table 1's note specifies.  Both codes used to add f*[Fe/H] instead;
+# see physics.py for the sign provenance (f = +0.04458) and the review note.
 # (absks, feh, expected_mass, expected_radius)
 _REFERENCE = [
     (7.5, None, 0.2280342072000418, 0.2565000000000003),
-    (7.5, -0.116, 0.22551544332725632, 0.2522662200000001),
+    (7.5, -0.116, 0.22551544332725632, 0.2561062186050001),
     (6.0, 0.0, 0.43662992768383013, 0.4438199999999999),
-    (9.0, 0.3, 0.11597242841928908, 0.1585439999999998),
+    (9.0, 0.3, 0.11597242841928908, 0.1471115035799998),
 ]
 
 
@@ -73,6 +78,29 @@ def test_feh_and_nofeh_forms_differ():
     # Assert
     assert m_nofeh != pytest.approx(m_feh, rel=1e-6)
     assert r_nofeh != pytest.approx(r_feh, rel=1e-6)
+
+
+@pytest.mark.parametrize("absks", [5.0, 6.5, 9.0])
+def test_feh_term_is_multiplicative_and_positive(absks):
+    """
+    Given Mann+2015 eq 5, whose [Fe/H] term multiplies the Ks polynomial,
+    When the relation is evaluated at +/-[Fe/H] against its own solar-value,
+    Then the offsets are *fractional* (not absolute) and metal-rich is larger.
+    """
+    # Arrange
+    feh = 0.3
+
+    # Act
+    r_solar = _call(physics.calc_mann_radius, absks, 0.0)
+    r_rich = _call(physics.calc_mann_radius, absks, feh)
+    r_poor = _call(physics.calc_mann_radius, absks, -feh)
+
+    # Assert -- an additive term would make these differences independent of
+    # r_solar, so pinning the ratio is what rules the old form out.
+    f = physics._R_COEFF_FEH[3]
+    assert r_rich / r_solar == pytest.approx(1.0 + f * feh, rel=1e-12)
+    assert r_poor / r_solar == pytest.approx(1.0 - f * feh, rel=1e-12)
+    assert r_rich > r_solar > r_poor
 
 
 def test_relations_are_differentiable():
