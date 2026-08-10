@@ -10,6 +10,7 @@ import yaml
 
 from exozippy.config import validate_sigma_has_center
 from exozippy.samplers import convergence
+from exozippy.trace_meta import check_trace_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +295,38 @@ def mkprior(
             validate_sigma_has_center(existing_params, source=str(param_path))
 
     idata = az.from_netcdf(str(trace_path))
+
+    # The restart file this writes IS the next fit's start, so seeding it
+    # from a trace sampled under a different model corrupts that fit
+    # silently.  This load most often fires automatically at the end of a
+    # run, where the trace was just written by the same System -- so the
+    # mismatch case is genuinely exceptional and worth failing on rather
+    # than papering over.  A trace with no fingerprint (written before this
+    # metadata existed) only warns.
+    #
+    # The fingerprint is recomputed here from the same two inputs the output
+    # file is built from -- this `config` and the parameter_file on disk --
+    # rather than being handed down from the live System.  That is
+    # deliberate and measured: across kelt4 (RV-only and rv+transit+sed),
+    # ob08092 and ob140939, the config dict is mutated ZERO times by stages
+    # 1-6, so the recomputation reproduces System's snapshot exactly.  (The
+    # one mutation that does exist -- Mann/Torres deriving `name:` from
+    # their `star:` key -- happens inside System.__init__, which is why the
+    # snapshot is taken at the END of __init__.)  Should some future
+    # component start writing into config during load_data, the raise here
+    # would be CORRECT, not spurious: existing_params and config are what
+    # this function merges the MAP into, so if they are not what was
+    # fitted, the restart file is wrong no matter what the trace says.
+    from .evaluator import structural_hash, structural_payload
+
+    check_trace_freshness(
+        idata,
+        (
+            structural_hash(config, existing_params),
+            structural_payload(config, existing_params),
+        ),
+        trace_path,
+    )
 
     # Find the MAP draw. lp is present for NUTS and for Metropolis traces saved
     # after the fix that persists it right after pm.sample(). Fall back to the
