@@ -10,6 +10,7 @@ import yaml
 
 from exozippy.config import validate_sigma_has_center
 from exozippy.samplers import convergence
+from exozippy.trace_meta import check_trace_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +224,12 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
 
 
 def mkprior(
-    config, base_dir=None, trace_path=None, output_path=None, n_seeds=None
+    config,
+    base_dir=None,
+    trace_path=None,
+    output_path=None,
+    n_seeds=None,
+    structural_fingerprint=None,
 ):
     """
     Write a params.yaml seeded from a previous trace.
@@ -252,6 +258,13 @@ def mkprior(
     n_seeds : int, optional
         Number of multi-seed start points to emit. When None, read from
         ``config['mkprior']['n_seeds']`` (default 1 = legacy scalar behavior).
+    structural_fingerprint : tuple, optional
+        ``System.structural_fingerprint()`` of the model the trace belongs
+        to.  run.py passes its live System's, so the automatic end-of-run
+        call compares against exactly what was stamped rather than
+        recomputing it from a config dict the lifecycle may since have
+        written into.  When omitted it is computed from ``config`` plus the
+        ``parameter_file`` on disk (the standalone scripts/mkprior.py path).
 
     Returns
     -------
@@ -294,6 +307,22 @@ def mkprior(
             validate_sigma_has_center(existing_params, source=str(param_path))
 
     idata = az.from_netcdf(str(trace_path))
+
+    # The restart file this writes IS the next fit's start, so seeding it
+    # from a trace sampled under a different model corrupts that fit
+    # silently.  This load most often fires automatically at the end of a
+    # run, where the trace was just written by the same System and the check
+    # is a formality -- so the mismatch case is genuinely exceptional and
+    # worth failing on rather than papering over.  A trace with no
+    # fingerprint (written before this metadata existed) only warns.
+    if structural_fingerprint is None:
+        from .evaluator import structural_hash, structural_payload
+
+        structural_fingerprint = (
+            structural_hash(config, existing_params),
+            structural_payload(config, existing_params),
+        )
+    check_trace_freshness(idata, structural_fingerprint, trace_path)
 
     # Find the MAP draw. lp is present for NUTS and for Metropolis traces saved
     # after the fix that persists it right after pm.sample(). Fall back to the

@@ -35,13 +35,26 @@ Note the deliberate asymmetry with the neighboring reload in
 merely falls back: whitening can honestly be re-measured from scratch at
 load time, so a mismatch there costs a probe.  A stale trace has no such
 repair -- the draws are already drawn.
+
+The code that produced the trace is recorded alongside the fingerprint (the
+package version, and the git commit / describe / dirty flag of the source
+tree it ran from), purely so a StaleTraceError can say WHICH code made those
+draws and print the git incantation to get back to it.  It is DIAGNOSTIC
+ONLY: nothing here ever compares versions, and a version or commit
+difference never raises.  A user on newer code whose model is structurally
+unchanged must keep being able to reuse a trace -- only the structural hash
+decides staleness.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from ._version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +62,10 @@ logger = logging.getLogger(__name__)
 # collide with ArviZ's or a sampler's own metadata.
 HASH_ATTR = "exozippy_structural_hash"
 PAYLOAD_ATTR = "exozippy_structural_payload"
+VERSION_ATTR = "exozippy_version"
+COMMIT_ATTR = "exozippy_git_commit"
+DESCRIBE_ATTR = "exozippy_git_describe"
+DIRTY_ATTR = "exozippy_git_dirty"
 
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
@@ -69,13 +86,146 @@ def _attrs(idata) -> Dict[str, Any]:
     return attrs if isinstance(attrs, dict) else {}
 
 
-def stamp_structural_metadata(idata, system) -> None:
-    """Record ``system``'s structural fingerprint in ``idata``'s root attrs.
+def _fingerprint_of(source) -> tuple:
+    """Accept a System (anything with structural_fingerprint()) or a ready
+    ``(hash, payload)`` pair.  The pair form lets a caller that already has a
+    built System -- run.py handing its fingerprint to mkprior -- pass it
+    straight through instead of recomputing it from a config dict that stage
+    1-2 may since have written into."""
+    if hasattr(source, "structural_fingerprint"):
+        return source.structural_fingerprint()
+    fingerprint, payload = source
+    return fingerprint, payload
 
-    Called immediately before the trace is written to netCDF, so every trace
-    this code writes can be checked when it is read back.
+
+# ---------------------------------------------------------------------------
+# Code provenance (diagnostic only -- never a staleness criterion)
+# ---------------------------------------------------------------------------
+
+_provenance_cache: Optional[Dict[str, Any]] = None
+
+
+def _git(args: List[str], cwd) -> Optional[str]:
+    """Run a git command, returning its stripped stdout or None.
+
+    Never raises and never blocks: git may be absent (installed wheel, slim
+    container), the source may not be in a repo, or the repo may be on a
+    stalled network mount.
     """
-    fingerprint, payload = system.structural_fingerprint()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd)] + args,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def code_provenance(refresh: bool = False) -> Dict[str, Any]:
+    """Identify the code that is running, as far as it can be identified.
+
+    Returns ``{version, commit, describe, dirty}``.  ``commit``/``describe``
+    are None when the package is not running from a git checkout (an
+    installed wheel, or git unavailable) -- that is a normal, supported
+    state, not an error.  ``dirty`` reports UNCOMMITTED TRACKED changes: a
+    dirty tree means the commit alone does not reproduce the code that ran.
+    Untracked files are ignored on purpose -- example data, scratch outputs
+    and notes sit untracked in a working EXOZIPPy tree and would otherwise
+    flag every run dirty.
+
+    Cached: the git calls run once per process.
+    """
+    global _provenance_cache
+    if _provenance_cache is not None and not refresh:
+        return _provenance_cache
+
+    src_dir = Path(__file__).resolve().parent
+    commit = _git(["rev-parse", "HEAD"], src_dir)
+    describe = (
+        _git(["describe", "--tags", "--always", "--dirty"], src_dir)
+        if commit
+        else None
+    )
+    dirty = describe.endswith("-dirty") if describe else None
+    _provenance_cache = {
+        "version": __version__,
+        "commit": commit,
+        "describe": describe,
+        "dirty": dirty,
+    }
+    return _provenance_cache
+
+
+def _repo_root() -> Optional[str]:
+    """Top level of the git checkout this code is running from, if any."""
+    return _git(
+        ["rev-parse", "--show-toplevel"], Path(__file__).resolve().parent
+    )
+
+
+def describe_trace_provenance(attrs: Dict[str, Any]) -> List[str]:
+    """Say which code produced a trace, and how to get back to it.
+
+    Degrades in three steps: full detail for a trace stamped from a git
+    checkout; version-only for one stamped from an installed package; and a
+    plain "not recorded" statement -- never a broken git command -- for a
+    trace written before this metadata existed.
+    """
+    version = attrs.get(VERSION_ATTR)
+    commit = attrs.get(COMMIT_ATTR)
+    describe = attrs.get(DESCRIBE_ATTR)
+    dirty = str(attrs.get(DIRTY_ATTR, "")).lower() == "true"
+
+    if not version and not commit:
+        return [
+            "The trace records no exozippy version or commit (it predates "
+            "that metadata), so the code that produced it cannot be "
+            "identified from the file."
+        ]
+
+    who = (
+        f"exozippy {version}" if version else "an unrecorded exozippy version"
+    )
+    if describe:
+        who += f" (git {describe})"
+    lines = [f"The trace was produced with {who}."]
+
+    if not commit:
+        lines.append(
+            "No git commit was recorded -- it ran from an installed package, "
+            "not a checkout -- so that exact source cannot be checked out."
+        )
+        return lines
+
+    root = _repo_root() or "/path/to/your/EXOZIPPy"
+    short = commit[:12]
+    lines.append("To run that exact code without disturbing your tree:")
+    lines.append(
+        f"    git -C {root} worktree add ../exozippy-{short} {commit}"
+    )
+    lines.append(f"    cd ../exozippy-{short} && poetry install")
+    if dirty:
+        lines.append(
+            "    CAVEAT: that tree had uncommitted changes when the trace was "
+            "written, so the commit alone does not reproduce the code that ran."
+        )
+    return lines
+
+
+def stamp_structural_metadata(idata, source) -> None:
+    """Record the structural fingerprint + code provenance in root attrs.
+
+    ``source`` is a System (or a ``(hash, payload)`` pair).  Called
+    immediately before the trace is written to netCDF, so every trace this
+    code writes can be checked when it is read back.
+    """
+    fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     attrs[HASH_ATTR] = fingerprint
     blob = json.dumps(payload, sort_keys=True, default=str)
@@ -83,6 +233,14 @@ def stamp_structural_metadata(idata, system) -> None:
         attrs[PAYLOAD_ATTR] = blob
     else:
         attrs.pop(PAYLOAD_ATTR, None)
+
+    # Diagnostic context for a future mismatch; never compared on load.
+    prov = code_provenance()
+    attrs[VERSION_ATTR] = str(prov["version"])
+    if prov["commit"]:
+        attrs[COMMIT_ATTR] = prov["commit"]
+        attrs[DESCRIBE_ATTR] = prov["describe"] or ""
+        attrs[DIRTY_ATTR] = "true" if prov["dirty"] else "false"
 
 
 def _diff_mapping(old: dict, new: dict, label: str) -> List[str]:
@@ -145,14 +303,17 @@ def describe_structural_diff(
     return lines
 
 
-def check_trace_freshness(idata, system, trace_path) -> str:
-    """Verify a reloaded trace was sampled from ``system``'s model.
+def check_trace_freshness(idata, source, trace_path) -> str:
+    """Verify a reloaded trace was sampled from this model.
 
-    Returns ``"match"`` or ``"unverifiable"``; raises
-    :class:`StaleTraceError` when the stored fingerprint disagrees with the
-    current config + params.
+    ``source`` is a System (or a ``(hash, payload)`` pair).  Returns
+    ``"match"`` or ``"unverifiable"``; raises :class:`StaleTraceError` when
+    the stored fingerprint disagrees with the current config + params.  Only
+    that fingerprint is compared -- the recorded version/commit are printed
+    in the error but never tested, so newer code with an unchanged model
+    reloads its trace silently.
     """
-    fingerprint, payload = system.structural_fingerprint()
+    fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     stored = attrs.get(HASH_ATTR)
 
@@ -184,6 +345,7 @@ def check_trace_freshness(idata, system, trace_path) -> str:
         f"  - {line}"
         for line in describe_structural_diff(old_payload, payload)
     )
+    provenance = "\n".join(describe_trace_provenance(attrs))
     raise StaleTraceError(
         f"{_BANNER}\n"
         f"STALE TRACE: {trace_path} was sampled under a structurally "
@@ -195,6 +357,7 @@ def check_trace_freshness(idata, system, trace_path) -> str:
         f"names and regenerate every posterior, LaTeX table and plot from "
         f"them -- silently wrong numbers. The draws cannot be repaired at "
         f"load time.\n"
+        f"{provenance}\n"
         f"REMEDY: re-sample with 'sampler: {{recompute_trace: true}}' in the "
         f"config (or revert the config/parameter-file edits listed above to "
         f"match the trace).\n{_BANNER}"

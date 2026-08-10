@@ -723,7 +723,15 @@ def _run_fit(config, gui, user_params=None):
             )
 
     try:
-        mkprior(config, trace_path=trace_path)
+        # Hand mkprior this System's fingerprint instead of letting it
+        # recompute one from `config`: stages 1-2 may have written into that
+        # dict since, and the restart file must not be refused for a
+        # spurious reason on the automatic end-of-run call.
+        mkprior(
+            config,
+            trace_path=trace_path,
+            structural_fingerprint=system.structural_fingerprint(),
+        )
     except Exception:
         logger.exception("mkprior failed (non-fatal)")
 

@@ -18,7 +18,13 @@ These tests pin the three load outcomes and the save-side stamping:
     existed) reloads with an "unverifiable" warning -- never reported as
     stale -- and does not raise;
   * System.structural_fingerprint is a stable snapshot of the config +
-    params the System was built from.
+    params the System was built from;
+  * the exozippy version and the source tree's git commit are stamped too,
+    and a mismatch quotes them plus the git lines that get back to that
+    code -- while a version/commit difference on its own NEVER raises, since
+    only the structural hash decides staleness;
+  * mkprior refuses a structurally stale trace (its output seeds the next
+    fit) but proceeds on an unstamped one.
 
 They follow AAA with Given/When/Then docstrings.
 """
@@ -33,10 +39,16 @@ import pytest
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.system import System
 from exozippy.trace_meta import (
+    COMMIT_ATTR,
+    DESCRIBE_ATTR,
+    DIRTY_ATTR,
     HASH_ATTR,
     PAYLOAD_ATTR,
+    VERSION_ATTR,
     StaleTraceError,
     check_trace_freshness,
+    code_provenance,
+    describe_trace_provenance,
     stamp_structural_metadata,
 )
 
@@ -252,6 +264,266 @@ def test_trace_without_a_fingerprint_is_unverifiable_not_stale(caplog):
     assert "UNVERIFIABLE TRACE" in text
     assert "STALE TRACE" not in text
     assert "old_trace.nc" in text
+
+
+# ---------------------------------------------------------------------------
+# Code provenance: diagnostic context in the error, never a staleness test
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_records_the_exozippy_version_and_git_commit():
+    """
+    Given a trace being stamped,
+    When stamp_structural_metadata runs,
+    Then the attrs carry the package version, and -- when the code is
+    running from a git checkout -- the commit, describe string and dirty
+    flag of that tree.
+    """
+    idata = _idata()
+
+    stamp_structural_metadata(idata, _FakeSystem(_CONFIG, _PARAMS))
+
+    prov = code_provenance()
+    assert idata.attrs[VERSION_ATTR] == str(prov["version"])
+    if prov["commit"]:
+        assert idata.attrs[COMMIT_ATTR] == prov["commit"]
+        assert len(idata.attrs[COMMIT_ATTR]) == 40
+        assert idata.attrs[DESCRIBE_ATTR] == (prov["describe"] or "")
+        assert idata.attrs[DIRTY_ATTR] in ("true", "false")
+    else:  # installed wheel / no git available
+        assert COMMIT_ATTR not in idata.attrs
+
+
+def test_stale_message_quotes_the_recorded_code_and_the_way_back():
+    """
+    Given a trace stamped from a git checkout,
+    When a structural mismatch raises,
+    Then the message names the version that produced it and prints the git
+    worktree lines that recreate that code.
+    """
+    prov = code_provenance()
+    if not prov["commit"]:
+        pytest.skip("not running from a git checkout")
+    idata = _idata()
+    stamp_structural_metadata(idata, _FakeSystem(_CONFIG, _PARAMS))
+    other = copy.deepcopy(_CONFIG)
+    other["star"] = [{"name": "A"}, {"name": "B"}]
+
+    with pytest.raises(StaleTraceError) as excinfo:
+        check_trace_freshness(
+            idata, _FakeSystem(other, _PARAMS), "fit_trace.nc"
+        )
+
+    message = str(excinfo.value)
+    assert f"exozippy {prov['version']}" in message
+    assert "worktree add" in message
+    assert prov["commit"] in message
+
+
+def test_a_version_difference_alone_never_raises():
+    """
+    Given a trace whose structural hash matches but whose recorded version
+      and commit are from entirely different code,
+    When it is checked,
+    Then it reports "match" -- the version is diagnostic context, not a
+    second staleness criterion, so newer code with an unchanged model must
+    keep reusing its trace.
+    """
+    system = _FakeSystem(_CONFIG, _PARAMS)
+    idata = _idata()
+    stamp_structural_metadata(idata, system)
+    idata.attrs[VERSION_ATTR] = "0.0.0-ancient"
+    idata.attrs[COMMIT_ATTR] = "0" * 40
+    idata.attrs[DESCRIBE_ATTR] = "v0.0.1-1-g0000000"
+    idata.attrs[DIRTY_ATTR] = "true"
+
+    result = check_trace_freshness(idata, system, "fit_trace.nc")
+
+    assert result == "match"
+
+
+def test_provenance_report_without_git_does_not_print_git_lines():
+    """
+    Given attrs from a trace stamped by an installed package (version, no
+      commit),
+    When the provenance is described,
+    Then it says the source cannot be checked out instead of printing a git
+    command with a missing commit.
+    """
+    lines = describe_trace_provenance({VERSION_ATTR: "1.2.3"})
+
+    text = " ".join(lines)
+    assert "exozippy 1.2.3" in text
+    assert "installed package" in text
+    assert "worktree add" not in text
+
+
+def test_provenance_report_without_any_metadata_says_so_plainly():
+    """
+    Given attrs from a trace written before this metadata existed,
+    When the provenance is described,
+    Then it states that plainly and prints no instructions.
+    """
+    lines = describe_trace_provenance({})
+
+    text = " ".join(lines)
+    assert "predates" in text
+    assert "git" not in text.replace("git commit", "")
+
+
+def test_provenance_report_flags_a_dirty_source_tree():
+    """
+    Given a trace stamped from a tree with uncommitted changes,
+    When the provenance is described,
+    Then the recovery lines carry the caveat that the commit alone does not
+    reproduce the code that ran.
+    """
+    lines = describe_trace_provenance(
+        {
+            VERSION_ATTR: "1.2.3",
+            COMMIT_ATTR: "a" * 40,
+            DESCRIBE_ATTR: "v1.2.3-4-gaaaaaaa-dirty",
+            DIRTY_ATTR: "true",
+        }
+    )
+
+    text = " ".join(lines)
+    assert "worktree add" in text
+    assert "uncommitted changes" in text
+
+
+# ---------------------------------------------------------------------------
+# mkprior: its output seeds the NEXT fit, so a stale trace there corrupts a
+# run that has not happened yet.
+# ---------------------------------------------------------------------------
+
+_MKPRIOR_CONFIG = {
+    "prefix": "fitresults/model",
+    "parameter_file": None,
+    "star": [{"name": "Host"}],
+}
+
+
+def _mkprior_trace(tmp_path, stamp_source=None):
+    """A one-draw trace mkprior can consume, optionally stamped."""
+    import xarray as xr
+
+    posterior = xr.Dataset(
+        {
+            "star.mass": xr.DataArray(
+                np.array([[0.95]]), dims=["chain", "draw"]
+            ),
+            "star.mass_raw": xr.DataArray(
+                np.array([[0.1]]), dims=["chain", "draw"]
+            ),
+        }
+    )
+    stats = xr.Dataset(
+        {"lp": xr.DataArray(np.array([[-10.0]]), dims=["chain", "draw"])}
+    )
+    idata = az.from_dict({"posterior": posterior, "sample_stats": stats})
+    if stamp_source is not None:
+        stamp_structural_metadata(idata, stamp_source)
+    path = tmp_path / "trace.nc"
+    idata.to_netcdf(str(path))
+    return path
+
+
+def test_mkprior_refuses_a_structurally_stale_trace(tmp_path):
+    """
+    Given a trace stamped under a different config,
+    When mkprior is asked to seed a restart file from it,
+    Then it raises StaleTraceError instead of writing start values drawn
+    from a foreign posterior.
+    """
+    from exozippy.mkparam import mkprior
+
+    other = dict(_MKPRIOR_CONFIG)
+    other["star"] = [{"name": "Host"}, {"name": "Companion"}]
+    trace = _mkprior_trace(tmp_path, stamp_source=_FakeSystem(other, {}))
+
+    with pytest.raises(StaleTraceError):
+        mkprior(
+            dict(_MKPRIOR_CONFIG),
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+        )
+
+    assert not (tmp_path / "out.yaml").exists()
+
+
+def test_mkprior_accepts_a_matching_fingerprint(tmp_path):
+    """
+    Given a trace stamped with the fingerprint mkprior computes for itself,
+    When mkprior runs,
+    Then it writes the restart file as before.
+    """
+    from exozippy.mkparam import mkprior
+
+    trace = _mkprior_trace(
+        tmp_path, stamp_source=_FakeSystem(_MKPRIOR_CONFIG, {})
+    )
+
+    out = mkprior(
+        dict(_MKPRIOR_CONFIG),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    assert out.exists()
+
+
+def test_mkprior_proceeds_on_an_unstamped_trace(tmp_path, caplog):
+    """
+    Given a trace written before this metadata existed,
+    When mkprior runs,
+    Then it warns that the trace is unverifiable and still writes the file.
+    """
+    from exozippy.mkparam import mkprior
+
+    trace = _mkprior_trace(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
+        out = mkprior(
+            dict(_MKPRIOR_CONFIG),
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+        )
+
+    assert out.exists()
+    assert "UNVERIFIABLE TRACE" in caplog.text
+
+
+def test_mkprior_uses_a_caller_supplied_fingerprint(tmp_path):
+    """
+    Given a trace stamped by a System whose config differs from the dict
+      handed to mkprior,
+    When the caller passes that System's fingerprint explicitly (what run.py
+      does at the end of a fit),
+    Then mkprior checks against it rather than recomputing one, and accepts.
+
+    This is what keeps the automatic end-of-run call from refusing a trace
+    it just wrote, should the lifecycle have written into the config dict.
+    """
+    from exozippy.mkparam import mkprior
+
+    sampled = dict(_MKPRIOR_CONFIG)
+    sampled["star"] = [{"name": "Host"}, {"name": "Companion"}]
+    fingerprint = _FakeSystem(sampled, {}).structural_fingerprint()
+    trace = _mkprior_trace(tmp_path, stamp_source=_FakeSystem(sampled, {}))
+
+    out = mkprior(
+        dict(_MKPRIOR_CONFIG),
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+        structural_fingerprint=fingerprint,
+    )
+
+    assert out.exists()
 
 
 # ---------------------------------------------------------------------------
