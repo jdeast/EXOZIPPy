@@ -608,6 +608,44 @@ def test_angle_entry_keeps_bounds_and_adds_no_mu(tmp_path):
     assert "mu" not in entry, "bounds are not a prior center"
 
 
+def test_uncentered_sigma_in_params_file_is_fatal(tmp_path):
+    """
+    Given an existing params file with sigma > 0 and no mu/initval,
+    When mkprior runs,
+    Then it raises and names the offending file.
+
+    mkprior reads the params file directly (bypassing ConfigManager), and its
+    pass-through loop copies constraint-bearing entries verbatim -- so without
+    this check it would launder an uncentered Gaussian prior into the restart
+    file, where the prior ends up centered on a data-derived start value.
+    """
+    import yaml
+
+    existing_params = {"star.Host.teff": {"sigma": 100.0}}
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        mkprior(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+        )
+
+    msg = str(exc.value)
+    assert "star.Host.teff" in msg
+    assert "star.params.yaml" in msg, "the input file must be named"
+
+
 def test_standardize_param_names_flat_dict_component_no_crash(tmp_path):
     """
     Regression: standardize_param_names crashed with AttributeError when a

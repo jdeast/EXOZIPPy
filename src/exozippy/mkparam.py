@@ -8,6 +8,7 @@ import arviz as az
 import numpy as np
 import yaml
 
+from exozippy.config import validate_sigma_has_center
 from exozippy.samplers import convergence
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,13 @@ def mkprior(
         param_path = base_dir / param_file
         if param_path.exists():
             existing_params = _load_yaml(str(param_path))
+            # mkprior reads the params file directly, bypassing ConfigManager,
+            # so the same check has to run here.  Every entry mkprior
+            # synthesizes carries an initval, but the pass-through loop below
+            # copies constraint-bearing entries verbatim -- a legacy
+            # '{sigma: 0.5}' would be re-emitted into the restart file.  Fail
+            # on the input: it is the actual source and the file to edit.
+            validate_sigma_has_center(existing_params, source=str(param_path))
 
     idata = az.from_netcdf(str(trace_path))
 
