@@ -6,10 +6,11 @@ Cross-checking the full RV distortion against allesfast's numpy reference
 (itself validated vs IDL / EXOFASTv2) is the intended regression, mirroring
 tests/test_torres.py's "pin the port against reference output" pattern.
 """
+
 import numpy as np
-import pytest
 import pytensor
 import pytensor.tensor as pt
+import pytest
 
 from exozippy.components import rm
 
@@ -21,9 +22,10 @@ def test_bessj0_matches_scipy():
     """Given a range spanning both branches (|x|<8 and |x|>=8), When we
     evaluate the symbolic bessj0, Then it matches scipy.special.j0."""
     from scipy.special import j0 as scipy_j0
+
     x = pt.dvector("x")
     f = pytensor.function([x], rm.bessj0(x))
-    xs = np.linspace(0.01, 60.0, 400)          # crosses the x=8 branch switch
+    xs = np.linspace(0.01, 60.0, 400)  # crosses the x=8 branch switch
     np.testing.assert_allclose(f(xs), scipy_j0(xs), atol=1e-6, rtol=1e-6)
 
 
@@ -39,7 +41,10 @@ def test_bessj0_is_differentiable():
 # 2. rm_delta_v_core: finite output, and the correct qualitative shape.
 # --------------------------------------------------------------------------
 def _eval_delta_v(xv, yv, zv, fluxv, vsini=5000.0):
-    x = pt.dvector("x"); y = pt.dvector("y"); z = pt.dvector("z"); flx = pt.dvector("f")
+    x = pt.dvector("x")
+    y = pt.dvector("y")
+    z = pt.dvector("z")
+    flx = pt.dvector("f")
     dv = rm.rm_delta_v_core(x, y, z, flx, vsini, 0.3, 0.2, n_sigma=101)
     fn = pytensor.function([x, y, z, flx], dv)
     return fn(xv, yv, zv, fluxv)
@@ -51,7 +56,7 @@ def test_delta_v_finite_and_zero_out_of_transit():
     x = np.array([-0.6, -0.3, 0.0, 0.3, 0.6])
     y = np.zeros_like(x)
     z = np.ones_like(x)
-    flux = np.array([1.0, 0.99, 0.99, 0.99, 1.0])   # dips only for the middle 3
+    flux = np.array([1.0, 0.99, 0.99, 0.99, 1.0])  # dips only for the middle 3
     dv = _eval_delta_v(x, y, z, flux)
     assert np.all(np.isfinite(dv))
     assert dv[0] == pytest.approx(0.0) and dv[-1] == pytest.approx(0.0)
@@ -62,14 +67,19 @@ def test_delta_v_antisymmetric_for_aligned_chord():
     """For lambda=0 (x already the spin-axis coordinate) a symmetric transit
     chord gives an antisymmetric RM curve: dv(-x) approx -dv(+x)."""
     x = np.array([-0.4, 0.4])
-    y = np.zeros_like(x); z = np.ones_like(x); flux = np.array([0.99, 0.99])
+    y = np.zeros_like(x)
+    z = np.ones_like(x)
+    flux = np.array([0.99, 0.99])
     dv = _eval_delta_v(x, y, z, flux)
     assert dv[0] == pytest.approx(-dv[1], rel=1e-3)
 
 
 def test_occultation_is_zeroed():
     """z < 0 (planet behind the star) contributes no RM."""
-    x = np.array([0.3]); y = np.array([0.0]); z = np.array([-1.0]); flux = np.array([0.99])
+    x = np.array([0.3])
+    y = np.array([0.0])
+    z = np.array([-1.0])
+    flux = np.array([0.99])
     assert _eval_delta_v(x, y, z, flux)[0] == pytest.approx(0.0)
 
 
@@ -83,11 +93,81 @@ def test_occultation_is_zeroed():
 # Scenario mirrors allesfast tests/test_rm_beta_ip _RM_KWARGS:
 #   ar=10, period=3, inc=87 deg, e=0, omega=90 deg, lambda=30 deg, Rp/Rstar=0.1,
 #   vsini=5000, vzeta=3000, vbeta=4000, vgamma=1000 m/s, u1=0.3, u2=0.2.
-_REF_X = np.array([-6.4499677409e-01, -4.6390934721e-01, -2.8261843435e-01, -1.0120355571e-01, 8.0255714157e-02, 2.6167978121e-01, 4.4298906687e-01, 6.2410404288e-01, 8.0494526623e-01, 9.8543341399e-01, 1.1654893181e+00])
-_REF_Y = np.array([-9.7340208191e-01, -8.7004230718e-01, -7.6630090314e-01, -6.6222337419e-01, -5.5785537219e-01, -4.5324267638e-01, -3.4843117335e-01, -2.4346683690e-01, -1.3839570784e-01, -3.3263873856e-02, 7.1882550766e-02])
-_REF_Z = np.array([9.9315893767e+00, 9.9512720042e+00, 9.9665896748e+00, 9.9775356698e+00, 9.9841051880e+00, 9.9862953475e+00, 9.9841051880e+00, 9.9775356698e+00, 9.9665896748e+00, 9.9512720042e+00, 9.9315893767e+00])
-_REF_FLUX = np.array([1.0000000000e+00, 9.9784107518e-01, 9.9238977628e-01, 9.8916756464e-01, 9.8730608364e-01, 9.8669345272e-01, 9.8730608364e-01, 9.8916756464e-01, 9.9238977628e-01, 9.9784107518e-01, 1.0000000000e+00])
-_REF_RM = np.array([-0.0000000000e+00, 6.0033663312e+00, 1.3570359529e+01, 7.1275360413e+00, -6.6564104943e+00, -2.2235655788e+01, -3.4118714209e+01, -3.7969249130e+01, -3.1132138186e+01, -9.5929309991e+00, -0.0000000000e+00])
+_REF_X = np.array(
+    [
+        -6.4499677409e-01,
+        -4.6390934721e-01,
+        -2.8261843435e-01,
+        -1.0120355571e-01,
+        8.0255714157e-02,
+        2.6167978121e-01,
+        4.4298906687e-01,
+        6.2410404288e-01,
+        8.0494526623e-01,
+        9.8543341399e-01,
+        1.1654893181e00,
+    ]
+)
+_REF_Y = np.array(
+    [
+        -9.7340208191e-01,
+        -8.7004230718e-01,
+        -7.6630090314e-01,
+        -6.6222337419e-01,
+        -5.5785537219e-01,
+        -4.5324267638e-01,
+        -3.4843117335e-01,
+        -2.4346683690e-01,
+        -1.3839570784e-01,
+        -3.3263873856e-02,
+        7.1882550766e-02,
+    ]
+)
+_REF_Z = np.array(
+    [
+        9.9315893767e00,
+        9.9512720042e00,
+        9.9665896748e00,
+        9.9775356698e00,
+        9.9841051880e00,
+        9.9862953475e00,
+        9.9841051880e00,
+        9.9775356698e00,
+        9.9665896748e00,
+        9.9512720042e00,
+        9.9315893767e00,
+    ]
+)
+_REF_FLUX = np.array(
+    [
+        1.0000000000e00,
+        9.9784107518e-01,
+        9.9238977628e-01,
+        9.8916756464e-01,
+        9.8730608364e-01,
+        9.8669345272e-01,
+        9.8730608364e-01,
+        9.8916756464e-01,
+        9.9238977628e-01,
+        9.9784107518e-01,
+        1.0000000000e00,
+    ]
+)
+_REF_RM = np.array(
+    [
+        -0.0000000000e00,
+        6.0033663312e00,
+        1.3570359529e01,
+        7.1275360413e00,
+        -6.6564104943e00,
+        -2.2235655788e01,
+        -3.4118714209e01,
+        -3.7969249130e01,
+        -3.1132138186e01,
+        -9.5929309991e00,
+        -0.0000000000e00,
+    ]
+)
 
 
 def test_matches_allesfast_reference():
@@ -95,9 +175,22 @@ def test_matches_allesfast_reference():
     IDL/EXOFASTv2) on a fixed geometry+flux, to well under 1e-3 m/s on a
     ~38 m/s amplitude. Cross-validation, no runtime allesfast dependency."""
     x, y, z, flx = pt.dvectors("x", "y", "z", "flx")
-    dv = rm.rm_delta_v_core(x, y, z, flx, 5000.0, 0.3, 0.2,
-                            vzeta=3000.0, vbeta=4000.0, vgamma=1000.0, n_sigma=201)
-    port = pytensor.function([x, y, z, flx], dv)(_REF_X, _REF_Y, _REF_Z, _REF_FLUX)
+    dv = rm.rm_delta_v_core(
+        x,
+        y,
+        z,
+        flx,
+        5000.0,
+        0.3,
+        0.2,
+        vzeta=3000.0,
+        vbeta=4000.0,
+        vgamma=1000.0,
+        n_sigma=201,
+    )
+    port = pytensor.function([x, y, z, flx], dv)(
+        _REF_X, _REF_Y, _REF_Z, _REF_FLUX
+    )
     np.testing.assert_allclose(port, _REF_RM, atol=1e-3)
 
 
@@ -109,8 +202,12 @@ def test_rm_system_logp_finite():
     """The KELT-17 RM example (examples/kelt17) -- a transiting planet with
     two in-transit RV sequences tagged `rm: b` -- builds end to end and yields
     a finite initial logp."""
-    import os, yaml
+    import os
+
+    import yaml
+
     from exozippy.system import System
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     exdir = os.path.join(root, "examples", "kelt17")
     if not os.path.exists(os.path.join(exdir, "kelt17.yaml")):
@@ -119,8 +216,10 @@ def test_rm_system_logp_finite():
         cfg = yaml.safe_load(fh)
     cwd = os.getcwd()
     try:
-        os.chdir(exdir)                      # config data paths are relative
-        s = System(cfg); s.prepare(); model = s.build_model()
+        os.chdir(exdir)  # config data paths are relative
+        s = System(cfg)
+        s.prepare()
+        model = s.build_model()
         lp = float(model.compile_logp()(model.initial_point()))
     finally:
         os.chdir(cwd)
@@ -133,7 +232,8 @@ def test_rm_system_logp_finite():
 #    Taylor series that is accurate only for slow/moderate rotators.
 # --------------------------------------------------------------------------
 def _eval_h2010(xv, fluxv, vsini=5000.0, vbeta=4000.0):
-    x = pt.dvector("x"); flx = pt.dvector("f")
+    x = pt.dvector("x")
+    flx = pt.dvector("f")
     dv = rm.rm_delta_v_hirano2010(x, flx, vsini, vbeta)
     return pytensor.function([x, flx], dv)(xv, fluxv)
 
@@ -143,16 +243,18 @@ def test_hirano2010_matches_closed_form():
     (RMHirano.evaluate): v = -1000 vp F [(2b^2+2s^2)/(2b^2+s^2)]^1.5 *
     (1 - vp^2/D + vp^4/2D^2), with vp = vsini x, s = vsini/1.31, D = 2b^2+s^2."""
     x = np.linspace(-1.1, 1.1, 40)
-    flux = 1.0 - 0.008 * np.exp(-(x / 0.5) ** 2)      # a shallow transit-like dip
+    flux = 1.0 - 0.008 * np.exp(
+        -((x / 0.5) ** 2)
+    )  # a shallow transit-like dip
     vsini, vbeta = 6000.0, 4000.0
     port = _eval_h2010(x, flux, vsini, vbeta)
     vk, bk = vsini / 1e3, vbeta / 1e3
     sk = vk / 1.31
     vp = vk * x
     F = 1.0 - flux
-    D = 2 * bk ** 2 + sk ** 2
-    pref = ((2 * bk ** 2 + 2 * sk ** 2) / D) ** 1.5
-    ref = -1000.0 * vp * F * pref * (1.0 - vp ** 2 / D + vp ** 4 / (2 * D ** 2))
+    D = 2 * bk**2 + sk**2
+    pref = ((2 * bk**2 + 2 * sk**2) / D) ** 1.5
+    ref = -1000.0 * vp * F * pref * (1.0 - vp**2 / D + vp**4 / (2 * D**2))
     np.testing.assert_allclose(port, ref, atol=1e-9)
 
 
@@ -164,10 +266,14 @@ def test_hirano2010_zero_out_of_transit():
 
 def test_hirano2010_is_differentiable():
     """Finite gradient wrt vsini (needed for NUTS/numpyro)."""
-    x = pt.dvector("x"); flx = pt.dvector("f"); vs = pt.dscalar("vs")
+    x = pt.dvector("x")
+    flx = pt.dvector("f")
+    vs = pt.dscalar("vs")
     dv = rm.rm_delta_v_hirano2010(x, flx, vs, 4000.0)
     g = pytensor.function([x, flx, vs], pt.grad(pt.sum(dv), vs))
-    assert np.isfinite(g(np.array([-0.3, 0.3]), np.array([0.99, 0.99]), 5000.0))
+    assert np.isfinite(
+        g(np.array([-0.3, 0.3]), np.array([0.99, 0.99]), 5000.0)
+    )
 
 
 def test_hirano2010_agrees_with_2011_at_low_vsini():
@@ -175,17 +281,38 @@ def test_hirano2010_agrees_with_2011_at_low_vsini():
     disk integral: at vsini = 2 km/s the peak amplitudes agree to < 10% (they
     diverge for fast rotators, where the vp^2/D >~ 1 series is out of range)."""
     from exoplanet_core.pymc import ops
-    x = pt.dvector("x"); y = pt.dvector("y"); z = pt.dvector("z")
+
+    x = pt.dvector("x")
+    y = pt.dvector("y")
+    z = pt.dvector("z")
     u1, u2, rprs = 0.4, 0.2, 0.0959
     rho = pt.sqrt(x * x + y * y)
     s_vec = ops.quad_solution_vector(rho, rprs + pt.zeros_like(rho))
     c = pt.stack([1.0 - u1 - u2, u1, u2])
     s_off = pt.as_tensor_variable(np.array([np.pi, 2.0 * np.pi / 3.0, 0.0]))
     flux = pt.switch(pt.ge(z, 0.0), pt.dot(s_vec, c) / pt.dot(s_off, c), 1.0)
-    f11 = pytensor.function([x, y, z], rm.rm_delta_v_core(
-        x, y, z, flux, 2000.0, u1, u2,
-        vzeta=4000.0, vbeta=4000.0, vgamma=1000.0, n_sigma=151))
-    f10 = pytensor.function([x, y, z], rm.rm_delta_v_hirano2010(x, flux, 2000.0, 4000.0))
-    xv = np.linspace(-1.25, 1.25, 80); yv = np.full_like(xv, 0.53); zv = np.ones_like(xv)
-    a11 = f11(xv, yv, zv); a10 = f10(xv, yv, zv)
+    f11 = pytensor.function(
+        [x, y, z],
+        rm.rm_delta_v_core(
+            x,
+            y,
+            z,
+            flux,
+            2000.0,
+            u1,
+            u2,
+            vzeta=4000.0,
+            vbeta=4000.0,
+            vgamma=1000.0,
+            n_sigma=151,
+        ),
+    )
+    f10 = pytensor.function(
+        [x, y, z], rm.rm_delta_v_hirano2010(x, flux, 2000.0, 4000.0)
+    )
+    xv = np.linspace(-1.25, 1.25, 80)
+    yv = np.full_like(xv, 0.53)
+    zv = np.ones_like(xv)
+    a11 = f11(xv, yv, zv)
+    a10 = f10(xv, yv, zv)
     assert np.max(np.abs(a10 - a11)) / np.max(np.abs(a11)) < 0.10
