@@ -9,6 +9,7 @@ import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
+from exozippy.components.limbdark import quad_limb_darkened_flux
 
 from . import physics
 
@@ -509,17 +510,6 @@ class Transit(Instrument):
             if dil_inst is not None:
                 dil_obs = dil_inst[self.inst_map[rows]]  # (n_g,)
 
-            # exoplanet_core's quad_solution_vector returns s in starry's Green's basis,
-            # not powers of mu. Converting the quadratic law (u1, u2) into that basis
-            # requires the change-of-basis in Agol, Luger & Foreman-Mackey (2020),
-            # matching exoplanet.light_curves.limb_dark.get_cl():
-            #   c0 = 1 - u1 - 1.5*u2, c1 = u1 + 2*u2, c2 = -0.25*u2
-            #   norm = dot(s_off, c) = pi*(c0 + c1/1.5), s_off = [pi, 2pi/3, 0]
-            c0 = 1.0 - u1_mapped - 1.5 * u2_mapped
-            c1 = u1_mapped + 2.0 * u2_mapped
-            c2 = -0.25 * u2_mapped
-            ld_norm = np.pi * (c0 + c1 / 1.5)
-
             for p_idx in range(planets.n_elements):
                 b_p = b[
                     :, :, p_idx
@@ -529,18 +519,12 @@ class Transit(Instrument):
                 ]  # (n_g, k_g) line-of-sight coord (+ = planet in front of star)
                 r_p = planets.p.value[p_idx]  # scalar R_p/R_*
 
-                # quad_solution_vector(b, r) -> (n_g, k_g, 3) solution vector s.
-                # Broadcast scalar r_p to (n_g, k_g) following the ops.kepler() pattern.
-                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
-
                 # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
-                # Verified against brute-force disk integration: lc = dot(s, c) / dot(s_off, c)
-                # c0/c1/c2/ld_norm are (n_g,); broadcast against the sub-exposure axis.
-                flux_frac = (
-                    sol[:, :, 0] * c0[:, None]
-                    + sol[:, :, 1] * c1[:, None]
-                    + sol[:, :, 2] * c2[:, None]
-                ) / ld_norm[:, None]  # (n_g, k_g)
+                # u1/u2_mapped are (n_g,); add the sub-exposure axis so they
+                # broadcast against b_p.
+                flux_frac = quad_limb_darkened_flux(
+                    b_p, r_p, u1_mapped[:, None], u2_mapped[:, None]
+                )  # (n_g, k_g)
 
                 # Fraction of stellar flux blocked (0 off-disk, ~ r^2 at disk centre)
                 blocked = 1.0 - flux_frac
@@ -653,11 +637,6 @@ class Transit(Instrument):
             thermal_inst = None
             if band.thermal_may_be_nonzero():
                 thermal_inst = band.thermal.value[band_idx]  # scalar ppm
-            # See build_likelihood for the Green's-basis change-of-basis derivation.
-            c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
-            c1_inst = u1_inst + 2.0 * u2_inst
-            c2_inst = -0.25 * u2_inst
-            ld_norm_inst = np.pi * (c0_inst + c1_inst / 1.5)
 
             decrement_matrix_list = []
             for p_idx in range(planets.n_elements):
@@ -665,12 +644,9 @@ class Transit(Instrument):
                 Z_p = Z[:, p_idx]
                 r_p = planets.p.value[p_idx]
 
-                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
-                flux_frac = (
-                    sol[:, 0] * c0_inst
-                    + sol[:, 1] * c1_inst
-                    + sol[:, 2] * c2_inst
-                ) / ld_norm_inst
+                flux_frac = quad_limb_darkened_flux(
+                    b_p, r_p, u1_inst, u2_inst
+                )  # (N_times,)
                 # Negative so that _compiled_full_lc output + baseline gives a transit dip
                 blocked = pt.where(Z_p > 0.0, 1.0 - flux_frac, 0.0)
                 # match the likelihood's SED depth dilution (built there first)

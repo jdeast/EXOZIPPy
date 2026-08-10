@@ -29,7 +29,8 @@ internally.  Angles in radians.  Returns the RM anomaly in m/s.
 
 import numpy as np
 import pytensor.tensor as pt
-from exoplanet_core.pymc import ops
+
+from .limbdark import quad_limb_darkened_flux
 
 
 # ==========================================================================
@@ -325,12 +326,10 @@ def compute_rm_rv(
     f = orbit.get_true_anomaly(time)[:, orbit_idx]
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)
 
-    # limb-darkened blocked flux at the RV times (same LD basis as transit.py)
+    # Limb-darkened blocked flux at the RV times -- the same shared helper
+    # (and therefore the same Green's-basis conversion) transit.py uses.
     rho = pt.sqrt(x * x + y * y)
-    s_vec = ops.quad_solution_vector(rho, rprs + pt.zeros_like(rho))
-    c = pt.stack([1.0 - u1 - u2, u1, u2])
-    s_off = pt.as_tensor_variable(np.array([np.pi, 2.0 * np.pi / 3.0, 0.0]))
-    flux = pt.dot(s_vec, c) / pt.dot(s_off, c)
+    flux = quad_limb_darkened_flux(rho, rprs, u1, u2)
     flux = pt.switch(pt.ge(z, 0.0), flux, 1.0)
 
     # Broadening (vmacro/vbeta/vmicro) belongs to the transited star -- the

@@ -280,17 +280,16 @@ def test_hirano2010_agrees_with_2011_at_low_vsini():
     """In its valid slow-rotator regime the fast H2010 series tracks the H2011
     disk integral: at vsini = 2 km/s the peak amplitudes agree to < 10% (they
     diverge for fast rotators, where the vp^2/D >~ 1 series is out of range)."""
-    from exoplanet_core.pymc import ops
+    from exozippy.components.limbdark import quad_limb_darkened_flux
 
     x = pt.dvector("x")
     y = pt.dvector("y")
     z = pt.dvector("z")
     u1, u2, rprs = 0.4, 0.2, 0.0959
     rho = pt.sqrt(x * x + y * y)
-    s_vec = ops.quad_solution_vector(rho, rprs + pt.zeros_like(rho))
-    c = pt.stack([1.0 - u1 - u2, u1, u2])
-    s_off = pt.as_tensor_variable(np.array([np.pi, 2.0 * np.pi / 3.0, 0.0]))
-    flux = pt.switch(pt.ge(z, 0.0), pt.dot(s_vec, c) / pt.dot(s_off, c), 1.0)
+    flux = pt.switch(
+        pt.ge(z, 0.0), quad_limb_darkened_flux(rho, rprs, u1, u2), 1.0
+    )
     f11 = pytensor.function(
         [x, y, z],
         rm.rm_delta_v_core(
