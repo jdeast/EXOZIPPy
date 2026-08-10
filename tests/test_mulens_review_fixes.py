@@ -2,9 +2,8 @@
 config validation."""
 
 import logging
-from unittest.mock import patch
+import warnings
 
-import MulensModel as mm
 import numpy as np
 import pytest
 
@@ -12,6 +11,7 @@ from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
 from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
+    BinaryLensMagOp,
     _build_binary_model,
     _build_pspl_model,
     _dev_skycoord,
@@ -64,25 +64,113 @@ def test_pspl_model_floors_nonpositive_rho():
     assert float(model.parameters.rho) > 0
 
 
+# Binary-lens parameter vectors: [t_0, u_0, t_E, pi_E_N, pi_E_E, (rho), s, q, alpha]
+_P_BINARY_FS = np.array(
+    [2450000.0, 0.1, 20.0, 0.0, 0.0, 1e-3, 1.2, 0.01, 30.0]
+)
+_P_BINARY_PS = np.array([2450000.0, 0.1, 20.0, 0.0, 0.0, 1.2, 0.01, 30.0])
+
+
 def test_binary_method_selection_follows_finite_source_flag():
     """
     Given a binary-lens parameter vector,
     When the model is built with and without finite_source (use_rho),
     Then the finite-source method (VBM) is selected iff use_rho is True,
-      independent of the runtime rho value.
+      independent of the runtime rho value, and the point-source case gets
+      MulensModel's point-source method (asking VBBL for a rho-less model
+      raises inside MulensModel).
+
+    Note this asserts against the REAL model object, not a mocked
+    set_magnification_methods -- the mock is what let the point-source
+    "VBBL" selection ship broken.
     """
-    # Arrange: [t_0, u_0, t_E, pi_E_N, pi_E_E, (rho), s, q, alpha]
-    p_fs = np.array([2450000.0, 0.1, 20.0, 0.0, 0.0, 1e-3, 1.2, 0.01, 30.0])
-    p_ps = np.array([2450000.0, 0.1, 20.0, 0.0, 0.0, 1.2, 0.01, 30.0])
+    # Act
+    model_fs = _build_binary_model(
+        _P_BINARY_FS, COORDS, "auto_vbbl", use_rho=True
+    )
+    model_ps = _build_binary_model(
+        _P_BINARY_PS, COORDS, "auto_vbbl", use_rho=False
+    )
 
-    # Act / Assert
-    with patch.object(mm.Model, "set_magnification_methods") as set_methods:
-        _build_binary_model(p_fs, COORDS, "auto_vbbl", use_rho=True)
-        assert set_methods.call_args[0][0][1] == "VBM"
+    # Assert
+    assert model_fs.methods[1] == "VBM"
+    assert model_ps.methods[1] == "point_source"
 
-    with patch.object(mm.Model, "set_magnification_methods") as set_methods:
-        _build_binary_model(p_ps, COORDS, "auto_vbbl", use_rho=False)
-        assert set_methods.call_args[0][0][1] == "VBBL"
+
+def test_point_source_binary_model_yields_finite_magnifications():
+    """
+    Given a point-source binary lens (backend: mulensmodel, finite_source
+      false),
+    When magnifications are computed through the real MulensModel call path,
+    Then they are finite and above 1 -- the old "VBBL" selection made
+      MulensModel raise, which perform() turned into an all-NaN curve and
+      hence -inf logp for every proposal.
+    """
+    # Arrange
+    op = BinaryLensMagOp(COORDS, mag_method="auto_vbbl", use_rho=False)
+    times = np.linspace(2449980.0, 2450020.0, 41)
+    obs_pos = np.zeros((times.size, 3))
+    outputs = [[None]]
+
+    # Act
+    op.perform(None, [_P_BINARY_PS, times, obs_pos], outputs)
+    magnification = outputs[0][0]
+
+    # Assert
+    assert np.all(np.isfinite(magnification))
+    assert np.all(magnification > 1.0)
+
+
+def test_finite_source_binary_model_yields_finite_magnifications():
+    """
+    Given a finite-source binary lens (finite_source true, so VBM),
+    When magnifications are computed through the real MulensModel call path,
+    Then they are finite and above 1, and agree with the point-source result
+      because rho is small enough to be indistinguishable.
+    """
+    # Arrange
+    times = np.linspace(2449980.0, 2450020.0, 41)
+    obs_pos = np.zeros((times.size, 3))
+    op_fs = BinaryLensMagOp(COORDS, mag_method="auto_vbbl", use_rho=True)
+    op_ps = BinaryLensMagOp(COORDS, mag_method="auto_vbbl", use_rho=False)
+    out_fs, out_ps = [[None]], [[None]]
+
+    # Act
+    op_fs.perform(None, [_P_BINARY_FS, times, obs_pos], out_fs)
+    op_ps.perform(None, [_P_BINARY_PS, times, obs_pos], out_ps)
+
+    # Assert
+    assert np.all(np.isfinite(out_fs[0][0]))
+    assert np.all(out_fs[0][0] > 1.0)
+    np.testing.assert_allclose(out_fs[0][0], out_ps[0][0], rtol=1e-4)
+
+
+def test_mag_op_warns_once_when_falling_back_to_nan():
+    """
+    Given an Op configured with a magnification method MulensModel rejects,
+    When perform() is called twice,
+    Then both calls return NaN (so the sampler rejects the proposal) but a
+      single RuntimeWarning naming the underlying error is emitted -- the
+      silent all-NaN fallback is what hid the point-source binary bug.
+    """
+    # Arrange
+    op = BinaryLensMagOp(COORDS, mag_method="VBBL", use_rho=False)
+    times = np.linspace(2449980.0, 2450020.0, 11)
+    obs_pos = np.zeros((times.size, 3))
+    first, second = [[None]], [[None]]
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], first)
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], second)
+
+    # Assert
+    assert np.all(np.isnan(first[0][0]))
+    assert np.all(np.isnan(second[0][0]))
+    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(runtime) == 1
+    assert "VBBL" in str(runtime[0].message)
 
 
 def test_lens_rejects_missing_body_component():

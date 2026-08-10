@@ -1,3 +1,5 @@
+import warnings
+
 import astropy.units as u
 import MulensModel as mm
 import numpy as np
@@ -123,7 +125,14 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         model.set_magnification_methods(mag_method)
     elif mag_method == "auto_vbbl":
         # Keyed on the finite_source config flag, not the runtime rho value.
-        method = "VBM" if use_rho else "VBBL"
+        # Point source must NOT ask for VBBL/VBM: MulensModel's _check_methods
+        # only allows "point_source"/"point_source_point_lens" when the
+        # parameters carry no rho, and otherwise raises ValueError -- which
+        # perform() would swallow into an all-NaN (i.e. -inf logp) curve for
+        # every proposal.  "point_source" selects
+        # BinaryLensPointSourceMagnification, the exact binary point-source
+        # solver (it reproduces VBBL at rho -> 0 to machine precision).
+        method = "VBM" if use_rho else "point_source"
         model.set_magnification_methods([0.0, method])
     else:
         model.set_magnification_methods([0.0, mag_method])
@@ -157,6 +166,7 @@ class _MagOpBase(Op):
             bandpass  # None = no LD; str = apply u1 LD for this bandpass
         )
         self._coord_cache = {}
+        self._warned = False
 
     def infer_shape(self, node, input_shapes):
         return [input_shapes[1]]
@@ -181,10 +191,26 @@ class _MagOpBase(Op):
                     A = model.get_magnification(
                         times_np, satellite_skycoord=sat_coord
                     )
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
             # Invalid parameter combination (e.g. NaN source position from extreme
             # parallax values during sampler exploration). Return NaN so the
             # likelihood evaluates to -inf and the sampler rejects the proposal.
+            #
+            # Warn once per Op instance: a *misconfigured* backend raises here
+            # on every single proposal, which is indistinguishable from a
+            # rejected proposal unless the first one is reported (this is
+            # exactly how the point-source-binary "VBBL" bug stayed hidden).
+            if not self._warned:
+                self._warned = True
+                warnings.warn(
+                    f"{type(self).__name__}: MulensModel raised "
+                    f"{type(exc).__name__}: {exc} -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal. "
+                    "If this repeats for every proposal the backend is "
+                    "misconfigured, not merely exploring bad parameters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A)
 

@@ -47,6 +47,12 @@ _ORDER = [
     "alpha",
     "u1",
 ]
+# Slice of a full _draw() vector for the point-source, no-LD param layout
+# ([t_0, u_0, t_E, pi_E_N, pi_E_E, s, q, alpha]): drop rho and u1, keep the
+# draw scatter conventions identical to the finite-source comparison.
+_POINT_SOURCE_INDEX = [
+    _ORDER.index(k) for k in _ORDER if k not in ("rho", "u1")
+]
 
 
 def _times_and_obs(n=400, span=150.0):
@@ -129,6 +135,79 @@ def test_vbm_direct_matches_mulensmodel_binary_with_parallax_and_ld():
         A_dir = f_dir(p, times, obs)
         worst = max(worst, np.max(np.abs(A_mm - A_dir) / np.abs(A_mm)))
     assert worst < 1e-8, f"direct path deviates from MulensModel: {worst:.2e}"
+
+
+@pytest.mark.parametrize(
+    "grid_name, n, span, min_peak",
+    [
+        ("wide", 400, 150.0, 5.0),
+        ("caustic", 600, 2.0, 50.0),
+    ],
+)
+def test_vbm_direct_matches_mulensmodel_binary_point_source(
+    grid_name, n, span, min_peak
+):
+    """
+    Given a POINT-source binary lens with satellite parallax and random
+      parameter draws around the DC128 MAP,
+    When both the MulensModel Op (auto_vbbl -> "point_source") and the
+      direct-VBM Op (BinaryMag0) are evaluated,
+    Then magnifications are finite and agree per-point to rtol 1e-9.
+
+    This is the first independent check of vbm_direct's point-source binary
+    magnification. It could not exist before: the MulensModel Op selected
+    "VBBL" for a rho-less model, MulensModel refused, and perform() returned
+    all-NaN -- so every A/B test in this file used use_rho=True.
+
+    Two grids, because the wide one alone would prove nothing here: at 0.75 d
+    sampling the narrow central caustic falls between epochs and the peak only
+    reaches A ~ 11.  The "caustic" grid resolves it (A ~ 60-600 depending on
+    the draw, up to ~63x the equivalent single-lens magnification), which is
+    where two independent root solvers are most likely to part ways.
+    min_peak asserts the grid really does sample that structure, so the test
+    cannot silently decay into a flat-wings comparison.
+
+    Both engines are exact analytic point-source solvers (MulensModel's
+    BinaryLensPointSourceMagnification vs VBM's BinaryMag0), not the shared
+    VBM kernel the finite-source test compares, so agreement is a genuine
+    cross-implementation result rather than a tautology.
+    """
+    # Arrange
+    times, obs = _times_and_obs(n=n, span=span)
+    f_mm = _compile(
+        BinaryLensMagOp(coords=_COORDS, mag_method="auto_vbbl", use_rho=False)
+    )
+    f_dir = _compile(
+        VBMDirectMagOp(coords=_COORDS, n_companions=1, use_rho=False)
+    )
+
+    # Act
+    rng = np.random.default_rng(42)
+    worst = 0.0
+    peak = 0.0
+    for _ in range(25):
+        p = _draw(rng)[_POINT_SOURCE_INDEX]
+        A_mm = f_mm(p, times, obs)
+        A_dir = f_dir(p, times, obs)
+        assert np.all(np.isfinite(A_mm)), f"{grid_name}: MulensModel gave NaN"
+        assert np.all(np.isfinite(A_dir)), f"{grid_name}: direct path gave NaN"
+        worst = max(worst, np.max(np.abs(A_mm - A_dir) / np.abs(A_mm)))
+        peak = max(peak, A_mm.max())
+
+    # Assert
+    assert peak > min_peak, (
+        f"{grid_name} grid never reached the caustic (peak A={peak:.2f}); "
+        "the comparison would be vacuous"
+    )
+    # Observed worst: 7.7e-15 (wide), 1.7e-12 (caustic); the caustic grid is
+    # worse because point-source magnification diverges at a fold and the
+    # 5th-order complex root solve is ill-conditioned there.  1e-9 keeps ~500x
+    # headroom over that while staying far below any convention error (an
+    # alpha or pi_E sign flip moves these by O(0.1-100), not O(1e-9)).
+    assert worst < 1e-9, (
+        f"{grid_name}: direct point-source path deviates from "
+        f"MulensModel: {worst:.2e}"
+    )
 
 
 def test_multi_lens_frame_reduces_to_binary():
