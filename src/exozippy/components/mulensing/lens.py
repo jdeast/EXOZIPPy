@@ -400,7 +400,8 @@ class Lens(Component):
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a component
         or instance that does not exist (instead of an AttributeError deep in
-        the model build), or if the PRIMARY lens body is not a star."""
+        the model build), if the PRIMARY lens body is not a star, or if any
+        SOURCE body is not a star."""
         for i in range(self.n_elements):
             for role, bodies in (
                 ("lens", self.lens_bodies[i]),
@@ -451,6 +452,34 @@ class Lens(Component):
                     f"a 'star' block with a low star.<name>.logmass instead; "
                     f"logmass reaches -9 dex (1e-9 solMass)."
                 )
+
+            # EVERY source body must be a star -- unlike the lens side there
+            # is no companion position to spare.  source_map is index-only
+            # exactly like lens_map, and the whole source-side chain resolves
+            # through the star component: star.distance[source_map],
+            # star.pm_ra/pm_dec[source_map], star.radius[source_map], and
+            # get_magnification's star.ra/dec[source_ndx].  The multi-source
+            # (2S) case does not change this: each source body is an
+            # independently monitored luminous star with its own trajectory
+            # and flux ratio, so every slot is star-only.
+            for s_type, s_idx in self.source_bodies[i]:
+                if s_type != "star":
+                    raise ValueError(
+                        f"lens.{i}: source body '{s_type}.{s_idx}' must be a "
+                        f"star -- a microlensing source is the background "
+                        f"star being monitored for magnification, and a "
+                        f"planet is not a self-luminous point source at "
+                        f"bulge distances, so a non-star source is "
+                        f"physically meaningless rather than merely "
+                        f"unimplemented.  source_map carries only an index "
+                        f"and the source-side physics resolves through "
+                        f"star.distance / star.pm_ra / star.pm_dec / "
+                        f"star.radius / star.ra / star.dec, so this would "
+                        f"silently model star.{s_idx} instead of "
+                        f"'{s_type}.{s_idx}'.  A genuinely faint source (a "
+                        f"brown dwarf, say) is a 'star' block with a low "
+                        f"star.<name>.logmass."
+                    )
 
     # ------------------------------------------------------------------
     # Lifecycle stages

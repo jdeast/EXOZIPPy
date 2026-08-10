@@ -294,6 +294,103 @@ def test_lens_accepts_a_stellar_companion_and_a_plain_single_star_lens():
     assert single.lens_bodies[0] == [("star", 0)]
 
 
+def test_lens_rejects_a_non_star_source_body():
+    """
+    Given a lens config whose source body is a planet,
+    When register_parameters validates the body references,
+    Then a ValueError explains that a source must be a star, names the star
+      that would otherwise have been modeled, and gives the workaround.
+
+    source_map is index-only exactly like lens_map and the whole
+    source-side chain resolves through the star component
+    (star.distance[source_map], star.pm_*[source_map],
+    star.radius[source_map], get_magnification's star.ra/dec), so the
+    failure mode is identical to the lens-primary one.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["planet.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="must be a") as excinfo:
+        lens.register_parameters(system)
+    message = str(excinfo.value)
+    assert "planet.0" in message, "the offending entry must be named"
+    assert "star.0" in message, "name the star that would be modeled instead"
+    assert "logmass" in message, "the workaround must be spelled out"
+
+
+def test_lens_rejects_a_non_star_body_in_a_second_source_slot():
+    """
+    Given a binary-source (2S) config whose SECOND source body is a planet,
+    When the body references are validated,
+    Then it is rejected too -- unlike the lens side, there is no companion
+      position where a non-star body is meaningful: every source body is an
+      independently monitored luminous star.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1", "planet.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="source body 'planet.0'"):
+        lens._validate_bodies(system)
+
+
+def test_lens_accepts_multiple_star_sources():
+    """
+    Given a binary-source (2S) config whose sources are both stars,
+    When the body references are validated,
+    Then no error is raised and both source slots survive.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1", "star.2"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    # Act
+    lens._validate_bodies(system)
+
+    # Assert
+    assert lens.source_bodies[0] == [("star", 1), ("star", 2)]
+    assert lens.n_sources == 2
+
+
+def test_omitted_sources_key_with_one_star_is_caught_not_silent():
+    """
+    Given a config that omits 'sources:' entirely while defining only ONE
+      star (so the source_ndx default of 1 points at a star that does not
+      exist),
+    When the body references are validated,
+    Then the existing out-of-range check catches it with a clear message.
+
+    Recorded because the default is easy to trip: 'sources' defaults to
+    [("star", source_ndx)] with source_ndx = 1, i.e. the SECOND star.
+    """
+    # Arrange
+    lens = Lens([{}], _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="out of range") as excinfo:
+        lens._validate_bodies(system)
+    assert "star.1" in str(excinfo.value)
+
+
 def test_lens_rejects_malformed_body_reference():
     """
     Given a body reference without an index ('planet' instead of 'planet.0'),
