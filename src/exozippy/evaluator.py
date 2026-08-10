@@ -171,6 +171,23 @@ def _param_structure(user_params: Optional[dict]) -> dict:
     return struct
 
 
+def structural_payload(
+    config: dict, user_params: Optional[dict] = None
+) -> Dict[str, Any]:
+    """The structural view :func:`structural_hash` hashes, as a plain dict.
+
+    Split out so a consumer that detects a hash mismatch can say WHAT
+    changed instead of only THAT something did (see
+    ``exozippy.trace_meta``).  The hash is sha256 of this dict's
+    sort_keys JSON, so the two can never describe different things.
+    """
+    return {
+        "components": _component_skeleton(config or {}),
+        "files": sorted(_gather_files(config or {})),
+        "params": _param_structure(user_params),
+    }
+
+
 def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
     """Stable structural fingerprint of a system configuration.
 
@@ -181,12 +198,9 @@ def structural_hash(config: dict, user_params: Optional[dict] = None) -> str:
     hash may share the same compiled evaluator; a changed hash means the GUI
     must re-solve.
     """
-    payload = {
-        "components": _component_skeleton(config or {}),
-        "files": sorted(_gather_files(config or {})),
-        "params": _param_structure(user_params),
-    }
-    blob = json.dumps(payload, sort_keys=True, default=str)
+    blob = json.dumps(
+        structural_payload(config, user_params), sort_keys=True, default=str
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 

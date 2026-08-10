@@ -34,6 +34,7 @@ import yaml
 from .logger import setup_logging
 from .outputs.report_pipeline import build_mode_reports
 from .system import System
+from .trace_meta import check_trace_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,13 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     system.build_model()
 
     idata = az.from_netcdf(str(trace_path))
+
+    # This CLI rewrites the published tables from the loaded draws, so the
+    # trace must belong to the model this config builds. A structural
+    # mismatch raises here exactly as it does in run.py: mode-identification
+    # problems are recoverable and only warn (see below), but draws sampled
+    # from a different model are not something this tool can reprocess.
+    check_trace_freshness(idata, system, trace_path)
 
     feature_var_list = feature_vars.split(",") if feature_vars else None
 

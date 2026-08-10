@@ -16,6 +16,7 @@ from exozippy.components.component import Component
 from exozippy.components.factory import discover_components
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
+from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
 
 """
@@ -50,6 +51,17 @@ class System(Component):
                 )
             with open(str(user_params_file), "r") as f:
                 self.user_params = yaml.safe_load(f)
+
+        # Structural fingerprint of the inputs, taken NOW -- before
+        # ConfigManager standardizes/strips them and before prepare() lets
+        # components push hints back into the config, so the same inputs
+        # always fingerprint the same way regardless of lifecycle stage.
+        # Stamped into the saved trace and checked on every reload
+        # (exozippy.trace_meta).
+        self._structural_payload = structural_payload(
+            self.config, self.user_params
+        )
+        self._structural_hash = structural_hash(self.config, self.user_params)
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
@@ -88,6 +100,17 @@ class System(Component):
         for comp_name, comp in self.active_components.items():
             for idx, name in enumerate(comp.names):
                 entity_directory[name] = (comp, idx)
+
+    def structural_fingerprint(self):
+        """``(hash, payload)`` of the config + params this System was built from.
+
+        The hash is ``evaluator.structural_hash``; the payload is the dict it
+        was taken over, kept so a mismatch can name what changed.  Both are
+        snapshotted in ``__init__`` because the inputs are mutated afterwards
+        (ConfigManager standardizes keys and strips link strings; the solver
+        injects resolved initvals back in).
+        """
+        return self._structural_hash, self._structural_payload
 
     def prepare(self):
         # ==========================================================

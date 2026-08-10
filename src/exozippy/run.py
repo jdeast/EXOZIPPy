@@ -59,6 +59,7 @@ from .mkparam import mkprior
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
+from .trace_meta import check_trace_freshness, stamp_structural_metadata
 from .whitening import load_whitening, measure_and_whiten, save_whitening
 
 logger = logging.getLogger(__name__)
@@ -398,6 +399,13 @@ def _run_fit(config, gui, user_params=None):
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
             idata = az.from_netcdf(trace_path)
+            # ...but only if it was sampled from THIS model. The raw draws
+            # decode through this build's bounds/links/whitening, so a trace
+            # from an edited config would be relabeled and reported as if it
+            # belonged here. Unlike the whitening reload above, which can
+            # honestly re-measure on a mismatch, there is no load-time repair
+            # for foreign draws: a mismatch raises (trace_meta).
+            check_trace_freshness(idata, system, trace_path)
         else:
             # do the sampling and save the results
             gui.phase("sampling")
@@ -586,6 +594,9 @@ def _run_fit(config, gui, user_params=None):
                 idata, system.get_parameter_lookup()
             )
             _sanitize_netcdf_attrs(idata)
+            # Stamp the structural fingerprint of the config + params that
+            # produced these draws, so any later reload can verify it.
+            stamp_structural_metadata(idata, system)
             idata.to_netcdf(trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
