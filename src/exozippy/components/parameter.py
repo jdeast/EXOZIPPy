@@ -879,7 +879,6 @@ class Parameter:
 
         # 5b. USER-DEFINED ELEMENT LINKS (dynamic bounds + hard links)
         links = self.element_links or {}
-        dyn_span_logps = []
         if links:
             if expr_raw is not None and any(
                 k in links for k in ("hard", "lower", "upper")
@@ -917,12 +916,17 @@ class Parameter:
                     pt.clip(lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
                 )
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
-                if is_sampled[i]:
-                    # Normalize the conditional uniform: p(val | bounds) = 1/span.
-                    # For static bounds this term is a constant and is omitted;
-                    # for dynamic bounds it must be included or the bound
-                    # parameter feels a spurious flat-prior volume reward.
-                    dyn_span_logps.append(-pt.log(span_t))
+                # NO -log(span) normalization term here, deliberately.  The
+                # reparameterization already supplies it: with lq = c + s*raw
+                # and section C cancelling the raw N(0,1), the raw-space
+                # density is q(1-q), and dval/draw = span*q*(1-q)*s, so
+                # p(val) = 1/(sqrt(2pi)*s*span) -- exactly U(lo, up), whose
+                # integral over the interval is independent of span for ANY
+                # span, dynamic or not.  Adding -log(span) would multiply the
+                # joint by another 1/span and reward the bound-source
+                # parameter for shrinking the interval (an ordering link
+                # lower: star.B.av over av in [0, 100] would give av_B a
+                # spurious 1/(100 - av_B) factor pushing it to the wall).
 
             # Hard links (initval link with sigma=0): the element deterministically
             # tracks its expression.  Same-parameter references are applied in
@@ -1017,10 +1021,6 @@ class Parameter:
                 f"link_mu.{self.label}.{i}",
                 -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2,
             )
-
-        # A3. Normalization of dynamic-bound conditional uniform priors.
-        if dyn_span_logps:
-            pm.Potential(f"link_span.{self.label}", sum(dyn_span_logps))
 
         # B. Soft bounds for derived params (and the rare half-bounded sampled
         #    param, where only one bound is finite so the logit transform does

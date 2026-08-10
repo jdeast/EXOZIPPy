@@ -24,8 +24,11 @@ Semantics
   engine solves the starting value from the expression; no runtime tie).
 - mu link (sigma > 0)       -> same runtime behavior as a soft initval link.
 - lower/upper link          -> the sampling transform maps into the dynamic
-  interval, so the bound can never be violated.  A -log(span) potential
-  keeps the implied conditional prior a normalized uniform.
+  interval, so the bound can never be violated.  No normalization potential
+  is added: the logit reparameterization is already span-normalized (the
+  sigmoid Jacobian supplies the 1/span), so the induced conditional is
+  exactly U(lower, upper) and the marginal of the bound source is exactly
+  its own prior -- for any span, dynamic or static.
 - sigma link                -> evaluated once, numerically, from the
   relaxation-engine solution (a static snapshot, not a runtime tie).
   (init_scale is not linkable: it is obsolete user-side -- whitening scales

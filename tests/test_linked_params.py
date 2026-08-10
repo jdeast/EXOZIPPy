@@ -170,7 +170,8 @@ def test_lower_bound_link_enforces_ordering_constraint():
     Given star.A.av = {lower: star.B.av},
     When the model is built,
     Then A's extinction can never fall below B's, for any raw values,
-    and the normalized-span potential is present.
+    and no span-normalization potential is added (the logit
+    reparameterization is already span-normalized -- see review 1.5).
     """
     # ARRANGE / ACT
     user_params = {
@@ -179,9 +180,9 @@ def test_lower_bound_link_enforces_ordering_constraint():
     }
     cm, star, model = _build_star_param(user_params, ["av"])
 
-    # ASSERT: both sampled, span normalization potential registered
+    # ASSERT: both sampled, no -log(span) potential
     assert list(star.av.is_sampled) == [True, True]
-    assert any(p.name == "link_span.star.av" for p in model.potentials)
+    assert not any(p.name.startswith("link_span") for p in model.potentials)
 
     # ASSERT: constraint holds across the raw space, including extremes
     point = model.initial_point()
@@ -191,6 +192,65 @@ def test_lower_bound_link_enforces_ordering_constraint():
             av = _eval(model, star.av.value, point)
             assert av[0] >= av[1] - 1e-12
             assert av[0] <= 100.0 + 1e-9
+
+
+def _raw_from_q(param, i, q):
+    """Raw coordinate at which element i's sigmoid coordinate equals q."""
+    tf = param._raw_transform
+    lq = np.log(q / (1.0 - q))
+    return (lq - tf["logit_q_inits"][i]) / tf["init_scale_logits"][i]
+
+
+def test_dynamic_bound_link_leaves_the_bound_source_prior_unbiased():
+    """
+    Given star.A.av = {lower: star.B.av} and no likelihood,
+    When the bounded element A is marginalized out by quadrature,
+    Then the implied marginal density of the bound SOURCE av_B is flat, i.e.
+    exactly its own U(0, 100) prior -- carrying a dynamic bound costs av_B
+    nothing.  A -log(span) potential would instead make it proportional to
+    1/(100 - av_B), a factor ~50 preference for the wall across the spans
+    probed here (review 1.5).
+    """
+    # ARRANGE
+    user_params = {
+        "star.A.av": {"initval": 0.7, "lower": "star.B.av"},
+        "star.B.av": {"initval": 0.5},
+    }
+    cm, star, model = _build_star_param(user_params, ["av"])
+    logp_c = model.compile_logp()
+    point = model.initial_point()
+    tf = star.av._raw_transform
+    s_a = tf["init_scale_logits"][0]
+
+    # Integrate A out in its own sigmoid coordinate q rather than in raw:
+    # the measure becomes dq / (s_a * q * (1-q)) and the integrand is smooth
+    # and bounded over the whole interval.
+    q_a = np.linspace(1e-6, 1.0 - 1e-6, 201)
+    raw_a = _raw_from_q(star.av, 0, q_a)
+
+    # ACT: p(av_B) at spans from 99.5% down to 50% of the static interval.
+    # Dividing the raw-space marginal by B's own sigmoid Jacobian factor
+    # q_b*(1-q_b) (the rest of dav_B/draw_b is the constant span*s_b)
+    # converts it to a density in av_B.
+    q_bs = (0.005, 0.05, 0.2, 0.5)
+    p_avb = []
+    for q_b in q_bs:
+        raw_b = _raw_from_q(star.av, 1, q_b)
+
+        def _logp(ra):
+            point["star.av_raw"] = np.array([ra, raw_b])
+            return float(logp_c(point))
+
+        dens = np.exp(np.array([_logp(ra) for ra in raw_a]))
+        marginal = np.trapezoid(dens / (s_a * q_a * (1.0 - q_a)), q_a)
+        p_avb.append(marginal / (q_b * (1.0 - q_b)))
+
+    # ASSERT: flat in av_B (av_B = 100*q_b here, so 0.5 -> 50 mag)
+    p_avb = np.array(p_avb)
+    assert np.allclose(p_avb, p_avb[0], rtol=1e-6), (
+        f"marginal p(av_B) varies with the span: "
+        f"{dict(zip([100.0 * q for q in q_bs], p_avb))}"
+    )
 
 
 # ----------------------------------------------------------------------
