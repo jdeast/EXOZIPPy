@@ -1,5 +1,7 @@
 """Tests for the GalacticModel component (register_parameters, build_likelihood)."""
 
+import math
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
@@ -170,7 +172,8 @@ def test_supported_imfs_are_accepted_case_insensitively(imf):
 
 
 # ---------------------------------------------------------------------------
-# Salpeter IMF: the change of variables into the sampled log10-mass coordinate
+# IMF priors: the change of variables into the sampled log10-mass coordinate,
+# and the normalization over that coordinate's bounded support
 # ---------------------------------------------------------------------------
 
 
@@ -201,6 +204,42 @@ def _salpeter_analytic(logmass):
         / (k * ln10)
     )
     return k * ln10 * np.asarray(logmass) - log_z
+
+
+# Chabrier 2003 system-IMF parameters, as used by the component.
+_LOG_MC = np.log10(0.22)
+_SIGMA_IMF = 0.57
+
+
+def _chabrier_log_norm():
+    """log Z for the Chabrier lognormal truncated to the logmass bounds --
+    derived here independently of the implementation (stdlib math.erf, not
+    the component's scipy/np.select branches).
+
+    p(x) ~ exp(-0.5 ((x - mu)/sigma)^2), so with u = (x - mu)/sigma
+        Z = int_lo^hi exp(-u^2/2) sigma du
+          = sigma sqrt(2 pi) [Phi(u_hi) - Phi(u_lo)]
+    """
+    u_lo = (_LOGMASS_LOWER - _LOG_MC) / _SIGMA_IMF
+    u_hi = (_LOGMASS_UPPER - _LOG_MC) / _SIGMA_IMF
+    phi_diff = 0.5 * (
+        math.erf(u_hi / math.sqrt(2.0)) - math.erf(u_lo / math.sqrt(2.0))
+    )
+    return (
+        math.log(_SIGMA_IMF)
+        + 0.5 * math.log(2.0 * math.pi)
+        + math.log(phi_diff)
+    )
+
+
+def _chabrier_analytic(logmass):
+    """log p(log10 M) for the Chabrier lognormal, normalized over the
+    logmass bounds."""
+    x = np.asarray(logmass)
+    return -0.5 * ((x - _LOG_MC) / _SIGMA_IMF) ** 2 - _chabrier_log_norm()
+
+
+_ANALYTIC = {"salpeter": _salpeter_analytic, "chabrier": _chabrier_analytic}
 
 
 def test_salpeter_imf_logp_matches_the_analytic_power_law():
@@ -254,17 +293,27 @@ def test_salpeter_imf_slope_is_the_mass_space_exponent_plus_one():
     )
 
 
-def test_salpeter_imf_prior_is_normalized_over_the_logmass_bounds():
+@pytest.mark.parametrize("imf", ["chabrier", "salpeter"])
+def test_both_imf_priors_are_normalized_densities(imf):
     """
-    Given the Salpeter IMF prior for a single star,
+    Given either supported IMF,
     When exp(logp) is integrated over the sampled logmass support,
-    Then the integral is 1: the branch is a proper normalized density, so
-      its logp is not offset by an arbitrary constant.
+    Then the integral is 1.
+
+    BOTH branches must be proper normalized densities over the SAME
+    support, otherwise switching IMF moves logp by an arbitrary offset
+    instead of by a meaningful amount.  The chabrier branch dropped its
+    truncated-lognormal constant until 2026-08, which is exactly that
+    asymmetry.
+
+    The Potential sums over stars, so the per-element density comes from
+    the analytic form; the second assertion is what ties that form to the
+    implementation (evaluated on the same grid, as 200001 "stars").
     """
     # Arrange
     grid = np.linspace(_LOGMASS_LOWER, _LOGMASS_UPPER, 200001)
-    cfg = [{"IMF": "salpeter"}]
-    gm = _make_gm(config=cfg)
+    analytic = _ANALYTIC[imf]
+    gm = _make_gm(config=[{"IMF": imf}])
     system = _MockSystem()
     system.star.logmass = _MockParam(
         grid, lower=_LOGMASS_LOWER, upper=_LOGMASS_UPPER
@@ -273,15 +322,12 @@ def test_salpeter_imf_prior_is_normalized_over_the_logmass_bounds():
     # Act
     with pm.Model() as model:
         gm.build_likelihood(model, system)
-    # The Potential sums over stars; rebuild the per-element vector from the
-    # analytic form the previous test pinned against the implementation.
-    dens = np.exp(_salpeter_analytic(grid))
-    integral = np.trapezoid(dens, grid)
+    integral = np.trapezoid(np.exp(analytic(grid)), grid)
     total = float(model["galacticmodel.imf_prior"].eval())
 
     # Assert
     assert integral == pytest.approx(1.0, rel=1e-6)
-    assert total == pytest.approx(float(np.sum(_salpeter_analytic(grid))))
+    assert total == pytest.approx(float(np.sum(analytic(grid))), rel=1e-12)
 
 
 def test_salpeter_imf_gradient_is_finite():
@@ -314,15 +360,23 @@ def test_salpeter_imf_gradient_is_finite():
     assert np.allclose(grad, (1.0 - 2.35) * np.log(10.0))
 
 
-def test_chabrier_remains_the_default_and_is_bit_for_bit_unchanged():
+def test_chabrier_is_the_default_and_carries_the_truncation_normalizer():
     """
     Given a galacticmodel block with no IMF key,
     When both potentials are evaluated for the standard mock star,
-    Then they equal the values measured before the IMF option was wired up
-      (the default must not move when a new option is added).
+    Then the IMF prior is the historical unnormalized value MINUS the
+      truncated-lognormal constant (0.3568 nats per star), and the
+      kinematic prior is untouched.
+
+    The shift is deliberate and is the only thing that moved: normalizing
+    chabrier is what makes its logp comparable with salpeter's.  Any other
+    delta here means something else changed and must be investigated
+    rather than re-pinned.
     """
     # Arrange
     gm = _make_gm()
+    unnormalized = -0.19563864866861083  # measured before normalization
+    log_z = _chabrier_log_norm()
 
     # Act
     with pm.Model() as model:
@@ -330,9 +384,13 @@ def test_chabrier_remains_the_default_and_is_bit_for_bit_unchanged():
     imf = float(model["galacticmodel.imf_prior"].eval())
     kinematic = float(model["galacticmodel.kinematic_prior"].eval())
 
-    # Assert: baselines captured from master before the change
+    # Assert
     assert gm.imf == "chabrier"
-    assert imf == -0.19563864866861083
+    # the delta IS the normalization constant, one star
+    assert log_z == pytest.approx(0.3568195998937742, rel=1e-12)
+    assert imf - unnormalized == pytest.approx(-log_z, rel=1e-12)
+    assert imf == pytest.approx(-0.5524582485623850, rel=1e-12)
+    # untouched by the IMF change (baseline captured from master)
     assert kinematic == 10.09330069291524
 
 

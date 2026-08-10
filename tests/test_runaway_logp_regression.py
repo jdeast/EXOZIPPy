@@ -168,7 +168,13 @@ def _point(raw_dict):
 # anchors, R0 = 8.16 frame) nudged it to -953.817; the mu_rel helio->geo
 # frame fix (t_E/pi_E now derive from mu_rel_geo at t0_par) moved the
 # mulens likelihood at this raw point to -944.858.
-GOOD_EXPECTED_LP = -944.858
+# Re-measured 2026-08-10: normalizing the galacticmodel Chabrier IMF prior
+# over the sampled logmass support (so it is comparable with the new
+# IMF: Salpeter option) subtracts the truncated-lognormal constant
+# log(sigma*sqrt(2pi)*(Phi(u_hi) - Phi(u_lo))) = +0.3568196 nats PER STAR.
+# This config has two (star.Lens, star.Source), so the shift is exactly
+# -0.7136392 and nothing else moved.
+GOOD_EXPECTED_LP = -945.5716
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

@@ -5,6 +5,7 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 from astropy.coordinates import CartesianDifferential, Galactocentric, SkyCoord
+from scipy.special import erf, erfc
 
 from exozippy.components.component import Component
 from exozippy.constants import (
@@ -76,6 +77,37 @@ GALACTOCENTRIC_FRAME = Galactocentric(
 )
 
 
+def _sampled_bounds(param):
+    """(lower, upper) of a Parameter's hard support as float arrays.
+
+    Returns None when the bounds are missing, non-finite, or symbolic, which
+    the IMF normalizers treat as "leave this prior unnormalized" -- a
+    constant offset never changes the sampling, so a bound the component
+    cannot read is not worth failing a fit over.
+    """
+    try:
+        # atleast_1d: a scalar bound must still broadcast against the
+        # (n_star,) logmass vector, and np.select wants real arrays.
+        lower = np.atleast_1d(np.asarray(param.lower, dtype=float))
+        upper = np.atleast_1d(np.asarray(param.upper, dtype=float))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+        return None
+    return lower, upper
+
+
+def _unnormalized_warning():
+    logger.warning(
+        "[galacticmodel] Cannot read finite log10-mass bounds; the IMF "
+        "prior is left unnormalized (harmless for sampling, but its logp "
+        "is offset by an unknown constant and is not comparable across "
+        "IMF choices)."
+    )
+    return 0.0
+
+
 def _power_law_log_norm(k, param):
     """log of the normalizer of p(x) ~ 10^(k x) over x in [lower, upper].
 
@@ -87,24 +119,11 @@ def _power_law_log_norm(k, param):
     which is finite for any k as long as both bounds are.  Evaluated as
     logdiffexp(., .) - log(|k| ln10) so the exponentials never overflow
     (10^(k*lo) is 1e12 already at the defaults.yaml floor of -9 dex).
-
-    Returns 0.0 (unnormalized, with a warning) when the bounds are missing,
-    non-finite, or symbolic -- a constant offset never changes the sampling,
-    so a bound the component cannot read is not worth failing a fit over.
     """
-    try:
-        lower = np.asarray(param.lower, dtype=float)
-        upper = np.asarray(param.upper, dtype=float)
-    except (AttributeError, TypeError, ValueError):
-        lower = upper = np.asarray(np.nan)
-
-    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
-        logger.warning(
-            "[galacticmodel] Cannot read finite log10-mass bounds; the "
-            "power-law IMF prior is left unnormalized (harmless for "
-            "sampling, but its logp is offset by an unknown constant)."
-        )
-        return 0.0
+    bounds = _sampled_bounds(param)
+    if bounds is None:
+        return _unnormalized_warning()
+    lower, upper = bounds
 
     if k == 0.0:  # uniform in log10 M
         return np.log(upper - lower)
@@ -113,6 +132,54 @@ def _power_law_log_norm(k, param):
     a, b = k * upper * ln10, k * lower * ln10
     hi, lo = np.maximum(a, b), np.minimum(a, b)
     return hi + np.log1p(-np.exp(lo - hi)) - np.log(abs(k) * ln10)
+
+
+def _lognormal_log_norm(mu, sigma, param):
+    """log of the normalizer of p(x) ~ exp(-0.5((x-mu)/sigma)^2) over the
+    Parameter's hard support [lower, upper].
+
+    With u = (x - mu)/sigma,
+
+        Z = int_lo^hi exp(-u^2/2) sigma du
+          = sigma sqrt(2 pi) [Phi(u_hi) - Phi(u_lo)]
+
+    so log Z = log(sigma) + 0.5 log(2 pi) + log(Phi(u_hi) - Phi(u_lo)).
+
+    The bracket is computed from erf/erfc rather than as a difference of
+    CDFs, choosing the branch whose two terms cannot cancel:
+      - both bounds above the mean -> erfc(z_lo) - erfc(z_hi), two small
+        positive numbers (a Phi difference would be 1-eps minus 1-eps',
+        which throws away every significant digit once the bounds are a few
+        sigma out; at 5 and 6 sigma only ~7 digits survive in float64);
+      - both below -> the mirrored erfc form;
+      - straddling -> erf(z_hi) - erf(z_lo), whose terms have opposite
+        signs, so subtracting them is exact.
+    All three are evaluated and selected elementwise; none can overflow
+    (erf is bounded, erfc saturates at 2 or underflows to 0).
+    """
+    bounds = _sampled_bounds(param)
+    if bounds is None:
+        return _unnormalized_warning()
+    lower, upper = bounds
+
+    # z = u / sqrt(2), so Phi(u) = 0.5 erfc(-z)
+    z_lo = (lower - mu) / (sigma * np.sqrt(2.0))
+    z_hi = (upper - mu) / (sigma * np.sqrt(2.0))
+
+    mass = 0.5 * np.select(
+        [z_lo >= 0.0, z_hi <= 0.0],
+        [
+            erfc(z_lo) - erfc(z_hi),
+            erfc(-z_hi) - erfc(-z_lo),
+        ],
+        default=erf(z_hi) - erf(z_lo),
+    )
+
+    if not np.all(np.isfinite(mass)) or np.any(mass <= 0.0):
+        # Support so far into a tail that its probability mass underflows.
+        return _unnormalized_warning()
+
+    return np.log(sigma) + 0.5 * np.log(2.0 * np.pi) + np.log(mass)
 
 
 class GalacticModel(Component):
@@ -169,9 +236,10 @@ class GalacticModel(Component):
                     "Initial mass function for the stellar mass prior "
                     "(default 'chabrier'): 'chabrier' is the Chabrier 2003 "
                     "system IMF, a lognormal in log10 mass; 'salpeter' is "
-                    "the Salpeter 1955 power law dN/dM ~ M^-2.35, "
-                    "normalized over the sampled logmass bounds.  Anything "
-                    "else raises."
+                    "the Salpeter 1955 power law dN/dM ~ M^-2.35.  Both are "
+                    "normalized over the sampled logmass bounds, so their "
+                    "logp values are directly comparable.  Anything else "
+                    "raises."
                 ),
             },
             {
@@ -308,16 +376,18 @@ class GalacticModel(Component):
             # Salpeter tail but the low-mass end is usually where the
             # unconstrained NUTS particles fall into the abyss.
             #
-            # Deliberately NOT normalized: the truncated-lognormal constant
-            #   log(sigma*sqrt(2pi)*(Phi((up-mu)/sigma) - Phi((lo-mu)/sigma)))
-            # is dropped, so this branch's logp carries an arbitrary offset
-            # and is NOT comparable with the (normalized) Salpeter branch's.
-            # Adding it would shift every archived logp for the default
-            # configuration; do that as its own change if cross-IMF logp
-            # comparison is ever wanted.
+            # Normalized over the SAME star.logmass support the power law
+            # uses, so both IMFs are proper densities and switching between
+            # them moves logp by a meaningful amount rather than by an
+            # arbitrary offset.  The truncated-lognormal constant is
+            #   log(sigma) + 0.5 log(2 pi) + log(Phi(u_hi) - Phi(u_lo)),
+            # +0.3568 nats per star at the defaults.yaml bounds (so every
+            # archived logp for the default config shifts down by that much
+            # times the number of stars -- see the re-pinned baselines in
+            # tests/test_runaway_logp_regression.py).
             imf_logp = -0.5 * pt.sqr(
                 (stars.logmass.value - log_Mc) / sigma_imf
-            )
+            ) - _lognormal_log_norm(log_Mc, sigma_imf, stars.logmass)
 
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
         ######
