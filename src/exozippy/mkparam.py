@@ -36,6 +36,38 @@ def _find_existing(existing_params, comp_key, idx, name, param):
     return None, None
 
 
+def _apply_existing_constraints(entry, existing_entry):
+    """Layer an existing params entry's constraint fields onto a fresh entry.
+
+    ``entry`` already carries the new ``initval`` (the trace MAP, or the
+    length-K seed list). The existing entry's mu/sigma/bounds are copied over
+    unchanged -- mu is the prior center, not the starting point, so it must
+    never drift toward the MAP.
+
+    If the original carried a Gaussian prior (sigma > 0) but no explicit mu,
+    its initval WAS the prior center (``Parameter.build_pymc`` centers the
+    potential on initval whenever mu is absent, for sampled and derived
+    parameters alike), so promote it to mu. Without the promotion the prior
+    would silently follow the MAP on every successive mkprior run.
+
+    Returns ``entry`` (mutated in place) for convenience.
+    """
+    if not isinstance(existing_entry, dict):
+        return entry
+    for prior_key in ("mu", "sigma", "lower", "upper"):
+        if prior_key in existing_entry:
+            entry[prior_key] = existing_entry[prior_key]
+    existing_sigma = existing_entry.get("sigma")
+    if (
+        existing_sigma is not None
+        and float(existing_sigma) != 0
+        and "mu" not in existing_entry
+        and "initval" in existing_entry
+    ):
+        entry["mu"] = existing_entry["initval"]
+    return entry
+
+
 def _normalize_key(key, config):
     """Rewrite comp.0.param index notation to comp.Name.param for readability."""
     parts = key.split(".", 2)
@@ -315,6 +347,9 @@ def mkprior(
 
     output = {}
     consumed_existing = set()
+    # out_key -> (comp_key, element index, instance name), so the direction-pair
+    # -> angle pass below can look the angle's existing entry up the same way.
+    key_context = {}
 
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
@@ -352,31 +387,15 @@ def mkprior(
 
             # Set initval to the seed value(s) so the next run starts there: a
             # scalar for single-seed, a length-K list for multi-seed (P4).
-            # Preserve mu/sigma/bounds from the existing entry unchanged — mu is
-            # the prior center, not the starting point, so it must not move.
+            # mu/sigma/bounds carry over from the existing entry unchanged.
             # No init_scale: whitening scales are measured from the data at
             # startup, and the key would be warn-ignored anyway.
-            entry = {
-                "initval": mv if K == 1 else mv_list,
-            }
-            if isinstance(existing_entry, dict):
-                for prior_key in ("mu", "sigma", "lower", "upper"):
-                    if prior_key in existing_entry:
-                        entry[prior_key] = existing_entry[prior_key]
-                # If the original had a Gaussian prior (sigma > 0) but no
-                # explicit mu, the original initval was the prior center.
-                # Promote it to mu so the prior doesn't shift as initval
-                # moves to the MAP on successive mkparam runs.
-                existing_sigma = existing_entry.get("sigma")
-                if (
-                    existing_sigma is not None
-                    and float(existing_sigma) != 0
-                    and "mu" not in existing_entry
-                    and "initval" in existing_entry
-                ):
-                    entry["mu"] = existing_entry["initval"]
+            entry = _apply_existing_constraints(
+                {"initval": mv if K == 1 else mv_list}, existing_entry
+            )
 
             output[out_key] = entry
+            key_context[out_key] = (comp_key, i, name)
 
     # Convert direction-vector pairs (x, y) → their angle (degrees).
     # These pairs (lens xalpha/yalpha, orbit xbigomega/ybigomega) are sampled
@@ -411,9 +430,26 @@ def mkprior(
             ]
             del output[x_key]
             del output[y_key]
-            output[f"{prefix}.{angle_name}"] = {
+            angle_entry = {
                 "initval": angles[0] if len(angles) == 1 else angles,
             }
+            # The angle itself is never in ``sampled_vars`` (only the x/y pair
+            # is), so its existing entry has NOT been consumed above.  Consume
+            # it here and merge it: a user prior/bound on alpha (or bigomega)
+            # survives, while the initval comes from the trace MAP.  Without
+            # this the pass-through loop below would overwrite the fresh MAP
+            # angle with the stale entry, breaking the restart contract.
+            comp_key, idx, name = key_context.get(
+                x_key, (prefix.split(".", 1)[0], 0, None)
+            )
+            existing_key, existing_entry = _find_existing(
+                existing_params, comp_key, idx, name, angle_name
+            )
+            if existing_key:
+                consumed_existing.add(existing_key)
+            output[f"{prefix}.{angle_name}"] = _apply_existing_constraints(
+                angle_entry, existing_entry
+            )
 
     _CONSTRAINT_FIELDS = {"sigma", "upper", "lower"}
 
