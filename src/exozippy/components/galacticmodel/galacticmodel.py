@@ -119,19 +119,28 @@ def _power_law_log_norm(k, param):
     which is finite for any k as long as both bounds are.  Evaluated as
     logdiffexp(., .) - log(|k| ln10) so the exponentials never overflow
     (10^(k*lo) is 1e12 already at the defaults.yaml floor of -9 dex).
+
+    ``k`` may be a scalar (one slope shared by every star, as Salpeter is) or
+    a per-star array (the FFP slope is per star and user-settable, and each
+    star carries its own bounds).  Both branches of the k == 0 split are
+    always evaluated and then selected, which is safe because neither can
+    produce a NaN: upper > lower always, and the power-law branch substitutes
+    k = 1 where k is zero.
     """
     bounds = _sampled_bounds(param)
     if bounds is None:
         return _unnormalized_warning()
     lower, upper = bounds
 
-    if k == 0.0:  # uniform in log10 M
-        return np.log(upper - lower)
-
     ln10 = np.log(10.0)
-    a, b = k * upper * ln10, k * lower * ln10
+    k = np.asarray(k, dtype=float)
+    is_flat = k == 0.0  # uniform in log10 M
+    k_safe = np.where(is_flat, 1.0, k)
+
+    a, b = k_safe * upper * ln10, k_safe * lower * ln10
     hi, lo = np.maximum(a, b), np.minimum(a, b)
-    return hi + np.log1p(-np.exp(lo - hi)) - np.log(abs(k) * ln10)
+    power_law = hi + np.log1p(-np.exp(lo - hi)) - np.log(np.abs(k_safe) * ln10)
+    return np.where(is_flat, np.log(upper - lower), power_law)
 
 
 def _lognormal_log_norm(mu, sigma, param):
@@ -180,6 +189,69 @@ def _lognormal_log_norm(mu, sigma, param):
         return _unnormalized_warning()
 
     return np.log(sigma) + 0.5 * np.log(2.0 * np.pi) + np.log(mass)
+
+
+def ffp_logmass_logp(logmass, alpha, param):
+    """Free-floating-planet mass prior, as a density in x = log10(M/Msun).
+
+    THIS IS THE SEAM.  If you have your own free-floating-planet mass
+    function, replace the two lines below the comment banner and nothing else:
+    every caller (``GalacticModel.build_likelihood``), the per-star selection
+    (``star:``'s ``mass_function: ffp``), the floor, and the tests reach the
+    functional form only through here.
+
+    Functional form
+    ---------------
+    Sumi et al. 2023 (AJ 166, 108; arXiv:2303.08280), MOA-II 9-year survey:
+
+        dN/dlog M = Z * (M / M_norm)^(-alpha)  dex^-1 star^-1
+
+    with alpha = 0.96 (+0.47/-0.27), Z = 2.18 (+0.52/-1.40) dex^-1 star^-1 and
+    M_norm = 8 M_Earth, fit over 0.33 < M/M_Earth < 6660 (1e-6 < M/Msun <
+    0.02).  ``alpha`` here is that exponent, POSITIVE for the observed
+    rising-toward-low-mass slope; it is per star and user-settable (``star:``
+    key ``mass_function: {kind: ffp, alpha: ...}``) because this measurement
+    is uncertain and Roman will revise it.
+
+    Change of variables
+    -------------------
+    None -- and that is the whole point of preferring this parameterization.
+    The measurement is ALREADY a density in log mass, and x = log10(M) is
+    already the sampled coordinate (``star.logmass``), so
+
+        log p(x) = -alpha * ln10 * x + const,
+
+    with no Jacobian.  Contrast the Salpeter branch in ``build_likelihood``,
+    which is quoted as dN/dM and therefore picks up |dM/dx| = M ln10, turning
+    its exponent from -alpha into (1 - alpha).  If you substitute a mass
+    function quoted as dN/dM, you must put that Jacobian back.
+
+    Normalization
+    -------------
+    From the sampled support, not from the paper.  ``param`` is the
+    ``star.logmass`` Parameter; ``_power_law_log_norm`` integrates 10^(k x)
+    over its hard [lower, upper] bounds, which makes this a proper density
+    directly comparable with the IMF branches over the same support.  Both Z
+    and M_norm are therefore unusable here: each contributes only an additive
+    constant that the normalizer cancels exactly.  Z is an abundance (a rate
+    per star), and would matter only to a model that weighed the FFP and
+    stellar lens populations against each other -- this prior conditions on
+    the lens being an FFP, so it cannot see a rate.
+
+    The support's lower end is a real modeling choice -- a rising density
+    piles prior mass against it, 90% of it within 1/alpha dex -- and it is
+    deliberately left to the user, as ``star.<name>.logmass``'s ordinary
+    ``lower`` bound.  Nothing clamps it: sub-stellar masses are this
+    relation's domain, so a floor imposed here would gate exactly the models
+    it exists to express.  ``Star._warn_ffp_logmass_bound`` says so out loud
+    when the bound is still the default.
+    """
+    # ---- substitute your own mass function here -------------------------
+    # k is the exponent of the density in the SAMPLED coordinate, p(x) ~
+    # 10^(k x); the normalizer is the integral of that over the support.
+    k = -np.asarray(alpha, dtype=float)
+    return k * np.log(10.0) * logmass - _power_law_log_norm(k, param)
+    # ---------------------------------------------------------------------
 
 
 class GalacticModel(Component):
@@ -239,7 +311,11 @@ class GalacticModel(Component):
                     "the Salpeter 1955 power law dN/dM ~ M^-2.35.  Both are "
                     "normalized over the sampled logmass bounds, so their "
                     "logp values are directly comparable.  Anything else "
-                    "raises."
+                    "raises.  This is the STELLAR mass prior: a star may opt "
+                    "out of it individually with the star block's "
+                    "'mass_function: ffp' (the free-floating-planet mass "
+                    "function), which is how an FFP lens and a stellar source "
+                    "get different mass priors in the same fit."
                 ),
             },
             {
@@ -388,6 +464,36 @@ class GalacticModel(Component):
             imf_logp = -0.5 * pt.sqr(
                 (stars.logmass.value - log_Mc) / sigma_imf
             ) - _lognormal_log_norm(log_Mc, sigma_imf, stars.logmass)
+
+        # Per-star opt-out of the stellar IMF.  A microlensing lens that is a
+        # free-floating planet MUST be declared as a star (Lens._validate_
+        # bodies rejects a non-star primary), and everything else that makes
+        # it a star is right -- the galactic density and kinematic priors
+        # below are mass-independent.  Only the mass prior is wrong: under
+        # Chabrier a 3 Mjup body sits ~3.3 sigma below the peak, ~5.4 nats of
+        # penalty for being what the user said it is.  The choice has to be
+        # PER STAR (a stellar source with an FFP lens is the realistic
+        # system), which is why it lives on the star block and not here; see
+        # Star._parse_mass_functions.
+        ffp_mask = getattr(stars, "ffp_mask", None)
+        ffp_mask = (
+            np.zeros(0, dtype=bool)
+            if ffp_mask is None
+            else np.asarray(ffp_mask, dtype=bool)
+        )
+        if ffp_mask.any():
+            # Both branches are finite everywhere on the support (one linear
+            # in x, one quadratic), so a plain weighted sum is safe and, being
+            # arithmetic rather than pt.switch, keeps a clean gradient on
+            # every backend.
+            w = ffp_mask.astype(float)
+            imf_logp = (
+                w
+                * ffp_logmass_logp(
+                    stars.logmass.value, stars.ffp_alpha, stars.logmass
+                )
+                + (1.0 - w) * imf_logp
+            )
 
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
         ######

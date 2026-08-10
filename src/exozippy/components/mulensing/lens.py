@@ -44,7 +44,9 @@ class Lens(Component):
     through star.mass/star.distance/star.pm_*, so a non-star primary is
     rejected in _validate_bodies rather than silently modeling the star at
     that index.  Companions may be ``planet`` or ``star``.  A
-    planetary-mass lens is modeled as a ``star`` block with a low logmass.
+    planetary-mass lens is modeled as a ``star`` block with a low logmass --
+    and, if it is a free-floating planet, with ``mass_function: ffp`` so that
+    it draws the FFP mass function rather than the stellar IMF.
 
     Each source follows its own trajectory: t_0, u_0, rho and the derived
     chain (t_E, theta_E, pi_rel, pi_E_*, mu_*) are vectors with one element
@@ -450,7 +452,11 @@ class Lens(Component):
                     f"lenses: ['star.0', '{p_type}.{p_ndx}'].  To model a "
                     f"very low-mass (even planetary-mass) lens, declare it as "
                     f"a 'star' block with a low star.<name>.logmass instead; "
-                    f"logmass reaches -9 dex (1e-9 solMass)."
+                    f"logmass reaches -9 dex (1e-9 solMass).  For a "
+                    f"FREE-FLOATING planet that is only half the recipe: give "
+                    f"that star block 'mass_function: ffp' as well, or it "
+                    f"draws the stellar IMF and is penalized for having the "
+                    f"mass you told it to have."
                 )
 
             # EVERY source body must be a star -- unlike the lens side there
