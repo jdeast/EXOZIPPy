@@ -39,6 +39,13 @@ class Lens(Component):
         lenses:  ["star.0", "planet.0"]   # 2-body binary
         sources: ["star.1", "star.2"]     # binary source (2S)
 
+    The FIRST entry of ``lenses`` is the primary and must be a ``star``:
+    the lens maps carry only an index and the primary-side physics resolves
+    through star.mass/star.distance/star.pm_*, so a non-star primary is
+    rejected in _validate_bodies rather than silently modeling the star at
+    that index.  Companions may be ``planet`` or ``star``.  A
+    planetary-mass lens is modeled as a ``star`` block with a low logmass.
+
     Each source follows its own trajectory: t_0, u_0, rho and the derived
     chain (t_E, theta_E, pi_rel, pi_E_*, mu_*) are vectors with one element
     per source, sharing the lens-side parameters (masses, s, alpha).  In the
@@ -63,8 +70,9 @@ class Lens(Component):
         if self.n_elements > 1:
             raise ValueError(
                 "Only one lensing event may be modeled at a time. Define a single "
-                "lens block and list all bodies in 'lenses'/'sources' "
-                "(e.g. lenses: ['star.0', 'planet.0', 'planet.1'])."
+                "lens block and list all bodies in 'lenses'/'sources', primary "
+                "first (e.g. lenses: ['star.0', 'planet.0', 'planet.1'] -- the "
+                "primary must be a star; companions may be planets or stars)."
             )
 
         # Parse lens / source body lists per event
@@ -392,7 +400,7 @@ class Lens(Component):
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a component
         or instance that does not exist (instead of an AttributeError deep in
-        the model build)."""
+        the model build), or if the PRIMARY lens body is not a star."""
         for i in range(self.n_elements):
             for role, bodies in (
                 ("lens", self.lens_bodies[i]),
@@ -412,6 +420,37 @@ class Lens(Component):
                             f"range: only {comp.n_elements} '{comp_type}' "
                             f"instance(s) are configured."
                         )
+
+            # The primary lens body must be a star.  build_maps stores only
+            # the INDEX (lens_map / primary_lens_map), and every primary-side
+            # dependency in defaults.yaml is hard-coded to the star component
+            # -- star.mass[lens_map], star.distance[lens_map],
+            # star.pm_ra[lens_map], star.pm_dec[lens_map] -- as is
+            # build_likelihood's d_l.  A 'planet.0' primary therefore silently
+            # models star.0 instead: measured on examples/ob08092, a config
+            # with lenses: ["planet.0"] builds a theta_E bit-identical to
+            # lenses: ["star.0"], responds to that star's mass, and is
+            # completely insensitive to the planet's -- a fit that completes
+            # and reports a lens mass which never touched the photometry.
+            # Companions ARE type-aware (their mass deps carry the component
+            # type), so only this slot is restricted.
+            p_type, p_ndx = self._primary_lens(i)
+            if p_type != "star":
+                raise ValueError(
+                    f"lens.{i}: the primary (first) lens body is "
+                    f"'{p_type}.{p_ndx}', but it must be a star.  The lens "
+                    f"maps carry only an index, and the lens-side physics "
+                    f"resolves the primary through star.mass / star.distance "
+                    f"/ star.pm_ra / star.pm_dec, so a non-star primary would "
+                    f"silently model star.{p_ndx} instead of "
+                    f"'{p_type}.{p_ndx}' and report a lens mass that never "
+                    f"entered the likelihood.  Planet COMPANIONS are "
+                    f"supported -- put the star first, e.g. "
+                    f"lenses: ['star.0', '{p_type}.{p_ndx}'].  To model a "
+                    f"very low-mass (even planetary-mass) lens, declare it as "
+                    f"a 'star' block with a low star.<name>.logmass instead; "
+                    f"logmass reaches -9 dex (1e-9 solMass)."
+                )
 
     # ------------------------------------------------------------------
     # Lifecycle stages

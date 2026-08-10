@@ -213,6 +213,87 @@ def test_lens_rejects_out_of_range_body_index():
         lens.register_parameters(system)
 
 
+def test_lens_rejects_a_non_star_primary_body():
+    """
+    Given a lens config whose PRIMARY (first) lens body is a planet,
+    When register_parameters validates the body references,
+    Then a ValueError explains that the primary must be a star and points at
+      the workaround.
+
+    This config used to build happily and be silently wrong: the lens maps
+    carry only an index and every primary-side dependency is hard-coded to
+    the star component (star.mass[lens_map], star.distance[lens_map],
+    star.pm_*[lens_map]).  Measured on examples/ob08092, lenses:
+    ["planet.0"] produced a theta_E bit-identical to lenses: ["star.0"],
+    responding to that star's mass and completely insensitive to the
+    planet's -- a fit that finishes and reports a lens mass which never
+    entered the likelihood.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["planet.0"], "sources": ["star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="primary") as excinfo:
+        lens.register_parameters(system)
+    message = str(excinfo.value)
+    assert "planet.0" in message, "the offending entry must be named"
+    assert "must be a star" in message
+    assert "logmass" in message, "the workaround must be spelled out"
+
+
+def test_lens_accepts_a_planet_companion_behind_a_star_primary():
+    """
+    Given the standard binary-lens topology (star primary, planet companion),
+    When register_parameters validates the body references,
+    Then no error is raised -- the primary-type guard must not touch the
+      companion slots, whose mass dependencies already carry the component
+      type.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    system.planet = _DummyComponent(1)
+
+    # Act
+    lens._validate_bodies(system)
+
+    # Assert
+    assert lens.lens_bodies[0] == [("star", 0), ("planet", 0)]
+    assert lens.n_companions == 1
+
+
+def test_lens_accepts_a_stellar_companion_and_a_plain_single_star_lens():
+    """
+    Given a stellar-binary lens and a plain single-star PSPL lens,
+    When the body references are validated,
+    Then neither raises (the guard is scoped to a non-star PRIMARY only).
+    """
+    # Arrange
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    binary = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+        _DummyConfigManager(),
+    )
+    single = Lens([{"lens_ndx": 0, "source_ndx": 1}], _DummyConfigManager())
+
+    # Act / Assert
+    binary._validate_bodies(system)
+    single._validate_bodies(system)
+    assert single.lens_bodies[0] == [("star", 0)]
+
+
 def test_lens_rejects_malformed_body_reference():
     """
     Given a body reference without an index ('planet' instead of 'planet.0'),
