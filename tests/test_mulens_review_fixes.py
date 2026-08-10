@@ -739,3 +739,105 @@ def test_unknown_sampler_key_is_detected(caplog):
     assert "step_method" in unknown
     assert "draws" not in unknown
     assert "method" not in unknown
+
+
+# ---------------------------------------------------------------------------
+# _check_data_format must see MMEXOFAST seed start values
+# ---------------------------------------------------------------------------
+
+
+class _SeedOnlyConfigManager(_DummyConfigManager):
+    """ConfigManager stub carrying a trajectory only in the seed hints, as in
+    the `mmexofast: auto` workflow (user_params names no lens parameter)."""
+
+    def __init__(self, seeds, user_params=None):
+        self.user_params = user_params or {}
+        self._seeds = seeds
+
+    def seed_start_value(self, path, seed=0):
+        return self._seeds.get(path)
+
+
+def _flux_labelled_as_magnitudes(t0=2458554.89, u0=0.14, tE=18.0, n=600):
+    """A light curve in normalized FLUX that a user forgot to declare, so it
+    reaches _check_data_format as 'magnitudes' and gets BRIGHTER (larger
+    value) at peak -- exactly what the check exists to catch."""
+    t = np.linspace(t0 - 60, t0 + 60, n)
+    tau = (t - t0) / tE
+    u = np.sqrt(tau**2 + u0**2)
+    flux = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    err = np.full(n, 0.001)
+    return t, flux, err, np.zeros((n, 3))
+
+
+def _run_check(config_manager, caplog):
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config_manager = config_manager
+    t, m, e, xyz = _flux_labelled_as_magnitudes()
+    with caplog.at_level(logging.WARNING):
+        inst._check_data_format(t, m, e, xyz, 0.0, 0.0, "OGLE-I")
+    return caplog.text
+
+
+def test_check_data_format_uses_mmexofast_seed_start_values(caplog):
+    """
+    Given flux data mislabelled as magnitudes, and a trajectory known ONLY
+      from the MMEXOFAST seed hints (the automated workflow, where the user
+      typed no start values at all),
+    When _check_data_format runs,
+    Then it warns that the data may be in flux units.
+
+    The check used to read cm.user_params alone, so it returned at the very
+    first `t0 is None` in precisely the workflow it was most needed in.
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager(
+        {"lens.0.t_0": 2458554.89, "lens.0.u_0": 0.14, "lens.0.t_E": 18.0}
+    )
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert "may be in flux units" in text
+
+
+def test_check_data_format_user_params_still_win(caplog):
+    """
+    Given the same mislabelled data with the trajectory in user_params and a
+      deliberately wrong seed,
+    When _check_data_format runs,
+    Then it still warns (the user's values are used, the seed is only a
+      fallback).
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager(
+        {"lens.0.t_0": 2400000.0, "lens.0.u_0": 5.0, "lens.0.t_E": 1.0},
+        user_params={
+            "lens.0.t_0": {"initval": 2458554.89},
+            "lens.0.u_0": {"initval": 0.14},
+            "lens.0.t_E": {"initval": 18.0},
+        },
+    )
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert "may be in flux units" in text
+
+
+def test_check_data_format_silent_without_any_trajectory(caplog):
+    """
+    Given neither user params nor seed hints,
+    When _check_data_format runs,
+    Then it returns silently (no trajectory, nothing to compare).
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager({})
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert text == ""

@@ -529,7 +529,16 @@ class MulensInstrument(Instrument):
         cm = self.config_manager
 
         def _get(key, default=None):
-            return _raw_initval(cm.user_params.get(key), default)
+            # User params first, then the seed-0 MMEXOFAST hints in user
+            # units -- the same fallback _estimate_flux_components uses.
+            # Without it this check silently did nothing in the automated
+            # (mmexofast: auto) workflow, which is exactly the workflow
+            # where the user typed the fewest start values and is therefore
+            # most likely to have mislabelled a flux file as magnitudes.
+            val = _raw_initval(cm.user_params.get(key), None)
+            if val is None:
+                val = cm.seed_start_value(key)
+            return default if val is None else val
 
         t0 = _get("lens.0.t_0")
         u0 = _get("lens.0.u_0")
