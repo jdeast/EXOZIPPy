@@ -6,7 +6,8 @@ prefix: "fitresults/HAT-P-3b_numpyro"
 star:
   - name: "A"
     mist: False
-    sed: "NextGen" # or name model: "NextGen" [MISTv1, MISTv2]
+    # The SED model grid is named by 'model:' inside hat3_sed.yaml
+    # ("NextGen" there; MISTv1/MISTv2 are the other choices), not here.
 
 planet:
   - name: "b"   
@@ -34,20 +35,22 @@ rvinstrument:
 transit:
   - name: "TESS-S16"
     file: "n20190912.TESS.TESS.HAT-P-3.S16.0120.SPOC.dat"
-    filter: "TESS"
+    band: "TESS"
   - name: "TESS-S22"
     file: "n20200220.TESS.TESS.HAT-P-3.S22.0120.SPOC.dat"
-    filter: "TESS"
+    band: "TESS"
   - name: "TESS-S49"
     file: "n20220301.TESS.TESS.HAT-P-3.S49.0120.SPOC.dat"
-    filter: "TESS"
+    band: "TESS"
   - name: "TESS-S76"
     file: "n20240227.TESS.TESS.HAT-P-3.S76.0120.SPOC.dat"
-    filter: "TESS"
+    band: "TESS"
 
+# One band per filter; the transits above reference it by name. Band is the
+# single carrier of filter identity and limb darkening.
 band:
   - name: "TESS"
-  - filter: "TESS"
+    filter: "TESS"
 
 sampler:
   method: numpyro         # nuts, numpyro, nutpie, blackjax, ptde

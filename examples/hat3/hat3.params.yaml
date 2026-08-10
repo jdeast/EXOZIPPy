@@ -26,8 +26,12 @@ star.parallax:
     initval: 7.45278
     sigma: 0.01745
 
-planet.b.tc:
-    initval: 2454218.76016 
+# The ephemeris lives on the orbit, not the planet: 'planet.b.tc' and
+# 'planet.b.period' name no parameter and were silently ignored, so these
+# two seeds had no effect at all until they were moved here.
+orbit.b.tc:
+    initval: 2454218.76016
 
-planet.b.period:
-    initval: 2.8997360 
+orbit.b.period:
+    initval: 2.8997360
+ 
