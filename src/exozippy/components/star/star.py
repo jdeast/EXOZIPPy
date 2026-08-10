@@ -1,8 +1,13 @@
+import logging
+
 import numpy as np
 
 from exozippy.components.component import Component
+from exozippy.constants import HYDROGEN_BURNING_LIMIT
 
 from . import physics
+
+logger = logging.getLogger(__name__)
 
 
 def _microlensing_only_star_indices(system):
@@ -50,12 +55,108 @@ class Star(Component):
     def prefix(self):
         return "star"
 
+    def _salpeter_logmass_floor(self, system):
+        """Lower bound to impose on logmass under a power-law IMF, or None.
+
+        defaults.yaml keeps logmass's floor at an unphysical -9 dex on
+        purpose: a planetary-mass LENS has to be declared as a star (see
+        Lens._validate_bodies, whose two guards advertise exactly that
+        workaround).  Under the default Chabrier lognormal that floor is
+        inert -- the prior density at -9 dex is ~exp(-107), so the bound is a
+        safety rail nothing ever touches.
+
+        Under IMF: Salpeter it stops being a rail and becomes the answer.
+        The power law rises toward low mass without limit, at
+        (1 - 2.35) * ln10 = 3.11 nats per dex, so it accumulates ~26 nats of
+        preference between the Chabrier peak and -9 dex; whatever the data
+        allow, the posterior piles against the floor.  A stellar IMF also
+        simply does not apply below the hydrogen-burning limit -- that is a
+        brown dwarf, with its own (poorly constrained) mass function.
+
+        So under Salpeter the floor is raised to the hydrogen-burning limit.
+        NOTE this is not a claim that a single Salpeter power law is accurate
+        down to there: Salpeter (1955) fit ~0.4-10 Msun, and the real IMF
+        flattens below ~0.5 Msun, which is precisely why Kroupa and Chabrier
+        exist.  Everything below ~0.5 Msun is extrapolation.  The
+        hydrogen-burning limit is the honest floor for a *stellar* IMF, and
+        it keeps the M-dwarf population that dominates real microlensing
+        lenses inside the prior -- truncating at Salpeter's own 0.4 Msun
+        calibration limit would exclude most actual lenses and make the prior
+        actively wrong for the science case it is there to serve.
+        """
+        gm = None
+        if hasattr(system, "active_components"):
+            gm = system.active_components.get("galacticmodel")
+        if gm is None:
+            gm = getattr(system, "galacticmodel", None)
+        if gm is None or str(getattr(gm, "imf", "")).lower() != "salpeter":
+            return None
+        return float(np.log10(HYDROGEN_BURNING_LIMIT))
+
+    def _apply_salpeter_logmass_floor(self, system):
+        """Manifest entry for logmass, with the power-law IMF floor applied.
+
+        The floor goes through the manifest's "overrides" channel, NOT its
+        ordinary options.  Options are merged OVER the resolved config
+        (``{**cfg, **options}``), which would replace a user's tighter bound
+        with the looser floor -- i.e. silently LOWER a bound the user raised.
+        Overrides instead go through ConfigManager.resolve's ``apply_value``,
+        which for the "lower" key keeps ``max(current, new)`` (and ``min``
+        for "upper").  The user's own params go through that same
+        ``apply_value``, so the result is exactly ``max(user_lower, floor)``
+        regardless of which is applied first: a user bound above the floor
+        survives untouched, and a user bound below it is raised to the floor.
+        That last case is deliberate -- asking for Salpeter and for support
+        below the hydrogen-burning limit is incoherent, and "bounds may only
+        be tightened" is the house rule the same max() enforces everywhere.
+        """
+        floor = self._salpeter_logmass_floor(system)
+        if floor is None:
+            return None
+
+        # Warn only where the floor actually moves the bound: resolve() gives
+        # the bound as it stands now (defaults, already merged with any user
+        # entry), in user units -- logmass's user and internal units are both
+        # dex(solMass), so no conversion is involved.
+        cfg = self.config_manager.resolve(
+            self.prefix,
+            "logmass",
+            shape=(self.n_elements,),
+            names=self.names,
+        )
+        current = cfg.get("lower")
+        for i in range(self.n_elements):
+            old = None if current is None else float(np.atleast_1d(current)[i])
+            if old is not None and old >= floor:
+                continue
+            old_txt = (
+                "unbounded"
+                if old is None
+                else f"{old:g} dex ({10.0**old:.3g} solMass)"
+            )
+            logger.warning(
+                f"[{self.prefix}] IMF: Salpeter -- raising the lower bound on "
+                f"{self.prefix}.{self.names[i]}.logmass from {old_txt} to "
+                f"{floor:.4f} dex ({HYDROGEN_BURNING_LIMIT:g} solMass, the "
+                f"hydrogen-burning limit), because a power-law IMF rises "
+                f"toward low mass without limit (+3.11 nats/dex) so an "
+                f"unphysically low floor becomes the answer rather than a "
+                f"safety rail, and a stellar IMF does not apply to "
+                f"sub-stellar objects.  To avoid this, use the default "
+                f"IMF: chabrier (a lognormal, calibrated across the "
+                f"sub-stellar range), or set a HIGHER lower bound yourself "
+                f"if you want a different floor -- this bound can be "
+                f"tightened but not loosened."
+            )
+        return {"overrides": {"lower": floor}}
+
     def register_parameters(self, system):
         """Stage 2: Declare the manifest and push to ConfigManager."""
 
-        # 1. Get the stellar parameters we always want
+        # 1. Get the stellar parameters we always want.  logmass may carry a
+        # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
         self.manifest = {
-            "logmass": None,
+            "logmass": self._apply_salpeter_logmass_floor(system),
             "radius": None,
             "mass": "default",
             "density": "default",

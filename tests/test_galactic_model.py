@@ -1,5 +1,6 @@
 """Tests for the GalacticModel component (register_parameters, build_likelihood)."""
 
+import logging
 import math
 
 import numpy as np
@@ -7,7 +8,7 @@ import pymc as pm
 import pytensor.tensor as pt
 import pytest
 
-from conftest import _DummyConfigManager
+from conftest import _DummyConfigManager, _DummySystem
 from exozippy.components.galacticmodel.galacticmodel import GalacticModel
 
 # RA/Dec for a typical Galactic-bulge microlensing field (Galactic center area).
@@ -833,3 +834,161 @@ def test_bulge_number_density_matches_vvv_box_budget():
     assert np.isclose(n0_msb, BULGE_CENTRAL_NUMBER_DENSITY, rtol=0.01), (
         f"recomputed {n0_msb:.4f} vs constant {BULGE_CENTRAL_NUMBER_DENSITY}"
     )
+
+
+# ---------------------------------------------------------------------------
+# A power-law IMF raises star.logmass's unphysical floor
+# ---------------------------------------------------------------------------
+
+
+_HBL_DEX = np.log10(0.075)  # hydrogen-burning limit, dex(solMass)
+
+
+def _logmass_lower(imf=None, user_params=None, names=("A",)):
+    """Resolved star.logmass lower bound(s) under the given IMF."""
+    from exozippy.components.star.star import Star
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(dict(user_params or {}))
+    star = Star([{"name": n} for n in names], cm)
+    system = _DummySystem()
+    system.config_manager = cm
+    if imf is not None:
+        system.galacticmodel = GalacticModel([{"IMF": imf}], cm)
+
+    star.register_parameters(system)
+    with pm.Model() as model:
+        star.add_parameter(model=model, param_name="logmass", system=system)
+    return np.atleast_1d(star.logmass.lower)
+
+
+def test_salpeter_raises_the_logmass_floor_and_warns(caplog):
+    """
+    Given a galacticmodel selecting the Salpeter power law,
+    When the star parameters are registered,
+    Then star.logmass's lower bound is raised from the unphysical -9 dex to
+      the hydrogen-burning limit, with a warning naming the parameter and
+      both the old and new bound.
+
+    Under chabrier the -9 floor is inert (density ~exp(-107) there), but a
+    power law rises toward low mass at 3.11 nats/dex without limit, so the
+    floor would become the answer instead of a safety rail.
+    """
+    # Act
+    with caplog.at_level(logging.WARNING):
+        lower = _logmass_lower("salpeter")
+
+    # Assert
+    assert lower[0] == pytest.approx(_HBL_DEX, rel=1e-12)
+    text = caplog.text
+    assert "star.A.logmass" in text
+    assert "-9" in text and "0.075 solMass" in text
+    assert "chabrier" in text
+
+
+def test_chabrier_leaves_the_logmass_floor_untouched_and_silent(caplog):
+    """
+    Given the default Chabrier IMF (and no galacticmodel at all),
+    When the star parameters are registered,
+    Then star.logmass keeps its defaults.yaml floor of -9 dex and nothing is
+      warned -- a planetary-mass lens must still be expressible as a star.
+    """
+    # Act
+    with caplog.at_level(logging.WARNING):
+        with_gm = _logmass_lower("chabrier")
+        without_gm = _logmass_lower(None)
+
+    # Assert
+    assert with_gm[0] == -9.0
+    assert without_gm[0] == -9.0
+    assert "raising the lower bound" not in caplog.text
+
+
+def test_user_logmass_bound_above_the_floor_is_preserved():
+    """
+    Given a user bound TIGHTER than the Salpeter floor,
+    When the floor is applied,
+    Then the user's bound survives -- the floor may only raise a bound,
+      never lower one (the combination is max(user_lower, floor)).
+    """
+    # Act
+    lower = _logmass_lower(
+        "salpeter", user_params={"star.A.logmass": {"lower": -0.5}}
+    )
+
+    # Assert
+    assert lower[0] == pytest.approx(-0.5, rel=1e-12)
+    assert lower[0] > _HBL_DEX
+
+
+def test_user_logmass_bound_below_the_floor_is_raised(caplog):
+    """
+    Given a user bound BELOW the Salpeter floor,
+    When the floor is applied,
+    Then it is raised to the floor and warned about: asking for a stellar
+      power-law IMF and for support below the hydrogen-burning limit at the
+      same time is incoherent, and bounds may only ever be tightened.
+    """
+    # Act
+    with caplog.at_level(logging.WARNING):
+        lower = _logmass_lower(
+            "salpeter", user_params={"star.A.logmass": {"lower": -3.0}}
+        )
+
+    # Assert
+    assert lower[0] == pytest.approx(_HBL_DEX, rel=1e-12)
+    assert "-3 dex" in caplog.text
+
+
+def test_floor_applies_to_every_star_the_imf_prior_sums_over():
+    """
+    Given several modeled stars,
+    When the Salpeter floor is applied,
+    Then EVERY star gets it -- the IMF potential is a plain sum over the
+      whole stars.logmass vector (lens and source alike), so the support
+      must be raised over exactly that set.
+    """
+    # Act
+    lower = _logmass_lower("salpeter", names=("Lens", "Source", "C"))
+
+    # Assert
+    assert len(lower) == 3
+    assert np.allclose(lower, _HBL_DEX)
+
+
+def test_salpeter_model_builds_with_finite_logp_and_gradient():
+    """
+    Given a full System whose galacticmodel selects Salpeter,
+    When the model is built and evaluated at its initial point,
+    Then the raised bound is in force and both logp and its gradient are
+      finite (the logit transform must still have a healthy span).
+
+    This also exercises the production lookup path (System.active_components)
+    rather than the attribute fallback the unit tests above use.
+    """
+    # Arrange
+    from exozippy.system import System
+
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "galacticmodel": [{"name": "gm", "IMF": "Salpeter"}],
+    }
+    user_params = {
+        "star.Lens.ra": {"initval": 270.0, "sigma": 0},
+        "star.Lens.dec": {"initval": -29.0, "sigma": 0},
+        "star.Source.ra": {"initval": 270.0, "sigma": 0},
+        "star.Source.dec": {"initval": -29.0, "sigma": 0},
+    }
+
+    # Act
+    system = System(config, user_params)
+    system.prepare()
+    model = system.build_model()
+    ip = model.initial_point()
+    logp = float(np.asarray(model.compile_logp()(ip)))
+    dlogp = model.compile_dlogp()(ip)
+
+    # Assert
+    assert np.allclose(np.atleast_1d(system.star.logmass.lower), _HBL_DEX)
+    assert np.isfinite(logp)
+    assert np.all(np.isfinite(dlogp))

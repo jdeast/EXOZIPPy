@@ -101,6 +101,14 @@ THICK_DISK_VELOCITY_SIGMA_V = 51.0  # in km/s
 THICK_DISK_VELOCITY_SIGMA_W = 42.0  # in km/s
 KROUPA_IMF_SLOPE = -1.3  # Kroupa IMF (mass range typical for lenses)
 SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
+# Hydrogen-burning minimum mass at ~solar composition (Chabrier & Baraffe
+# 2000, ARA&A 38, 337).  Composition-dependent -- ~0.072 Msun at solar
+# metallicity, rising toward ~0.09 Msun in metal-poor material -- and 0.075 is
+# the round value the low-mass literature uses.  It is also already this
+# codebase's stellar low-mass boundary (components/mann applies Mann+2015/2019
+# over 0.075-0.7 Msun), so one number serves both.  Below it an object is a
+# brown dwarf, not a star, and a STELLAR IMF has no claim on it.
+HYDROGEN_BURNING_LIMIT = 0.075  # solMass
 
 # --- 7. SUN CONSTANTS ---
 SUN_GC_DISTANCE = 8.16  # in kpc (genulens/Koshimoto+21 R0 = 8160 pc)
