@@ -24,7 +24,29 @@ from exozippy.gui import TERMINAL_PHASES
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
+# Poll budgets for the slow end-to-end test at the bottom. Their sum must sit
+# comfortably UNDER that test's @pytest.mark.timeout(900): if the guard fires
+# first, pytest-timeout kills the test instead of letting the poll report what
+# it was waiting for (and under xdist that used to surface as a nameless dead
+# worker). Warm, that test measures 52-84 s end to end; a cold pytensor compile
+# cache alone has been seen to multiply it ~6x, so the one budget that spans a
+# compile stays large and the post-stop ones -- which only cover wrap-up and
+# process reaping -- are sized to that work, not to the compile.
+#
+#   REACH_SAMPLING_TIMEOUT 360 s  subprocess + imports + model build + a COLD
+#                                 pytensor compile + tune + 100 draws
+#   GRACEFUL_EXIT_TIMEOUT  240 s  wrap-up: save partial trace + reports/plots
+#                                 (~20-30 s warm, so ~8x headroom)
+#   FORCE_EXIT_TIMEOUT      45 s  only reached after stop(force=True), which
+#                                 itself blocks ~50 s through second-SIGINT and
+#                                 SIGKILL; the terminal phase is then written
+#                                 (or synthesized by RunHandle.status) at once
+#
+# Worst case, counting the ~50 s each force stop blocks internally:
+# 360 + 240 + 50 + 45 + 50 = 745 s < 900 s.
 REACH_SAMPLING_TIMEOUT = 360.0
+GRACEFUL_EXIT_TIMEOUT = 240.0
+FORCE_EXIT_TIMEOUT = 45.0
 POLL_INTERVAL = 0.5
 
 
@@ -341,7 +363,8 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             )
 
         assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), (
-            "run never reported n_draws>=100 during sampling; last status: "
+            "run never reported n_draws>=100 during sampling within "
+            f"{REACH_SAMPLING_TIMEOUT}s; last status: "
             f"{client.get('/api/run/status').json()}"
         )
 
@@ -366,14 +389,20 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             final_status.update(st)
             return st["phase"] if st.get("phase") in TERMINAL_PHASES else None
 
-        final_phase = _poll_until(_terminal, timeout=600.0)
-        if final_phase is None:
+        final_phase = _poll_until(_terminal, timeout=GRACEFUL_EXIT_TIMEOUT)
+        escalated = final_phase is None
+        if escalated:
             client.post("/api/run/stop", json={"force": True})
-            final_phase = _poll_until(_terminal, timeout=120.0)
+            final_phase = _poll_until(_terminal, timeout=FORCE_EXIT_TIMEOUT)
     finally:
         client.post("/api/run/stop", json={"force": True})
 
-    assert final_phase in {
-        "stopped",
-        "done",
-    }, f"non-terminal end: {final_phase}; status: {final_status}"
+    how = (
+        f"graceful stop timed out after {GRACEFUL_EXIT_TIMEOUT}s and was "
+        "force-escalated"
+        if escalated
+        else "graceful stop was honored"
+    )
+    assert final_phase in {"stopped", "done"}, (
+        f"non-terminal end: {final_phase}; {how}; last status: {final_status}"
+    )
