@@ -223,3 +223,47 @@ def test_unknown_component_raises_keyerror():
     # Act / Assert
     with pytest.raises(KeyError):
         introspect.component_schema("does_not_exist")
+
+
+def test_no_defaults_yaml_string_contains_a_control_character():
+    """
+    Given every component's defaults.yaml, surfaced through the schema,
+    When each string field (latex, description, unit, ...) is inspected,
+    Then none contains a control character.
+
+    A LaTeX macro in a DOUBLE-quoted YAML scalar needs its backslash
+    doubled: "\\pi_{\rm E,N}" stores a carriage return followed by "m",
+    so lens.pi_E_N's latex was corrupted (silently -- YAML accepts \r) and
+    every table/plot label built from it was wrong.  Any single-backslash
+    escape YAML happens to recognize lands here.
+    """
+    # Arrange
+    schema = introspect.full_schema()
+    control = {chr(c) for c in range(32)} | {"\x7f", "\x85", "\xa0"}
+
+    # Act
+    offenders = [
+        (key, name, field, value)
+        for key, comp in schema["components"].items()
+        for name, param in comp["parameters"].items()
+        for field, value in param.items()
+        if isinstance(value, str) and control & set(value)
+    ]
+
+    # Assert
+    assert offenders == [], f"control characters in defaults.yaml: {offenders}"
+
+
+def test_parallax_latex_labels_are_well_formed():
+    """
+    Given the lens component's north/east microlensing parallax parameters,
+    When their latex labels are read,
+    Then both are the intended \\pi_{\\rm E,*} macro (this is the parameter
+      pair whose labels carried an embedded carriage return until 2026-08).
+    """
+    # Arrange / Act
+    params = introspect.component_schema("lens")["parameters"]
+
+    # Assert
+    assert params["pi_E_N"]["latex"] == r"\pi_{\rm E,N}"
+    assert params["pi_E_E"]["latex"] == r"\pi_{\rm E,E}"

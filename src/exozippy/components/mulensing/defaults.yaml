@@ -33,7 +33,7 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,N}"
+    latex: "\\pi_{\\rm E,N}"
     description: "Parallax vector (North)"
     debug_print: true
     expressions:
@@ -44,7 +44,7 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,E}"
+    latex: "\\pi_{\\rm E,E}"
     description: "Parallax vector (East)"
     debug_print: true
     expressions:
