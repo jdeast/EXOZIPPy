@@ -27,8 +27,6 @@ from exozippy.constants import (
     DISK_VELOCITY_SIGMA_V,
     DISK_VELOCITY_SIGMA_W,
     K_VEL_CONVERSION,
-    KROUPA_IMF_SLOPE,
-    SALPETER_IMF_SLOPE,
     SUN_GALCEN_V,
     SUN_GC_DISTANCE,
     SUN_Z_OFFSET,
@@ -74,15 +72,71 @@ GALACTOCENTRIC_FRAME = Galactocentric(
 
 
 class GalacticModel(Component):
+    # The only mass function implemented below.  ``IMF:`` is validated
+    # against this in __init__ rather than silently ignored: the key used to
+    # select KROUPA_IMF_SLOPE / SALPETER_IMF_SLOPE for a power-law prior that
+    # has not been applied since the Chabrier lognormal replaced it (the
+    # power law is flat in the sampled log10 mass -- no curvature for NUTS --
+    # and improper without mass cutoffs), so every `IMF: Salpeter` in a
+    # config was a no-op.
+    SUPPORTED_IMFS = ("chabrier",)
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Galactic Prior"
-        self.imf = self.config[0].get("IMF", "Kroupa")
+        if self.n_elements != 1:
+            # Only config[0] is ever read (imf, anchor_idx), and the extra
+            # blocks used to leak into the likelihood as a broadcast: with
+            # 2 blocks and 1 star the whole kinematic prior was counted
+            # TWICE, and with 2 blocks and 3 stars it raised a bare shape
+            # error.  One galactic prior describes one line of sight.
+            raise ValueError(
+                f"galacticmodel takes exactly one config block, got "
+                f"{self.n_elements}.  It is a single prior on the line of "
+                f"sight shared by every star; use 'anchor_idx' to choose "
+                f"which star's (ra, dec) defines it."
+            )
+        self.imf = self.config[0].get("IMF", "chabrier")
+        if str(self.imf).lower() not in self.SUPPORTED_IMFS:
+            raise ValueError(
+                f"galacticmodel IMF '{self.imf}' is not implemented.  "
+                f"Supported: {', '.join(self.SUPPORTED_IMFS)} (Chabrier 2003 "
+                f"system IMF, a lognormal in log10 mass).  Power-law options "
+                f"('Kroupa', 'Salpeter') were accepted but silently ignored "
+                f"before 2026-08."
+            )
         self.anchor_idx = self.config[0].get("anchor_idx", 0)
 
     @property
     def prefix(self):
         return "galacticmodel"
+
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "IMF",
+                "kind": "option",
+                "accepts": list(cls.SUPPORTED_IMFS),
+                "required": False,
+                "doc": (
+                    "Initial mass function for the lens/source mass prior. "
+                    "Only 'chabrier' (Chabrier 2003 system IMF, a lognormal "
+                    "in log10 mass) is implemented; anything else raises."
+                ),
+            },
+            {
+                "key": "anchor_idx",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Index of the star whose (ra, dec) defines the line of "
+                    "sight for the density/kinematic prior (default 0). One "
+                    "galacticmodel block describes one sight line."
+                ),
+            },
+        ]
 
     def register_parameters(self, system):
         """No parameters to sample! Just an empty manifest."""
@@ -91,89 +145,59 @@ class GalacticModel(Component):
     def build_likelihood(self, model, system):
         stars = system.star
 
-        M_rot_list = []
-        v0_list = []
-        sinl_cosb_list = []
-        cosl_cosb_list = []
-        sinb_list = []
+        # 1. Pre-compute the transformation matrix using Astropy, ONCE, from
+        # the anchor star's initial RA/Dec.  This is a property of the line
+        # of sight, not of a component element: the loop this replaced ran
+        # over self.n_elements (the number of galacticmodel BLOCKS) while
+        # indexing self.anchor_idx every time, so it stacked n_elements
+        # identical copies and then relied on those copies broadcasting
+        # against the (n_star,) sampled vectors -- which silently doubled
+        # the whole prior for 2 blocks and 1 star, and raised a bare shape
+        # error whenever n_blocks and n_stars disagreed and neither was 1.
+        # Keeping the matrix 2-D (and the direction cosines scalar) lets it
+        # broadcast over any number of stars by construction.
+        ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
+        dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
 
-        # 1. Pre-compute transformation matrices using Astropy based on initial RA/Dec
-        for i in range(self.n_elements):
-            # Grab the internal initvals (which are in radians)
-            ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
-            dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
+        sc = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad)
+        d = 1.0  # kpc, arbitrary distance for velocity basis projection
+        pm_1 = 1.0 / (K_VEL_CONVERSION * d)  # mas/yr
 
-            sc = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad)
-            d = 1.0  # kpc, arbitrary distance for velocity basis projection
-            pm_1 = 1.0 / (K_VEL_CONVERSION * d)  # mas/yr
-
-            sc0 = SkyCoord(
+        def _basis(pm_ra_cosdec, pm_dec, rv):
+            return SkyCoord(
                 ra=sc.ra,
                 dec=sc.dec,
                 distance=d * u.kpc,
-                pm_ra_cosdec=0 * u.mas / u.yr,
-                pm_dec=0 * u.mas / u.yr,
-                radial_velocity=0 * u.km / u.s,
-            )
-            sc1 = SkyCoord(
-                ra=sc.ra,
-                dec=sc.dec,
-                distance=d * u.kpc,
-                pm_ra_cosdec=pm_1 * u.mas / u.yr,
-                pm_dec=0 * u.mas / u.yr,
-                radial_velocity=0 * u.km / u.s,
-            )
-            sc2 = SkyCoord(
-                ra=sc.ra,
-                dec=sc.dec,
-                distance=d * u.kpc,
-                pm_ra_cosdec=0 * u.mas / u.yr,
-                pm_dec=pm_1 * u.mas / u.yr,
-                radial_velocity=0 * u.km / u.s,
-            )
-            sc3 = SkyCoord(
-                ra=sc.ra,
-                dec=sc.dec,
-                distance=d * u.kpc,
-                pm_ra_cosdec=0 * u.mas / u.yr,
-                pm_dec=0 * u.mas / u.yr,
-                radial_velocity=1 * u.km / u.s,
-            )
+                pm_ra_cosdec=pm_ra_cosdec * u.mas / u.yr,
+                pm_dec=pm_dec * u.mas / u.yr,
+                radial_velocity=rv * u.km / u.s,
+            ).transform_to(GALACTOCENTRIC_FRAME)
 
-            gal0 = sc0.transform_to(GALACTOCENTRIC_FRAME)
-            gal1 = sc1.transform_to(GALACTOCENTRIC_FRAME)
-            gal2 = sc2.transform_to(GALACTOCENTRIC_FRAME)
-            gal3 = sc3.transform_to(GALACTOCENTRIC_FRAME)
+        gal0 = _basis(0, 0, 0)
+        gal1 = _basis(pm_1, 0, 0)
+        gal2 = _basis(0, pm_1, 0)
+        gal3 = _basis(0, 0, 1)
 
-            v0_arr = np.array([gal0.v_x.value, gal0.v_y.value, gal0.v_z.value])
-            v1 = (
-                np.array([gal1.v_x.value, gal1.v_y.value, gal1.v_z.value])
-                - v0_arr
-            )
-            v2 = (
-                np.array([gal2.v_x.value, gal2.v_y.value, gal2.v_z.value])
-                - v0_arr
-            )
-            v3 = (
-                np.array([gal3.v_x.value, gal3.v_y.value, gal3.v_z.value])
-                - v0_arr
-            )
+        v0_arr = np.array([gal0.v_x.value, gal0.v_y.value, gal0.v_z.value])
+        v1 = (
+            np.array([gal1.v_x.value, gal1.v_y.value, gal1.v_z.value]) - v0_arr
+        )
+        v2 = (
+            np.array([gal2.v_x.value, gal2.v_y.value, gal2.v_z.value]) - v0_arr
+        )
+        v3 = (
+            np.array([gal3.v_x.value, gal3.v_y.value, gal3.v_z.value]) - v0_arr
+        )
 
-            M_rot_list.append(np.column_stack([v1, v2, v3]))
-            v0_list.append(v0_arr)
-
-            l_rad = sc.galactic.l.rad
-            b_rad = sc.galactic.b.rad
-            sinl_cosb_list.append(np.sin(l_rad) * np.cos(b_rad))
-            cosl_cosb_list.append(np.cos(l_rad) * np.cos(b_rad))
-            sinb_list.append(np.sin(b_rad))
+        l_rad = sc.galactic.l.rad
+        b_rad = sc.galactic.b.rad
 
         # Convert to tensors for graph injection
-        M_rot = pt.as_tensor_variable(np.array(M_rot_list))
-        v0 = pt.as_tensor_variable(np.array(v0_list))
-        cosl_cosb = pt.as_tensor_variable(np.array(cosl_cosb_list))
-        sinl_cosb = pt.as_tensor_variable(np.array(sinl_cosb_list))
-        sinb = pt.as_tensor_variable(np.array(sinb_list))
+        M_rot = pt.as_tensor_variable(np.column_stack([v1, v2, v3]))  # (3, 3)
+        v0 = pt.as_tensor_variable(v0_arr)  # (3,)
+        cosl_cosb = pt.as_tensor_variable(np.cos(l_rad) * np.cos(b_rad))
+        sinl_cosb = pt.as_tensor_variable(np.sin(l_rad) * np.cos(b_rad))
+        sinb = pt.as_tensor_variable(np.sin(b_rad))
 
         # 2. PyTensor Math Helpers
         def get_galactocentric_velocity(dist_kpc, pm_ra, pm_dec, rv_ms):
@@ -204,18 +228,14 @@ class GalacticModel(Component):
             v_phi = v_y * cos_phi - v_x * sin_phi
             return v_r, v_phi
 
-        # match the IMF
-        if self.imf == "Kroupa":
-            imf_slope = KROUPA_IMF_SLOPE
-        else:
-            imf_slope = SALPETER_IMF_SLOPE
-
-        # if we sample in log10 mass, there is no curvature
-        # log_m_weight = pt.sum((imf_slope + 1.0) * np.log(10.0) * stars.logmass.value)
-
-        # if we sample in mass, it's hard to explore the full dynamic range
-        # log_m_weight = pt.sum(imf_slope * pt.log(stars.mass.value))
-        # pm.Potential(f"{self.prefix}.imf_prior", log_m_weight)
+        # match the IMF.  Only the Chabrier lognormal is implemented; the
+        # config key is validated in __init__, so nothing to branch on here.
+        # A power law dN/dM ~ M^slope would be
+        #   log_m_weight = (slope + 1) * ln(10) * logmass   (sampled log10 M)
+        #   log_m_weight = slope * log(mass)                (sampled M)
+        # but it is flat in the sampled log10 mass -- no curvature for NUTS
+        # to follow -- and improper without explicit mass cutoffs, which is
+        # why it was replaced rather than kept as an option.
 
         ### Chabrier 2003 System IMF parameters
         log_Mc = np.log10(0.22)

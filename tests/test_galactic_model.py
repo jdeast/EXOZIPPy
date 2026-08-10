@@ -120,15 +120,84 @@ def test_imf_prior_is_negative_for_star_above_chabrier_peak():
     assert expected_chabrier < 0
 
 
-def test_imf_salpeter_branch_does_not_crash():
+@pytest.mark.parametrize("imf", ["Salpeter", "Kroupa", "chabier"])
+def test_unimplemented_imf_raises_instead_of_being_ignored(imf):
     """
-    Given a GalacticModel configured with IMF = 'Salpeter',
+    Given a GalacticModel configured with an IMF that is not implemented,
+    When the component is constructed,
+    Then a ValueError names the supported options.
+
+    The power-law options used to be accepted and then silently ignored:
+    imf_slope was computed and consumed only by commented-out code, so the
+    prior was always the Chabrier lognormal no matter what the user asked
+    for.
+    """
+    # Act / Assert
+    with pytest.raises(ValueError, match="not implemented"):
+        _make_gm(config=[{"IMF": imf}])
+
+
+def test_chabrier_imf_is_accepted_case_insensitively():
+    """
+    Given a GalacticModel configured with the implemented IMF,
     When build_likelihood runs,
-    Then no error is raised (Salpeter branch is reachable code).
+    Then the IMF potential is added (the option is live, not decorative).
     """
-    gm = _make_gm(config=[{"IMF": "Salpeter"}])
-    with pm.Model():
-        gm.build_likelihood(pm.modelcontext(None), _MockSystem())
+    # Arrange
+    gm = _make_gm(config=[{"IMF": "Chabrier"}])
+
+    # Act
+    with pm.Model() as model:
+        gm.build_likelihood(model, _MockSystem())
+
+    # Assert
+    assert "galacticmodel.imf_prior" in model.named_vars
+
+
+def test_multiple_galacticmodel_blocks_raise():
+    """
+    Given two galacticmodel config blocks,
+    When the component is constructed,
+    Then a ValueError explains that one sight line takes one block.
+
+    Only config[0] was ever read for IMF/anchor_idx, but the extra blocks
+    leaked into the likelihood through the pre-computed (n_blocks, 3, 3)
+    rotation stack: with 2 blocks and 1 star the whole kinematic prior was
+    broadcast to shape (2,) and therefore counted TWICE.
+    """
+    # Act / Assert
+    with pytest.raises(ValueError, match="exactly one config block"):
+        _make_gm(config=[{"name": "a"}, {"name": "b"}])
+
+
+def test_kinematic_prior_scales_with_star_count_not_block_count():
+    """
+    Given one galacticmodel block and one star, then the same block with two
+    identical stars,
+    When the kinematic prior is evaluated,
+    Then the two-star value is exactly twice the one-star value.
+
+    This pins the anchor geometry as scalars broadcasting over stars: the
+    old (n_blocks, 3, 3) stack made the sum's length depend on the number of
+    config blocks rather than the number of stars.
+    """
+    # Arrange
+    one = _MockSystem()
+    two = _MockSystem()
+    for attr in ("ra", "dec", "logmass", "distance", "pm_ra", "pm_dec", "rv"):
+        val = float(np.atleast_1d(getattr(one.star, attr).initval)[0])
+        setattr(two.star, attr, _MockParam([val, val]))
+
+    # Act
+    lps = []
+    for system in (one, two):
+        gm = _make_gm()
+        with pm.Model() as model:
+            gm.build_likelihood(model, system)
+        lps.append(float(model["galacticmodel.kinematic_prior"].eval()))
+
+    # Assert
+    assert np.isclose(lps[1], 2.0 * lps[0], rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------
