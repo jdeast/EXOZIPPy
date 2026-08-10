@@ -211,7 +211,12 @@ def test_set_whitening_handles_partially_frozen_vector_parameters():
 
     with pm.Model() as model:
         # PyMC compresses 'star.mass_raw' to shape (1,): only element 0 samples.
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=system)
 
     p = star.mass
@@ -523,7 +528,12 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
     with pm.Model() as model:
         # build_parameters calls build_core_parameters, which triggers
         # add_parameter for "mass".
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
@@ -716,9 +726,7 @@ def test_logit_saturation_guard_is_inert_inside_and_quadratic_outside():
     # ACT: measure logp differences against raw = 0 (constant drops out)
     lp0 = float(logp_fn({"p_raw": np.array([0.0])}))
     raws = [-100.0, -80.0, -74.0, -3.0, 3.0, 74.0, 80.0, 100.0]
-    measured = [
-        float(logp_fn({"p_raw": np.array([r])})) - lp0 for r in raws
-    ]
+    measured = [float(logp_fn({"p_raw": np.array([r])})) - lp0 for r in raws]
     predicted = [expected_shape(r) - expected_shape(0.0) for r in raws]
 
     # ASSERT
@@ -1210,3 +1218,39 @@ def test_parameter_rejects_an_unparseable_unit_at_construction():
     # ARRANGE / ACT / ASSERT
     with pytest.raises(ValueError, match="not_a_real_unit"):
         Parameter(label="star.0.mass", unit="not_a_real_unit", initval=1.0)
+
+
+def test_derived_star_mass_builds_no_barrier_potentials():
+    """
+    Given the production star manifest, where mass is DERIVED from logmass,
+    When the parameters are built,
+    Then no soft-bound barrier Potential is created for star.mass, while
+      logmass keeps the hard [-9, 2.5] dex support that the logit transform
+      enforces exactly.
+
+    star/defaults.yaml used to declare mass bounds of [0.1, 250] solMass
+    alongside logmass's [-9, 2.5] dex ([1e-9, 316] solMass) -- eight orders
+    of magnitude apart.  Because mass is derived, those could only ever act
+    as barrier potentials layered on top of the hard bound, so they added
+    numerical machinery without adding a constraint.
+    """
+    # Arrange
+    config_manager = ConfigManager({})
+    star = Star([{"name": "A"}], config_manager)
+
+    # Act
+    with pm.Model() as model:
+        star.manifest = {"mass": "default", "logmass": None}
+        star.add_parameter(model=model, param_name="mass", system=None)
+
+    # Assert
+    barriers = [
+        k
+        for k in model.named_vars
+        if k.startswith(("low_bound.", "up_bound."))
+        and k.endswith("star.mass")
+    ]
+    assert barriers == [], f"unexpected star.mass barrier(s): {barriers}"
+    assert star.mass.lower is None and star.mass.upper is None
+    assert np.allclose(np.atleast_1d(star.logmass.lower), -9.0)
+    assert np.allclose(np.atleast_1d(star.logmass.upper), 2.5)

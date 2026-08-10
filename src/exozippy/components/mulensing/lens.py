@@ -14,6 +14,7 @@ from exozippy.potentials import soft_lower_bound
 
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
+from .physics import MU_REL_FLOOR, THETA_E_FLOOR
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,13 @@ class Lens(Component):
     config as:
         lenses:  ["star.0", "planet.0"]   # 2-body binary
         sources: ["star.1", "star.2"]     # binary source (2S)
+
+    The FIRST entry of ``lenses`` is the primary and must be a ``star``:
+    the lens maps carry only an index and the primary-side physics resolves
+    through star.mass/star.distance/star.pm_*, so a non-star primary is
+    rejected in _validate_bodies rather than silently modeling the star at
+    that index.  Companions may be ``planet`` or ``star``.  A
+    planetary-mass lens is modeled as a ``star`` block with a low logmass.
 
     Each source follows its own trajectory: t_0, u_0, rho and the derived
     chain (t_E, theta_E, pi_rel, pi_E_*, mu_*) are vectors with one element
@@ -62,8 +70,9 @@ class Lens(Component):
         if self.n_elements > 1:
             raise ValueError(
                 "Only one lensing event may be modeled at a time. Define a single "
-                "lens block and list all bodies in 'lenses'/'sources' "
-                "(e.g. lenses: ['star.0', 'planet.0', 'planet.1'])."
+                "lens block and list all bodies in 'lenses'/'sources', primary "
+                "first (e.g. lenses: ['star.0', 'planet.0', 'planet.1'] -- the "
+                "primary must be a star; companions may be planets or stars)."
             )
 
         # Parse lens / source body lists per event
@@ -391,7 +400,8 @@ class Lens(Component):
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a component
         or instance that does not exist (instead of an AttributeError deep in
-        the model build)."""
+        the model build), if the PRIMARY lens body is not a star, or if any
+        SOURCE body is not a star."""
         for i in range(self.n_elements):
             for role, bodies in (
                 ("lens", self.lens_bodies[i]),
@@ -412,6 +422,91 @@ class Lens(Component):
                             f"instance(s) are configured."
                         )
 
+            # The primary lens body must be a star.  build_maps stores only
+            # the INDEX (lens_map / primary_lens_map), and every primary-side
+            # dependency in defaults.yaml is hard-coded to the star component
+            # -- star.mass[lens_map], star.distance[lens_map],
+            # star.pm_ra[lens_map], star.pm_dec[lens_map] -- as is
+            # build_likelihood's d_l.  A 'planet.0' primary therefore silently
+            # models star.0 instead: measured on examples/ob08092, a config
+            # with lenses: ["planet.0"] builds a theta_E bit-identical to
+            # lenses: ["star.0"], responds to that star's mass, and is
+            # completely insensitive to the planet's -- a fit that completes
+            # and reports a lens mass which never touched the photometry.
+            # Companions ARE type-aware (their mass deps carry the component
+            # type), so only this slot is restricted.
+            p_type, p_ndx = self._primary_lens(i)
+            if p_type != "star":
+                raise ValueError(
+                    f"lens.{i}: the primary (first) lens body is "
+                    f"'{p_type}.{p_ndx}', but it must be a star.  The lens "
+                    f"maps carry only an index, and the lens-side physics "
+                    f"resolves the primary through star.mass / star.distance "
+                    f"/ star.pm_ra / star.pm_dec, so a non-star primary would "
+                    f"silently model star.{p_ndx} instead of "
+                    f"'{p_type}.{p_ndx}' and report a lens mass that never "
+                    f"entered the likelihood.  Planet COMPANIONS are "
+                    f"supported -- put the star first, e.g. "
+                    f"lenses: ['star.0', '{p_type}.{p_ndx}'].  To model a "
+                    f"very low-mass (even planetary-mass) lens, declare it as "
+                    f"a 'star' block with a low star.<name>.logmass instead; "
+                    f"logmass reaches -9 dex (1e-9 solMass)."
+                )
+
+            # EVERY source body must be a star -- unlike the lens side there
+            # is no companion position to spare.  source_map is index-only
+            # exactly like lens_map, and the whole source-side chain resolves
+            # through the star component: star.distance[source_map],
+            # star.pm_ra/pm_dec[source_map], star.radius[source_map], and
+            # get_magnification's star.ra/dec[source_ndx].  The multi-source
+            # (2S) case does not change this: each source body is an
+            # independently monitored luminous star with its own trajectory
+            # and flux ratio, so every slot is star-only.
+            for s_type, s_idx in self.source_bodies[i]:
+                if s_type != "star":
+                    raise ValueError(
+                        f"lens.{i}: source body '{s_type}.{s_idx}' must be a "
+                        f"star -- a microlensing source is the background "
+                        f"star being monitored for magnification, and a "
+                        f"planet is not a self-luminous point source at "
+                        f"bulge distances, so a non-star source is "
+                        f"physically meaningless rather than merely "
+                        f"unimplemented.  source_map carries only an index "
+                        f"and the source-side physics resolves through "
+                        f"star.distance / star.pm_ra / star.pm_dec / "
+                        f"star.radius / star.ra / star.dec, so this would "
+                        f"silently model star.{s_idx} instead of "
+                        f"'{s_type}.{s_idx}'.  A genuinely faint source (a "
+                        f"brown dwarf, say) is a 'star' block with a low "
+                        f"star.<name>.logmass."
+                    )
+
+            # A body cannot lens itself.  pi_rel = 1000/d_L - 1000/d_S is
+            # then identically 0, so theta_E collapses onto its floor and
+            # the likelihood is NaN at the very first evaluation -- which
+            # today surfaces as a baffling sampler-initialization failure
+            # far from the config line that caused it.  Both spellings are
+            # covered for free: the legacy lens_ndx/source_ndx keys are
+            # normalized into lens_bodies/source_bodies in __init__, so
+            # comparing those two lists catches `lens_ndx: 0, source_ndx: 0`
+            # as well as an explicit overlap between the lists (including a
+            # body repeated across a multi-source 2S list).
+            shared = [
+                b for b in self.lens_bodies[i] if b in self.source_bodies[i]
+            ]
+            if shared:
+                shared_txt = ", ".join(f"'{t}.{n}'" for t, n in shared)
+                raise ValueError(
+                    f"lens.{i}: {shared_txt} is listed as BOTH a lens body "
+                    f"and a source body.  A lens and its source must be "
+                    f"distinct objects at different distances: with the same "
+                    f"body on both sides, pi_rel = 1000/d_L - 1000/d_S is "
+                    f"identically 0, so theta_E is 0 and the likelihood is "
+                    f"NaN from the first evaluation.  Give the lens and the "
+                    f"source separate entries (via 'lenses:'/'sources:', or "
+                    f"distinct 'lens_ndx:'/'source_ndx:' values)."
+                )
+
     # ------------------------------------------------------------------
     # Lifecycle stages
     # ------------------------------------------------------------------
@@ -422,6 +517,25 @@ class Lens(Component):
         source_map has one entry per SOURCE BODY (not per event): it drives the
         shapes of the per-source parameter chain (pi_rel, t_E, rho, ...) via the
         star.<param>[source_map] dependency slices.
+
+        lens_map carries TWO conceptually different roles that happen to
+        share one index:
+
+          1. the LENSING MASS -- star.mass[lens_map] feeds theta_E;
+          2. the KINEMATIC HOST -- star.distance[lens_map] and
+             star.pm_ra/pm_dec[lens_map] feed pi_rel and mu_rel.
+
+        They coincide only because the primary lens body is always a star,
+        which _validate_bodies now enforces.  The conflation is exactly what
+        let the silent planet-primary bug through: a planet has a mass but
+        no distance or proper motion of its own, so a planet primary
+        resolved role 1 to the planet (had the deps been typed) and role 2
+        to whatever star sat at the same index.  Splitting the two would
+        mean inventing a "kinematic host star" for a body that by
+        definition has no host -- which is why planet-as-lens was abandoned
+        in favor of declaring a low-mass lens as a star.  Under the guards
+        the roles can never diverge, so this stays one index; the note is
+        here so the next reader does not have to rediscover why.
         """
         _, l_ndxs = zip(
             *[self._primary_lens(i) for i in range(self.n_elements)]
@@ -775,9 +889,18 @@ class Lens(Component):
         mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
 
+        # Both logs are floored (belt and braces -- calc_theta_E and
+        # calc_mu_rel_mag already floor their radicands, see physics.py).  A
+        # bare log(0) is a -inf wall with no gradient for NUTS to follow,
+        # which is exactly what the soft bounds below exist to avoid; the
+        # floors are ~6 decades below their 1e-6 turn-on, so the prior is
+        # untouched wherever it was already finite.
         pm.Potential(
             f"{self.prefix}.event_rate_prior",
-            pt.sum(pt.log(mu_rel_geo) + pt.log(theta_E)),
+            pt.sum(
+                pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
+                + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
+            ),
         )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and

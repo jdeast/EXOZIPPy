@@ -213,6 +213,272 @@ def test_lens_rejects_out_of_range_body_index():
         lens.register_parameters(system)
 
 
+def test_lens_rejects_a_non_star_primary_body():
+    """
+    Given a lens config whose PRIMARY (first) lens body is a planet,
+    When register_parameters validates the body references,
+    Then a ValueError explains that the primary must be a star and points at
+      the workaround.
+
+    This config used to build happily and be silently wrong: the lens maps
+    carry only an index and every primary-side dependency is hard-coded to
+    the star component (star.mass[lens_map], star.distance[lens_map],
+    star.pm_*[lens_map]).  Measured on examples/ob08092, lenses:
+    ["planet.0"] produced a theta_E bit-identical to lenses: ["star.0"],
+    responding to that star's mass and completely insensitive to the
+    planet's -- a fit that finishes and reports a lens mass which never
+    entered the likelihood.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["planet.0"], "sources": ["star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="primary") as excinfo:
+        lens.register_parameters(system)
+    message = str(excinfo.value)
+    assert "planet.0" in message, "the offending entry must be named"
+    assert "must be a star" in message
+    assert "logmass" in message, "the workaround must be spelled out"
+
+
+def test_lens_accepts_a_planet_companion_behind_a_star_primary():
+    """
+    Given the standard binary-lens topology (star primary, planet companion),
+    When register_parameters validates the body references,
+    Then no error is raised -- the primary-type guard must not touch the
+      companion slots, whose mass dependencies already carry the component
+      type.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0", "planet.0"], "sources": ["star.1"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    system.planet = _DummyComponent(1)
+
+    # Act
+    lens._validate_bodies(system)
+
+    # Assert
+    assert lens.lens_bodies[0] == [("star", 0), ("planet", 0)]
+    assert lens.n_companions == 1
+
+
+def test_lens_accepts_a_stellar_companion_and_a_plain_single_star_lens():
+    """
+    Given a stellar-binary lens and a plain single-star PSPL lens,
+    When the body references are validated,
+    Then neither raises (the guard is scoped to a non-star PRIMARY only).
+    """
+    # Arrange
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    binary = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2"]}],
+        _DummyConfigManager(),
+    )
+    single = Lens([{"lens_ndx": 0, "source_ndx": 1}], _DummyConfigManager())
+
+    # Act / Assert
+    binary._validate_bodies(system)
+    single._validate_bodies(system)
+    assert single.lens_bodies[0] == [("star", 0)]
+
+
+def test_lens_rejects_a_non_star_source_body():
+    """
+    Given a lens config whose source body is a planet,
+    When register_parameters validates the body references,
+    Then a ValueError explains that a source must be a star, names the star
+      that would otherwise have been modeled, and gives the workaround.
+
+    source_map is index-only exactly like lens_map and the whole
+    source-side chain resolves through the star component
+    (star.distance[source_map], star.pm_*[source_map],
+    star.radius[source_map], get_magnification's star.ra/dec), so the
+    failure mode is identical to the lens-primary one.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["planet.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="must be a") as excinfo:
+        lens.register_parameters(system)
+    message = str(excinfo.value)
+    assert "planet.0" in message, "the offending entry must be named"
+    assert "star.0" in message, "name the star that would be modeled instead"
+    assert "logmass" in message, "the workaround must be spelled out"
+
+
+def test_lens_rejects_a_non_star_body_in_a_second_source_slot():
+    """
+    Given a binary-source (2S) config whose SECOND source body is a planet,
+    When the body references are validated,
+    Then it is rejected too -- unlike the lens side, there is no companion
+      position where a non-star body is meaningful: every source body is an
+      independently monitored luminous star.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1", "planet.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+    system.planet = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="source body 'planet.0'"):
+        lens._validate_bodies(system)
+
+
+def test_lens_accepts_multiple_star_sources():
+    """
+    Given a binary-source (2S) config whose sources are both stars,
+    When the body references are validated,
+    Then no error is raised and both source slots survive.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.1", "star.2"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    # Act
+    lens._validate_bodies(system)
+
+    # Assert
+    assert lens.source_bodies[0] == [("star", 1), ("star", 2)]
+    assert lens.n_sources == 2
+
+
+def test_omitted_sources_key_with_one_star_is_caught_not_silent():
+    """
+    Given a config that omits 'sources:' entirely while defining only ONE
+      star (so the source_ndx default of 1 points at a star that does not
+      exist),
+    When the body references are validated,
+    Then the existing out-of-range check catches it with a clear message.
+
+    Recorded because the default is easy to trip: 'sources' defaults to
+    [("star", source_ndx)] with source_ndx = 1, i.e. the SECOND star.
+    """
+    # Arrange
+    lens = Lens([{}], _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="out of range") as excinfo:
+        lens._validate_bodies(system)
+    assert "star.1" in str(excinfo.value)
+
+
+def test_lens_rejects_a_body_that_is_both_lens_and_source():
+    """
+    Given a config listing the same star as both the lens and the source,
+    When the body references are validated,
+    Then a ValueError explains that they must be distinct objects and why.
+
+    pi_rel = 1000/d_L - 1000/d_S is identically 0 for one body, so theta_E
+    collapses onto its floor and the likelihood is NaN from the first
+    evaluation -- which otherwise surfaces as a baffling sampler-init
+    failure far from the config line that caused it.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0"], "sources": ["star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="BOTH a lens body") as excinfo:
+        lens._validate_bodies(system)
+    message = str(excinfo.value)
+    assert "star.0" in message
+    assert "pi_rel" in message and "NaN" in message
+
+
+def test_lens_rejects_self_lensing_via_the_legacy_ndx_keys():
+    """
+    Given the legacy spelling lens_ndx == source_ndx,
+    When the body references are validated,
+    Then the same error is raised -- the legacy keys normalize into
+      lens_bodies/source_bodies in __init__, so one check covers both
+      spellings.
+    """
+    # Arrange
+    lens = Lens([{"lens_ndx": 0, "source_ndx": 0}], _DummyConfigManager())
+    system = _DummySystem()
+    system.star = _DummyComponent(2)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="BOTH a lens body"):
+        lens._validate_bodies(system)
+
+
+def test_lens_rejects_overlap_with_a_second_source_body():
+    """
+    Given a binary-source (2S) config where the lens star also appears in
+      the SECOND source slot,
+    When the body references are validated,
+    Then the overlap is caught: the check compares the whole lists, not
+      just the primary slots.
+    """
+    # Arrange
+    lens = Lens(
+        [{"lenses": ["star.0", "star.1"], "sources": ["star.2", "star.0"]}],
+        _DummyConfigManager(),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(3)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="'star.0' is listed as BOTH"):
+        lens._validate_bodies(system)
+
+
+def test_distinct_lens_and_source_bodies_are_accepted():
+    """
+    Given ordinary configs (single-star PSPL by legacy default, an explicit
+      binary lens, and a 2S source list) where no body is shared,
+    When the body references are validated,
+    Then nothing is raised.
+    """
+    # Arrange
+    system = _DummySystem()
+    system.star = _DummyComponent(4)
+    system.planet = _DummyComponent(1)
+    configs = [
+        {},  # legacy defaults: lens_ndx 0, source_ndx 1
+        {"lenses": ["star.0", "planet.0"], "sources": ["star.1"]},
+        {"lenses": ["star.0"], "sources": ["star.1", "star.2"]},
+    ]
+
+    # Act / Assert
+    for cfg in configs:
+        Lens([cfg], _DummyConfigManager())._validate_bodies(system)
+
+
 def test_lens_rejects_malformed_body_reference():
     """
     Given a body reference without an index ('planet' instead of 'planet.0'),
@@ -739,3 +1005,105 @@ def test_unknown_sampler_key_is_detected(caplog):
     assert "step_method" in unknown
     assert "draws" not in unknown
     assert "method" not in unknown
+
+
+# ---------------------------------------------------------------------------
+# _check_data_format must see MMEXOFAST seed start values
+# ---------------------------------------------------------------------------
+
+
+class _SeedOnlyConfigManager(_DummyConfigManager):
+    """ConfigManager stub carrying a trajectory only in the seed hints, as in
+    the `mmexofast: auto` workflow (user_params names no lens parameter)."""
+
+    def __init__(self, seeds, user_params=None):
+        self.user_params = user_params or {}
+        self._seeds = seeds
+
+    def seed_start_value(self, path, seed=0):
+        return self._seeds.get(path)
+
+
+def _flux_labelled_as_magnitudes(t0=2458554.89, u0=0.14, tE=18.0, n=600):
+    """A light curve in normalized FLUX that a user forgot to declare, so it
+    reaches _check_data_format as 'magnitudes' and gets BRIGHTER (larger
+    value) at peak -- exactly what the check exists to catch."""
+    t = np.linspace(t0 - 60, t0 + 60, n)
+    tau = (t - t0) / tE
+    u = np.sqrt(tau**2 + u0**2)
+    flux = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    err = np.full(n, 0.001)
+    return t, flux, err, np.zeros((n, 3))
+
+
+def _run_check(config_manager, caplog):
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst.config_manager = config_manager
+    t, m, e, xyz = _flux_labelled_as_magnitudes()
+    with caplog.at_level(logging.WARNING):
+        inst._check_data_format(t, m, e, xyz, 0.0, 0.0, "OGLE-I")
+    return caplog.text
+
+
+def test_check_data_format_uses_mmexofast_seed_start_values(caplog):
+    """
+    Given flux data mislabelled as magnitudes, and a trajectory known ONLY
+      from the MMEXOFAST seed hints (the automated workflow, where the user
+      typed no start values at all),
+    When _check_data_format runs,
+    Then it warns that the data may be in flux units.
+
+    The check used to read cm.user_params alone, so it returned at the very
+    first `t0 is None` in precisely the workflow it was most needed in.
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager(
+        {"lens.0.t_0": 2458554.89, "lens.0.u_0": 0.14, "lens.0.t_E": 18.0}
+    )
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert "may be in flux units" in text
+
+
+def test_check_data_format_user_params_still_win(caplog):
+    """
+    Given the same mislabelled data with the trajectory in user_params and a
+      deliberately wrong seed,
+    When _check_data_format runs,
+    Then it still warns (the user's values are used, the seed is only a
+      fallback).
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager(
+        {"lens.0.t_0": 2400000.0, "lens.0.u_0": 5.0, "lens.0.t_E": 1.0},
+        user_params={
+            "lens.0.t_0": {"initval": 2458554.89},
+            "lens.0.u_0": {"initval": 0.14},
+            "lens.0.t_E": {"initval": 18.0},
+        },
+    )
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert "may be in flux units" in text
+
+
+def test_check_data_format_silent_without_any_trajectory(caplog):
+    """
+    Given neither user params nor seed hints,
+    When _check_data_format runs,
+    Then it returns silently (no trajectory, nothing to compare).
+    """
+    # Arrange
+    cm = _SeedOnlyConfigManager({})
+
+    # Act
+    text = _run_check(cm, caplog)
+
+    # Assert
+    assert text == ""

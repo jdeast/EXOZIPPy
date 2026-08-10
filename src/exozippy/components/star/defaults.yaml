@@ -11,8 +11,13 @@ star:
   mass:
     unit: "solMass"
     internal_unit: "solMass"
-    lower: 0.1
-    upper: 250.0
+    # No lower/upper here on purpose.  mass is DERIVED (mass = 10**logmass),
+    # so logmass's [-9.0, 2.5] IS the support and the logit transform of the
+    # sampled coordinate enforces it exactly.  Bounds on mass could only act
+    # as soft barrier potentials layered on top of that hard bound, and the
+    # two disagreed by eight orders of magnitude (0.1-250 vs 1e-9-316
+    # solMass), so they added numerical machinery without adding a
+    # constraint.  To change the allowed mass range, change logmass.
     init_scale: 0.02
     latex: "M_*"
     description: "Stellar Mass"

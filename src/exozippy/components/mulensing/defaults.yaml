@@ -33,7 +33,7 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,N}"
+    latex: "\\pi_{\\rm E,N}"
     description: "Parallax vector (North)"
     debug_print: true
     expressions:
@@ -44,13 +44,20 @@ lens:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,E}"
+    latex: "\\pi_{\\rm E,E}"
     description: "Parallax vector (East)"
     debug_print: true
     expressions:
       default:
         func_name: "calc_pi_E_E"
         deps: [ "pi_rel", "theta_E", "mu_ra_rel_geo", "mu_rel_geo_mag" ]
+  # NOTE on lens_map: it names the primary lens body by INDEX only, and it
+  # serves two different roles -- the lensing MASS (star.mass[lens_map],
+  # theta_E below) and the KINEMATIC HOST (star.distance/pm_ra/pm_dec
+  # [lens_map], pi_rel and mu_rel).  Those coincide only because the primary
+  # lens body is always a star, which Lens._validate_bodies enforces; see
+  # the longer note in Lens.build_maps.  Do not add a non-star primary
+  # without splitting the two.
   pi_rel:
     lower: 0.0
     upper: 10000

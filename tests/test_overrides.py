@@ -114,7 +114,12 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
     system.star = star
 
     with pm.Model(name="model_test5") as model:
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ACT
@@ -295,7 +300,12 @@ def test_vectorized_overrides_apply_to_correct_indices():
 
     # ACT
     with pm.Model(name="model_vector") as model:
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT

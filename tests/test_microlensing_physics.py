@@ -6,12 +6,16 @@ from astropy import units as u
 
 from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.physics import (
+    MU_REL_FLOOR,
+    THETA_E_FLOOR,
+    calc_mu_rel_mag,
     calc_pi_rel,
     calc_t_E,
     calc_theta_E,
 )
 from exozippy.components.parameter import Parameter
 from exozippy.config import ConfigManager
+from exozippy.constants import KAPPA
 from exozippy.physics_registry import PHYSICS_REGISTRY
 from exozippy.system import System
 
@@ -166,14 +170,16 @@ def test_microlensing_sympy_pytensor_equivalence():
     assert np.isclose(te_sympy, t_E_pt, rtol=1e-8), "t_E mismatch!"
 
 
-def test_calc_theta_E_negative_pi_rel_returns_zero_not_nan():
+def test_calc_theta_E_negative_pi_rel_returns_tiny_positive_not_nan():
     """
-    Given a negative pi_rel (source in front of the lens — unphysical),
+    Given a negative pi_rel (source in front of the lens -- unphysical),
     When calc_theta_E is called,
-    Then it returns exactly 0.0 (not NaN), so downstream parameters
-      (rho, pi_E) remain finite and the Op does not receive NaN inputs.
-    The build_likelihood potentials (event_rate_prior = log(theta_E) = -inf)
-    ensure the sampler rejects such proposals.
+    Then it returns THETA_E_FLOOR: positive and tiny, not NaN and not
+      exactly 0, so downstream parameters (rho, pi_E) stay finite, the Op
+      receives no NaN, and log(theta_E) in the event-rate prior is finite.
+      The floor is 6 decades below the 1e-6 turn-on of the
+      theta_E_singularity soft bound, so that barrier is fully engaged
+      wherever the floor bites.
     """
     # Arrange
     calc_theta_E = PHYSICS_REGISTRY["calc_theta_E"]
@@ -183,16 +189,80 @@ def test_calc_theta_E_negative_pi_rel_returns_zero_not_nan():
     theta_E_neg = calc_theta_E(mass, pt.as_tensor_variable(-0.1)).eval()
     theta_E_zero = calc_theta_E(mass, pt.as_tensor_variable(0.0)).eval()
 
-    # Assert: finite zero, not NaN
-    assert np.isfinite(theta_E_neg), f"Expected finite 0.0, got {theta_E_neg}"
-    assert theta_E_neg == 0.0, (
-        f"Expected 0.0 for negative pi_rel, got {theta_E_neg}"
+    # Assert: finite and positive, no log(0) wall
+    assert np.isfinite(theta_E_neg), (
+        f"Expected finite value, got {theta_E_neg}"
     )
-    assert theta_E_zero == 0.0
+    assert theta_E_neg == THETA_E_FLOOR
+    assert theta_E_zero == THETA_E_FLOOR
+    assert THETA_E_FLOOR < 1e-6, "floor must sit inside the singularity bound"
 
     # Positive pi_rel still works correctly
     theta_E_pos = calc_theta_E(mass, pt.as_tensor_variable(0.125)).eval()
     assert theta_E_pos > 0.0
+
+
+def test_calc_theta_E_is_unchanged_in_the_physical_regime():
+    """
+    Given physical lens masses and positive pi_rel,
+    When calc_theta_E is called,
+    Then the value is bit-for-bit sqrt(KAPPA * M * pi_rel) -- the floor
+      added for the unphysical branch must not perturb any reachable
+      posterior region.
+    """
+    # Arrange
+    calc_theta_E = PHYSICS_REGISTRY["calc_theta_E"]
+
+    for mass_v, pi_rel_v in [(0.5, 0.125), (0.08, 0.02), (1.4, 1.0)]:
+        # Act
+        got = calc_theta_E(
+            pt.as_tensor_variable(mass_v), pt.as_tensor_variable(pi_rel_v)
+        ).eval()
+
+        # Assert
+        assert got == np.sqrt(KAPPA * mass_v * pi_rel_v)
+
+
+def test_event_rate_prior_and_gradient_are_finite_for_negative_pi_rel():
+    """
+    Given a source in front of the lens (pi_rel < 0), a lens mass dragged
+      negative by a linear-mass planet, or an exactly zero relative proper
+      motion (the two stars share one pm default),
+    When the event-rate prior log(mu_rel_geo) + log(theta_E) and its
+      gradient w.r.t. the underlying sampled quantities are evaluated,
+    Then both are finite.
+
+    Before the fix theta_E was exactly 0 there, so the prior was a -inf
+    wall -- and its gradient was NaN, because sqrt'(0) is infinite and
+    pt.maximum's zero gradient on the clamped side turns that into
+    0 * inf.  A NaN gradient poisons the whole logp for NUTS; the
+    source_behind_lens soft bound is what is meant to push back.
+    """
+    # Arrange
+    d_l, d_s, mass = pt.dscalar("d_l"), pt.dscalar("d_s"), pt.dscalar("m")
+    mu_ra, mu_dec = pt.dscalar("mu_ra"), pt.dscalar("mu_dec")
+    theta_E = calc_theta_E(mass, calc_pi_rel(d_l, d_s))
+    mu_rel = calc_mu_rel_mag(mu_ra, mu_dec)
+    prior = pt.log(pt.maximum(mu_rel, MU_REL_FLOOR)) + pt.log(
+        pt.maximum(theta_E, THETA_E_FLOOR)
+    )
+    inputs = [d_l, d_s, mass, mu_ra, mu_dec]
+    fn = pytensor.function(inputs, [prior] + pt.grad(prior, inputs))
+
+    cases = {
+        "physical": (1000.0, 8000.0, 0.5, 3.0, 4.0),
+        "source in front of lens": (8000.0, 1000.0, 0.5, 3.0, 4.0),
+        "source and lens co-located": (1000.0, 1000.0, 0.5, 3.0, 4.0),
+        "negative lens mass": (1000.0, 8000.0, -0.3, 3.0, 4.0),
+        "zero relative proper motion": (1000.0, 8000.0, 0.5, 0.0, 0.0),
+    }
+
+    for label, args in cases.items():
+        # Act
+        out = fn(*args)
+
+        # Assert
+        assert np.all(np.isfinite(out)), f"{label}: non-finite {out}"
 
 
 def test_microlensing_contradiction_no_override(caplog):
