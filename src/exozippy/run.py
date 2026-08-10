@@ -717,6 +717,72 @@ def _run_fit(config, gui, user_params=None):
         logger.exception("mkprior failed (non-fatal)")
 
 
+def _element_conversion_factor(par, index):
+    """Internal -> user conversion factor for element ``index`` of ``par``."""
+    f = par._get_conversion_factors()
+    if np.size(f) > 1:
+        return float(np.ravel(f)[index])
+    if np.size(f) == 1:
+        return float(np.ravel(f)[0])
+    return float(f)
+
+
+def _user_initval(config_manager, par, index):
+    """Start value (INTERNAL units) for element ``index`` of ``par`` as spelled
+    in the user/solved parameter table, or None if the table does not set one.
+
+    The key lookup mirrors ``ConfigManager.resolve``: the same three forms
+    (``comp.param``, ``comp.<index>.param``, ``comp.<name>.param``) in the same
+    precedence (later wins), each canonicalized through
+    ``ConfigManager.canonical_key``.  Without that canonicalization a NAMED
+    instance never matches, because ``standardize_param_names`` stores every
+    entry in index form -- so the lookup used to succeed or fail depending on
+    whether the user had named their components.
+    """
+    prefix = par.label.split(".")[0]
+    attr = par.label.split(".")[-1]
+    candidates = [
+        f"{prefix}.{attr}",
+        f"{prefix}.{index}.{attr}",
+        par.get_display_label(index),
+    ]
+
+    val = None
+    for key in candidates:
+        entry = config_manager.user_params.get(
+            config_manager.canonical_key(key)
+        )
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            entry = {"initval": entry}  # bare scalar, as resolve() treats it
+        if "initval" not in entry:
+            continue
+        v = entry["initval"]
+        # List-valued initvals are per-seed starts (P4); seed 0 is canonical.
+        if isinstance(v, (list, tuple)):
+            v = v[0] if len(v) else None
+        if v is not None:
+            val = v
+
+    if val is None:
+        return None
+    try:
+        return float(val) / _element_conversion_factor(par, index)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _is_unset(x):
+    """True when a start-value element carries no usable number."""
+    if x is None:
+        return True
+    try:
+        return bool(np.isnan(float(x)))
+    except (TypeError, ValueError):
+        return False
+
+
 def inspect_start(
     model,
     system,
@@ -813,17 +879,21 @@ def inspect_start(
         raw_v = p.initval
         raw_s = p.init_scale
 
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        cfg_mgr = auditor.system.config_manager
+
         if raw_v is None:
-            # 1. Try to get it from the expression's dependency-solved graph
+            # 1. Try the user/solved parameter table, one element at a time so
+            #    a vector parameter still reports every element.
             try:
-                if p.label in auditor.system.config_manager.user_params:
-                    user_val = auditor.system.config_manager.user_params[
-                        p.label
-                    ].get("initval")
-                    if user_val is not None:
-                        # Convert to internal units so it matches expectations
-                        raw_v = p.to_internal(user_val)
-            except:
+                vals = np.full(n_elements, np.nan)
+                for i in range(n_elements):
+                    uv = _user_initval(cfg_mgr, p, i)
+                    if uv is not None:
+                        vals[i] = uv
+                if np.any(np.isfinite(vals)):
+                    raw_v = vals if n_elements > 1 else float(vals[0])
+            except Exception:
                 pass
 
             # 2. Last resort: Eval the expression if it exists
@@ -842,7 +912,13 @@ def inspect_start(
         if raw_v is None:
             continue
 
-        v_phys = np.atleast_1d(raw_v)
+        # inspect_start is a READ-ONLY diagnostic.  np.atleast_1d returns the
+        # SAME object for a 1-D array, so without the copy every write below
+        # lands in Parameter.initval itself -- which used to revert the
+        # polished starts apply_polished_starts had just stored there, so the
+        # table lied AND get_raw_starts/_seed_initvals_for rebuilt the later
+        # seeds from the reverted values.
+        v_phys = np.atleast_1d(raw_v).copy()
         s_phys = np.atleast_1d(raw_s if raw_s is not None else np.nan)
         m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
@@ -851,20 +927,19 @@ def inspect_start(
         for i in range(len(v_phys)):
             row_label = p.get_display_label(i)
 
-            # Grab the solver's reconciled value if it exists ---
-            if row_label in auditor.system.config_manager.user_params:
-                resolved_data = auditor.system.config_manager.user_params[
-                    row_label
-                ]
-                if "initval" in resolved_data:
-                    # Fetch the conversion factor and apply it backwards
-                    f = p._get_conversion_factors()
-                    f_val = (
-                        f[i]
-                        if np.size(f) > 1
-                        else (f[0] if np.size(f) == 1 else f)
-                    )
-                    v_phys[i] = float(resolved_data["initval"]) / float(f_val)
+            # Parameter.initval is the AUTHORITATIVE start: it is what
+            # get_raw_start encodes and what the sampler actually begins from.
+            # ConfigManager.resolve already layered the solver-reconciled
+            # user_params value into it at construction, and a pre-whitening
+            # seed polish (apply_polished_starts) may legitimately have moved
+            # it since.  So the user_params entry is only a FALLBACK, for an
+            # element the Parameter never got a number for -- re-asserting it
+            # over a live initval would make this table report a start the
+            # sampler is not going to use.
+            if _is_unset(v_phys[i]):
+                uv = _user_initval(cfg_mgr, p, i)
+                if uv is not None:
+                    v_phys[i] = uv
 
             def safe_float(x):
                 if x is None or (hasattr(x, "size") and x.size == 0):
