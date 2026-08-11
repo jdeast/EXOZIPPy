@@ -854,13 +854,25 @@ class AstrometryInstrument(Instrument):
         s = d["star_ndx"]
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
-        def get(label, default):
-            return np.atleast_1d(point.get(label, default))[s]
+        def get(param):
+            """This star's value of ``param`` from the point, else its own
+            initval -- the same fallback _point_values uses.
 
-        ra = get(star.ra.label, d["ra_ref"])
-        dec = get(star.dec.label, d["dec_ref"])
-        pm_ra = get(star.pm_ra.label, 0.0)
-        pm_dec = get(star.pm_dec.label, 0.0)
+            A ``point.get(label, 0.0)`` here silently substituted ZERO for
+            any parameter absent from the draws, and pinned (``sigma: 0``)
+            parameters are always absent: a fit with a fixed nonzero proper
+            motion plotted a star that does not move while the likelihood
+            used the pinned value.
+            """
+            val = point.get(param.label)
+            if val is None:
+                val = param.initval
+            return np.atleast_1d(val)[s]
+
+        ra = get(star.ra)
+        dec = get(star.dec)
+        pm_ra = get(star.pm_ra)
+        pm_dec = get(star.pm_dec)
         # parallax is a derived parameter and is usually absent from
         # posterior draws; falling back to 0 silently removed the parallax
         # wiggles from the plots.  Recover it from the sampled distance.
@@ -868,10 +880,7 @@ class AstrometryInstrument(Instrument):
         if plx is not None:
             plx = np.atleast_1d(plx)[s]
         else:
-            dist = get(
-                star.distance.label, np.atleast_1d(star.distance.initval)[s]
-            )
-            plx = 1000.0 / dist
+            plx = 1000.0 / get(star.distance)
 
         dE = (
             (ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
