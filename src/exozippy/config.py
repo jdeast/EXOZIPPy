@@ -1921,6 +1921,18 @@ class ConfigManager:
         map.  A solver that raises (missing dependencies) is retried next
         iteration; results carry RANK_DERIVED_MIXED so user values and
         data-derived hints always win, and re-fire as inputs refine.
+
+        "Always win" has to be enforced here, not just asserted: unlike the
+        equation path (``_attempt_solve``), which picks the LOWEST-ranked
+        symbol of a violated relation, a standalone solver writes its target
+        unconditionally.  ``_meaningful_change`` compares values, not ranks,
+        so before the guard below an explicit ``orbit.b.m_total`` in
+        params.yaml (RANK_USER) was overwritten every iteration by the body
+        mass sum and its provenance DOWNGRADED to RANK_DERIVED_MIXED --
+        exactly the inversion the ranking system exists to prevent.  A path
+        already held at a rank the solver cannot beat is therefore skipped;
+        one held at RANK_DERIVED_MIXED or below (including the solver's own
+        previous answer) still re-fires as its inputs refine.
         """
         for lookup_key in self.standalone_solvers:
             solver_func = self.custom_solvers[lookup_key]
@@ -1935,6 +1947,13 @@ class ConfigManager:
                 ):
                     continue
                 if pinned_vars and path in pinned_vars:
+                    continue
+                if provenance.get(path, 0) > RANK_DERIVED_MIXED:
+                    logger.debug(
+                        f"Standalone solver for {path} skipped: already held "
+                        f"at rank {provenance.get(path)} > "
+                        f"{RANK_DERIVED_MIXED}."
+                    )
                     continue
                 try:
                     val = float(
