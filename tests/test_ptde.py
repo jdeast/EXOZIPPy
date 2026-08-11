@@ -806,3 +806,89 @@ def test_make_starts_caps_exact_seed_chains():
     assert n_exact <= n_chains // 2
     # every seed still contributes a chain (round-robin unchanged)
     assert set(chain_seed_index) == set(range(K))
+
+
+# ---------------------------------------------------------------------------
+# review 2.9.3: a pair with ZERO swap proposals carries no measurement and
+# must not be scored as fully rejecting.
+# ---------------------------------------------------------------------------
+
+
+def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
+    """
+    Given a 5-rung ladder in which every MEASURED adjacent pair rejects at
+      the same rate, and the other pairs were never proposed (the DEO
+      schedule alternates even/odd pairs and the counters reset every
+      adaptation window, so this is routine),
+    When the barrier-equalizing ladder update runs,
+    Then the ladder is unchanged -- a uniform barrier is already
+      equal-share, so the only honest update is none.
+
+    Regression (notes/code_review_20260808.txt 2.9.3): the old
+    `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
+    REJECTING, r = 1, the largest barrier a link can carry, so an
+    unmeasured link stole ladder resolution from the links that had
+    actually been measured.
+    """
+    # ARRANGE: pairs 0 and 2 measured at 20% rejection; pairs 1 and 3 never
+    # proposed.
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    accept = np.array([8.0, 0.0, 8.0, 0.0])
+    propose = np.array([10.0, 0.0, 10.0, 0.0])
+
+    # ACT
+    new_T = _update_ladder_barrier(temps, accept, propose)
+
+    # ASSERT
+    np.testing.assert_allclose(new_T, temps, rtol=1e-9)
+
+
+def test_unmeasured_pair_is_interpolated_from_its_measured_neighbours():
+    """
+    Given a ladder whose measured pairs have very different rejection rates
+      and an unmeasured pair between them,
+    When the ladder update runs,
+    Then the result matches what the same ladder would give if the gap had
+      been measured at the interpolated rate -- the gap inherits the local
+      barrier PROFILE rather than a global constant, and the total barrier
+      stays honest.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    # measured: pair0 r=0.1, pair2 r=0.5 -> pair1 should read r=0.3, and
+    # pair3 (past the last measurement) clamps to 0.5.
+    accept = np.array([9.0, 0.0, 5.0, 0.0])
+    propose = np.array([10.0, 0.0, 10.0, 0.0])
+    equivalent_accept = np.array([9.0, 7.0, 5.0, 5.0])
+    equivalent_propose = np.full(4, 10.0)
+
+    # ACT
+    got = _update_ladder_barrier(temps, accept, propose)
+    want = _update_ladder_barrier(temps, equivalent_accept, equivalent_propose)
+
+    # ASSERT
+    np.testing.assert_allclose(got, want, rtol=1e-9)
+    # and it is NOT what scoring the gaps as fully-rejecting would give
+    old_style = _update_ladder_barrier(temps, accept, np.maximum(propose, 1.0))
+    assert not np.allclose(got, old_style)
+
+
+def test_ladder_update_is_a_noop_when_nothing_was_proposed():
+    """
+    Given an adaptation window in which no swap at all was proposed,
+    When the ladder update runs,
+    Then the ladder is returned unchanged rather than re-spaced against
+      four fabricated full-rejection links.
+    """
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    zeros = np.zeros(4)
+
+    np.testing.assert_allclose(
+        _update_ladder_barrier(temps, zeros, zeros), temps
+    )

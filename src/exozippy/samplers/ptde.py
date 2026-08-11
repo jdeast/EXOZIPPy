@@ -335,12 +335,41 @@ def _update_ladder_barrier(temperatures, swap_accept, swap_propose):
     Only valid to call DURING the tuning phase -- re-spacing the ladder after
     tuning would break invariance, the same rule the DE gamma adaptation
     follows.
+
+    Pairs with ZERO proposals in the window carry no measurement and are
+    filled in from their measured neighbours, never scored.  The old
+    `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
+    REJECTING, r_k = 1, the largest barrier a link can have -- so an
+    unmeasured link stole ladder resolution from the links that had actually
+    been measured.  Zero proposals are routine: the DEO schedule alternates
+    even and odd pairs by round, the counters are reset every adaptation
+    window, and rung thinning lengthens the windows in which a given parity
+    never came up.  Scoring the gap 0 instead is equally wrong in the other
+    direction (it claims perfect mixing, collapsing those two rungs
+    together) and, because the gap then drops out of the total, silently
+    rescales every other pair's share.  Linear interpolation over the pair
+    index keeps the total honest and preserves the barrier PROFILE, which
+    varies smoothly along a smooth ladder; np.interp clamps at the ends, so
+    an unmeasured end pair inherits its nearest measured neighbour.  With a
+    single measured pair every r_k is that one value, the ladder is already
+    equal-share, and the update is exactly a no-op -- the right answer from
+    one datum.
     """
     n_temps = len(temperatures)
     if n_temps < 3:
         return np.asarray(temperatures, dtype=float)
-    r = 1.0 - swap_accept / np.maximum(swap_propose, 1)
-    r = np.clip(r, 0.0, 1.0)
+    prop = np.asarray(swap_propose, dtype=float)
+    acc = np.asarray(swap_accept, dtype=float)
+    measured = prop > 0
+    if not measured.any():
+        return np.asarray(temperatures, dtype=float)
+    r = np.zeros(prop.shape, dtype=float)
+    r[measured] = np.clip(1.0 - acc[measured] / prop[measured], 0.0, 1.0)
+    if not measured.all():
+        pair_idx = np.arange(prop.size)
+        r[~measured] = np.interp(
+            pair_idx[~measured], pair_idx[measured], r[measured]
+        )
     # Cumulative barrier at each rung; Lambda[0] = 0, length n_temps.
     Lambda = np.concatenate([[0.0], np.cumsum(r)])
     total = float(Lambda[-1])
