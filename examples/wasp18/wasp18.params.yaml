@@ -1,0 +1,73 @@
+# Seeds/priors below are carried over from the reference EXOFASTv2 example
+# (examples/wasp18/wasp18.priors and wasp18.priors.2, the latter being that
+# fit's own converged MAP on the same S02+S03 TESS data we're using here) --
+# not a fresh literature review. Treat mass/period/tc/cosi as good starting
+# points, not final answers.
+
+# spectroscopic value (wasp18.priors); TICv8 gives 6226 if you'd rather start there
+star.A.teff:
+  initval: 6400.0
+  sigma: 100.0
+
+# spectroscopic
+star.A.feh:
+  initval: 0.0
+  sigma: 0.09
+
+# Seeds only -- star.A.mass/radius priors actually come from the torres:
+# block in wasp18.yaml (WASP-18A is well within Torres+2010's >~0.6 Msun
+# calibration range).
+star.A.mass:
+  initval: 1.20
+star.A.radius:
+  initval: 1.35
+
+# Schlegel+1998-style dust map upper limit (see kelt4 for the mkticsed.py
+# recipe); reused as-is from wasp18.priors.
+star.A.av:
+  upper: 0.04247
+
+# NOTE: this is the *uncorrected* Gaia DR2 parallax from wasp18.priors, not a
+# DR3 value with zero-point correction applied (c.f. kelt4's parallax note).
+# Replace with a corrected DR3 parallax for a real fit.
+star.A.parallax:
+  mu: 8.0994
+  sigma: 0.03344
+
+# Rp/Rstar ~ 0.1 (wasp18.priors.2's p_0) at Rstar ~ 1.34 Rsun -> ~1.34 Rjup.
+planet.b.radius:
+  initval: 1.34
+
+# WASP-18b is one of the most massive known hot Jupiters (~10 Mjup,
+# Hellier+2009 discovery paper); the CORALIE RVs below will refine this.
+planet.b.mass:
+  initval: 10.3
+
+# Hellier+2009 discovery ephemeris (also what wasp18.priors seeds).
+orbit.b.period:
+  initval: 0.94145299
+orbit.b.tc:
+  initval: 2457656.84084398
+# cos(i) from wasp18.priors.2's own fit to this TESS data (i ~ 81 deg).
+orbit.b.cosi:
+  initval: 0.1554
+
+# WASP-18b's orbit is expected to be circularized (short period, massive
+# planet, strong tides); fixing e=0 also keeps the secondary eclipse at
+# phase 0.5, which makes it easier to sanity-check the new fitthermal
+# feature. wasp18.priors.2's free eccentricity fit (e ~ 0.05, from only 9
+# RV points) isn't a reliable literature value -- free these if you want to
+# test e/omega sensitivity later.
+orbit.b.secosw:
+  initval: 0.0
+  sigma: 0.0
+orbit.b.sesinw:
+  initval: 0.0
+  sigma: 0.0
+
+# CORALIE's gamma is an absolute systemic RV (~2000-5000 m/s), not a
+# near-zero pipeline offset, so it needs a seed near the data rather than
+# the component default of 0 -- otherwise the sampler starts ~4000 m/s from
+# where it needs to be. Seeded at the mean of the 9 RVs in WASP-18b.CORALIE.rv.
+rvinstrument.CORALIE.gamma:
+  initval: 3926.0

@@ -1,0 +1,50 @@
+# KELT-17 b priors, near the EXOFASTv2 best fit (kelt17/RM kelt17.priors).
+# initval = start (near MAP); sigma = Gaussian prior width (0 = fixed).
+
+# ---- Star (no SED/MIST here -> prior the fundamentals) ----
+star.A.radius:
+  initval: 1.645
+  sigma: 0.06
+star.A.teff:
+  initval: 7454
+  sigma: 75
+star.A.feh:
+  initval: 0.21
+  sigma: 0.08
+
+# ---- Rossiter-McLaughlin broadening (m/s), fixed as in the EXOFASTv2 example
+star.A.vmacro:
+  initval: 4000
+  sigma: 0
+star.A.vbeta:
+  initval: 4000
+  sigma: 0
+star.A.vmicro:
+  initval: 1000
+  sigma: 0
+
+# ---- Orbit (near best fit) ----
+orbit.b.period:
+  initval: 3.0801716
+orbit.b.tc:
+  initval: 2457330.86812
+orbit.b.cosi:               # i ~ 84.9 deg (b ~ 0.56)
+  initval: 0.089
+# circular orbit
+orbit.b.secosw:
+  initval: 0.0
+  sigma: 0
+orbit.b.sesinw:
+  initval: 0.0
+  sigma: 0
+
+# ---- Spin-orbit via sqrt(vsini)cos/sin(lambda) [(m/s)^1/2] ----
+# -> vsini ~ 49 km/s, lambda ~ -113 deg (retrograde).
+orbit.b.svcoslam:
+  initval: -87.50
+orbit.b.svsinlam:
+  initval: -204.33
+
+# ---- Planet radius ratio ----
+planet.b.p:
+  initval: 0.0959

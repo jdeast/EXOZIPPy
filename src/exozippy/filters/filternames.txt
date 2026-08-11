@@ -37,6 +37,8 @@ I	        Bessell_I	        I	        Generic/Bessell.I	    Bessell.I
 R	        Bessell_R	        R	        Generic/Bessell.R	    Bessell.R
 U	        Bessell_U	        U	        Generic/Bessell.U	    Bessell.U
 V	        Bessell_V	        V	        Generic/Bessell.V	    Bessell.V
+Unsupported	Cousins_I	        I	        Generic/Cousins.I	    Cousins.I
+Unsupported	Cousins_R	        R	        Generic/Cousins.R	    Cousins.R
 Unsupported	CFHT_g	            Unsupported	CFHT/Megaprime.gS	    Megaprime.gS
 Unsupported	CFHT_i_new	        Unsupported	CFHT/Megaprime.i	    Megaprime.i
 Unsupported	CFHT_i_old	        Unsupported	CFHT/Megaprime.iS	    Megaprime.iS

@@ -10,6 +10,7 @@ transit:
   jitter_variance:
     lower: -1000.0
     upper: 100000.0
+    initval: 0.0
     init_scale: 0.000001
     unit: ""
     internal_unit: ""
@@ -24,42 +25,34 @@ transit:
       default:
         func_name: "calc_transit_jitter"
         deps: [ "jitter_variance" ]
-  q1:
+  # Limb darkening lives on the Band component (band: reference per
+  # instrument); see components/band/defaults.yaml.
+  # Optional GP amplitudes, in relative flux (the light curve is normalized to
+  # ~1, so an amplitude above 1 is not physical).  The rest of the GP
+  # blueprint is in components/defaults.yaml.
+  gp_rot_sigma:
     lower: 0.0
     upper: 1.0
-    initval: 0.5
-    init_scale: 0.1
+    initval: 0.001
+    init_scale: 0.001
     unit: ""
     internal_unit: ""
-    latex: "q_1"
-    description: "Limb darkening q1"
-  q2:
+  gp_sho_sigma:
     lower: 0.0
     upper: 1.0
-    initval: 0.5
-    init_scale: 0.1
+    initval: 0.001
+    init_scale: 0.001
     unit: ""
     internal_unit: ""
-    latex: "q_2"
-    description: "Limb darkening q2"
-  u1:
+  # Optional hogg-mixture outlier scatter, in relative flux (the rest of the
+  # robust-likelihood blueprint lives in components/defaults.yaml).
+  out_scale:
+    lower: 0.0
+    upper: 1.0
+    initval: 0.01
+    init_scale: 0.005
     unit: ""
     internal_unit: ""
-    latex: "u_1"
-    description: "Linear limb darkening"
-    expressions:
-      default:
-        func_name: "calc_u1"
-        deps: ["q1", "q2"]
-  u2:
-    unit: ""
-    internal_unit: ""
-    latex: "u_2"
-    description: "Quadratic limb darkening"
-    expressions:
-      default:
-        func_name: "calc_u2"
-        deps: ["q1", "q2"]
   detrend_coeffs:
     initval: 0.0
     init_scale: 1.0

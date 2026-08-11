@@ -1,0 +1,59 @@
+run:
+  name: "kelt17"
+
+prefix: "fitresults/KELT-17b"
+logger_level: INFO
+
+# KELT-17 b -- a misaligned hot Jupiter around a fast-rotating A star
+# (vsini ~ 44 km/s, lambda ~ -116 deg; Zhou et al. 2016). Data converted from
+# the EXOFASTv2 kelt17/RM example. Demonstrates the Rossiter-McLaughlin hook:
+# the two in-transit TRES spectroscopic sequences set `rm: b`.
+
+star:
+  - name: "A"
+    mist: False
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+transit:
+  - name: "KUO_V"
+    file: "n20150312.V.KUO.dat"       # cols: t, flux, err, (t-tbar), (t-tbar)^2
+    band: "V"                          # -> constant + linear + quadratic baseline
+  - name: "MVRC_i"
+    file: "n20160226.Sloani.MVRC.dat"
+    band: "Sloani"
+
+band:
+  - name: "V"
+    filter: "V"
+  - name: "Sloani"
+    filter: "Sloani"
+
+rvinstrument:
+  # Out-of-transit orbital RVs and the two in-transit RM sequences are all in
+  # one TRES file. `rm: b` applies the Rossiter-McLaughlin model to this
+  # instrument; it contributes only during transit (the model is ~0 elsewhere),
+  # so the same tag safely covers the out-of-transit points.
+  - name: "TRES"
+    file: "KELT-17.TRES.rv"
+    rm: "b"
+    rm_band: "V"
+
+parameter_file: "kelt17.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 1000
+  chains: 4
+  cores: 4
+  init: adapt_diag
+  target_accept: 0.95
+  check_curvatures: False   # quad_solution_vector has no 2nd derivative (as in kelt4)
+  recompute_trace: True

@@ -1,6 +1,7 @@
 """Tests for components/factory.py: discover_components auto-discovery."""
-from exozippy.components.factory import discover_components
+
 from exozippy.components.component import Component
+from exozippy.components.factory import discover_components
 
 
 def test_discover_components_returns_core_yaml_keys():
@@ -23,6 +24,7 @@ def test_discover_components_uses_yaml_key_attribute_over_class_name():
     Then registry['band'] resolves to the Band class.
     """
     from exozippy.components.band.band import Band
+
     registry = discover_components()
     assert registry.get("band") is Band, (
         f"Expected registry['band'] to be Band, got {registry.get('band')}"

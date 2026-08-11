@@ -1,0 +1,210 @@
+name: Publish
+
+# EXOZIPPy is pure Python, so there are no binary wheels to build per platform
+# -- one sdist plus one py3-none-any wheel covers everything. That is the whole
+# difference between this file and exoplanet-core's wheels.yml.
+#
+# Triggers:
+#   push of a v* tag  -> build, verify, publish to PyPI, create a GitHub Release
+#   workflow_dispatch -> build and verify only; optionally publish to TestPyPI
+#
+# Publishing uses PyPI Trusted Publishing (OIDC), so there is no API token in
+# the repository secrets. The trust is registered on PyPI against this exact
+# combination and nothing else can use it:
+#
+#     owner/repo:    jdeast/EXOZIPPy
+#     workflow:      publish.yml     <- this file's name; renaming it breaks
+#                                       publishing until PyPI is updated too
+#     environment:   pypi            <- must also exist in repo Settings
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Also publish the build to TestPyPI (rehearsal)"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # The full test suite, gating the real PyPI upload below. Reused from
+  # tests.yml via workflow_call rather than copied, so the release runs the
+  # same suite CI runs and the two cannot drift.
+  tests:
+    uses: ./.github/workflows/tests.yml
+    # REQUIRED, not tidiness. A called workflow cannot request more permission
+    # than its caller grants, and this repository's default workflow token is
+    # read-only. tests.yml's pytest-latest-deps job asks for `issues: write`
+    # (it files a tracking issue when the nightly unlocked-resolution run
+    # fails), so without this line the whole workflow dies at STARTUP with a
+    # permissions error -- before a single job runs, and regardless of whether
+    # that job would have been skipped by its own `if:`.
+    #
+    # This was found by dispatching publish.yml as a release rehearsal, which
+    # returned `startup_failure`. It would otherwise have surfaced the first
+    # time a version tag was pushed, i.e. during a real release.
+    permissions:
+      contents: read
+      issues: write
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is required, not tidiness: poetry-dynamic-versioning
+      # derives the version from `git describe`, and a shallow clone has no
+      # tags to describe against.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install -U pip
+          pipx install poetry
+          pipx inject poetry "poetry-dynamic-versioning[plugin]"
+          python -m pip install -U twine
+
+      # A rehearsal build cannot be uploaded as-is. Off a tag,
+      # poetry-dynamic-versioning derives something like
+      # "0.1.0rc1.post20.dev0+a911ca1" from `git describe`, and the "+<sha>"
+      # is a PEP 440 LOCAL VERSION, which PyPI and TestPyPI both refuse:
+      #
+      #   400 The use of local versions in '...' is not allowed.
+      #
+      # So the rehearsal used to validate every step except the one that
+      # actually uploads. Substituting a clean throwaway version on dispatch
+      # makes the last link testable too.
+      #
+      # This MUST be a conditional step rather than a conditional value on the
+      # build step. poetry-dynamic-versioning checks `if bypass is not None`,
+      # not truthiness, so setting the variable to an empty string on a tag
+      # push would make the release build's version the empty string.
+      # The !startsWith guard matters: dispatching this workflow FROM a tag ref
+      # would otherwise substitute a throwaway version while the "Version
+      # matches the tag" step below compared it against the tag, failing with a
+      # mismatch that looks like a versioning bug rather than a rehearsal.
+      - name: Use a throwaway version for rehearsal builds
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          !startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "POETRY_DYNAMIC_VERSIONING_BYPASS=0.1.0.dev${{ github.run_number }}" \
+            >> "$GITHUB_ENV"
+
+      - name: Build sdist and wheel
+        run: poetry build
+
+      - name: Check the metadata
+        run: python -m twine check dist/*
+
+      # On a tag push, fail fast if the version the build derived does not match
+      # the tag. exoplanet-core shipped a v0.4.0 run that built rc2-named
+      # artifacts because two tags sat on one commit and `git describe` picked
+      # between them non-deterministically; it only failed because those files
+      # already existed on PyPI. A first-time name would have published silently
+      # wrong. PyPI versions can never be reused, so check before uploading.
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.tar.gz | sed -E 's|.*/exozippy-(.*)\.tar\.gz|\1|')
+          echo "tag=$tag built=$built"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME implies version '$tag' but the" \
+                 "build produced '$built'. Refusing to publish. If two tags" \
+                 "point at this commit, move the release tag to its own commit."
+            exit 1
+          fi
+
+      # The v7/v8 pairing of upload/download-artifact is verified, not assumed:
+      # they are only exercised on a release, so no test covers them. It was
+      # checked by dispatching this workflow as a rehearsal and confirming the
+      # download step succeeded. Do the same if you bump either of them --
+      # they must stay compatible with each other.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+
+  # Rehearsal target. TestPyPI needs its own trusted publisher registered
+  # against this same workflow, with environment name "testpypi".
+  #
+  # Deliberately gated on build only, NOT on tests: this exists to exercise the
+  # publish plumbing quickly, and TestPyPI is disposable. The real upload below
+  # is the one that must wait for a green suite.
+  testpypi:
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/exozippy
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # needs: tests as well as build -- a PyPI version can never be reused, so a
+  # release must not be able to go out over a red suite. v0.1.0rc1 published
+  # without this gate; it happened to be backed by a verified local run, which
+  # is not a control.
+  pypi:
+    needs: [build, tests]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/exozippy
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+
+  # Pushing a tag publishes to PyPI but does NOT create a GitHub Release -- that
+  # is a separate object -- so the Releases page silently falls behind the tags.
+  # Create it here from the annotated tag's own message so the two never
+  # diverge. Tags containing a/b/rc are marked as pre-releases.
+  github_release:
+    needs: [pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # Body = the annotated tag message minus its first line (the title).
+          git tag -l "$tag" --format='%(contents)' | tail -n +2 > notes.md
+          prerelease=""
+          case "$tag" in
+            *a*|*b*|*rc*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$tag" --verify-tag --title "$tag" \
+            --notes-file notes.md $prerelease dist/*

@@ -8,18 +8,18 @@ and produce user-unit (or correctly converted internal-unit) outputs.
 These four tests guard each link in that chain.
 """
 
-import numpy as np
-import pytest
-import pymc as pm
-import xarray as xr
 import arviz as az
 import astropy.units as u
+import numpy as np
+import pymc as pm
+import pytest
+import xarray as xr
 
 from exozippy.components.parameter import Parameter
 from exozippy.run import _convert_posterior_to_user_units, get_draws
 
-MJ_TO_MSUN = float(u.jupiterMass.to(u.solMass))   # ≈ 9.546e-4
-MSUN_TO_MJ = 1.0 / MJ_TO_MSUN                     # ≈ 1047.6
+MJ_TO_MSUN = float(u.jupiterMass.to(u.solMass))  # ≈ 9.546e-4
+MSUN_TO_MJ = 1.0 / MJ_TO_MSUN  # ≈ 1047.6
 
 
 def _mass_param(**kwargs):
@@ -43,12 +43,13 @@ def _make_idata(var_values: dict, n_chains=1, n_draws=4):
     for name, val in var_values.items():
         arr = np.full((n_chains, n_draws), float(val))
         data_vars[name] = xr.DataArray(arr, dims=["chain", "draw"])
-    return az.InferenceData(posterior=xr.Dataset(data_vars))
+    return az.from_dict({"posterior": xr.Dataset(data_vars)})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Test 1  –  _convert_posterior_to_user_units
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_convert_posterior_multiplies_by_internal_to_user_factor():
     """
@@ -59,7 +60,7 @@ def test_convert_posterior_multiplies_by_internal_to_user_factor():
     are now in jupiterMass.
     """
     # ARRANGE
-    internal_value = MJ_TO_MSUN          # 1.0 jupiterMass expressed in solMass
+    internal_value = MJ_TO_MSUN  # 1.0 jupiterMass expressed in solMass
     idata = _make_idata({"planet.b.mass": internal_value})
     p = _mass_param()
     param_lookup = {p.label: p}
@@ -83,8 +84,9 @@ def test_convert_posterior_skips_raw_variables():
     """
     # ARRANGE
     raw_value = 0.0
-    idata = _make_idata({"planet.b.mass": MJ_TO_MSUN,
-                         "planet.b.mass_raw": raw_value})
+    idata = _make_idata(
+        {"planet.b.mass": MJ_TO_MSUN, "planet.b.mass_raw": raw_value}
+    )
     p = _mass_param()
     param_lookup = {p.label: p}
 
@@ -102,6 +104,7 @@ def test_convert_posterior_skips_raw_variables():
 # Test 2  –  compute_summary
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_compute_summary_treats_posterior_as_already_user_units():
     """
     Given a Parameter with unit=jupiterMass, internal_unit=solMass and
@@ -114,7 +117,9 @@ def test_compute_summary_treats_posterior_as_already_user_units():
     """
     # ARRANGE
     p = _mass_param()
-    p.posterior = np.full(200, 1.0)    # 200 samples at 1.0 jupiterMass (user units)
+    p.posterior = np.full(
+        200, 1.0
+    )  # 200 samples at 1.0 jupiterMass (user units)
 
     # ACT
     summary = p.compute_summary()
@@ -129,6 +134,7 @@ def test_compute_summary_treats_posterior_as_already_user_units():
 # ──────────────────────────────────────────────────────────────────────────────
 # Test 3  –  generate_posterior with param_lookup
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_generate_posterior_with_param_lookup_round_trips_user_units():
     """
@@ -215,6 +221,7 @@ def test_generate_posterior_without_param_lookup_returns_internal_units():
 # Test 4  –  get_draws
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_get_draws_converts_user_units_to_internal():
     """
     Given an idata whose posterior has planet.b.mass = 1.0 (user units, jupiterMass)
@@ -262,6 +269,7 @@ def test_get_draws_without_param_lookup_returns_values_as_is():
 # Regression: compute_summary on a scalar-float posterior
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_compute_summary_handles_scalar_float_posterior():
     """
     Regression: generate_posterior returns a plain Python float (not a numpy
@@ -274,7 +282,9 @@ def test_compute_summary_handles_scalar_float_posterior():
     """
     # ARRANGE — simulate what _set_comp_posterior stores for a constant derived param
     p = _mass_param()
-    p.posterior = 1.0   # plain float, as returned by generate_posterior's val.item()
+    p.posterior = (
+        1.0  # plain float, as returned by generate_posterior's val.item()
+    )
 
     # ACT / ASSERT — must not raise AttributeError
     summary = p.compute_summary()

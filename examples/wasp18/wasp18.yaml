@@ -1,0 +1,67 @@
+run:
+  name: "wasp18"
+
+prefix: "fitresults/WASP-18Ab"
+logger_level: INFO   # DEBUG, INFO, or WARNING
+
+# WASP-18: a single star with one known hot Jupiter (no stellar companions,
+# unlike KELT-4's hierarchical triple -- so no mann relation, no astrometry,
+# no B/C stars needed here).
+
+star:
+  - name: "A"
+    mist: False
+
+sed:
+  file: "wasp18.sed.yaml"
+
+# WASP-18A is comfortably within the Torres+2010 calibration (teff ~6400 K,
+# mass ~1.2 Msun, well above the ~0.6 Msun floor), so its mass/radius come
+# from the empirical relation rather than a hand-entered literature prior --
+# same pattern as KELT-4A in examples/kelt4.
+torres:
+  - star: "A"
+    constrain: [mass, radius]
+
+planet:
+  - name: "b"
+
+orbit:
+  - name: "b"
+    primary: ["A"]
+    companion: ["b"]
+
+# Single TESS sector (Sector 2, SPOC 2-minute cadence) to start -- WASP-18
+# has several more sectors available (see scripts/getdata.py WASP-18) if you
+# want to add them once this baseline fit is working.
+transit:
+  - name: "TESS_S02"
+    file: "n20180823.TESS.TESS.WASP-18.S02.0120.SPOC.dat"
+    band: "TESS"
+    exptime: 2.0 # exposure time in minutes
+    ninterp: 1   # model points per data point for cadence smearing
+                 # (1 = no smearing; fine at 2-min cadence)
+
+# WASP-18b has one of the strongest known secondary eclipses (~400 ppm in
+# TESS per wasp18.priors.2's thermal_0) -- fitthermal: true fits that depth
+# in this same light curve (mirrors the reference EXOFASTv2 config,
+# examples/wasp18/wasp18.args: fitthermal=["TESS"]).
+band:
+  - name: "TESS"
+    filter: "TESS"
+    fitthermal: true
+
+rvinstrument:
+  - name: "CORALIE"
+    file: "WASP-18b.CORALIE.rv"
+
+parameter_file: "wasp18.params.yaml"
+
+sampler:
+  method: nuts      # nuts, numpyro, blackjax, nutpie, ptde
+  tune: 2000
+  draws: 4000
+  init: adapt_diag
+  target_accept: 0.95
+  recompute_trace: True   # if False and a prefix.nc file exists, load it instead of re-sampling
+  profile: False

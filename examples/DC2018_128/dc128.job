@@ -1,0 +1,28 @@
+# /bin/sh
+# ----------------Parameters---------------------- #
+#$ -S /bin/sh
+#$ -pe mthread 64
+#$ -q mThC.q
+#$ -cwd
+#$ -j y
+#$ -N dc128
+#$ -o dc128.log
+#
+# ----------------Modules------------------------- #
+module purge
+module load tools/python/3.13
+
+export PATH="$HOME/miniconda3/bin:$PATH:$HOME/.local/bin"
+
+# 2. Source conda and activate your specific environment
+source $HOME/miniconda3/etc/profile.d/conda.sh
+conda activate exozippy
+
+which python
+python -c "import matplotlib; print(matplotlib.__file__)"
+
+# 3. Navigate to the code directory
+cd $HOME/python/EXOZIPPy/examples/DC2018_128
+
+# 4. Run your python script
+exozippy DC2018_128_hpc.yaml

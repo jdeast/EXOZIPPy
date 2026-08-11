@@ -1,0 +1,79 @@
+run:
+  name: "OGLE-2016-BLG-1003"
+
+prefix: "fitresults/OGLE-2016-BLG-1003"
+#logger_level: DEBUG
+
+# OGLE-2016-BLG-1003: binary source + binary lens (2S2L).
+# Jung et al. 2017, ApJ 841, 75 — "standard" 2S2L solution (Table 1):
+#   t_0,1~2457551.04, u_0,1~0.059, t_0,2~2457552.52, u_0,2~0.135,
+#   t_E~28.9 d, s~1.033, q~1.19, alpha~48.2 deg, rho_1~4.5e-4, rho_2~1.3e-3
+#
+# system architecture:
+#   star.0 = Lens     (primary lens)
+#   star.1 = LensB    (secondary lens body; q~1.19 → stellar, not planetary)
+#   star.2 = SourceA  (brighter source)
+#   star.3 = SourceB  (fainter source)
+
+star:
+  - name: "Lens"
+  - name: "LensB"
+  - name: "SourceA"
+  - name: "SourceB"
+
+lens:
+  - name: "Lens"
+    lenses:  ["star.0", "star.1"]
+    sources: ["star.2", "star.3"]
+    finite_source: True
+
+galacticmodel:
+  - name: "OGLE-2016-BLG-1003"
+    anchor_idx: 2              # anchor on SourceA (star.2)
+
+band:
+  - name: "I"
+    filter: "Generic/Cousins.I"
+    ld_law: "linear"
+  - name: "R"
+    filter: "MOA/MOA.Red"
+    ld_law: "linear"
+  - name: "V"
+    filter: "Generic/Cousins.V"
+    ld_law: "linear"
+
+mulensinstrument:
+  - name: "OGLE"
+    file: "n20140130.I.OGLE.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "MOA"
+    file: "n20150210.R.MOA.OGLE-2016-BLG-1003.dat"
+    band: "R"
+  - name: "KMTC_I"
+    file: "n20160221.I.KMTC.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTS_I"
+    file: "n20160222.I.KMTS.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTA_I"
+    file: "n20160224.I.KMTA.OGLE-2016-BLG-1003.dat"
+    band: "I"
+  - name: "KMTC_V"
+    file: "n20160227.V.KMTC.OGLE-2016-BLG-1003.dat"
+    band: "V"
+  - name: "KMTS_V"
+    file: "n20160317.V.KMTS.OGLE-2016-BLG-1003.dat"
+    band: "V"
+
+parameter_file: "ob161003.params.yaml"
+
+sampler:
+  method: ptde_async      # Differential Evolution + Parallel Tempering (async worker pool)
+  n_temps: 8              # temperature rungs (EXOFASTv2 parity)
+  T_max: 200              # hottest temperature (EXOFASTv2 parity)
+  # n_chains: defaults to 2 × n_params
+  # cores: defaults to 75% of physical cores
+  tune: 0
+  draws: 500
+  nthin: 1
+  recompute_trace: True

@@ -1,0 +1,49 @@
+# TIC 100100827 = WASP-18A. Single star, no known companions (unlike
+# KELT-4, no deblending needed here).
+#
+# Photometry and error floors carried over verbatim from the reference
+# EXOFASTv2 example (examples/wasp18/wasp18.sed): Gaia DR2 G/BP/RP,
+# 2MASS JHKs, WISE W1-W4.
+
+model: NextGen
+nstars: 1
+filters:
+    - name: "GAIA/GAIA2r.G"
+      mag: 9.1662
+      err: 0.02
+
+    - name: "GAIA/GAIA2r.Gbp"
+      mag: 9.4274
+      err: 0.02
+
+    - name: "GAIA/GAIA2r.Grp"
+      mag: 8.7881
+      err: 0.02
+
+    - name: "2MASS/2MASS.J"
+      mag: 8.409
+      err: 0.02
+
+    - name: "2MASS/2MASS.H"
+      mag: 8.231
+      err: 0.055
+
+    - name: "2MASS/2MASS.Ks"
+      mag: 8.131
+      err: 0.027
+
+    - name: "WISE/WISE.W1"
+      mag: 8.075
+      err: 0.03
+
+    - name: "WISE/WISE.W2"
+      mag: 8.123
+      err: 0.03
+
+    - name: "WISE/WISE.W3"
+      mag: 8.079
+      err: 0.03
+
+    - name: "WISE/WISE.W4"
+      mag: 7.753
+      err: 0.196

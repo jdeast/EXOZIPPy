@@ -1,5 +1,21 @@
 star:
   logmass:
+    # -9.0 dex is 1e-9 solMass, about two Ceres masses.  Absurd for a star --
+    # that is the point, and it is NOT a sloppy wide default.  Do not raise it.
+    # A planetary-mass microlensing lens must be declared in a 'star' block: a
+    # planet PRIMARY is rejected (see Lens._validate_bodies) because a planet
+    # body has no distance or proper motion of its own, and
+    # galacticmodel.build_likelihood reads system.star only, so a free-floating
+    # planet declared as a 'planet' would get neither the galactic density
+    # prior nor the kinematic one.  As a star it inherits both correctly; they
+    # are mass-independent.  The DEFAULT has to be this low because user bounds
+    # may only ever be TIGHTENED -- raise it here and FFP lenses become
+    # unmodelable with no user-side recourse.  What makes such a body plausible
+    # is the mass PRIOR, not the bound: give that star 'mass_function: ffp'
+    # (galacticmodel.ffp_logmass_logp).  Note the deliberate asymmetry --
+    # IMF: Salpeter raises this floor to the hydrogen-burning limit because a
+    # STELLAR IMF has no claim below it, while the FFP mass function leaves it
+    # alone because sub-stellar masses are exactly its domain.
     lower: -9.0
     upper: 2.5
     initval: 0.0
@@ -11,8 +27,13 @@ star:
   mass:
     unit: "solMass"
     internal_unit: "solMass"
-    lower: 0.1
-    upper: 250.0
+    # No lower/upper here on purpose.  mass is DERIVED (mass = 10**logmass),
+    # so logmass's [-9.0, 2.5] IS the support and the logit transform of the
+    # sampled coordinate enforces it exactly.  Bounds on mass could only act
+    # as soft barrier potentials layered on top of that hard bound, and the
+    # two disagreed by eight orders of magnitude (0.1-250 vs 1e-9-316
+    # solMass), so they added numerical machinery without adding a
+    # constraint.  To change the allowed mass range, change logmass.
     init_scale: 0.02
     latex: "M_*"
     description: "Stellar Mass"
@@ -28,7 +49,7 @@ star:
     description: "Surface Gravity"
     expressions:
       default:
-        func_name: "calc_logg"
+        func_name: "calc_logg_from_logmass"
         deps: ["logmass", "radius"]
 
   distance:
@@ -210,21 +231,38 @@ star:
       default:
         func_name: "calc_parallax"
         deps: [ "distance" ]
-  appks:
-    initval: 10.0
-    init_scale: 0.02
-    lower: -30.0 # the Sun is -28.29
-    upper: 50.0
-    unit: "mag"
-    internal_unit: "mag"
-    latex: "m_{K_s}"
-    description: "Apparent Ks magnitude"
-  absks:
-    unit: "mag"
-    internal_unit: "mag"
-    latex: "M_{K_s}"
-    description: "Absolute Ks magnitude"
-    expressions:
-      default:
-        func_name: "calc_absmag"
-        deps: ["appks", "distance"]
+  # Rossiter-McLaughlin broadening parameters (m/s), shared across planets.
+  # Declared only when an rvinstrument enables `rm:`. vmacro=zeta, vbeta=full
+  # Gaussian broadening (Hirano+2011 Eq. 20), vmicro=xi -> Lorentzian gamma.
+  # (vsini and the projected obliquity lambda are coupled by the
+  # sqrt(vsini)cos/sin(lambda) reparameterization, so they live on `orbit`.)
+  vmacro:
+    lower: 0.0
+    upper: 50000.0
+    initval: 4000.0
+    init_scale: 1000.0
+    unit: "m/s"
+    internal_unit: "m/s"
+    latex: "\\zeta"
+    description: "Macroturbulent Velocity"
+  vbeta:
+    lower: 0.0
+    upper: 50000.0
+    initval: 4000.0
+    init_scale: 1000.0
+    unit: "m/s"
+    internal_unit: "m/s"
+    latex: "\\beta"
+    description: "Gaussian Line Broadening (Hirano+2011 Eq. 20)"
+  vmicro:
+    lower: 0.0
+    upper: 50000.0
+    initval: 1000.0
+    init_scale: 500.0
+    unit: "m/s"
+    internal_unit: "m/s"
+    latex: "\\xi"
+    description: "Microturbulent (Lorentzian) Velocity"
+# The apparent/absolute Ks the Mann relations key on live on the mann
+# component (mann.appks / mann.absks), which derives them from its own
+# non-centered Ks latent rather than sampling them here.

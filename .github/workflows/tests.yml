@@ -1,0 +1,288 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # Nightly, for the unlocked-resolution job below -- it catches an upstream
+  # release breaking us, which has nothing to do with when we push.
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+  # Callable from publish.yml so a release runs exactly this suite, rather
+  # than a copy of it that drifts out of sync.
+  workflow_call:
+
+jobs:
+  # NOTE ON JOB NAMES -- read before renaming anything here.
+  #
+  # The branch ruleset requires a status check literally named `test`, and
+  # there are no bypass actors, so if nothing ever reports that name then
+  # NOTHING CAN EVER MERGE, including the PR that would fix it.
+  #
+  # A matrix job does not report its own id: it reports one check per
+  # combination, named `pytest (ubuntu-latest, 3.12)` and so on. That is why
+  # the matrix below is called `pytest` and the aggregating gate job at the
+  # bottom is called `test` -- the required name stays stable no matter how
+  # the matrix grows or shrinks.
+
+  # Runs on everything, including pull requests.
+  #
+  # These four combinations cost the SAME wall clock as the single 3.12 job
+  # that preceded them, because matrix combinations run concurrently -- a
+  # measured run had all four starting within 6 seconds of each other and
+  # finishing between 12 and 16 minutes. Adding Python versions here is
+  # effectively free; do not trim them to "save time", there is none to save.
+  #
+  # WINDOWS IS DELIBERATELY ABSENT. It was tried and removed: the suite takes
+  # over 90 minutes there against ~16 on Linux, and the job was cancelled at
+  # the cap on every attempt -- it never once produced a result, green or red.
+  # Adding it back means first making the suite finish, not raising the
+  # timeout again. The bugs it did find (mkl wheels, SIGALRM, the GUI's
+  # cross-process signal) are fixed and stay fixed. See notes/todo.txt.
+  pytest:
+    name: pytest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # Do not cancel the other combinations when one fails. When a new Python
+      # breaks something, "3.14 failed and everything else was cancelled" tells
+      # you much less than seeing which combinations passed.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          # CONTRIBUTING documents a macOS setup, and macOS is as fast as Linux
+          # here, so it stays on the pull-request path.
+          - os: macos-latest
+            python-version: "3.12"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: poetry
+
+      # --extras gui is required, not polish: ruamel-yaml lives in that extra,
+      # so without it tests/test_gui_document.py fails at import and the whole
+      # GUI test surface never runs here. (httpx, which fastapi's TestClient
+      # needs, is in the dev group and so is always installed.)
+      - name: Install dependencies
+        run: poetry install --extras gui --no-interaction
+
+      # The SED tests need ~250 MB of NextGen model spectra that
+      # ensure_model_data() fetches from Zenodo on first use, caching into the
+      # checkout -- which is fresh in every job, so without this EVERY matrix
+      # combination re-downloads it. That is ~1.3 GB per run pulled from a free
+      # academic host, and it is why two consecutive Dependabot PRs went red on
+      # `HTTPError: HTTP Error 504: Gateway Time-out` in tests that had nothing
+      # to do with their diffs.
+      #
+      # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
+      # correct by construction: change the data, change the key. Keep it in
+      # sync if that pin ever moves.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v6
+        with:
+          path: src/exozippy/components/sed/models/NextGen
+          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      # The mulensing component sets astropy's solar-system ephemeris to
+      # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
+      # on first use. Same failure mode as the Zenodo spectra above: a slow
+      # JPL server turned into URLError failures across the suite (nightlies
+      # of 2026-07-29 and 2026-07-31). The kernel file never changes, so a
+      # static key is correct; bump it only if the ephemeris name in
+      # ephemeris.py / mulensing/op.py ever moves off de430.
+      - name: Cache the astropy ephemeris kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-de430
+
+      # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
+      # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
+      # building a System and compiling PyTensor graphs. The symptom was never
+      # an assertion failure but "worker 'gwN' crashed", landing on whichever
+      # heavy test drew the short straw -- it moved between
+      # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
+      # and vanished entirely on others. That is a memory ceiling, not a bug.
+      - name: Run test suite
+        run: poetry run pytest -q -n 2
+
+  # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
+  # `pip install exozippy` does.
+  #
+  # Every other job here installs the lock: one exact, frozen dependency set.
+  # That verifies what we SHIP. It does not verify what users RESOLVE, and
+  # those are different artifacts -- pyproject declares ranges ("jax>=0.5.0,
+  # <1.0.0", "nutpie>=0.13.0") that nothing otherwise exercises. This stack is
+  # unusually sensitive to that gap: a pymc/pytensor/numpy minor release can
+  # shift numerical results rather than fail loudly.
+  #
+  # Dependabot does not cover this. It bumps the lock, so it tells us a new
+  # version works with our pins; it never tests a fresh resolution.
+  #
+  # Deliberately NOT in the `test` gate's needs. An upstream project releasing
+  # something incompatible must not turn the required check red and block
+  # merges for a reason that has nothing to do with the pull request. A
+  # failure here fails the workflow run, which is the alarm we want.
+  pytest-latest-deps:
+    name: pytest-latest-deps
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # Scoped to this job, not the workflow. Only this job files issues; nothing
+    # here needs write access to the repository contents.
+    permissions:
+      contents: read
+      issues: write
+
+    # The open-on-failure and close-on-success steps below both look the
+    # tracking issue up by this exact title. Defined once so they cannot
+    # drift apart -- if they did, a green run would stop closing the issue
+    # a red run opened.
+    env:
+      ISSUE_TITLE: "Nightly: suite fails against freshly resolved dependencies"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # No poetry, no lock. pip resolves from pyproject's ranges, exactly as a
+      # user installing from PyPI would. The test harness is installed
+      # separately and unpinned -- it lives in poetry's dev GROUP, which never
+      # reaches published metadata, so `pip install .[gui]` cannot bring it in.
+      - name: Install with a fresh resolution
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[gui]"
+          pip install pytest pytest-timeout pytest-xdist httpx
+
+      # Same Zenodo spectra cache as the other jobs -- see the comment there.
+      # Shares their key, so this job is usually a cache hit populated by them.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v6
+        with:
+          path: src/exozippy/components/sed/models/NextGen
+          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      # Same astropy ephemeris-kernel cache as the matrix job -- see the
+      # comment there.
+      - name: Cache the astropy ephemeris kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-de430
+
+      # Saved to a file, not just echoed: the failure report below quotes it,
+      # and "which versions did it actually pick" is the first question anyone
+      # asks about a resolution failure.
+      - name: Record what actually got resolved
+        run: pip freeze | tee resolved.txt
+
+      - name: Run test suite
+        run: pytest -q -n 2
+
+      # Email alone is a weak alarm for this job. A nightly that stays broken
+      # for a week sends seven identical emails, which is how an alarm becomes
+      # noise and then becomes invisible. One issue, updated in place, stays
+      # visible to collaborators and has a state that means something: open =
+      # still broken, closed = fixed.
+      #
+      # Uses the preinstalled gh CLI and the automatic GITHUB_TOKEN, so there
+      # is no marketplace action in the supply chain for this.
+      - name: Open or update the tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="$ISSUE_TITLE"
+
+          {
+            echo "The nightly unlocked-resolution job failed."
+            echo
+            echo "This job installs with \`pip install \".[gui]\"\` -- no"
+            echo "poetry.lock -- so it reflects what a user gets from PyPI"
+            echo "rather than what we ship. A failure here usually means an"
+            echo "upstream release is incompatible with our declared ranges,"
+            echo "not that anything in this repository changed."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo "<details><summary>Resolved versions</summary>"
+            echo
+            echo '```'
+            # Key packages first; the full list is in the run's logs.
+            grep -iE '^(pymc|pytensor|numpy|scipy|astropy|jax|jaxlib|numpyro|blackjax|nutpie|celerite2|exoplanet-core)' resolved.txt || true
+            echo '```'
+            echo "</details>"
+          } > body.md
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+                       --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing issue #$EXISTING"
+            gh issue comment "$EXISTING" --body-file body.md
+          else
+            echo "Opening a new issue"
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
+
+      # The inverse of the step above. Without it the issue only ever opens,
+      # so after a transient failure (a JPL or Zenodo hiccup, run 30620673936)
+      # "open" stops meaning "still broken" until a human triages it. With it
+      # the state is truthful on its own: a real upstream break keeps failing
+      # nightly and the issue stays open; a one-night flake closes itself on
+      # the next green run, with the open/close timestamps recording how long
+      # it lasted. A genuine break is never masked -- this step cannot run
+      # while the suite is failing.
+      - name: Close the tracking issue when the suite is green again
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --state open --search "$ISSUE_TITLE in:title" \
+                       --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Closing issue #$EXISTING"
+            gh issue close "$EXISTING" \
+              --comment "The nightly unlocked-resolution job passed again: $RUN_URL"
+          else
+            echo "No open tracking issue to close"
+          fi
+
+  # The stable name the ruleset requires. It exists only to aggregate the
+  # matrix into one pass/fail, so the required check never has to be renamed
+  # when the matrix changes.
+  #
+  # `if: always()` is load-bearing. Without it this job is skipped when any
+  # matrix combination fails, and a skipped required check reads as neutral
+  # rather than failing -- the PR would look mergeable with a red matrix.
+  test:
+    name: test
+    if: always()
+    needs: [pytest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required combination did not succeed
+        run: |
+          echo "pytest: ${{ needs.pytest.result }}"
+          test "${{ needs.pytest.result }}" = "success"

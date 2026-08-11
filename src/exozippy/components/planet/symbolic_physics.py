@@ -1,7 +1,9 @@
-import sympy as sp
-import numpy as np
-from ...constants import LOGG_CONST, KEPLER_CONST, G
 import inspect
+
+import numpy as np
+import sympy as sp
+
+from ...constants import KEPLER_CONST, LOGG_CONST, G
 
 # ---------------------------------------------------------
 # 1. Define Symbols
@@ -9,16 +11,19 @@ import inspect
 
 # All parameters are strictly real.
 # Positivity bounds (mass > 0, radius > 0) are enforced downstream by defaults.yaml
-star_radius, star_mass = sp.symbols('star_radius star_mass', real=True)
-mass, radius = sp.symbols('mass radius', real=True)
-p, ar = sp.symbols('p ar', real=True)
-density = sp.symbols('density', real=True)
+star_radius, star_mass = sp.symbols("star_radius star_mass", real=True)
+mass, radius = sp.symbols("mass radius", real=True)
+p, ar = sp.symbols("p ar", real=True)
+density = sp.symbols("density", real=True)
 
 # Log parameters
-logg = sp.symbols('logg', real=True)
-ecc = sp.symbols('ecc', real=True)
+logg = sp.symbols("logg", real=True)
+log_q = sp.symbols("log_q", real=True)
+ecc = sp.symbols("ecc", real=True)
 
-K, arsun, sini, period, m_total = sp.symbols('K arsun sini period m_total', real=True)
+K, arsun, sini, period, m_total = sp.symbols(
+    "K arsun sini period m_total", real=True
+)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
@@ -27,6 +32,7 @@ K, arsun, sini, period, m_total = sp.symbols('K arsun sini period m_total', real
 
 comp_key = "planet"
 
+
 def get_symbol_map(config):
     # Grab the indices to know WHICH star and orbit this planet belongs to
     star_idx = config.get("star_ndx", 0)
@@ -34,6 +40,7 @@ def get_symbol_map(config):
 
     return {
         "mass": "mass",
+        "log_q": "log_q",
         "radius": "radius",
         "density": "density",
         "logg": "logg",
@@ -42,14 +49,14 @@ def get_symbol_map(config):
         "K": "K",
         "arsun": "arsun",
         "m_total": "m_total",
-
         # Cross-Component Bridges:
         "sini": f"orbit.{orbit_idx}.sini",
         "period": f"orbit.{orbit_idx}.period",
         "ecc": f"orbit.{orbit_idx}.ecc",
         "star_mass": f"star.{star_idx}.mass",
-        "star_radius": f"star.{star_idx}.radius"
+        "star_radius": f"star.{star_idx}.radius",
     }
+
 
 # ---------------------------------------------------------
 # 3. Physics Relations
@@ -57,28 +64,39 @@ def get_symbol_map(config):
 ONE = sp.Integer(1)
 TWO = sp.Integer(2)
 THREE = sp.Integer(3)
-Gsym = sp.Rational(int(round(G*1e10)),10000000000)
+Gsym = sp.Rational(int(round(G * 1e10)), 10000000000)
 
 RELATIONS = [
+    # Mass ratio to the host star.  In log_q mode this back-solves a user's
+    # planet.<i>.mass initval (or the K -> mass custom solver's result) into a
+    # log_q start.  In linear mode log_q is never materialized, and because it
+    # carries the lowest rank in this relation (planet/defaults.yaml) it always
+    # absorbs the residual, so the relation cannot perturb mass or star_mass.
+    sp.Eq(mass, (10**log_q) * star_mass),
     # Bulk Density (rho \propto M / R^3)
-    sp.Eq(density, mass / (radius ** THREE)),
-
+    sp.Eq(density, mass / (radius**THREE)),
     # Surface Gravity in cgs (g = G * M / R^2)
-    #sp.Eq(logg, LOGG_CONST + sp.log(mass, 10) - 2.0 * sp.log(radius, 10)),
-
-    sp.Eq(p, radius / star_radius), # You'll need to define star_radius as a symbol!
-
+    # sp.Eq(logg, LOGG_CONST + sp.log(mass, 10) - 2.0 * sp.log(radius, 10)),
+    sp.Eq(
+        p, radius / star_radius
+    ),  # You'll need to define star_radius as a symbol!
     # RV semi-amplitude
-    #sp.Eq(m_total, star_mass + mass),
-    #sp.Eq(arsun, KEPLER_CONST * (m_total ** (1.0/3.0)) * (period ** (2.0/3.0))),
-    #sp.Eq(K, (2.0 * sp.pi * sini * arsun * mass) /
+    # sp.Eq(m_total, star_mass + mass),
+    # sp.Eq(arsun, KEPLER_CONST * (m_total ** (1.0/3.0)) * (period ** (2.0/3.0))),
+    # sp.Eq(K, (2.0 * sp.pi * sini * arsun * mass) /
     #             (period * m_total * sp.sqrt(1.0 - ecc ** 2))),
-    #sp.Eq(K,((2.0*sp.pi*G)/(period*(star_mass + mass)**2))**(1.0/3.0)*mass*sini/(sp.sqrt(1.0-ecc**2)))
-    #sp.Eq(mass, sp.Symbol('mass_check_sentinel')) # this triggers our custom solver for K->mass
-    sp.Eq(K, (
-        ((TWO * sp.pi * Gsym) / (period * (star_mass + mass)**TWO))**sp.Rational(1, 3)
-    ) * mass * sini / sp.sqrt(ONE - ecc**TWO))
-
+    # sp.Eq(K,((2.0*sp.pi*G)/(period*(star_mass + mass)**2))**(1.0/3.0)*mass*sini/(sp.sqrt(1.0-ecc**2)))
+    # sp.Eq(mass, sp.Symbol('mass_check_sentinel')) # this triggers our custom solver for K->mass
+    sp.Eq(
+        K,
+        (
+            ((TWO * sp.pi * Gsym) / (period * (star_mass + mass) ** TWO))
+            ** sp.Rational(1, 3)
+        )
+        * mass
+        * sini
+        / sp.sqrt(ONE - ecc**TWO),
+    ),
 ]
 
 
@@ -97,7 +115,7 @@ def register_solvers(config_manager):
             "ecc": resolved.get(f"orbit.{o_idx}.ecc"),
             "sini": resolved.get(f"orbit.{o_idx}.sini"),
             "period": resolved.get(f"orbit.{o_idx}.period"),
-            "primary_mass": resolved.get(f"star.{s_idx}.mass")
+            "primary_mass": resolved.get(f"star.{s_idx}.mass"),
         }
 
         # 3. If any dependency hasn't been solved yet, abort and try later
@@ -108,6 +126,35 @@ def register_solvers(config_manager):
 
     config_manager.register_custom_solver("planet.mass", solver_wrapper)
 
+    def log_q_wrapper(resolved, system_config, index):
+        """log_q from the planet mass and its host mass.
+
+        Registered so the transcendental inversion of
+        Eq(mass, 10**log_q * star_mass) never reaches sp.solve (2 s alarm).
+        A non-positive mass is not representable in this coordinate; abort
+        (KeyError is the documented "cannot solve yet" signal) and leave the
+        defaults.yaml start in place.  That case only arises in linear mode,
+        where the value is unused -- a log_q-mode planet with a negative mass
+        was already rejected by Planet._reconcile_mass_user_params.
+        """
+        planet_cfgs = system_config.get("planet", [{}])
+        p_cfg = planet_cfgs[index] if index < len(planet_cfgs) else {}
+        s_idx = p_cfg.get("star_ndx", 0)
+
+        mass = resolved.get(f"planet.{index}.mass")
+        star_mass = resolved.get(f"star.{s_idx}.mass")
+        if mass is None or star_mass is None:
+            raise KeyError("Missing dependencies for log_q solver")
+        if mass <= 0.0 or star_mass <= 0.0:
+            raise KeyError(
+                f"planet.{index}.mass = {mass} is not representable as log_q"
+            )
+
+        return float(np.log10(mass / star_mass))
+
+    config_manager.register_custom_solver("planet.log_q", log_q_wrapper)
+
+
 def solve_companion_mass(K, ecc, sini, period, primary_mass):
     # K in radSol/day (m/s?)
     # period in days
@@ -116,18 +163,28 @@ def solve_companion_mass(K, ecc, sini, period, primary_mass):
     # Constants (IDL defaults)
     cubert2 = 1.25992104989487319
 
-    x = period / (2.0 * np.pi * G) * (K * np.sqrt(1.0 - ecc ** 2) / sini) ** 3
-    x2 = x ** 2
-    x3 = x ** 3
-    m12 = primary_mass ** 2
+    x = period / (2.0 * np.pi * G) * (K * np.sqrt(1.0 - ecc**2) / sini) ** 3
+    x2 = x**2
+    x3 = x**3
+    m12 = primary_mass**2
     m13 = m12 * primary_mass
-    m14 = m12 ** 2
+    m14 = m12**2
 
     # The IDL analytic solution
-    y = (27.0 * m12 * x + np.sqrt(729.0 * m14 * x2 + 108.0 * m13 * x3) + 18.0 * primary_mass * x2 + 2.0 * x3) ** (1.0 / 3.0)
-    companion_mass = y / (3.0 * cubert2) - cubert2 * (-6.0 * primary_mass * x - x2) / (3.0 * y) + x / 3.0
+    y = (
+        27.0 * m12 * x
+        + np.sqrt(729.0 * m14 * x2 + 108.0 * m13 * x3)
+        + 18.0 * primary_mass * x2
+        + 2.0 * x3
+    ) ** (1.0 / 3.0)
+    companion_mass = (
+        y / (3.0 * cubert2)
+        - cubert2 * (-6.0 * primary_mass * x - x2) / (3.0 * y)
+        + x / 3.0
+    )
 
     return companion_mass  # Return in Msun
+
 
 def get_solver_paths():
     """

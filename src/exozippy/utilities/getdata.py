@@ -1,0 +1,548 @@
+"""Download TESS/Kepler light curves and format them for EXOFASTv2/EXOZIPPy.
+
+This is the importable home of the former scripts/getdata.py. The CLI is
+defined by build_parser() and driven by main(argv=None); scripts/getdata.py
+is now a thin wrapper that calls main().
+
+The heavy lightkurve import is deferred into run() so that build_parser()
+and the introspection layer stay importable without the download stack.
+
+Please acknowledge Lightkurve when using this tool:
+
+This research made use of Lightkurve, a Python package for Kepler and TESS
+data analysis (Lightkurve Collaboration 2018).
+"""
+
+import argparse
+import datetime
+import glob
+import os
+import sys
+
+import numpy as np
+
+
+def build_parser():
+    """Return the argparse parser for the getdata utility."""
+    parser = argparse.ArgumentParser(
+        prog="getdata.py",
+        description="Downloads TESS/Kepler data and formats it for EXOFASTv2",
+    )
+    parser.add_argument("id", help="SIMBAD-resolvable star name")
+    parser.add_argument(
+        "-d",
+        "--depth",
+        default=0.03,
+        type=float,
+        dest="depth",
+        help="Fractional transit depth. Flux >= 1-depth will not be clipped.",
+    )
+    parser.add_argument(
+        "-n",
+        "--nsigma",
+        default=5.0,
+        type=float,
+        dest="nsigma",
+        help="N sigma clipping. Negative values will skip clipping.",
+    )
+    parser.add_argument(
+        "-p", "--path", default=".", dest="path", help="path to output files"
+    )
+    parser.add_argument(
+        "-u",
+        "--undeblend",
+        default=False,
+        action="store_true",
+        dest="undeblend",
+        help="Undo deblending from lightcurves",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        default=False,
+        action="store_true",
+        dest="verbose",
+        help="Display clipping stats",
+    )
+    parser.add_argument(
+        "-a",
+        "--all",
+        default=False,
+        action="store_true",
+        dest="download_all",
+        help="Download all lightcurves",
+    )
+    parser.add_argument(
+        "-o",
+        "--overwrite",
+        default=False,
+        action="store_true",
+        dest="overwrite",
+        help="Overwrite previously downloaded files",
+    )
+    return parser
+
+
+def tic_contamination_ratio(target_id, verbose=False):
+    """Return the TIC-8.2 contamination ratio Rcont for ``target_id``.
+
+    Rcont = (flux from contaminating neighbors) / (flux from the target),
+    measured in the TIC's own fixed aperture. Returns 0.0 when the TIC has
+    no contamination entry for the star. Only used as a fallback when the
+    light curve itself does not carry CROWDSAP (see crowding_fraction).
+    """
+    # this feature probably won't be used often. don't make it a
+    # dependency if not used
+    from astroquery.vizier import Vizier
+
+    v = Vizier(
+        columns=["TIC", "Ncont", "Rcont", "_r"], catalog="IV/39/tic82"
+    ).query_object(target_id)[0]
+    ndx = np.argmin(v["_r"])
+    v = v[ndx]
+
+    if str(v["Rcont"]) == "--":
+        if verbose:
+            print("No contamination listed in the TIC for " + str(target_id))
+        return 0.0
+
+    if verbose:
+        print(
+            "TIC lists "
+            + str(v["Ncont"])
+            + " contaminating stars (Rcont = "
+            + str(v["Rcont"])
+            + ")"
+        )
+    return float(v["Rcont"])
+
+
+def crowding_fraction(lc, contratio=0.0):
+    """Return (crowdsap, source) for a light curve about to be re-blended.
+
+    CROWDSAP is the fraction of the flux in the photometric aperture that
+    belongs to the target. The SPOC/PDC pipeline used exactly this number to
+    subtract the contaminating flux, so taking it from the light curve's own
+    header is the exact inverse of the correction we are undoing (it is
+    per-sector and measured for the aperture actually used, unlike the TIC's
+    single all-sky number).
+
+    When the header does not carry it -- older products, QLP and other
+    non-SPOC pipelines, or a light curve that has already been un-corrected
+    -- fall back on the TIC contamination ratio, which is the same quantity
+    in a different form: Rcont = F_contam / F_target, so
+
+        crowdsap = F_target / (F_target + F_contam) = 1 / (1 + Rcont)
+
+    FLFRCSAP (the fraction of the target's flux that lands inside the
+    aperture) is deliberately unused: the pipeline divides the flux by it,
+    and a multiplicative constant cancels exactly under normalization.
+
+    Returns (1.0, "none") when there is nothing to undo.
+    """
+    meta = getattr(lc, "meta", None) or {}
+    raw = None
+    for key in ("CROWDSAP", "crowdsap"):
+        if key in meta:
+            raw = meta[key]
+            break
+
+    if raw is not None:
+        try:
+            crowdsap = float(raw)
+        except (TypeError, ValueError):
+            crowdsap = np.nan
+        if np.isfinite(crowdsap) and 0.0 < crowdsap <= 1.0:
+            return crowdsap, "CROWDSAP"
+        print(
+            "WARNING: ignoring unusable CROWDSAP = "
+            + str(raw)
+            + " in the light curve header"
+        )
+
+    if contratio > 0.0:
+        print(
+            "WARNING: no usable CROWDSAP in the light curve header; falling "
+            "back on the TIC contamination ratio (Rcont = "
+            + str(contratio)
+            + "), which was measured in the TIC aperture, not this "
+            "pipeline's"
+        )
+        return 1.0 / (1.0 + contratio), "Rcont"
+
+    print(
+        "WARNING: no CROWDSAP in the light curve header and no TIC "
+        "contamination ratio -- leaving the light curve as delivered "
+        "(no deblending undone)"
+    )
+    return 1.0, "none"
+
+
+def reblend_lightcurve(lc, crowdsap):
+    """Put back the contaminating flux the pipeline subtracted.
+
+    SPOC/PDC removes crowding *additively*, then divides by the aperture
+    throughput (Kepler Data Processing Handbook, KSCI-19081):
+
+        F_pdc = (F_sap - (1 - CROWDSAP) * median(F_sap)) / FLFRCSAP
+
+    Taking the median of both sides gives
+
+        median(F_sap) = FLFRCSAP * median(F_pdc) / CROWDSAP
+
+    and substituting back inverts the correction exactly:
+
+        F_sap = FLFRCSAP * (F_pdc + (1 - CROWDSAP)/CROWDSAP * median(F_pdc))
+
+    The FLFRCSAP factor is a constant, so it cancels under normalize(); the
+    additive term does not. In normalized units the whole operation is
+
+        f_blended = CROWDSAP * f + (1 - CROWDSAP)
+
+    so a transit of undiluted depth d comes back at depth CROWDSAP * d, and
+    the errors scale by CROWDSAP with it (the transit S/N is unchanged).
+    That dilution is the whole point of the -u flag: the fit then models it
+    with its own dilution parameter.
+
+    The old code multiplied the flux by the constant (1 + Rcont) instead,
+    which normalize() divided straight back out -- a no-op that left users
+    with undiluted depths while their file said otherwise.
+    """
+    if not np.isfinite(crowdsap) or crowdsap <= 0.0 or crowdsap > 1.0:
+        raise ValueError("crowdsap must be in (0, 1]; got " + repr(crowdsap))
+    if crowdsap == 1.0:
+        # no contaminating flux in the aperture: nothing to put back
+        return lc
+
+    median = np.nanmedian(np.asarray(lc.flux.value, dtype=float))
+    if not np.isfinite(median) or median <= 0.0:
+        raise ValueError(
+            "cannot undo deblending: the median flux is "
+            + repr(median)
+            + ", so the contaminating flux level is undefined"
+        )
+
+    excess = (1.0 - crowdsap) / crowdsap * median
+    unit = getattr(lc.flux, "unit", None)
+    if unit is not None:
+        excess = excess * unit
+    return lc + excess
+
+
+def run(args):
+    """Download and write light curves for the parsed argparse namespace."""
+    import lightkurve as lk
+
+    # undo the deblending applied to TESS/Kepler lightcurves.
+    # contratio is None for a lightcurve that must be left as delivered;
+    # otherwise it is the TIC contamination ratio, used only as a fallback
+    # when the lightcurve header has no CROWDSAP.
+    if args.undeblend:
+        og_contratio = tic_contamination_ratio(args.id, verbose=args.verbose)
+        file_ext = ".undeblended.dat"
+    else:
+        file_ext = ".dat"
+        contratio = None
+
+    t0 = datetime.datetime(2000, 1, 1)
+    jd0 = 2451544.5
+
+    search_results = lk.search_lightcurve(
+        args.id,
+        author=(
+            "SPOC",
+            "TESS-SPOC",
+            "QLP",
+            "TASOC",
+            "CDIPS",
+            "Kepler",
+            "K2",
+            "K2SFF",
+            "EVEREST",
+        ),
+    )
+
+    if len(search_results) == 0:
+        print(
+            "No light curves found for "
+            + args.id
+            + ". Name must be SIMBAD-resolveable"
+        )
+        return
+
+    # sometimes IDs match to multiple TIC IDs
+    # warn the user to select by TIC ID
+    unique_ids = list(set(search_results.target_name))
+
+    # K2 has unique names (ktwoEPICID) for the same target
+    # Kepler has unique names (kplrKICID) for the same target
+    # download them
+    match = []
+    for id in unique_ids:
+        if "ktwo" in id:
+            match.append(id)
+        if "kplr" in id:
+            match.append("KIC" + id[4:])
+
+    if len(match) == 1 and len(unique_ids) <= 2:
+        pass
+    else:
+        if len(unique_ids) > 1 and "TIC" in args.id:
+            match = np.where(search_results.target_name == args.id[3:])[0]
+            if len(match) == 0:
+                raise ValueError(
+                    "No light curves match the requested TIC ID "
+                    + args.id
+                    + ". The search returned these target names: "
+                    + ", ".join(sorted(str(u) for u in unique_ids))
+                    + ". Specify the target by one of those TIC IDs."
+                )
+            search_results = search_results[match]
+            unique_ids = list(set(search_results.target_name))
+
+        if len(unique_ids) > 1:
+            print("Multiple IDs match " + args.id)
+            print(unique_ids)
+            print("Specify target by TIC ID")
+            return
+
+    unique_sectors = list(set(search_results.mission))
+
+    if args.download_all:
+        # download everything
+        to_download = list(range(len(search_results)))
+    else:
+        # only get unique lightcurves (prioritized by cadence and pipeline)
+        to_download = []
+        for sector in unique_sectors:
+            match = np.where(search_results.mission == sector)[0]
+            if len(match) == 1:
+                to_download.append(match[0])
+            if len(match) > 1:
+                # prioritize by exptime: 120, 200, 20, (short cadence) 300, 600, then 1800 (long cadence)
+                match2 = np.where(search_results[match].exptime.value == 120)[
+                    0
+                ]
+                if len(match2) == 0:
+                    match2 = np.where(
+                        search_results[match].exptime.value == 200
+                    )[0]
+                if len(match2) == 0:
+                    match2 = np.where(
+                        search_results[match].exptime.value == 20
+                    )[0]
+                if len(match2) == 0:
+                    match2 = np.where(
+                        search_results[match].exptime.value == 300
+                    )[0]
+                if len(match2) == 0:
+                    match2 = np.where(
+                        search_results[match].exptime.value == 600
+                    )[0]
+                if len(match2) == 0:
+                    match2 = np.where(
+                        search_results[match].exptime.value == 1800
+                    )[0]
+                if len(match2) == 1:
+                    to_download.append(match[match2[0]])
+                if len(match2) > 1:
+                    # prioritize by author: TESS, SPOC, TESS-SPOC, QLP, Kepler, K2SFF, EVEREST, K2, CDIPS, then TASOC
+                    match3 = np.where(
+                        search_results[match[match2]].author == "TESS"
+                    )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "SPOC"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "TESS-SPOC"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "QLP"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "Kepler"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "K2SFF"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "EVEREST"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "K2"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "CDIPS"
+                        )[0]
+                    if len(match3) == 0:
+                        match3 = np.where(
+                            search_results[match[match2]].author == "TASOC"
+                        )[0]
+                    if len(match3) == 1:
+                        to_download.append(match[match2[match3[0]]])
+
+    for search_result in search_results[to_download]:
+        author = search_result.author[0]  # SPOC, QLP, etc
+        exptime = str(int(search_result.exptime[0].value)).zfill(4)
+        ticid = "TIC" + search_result.target_name[0]
+
+        if author == "Kepler":
+            # Quarters of Kepler (prime) data
+            bjd_offset = 2454833.0
+            sector = "Q" + search_result.mission[0][-2:]
+            filter = "Kepler"
+            telescope = "Kepler"
+            if args.undeblend:
+                contratio = None
+                file_ext = ".dat"
+                print(
+                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
+                )
+        elif (
+            author == "K2"
+            or author == "EVEREST"
+            or author == "K2SFF"
+            or author == "K2VARCAT"
+        ):
+            # Campaigns of K2 data
+            bjd_offset = 2454833.0
+            sector = "C" + search_result.mission[0][-2:]
+            filter = "Kepler"
+            telescope = "Kepler"
+            if args.undeblend:
+                contratio = None
+                file_ext = ".dat"
+                print(
+                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
+                )
+        elif author == "TESS-SPOC" or author == "QLP" or author == "SPOC":
+            # TESS sectors
+            bjd_offset = 2457000.0
+            sector = "S" + str(
+                int(str(search_result.mission[0]).split()[-1])
+            ).zfill(2)
+            filter = "TESS"
+            telescope = "TESS"
+            if args.undeblend:
+                contratio = og_contratio
+                file_ext = ".undeblended.dat"
+        elif author == "CDIPS" or author == "TASOC":
+            # they don't have flux in the same place. Or errors.
+            print("WARNING: CDIPS and TASOC LCs are not supported (yet?)")
+            continue
+        else:
+            print(
+                "WARNING: Skipping lightcurve with unrecognized author: "
+                + author
+            )
+            continue
+        file_suffix = (
+            "."
+            + filter
+            + "."
+            + telescope
+            + "."
+            + args.id
+            + "."
+            + sector
+            + "."
+            + exptime
+            + "."
+            + author
+            + file_ext
+        )
+
+        # skip if I've already got it
+        if not args.overwrite:
+            files = glob.glob(os.path.join(args.path, "*" + file_suffix))
+            if len(files) != 0:
+                continue
+
+        lc = search_result.download()
+        lc = lc.remove_nans()
+        if contratio is not None:
+            # must happen before normalize(): the correction is additive,
+            # and normalize() would divide any multiplicative one back out
+            crowdsap, source = crowding_fraction(lc, contratio)
+            lc = reblend_lightcurve(lc, crowdsap)
+            if crowdsap < 1.0:
+                print(
+                    "Undoing deblending of "
+                    + sector
+                    + " with crowdsap = "
+                    + "%.6f" % crowdsap
+                    + " (from "
+                    + source
+                    + "); transit depths are diluted by that factor"
+                )
+        lc = lc.normalize()
+
+        time = np.array(lc.time.value) + bjd_offset
+        flux = np.array(lc.flux.value)
+        err = np.array(lc.flux_err.value)
+
+        # replace nans in err with median absolute deviation
+        nan = np.where(np.isnan(err) | np.isinf(err))[0]
+        maderr = np.median(abs(flux[1:] - flux[0:-1])) * 1.48 / np.sqrt(2.0)
+        err[nan] = maderr
+
+        # lopsided 5 sigma clipping (keeping values that are low by transit depth)
+        # Should not clip transits or stellar variability
+        if args.nsigma < 0:
+            nbad = 0
+            ngood = len(flux)
+        else:
+            nbad = 1
+
+        while nbad != 0:
+            rms = np.std(flux)
+            median = np.median(flux)
+            good = np.where(
+                (flux > (median - args.depth - args.nsigma * rms))
+                & (flux < (median + args.nsigma * rms))
+            )[0]
+            ngood = len(good)
+            nbad = len(flux) - ngood
+
+            time = time[good]
+            flux = flux[good] / median
+            err = err[good] / median
+            if args.verbose:
+                print((nbad, rms, median))
+
+        # are they all bad?
+        if ngood == 0:
+            print("WARNING: no good points after sigma clipping")
+            print(
+                "Skipping lightcurve " + sector + " " + exptime + " " + author
+            )
+            continue
+
+        datestr = (t0 + datetime.timedelta(days=time[0] - jd0)).strftime(
+            "n%Y%m%d"
+        )
+
+        # create the filename in EXOFASTv2 format
+        filename = os.path.join(args.path, datestr + file_suffix)
+
+        np.savetxt(filename, np.column_stack([time, flux, err]))
+        print("Downloaded " + filename)
+
+
+def main(argv=None):
+    """CLI entry point. Parses argv (or sys.argv) and runs the download."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

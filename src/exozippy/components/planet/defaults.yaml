@@ -1,4 +1,33 @@
 planet:
+  # log10 of the planet/host mass ratio is the SAMPLED coordinate whenever the
+  # mass cannot be negative (mass is then derived as 10**log_q * star.mass).
+  # See Planet._resolve_mass_parameterization for when that applies.  log_q
+  # rather than log(mass) because the microlensing constraint measures q, not
+  # the masses, and star.logmass is already the sampled stellar coordinate --
+  # so the constraint becomes a shear of the sampled pair.  Measured on
+  # examples/DC2018_128: the whitened 2x2 curvature block conditions ~4.5x
+  # better (48 -> 11); worthwhile, but not the headline (see CLAUDE.md).
+  # Base: log10.
+  log_q:
+    # q = 1e-9 is an order below lens.q's 1e-8 floor (itself 10x below the
+    # most optimistic Roman detection floor); q = 10 keeps the "planet"-typed
+    # body free to be more massive than its host, as lens.q's upper bound does.
+    lower: -9.0
+    upper: 1.0
+    initval: -3.0  # ~Jupiter/Sun
+    # d(log10 q) = dq / (q * ln 10); mass init_scale 0.1 Mjup at 1 Mjup around
+    # a solar-mass host gives 0.1 / ln(10) ~ 0.043.
+    init_scale: 0.043
+    unit: ""
+    internal_unit: ""
+    latex: "\\log{q}"
+    description: "log10 of the planet/host star mass ratio"
+    # rank 5 (below mass's 10) is load-bearing: the relaxation engine's
+    # Condition B rewrites the LOWEST-rank symbol of a violated relation, so
+    # log_q always absorbs Eq(mass, 10**log_q * star_mass).  That both gives
+    # the right back-solve in log_q mode and makes the relation inert in
+    # linear mode, where log_q is never materialized.
+    rank: 5
   mass:
     initval: 1.0
     init_scale: 0.1
@@ -9,6 +38,14 @@ planet:
     latex: "M_P"
     description: "planet mass"
     rank: 10 # rank < 20 makes this the first to be overwritten if we have a constraint from somewhere else (e.g., K estimate)
+    # Used only in log_q mode (manifest entry "mass": {"expr_key": "default"});
+    # in linear mode the manifest declares mass free and this block is unused.
+    # The lower/upper above are hard logit bounds when sampled and soft
+    # barriers when derived -- in log_q mode the hard range comes from log_q.
+    expressions:
+      default:
+        func_name: "calc_mass_from_log_q"
+        deps: ["log_q", "star.mass"]
   density:
     unit: "g/cm3"
     internal_unit: "solMass/solRad3"
@@ -26,7 +63,7 @@ planet:
     description: "Surface Gravity"
     expressions:
       default:
-        func_name: "calc_logg"
+        func_name: "calc_logg_from_mass"
         deps: ["mass", "radius"]
 
   distance:

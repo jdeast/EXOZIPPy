@@ -1,8 +1,10 @@
-from .parameter import Parameter
-from ..physics_registry import PHYSICS_REGISTRY
 from abc import ABC, abstractmethod
+
 import numpy as np
 import pytensor.tensor as pt
+
+from ..physics_registry import PHYSICS_REGISTRY
+from .parameter import Parameter
 
 
 class Component(ABC):
@@ -46,6 +48,65 @@ class Component(ABC):
         """Naming prefix for the model (e.g., 'star', 'planet', 'inst')."""
         pass
 
+    @classmethod
+    def config_schema(cls):
+        """Describe component-LEVEL config keys that are not parameters.
+
+        These are the keys a user may set on a component's YAML block that
+        are not sampled/derived parameters: data-file references, references
+        to other components (bands, orbits, star indices), and free-form
+        options. They are consumed by the introspection layer (see
+        ``exozippy.introspect``) to drive documentation and a GUI without
+        building a System.
+
+        Returns a JSON-serializable list of dicts, each with keys:
+          key      : the YAML key name
+          kind     : "datafile" | "ref" | "option"
+          accepts  : for "ref", the list of component yaml_keys it may point
+                     at; for "datafile", a glob pattern (string); for
+                     "option", a list of allowed values or None (free-form)
+          required : bool, whether the key must be present
+          doc      : human-readable description
+
+        The base implementation returns an empty schema; components with
+        such keys override this.
+        """
+        return []
+
+    @classmethod
+    def shared_parameter_names(cls):
+        """Names of root-level parameters this component may register.
+
+        Most parameters are declared in the component's own ``defaults.yaml``
+        block and need no announcement.  A few live at the root level of
+        ``components/defaults.yaml`` because several components share the
+        blueprint (Instrument's optional GP hyperparameters are the current
+        case), and a component's own block then overrides only what differs.
+        Static consumers -- ``introspect``, and through it the GUI -- cannot
+        infer those from the component's block alone, so this classmethod
+        names them.
+
+        The base implementation returns an empty list; mirrors
+        ``config_schema()`` and ``get_utilities()``.
+        """
+        return []
+
+    @classmethod
+    def get_utilities(cls):
+        """Declare the user-facing utility programs this component surfaces.
+
+        A "utility" is a helper CLI that logically belongs to this component
+        (downloading light curves, building an SED file, converting an
+        external fit to a params file, ...). Returns a list of
+        ``exozippy.utilities.registry.UtilitySpec``; the introspection layer
+        (and a GUI) discover them generically, so no component names are ever
+        hardcoded outside component-owned code.
+
+        The base implementation returns an empty list; components with
+        utilities override this. Mirrors ``config_schema()``.
+        """
+        return []
+
     def load_data(self, system):
         """
         Stage 1a: Data Ingestion.
@@ -83,20 +144,28 @@ class Component(ABC):
                 # Only convert if it's actually an array/list (safeguard)
                 if isinstance(logical_array, (np.ndarray, list)):
                     tensor_name = attr_name + "_tensor"
-                    tensor_var = pt.as_tensor_variable(logical_array).astype("int32")
+                    tensor_var = pt.as_tensor_variable(logical_array).astype(
+                        "int32"
+                    )
                     setattr(self, tensor_name, tensor_var)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
 
         # 0. Prevent double-building nodes
-        if hasattr(self, param_name) and isinstance(getattr(self, param_name), Parameter):
+        if hasattr(self, param_name) and isinstance(
+            getattr(self, param_name), Parameter
+        ):
             return getattr(self, param_name).value
 
-        if not hasattr(self, 'manifest'):
-            raise ValueError(f"[{self.prefix}] has no manifest. Did register_parameters run?")
+        if not hasattr(self, "manifest"):
+            raise ValueError(
+                f"[{self.prefix}] has no manifest. Did register_parameters run?"
+            )
         if param_name not in self.manifest:
-            raise KeyError(f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest.")
+            raise KeyError(
+                f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest."
+            )
 
         options = self.manifest[param_name] or {}
         if isinstance(options, str):
@@ -104,12 +173,29 @@ class Component(ABC):
         options = dict(options)  # don't mutate the manifest via the pops below
 
         # Manifest entries may override the shape for parameters that are not
-        # one-per-element (e.g. one (s, alpha) per lens companion).
+        # one-per-element (e.g. one (s, alpha) per lens companion), and the
+        # per-element names used for user-param resolution and display labels
+        # (e.g. per-source lens params named after the source stars).
         shape = tuple(options.pop("shape", None) or (self.n_elements,))
+        names = options.pop("names", None) or getattr(self, "names", None)
+
+        # Component-computed per-element defaults ("overrides") are layered in
+        # BELOW the user's params file, unlike the remaining manifest options,
+        # which are merged over the resolved config and so win outright.  Use
+        # this whenever a component derives a value from its own configuration
+        # or data but the user must still be able to override it (see
+        # Instrument._register_gp, which pins the GP hyperparameters of files
+        # that did not request a GP).  Per-element arrays may carry NaN for
+        # "leave this element alone".
+        overrides = options.pop("overrides", None)
 
         # 1. Grab configuration properties agnostically
         cfg = self.config_manager.resolve(
-            self.prefix, param_name, shape=shape, names=getattr(self, 'names', None)
+            self.prefix,
+            param_name,
+            shape=shape,
+            names=names,
+            internal_overrides=overrides,
         )
 
         expr_key = options.pop("expr_key", None)
@@ -124,11 +210,16 @@ class Component(ABC):
 
             if func_name not in PHYSICS_REGISTRY:
                 raise NotImplementedError(
-                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY.")
+                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY."
+                )
 
             func = PHYSICS_REGISTRY[func_name]
             manifest_deps = options.pop("deps", None)
-            dep_names = manifest_deps if manifest_deps is not None else expr_cfg.get("deps", [])
+            dep_names = (
+                manifest_deps
+                if manifest_deps is not None
+                else expr_cfg.get("deps", [])
+            )
             dep_nodes = []
 
             for d in dep_names:
@@ -147,16 +238,24 @@ class Component(ABC):
                     ext_comp_name, ext_param_name = d_lookup.split(".", 1)
                     ext_comp = getattr(system, ext_comp_name, None)
                     if not ext_comp:
-                        raise ValueError(f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active.")
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active."
+                        )
 
                     # Ensure the dependency node is built lazily on demand
                     if not hasattr(ext_comp, ext_param_name):
-                        ext_comp.add_parameter(model, ext_param_name, system, context_nodes)
+                        ext_comp.add_parameter(
+                            model, ext_param_name, system, context_nodes
+                        )
 
                     ext_param = getattr(ext_comp, ext_param_name)
 
                     # Dynamically slice via requested map name or component fallback name
-                    map_attr = f"{custom_slice}_tensor" if custom_slice else f"{ext_comp_name}_map_tensor"
+                    map_attr = (
+                        f"{custom_slice}_tensor"
+                        if custom_slice
+                        else f"{ext_comp_name}_map_tensor"
+                    )
                     if hasattr(self, map_attr):
                         map_tensor = getattr(self, map_attr)
                         dep_nodes.append(ext_param.value[map_tensor])
@@ -164,24 +263,149 @@ class Component(ABC):
                         dep_nodes.append(ext_param.value)
                 else:
                     # Local tracking recursive lookup
-                    if not hasattr(self, d) or not isinstance(getattr(self, d), Parameter):
+                    if not hasattr(self, d) or not isinstance(
+                        getattr(self, d), Parameter
+                    ):
                         self.add_parameter(model, d, system, context_nodes)
                     dep_nodes.append(getattr(self, d).value)
 
             expression = lambda: func(*dep_nodes)
 
+        # 2b. Wire up user-defined parameter links (initval/mu/lower/upper
+        # expressions from the params file referencing other parameters).
+        element_links = self._wire_user_links(
+            model, param_name, system, cfg, expression
+        )
+
         # 3. Create Parameter Node
         full_params = {**cfg, **options}
         param_obj = Parameter(
             label=f"{self.prefix}.{param_name}",
-            names=getattr(self, 'names', None),
+            names=names,
             expression=expression,
+            element_links=element_links,
             user_params=self.config_manager.user_params,
-            **full_params
+            **full_params,
         )
 
         setattr(self, param_name, param_obj)
         return param_obj.build_pymc()
+
+    def _wire_user_links(self, model, param_name, system, cfg, expression):
+        """
+        Translate the ConfigManager's user-defined links targeting this
+        parameter into per-element PyTensor closures for Parameter.build_pymc.
+
+        Each closure receives this parameter's own physical vector (internal
+        units) so same-parameter references (star.A.age -> star.B.age) resolve
+        without leaving the node; external references are materialized lazily
+        through add_parameter, exactly like physics expression dependencies.
+        Unit convention: referenced parameters contribute their values in
+        their own user units; the result is taken in the target's user unit.
+        """
+        cm = self.config_manager
+        get_links = getattr(cm, "get_element_links", None)
+        if get_links is None:
+            return None
+        links = get_links(self.prefix, param_name)
+        if not links:
+            return None
+
+        from ..linking import sympy_to_pytensor
+
+        sigma_arr = cfg.get("sigma")
+        out = {}
+        for fld, per_elem in links.items():
+            for idx, plink in per_elem.items():
+                # Classify the runtime role of this link.
+                if fld == "initval":
+                    s = sigma_arr[idx] if sigma_arr is not None else np.nan
+                    if s == 0:
+                        key = "hard"  # derived element: tracks the expression exactly
+                    elif s > 0:
+                        key = "mu"  # soft link: Gaussian penalty on the difference
+                    else:
+                        continue  # initialization-only; solver already applied it
+                elif fld == "mu":
+                    key = "mu"
+                elif fld in ("lower", "upper"):
+                    key = fld
+                else:
+                    continue  # sigma / init_scale: static snapshots
+
+                if expression is not None and key != "mu":
+                    raise ValueError(
+                        f"[{self.prefix}.{param_name}] link '{plink.expr_str}' targets "
+                        f"field '{fld}', but this parameter is derived from a physics "
+                        f"expression; only soft (mu) links are supported there."
+                    )
+
+                ext_vals = {}  # dep path -> tensor in the dep's USER units
+                self_refs = {}  # dep path -> (element index, user->internal factor)
+                for dep in plink.dep_paths:
+                    dparts = dep.split(".")
+                    dcomp, didx, dparam = dparts[0], int(dparts[1]), dparts[2]
+                    dfactor = cm.get_conversion_factor(
+                        dcomp, dparam, full_path=dep
+                    )
+                    if dcomp == self.prefix and dparam == param_name:
+                        self_refs[dep] = (didx, dfactor)
+                        continue
+                    comp = (
+                        self
+                        if dcomp == self.prefix
+                        else getattr(system, dcomp, None)
+                    )
+                    if comp is None:
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
+                            f"references component '{dcomp}', which is not active."
+                        )
+                    if not (
+                        hasattr(comp, dparam)
+                        and isinstance(getattr(comp, dparam), Parameter)
+                    ):
+                        comp.add_parameter(model, dparam, system)
+                    node = getattr(comp, dparam).value
+                    if getattr(node, "ndim", 0) >= 1:
+                        node = node[didx]
+                    elif didx != 0:
+                        raise ValueError(
+                            f"[{self.prefix}.{param_name}] link '{plink.expr_str}': "
+                            f"'{dep}' indexes element {didx} of a scalar parameter."
+                        )
+                    ext_vals[dep] = node / dfactor if dfactor != 1.0 else node
+
+                tfactor = cm.get_conversion_factor(
+                    self.prefix,
+                    param_name,
+                    full_path=f"{self.prefix}.{idx}.{param_name}",
+                )
+
+                def make_fn(
+                    plink=plink,
+                    ext_vals=ext_vals,
+                    self_refs=self_refs,
+                    tfactor=tfactor,
+                ):
+                    def fn(phys_internal):
+                        vals = dict(ext_vals)
+                        for dep, (j, f) in self_refs.items():
+                            v = phys_internal[j]
+                            vals[dep] = v / f if f != 1.0 else v
+                        user_val = sympy_to_pytensor(plink.expr, vals)
+                        return (
+                            user_val * tfactor if tfactor != 1.0 else user_val
+                        )
+
+                    return fn
+
+                out.setdefault(key, {})[idx] = {
+                    "fn": make_fn(),
+                    "intra_deps": {j for (j, _) in self_refs.values()},
+                }
+
+        return out or None
 
     @abstractmethod
     def build_likelihood(self, model, system):
@@ -205,6 +429,86 @@ class Component(ABC):
         Plot the model and data. Called twice:
           - Pre-flight: To visually verify the initialization logic.
           - Post-flight: To generate publication-quality posterior models.
+        """
+        pass
+
+    def plot_data(self, system, point=None):
+        """
+        Stage: GUI plot description (the data behind plot()).
+
+        Return a list of exozippy.plotspec.PlotSpec objects -- the arrays
+        and labels a browser GUI needs to draw pan/zoomable charts and
+        re-render model curves when parameter sliders move. This is the
+        data-only counterpart to plot(), which renders matplotlib figures.
+
+        Semantics
+        ---------
+        point is None
+            Return data-only specs (observations, no model curves). These
+            are usable right after load_data()/prepare(), BEFORE any PyMC
+            model or compiled plotter exists -- a raw file preview.
+        point is a start/posterior point dict
+            Include model traces evaluated at that point, reusing the
+            functions compiled by compile_plotters() (no physics is
+            duplicated here). Requires build_model() to have run.
+
+        The default returns []; components that own observational data
+        override it. See plotspec.PlotSpec for the payload contract.
+        """
+        return []
+
+    def _point_to_plot_params(self, point, system):
+        """
+        Marshal a point dict into the positional argument list the
+        compiled plotter functions expect (one entry per
+        system.plot_params, scalars squeezed, vectors kept 1-D).
+
+        This is the single source of truth shared by the matplotlib
+        plot() path and the GUI plot_data() path, so both feed the
+        compiled functions the exact same values.
+        """
+        values = []
+        for p in system.plot_params:
+            val = np.asarray(point.get(p.label, p.initval), dtype=np.float64)
+            if getattr(p.value, "ndim", 0) == 0:
+                values.append(float(np.squeeze(val)))
+            else:
+                values.append(np.atleast_1d(val))
+        return values
+
+    def _model_trace_param_deps(self, node, system):
+        """
+        Sampled-parameter labels (a subset of system.plot_params) that a
+        symbolic model-trace node depends on, found by walking the
+        pytensor graph. Used to populate PlotSpec.param_deps so a GUI can
+        highlight the charts a moved slider affects. Returns [] when the
+        node or plot_params are unavailable (e.g. data-only mode).
+        """
+        if node is None or not hasattr(system, "plot_params"):
+            return []
+        try:
+            # Moved from pytensor.graph.basic in newer pytensor releases.
+            from pytensor.graph.traversal import ancestors
+        except ImportError:
+            try:
+                from pytensor.graph.basic import ancestors
+            except Exception:
+                return []
+        wanted = {id(p.value): p.label for p in system.plot_params}
+        deps = []
+        for anc in ancestors([node]):
+            label = wanted.get(id(anc))
+            if label is not None and label not in deps:
+                deps.append(label)
+        return deps
+
+    def plot_corner(self, idata, filename_prefix="debug"):
+        """Optional: draw a component-specific posterior corner plot.
+
+        Called once, after sampling, when the full posterior (idata) is
+        available -- unlike plot(), which also runs pre-flight on a single
+        point where a corner plot would be meaningless. Default: no-op;
+        override in components that want one (see mulensing.Lens).
         """
         pass
 
