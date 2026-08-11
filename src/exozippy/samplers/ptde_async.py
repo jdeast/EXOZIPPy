@@ -117,7 +117,7 @@ def ptde_async_sample(
     lp_plausibility_ceiling=None,
     collect_rung_timing=False,
     progress_callback=None,
-    store_hot_chains=False,
+    store_hot_chains="auto",
 ):
     """
     Asynchronous Parallel Tempering + Differential Evolution sampler.
@@ -153,11 +153,16 @@ def ptde_async_sample(
                the knob means the same thing for both samplers. None -> 5%.
     lp_plausibility_ceiling : float | None -- same runaway-lp warning as
                ptde.py (None -> outputs.modes.DEFAULT_LP_ABS_MAX).
-    store_hot_chains : False | True | int -- keep THINNED draws from the
-               hot rungs (T > 1) as an extra ``posterior_hot`` group on the
-               returned InferenceData: every int-th post-tune iteration of
+    store_hot_chains : "auto" | False | True | int -- keep THINNED draws from
+               the hot rungs (T > 1) as an extra ``posterior_hot`` group on
+               the returned InferenceData: every int-th post-tune iteration of
                each hot chain (True -> 20), with its UNtempered logp and a
-               per-chain ``temperature`` coordinate. Hot draws are not
+               per-chain ``temperature`` coordinate. "auto" (the default)
+               decides from the TOPOLOGY -- on when any active component
+               declares ``expects_suppressed_modes`` (today the microlensing
+               lens), off otherwise; see
+               _common.resolve_store_hot_chains, which also logs the decision
+               and the resulting trace-size cost. Hot draws are not
                posterior draws -- a T-tempered mode is ~sqrt(T) too wide --
                but they visit posterior-suppressed basins (occupancy
                ~exp(-dlp/T)) that the T=1 chains abandon, so they are the
@@ -198,6 +203,15 @@ def ptde_async_sample(
     # see _common.compile_conversions for the rationale).
     raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names = (
         _common.compile_conversions(model)
+    )
+    # Element count of the PHYSICAL side (sampled + Deterministic), the
+    # denominator of the hot-group trace share below.  One transform
+    # evaluation at the start point; the graph is compiled either way.
+    _n_out_elements = sum(
+        int(np.asarray(v).size)
+        for v in raw_to_phys(
+            *[np.asarray(raw_start[k]) for k in raw_var_names]
+        )
     )
 
     n_chains = _common.resolve_n_chains(
@@ -297,11 +311,15 @@ def ptde_async_sample(
     # parameter docstring. UNtempered logp is stored (current_lp holds the
     # raw logp; tempering happens in the acceptance rule), so hot lp values
     # are directly comparable to T=1.
-    hot_thin = 0
-    if store_hot_chains and n_temps > 1:
-        hot_thin = (
-            20 if store_hot_chains is True else max(1, int(store_hot_chains))
-        )
+    hot_thin = _common.resolve_store_hot_chains(
+        store_hot_chains,
+        system,
+        n_temps,
+        n_params,
+        _n_out_elements,
+        "PTDE-async",
+        logger,
+    )
     hot_cap = max(1, draws // hot_thin) if hot_thin else 0
     if hot_thin:
         stored_hot_raw = {

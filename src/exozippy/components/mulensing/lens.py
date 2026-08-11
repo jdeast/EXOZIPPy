@@ -59,6 +59,18 @@ class Lens(Component):
         source_ndx: 1
     """
 
+    # Microlensing is THE topology where a solution the posterior abandons
+    # still has to be reported.  Its degeneracies are structural, not
+    # accidental: the u_0 sign flip (ob140939's four Yee+2015 basins), the
+    # close/wide s <-> 1/s pair, and the ecliptic/jerk-parallax families all
+    # give distinct basins that fit the light curve nearly as well while
+    # differing by a factor of a few in lens mass and distance.  Published
+    # solutions routinely quote two or four of them.  A T=1 posterior keeps
+    # only the winner, so without hot-rung draws the alternatives leave no
+    # record of having been examined at all -- see
+    # samplers._common.resolve_store_hot_chains.
+    expects_suppressed_modes = True
+
     # Deps satisfied by context-node injection in add_parameter (constants,
     # not manifest parameters); graph.py skips them when ordering the build.
     context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})

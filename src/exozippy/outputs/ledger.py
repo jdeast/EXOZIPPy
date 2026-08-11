@@ -424,7 +424,8 @@ def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
             "state": HOT_NOT_SEARCHED,
             "detail": (
                 "no posterior_hot group in the trace (sampler config "
-                "`store_hot_chains` is off by default)"
+                "`store_hot_chains`, which defaults on only for topologies "
+                "that expect posterior-suppressed modes)"
             ),
         }
     status = {}
@@ -477,7 +478,11 @@ def hot_status_to_text(status):
             "is not evidence"
         )
         lines.append(
-            "that none exist. Enable it with sampler config "
+            "that none exist. Hot-rung retention defaults on only for "
+            "topologies that expect"
+        )
+        lines.append(
+            "suppressed modes (microlensing); force it with sampler config "
             "`store_hot_chains: true`."
         )
     elif state == HOT_FAILED:
@@ -513,6 +518,19 @@ def hot_status_to_text(status):
         lines.append("survived is given by its own ledger entry.")
     else:  # unknown state -- never silently swallow it
         lines.append(f"UNKNOWN state '{state}'.")
+    if state in (HOT_NONE_FOUND, HOT_FOUND):
+        # A microlensing fit gets hot-rung retention without asking for it,
+        # so say plainly that a search HAPPENED -- otherwise a reader who
+        # never typed `store_hot_chains` reads this section as boilerplate.
+        lines.append(
+            "The search ran on the retained hot-rung draws (sampler config "
+            "`store_hot_chains`,"
+        )
+        lines.append(
+            "on by default for topologies that expect suppressed modes); it "
+            "did not have to be"
+        )
+        lines.append("requested.")
     counts = [
         f"{k} = {status[k]}"
         for k in ("n_hot_draws", "n_viable", "n_clusters", "n_new")

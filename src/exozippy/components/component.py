@@ -24,6 +24,21 @@ class Component(ABC):
     Stage 6: build_likelihood()    - Defines observational Likelihoods and Potentials.
     """
 
+    # Does this component's parameter space routinely carry posterior-
+    # SUPPRESSED but physically plausible alternative solutions -- distinct
+    # basins with near-zero T=1 occupancy that a referee will still ask
+    # about?  Declared per component and read only in aggregate ("does any
+    # active component say yes"), so the sampler layer can default hot-rung
+    # retention (samplers._common.resolve_store_hot_chains) ON for the
+    # topologies where the suppressed-mode search earns its trace size and
+    # off for the ones where it does not.
+    #
+    # A flag here rather than a component-name test up in run.py for the
+    # same reason `supports_gp` is one: the higher-level code is
+    # component-agnostic by design, and a future component with degenerate
+    # solutions must be able to opt in without anyone editing the sampler.
+    expects_suppressed_modes = False
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config

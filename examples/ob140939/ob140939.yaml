@@ -70,7 +70,9 @@ sampler:
   n_temps: 24
   # Keep thinned hot-rung draws: they detect posterior-suppressed modes
   # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
-  # nobody seeded still show up as "considered and rejected".
+  # nobody seeded still show up as "considered and rejected".  Left explicit
+  # for documentation only -- 'auto' (the default) already turns this on for
+  # a microlensing topology.  Costs ~37% of the trace file here.
   store_hot_chains: true
   recompute_trace: True
   # The seeds are literature solution estimates, not posterior draws,
