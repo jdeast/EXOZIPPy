@@ -287,6 +287,12 @@ or `sudo apt install python-is-python3`.)
 
 The `gui` extra installs cleanly here (PyQt6 6.9.1 against glibc 2.43); its
 `<6.10` cap in `pyproject.toml` is a glibc *floor*, so a newer distro is fine.
+Installing the extra is NOT an endorsement of the GUI: it is experimental on
+every platform, still buggy, and has never been verified driving a real fit --
+see README. `exozippy-gui` was never launched on this machine, so nothing here
+says whether it works under WSL (it would need WSLg for the desktop window, or
+`--browser` plus localhost forwarding). The extra is taken for `ruamel-yaml`,
+which ~30 tests import.
 
 Status: [VERIFIED]
 
