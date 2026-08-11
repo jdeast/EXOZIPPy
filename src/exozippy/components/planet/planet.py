@@ -5,7 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.constants import MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 from . import physics
@@ -410,36 +410,99 @@ class Planet(Component):
             ),
         )
 
-        if self.n_elements < 2:
-            return
+        if self.n_elements >= 2:
+            self._add_crossing_potential(system, orbits)
 
-        logger.warning("Planet collision penalty is untested.")
+    def _initial_semimajor_axes(self, system, orbits):
+        """Per-planet starting semi-major axis, solRad.
 
-        # 1. Sort planets by semi-major axis (using the PyMC variables)
-        # Note: Since these are tensors, we usually assume the user
-        # provided them in order, or we use their 'initval' to sort.
-        sorted_planets = sorted(self.planets, key=lambda p: p.a.initval)
+        ``planet.arsun`` is a derived Parameter and carries no ``initval``
+        of its own, so the start is recomputed here from the same relation
+        (``physics.calc_arsun``) using the start values the relaxation
+        engine did resolve.  Returns NaN wherever an input is missing; the
+        caller falls back to the config order there.
+        """
 
-        for i in range(len(sorted_planets) - 1):
-            inner = sorted_planets[i]
-            outer = sorted_planets[i + 1]
+        def vec(x, n):
+            try:
+                out = np.asarray(np.atleast_1d(x), dtype=float) * np.ones(n)
+            except (TypeError, ValueError):
+                return np.full(n, np.nan)
+            return out
 
-            # Get the symbolic apastron (furthest point) of the inner planet
-            # Q = a * (1 + e)
-            inner_apastron = inner.orbit.a.value * (
-                1.0 + inner.orbit.ecc.value
+        n = self.n_elements
+        period = vec(orbits.period.initval, orbits.n_elements)[self.orbit_map]
+        m_planet = vec(self.mass.initval, n)
+        star = system.active_components["star"]
+        m_star = vec(star.mass.initval, star.n_elements)[self.star_map]
+
+        m_total = np.maximum(m_star + m_planet, 1e-9)
+        with np.errstate(invalid="ignore"):
+            return (
+                KEPLER_CONST * m_total ** (1.0 / 3.0) * period ** (2.0 / 3.0)
             )
 
-            # Get the symbolic periastron (closest point) of the outer planet
-            # q = a * (1 - e)
-            outer_periastron = outer.orbit.a_val * (
-                1.0 - outer.orbit.ecc.value
-            )
+    def _add_crossing_potential(self, system, orbits):
+        """Soft non-crossing barrier between neighboring planets' orbits.
 
-            # Potential: If they cross, log-probability goes to -inf
+        Two planets whose orbits intersect are dynamically unstable on
+        timescales far shorter than the age of any system we fit, so the
+        posterior is bounded by keeping the outer planet's periastron,
+        a_out (1 - e_out), outside the inner planet's apastron,
+        a_in (1 + e_in).  This is the constraint the original (never
+        executed) block described; three things about it are new:
+
+        - It reads the component's own vectors.  The old code walked a
+          ``self.planets`` list of per-planet objects with ``.orbit.a`` /
+          ``.orbit.a_val`` attributes, none of which have existed since the
+          vectorized refactor -- so ANY system with two or more planets
+          raised AttributeError here.  A planet's semi-major axis is
+          ``planet.arsun`` (solRad, derived from m_total and the orbit's
+          period) and its eccentricity is its orbit's, via ``orbit_map``.
+        - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
+          gives NUTS no gradient to follow out of the forbidden region (and
+          NaNs the JAX backward pass), so this uses the same clipped
+          log-sigmoid barrier as every other soft constraint here.  The
+          transition width is 1% of the inner planet's starting semi-major
+          axis, i.e. the barrier is scaled to the orbit it guards.
+        - Planets are ordered ONCE, by their starting semi-major axes.  The
+          ordering is a topology choice, not a sampled quantity: re-deriving
+          it per draw would make the potential discontinuous wherever two
+          orbits swap places.
+
+        Limitation, deliberately not modeled: only adjacent pairs are
+        constrained, and only pairs on distinct orbits.  For nested
+        hierarchical orbits (a planet orbiting a body group) this compares
+        semi-major axes about different centers, which is the right
+        first-order condition but not a stability criterion.
+        """
+        # Semi-major axis (solRad) and eccentricity, per planet.
+        a = self.arsun.value
+        ecc = orbits.ecc.value[self.orbit_map]
+
+        a_init = self._initial_semimajor_axes(system, orbits)
+        # A missing start sorts last but must not become the barrier scale.
+        order = np.argsort(np.where(np.isfinite(a_init), a_init, np.inf))
+
+        for k in range(len(order) - 1):
+            i, j = int(order[k]), int(order[k + 1])
+            if self.orbit_map[i] == self.orbit_map[j]:
+                # One orbit cannot cross itself; two planets sharing an
+                # orbit index are co-orbital by construction.
+                continue
+
+            inner_apastron = a[i] * (1.0 + ecc[i])
+            outer_periastron = a[j] * (1.0 - ecc[j])
+
+            scale = a_init[i] if np.isfinite(a_init[i]) else 0.0
+            scale = float(max(abs(scale), 1e-6))
+
             pm.Potential(
-                f"crossing_penalty_{inner.name}_{outer.name}",
-                pt.switch(outer_periastron > inner_apastron, 0.0, -np.inf),
+                f"{self.prefix}.crossing_bound_"
+                f"{self.names[i]}_{self.names[j]}",
+                soft_lower_bound(
+                    outer_periastron - inner_apastron, 0.0, scale=scale
+                ),
             )
 
     def _add_chen_potential(self):
