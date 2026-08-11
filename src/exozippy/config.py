@@ -843,6 +843,11 @@ class ConfigManager:
             return current_arr
 
         resolved["auto_estimated"] = False
+        # Component-computed bounds that were actually applied, so a user bound
+        # they later clip can be reported instead of silently overridden (the
+        # clip itself is deliberate: these are validity limits, e.g.
+        # Instrument._register_noise's jitter-variance floor).
+        override_bounds = {}
         if internal_overrides:
             for key in all_numeric:
                 if key in internal_overrides:
@@ -866,6 +871,8 @@ class ConfigManager:
                             continue
                         resolved["auto_estimated"] = True
                         apply_value(key, resolved[key], i, v * unit_scaling)
+                        if key in ("lower", "upper"):
+                            override_bounds[(key, i)] = v * unit_scaling
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
@@ -949,6 +956,22 @@ class ConfigManager:
                             if isinstance(v_ov, (list, tuple)):
                                 v_ov = v_ov[0]
                             apply_value(key, resolved[key], i, v_ov)
+                            # apply_value keeps the TIGHTER of the two bounds.
+                            # When the winner is a component-computed one, say
+                            # so: these are validity limits (the likelihood is
+                            # NaN past them), but the user asked for something
+                            # else and deserves to hear that it did not apply.
+                            if (key, i) in override_bounds and not np.isclose(
+                                resolved[key][i], float(v_ov)
+                            ):
+                                logger.warning(
+                                    f"[{component_type}.{_eff_idx(i)}."
+                                    f"{param_name}] user {key}={float(v_ov):g}"
+                                    f" is outside the component-computed "
+                                    f"validity bound "
+                                    f"{override_bounds[(key, i)]:g}; using "
+                                    f"{resolved[key][i]:g}."
+                                )
 
                     for str_key in ["unit", "latex", "description"]:
                         if str_key in ov:
