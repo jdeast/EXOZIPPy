@@ -293,11 +293,196 @@ def _map_logp_timeout(pool, proposals, timeout):
 # warn_if_population_degenerate for the mixing side).
 DE_JITTER = 1e-4
 
+# Smallest DE population this code will run with.
+#
+# A DE proposal for member i is x_i + gamma*(x_j1 - x_j2) with j1 != j2 != i,
+# so it needs two OTHER members: n = 2 has only one other and _pick_two used
+# to die inside numpy with "Cannot take a larger sample than population when
+# replace is False" (notes/code_review_20260808.txt 2.9.4).  n = 2 is not a
+# perverse setting -- it is what the DEFAULT n_chains = 2 * n_params produces
+# for a one-parameter model.  n = 3 is the smallest population that can move
+# at all, but the two others are then FORCED, so every proposal for member i
+# lies along the single direction +/-(x_j1 - x_j2); 4 is the smallest that
+# offers any choice of difference vector, and is what the default is floored
+# at.  This is a hard floor on the MOVE being defined, not a mixing
+# recommendation -- warn_if_population_degenerate below owns that, and it
+# asks for a great deal more (n_params + 2).
+MIN_DE_CHAINS = 4
+
 
 def _pick_two(rng, n, exclude):
     """Pick two distinct indices from [0, n) excluding `exclude`."""
+    if n < 3:
+        raise ValueError(
+            f"A DE proposal needs two other population members, but n={n} "
+            f"leaves only {max(n - 1, 0)}. There is no meaningful "
+            f"difference vector to propose with -- raise n_chains to at "
+            f"least {MIN_DE_CHAINS} (the default is 2 x n_params, floored "
+            f"at {MIN_DE_CHAINS})."
+        )
     idx = rng.choice(n - 1, 2, replace=False)
     return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
+
+
+def resolve_n_chains(n_chains, n_params, label, log):
+    """Resolve and validate the DE population size for one rung.
+
+    ``None`` takes the default 2 * n_params, floored at MIN_DE_CHAINS so the
+    default can never land on a population too small to form a difference
+    vector (n_params = 1 -> 2; see MIN_DE_CHAINS).  An explicit value below 3
+    RAISES rather than being silently bumped: the user asked for something
+    the DE move cannot do, and quietly running a different sampler than the
+    one requested is worse than stopping.  Also emits the
+    warn_if_population_degenerate mixing warning.
+    """
+    if n_chains is None:
+        n_chains = max(2 * n_params, MIN_DE_CHAINS)
+        if n_chains > 2 * n_params:
+            log.info(
+                f"{label}: default n_chains = 2 x n_params = "
+                f"{2 * n_params} is below the DE minimum; using "
+                f"{n_chains} chains/rung."
+            )
+    else:
+        n_chains = int(n_chains)
+        if n_chains < 3:
+            raise ValueError(
+                f"{label}: n_chains={n_chains} is too small for a DE "
+                f"proposal, which needs two OTHER population members "
+                f"(x_i + gamma*(x_j1 - x_j2), j1 != j2 != i). Use "
+                f"n_chains >= {MIN_DE_CHAINS}, or omit n_chains for the "
+                f"default 2 x n_params."
+            )
+    warn_if_population_degenerate(n_chains, n_params, label, log)
+    return n_chains
+
+
+# ---------------------------------------------------------------------------
+# Hot-rung retention (store_hot_chains)
+# ---------------------------------------------------------------------------
+
+# Thinning applied when hot-rung retention is on but no factor was given.
+DEFAULT_HOT_THIN = 20
+
+
+def hot_chain_trace_share(n_temps, hot_thin, n_raw_elements, n_out_elements):
+    """Fraction of the saved trace the ``posterior_hot`` group will occupy.
+
+    Both groups scale with n_chains x draws, so those cancel exactly and the
+    share is fixed by three things: the ladder height, the thinning, and --
+    the term nobody expects -- the DERIVED-variable count.  The cold group
+    stores PHYSICAL variables (sampled plus every pm.Deterministic), the hot
+    group stores RAW ones only, so a model with many derived quantities
+    dilutes the hot share even at the same n_temps.
+
+    examples/ob140939: n_temps=24, hot_thin=20, 19 raw and 39 output
+    elements -> 23 x 20/20 = 23 against 40, i.e. 36.5% of the file.
+    """
+    if n_temps < 2 or hot_thin <= 0:
+        return 0.0
+    hot = (n_temps - 1) * (n_raw_elements + 1) / float(hot_thin)
+    cold = float(n_out_elements + 1)
+    return hot / (hot + cold)
+
+
+def resolve_store_hot_chains(
+    spec, system, n_temps, n_raw_elements, n_out_elements, label, log
+):
+    """Resolve ``store_hot_chains`` to a thinning factor (0 = off).
+
+    Vocabulary, matching the rest of the sampler block ('auto' as in
+    `seed_polish`, `n_temps` and `mmexofast`): ``True``/'on' -> the default
+    thinning, ``False``/None/'off' -> off, an int -> that thinning factor,
+    and 'auto' (the default) -> decided by TOPOLOGY.
+
+    'auto' turns retention on when any active component declares
+    ``expects_suppressed_modes`` -- today the microlensing lens, whose
+    degeneracies are structural rather than accidental.  Hot-rung draws are
+    the only detector for a basin the T=1 posterior abandons
+    (outputs.ledger.discover_hot_modes), and they cost real trace size, so
+    the default follows the topology the way `chen` and
+    `mass_parameterization` do on the planet component: resolved from the
+    built system, overridable per fit, and never silent -- the decision and
+    its price are logged where it is made.
+
+    ``isinstance(spec, bool)`` comes first deliberately: ``spec is True``
+    already guarded the ``store_hot_chains: 1`` case here, but the same
+    ``1 == True`` collision cost `seed_polish` a whole value
+    (notes/code_review_20260808.txt 2.9.1), so the guard is now explicit
+    rather than incidental.
+    """
+    auto = False
+    if isinstance(spec, bool):
+        hot_thin = DEFAULT_HOT_THIN if spec else 0
+    elif spec is None:
+        hot_thin = 0
+    elif isinstance(spec, str):
+        key = spec.strip().lower()
+        if key == "auto":
+            auto = True
+            hot_thin = 0
+        elif key == "on":
+            hot_thin = DEFAULT_HOT_THIN
+        elif key == "off":
+            hot_thin = 0
+        else:
+            raise ValueError(
+                f"{label}: store_hot_chains={spec!r} is not recognized; use "
+                f"auto (default), true/on, false/off, or an integer "
+                f"thinning factor."
+            )
+    else:
+        hot_thin = max(1, int(spec))
+
+    named = sorted(
+        name
+        for name, comp in getattr(system, "active_components", {}).items()
+        if getattr(comp, "expects_suppressed_modes", False)
+    )
+    if auto:
+        hot_thin = DEFAULT_HOT_THIN if named else 0
+
+    if n_temps < 2:
+        if hot_thin:
+            log.info(
+                f"{label}: store_hot_chains is set but n_temps={n_temps} "
+                f"leaves no hot rungs; nothing will be stored."
+            )
+        return 0
+
+    share = hot_chain_trace_share(
+        n_temps, hot_thin, n_raw_elements, n_out_elements
+    )
+    if auto and hot_thin:
+        log.info(
+            f"{label}: store_hot_chains: auto -> ON (thin {hot_thin}). "
+            f"Component(s) {named} expect posterior-suppressed modes, so "
+            f"thinned draws from the {n_temps - 1} hot rungs are kept to "
+            f"search for solutions the T=1 posterior abandons "
+            f"(outputs.ledger.discover_hot_modes). Cost: roughly "
+            f"{100 * share:.0f}% of the trace file. Set "
+            f"`store_hot_chains: false` to opt out."
+        )
+    elif auto:
+        log.info(
+            f"{label}: store_hot_chains: auto -> OFF. No active component "
+            f"expects posterior-suppressed modes, so hot-rung draws are not "
+            f"kept and NO search for suppressed modes will run. Set "
+            f"`store_hot_chains: true` to enable it (adds roughly "
+            f"{100 * hot_chain_trace_share(n_temps, DEFAULT_HOT_THIN, n_raw_elements, n_out_elements):.0f}% "
+            f"to the trace file)."
+        )
+    elif hot_thin:
+        log.info(
+            f"{label}: store_hot_chains set explicitly -> ON (thin "
+            f"{hot_thin}), roughly {100 * share:.0f}% of the trace file."
+        )
+    else:
+        log.info(
+            f"{label}: store_hot_chains set explicitly -> OFF; no search "
+            f"for posterior-suppressed modes will run."
+        )
+    return hot_thin
 
 
 def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):

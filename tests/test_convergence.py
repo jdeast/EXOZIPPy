@@ -163,3 +163,101 @@ def test_analyze_idata_trims_and_flags(monkeypatch):
     assert trimmed.sample_stats.sizes["draw"] == 2000 - diag["burnin"]
     assert isinstance(diag["converged"], bool)
     assert diag["max_rhat"] < 1.02
+
+
+# --- review 2.9.2: the trim must never touch posterior_hot ----------------
+
+
+def _idata_with_hot(n_hot_chains=14, n_hot=40):
+    """A transient-bearing T=1 posterior plus a posterior_hot group whose
+    chain axis (rungs x chains) and draw axis (thinned) are BOTH unrelated
+    to the T=1 ones -- exactly what ptde_async's store_hot_chains writes."""
+    az = pytest.importorskip("arviz")
+    xr = pytest.importorskip("xarray")
+    raw = _transient(6, 2000, frac=0.3, seed=5)
+    idata = az.from_dict(
+        {
+            "posterior": {"p.x": raw * 2.0 + 10.0, "p.x_raw": raw},
+            "sample_stats": {"lp": -0.5 * raw**2},
+        }
+    )
+    rng = np.random.default_rng(0)
+    idata["posterior_hot"] = xr.Dataset(
+        {
+            "p.x_raw": (
+                ("chain", "draw"),
+                rng.standard_normal((n_hot_chains, n_hot)),
+            ),
+            "lp": (
+                ("chain", "draw"),
+                rng.standard_normal((n_hot_chains, n_hot)),
+            ),
+        },
+        coords={
+            "chain": np.arange(n_hot_chains),
+            "draw": np.arange(n_hot),
+            "temperature": (
+                "chain",
+                np.repeat(np.geomspace(2.0, 128.0, n_hot_chains // 2), 2),
+            ),
+        },
+    )
+    return idata
+
+
+def test_analyze_idata_leaves_posterior_hot_bit_identical():
+    """
+    Given an InferenceData carrying a posterior_hot group,
+    When analyze_idata trims stuck chains and burn-in,
+    Then posterior_hot comes out IDENTICAL to what went in.
+
+    Regression (notes/code_review_20260808.txt 2.9.2): the trim isel'd
+    EVERY group with chain/draw dims, so posterior_hot -- whose chain axis
+    is (n_temps-1) x n_chains hot-rung chains and whose draw axis is its own
+    thinned one -- was sliced by T=1 good-chain indices and a T=1 burn-in.
+    It survived only because outputs.ledger.discover_hot_modes happens to
+    run BEFORE this call in run.py; this pins the invariant instead of the
+    ordering.
+    """
+    # ARRANGE
+    idata = _idata_with_hot()
+    before = idata.posterior_hot.to_dataset().copy(deep=True)
+
+    # ACT
+    trimmed, diag = C.analyze_idata(idata, min_ess=100, max_rhat=1.01)
+
+    # ASSERT: the T=1 groups WERE trimmed ...
+    assert diag["burnin"] > 0
+    assert trimmed.posterior.sizes["draw"] == 2000 - diag["burnin"]
+    # ... and the hot group was not touched at all.
+    assert trimmed.posterior_hot.to_dataset().identical(before)
+    # nor was the caller's original object mutated
+    assert idata.posterior_hot.to_dataset().identical(before)
+
+
+def test_analyze_idata_warns_about_an_unknown_chain_draw_group(caplog):
+    """
+    Given an InferenceData carrying a group that is neither a known T=1
+      group nor a known exempt one, but does have chain/draw dims,
+    When analyze_idata trims,
+    Then the group is carried across untrimmed and a warning names it --
+      the allow-list fails loudly rather than silently mangling a group
+      whose axes it does not understand.
+    """
+    # ARRANGE
+    import logging
+
+    xr = pytest.importorskip("xarray")
+    idata = _idata_with_hot()
+    rng = np.random.default_rng(1)
+    idata["mystery"] = xr.Dataset(
+        {"z": (("chain", "draw"), rng.standard_normal((6, 2000)))}
+    )
+
+    # ACT
+    with caplog.at_level(logging.WARNING):
+        trimmed, _diag = C.analyze_idata(idata)
+
+    # ASSERT
+    assert "mystery" in caplog.text
+    assert trimmed.mystery.sizes["draw"] == 2000

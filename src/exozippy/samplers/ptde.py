@@ -146,6 +146,42 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     return lam
 
 
+# OPT-IN improvement tolerance for the gradient-free polish: stop when the
+# best point found has gained less than `tol` nats over the last `tol_window`
+# sweeps.  DEFAULT OFF (tol=None), and that default is measured, not timid.
+#
+# The L-BFGS engine stops on its GRADIENT NORM by default (polish.py
+# _LBFGS_GTOL) -- an actual statement about the local surface.  No such
+# quantity exists here; this engine is gradient-free by construction.  The
+# only observable is the best-lp history, and on a real binary-lens surface
+# that history is a STAIRCASE: exactly-flat plateaus punctuated by jumps,
+# because best_lp is the running maximum of a T=1 Metropolis population that
+# spends many sweeps before one member escapes to a better region.  Measured
+# on examples/DC2018_128 (2 seeds, 300 sweeps, pop 38):
+#
+#   window  seed 0 stops at   nats missed    seed 1 stops at   nats missed
+#     10        sweep 11          73.2          sweep 20          136.5
+#     20        sweep 36          38.8          sweep 30          136.5
+#     30        sweep 46          38.8          sweep 40          136.5
+#     50        sweep 66          38.8          sweep 158          11.3
+#
+# and the shortfall is IDENTICAL for tol = 0.05, 0.5 and 2.0 nats, which is
+# the proof: the plateaus are exactly flat, so no threshold separates "has
+# converged" from "has not jumped yet".  Widening the window only delays the
+# same mistake.  A rule that costs 38-137 nats of start quality to save
+# sweeps is the opposite of the point -- the polish exists because a start
+# far below its basin optimum poisons the whitening probe (polish.py).
+#
+# So this engine's default stopping criterion stays the step CAP.  These
+# constants are the values used when a caller does opt in (tol=..., e.g. for
+# a surface known to be smooth, or a re-polish of an already-polished point).
+# ABSOLUTE nats, never relative to |lp|: logp carries an arbitrary additive
+# normalization, so a relative threshold means something different for every
+# model -- the trap documented on polish._LBFGS_FTOL.
+POLISH_TOL_NATS = 0.05
+POLISH_TOL_WINDOW = 10
+
+
 def polish_seed_starts(
     raw_starts,
     logp_fn,
@@ -154,14 +190,21 @@ def polish_seed_starts(
     n_steps=150,
     pop_size=None,
     gamma=None,
+    tol=None,
+    tol_window=POLISH_TOL_WINDOW,
 ):
     """T=1 differential-evolution polish of each seed's raw start.
 
     For each seed: spawn a small population jittered at ONE scale unit
     around the seed (staying inside its own basin -- this is a local
-    refiner, not a search), run ``n_steps`` of DE-MC at T=1 (Metropolis
-    acceptance on difference-vector proposals, the same move the sampler
-    itself uses), and return the best-lp point visited as the new seed.
+    refiner, not a search), run DE-MC at T=1 (Metropolis acceptance on
+    difference-vector proposals, the same move the sampler itself uses), and
+    return the best-lp point visited as the new seed.
+
+    Stopping: ``n_steps`` sweeps.  An improvement tolerance is available
+    (``tol`` nats over the last ``tol_window`` sweeps) but is OFF by default
+    -- see the POLISH_TOL_NATS comment for the measurement that says why a
+    best-lp window cannot be trusted on this engine.
 
     Rationale: an unpolished solution-estimate seed (e.g. a raw MMEXOFAST
     fit) can start hundreds of nats below its own basin's optimum, and
@@ -207,6 +250,10 @@ def polish_seed_starts(
         best_lp = float(lps[best_i])
         lp0 = float(lps[0])  # the seed's own lp (member 0 = exact center)
 
+        # best_lp after each completed sweep; the tolerance test reads it
+        # tol_window sweeps back.
+        history = []
+        steps_taken, stop = 0, "cap"
         for _ in range(int(n_steps)):
             for i in range(pop_size):
                 j1, j2 = _pick_two(rng, pop_size, i)
@@ -224,11 +271,27 @@ def polish_seed_starts(
                     if lp > best_lp:
                         best_lp = lp
                         best = {k: v.copy() for k, v in prop.items()}
+            steps_taken += 1
+            if tol is None or not tol_window:
+                continue
+            history.append(best_lp)
+            if (
+                len(history) > tol_window
+                and history[-1] - history[-1 - tol_window] < tol
+            ):
+                stop = "tol"
+                break
         polished.append(best)
         dlps.append(best_lp - lp0)
+        reason = (
+            f"converged: < {tol} nats over {tol_window} sweeps"
+            if stop == "tol"
+            else f"hit the {int(n_steps)}-step cap"
+        )
         logger.info(
             f"PTDE seed polish: seed {s} lp {lp0:.1f} -> {best_lp:.1f} "
-            f"(dlp=+{best_lp - lp0:.1f}, {n_steps} steps x {pop_size} pop)"
+            f"(dlp=+{best_lp - lp0:.1f}, {steps_taken} steps x {pop_size} "
+            f"pop, {reason})"
         )
     return polished, dlps
 
@@ -335,12 +398,41 @@ def _update_ladder_barrier(temperatures, swap_accept, swap_propose):
     Only valid to call DURING the tuning phase -- re-spacing the ladder after
     tuning would break invariance, the same rule the DE gamma adaptation
     follows.
+
+    Pairs with ZERO proposals in the window carry no measurement and are
+    filled in from their measured neighbours, never scored.  The old
+    `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
+    REJECTING, r_k = 1, the largest barrier a link can have -- so an
+    unmeasured link stole ladder resolution from the links that had actually
+    been measured.  Zero proposals are routine: the DEO schedule alternates
+    even and odd pairs by round, the counters are reset every adaptation
+    window, and rung thinning lengthens the windows in which a given parity
+    never came up.  Scoring the gap 0 instead is equally wrong in the other
+    direction (it claims perfect mixing, collapsing those two rungs
+    together) and, because the gap then drops out of the total, silently
+    rescales every other pair's share.  Linear interpolation over the pair
+    index keeps the total honest and preserves the barrier PROFILE, which
+    varies smoothly along a smooth ladder; np.interp clamps at the ends, so
+    an unmeasured end pair inherits its nearest measured neighbour.  With a
+    single measured pair every r_k is that one value, the ladder is already
+    equal-share, and the update is exactly a no-op -- the right answer from
+    one datum.
     """
     n_temps = len(temperatures)
     if n_temps < 3:
         return np.asarray(temperatures, dtype=float)
-    r = 1.0 - swap_accept / np.maximum(swap_propose, 1)
-    r = np.clip(r, 0.0, 1.0)
+    prop = np.asarray(swap_propose, dtype=float)
+    acc = np.asarray(swap_accept, dtype=float)
+    measured = prop > 0
+    if not measured.any():
+        return np.asarray(temperatures, dtype=float)
+    r = np.zeros(prop.shape, dtype=float)
+    r[measured] = np.clip(1.0 - acc[measured] / prop[measured], 0.0, 1.0)
+    if not measured.all():
+        pair_idx = np.arange(prop.size)
+        r[~measured] = np.interp(
+            pair_idx[~measured], pair_idx[measured], r[measured]
+        )
     # Cumulative barrier at each rung; Lambda[0] = 0, length n_temps.
     Lambda = np.concatenate([[0.0], np.cumsum(r)])
     total = float(Lambda[-1])
@@ -617,14 +709,14 @@ def ptde_sample(
         _common.compile_conversions(model)
     )
 
-    if n_chains is None:
-        n_chains = 2 * n_params  # standard DE minimum for good mixing
+    # 2 * n_params is the standard DE population for good mixing; the floor
+    # and the warning both live in _common.resolve_n_chains.
+    n_chains = _common.resolve_n_chains(n_chains, n_params, "PTDE", logger)
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * n_params)
     logger.info(
         f"PTDE: {n_params} params, {n_chains} chains/rung, γ={gamma:.4f}"
     )
-    _common.warn_if_population_degenerate(n_chains, n_params, "PTDE", logger)
 
     # initialize populations
     t1_starts, chain_seed_index = _common.resolve_start_population(

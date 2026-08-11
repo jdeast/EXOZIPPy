@@ -227,8 +227,13 @@ def _run_fit(config, gui, user_params=None):
     )
     # Thinned hot-rung retention (ptde_async only): detector data for
     # post-hoc discovery of posterior-suppressed modes; see
-    # outputs.ledger.discover_hot_modes. False | True (thin 20) | int thin.
-    store_hot_chains = sampler_cfg.get("store_hot_chains", False)
+    # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
+    # int thin.  "auto" (the default) is resolved from the TOPOLOGY -- on for
+    # microlensing, off otherwise -- in
+    # samplers._common.resolve_store_hot_chains, which logs the decision and
+    # its trace-size cost.  Passed through unresolved on purpose: the
+    # component list does not exist yet at this point in run_fit.
+    store_hot_chains = sampler_cfg.get("store_hot_chains", "auto")
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -645,18 +650,19 @@ def _run_fit(config, gui, user_params=None):
     # never held still shows up as "considered and rejected" in the final
     # report. Runs BEFORE burn-in trimming (hot draws are detectors; no
     # burn-in semantics) and tolerates a missing/empty group.
-    if hasattr(idata, "posterior_hot"):
-        try:
-            from .outputs.ledger import discover_hot_modes
+    # The outcome is recorded in `hot_status` and rendered into
+    # <prefix>_modes.txt: "searched and found nothing", "never searched"
+    # (what a non-microlensing topology gets by default) and "the search
+    # crashed" used to be indistinguishable in every output the user reads,
+    # which turns a silent failure into false assurance that a candidate
+    # mode was considered.  The catch stays broad and stays
+    # NON-FATAL -- a wrap-up diagnostic must not kill a finished multi-day
+    # fit -- but the exception type and message now reach the report.
+    from .outputs.ledger import run_hot_mode_discovery
 
-            seed_ledger = discover_hot_modes(
-                system, model, idata.posterior_hot, seed_ledger
-            )
-        except Exception:
-            logger.warning(
-                "Hot-chain mode discovery failed; continuing without it",
-                exc_info=True,
-            )
+    seed_ledger, hot_status = run_hot_mode_discovery(
+        system, model, idata, seed_ledger
+    )
 
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
@@ -686,6 +692,7 @@ def _run_fit(config, gui, user_params=None):
         evidence_weights=str(modes_cfg.get("weights", "")).lower()
         == "evidence",
         seed_ledger=seed_ledger,
+        hot_status=hot_status,
     )
 
     summary_path = Path(str(prefix) + "_summary.txt")
