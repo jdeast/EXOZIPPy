@@ -698,6 +698,12 @@ def mkticsed(
         notes.append("[Fe/H]: no value found; using wide prior N(0, 1)")
 
     # --- 8. Optional: Tycho-2 BT/VT (disabled by default) ---------------------
+    # BT/VT of the *matched* Tycho star, carried into section 9 as the APASS
+    # dedup reference. Reading row 0 instead would compare the target's APASS
+    # photometry against an unrelated star whenever the cone holds more than
+    # one Tycho source.
+    bt_ref = float("nan")
+    vt_ref = float("nan")
     qtyc2 = query_region("I/259/TYC2", tic_ra, tic_dec, dist / 60.0)
     if qtyc2 is not None and len(qtyc2) > 0:
         t_row = 0
@@ -707,6 +713,8 @@ def mkticsed(
         ebt = _get(qtyc2, "e_BTmag", t_row)
         vt = _get(qtyc2, "VTmag", t_row)
         evt = _get(qtyc2, "e_VTmag", t_row)
+        bt_ref = bt
+        vt_ref = vt
         if np.isfinite(bt) and np.isfinite(ebt):
             sed_entries.append(
                 _sed_entry("TYCHO/TYCHO.B", bt, max(0.02, ebt), enabled=tycho)
@@ -715,8 +723,6 @@ def mkticsed(
             sed_entries.append(
                 _sed_entry("TYCHO/TYCHO.V", vt, max(0.02, evt), enabled=tycho)
             )
-    else:
-        qtyc2 = None
 
     # --- 9. Optional: UCAC4 / APASS DR6 (disabled by default) -----------------
     qucac = query_region("UCAC4", tic_ra, tic_dec, dist / 60.0)
@@ -724,8 +730,6 @@ def mkticsed(
         u_row = 0
         if len(qucac) > 1:
             u_row, _ = _nearest(qucac, tic_ra, tic_dec)
-        bt_ref = _get(qtyc2, "BTmag", 0) if qtyc2 is not None else float("nan")
-        vt_ref = _get(qtyc2, "VTmag", 0) if qtyc2 is not None else float("nan")
         B_mag = _get(qucac, "Bmag", u_row)
         eB = _get(qucac, "e_Bmag", u_row)
         V_mag = _get(qucac, "Vmag", u_row)
@@ -736,7 +740,11 @@ def mkticsed(
         er = _get(qucac, "e_rmag", u_row)
         i_mag = _get(qucac, "imag", u_row)
         ei = _get(qucac, "e_imag", u_row)
-        # UCAC4 stores APASS errors as 0.01 mag integers; avoid duplicating Tycho
+        # UCAC4 stores APASS errors as 0.01 mag integers, with 99 as the
+        # catalog's "no data" sentinel -- it must be rejected on every band,
+        # or it survives as a fabricated max(0.02, 99 * 0.01) = 0.99 mag error
+        # on a magnitude that was never measured. Also avoid duplicating the
+        # Tycho photometry the SED already carries.
         if (
             np.isfinite(B_mag)
             and np.isfinite(eB)
@@ -765,19 +773,19 @@ def mkticsed(
                     enabled=ucac,
                 )
             )
-        if np.isfinite(g_mag) and np.isfinite(eg):
+        if np.isfinite(g_mag) and np.isfinite(eg) and eg != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.g", g_mag, max(0.02, eg * 0.01), enabled=ucac
                 )
             )
-        if np.isfinite(r_mag) and np.isfinite(er):
+        if np.isfinite(r_mag) and np.isfinite(er) and er != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.r", r_mag, max(0.02, er * 0.01), enabled=ucac
                 )
             )
-        if np.isfinite(i_mag) and np.isfinite(ei):
+        if np.isfinite(i_mag) and np.isfinite(ei) and ei != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.i", i_mag, max(0.02, ei * 0.01), enabled=ucac
