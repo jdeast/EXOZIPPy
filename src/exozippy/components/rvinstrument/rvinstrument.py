@@ -169,9 +169,7 @@ class RVInstrument(Instrument):
         self.inst_map = np.concatenate(inst_indices).astype(int)
 
         self.n_total_obs = len(self.time)
-        self.k_init = (
-            ((u.solRad / u.d).to(u.m / u.s)) * np.sqrt(2.0) * np.std(self.rv)
-        )
+        self.k_init = self._estimate_k_init()
 
         # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
         (
@@ -195,6 +193,52 @@ class RVInstrument(Instrument):
             self.inst_map,
             user_factor=(u.solRad / u.d).to(u.m / u.s),
         )
+
+    def _estimate_k_init(self):
+        """Seed for the planetary RV semi-amplitude, in m/s.
+
+        ``sqrt(2) * std`` is the semi-amplitude of a sinusoid, but only when
+        the scatter it is measured on is the SIGNAL's.  Measured on the raw
+        concatenation of every instrument it is dominated instead by the
+        constant offsets BETWEEN instruments: one absolute-RV instrument
+        sitting at a ~30 km/s systemic velocity next to a relative one seeds
+        ``planet.K`` at ~20 km/s for an m/s-level planet.  So each file's own
+        ``gamma_init`` (its mean, already computed above) is removed first.
+
+        With a single instrument this is identical to the old expression --
+        subtracting a constant does not change a standard deviation.
+
+        Degenerate inputs (one point per file, a file whose RVs are all
+        identical, zero-variance data) leave no scatter to measure at all and
+        would seed K = 0, which the relaxation engine happily turns into a
+        ~1e-20 Mjup planet mass.  There the median error bar -- the white
+        noise level, i.e. the amplitude at the detection limit -- is the
+        honest answer, and 1 m/s the last resort if even that vanishes.
+        """
+        to_ms = (u.solRad / u.d).to(u.m / u.s)
+        gammas = np.asarray(self.gamma_init, dtype=float)
+        residual = self.rv * to_ms - gammas[self.inst_map]
+        k = np.sqrt(2.0) * np.std(residual)
+        if np.isfinite(k) and k > 0.0:
+            return float(k)
+
+        median_err = float(np.median(self.err)) * to_ms
+        if np.isfinite(median_err) and median_err > 0.0:
+            logger.warning(
+                "[%s] the RVs carry no scatter about their per-instrument "
+                "means; seeding K from the median error bar (%.3g m/s) "
+                "instead.",
+                self.prefix,
+                median_err,
+            )
+            return median_err
+
+        logger.warning(
+            "[%s] the RVs carry neither scatter nor usable error bars; "
+            "seeding K at 1 m/s.",
+            self.prefix,
+        )
+        return 1.0
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
