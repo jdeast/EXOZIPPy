@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .latex import build_csv_output, build_latex_output
 from .modes import DEFAULT_MAX_INVALID_FRAC, check_invalid_frac, identify_modes
+from .texutils import latex_escape
 
 logger = logging.getLogger(__name__)
 
@@ -216,20 +217,36 @@ def build_mode_reports(
     # populate the parameters with the posteriors
     system.distribute_posterior(idata)
 
-    # Generate latex table and machine-readable CSV
+    # The ledger's rejected-seed rows are mode-keyed ('rejected-seed<k>'),
+    # so the CSV must carry the mode columns even when the surviving
+    # posterior is unimodal -- otherwise a 4-column header would sit over a
+    # mix of 4- and 7-column rows.  Decided with the same predicate
+    # append_ledger_csv uses, so the two can never disagree.
+    ledger_rows = False
+    if seed_ledger:
+        from .ledger import rejected_records
+
+        ledger_rows = bool(rejected_records(seed_ledger))
+
+    # Generate latex table and machine-readable CSV.  prefix.stem is a user
+    # string on its way into \tablecaption{}: 'DC2018_128' and
+    # 'KMT-2019-BLG-1806_nt8long' are both real prefixes here, and a raw
+    # underscore is a LaTeX compile error at the end of a long fit.
     build_latex_output(
         system,
         var_filename=str(prefix) + "_definitions.tex",
         template_filename=str(prefix) + "_template.tex",
-        caption=r"Median and 68\% Confidence intervals for " + prefix.stem,
+        caption=r"Median and 68\% Confidence intervals for "
+        + latex_escape(prefix.stem),
         mode_report=mode_report,
     )
     build_csv_output(
         system,
         csv_filename=str(prefix) + "_results.csv",
         mode_report=mode_report,
+        mode_columns=ledger_rows,
     )
-    if seed_ledger:
+    if ledger_rows:
         try:
             from .ledger import append_ledger_csv
 

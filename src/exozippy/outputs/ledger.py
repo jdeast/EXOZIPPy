@@ -32,11 +32,15 @@ needs, not for precision odds.  Values are quoted in each parameter's USER
 units.
 """
 
+import csv
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
+
+from .latex import CSV_COLUMNS_MODE
+from .texutils import latex_escape
 
 logger = logging.getLogger(__name__)
 
@@ -269,30 +273,72 @@ def ledger_to_text(ledger):
     return "\n".join(lines) + "\n"
 
 
+def _existing_row_width(csv_filename):
+    """Width of the data rows already in ``csv_filename``, or None if empty.
+
+    Comment lines ('#...') are skipped; the widest data row wins, so a
+    file that is already ragged is reported as such rather than silently
+    matching on its first row.
+    """
+    try:
+        with open(csv_filename, newline="", encoding="utf-8") as f:
+            widths = {
+                len(row)
+                for row in csv.reader(f)
+                if row and not row[0].lstrip().startswith("#")
+            }
+    except FileNotFoundError:
+        return None
+    return max(widths) if widths else None
+
+
 def append_ledger_csv(ledger, csv_filename):
     """Append rejected-mode Laplace rows to the results CSV.
 
-    Row shape matches build_csv_output: name, mode, weight, weight_err,
+    Row shape is latex.CSV_COLUMNS_MODE: name, mode, weight, weight_err,
     value, +err, -err -- with mode = 'rejected-seed<k>' and weight the
     Laplace weight relative to the best seed (an upper-bound-flavored
     estimate, labeled by the mode column itself).  weight_err is left blank:
     a Laplace ratio carries no sampling error bar of the kind the surviving
     modes' weights do.
+
+    These rows only make sense in the mode-keyed layout -- the mode column
+    IS their content -- so the caller must have written the file with
+    build_csv_output(..., mode_columns=True).  A file whose rows are a
+    different width raises instead of being made ragged: a mixed-width CSV
+    breaks every consumer that assumes a rectangular table (pandas,
+    csv.DictReader, any spreadsheet), and it breaks it silently.
     """
     rej = rejected_records(ledger)
     if not rej:
         return
+    n_cols = len(CSV_COLUMNS_MODE)
+    existing = _existing_row_width(csv_filename)
+    if existing is not None and existing != n_cols:
+        raise ValueError(
+            f"{csv_filename} has {existing}-column rows but the ledger "
+            f"writes {n_cols}-column rows ({', '.join(CSV_COLUMNS_MODE)}); "
+            "write it with build_csv_output(..., mode_columns=True)."
+        )
     best_logw = max(r.laplace_logw for r in ledger)
-    with open(csv_filename, "a", encoding="utf-8") as f:
+    with open(csv_filename, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, lineterminator="\n")
         for r in rej:
             w = float(np.exp(r.laplace_logw - best_logw))
             for name in sorted(r.phys):
                 vals = np.asarray(r.phys[name]).reshape(-1)
                 sigs = np.asarray(r.phys_sigma[name]).reshape(-1)
                 for i in r.sampled_idx.get(name, range(vals.size)):
-                    f.write(
-                        f"{name},rejected-seed{r.seed_index},{w:.3g},,"
-                        f"{vals[i]:.6g},{sigs[i]:.3g},{sigs[i]:.3g}\n"
+                    writer.writerow(
+                        [
+                            name,
+                            f"rejected-seed{r.seed_index}",
+                            f"{w:.3g}",
+                            "",
+                            f"{vals[i]:.6g}",
+                            f"{sigs[i]:.3g}",
+                            f"{sigs[i]:.3g}",
+                        ]
                     )
     logger.info(
         f"Ledger: appended {len(rej)} rejected mode(s) to {csv_filename}"
@@ -333,7 +379,7 @@ def write_rejected_latex(ledger, filename):
         )
         el_lists = [r.sampled_idx.get(name, list(range(n_el))) for r in rej]
         for i in sorted({i for lst in el_lists for i in lst}):
-            row = [f"{name}[{i}]".replace("_", r"\_")]
+            row = [latex_escape(f"{name}[{i}]")]
             for r in rej:
                 vals = np.asarray(r.phys.get(name, []), dtype=float).reshape(
                     -1

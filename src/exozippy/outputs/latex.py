@@ -5,6 +5,22 @@ import numpy as np
 
 from ..components import Parameter
 from ..components.parameter import _idx_to_words
+from .texutils import latex_escape
+
+# The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
+# whenever ANY row in the file needs a mode key -- a multimodal posterior,
+# or a unimodal one whose seed ledger contributes 'rejected-seed<k>' rows
+# (outputs.ledger.append_ledger_csv, which imports this to stay in step).
+CSV_COLUMNS_PLAIN = ("parname", "value", "up_err", "low_err")
+CSV_COLUMNS_MODE = (
+    "parname",
+    "mode",
+    "weight",
+    "weight_err",
+    "value",
+    "up_err",
+    "low_err",
+)
 
 
 def _instance_count(p):
@@ -20,10 +36,15 @@ def _instance_name(params, index):
 
 
 def _instance_subhead(name, n_cols=4):
-    """A secondary row that acts as an indented instance sub-header."""
+    """A secondary row that acts as an indented instance sub-header.
+
+    ``name`` is a user-chosen instance name (an instrument, band or star
+    name such as MEARTH_20090513), so it is escaped -- it is data, not
+    LaTeX.
+    """
     return (
         rf"\multicolumn{{{n_cols}}}{{l}}{{~~~~~\textit{{"
-        + name
+        + latex_escape(name)
         + r":}} \\"
         + "\n"
     )
@@ -84,7 +105,9 @@ def _ensure_mode_summaries(system, p, mode_report):
     p.compute_mode_summaries(labels, mode_report.n_modes)
 
 
-def build_csv_output(system, csv_filename, mode_report=None):
+def build_csv_output(
+    system, csv_filename, mode_report=None, mode_columns=False
+):
     """Write a machine-readable CSV of posterior results.
 
     Comment header line lists columns: parname, value, up_err, low_err.
@@ -95,8 +118,18 @@ def build_csv_output(system, csv_filename, mode_report=None):
     indicator's effective sample size for occupancy weights, from the
     propagated lnZ error for evidence weights -- and is blank only when the
     report predates it.
+
+    ``mode_columns`` forces the mode-keyed layout for a UNIMODAL posterior
+    (one 'all' row per parameter, no per-mode rows).  The caller sets it
+    when something else is going to append mode-keyed rows to the same file
+    -- in practice outputs.ledger.append_ledger_csv's 'rejected-seed<k>'
+    rows, whose whole content is a mode key plus a Laplace weight.  Without
+    it the file would carry a 4-column header over a mix of 4- and 7-column
+    rows (the multi-seed-with-rejected-seeds, unimodal-survivor case), which
+    no CSV reader can parse.
     """
-    multimodal = _multimodal(mode_report)
+    per_mode = _multimodal(mode_report)
+    mode_cols = per_mode or mode_columns
 
     rows = []
     for comp in system.get_all_components():
@@ -108,7 +141,7 @@ def build_csv_output(system, csv_filename, mode_report=None):
             n_instances = _instance_count(p)
             if p.posterior is not None and p.summary is None:
                 p.compute_summary()
-            if multimodal:
+            if per_mode:
                 _ensure_mode_summaries(system, p, mode_report)
 
             def emit(name, index):
@@ -122,8 +155,11 @@ def build_csv_output(system, csv_filename, mode_report=None):
 
                 if p.summary is not None:
                     med, ep, em = summ_at(p.summary).format(sigfigs=2)
-                    if multimodal:
+                    if mode_cols:
                         rows.append((name, "all", 1.0, "", med, ep, em))
+                    else:
+                        rows.append((name, med, ep, em))
+                    if per_mode:
                         for k, m in enumerate(mode_report.modes):
                             med, ep, em = summ_at(p.mode_summaries[k]).format(
                                 sigfigs=2
@@ -139,14 +175,12 @@ def build_csv_output(system, csv_filename, mode_report=None):
                                     em,
                                 )
                             )
-                    else:
-                        rows.append((name, med, ep, em))
                 elif p.initval is not None:
                     inits = np.atleast_1d(p.from_internal(p.initval))
                     val = float(
                         inits[index] if index < len(inits) else inits[-1]
                     )
-                    if multimodal:
+                    if mode_cols:
                         rows.append((name, "all", 1.0, "", val, "", ""))
                     else:
                         rows.append((name, val, "", ""))
@@ -157,18 +191,21 @@ def build_csv_output(system, csv_filename, mode_report=None):
                 for i in range(n_instances):
                     emit(p.get_display_label(i), i)
 
+    columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        if multimodal:
-            f.write(
-                "# parname, mode, weight, weight_err, value, up_err, low_err\n"
-            )
+        f.write("# " + ", ".join(columns) + "\n")
+        if per_mode:
             f.write("# mode weights: " + mode_report.provenance + "\n")
             mixing = _mixing_sentence(mode_report)
             if mixing:
                 f.write("# " + mixing.strip() + "\n")
-        else:
-            f.write("# parname, value, up_err, low_err\n")
+        elif mode_cols:
+            f.write(
+                "# unimodal posterior: mode 'all' is the whole posterior "
+                "(weight 1); 'rejected-seed<k>' rows are Laplace "
+                "approximations of seeded solutions the posterior rejected\n"
+            )
         writer.writerows(rows)
 
 
@@ -248,7 +285,11 @@ def build_latex_output(
         if not printable:
             continue
 
-        comp_label = getattr(comp, "label", comp.__class__.__name__)
+        # A section title, i.e. prose -- escaped like every other non-LaTeX
+        # string that reaches the table.
+        comp_label = latex_escape(
+            getattr(comp, "label", comp.__class__.__name__)
+        )
 
         # All \newcommand defs span every index — emit them once per parameter.
         # When multimodal, the unsuffixed def is the pooled-across-modes
@@ -357,8 +398,12 @@ def build_latex_output(
         )
 
     if mode_report is not None and mode_report.n_invalid:
+        # The percentage MUST carry \% -- a bare % starts a LaTeX comment and
+        # would swallow the rest of the \tablecomments{...} line, including
+        # its closing brace.
         invalid_note = (
-            f"{mode_report.n_invalid} draws ({mode_report.invalid_frac:.2%}) "
+            f"{mode_report.n_invalid} draws "
+            rf"({100 * mode_report.invalid_frac:.2f}\%) "
             "rejected as numerically invalid -- this indicates a model or "
             "sampler bug; investigate before trusting this table."
         )
