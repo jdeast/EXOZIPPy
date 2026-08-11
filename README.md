@@ -79,6 +79,14 @@ source ~/exozippy-env/bin/activate
 pip install --pre exozippy
 ```
 
+That is the end-user path (installing the published package). If you are
+setting up a **development** checkout on Windows -- git clone plus Poetry, and
+running the test suite -- follow `WINDOWS_INSTALL.md` instead. It is a
+step-by-step runbook verified on a real machine, and it covers two WSL-specific
+traps that will otherwise cost you an afternoon (Windows `PATH` interop
+shadowing `python`/`pip`/`npm` with unusable Windows shims, and the missing
+`ensurepip` that breaks the Poetry installer).
+
 Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
 runtime compilation (MSVC will not do), which we have never tested.
 
