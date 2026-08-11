@@ -60,7 +60,7 @@ from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
 from .trace_meta import check_trace_freshness, stamp_structural_metadata
-from .whitening import load_whitening, measure_and_whiten, save_whitening
+from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +298,10 @@ def _run_fit(config, gui, user_params=None):
         # (recompute_trace: false with an existing trace) restores the exact
         # scales the trace was sampled with instead of re-probing -- raw
         # draws only decode correctly under the whitening they were sampled
-        # under.  Any model mismatch falls back to a fresh measurement.
+        # under.  On a FRESH run a model mismatch falls back to a fresh
+        # measurement (nothing is sampled yet, so the coordinates are still
+        # a free choice); on the reuse path they are not, and a mismatch
+        # raises instead -- see whitening.restore_whitening_for_trace.
         trace_path = str(prefix) + "_trace.nc"
         whitening_path = str(prefix) + "_whitening.json"
         reusing_trace = os.path.exists(trace_path) and not recompute_trace
@@ -340,16 +343,22 @@ def _run_fit(config, gui, user_params=None):
 
         whiten_report = None
         if measure_scales:
-            loaded = (
-                reusing_trace
-                and os.path.exists(whitening_path)
-                and load_whitening(system, whitening_path)
+            # Fresh run -> measure + persist.  Reuse -> restore only: the
+            # whitening is a property of the draws being decoded, so it is
+            # never re-measured and never rewritten there (a mismatch
+            # raises StaleWhiteningError, a missing file warns and keeps
+            # the preliminary scales).  The old code fell back to
+            # measure + save on BOTH, silently re-coordinating the trace it
+            # was reusing and overwriting the only record of how to read it.
+            whiten_report = prepare_whitening(
+                system,
+                model,
+                raw_start,
+                whitening_path,
+                trace_path,
+                reusing_trace=reusing_trace,
             )
-            if not loaded:
-                whiten_report = measure_and_whiten(system, model, raw_start)
-                save_whitening(
-                    system, whitening_path, map_lp=whiten_report["map_lp"]
-                )
+            if whiten_report is not None:
                 # The rescale re-expressed a polished (nonzero) start in
                 # the new raw coordinates; re-read it for every consumer
                 # below (a no-op for an unpolished all-zeros start).

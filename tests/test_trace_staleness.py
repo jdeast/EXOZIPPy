@@ -660,3 +660,92 @@ def test_modes_cli_refuses_a_stale_trace(tmp_path):
     assert result.exit_code != 0
     assert isinstance(result.exception, StaleTraceError)
     assert "orbit.test_orbit.logP" in str(result.exception)
+
+
+# ---------------------------------------------------------------------------
+# The whitening file beside the trace: run.py's reuse branch must restore it,
+# never re-measure it, and never write to it.
+# ---------------------------------------------------------------------------
+
+
+def _write_whitening_file(prefix, config, params):
+    """Measure and persist a whitening state for (config, params)."""
+    from exozippy import whitening
+
+    system = System(copy.deepcopy(config), user_params=copy.deepcopy(params))
+    system.prepare()
+    model = system.build_model()
+    report = whitening.measure_and_whiten(
+        system, model, system.get_raw_start(model)
+    )
+    path = str(prefix) + "_whitening.json"
+    whitening.save_whitening(system, path, map_lp=report["map_lp"])
+    return path
+
+
+@pytest.mark.slow
+def test_run_fit_reuse_path_never_overwrites_the_whitening_file(tmp_path):
+    """
+    Given a saved trace being reused (`recompute_trace: false`) and a
+      whitening file beside it that no longer applies to the build,
+    When run_fit reaches its whitening step,
+    Then it raises StaleWhiteningError and the whitening file on disk is
+      byte-for-byte unchanged.
+
+    Pre-fix, run.py's whitening step made no distinction between "about to
+    sample" and "about to decode existing draws": it re-probed and re-saved
+    on both.  On the reuse path that silently re-coordinated the very trace
+    being reused, and overwrote the only record of the coordinates those
+    draws were actually taken in.  The file-bytes assertion below is the
+    behavioural pin (it fails on pre-fix code whatever run_fit goes on to
+    do); the exception check pins the diagnosis on top of it.
+    """
+    import json
+    import os
+
+    import yaml
+
+    from exozippy.run import run_fit
+
+    # Arrange -- a trace + a whitening file that describe this model...
+    rng = np.random.default_rng(11)
+    config_path, prefix, config, params = _write_fit_inputs(tmp_path)
+    _write_stamped_trace(prefix, config, params, rng)
+    whitening_path = _write_whitening_file(prefix, config, params)
+    # ...then break the whitening file the way a truncated write or an edited
+    # model does: drop one entry.  The trace's structural fingerprint is
+    # untouched, so this is a whitening mismatch and nothing else.
+    data = json.loads(open(whitening_path).read())
+    dropped = sorted(data["params"])[0]
+    del data["params"][dropped]
+    with open(whitening_path, "w") as f:
+        json.dump(data, f)
+    before_bytes = open(whitening_path, "rb").read()
+
+    run_config = copy.deepcopy(config)
+    run_config["sampler"] = {"recompute_trace": False}
+    with open(config_path, "w") as f:
+        yaml.safe_dump(run_config, f)
+
+    # Act -- deliberately NOT pytest.raises: the point is what the file on
+    # disk looks like afterwards, which must be asserted whether run_fit
+    # raised, returned, or blew up somewhere else entirely.
+    cwd = os.getcwd()
+    error = None
+    os.chdir(tmp_path)
+    try:
+        run_fit(run_config, user_params=copy.deepcopy(params))
+    except BaseException as exc:  # noqa: BLE001 - re-asserted below
+        error = exc
+    finally:
+        os.chdir(cwd)
+
+    # Assert
+    assert open(whitening_path, "rb").read() == before_bytes, (
+        "the reuse path rewrote the whitening state a saved trace was "
+        "sampled under; its raw draws no longer decode to the values the "
+        "sampler visited"
+    )
+    assert type(error).__name__ == "StaleWhiteningError", error
+    assert dropped in str(error)
+    assert "recompute_trace: true" in str(error)
