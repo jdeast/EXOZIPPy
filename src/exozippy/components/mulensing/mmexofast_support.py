@@ -131,8 +131,10 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
     Epochs are shifted back into the data's own time system by subtracting
     the JSON's ``jd_offset`` (0.0 when absent, and for pre-jd_offset files).
 
-    Rank sits between RANK_DERIVED_DATA and RANK_USER (config.add_seed_hints
-    default) so an explicit user initval list still wins.
+    Rank is RANK_DERIVED_DATA (config.add_seed_hints): MMEXOFAST is a very
+    fancy derivation FROM THE DATA, not a user statement, so it sits in the
+    same tier as any other data-driven hint and EVERY user entry -- an initval
+    list, and equally a plain scalar initval -- outranks it.
 
     Returns the number of seed solutions pushed (0 when the file has none).
     """

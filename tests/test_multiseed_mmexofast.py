@@ -31,7 +31,6 @@ class _RecordingConfigManager:
         self.system_config = system_config or {}
         self.user_params = user_params or {}
         self.seed_hint_sets = []
-        self.seed_hint_rank = None
         self.scale_hints = {}
 
     def add_hint(self, *args, **kwargs):
@@ -40,10 +39,8 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts, rank=None):
+    def add_seed_hints(self, seed_dicts):
         self.seed_hint_sets = seed_dicts
-        if rank is not None:
-            self.seed_hint_rank = rank
 
 
 def _make_binary_lens(mmexofast_path, finite_source=True):

@@ -28,7 +28,7 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts, rank=None):
+    def add_seed_hints(self, seed_dicts):
         self.seed_hint_sets = seed_dicts
 
 

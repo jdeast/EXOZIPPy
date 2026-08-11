@@ -363,13 +363,12 @@ class ConfigManager:
         # finalize_user_params runs the relaxation engine once per seed; it
         # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
         # is a per-seed observable channel that components (e.g. the MMEXOFAST
-        # loader) push into; it feeds the relaxation engine at a rank between
-        # RANK_DERIVED_DATA and RANK_USER so an explicit user initval list wins.
+        # loader) push into; it feeds the relaxation engine at RANK_DERIVED_DATA
+        # -- MMEXOFAST is a (very fancy) derivation FROM THE DATA, not a user
+        # statement, so it sits in the same tier as any other data-driven hint
+        # and every user entry outranks it.
         self.seed_resolved = None
         self.seed_hint_sets = []
-        self.seed_hint_rank = (
-            RANK_DERIVED_USER  # 80: below RANK_USER, above data
-        )
         self.scale_hints = {}  # path -> init_scale in internal units
         self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
@@ -604,16 +603,17 @@ class ConfigManager:
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
 
-    def add_seed_hints(self, seed_dicts, rank=None):
+    def add_seed_hints(self, seed_dicts):
         """Register K per-seed observable sets for multi-seed sampling (P4).
 
         `seed_dicts` is a list of length K; each entry maps a parameter path
         (human-readable or index form) to a value in that parameter's user
         unit.  These feed the relaxation engine as one complete start point per
-        seed (see finalize_user_params).  Rank sits between RANK_DERIVED_DATA
-        and RANK_USER by default so an explicit user initval list still wins;
-        the MMEXOFAST loader is the primary caller.  Paths absent from a given
-        seed fall back to the base (defaults/hints/user) solution for that seed.
+        seed (see finalize_user_params), at RANK_DERIVED_DATA -- the same tier
+        as ``add_hint``'s default, because the MMEXOFAST loader (the primary
+        caller) is a derivation from the data, not a user statement.  Every
+        user entry therefore outranks a seed.  Paths absent from a given seed
+        fall back to the base (defaults/hints/user) solution for that seed.
         """
         processed = []
         for d in seed_dicts:
@@ -623,8 +623,6 @@ class ConfigManager:
                 pd[tpath] = ival
             processed.append(pd)
         self.seed_hint_sets = processed
-        if rank is not None:
-            self.seed_hint_rank = rank
 
     def seed_start_value(self, path, seed=0):
         """Seed-hint start value for ``path`` in USER units, or None.
@@ -1176,15 +1174,18 @@ class ConfigManager:
         base_flat = {str(k): v for k, v in flat_params.items()}
 
         # --- MULTI-SEED SOLVE (P4) ---
-        # Build K per-seed RANK_USER override sets (user initval lists win over
-        # MMEXOFAST-style seed hints; both fall back to the shared base_flat for
-        # any path they do not touch), then run the relaxation engine once per
+        # Build the K per-seed override sets in their two provenance channels
+        # (user initval lists at RANK_USER, component/MMEXOFAST seed hints at
+        # RANK_DERIVED_DATA; both fall back to the shared base_flat for any
+        # path they do not touch), then run the relaxation engine once per
         # seed inside this single prepare() call so every seed shares one symbol
         # environment (guards against the known cross-build nondeterminism).
         # Bounds/scales are taken from seed 0 only -- seeds move the START, never
         # the bounds -- so self.propagated_scales is restored to seed 0's after
         # the loop.
-        K, seed_overrides = self._build_seed_overrides(name_to_index)
+        K, user_overrides, seed_hint_overrides = self._build_seed_overrides(
+            name_to_index
+        )
 
         # Solve seed 0 LAST so the final self.propagated_scales and any
         # init_scale synced back into self.user_params by _execute_solve both
@@ -1193,8 +1194,10 @@ class ConfigManager:
         seed_resolved = [None] * K
         for k in list(range(1, K)) + [0]:
             flat_k = dict(base_flat)
-            flat_k.update(seed_overrides[k])
-            seed_resolved[k] = self.resolve_and_validate_parameters(flat_k)
+            flat_k.update(user_overrides[k])
+            seed_resolved[k] = self.resolve_and_validate_parameters(
+                flat_k, seed_hints=seed_hint_overrides[k]
+            )
 
         # seed 0 remains the canonical single start injected back into
         # user_params below; the full K-set is stored for get_raw_starts.
@@ -1296,19 +1299,29 @@ class ConfigManager:
                 )
 
     def _build_seed_overrides(self, name_to_index):
-        """Assemble the per-seed RANK_USER override sets for multi-seed sampling.
+        """Assemble the per-seed override sets for multi-seed sampling.
 
-        Two sources feed the seeds, in priority order:
+        Two sources feed the seeds, and they are kept in SEPARATE channels
+        because they carry different provenance:
           1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
-             highest priority (an explicit user list always wins).
+             RANK_USER, merged into the engine's user_provided_params.
           2. Component seed hints (config_manager.seed_hint_sets), e.g. the
-             MMEXOFAST loader -- lower priority.
+             MMEXOFAST loader -- RANK_DERIVED_DATA, passed to the engine as
+             `seed_hints` and layered in with the other data-driven hints.
 
-        Returns (K, overrides) where K is the seed count and overrides is a
-        length-K list of {internal_path_str: internal_value} dicts.  Every list
-        must have length K or 1 (length-1 broadcasts to all seeds).  When no
-        list initvals and no seed hints exist, K == 1 and overrides == [{}],
-        exactly reproducing the legacy single-solve behavior.
+        Merging them into one RANK_USER dict (as this did until the 2.1.2
+        review fix) had two consequences: a seed silently clobbered a user's
+        *scalar* initval for the same path -- the scalar lives in base_flat,
+        which the merged override dict overwrote -- and a seed that disagreed
+        with a genuine user entry made every symbol of the connecting relation
+        RANK_USER, tripping the "over-constrained" contradiction clause.
+
+        Returns (K, user_overrides, seed_hint_overrides) where K is the seed
+        count and each override list has length K of {internal_path_str:
+        internal_value} dicts.  Every initval list must have length K or 1
+        (length-1 broadcasts to all seeds).  When no list initvals and no seed
+        hints exist, K == 1 and both lists are [{}], exactly reproducing the
+        legacy single-solve behavior.
         """
         # 1. User initval lists -> {sym_path: [internal values]}
         user_lists = {}
@@ -1349,18 +1362,25 @@ class ConfigManager:
                 f"component seed hints. Provide matching counts (or length 1)."
             )
 
-        # 3. Merge per seed (mm first, user lists override).
-        overrides = []
+        # 3. Split per seed.  No merge: the two channels enter the engine at
+        #    different ranks, and a path in both is resolved by rank, not by
+        #    dict order (a user list is RANK_USER and wins).
+        user_overrides = []
+        seed_hint_overrides = []
         for k in range(K):
-            d = {}
             if mm_sets:
                 src = mm_sets[k] if len(mm_sets) > 1 else mm_sets[0]
-                d.update(src)
-            for p, vals in user_lists.items():
-                d[p] = vals[k] if len(vals) > 1 else vals[0]
-            overrides.append(d)
+                seed_hint_overrides.append(dict(src))
+            else:
+                seed_hint_overrides.append({})
+            user_overrides.append(
+                {
+                    p: (vals[k] if len(vals) > 1 else vals[0])
+                    for p, vals in user_lists.items()
+                }
+            )
 
-        return K, overrides
+        return K, user_overrides, seed_hint_overrides
 
     def _to_symbol_path(self, path, name_to_index):
         """Translate a user_params key to the internal-index path string used by
@@ -1686,8 +1706,15 @@ class ConfigManager:
         return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
 
     def resolve_and_validate_parameters(
-        self, user_provided_params, tolerance=1e-3
+        self, user_provided_params, tolerance=1e-3, seed_hints=None
     ):
+        """Run the relaxation engine.
+
+        ``user_provided_params`` is {internal_path: internal_value} at
+        RANK_USER.  ``seed_hints`` is the optional per-seed hint set for this
+        seed (see ``_build_seed_overrides``), layered in at RANK_DERIVED_DATA
+        alongside ``self.hints``.
+        """
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
         provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
         resolved_scales = {}
@@ -1743,6 +1770,23 @@ class ConfigManager:
                 provenance[path_str] = self.hint_ranks.get(
                     path_str, RANK_DERIVED_DATA
                 )
+
+        # 1.5b LAYER IN THIS SEED'S HINT SET (RANK_DERIVED_DATA)
+        # Same tier as the component hints above: an MMEXOFAST solution is a
+        # derivation from the data, not a user statement.  The guard is `<=`
+        # rather than `<` so a seed WINS a tie with an ordinary component
+        # hint -- a per-seed fit of the actual light curve is strictly more
+        # informative than the generic guess a component pushes for every
+        # seed alike.  (Today no real path is in both channels: the seeds
+        # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
+        # component hint that touches one of those, lens.0.alpha, is rank
+        # 20.  The rule is stated so a future overlap has a defined answer.)
+        # Anything above RANK_DERIVED_DATA -- every user entry, in particular
+        # a scalar initval, which lives in user_provided_params -- wins.
+        for path_str, val in (seed_hints or {}).items():
+            if provenance.get(path_str, 0) <= RANK_DERIVED_DATA:
+                resolved[path_str] = val
+                provenance[path_str] = RANK_DERIVED_DATA
 
         # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
         # The initialization loop above calls resolve() without an index, so a hint
