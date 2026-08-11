@@ -1156,7 +1156,7 @@ class SED(Component):
 
     def _filter_wave_eff_micron(self):
         """Effective wavelength (micron) of each .sed filter row."""
-        from .filters import filter as VOID
+        from ...filters import filter as VOID
 
         alias_df = _load_alias_table()
         waves = []
