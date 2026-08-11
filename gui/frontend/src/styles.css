@@ -1043,6 +1043,17 @@ button.save-btn:disabled {
   color: var(--danger);
   font-size: 12px;
 }
+/* Non-blocking complaint about the last eval (an out-of-bounds value):
+   warning-colored, not the danger red of a failed solve, and it gates
+   nothing -- see the `notice` state in TuneTab. */
+.tune-notice {
+  color: #f2c777;
+  font-size: 12px;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tune-stale-banner {
   display: flex;
   align-items: center;

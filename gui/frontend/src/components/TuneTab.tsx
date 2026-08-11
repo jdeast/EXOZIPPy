@@ -58,6 +58,11 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [staleReason, setStaleReason] = useState<string | null>(null);
+  // A transient, NON-blocking complaint about the last eval (an out-of-bounds
+  // value). Distinct from `stale`: nothing about the compiled evaluator is
+  // invalid, so demanding a re-Solve would be wrong -- moving back inside the
+  // bounds resumes at once, and the notice clears itself on the next good eval.
+  const [notice, setNotice] = useState<string | null>(null);
   const [docDirty, setDocDirty] = useState(false);
 
   // Filters
@@ -146,6 +151,7 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
 
   const solve = useCallback(async () => {
     setError(null);
+    setNotice(null);
     dataPlotsLoaded.current = false;
     await ensureDoc();
     try {
@@ -270,19 +276,35 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
     []
   );
 
+  // Eval requests are debounced but still overlap, and nothing makes the server
+  // answer them in order: a slower early response landing last would repaint
+  // the charts at a value the user has already dragged away from, leaving the
+  // panel showing a curve that is not the one the slider says. Each request
+  // takes a monotonically increasing id and a response older than the newest
+  // one already applied is dropped -- including its notice/staleness verdict,
+  // which describes a superseded value.
+  const evalSeq = useRef(0);
+  const appliedSeq = useRef(0);
+
   const doEval = useCallback(
     async (path: string, value: number) => {
+      const seq = ++evalSeq.current;
       try {
         const res = await api.tuneEval(path, value);
+        if (seq < appliedSeq.current) return; // a newer response already landed
+        appliedSeq.current = seq;
         if (res.needs_resolve) {
           setStale(true);
           setStaleReason(res.reason || "This parameter needs a re-Solve.");
           return;
         }
         if (res.out_of_bounds) {
-          setStaleReason(res.reason || "Value outside bounds.");
+          // Visible feedback, and NOT via the stale banner (see `notice`): the
+          // value was rejected, the plots still show the last good point.
+          setNotice(res.reason || "Value outside bounds -- plots not updated.");
           return;
         }
+        setNotice(null);
         if (res.plots) applyEval(res.plots);
       } catch {
         // transient; sliders stay usable
@@ -369,6 +391,11 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
           title={docDirty ? "Unsaved changes" : "Saved"}
         />
         <ProvenanceLegend />
+        {notice && (
+          <span className="tune-notice" title={notice}>
+            {notice}
+          </span>
+        )}
         {error && <span className="tune-error">{error}</span>}
       </div>
 
@@ -585,9 +612,22 @@ function DetailPanel({
 }) {
   const [value, setValue] = useState<number>(param.value ?? 0);
   const debounce = useRef<number | null>(null);
+  // The value the user has actually moved to, readable synchronously. `value`
+  // is React state, so a handler that closes over it sees the value as of its
+  // own render: the pointerup that ends a drag can run in the same batch as
+  // the last pointermove and commit the move BEFORE it -- one move stale, and
+  // the params file then disagrees with both the slider and the plots. Every
+  // write goes through applyValue so the ref and the state move together.
+  const latest = useRef<number>(param.value ?? 0);
+  // The value last written to the params file (starting at the solved one,
+  // which is not an override). The number input commits onBlur, which fires on
+  // a plain click-through, so this is what tells a real edit from a tab-past.
+  const committed = useRef<number | null>(param.value ?? null);
 
   // Reset the local value whenever the selection or solved value changes.
   useEffect(() => {
+    latest.current = param.value ?? 0;
+    committed.current = param.value ?? null;
     setValue(param.value ?? 0);
   }, [path, param.value]);
 
@@ -636,10 +676,22 @@ function DetailPanel({
     [canLiveEdit, onEval, path]
   );
 
+  // Move the value: state (for the render) + ref (for the handlers) + a
+  // debounced live eval. The single writer for slider, drag and typed input.
+  const applyValue = useCallback(
+    (v: number) => {
+      latest.current = v;
+      setValue(v);
+      liveEval(v);
+    },
+    [liveEval]
+  );
+
   // Commit the value to params.yaml as an undoable RANK_USER initval override
   // (one entry per slider release -- coalesces the whole drag).
   const commit = useCallback(
     (v: number) => {
+      committed.current = v;
       onCommand(
         { op: "set_param_field", args: { path, field: "initval", value: v } },
         false
@@ -681,9 +733,7 @@ function DetailPanel({
   const beginDrag = (clientX: number, rectLeft: number, width: number) => {
     const w = Math.max(1, width);
     const clickT = (clientX - rectLeft) / w;
-    const v = clampToHardBounds(fromSlider(clickT, winLo, winHi, logScale));
-    setValue(v);
-    liveEval(v);
+    applyValue(clampToHardBounds(fromSlider(clickT, winLo, winHi, logScale)));
     dragRef.current = { startX: clientX, startT: clickT, lo: winLo, hi: winHi, log: logScale, width: w };
   };
 
@@ -691,15 +741,16 @@ function DetailPanel({
     const drag = dragRef.current;
     if (!drag) return;
     const t = drag.startT + (clientX - drag.startX) / drag.width; // unclamped
-    const v = clampToHardBounds(fromSlider(t, drag.lo, drag.hi, drag.log));
-    setValue(v);
-    liveEval(v);
+    applyValue(clampToHardBounds(fromSlider(t, drag.lo, drag.hi, drag.log)));
   };
 
   const endDrag = () => {
     if (!dragRef.current) return;
     dragRef.current = null;
-    commit(value);
+    // latest.current, not `value`: the last pointermove may not have been
+    // rendered yet, and committing the render's value would write the
+    // second-to-last position of the drag.
+    commit(latest.current);
   };
 
   const sliderPos = hasBounds ? toSlider(value, winLo, winHi, logScale) : 0.5;
@@ -752,9 +803,9 @@ function DetailPanel({
             // keep moving past it).
             if (dragRef.current) return;
             const t = Number(e.target.value) / 1000;
-            const v = clampToHardBounds(fromSlider(t, winLo, winHi, logScale));
-            setValue(v);
-            liveEval(v);
+            applyValue(
+              clampToHardBounds(fromSlider(t, winLo, winHi, logScale))
+            );
           }}
         />
         <input
@@ -770,14 +821,11 @@ function DetailPanel({
           disabled={!canLiveEdit}
           onChange={(e) => {
             const v = Number(e.target.value);
-            if (Number.isFinite(v)) {
-              setValue(v);
-              liveEval(v);
-            }
+            if (Number.isFinite(v)) applyValue(v);
           }}
           onBlur={(e) => {
             const v = Number(e.target.value);
-            if (Number.isFinite(v)) commit(v);
+            if (Number.isFinite(v) && v !== committed.current) commit(v);
           }}
         />
         <span className="muted detail-unit-inline">{param.unit || ""}</span>
@@ -846,7 +894,10 @@ function DetailPanel({
               { op: "set_param_field", args: { path, field: "initval", value: null } },
               false
             );
-            setValue(param.value ?? 0);
+            // applyValue, so the ref the drag/commit handlers read cannot
+            // drift from the number on screen (and the plots follow it back).
+            committed.current = param.value ?? null;
+            applyValue(param.value ?? 0);
           }}
         >
           Reset to solved
