@@ -164,7 +164,7 @@ def test_download_retries_a_transient_gateway_error(tmp_path, monkeypatch):
 
     # ASSERT
     assert len(calls) == 2, "should have retried exactly once"
-    assert (tmp_path / "M" / "f.csv").read_bytes() == payload
+    assert (tmp_path / "M" / "BCs" / "f.csv").read_bytes() == payload
 
 
 def test_download_does_not_retry_a_404(tmp_path, monkeypatch):
@@ -221,4 +221,6 @@ def test_download_gives_up_after_the_attempt_budget(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="f.csv"):
         make_bc.ensure_model_data("M", tmp_path)
     assert len(calls) == make_bc._DOWNLOAD_ATTEMPTS
-    assert not list((tmp_path / "M").glob("*.part")), "left a .part behind"
+    assert not list(
+        (tmp_path / "M" / "BCs").glob("*.part")
+    ), "left a .part behind"
