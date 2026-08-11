@@ -1915,20 +1915,34 @@ class Parameter:
         return ""
 
     def to_latex_prior_def(self) -> str:
-        """Generate a \\providecommand for the prior column value.
+        """Generate the \\providecommand(s) for the prior column value.
 
-        The command name is ``\\<latex_varname>prior`` so the table body can
-        reference it symbolically rather than inlining the prior string.  A
-        single command is generated per parameter (not per element) because
-        all elements of a vector parameter share the same prior.
+        The command name is ``\\<latex_varname><idx>prior`` -- the same
+        ``<idx>`` word suffix ``to_latex_def`` puts on the value macros -- so
+        the table body can reference the prior symbolically rather than
+        inlining the string.  A scalar parameter keeps the unsuffixed
+        ``\\<latex_varname>prior``.
+
+        ONE COMMAND PER ELEMENT, not per parameter: elements of a vector
+        stopped sharing a prior when the manifest's per-element "overrides"
+        channel arrived (GP and robust-likelihood hyperparameters are
+        full-length vectors with the files that did not opt in pinned via
+        ``sigma: 0``).  Reading element 0 and reusing it made such a vector
+        report "Fixed" for its genuinely sampled elements -- a false
+        statement of the prior in a published table.
         """
-        prior_str = self.get_prior_str(index=0, latex=True)
-        if not prior_str:
-            return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
-        return (
-            rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}"
-            + "\n"
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
         )
+        lines = []
+        for i in range(n_elements):
+            idx_str = _idx_to_words(i) if n_elements > 1 else ""
+            prior_str = self.get_prior_str(index=i, latex=True)
+            lines.append(
+                rf"\providecommand{{\{self.latex_varname}{idx_str}prior}}"
+                rf"{{{prior_str}}}" + "\n"
+            )
+        return "".join(lines)
 
     def _value_cells(self, idx_str: str, mode_suffixes: Optional[list]) -> str:
         """The Value column(s) of a table row.
@@ -1997,7 +2011,9 @@ class Parameter:
                     + r"\dotfill"
                 )
 
-            prior_text = "\\" + self.latex_varname + "prior"
+            # Per-element prior macro (see to_latex_prior_def): a vector's
+            # elements may carry different priors.
+            prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
             lines.append(
                 rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
@@ -2049,7 +2065,7 @@ class Parameter:
                 + r"\dotfill"
             )
 
-        prior_text = "\\" + self.latex_varname + "prior"
+        prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
         return (
             rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "

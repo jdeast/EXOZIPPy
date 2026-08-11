@@ -1407,3 +1407,73 @@ def test_zero_init_scale_falls_back_instead_of_freezing():
     # Assert
     assert p.is_sampled.tolist() == [True]
     assert float(p._whiten_state["sv_scale_logits"].get_value()[0]) > 0.0
+
+
+def test_to_latex_prior_def_is_per_element_for_a_mixed_vector():
+    """
+    Given a vector parameter whose element 0 is pinned (sigma=0) and whose
+    element 1 is sampled with a uniform prior -- exactly what the manifest's
+    per-element "overrides" channel builds for GP / robust-likelihood
+    hyperparameters,
+    When the prior \\providecommand defs and the table rows are generated,
+    Then each element gets its OWN prior macro and the sampled element is
+    NOT reported as "Fixed".
+    """
+    # Arrange
+    p = Parameter(
+        label="gp.amp",
+        initval=[1.0, 2.0],
+        sigma=[0.0, np.nan],
+        lower=[0.0, 0.0],
+        upper=[10.0, 10.0],
+        shape=(2,),
+        names=["fileA", "fileB"],
+        unit="",
+        internal_unit="",
+    )
+    p.latex = "A"
+    p.latex_prefix = "ez"
+    p.description = "GP amplitude"
+    v = p.latex_varname
+
+    # Act
+    defs = p.to_latex_prior_def()
+    rows = p.to_table_line().splitlines()
+
+    # Assert -- two distinct macros, the sampled one uniform, not "Fixed"
+    assert rf"\providecommand{{\{v}zeroprior}}{{Fixed}}" in defs
+    assert rf"\providecommand{{\{v}oneprior}}" in defs
+    one_body = defs.split(rf"\{v}oneprior}}", 1)[1]
+    assert "Fixed" not in one_body
+    assert r"\mathcal{U}" in one_body
+    # ...and each table row cites its own element's macro
+    assert f"\\{v}zeroprior" in rows[0]
+    assert f"\\{v}oneprior" in rows[1]
+    assert f"\\{v}oneprior" not in rows[0]
+
+
+def test_to_latex_prior_def_stays_unsuffixed_for_a_scalar():
+    """
+    Given a scalar parameter,
+    When the prior def and table row are generated,
+    Then the macro is still the unsuffixed \\<varname>prior -- the
+    per-element naming only kicks in for vectors, mirroring to_latex_def.
+    """
+    # Arrange
+    p = Parameter(
+        label="star.teff",
+        initval=5778.0,
+        mu=5778.0,
+        sigma=100.0,
+        unit="K",
+        internal_unit="K",
+    )
+    p.latex = r"T_{\rm eff}"
+    p.latex_prefix = "ez"
+    p.description = "Effective temperature"
+
+    # Act / Assert
+    assert rf"\providecommand{{\{p.latex_varname}prior}}" in (
+        p.to_latex_prior_def()
+    )
+    assert f"\\{p.latex_varname}prior" in p.to_table_line()
