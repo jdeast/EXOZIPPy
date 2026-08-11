@@ -199,8 +199,10 @@ class AstrometryInstrument(Instrument):
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Observer location. Defaults to 'gaia' in gaia mode, "
-                    "else 'earth'."
+                    "Observer location: an ephemeris name, 'earth', an "
+                    "astropy site name (e.g. 'CTIO'), or a geodetic "
+                    "'lon_deg,lat_deg[,height_m]' string (lon FIRST). "
+                    "Defaults to 'gaia' in gaia mode, else 'earth'."
                 ),
             },
             {
