@@ -106,7 +106,7 @@ def _add_or_grab_solar_values_to_MIST_yaml(EEP_path = EEP_RAW_TRACKS_PATH_DEFAUL
         # assume we're running this within the "models" directory
         yaml_filename = current_dir / f"MISTv{version}" / "EEPs" / f"MISTv{version}.grid.yaml"
     else:
-        yaml_filename = current_dir.parent.parent / "models" / f"MISTv{version}" / "EEPs" / f"MISTv{version}.grid.yaml"
+        yaml_filename = current_dir.parent.parent / "models" / "MIST" / f"MISTv{version}" / "EEPs" / f"MISTv{version}.grid.yaml"
 
     if not yaml_filename.is_file():
         raise FileNotFoundError(f"YAML file not found at {yaml_filename}")
@@ -234,8 +234,8 @@ def _add_age_and_here_be_dragons_col(df, new_df):
     feh_values = new_df["feh_mist"].values
     invalid_feh_mask = feh_values == 30.0
 
-    # if no repeated values or no invalid feh values, just return the age array
-    if repeated_vals.size == 0 or not np.any(invalid_feh_mask):
+    # if no repeated values and no invalid feh values, just return the age array
+    if repeated_vals.size == 0 and not np.any(invalid_feh_mask):
         new_df["age_mist"] = age
         new_df["here_be_dragons"] = here_be_dragons
         return
@@ -250,9 +250,15 @@ def _add_age_and_here_be_dragons_col(df, new_df):
 
     # flag all indices from the first invalid feh value onward, since this indicates
     # problematic ages that need adjustment -- not just the ones with duplicate ages
-    first_invalid_feh_index = np.argmax(invalid_feh_mask)
-    problematic_indices = np.arange(len(age)) >= first_invalid_feh_index
+    # only want to calculate first invalid feh index if an invalid value exists
+    if np.any(invalid_feh_mask):
+        first_invalid_feh_index = np.argmax(invalid_feh_mask)
+        problematic_indices = np.arange(len(age)) >= first_invalid_feh_index
 
+    else:
+        # only want to include *added* duplicated ages, not the original age that was duplicated
+        problematic_indices = age > repeated_vals
+        
     # mark the problematic indices in the "here_be_dragons" column
     here_be_dragons[problematic_indices] = 1 + np.arange(np.sum(problematic_indices))
 
@@ -394,7 +400,7 @@ def __main_step1_process_raw_eep_tracks__():
 def __main_step2_generate_eep_grids__():
 
     alpha_grid_values = [-0.2, 0.0, 0.2, 0.4, 0.6]
-    vvcrit_values = [0.0]
+    vvcrit_values = [0.0, 0.4]
 
     for alpha in alpha_grid_values:
         for vvcrit in vvcrit_values:
