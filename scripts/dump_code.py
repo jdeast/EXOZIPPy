@@ -17,7 +17,7 @@ EXCLUDE_DIRS = {
     "runs",
     "docs",
     "data",
-    "evolutionary_model",
+    "evolutionarymodel",
 }
 
 

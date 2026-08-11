@@ -186,6 +186,62 @@ def test_resolve_filter_name_passthrough_when_alias_table_is_none():
     assert result == user_label
 
 
+def test_alias_table_cells_are_stripped_of_alignment_whitespace():
+    """
+    Given filternames.txt, whose columns are hand-aligned with literal
+    spaces (so cells such as 'TESS/TESS.Red     ' carry trailing blanks),
+    When _load_alias_table loads it,
+    Then no cell retains leading or trailing whitespace.
+
+    Without the strip the padding is invisible in every printout and only
+    shows up as a lookup that quietly misses -- see the companion test
+    below for what that costs.
+    """
+    # ARRANGE
+    from exozippy.components.sed.bc_grid import _load_alias_table
+
+    alias_df = _load_alias_table()
+    assert alias_df is not None, "shipped alias table should be findable"
+
+    # ACT
+    padded = [
+        value
+        for col in alias_df.select_dtypes(include="object").columns
+        for value in alias_df[col].dropna()
+        if value != value.strip()
+    ]
+
+    # ASSERT
+    assert padded == []
+
+
+def test_resolve_filter_name_matches_a_whitespace_padded_alias_cell():
+    """
+    Given 'TESS/TESS.Red', whose SVO cell in filternames.txt is padded
+    with trailing spaces for column alignment,
+    When resolve_filter_name looks it up for the MIST alias,
+    Then the table's own answer 'TESS' comes back.
+
+    Regression: unstripped, the .eq() row match fails, resolve falls
+    through to synthesize_mist_name and returns 'TESS_Red' -- a BC column
+    that does not exist in models/NextGen/BCs/TESS (whose one column is
+    'TESS'). No exception is raised at resolve time; the fit dies later,
+    or worse, regenerates a duplicate column under the wrong name.
+    """
+    # ARRANGE
+    from exozippy.components.sed.bc_grid import _load_alias_table
+
+    alias_df = _load_alias_table()
+
+    # ACT
+    mist_name = resolve_filter_name("TESS/TESS.Red", alias_df, alias="MIST")
+    svo_name = resolve_filter_name("TESS.Red", alias_df, alias="SVO")
+
+    # ASSERT
+    assert mist_name == "TESS"
+    assert svo_name == "TESS/TESS.Red"
+
+
 # ---------------------------------------------------------------------------
 # Section 3 — Grid axis slicer (_range_indices)
 # ---------------------------------------------------------------------------
