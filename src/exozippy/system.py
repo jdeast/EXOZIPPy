@@ -21,9 +21,45 @@ from exozippy.graph import determine_pymc_build_order
 
 """
 The System Class builds an entire system to model from its components.
-Critically, it contains no component-specific logic, so it 
+Critically, it contains no component-specific logic, so it
 can generally construct any model containing arbitrary components.
 """
+
+# Top-level config keys that are NOT component blocks. Every other top-level
+# key is looked up in the component registry and, failing that, warned about
+# as "will be ignored" -- so a key that some part of the codebase honors but
+# that is missing here produces a warning which is actively false, training
+# users to disbelieve the warning system. Each entry names its consumer:
+#
+#   run            -- documentation/bookkeeping block; deliberately inert.
+#                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it from
+#                     the structural hash, which is its only mention in code.
+#   name           -- System.name (below), read back by e.g.
+#                     astrometryinstrument's sky-plot title.
+#   parameter_file -- System.__init__, mkparam.mkprior, gui.document.
+#   prefix         -- run.py, cli_modes.py, mkparam.py, gui/status.py,
+#                     gui/runner.py, mulensinstrument's mmexofast cache path.
+#   logger_level   -- run.py, cli.py, cli_modes.py.
+#   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
+#   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
+#   mkprior        -- mkparam.mkprior: {n_seeds}.
+#   gui            -- gui.status.gui_enabled: {snapshot}.
+#
+# tests/test_known_keys.py cross-checks this set against the top-level-config
+# accesses in the source, in both directions, so it cannot silently drift.
+RESERVED_CONFIG_KEYS = frozenset(
+    {
+        "run",
+        "parameter_file",
+        "prefix",
+        "sampler",
+        "name",
+        "logger_level",
+        "modes",
+        "mkprior",
+        "gui",
+    }
+)
 
 
 class System(Component):
@@ -59,14 +95,7 @@ class System(Component):
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = {
-            "run",
-            "parameter_file",
-            "prefix",
-            "sampler",
-            "name",
-            "logger_level",
-        }
+        reserved_keys = RESERVED_CONFIG_KEYS
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]

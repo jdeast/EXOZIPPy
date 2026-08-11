@@ -67,6 +67,15 @@ logger = logging.getLogger(__name__)
 # debugging imports
 # import ipdb
 
+# Every key `_run_fit` reads off the `sampler:` block. Anything else is
+# warned about and ignored, so this set must stay a superset of the keys the
+# code actually consumes: a key missing here produces a warning saying it will
+# be IGNORED about a key that is in fact HONORED, which is worse than no
+# warning at all (that is how 'jitter' -- the very key the sample_jax_nuts
+# comment tells users to opt back in with -- got flagged as unknown).
+# tests/test_known_keys.py cross-checks this set against the `sampler_cfg`
+# accesses in this module's own source, in both directions, so it cannot
+# silently drift again. Add the key here in the same edit that consumes it.
 KNOWN_SAMPLER_KEYS = {
     "init",
     "tune",
@@ -86,6 +95,7 @@ KNOWN_SAMPLER_KEYS = {
     "max_rhat",
     "maxtime",
     "chain_method",
+    "jitter",
     "eval_timeout",
     "rung_thin_factor",
     "rung_thin_start",
@@ -94,6 +104,22 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "store_hot_chains",
 }
+
+
+def warn_unknown_sampler_keys(sampler_cfg):
+    """Warn about `sampler:` keys this module does not consume.
+
+    Returns the sorted list of unrecognized keys (empty when all are known),
+    so the check is exercisable without running a fit.
+    """
+    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    if unknown:
+        logger.warning(
+            f"Unrecognized key(s) in the sampler block will be ignored: "
+            f"{unknown}. "
+            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
+        )
+    return unknown
 
 
 def run_fit(config, user_params=None):
@@ -214,13 +240,7 @@ def _run_fit(config, gui, user_params=None):
         pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
-    _unknown_sampler_keys = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
-    if _unknown_sampler_keys:
-        logger.warning(
-            f"Unrecognized key(s) in the sampler block will be ignored: "
-            f"{_unknown_sampler_keys}. "
-            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
-        )
+    warn_unknown_sampler_keys(sampler_cfg)
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
