@@ -24,12 +24,16 @@ orbit.0.cosi:
   initval: 0.11996
 planet.0.radius:
   initval: 1.706
-rvinstrument.EXPERT.jitter_variance:
-  lower: -100
-  upper: 100
-rvinstrument.FIES.jitter_variance:
-  lower: -100
-  upper: 100
+# EXPERT and FIES are commented out of the rvinstrument block in
+# kelt4_rvonly.yaml, so these entries name instances the config does not
+# define.  They were silently ignored; naming an undefined instance is now a
+# STRICT NAMING ERROR, so they are commented out here to match the config.
+#rvinstrument.EXPERT.jitter_variance:
+#  lower: -100
+#  upper: 100
+#rvinstrument.FIES.jitter_variance:
+#  lower: -100
+#  upper: 100
 #inst.TRES.jitter_variance:
 #  lower: -100
 #  upper: 100
