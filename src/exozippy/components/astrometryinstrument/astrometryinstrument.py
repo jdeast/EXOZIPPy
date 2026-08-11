@@ -350,7 +350,19 @@ class AstrometryInstrument(Instrument):
                 d["err_pa"] = (
                     df.iloc[:, 4].values.astype(float) * np.pi / 180.0
                 )
-                min_err = np.min(d["err_sep"])
+                # BOTH rel channels constrain the jitter floor.  The PA
+                # channel's variance is err_pa**2 + jv/sep**2 (see
+                # build_likelihood), i.e. in mas the tangential error is
+                # err_pa*sep -- so a jitter that is legal for the
+                # separation channel can still drive the PA variance
+                # negative (sqrt -> NaN logp and NaN gradient) whenever
+                # err_pa*sep < sqrt(0.95)*min(err_sep).  That is the
+                # common case for interferometric data, whose tangential
+                # error is far better than its radial one.  Floor on
+                # whichever channel is tighter.
+                min_err = min(
+                    np.min(d["err_sep"]), np.min(d["err_pa"] * d["sep"])
+                )
 
             # Parallax factors (needed for gaia/abs only)
             if mode in ("gaia", "abs"):
