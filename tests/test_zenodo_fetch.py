@@ -268,9 +268,7 @@ def test_make_bc_warns_about_downsampling_only_when_it_really_fetches(
     from exozippy.components.sed import make_bc
 
     payload = b"hello"
-    monkeypatch.setattr(
-        make_bc, "_MODEL_DATA", {"M": _fake_assets(payload)}
-    )
+    monkeypatch.setattr(make_bc, "_MODEL_DATA", {"M": _fake_assets(payload)})
     monkeypatch.setattr(make_bc, "_warned_models", set())
     monkeypatch.setattr(
         zenodo.urllib.request,
@@ -326,9 +324,7 @@ def test_mist_grid_fetch_does_not_emit_the_spectra_warning(
     assert not [r for r in caplog.records if "DOWNSAMPLED" in r.getMessage()]
 
 
-def test_mist_grid_is_not_refetched_when_already_cached(
-    tmp_path, monkeypatch
-):
+def test_mist_grid_is_not_refetched_when_already_cached(tmp_path, monkeypatch):
     """
     Given the EEP grid parquet is already cached at the pinned size,
     When ensure_eep_grid runs,

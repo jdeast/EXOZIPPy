@@ -1,8 +1,8 @@
 """
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
-Given a set of filter names and a model name ("NextGen" in v1), 
-it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/` 
+Given a set of filter names and a model name ("NextGen" in v1),
+it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/`
 tree and builds a pytensor-compatible RegularGridInterpolator over
 (lgTeff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.

@@ -96,7 +96,9 @@ class SED(Component):
         self.config = config if isinstance(config, dict) else config[0]
 
         self.label = "SED Parameters"
-        self.model_root = Path(self.config.get("model_root", DEFAULT_MODEL_ROOT))
+        self.model_root = Path(
+            self.config.get("model_root", DEFAULT_MODEL_ROOT)
+        )
 
         # for now lets assume only one SED file
         self.sedfile = self.config.get("file")

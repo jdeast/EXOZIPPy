@@ -108,4 +108,3 @@ def test_generated_bc_includes_extinction_along_av_axis(regenerated_2mass):
 
     # ASSERT
     assert 1.0 < a_j < 2.5
-

@@ -17,7 +17,6 @@ from ...constants import *
 from ...filters import filter as VOID
 from .bc_grid import _load_alias_table, resolve_filter_name
 
-
 try:
     current_dir = Path(__file__).parent
 except NameError:
@@ -26,6 +25,7 @@ except NameError:
 source_code_dir = current_dir.parent.parent  # source code two directories up
 DEFAULT_FILTER_ROOT = source_code_dir / "filters"
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
+
 
 class Plot:
     # Validated 8-hue categorical palette (light mode), fixed order --

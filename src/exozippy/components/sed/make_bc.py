@@ -41,6 +41,8 @@ from typing import Dict, List, Sequence
 import numpy as np
 import pandas as pd
 
+from ...filters.filter import Filter
+from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
     DEFAULT_MODEL_ROOT,
     _load_alias_table,
@@ -49,8 +51,6 @@ from .bc_grid import (
     peek_grid_axes,
     resolve_filter_name,
 )
-from ...filters.filter import Filter
-from ...utilities.zenodo import fetch_assets
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,7 @@ _DOWNSAMPLING_WARNING = (
 _warned_models: set[str] = set()
 
 
-def ensure_model_data(
-    model: str, model_root: Path | str = DEFAULT_MODEL_ROOT
-):
+def ensure_model_data(model: str, model_root: Path | str = DEFAULT_MODEL_ROOT):
     """Download large model data files from Zenodo if not present locally.
 
     These are the raw model spectra used to synthesize bolometric corrections
