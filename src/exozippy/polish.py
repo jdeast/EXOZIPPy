@@ -29,26 +29,34 @@ Two engines, dispatched on gradient availability:
   the gradient graph cannot be built or is non-finite at the start -- e.g.
   the binary-lens magnification Op has no analytic gradient.
 
-Stopping: BOTH engines stop on a tolerance and treat the configured step
-count (`seed_polish: N`, default DEFAULT_POLISH_STEPS) as a safety cap only.
-The two tolerances are deliberately different because the two engines see
-different information, and neither measure exists on the other path:
+Stopping: `seed_polish: N` (default DEFAULT_POLISH_STEPS) is a step CAP, not
+a target -- "at most N".  The two engines stop differently, because they see
+different information and the differentiable one's criterion has no
+counterpart on the other path:
 
-- L-BFGS-B stops on the GRADIENT NORM (_LBFGS_GTOL, nats per raw unit).
-  That is the strongest available statement of "this is the top of the
-  basin" and it needs no history; the gradient is right there.  It is also
-  the reason a logp-improvement rule must NOT be layered on here -- see the
-  _LBFGS_FTOL note below for what per-iteration improvement tests do to a
-  curved valley.
+- L-BFGS-B stops on the GRADIENT NORM (_LBFGS_GTOL, nats per raw unit) with
+  maxiter as its safety net.  That is a real statement about the local
+  surface and needs no history.  Measured on examples/ob140939 (4 literature
+  seeds): 2 of 4 reach |grad| < 0.01 at 432 and 655 iterations; the other 2
+  are still crawling along a flat direction at 5000, where 33x the default
+  cap buys 9 nats out of a 547-nat climb (1.6%) and doubles the wall time.
+  So the cap is not a stand-in for the tolerance -- it is the bound on
+  hierarchical-MAP drift it was documented to be, and 150 is a reasonable
+  place for it.  Do NOT layer a logp-improvement rule on top: the
+  _LBFGS_FTOL note below records what per-iteration improvement tests do to
+  a curved valley.
 - The gradient-free DE polish (samplers.ptde.polish_seed_starts) has no
   gradient by construction -- it exists because the binary-lens
-  magnification Op has none -- so it stops on the ABSOLUTE logp gain of the
-  best point over a WINDOW of sweeps (ptde.POLISH_TOL_NATS /
-  POLISH_TOL_WINDOW).  Absolute, not relative to |lp|, for the same reason
-  ftol is disabled below.
+  magnification Op has none -- and its only observable, the best-lp history,
+  is a STAIRCASE of exactly-flat plateaus.  A best-lp improvement window
+  therefore cannot separate "converged" from "has not jumped yet": on
+  examples/DC2018_128 it stops 38-137 nats short, by the SAME amount for
+  tol = 0.05, 0.5 and 2.0 nats.  The measurement is tabulated on
+  ptde.POLISH_TOL_NATS.  That engine's default stopping criterion is
+  therefore the step cap; the tolerance is an opt-in
+  (polish_raw_starts(tol=...)) for a surface known to be smooth.
 
-The cap always remains: neither rule can run away, and a pathological
-surface stops at N steps as before.
+The cap always remains, so nothing can polish forever.
 
 Seed-provenance gate (resolve_polish_steps): 'auto' polishes SOLUTION
 ESTIMATES -- the single canonical start (user/literature initvals, the
@@ -65,9 +73,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Safety CAP on the polish, not a target: both engines stop on their own
-# tolerance well before this on any well-behaved surface (see "Stopping" in
-# the module docstring).
+# Step CAP on the polish -- "at most this many" -- not a target.  On the
+# L-BFGS path the gradient tolerance usually ends it first; on the
+# gradient-free path the cap IS the criterion (see "Stopping" in the module
+# docstring for the measurement behind both statements).
 DEFAULT_POLISH_STEPS = 150
 
 # L-BFGS stopping: terminate on the GRADIENT (plus the maxiter cap),

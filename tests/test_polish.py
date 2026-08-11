@@ -362,8 +362,8 @@ def test_de_polish_step_count_is_a_cap_honored_exactly_at_one():
     Given the gradient-free DE engine with n_steps=1,
     When polish_seed_starts runs,
     Then exactly ONE sweep of pop_size proposals happens (plus the
-      pop_size population-seeding evaluations) -- the cap is honored
-      literally and the tolerance window (10 sweeps) cannot pre-empt it.
+      pop_size population-seeding evaluations) -- `seed_polish: 1` really
+      is one step of work, which is what 2.9.1 was about.
     """
     # ARRANGE
     from exozippy.samplers.ptde import polish_seed_starts
@@ -391,97 +391,23 @@ def test_de_polish_step_count_is_a_cap_honored_exactly_at_one():
     assert len(calls) == 16
 
 
-def test_de_polish_stops_on_tolerance_well_before_the_cap():
+def test_de_polish_default_is_the_step_cap_not_an_improvement_window():
     """
-    Given a start already sitting at its basin optimum and a 150-step cap,
-    When the DE polish runs,
-    Then it stops on its tolerance after ~tol_window sweeps instead of
-      burning all 150 -- "polish" is a stopping criterion, not a step count.
+    Given a start already sitting at its basin optimum,
+    When the gradient-free DE polish runs with the DEFAULT settings,
+    Then all n_steps sweeps run: this engine's default stopping criterion
+      is the cap, deliberately.
 
-    Also pins that the tolerance cannot be reached before tol_window+1
-    sweeps (the window is what keeps a single quiet sweep of a stochastic
-    search from ending it).
-    """
-    # ARRANGE
-    from exozippy.samplers.ptde import (
-        POLISH_TOL_WINDOW,
-        polish_seed_starts,
-    )
-
-    calls = []
-
-    def logp(p):
-        calls.append(1)
-        return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
-
-    seed = {"x": np.array([3.0])}
-    scales = {"x": np.ones(1)}
-    pop = 8
-
-    # ACT
-    _polished, dlps = polish_seed_starts(
-        [seed],
-        logp,
-        np.random.default_rng(0),
-        scales,
-        n_steps=150,
-        pop_size=pop,
-    )
-
-    # ASSERT
-    sweeps = (len(calls) - pop) / pop
-    assert sweeps == POLISH_TOL_WINDOW + 1
-    assert sweeps < 150
-    assert dlps[0] >= 0.0
-
-
-def test_de_polish_tolerance_does_not_stop_a_climbing_search_early():
-    """
-    Given a start far below its basin optimum,
-    When the DE polish runs with the default tolerance,
-    Then it keeps going past the tolerance window (the search is still
-      gaining more than the tolerance per window) and reaches the optimum.
+    Why (measured on examples/DC2018_128, tabulated on
+    ptde.POLISH_TOL_NATS): the best-lp history of a T=1 Metropolis
+    population is a STAIRCASE of exactly-flat plateaus, so a best-lp
+    improvement window fires on a plateau and misses the next jump -- 38 to
+    137 nats short there, by the SAME amount at tol = 0.05, 0.5 and 2.0,
+    which proves no threshold separates the two cases.  A start left tens
+    of nats below its basin optimum is exactly what poisons the whitening
+    probe, i.e. the thing the polish exists to prevent.
     """
     # ARRANGE
-    from exozippy.samplers.ptde import (
-        POLISH_TOL_WINDOW,
-        polish_seed_starts,
-    )
-
-    calls = []
-
-    def logp(p):
-        calls.append(1)
-        return float(-0.5 * np.sum((p["x"] - 40.0) ** 2))
-
-    seed = {"x": np.array([0.0])}
-    scales = {"x": np.ones(1)}
-    pop = 8
-
-    # ACT
-    polished, dlps = polish_seed_starts(
-        [seed],
-        logp,
-        np.random.default_rng(1),
-        scales,
-        n_steps=150,
-        pop_size=pop,
-    )
-
-    # ASSERT
-    sweeps = (len(calls) - pop) / pop
-    assert sweeps > POLISH_TOL_WINDOW + 1
-    assert dlps[0] > 0.0
-    assert abs(float(polished[0]["x"][0]) - 40.0) < 5.0
-
-
-def test_de_polish_tolerance_can_be_disabled_for_a_fixed_step_count():
-    """
-    Given tol=None (the pre-tolerance behavior),
-    When the DE polish runs from a start already at its optimum,
-    Then all n_steps sweeps run -- the old fixed-step contract is still
-      reachable for anything that depends on it.
-    """
     from exozippy.samplers.ptde import polish_seed_starts
 
     calls = []
@@ -490,17 +416,88 @@ def test_de_polish_tolerance_can_be_disabled_for_a_fixed_step_count():
         calls.append(1)
         return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
 
+    pop = 8
+
+    # ACT
     polish_seed_starts(
         [{"x": np.array([3.0])}],
         logp,
         np.random.default_rng(0),
         {"x": np.ones(1)},
         n_steps=25,
-        pop_size=8,
-        tol=None,
+        pop_size=pop,
     )
 
-    assert len(calls) == 8 + 25 * 8
+    # ASSERT
+    assert len(calls) == pop + 25 * pop
+
+
+def test_de_polish_improvement_window_is_available_as_an_opt_in():
+    """
+    Given a caller who opts in with tol/tol_window on a smooth surface,
+    When the DE polish runs from a start already at its optimum,
+    Then it stops one window past the window length instead of burning the
+      whole cap -- the machinery works; only the DEFAULT is off.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import (
+        POLISH_TOL_NATS,
+        POLISH_TOL_WINDOW,
+        polish_seed_starts,
+    )
+
+    calls = []
+
+    def logp(p):
+        calls.append(1)
+        return float(-0.5 * np.sum((p["x"] - 3.0) ** 2))
+
+    pop = 8
+
+    # ACT
+    _polished, dlps = polish_seed_starts(
+        [{"x": np.array([3.0])}],
+        logp,
+        np.random.default_rng(0),
+        {"x": np.ones(1)},
+        n_steps=150,
+        pop_size=pop,
+        tol=POLISH_TOL_NATS,
+    )
+
+    # ASSERT
+    sweeps = (len(calls) - pop) / pop
+    assert sweeps == POLISH_TOL_WINDOW + 1
+    assert dlps[0] >= 0.0
+
+
+def test_an_improvement_window_would_quit_on_a_staircase_plateau():
+    """
+    Given a best-lp history shaped like the DE polish's real one -- flat
+      plateaus punctuated by jumps (examples/DC2018_128),
+    When an improvement window of any tolerance is applied to it,
+    Then it stops on the first plateau and misses every later jump.
+
+    This is the measurement that keeps the DE tolerance OFF by default,
+    kept as an executable statement so nobody turns it on by analogy with
+    the L-BFGS path's gradient tolerance.  Note the verdict does not move
+    with the tolerance: the plateaus are EXACTLY flat.
+    """
+    # ARRANGE: a plateau, a jump, a longer plateau, a bigger jump
+    history = [100.0] * 15 + [140.0] * 40 + [180.0] * 30 + [220.0] * 15
+
+    def first_stop(window, tol):
+        for t in range(window, len(history)):
+            if history[t] - history[t - window] < tol:
+                return t + 1
+        return len(history)
+
+    # ACT + ASSERT
+    for window in (10, 20, 30):
+        stops = {tol: first_stop(window, tol) for tol in (0.05, 0.5, 2.0)}
+        assert len(set(stops.values())) == 1, stops
+        stop = stops[0.05]
+        assert history[stop - 1] < history[-1]
 
 
 def test_lbfgs_polish_stops_on_the_gradient_not_the_cap():

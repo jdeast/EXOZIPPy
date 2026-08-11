@@ -146,26 +146,38 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     return lam
 
 
-# Gradient-free polish stopping rule: stop when the best point found has
-# gained less than POLISH_TOL_NATS over the last POLISH_TOL_WINDOW sweeps.
+# OPT-IN improvement tolerance for the gradient-free polish: stop when the
+# best point found has gained less than `tol` nats over the last `tol_window`
+# sweeps.  DEFAULT OFF (tol=None), and that default is measured, not timid.
 #
+# The L-BFGS engine stops on its GRADIENT NORM by default (polish.py
+# _LBFGS_GTOL) -- an actual statement about the local surface.  No such
+# quantity exists here; this engine is gradient-free by construction.  The
+# only observable is the best-lp history, and on a real binary-lens surface
+# that history is a STAIRCASE: exactly-flat plateaus punctuated by jumps,
+# because best_lp is the running maximum of a T=1 Metropolis population that
+# spends many sweeps before one member escapes to a better region.  Measured
+# on examples/DC2018_128 (2 seeds, 300 sweeps, pop 38):
+#
+#   window  seed 0 stops at   nats missed    seed 1 stops at   nats missed
+#     10        sweep 11          73.2          sweep 20          136.5
+#     20        sweep 36          38.8          sweep 30          136.5
+#     30        sweep 46          38.8          sweep 40          136.5
+#     50        sweep 66          38.8          sweep 158          11.3
+#
+# and the shortfall is IDENTICAL for tol = 0.05, 0.5 and 2.0 nats, which is
+# the proof: the plateaus are exactly flat, so no threshold separates "has
+# converged" from "has not jumped yet".  Widening the window only delays the
+# same mistake.  A rule that costs 38-137 nats of start quality to save
+# sweeps is the opposite of the point -- the polish exists because a start
+# far below its basin optimum poisons the whitening probe (polish.py).
+#
+# So this engine's default stopping criterion stays the step CAP.  These
+# constants are the values used when a caller does opt in (tol=..., e.g. for
+# a surface known to be smooth, or a re-polish of an already-polished point).
 # ABSOLUTE nats, never relative to |lp|: logp carries an arbitrary additive
 # normalization, so a relative threshold means something different for every
-# model -- the exact trap documented on polish._LBFGS_FTOL, where scipy's
-# relative ftol quit whenever an iteration gained < 1e-3*|lp| (~2 nats at
-# lp ~ 1900) and stranded ob140939's seeds ~15 nats below their peaks.
-#
-# 0.05 nats: the polish exists to put the start inside its basin, close
-# enough that the whitening probe measures honest curvature.  That probe
-# works in 0.5-nat steps, so a tenth of one probe step is already far below
-# anything downstream can resolve, and the remaining climb to the exact MAP
-# is not wanted anyway (polish.py: the exact MAP of a scale-like parameter
-# is not in the typical set).
-#
-# Over a WINDOW of sweeps, never per sweep: best_lp is a running maximum of a
-# stochastic search, so single quiet sweeps are routine even while the search
-# is still climbing.  10 sweeps is >= 80 proposals (pop_size >= 8), enough
-# that a genuinely climbing search cannot look flat across all of them.
+# model -- the trap documented on polish._LBFGS_FTOL.
 POLISH_TOL_NATS = 0.05
 POLISH_TOL_WINDOW = 10
 
@@ -178,7 +190,7 @@ def polish_seed_starts(
     n_steps=150,
     pop_size=None,
     gamma=None,
-    tol=POLISH_TOL_NATS,
+    tol=None,
     tol_window=POLISH_TOL_WINDOW,
 ):
     """T=1 differential-evolution polish of each seed's raw start.
@@ -189,10 +201,10 @@ def polish_seed_starts(
     difference-vector proposals, the same move the sampler itself uses), and
     return the best-lp point visited as the new seed.
 
-    Stopping is by TOLERANCE, with ``n_steps`` as the safety cap: the sweeps
-    end as soon as the best point has gained less than ``tol`` nats over the
-    last ``tol_window`` sweeps (see POLISH_TOL_NATS).  ``tol=None`` restores
-    the old fixed ``n_steps`` sweeps.
+    Stopping: ``n_steps`` sweeps.  An improvement tolerance is available
+    (``tol`` nats over the last ``tol_window`` sweeps) but is OFF by default
+    -- see the POLISH_TOL_NATS comment for the measurement that says why a
+    best-lp window cannot be trusted on this engine.
 
     Rationale: an unpolished solution-estimate seed (e.g. a raw MMEXOFAST
     fit) can start hundreds of nats below its own basin's optimum, and
