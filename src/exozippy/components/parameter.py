@@ -639,7 +639,12 @@ class Parameter:
 
         # 2. IDENTIFY ROLES
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
-        is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
+        # sigma == 0 is the ONE way to pin an element.  A tiny init_scale used
+        # to pin one too (`scales <= 1e-12`), which contradicted the premise
+        # that init_scale never affects the posterior -- it is a preliminary
+        # whitening scale the startup probe supersedes, not a modeling
+        # statement -- and gave pinning a second, undocumented spelling.
+        is_fixed = (sigmas == 0) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
 
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
@@ -647,7 +652,13 @@ class Parameter:
         # missing entry falls back to a fraction of the bound span, or sigma
         # when unbounded.  Non-sampled elements just need a finite
         # placeholder (a NaN scale would poison phys_linear via NaN * raw=0).
-        for i in np.where(~np.isfinite(scales))[0]:
+        # A non-POSITIVE scale takes the same fallback: a whitening scale of
+        # zero is not a scale, it is a degenerate raw direction the sampler
+        # cannot move (and it used to be silently reinterpreted as a pin --
+        # the `scales <= 1e-12` clause deleted above).  The user's sigma is
+        # synced into init_scale, so `sigma: 0` lands here; that element is
+        # already is_fixed and the placeholder never reaches the posterior.
+        for i in np.where(~(np.isfinite(scales) & (scales > 0)))[0]:
             if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
                 scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
                     uppers[i] - lowers[i]

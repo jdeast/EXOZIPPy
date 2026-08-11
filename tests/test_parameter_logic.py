@@ -1359,3 +1359,51 @@ def test_unselected_logit_branch_carries_no_nan_or_inf():
         assert np.all(np.isfinite(np.asarray(val))), (
             f"non-finite intermediate {var}: {val}"
         )
+
+
+def test_tiny_init_scale_does_not_fix_a_parameter():
+    """
+    Given a sampled parameter whose preliminary init_scale is far below the
+    old 1e-12 threshold,
+    When the PyMC model is built,
+    Then it is still SAMPLED (a raw RV exists and its scale is positive).
+
+    Review 2.10.3: `scales <= 1e-12` was a second, undocumented spelling of
+    `sigma: 0`, and it contradicted the premise that init_scale -- a
+    preliminary whitening scale the startup probe supersedes -- never
+    affects the posterior.
+    """
+    # Arrange / Act
+    with pm.Model() as model:
+        p = Parameter(
+            label="tiny", initval=0.5, init_scale=1e-18, lower=0.0, upper=1.0
+        )
+        p.build_pymc()
+
+    # Assert
+    assert [rv.name for rv in model.free_RVs] == ["tiny_raw"]
+    assert p.is_sampled.tolist() == [True]
+    assert p._whiten_state is not None
+
+
+def test_zero_init_scale_falls_back_instead_of_freezing():
+    """
+    Given a sampled parameter handed a non-positive init_scale,
+    When the model is built,
+    Then it takes the same span-fraction fallback a missing scale takes --
+    a zero whitening scale is a degenerate raw direction, not a pin.
+    """
+    # Arrange / Act
+    with pm.Model():
+        p = Parameter(
+            label="zeroscale",
+            initval=0.5,
+            init_scale=0.0,
+            lower=0.0,
+            upper=1.0,
+        )
+        p.build_pymc()
+
+    # Assert
+    assert p.is_sampled.tolist() == [True]
+    assert float(p._whiten_state["sv_scale_logits"].get_value()[0]) > 0.0
