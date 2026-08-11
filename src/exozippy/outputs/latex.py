@@ -33,6 +33,44 @@ def _multimodal(mode_report):
     return mode_report is not None and mode_report.n_modes > 1
 
 
+def _weight_err_cell(mode_info):
+    """CSV cell for a mode weight's 1-sigma; blank when unavailable."""
+    err = getattr(mode_info, "weight_err", np.nan)
+    return round(float(err), 4) if np.isfinite(err) else ""
+
+
+def _mixing_sentence(mode_report):
+    """One sentence of mode-mixing context for the table comments.
+
+    Occupancy weighting is unbiased when the sampler mixes between modes, but
+    its precision comes from the number of independent mode TRANSITIONS, not
+    from the number of draws -- so the transition count and the number of
+    chains that never switched belong next to the weights, in every format
+    that prints them.  Returns '' (no sentence) for a report predating these
+    fields.
+    """
+    per_chain = getattr(mode_report, "transitions_per_chain", None)
+    if per_chain is None:
+        return ""
+    text = (
+        f"Mode changes in the stored draws: {mode_report.n_transitions} "
+        f"({mode_report.n_round_trips} round trips); "
+        f"{mode_report.n_chains_no_switch} of "
+        f"{mode_report.n_chains_with_draws} chains never changed mode. "
+    )
+    if getattr(mode_report, "thin_factor", 1) > 1:
+        text += (
+            f"Draws are stored thinned by {mode_report.thin_factor}, so that "
+            f"count is a lower bound. "
+        )
+    elif not getattr(mode_report, "thin_known", True):
+        text += (
+            "The trace does not record its storage thinning; that count "
+            "assumes every sampler step was stored. "
+        )
+    return text
+
+
 def _ensure_mode_summaries(system, p, mode_report):
     """Compute per-mode summaries for a sampled parameter if missing."""
     if p.posterior is None or p.mode_summaries is not None:
@@ -50,9 +88,13 @@ def build_csv_output(system, csv_filename, mode_report=None):
     """Write a machine-readable CSV of posterior results.
 
     Comment header line lists columns: parname, value, up_err, low_err.
-    With a multimodal ``mode_report``, two extra leading columns (mode,
-    weight) are added; each parameter gets one row per mode plus a combined
-    row (mode 'all', weight 1).  Fixed parameters have empty error columns.
+    With a multimodal ``mode_report``, three extra leading columns (mode,
+    weight, weight_err) are added; each parameter gets one row per mode plus
+    a combined row (mode 'all', weight 1).  Fixed parameters have empty error
+    columns.  ``weight_err`` is the weight's 1-sigma -- from the mode
+    indicator's effective sample size for occupancy weights, from the
+    propagated lnZ error for evidence weights -- and is blank only when the
+    report predates it.
     """
     multimodal = _multimodal(mode_report)
 
@@ -81,13 +123,21 @@ def build_csv_output(system, csv_filename, mode_report=None):
                 if p.summary is not None:
                     med, ep, em = summ_at(p.summary).format(sigfigs=2)
                     if multimodal:
-                        rows.append((name, "all", 1.0, med, ep, em))
+                        rows.append((name, "all", 1.0, "", med, ep, em))
                         for k, m in enumerate(mode_report.modes):
                             med, ep, em = summ_at(p.mode_summaries[k]).format(
                                 sigfigs=2
                             )
                             rows.append(
-                                (name, k + 1, round(m.weight, 4), med, ep, em)
+                                (
+                                    name,
+                                    k + 1,
+                                    round(m.weight, 4),
+                                    _weight_err_cell(m),
+                                    med,
+                                    ep,
+                                    em,
+                                )
                             )
                     else:
                         rows.append((name, med, ep, em))
@@ -97,7 +147,7 @@ def build_csv_output(system, csv_filename, mode_report=None):
                         inits[index] if index < len(inits) else inits[-1]
                     )
                     if multimodal:
-                        rows.append((name, "all", 1.0, val, "", ""))
+                        rows.append((name, "all", 1.0, "", val, "", ""))
                     else:
                         rows.append((name, val, "", ""))
 
@@ -110,7 +160,13 @@ def build_csv_output(system, csv_filename, mode_report=None):
     with open(csv_filename, "w", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
         if multimodal:
-            f.write("# parname, mode, weight, value, up_err, low_err\n")
+            f.write(
+                "# parname, mode, weight, weight_err, value, up_err, low_err\n"
+            )
+            f.write("# mode weights: " + mode_report.provenance + "\n")
+            mixing = _mixing_sentence(mode_report)
+            if mixing:
+                f.write("# " + mixing.strip() + "\n")
         else:
             f.write("# parname, value, up_err, low_err\n")
         writer.writerows(rows)
@@ -247,13 +303,32 @@ def build_latex_output(
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.
+        # Each weight carries its 1-sigma: for occupancy weighting that is
+        # set by the number of independent mode transitions (NOT by the draw
+        # count), and for evidence weighting it is the propagated lnZ error.
+        # A weight printed bare invites reading 0.7 +/- 0.3 as 0.7 +/- 0.02.
         for k, m in enumerate(mode_report.modes):
+            suffix = _idx_to_words(k + 1)
             all_defs.append(
-                rf"\providecommand{{\ezmodeweight{_idx_to_words(k + 1)}}}"
+                rf"\providecommand{{\ezmodeweight{suffix}}}"
                 rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n"
             )
+            if np.isfinite(getattr(m, "weight_err", np.nan)):
+                all_defs.append(
+                    rf"\providecommand{{\ezmodeweighterr{suffix}}}"
+                    rf"{{\ensuremath{{{m.weight_err:.3f}}}}}" + "\n"
+                )
+        # \pm needs math mode; the macros are each \ensuremath already, so
+        # wrap the pair (nested \ensuremath is a no-op inside math mode).
         weight_cells = " & ".join(
-            rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
+            (
+                rf"\ensuremath{{\ezmodeweight{_idx_to_words(k + 1)} \pm "
+                rf"\ezmodeweighterr{_idx_to_words(k + 1)}}}\dotfill"
+                if np.isfinite(
+                    getattr(mode_report.modes[k], "weight_err", np.nan)
+                )
+                else rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
+            )
             for k in range(mode_report.n_modes)
         )
         weight_row = (
@@ -266,7 +341,11 @@ def build_latex_output(
         all_table_lines.insert(0, weight_row)
 
         provenance_note = (
-            "Mode weights: " + mode_report.provenance + ". Combined "
+            "Mode weights: "
+            + mode_report.provenance
+            + ". "
+            + _mixing_sentence(mode_report)
+            + "Combined "
             "(pooled-across-modes) parameter values are suppressed above "
             "because pooled values inherit the mode-weight provenance; see "
             "the per-mode columns."

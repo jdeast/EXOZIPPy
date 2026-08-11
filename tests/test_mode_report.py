@@ -17,18 +17,30 @@ import numpy as np
 import pytest
 
 from exozippy.components.parameter import Parameter
-from exozippy.outputs.latex import build_latex_output
+from exozippy.outputs.latex import build_csv_output, build_latex_output
 from exozippy.outputs.modes import (
     DEFAULT_MAX_INVALID_FRAC,
     ModeInfo,
     ModeReport,
     check_invalid_frac,
     identify_modes,
+    markov_indicator_iact,
     mode_suffix,
+    transition_stats,
+    weight_ess,
 )
 
 N_CHAIN, N_DRAW = 8, 1500
 N = N_CHAIN * N_DRAW
+
+
+class _StubSystem:
+    """Component-free system, for exercising the table builders alone."""
+
+    name = "toy"
+
+    def get_all_components(self):
+        return []
 
 
 def _make_idata(posterior, lp):
@@ -622,7 +634,9 @@ def test_displaced_high_lp_minority_is_a_mode_not_invalid():
       second mode, with no invalid draws at all.
     """
     rng = np.random.default_rng(7)
-    a = rng.normal(0.0, 0.001, N)  # razor-tight bulk: huge robust z for any offset
+    a = rng.normal(
+        0.0, 0.001, N
+    )  # razor-tight bulk: huge robust z for any offset
     lp = rng.normal(1000.0, 3.0, N)
     minority = slice(0, N_DRAW)  # chain 0 entirely in the displaced basin
     a[minority] = rng.normal(5.0, 0.001, N_DRAW)  # z ~ 5000 sigma_bulk
@@ -658,3 +672,258 @@ def test_displaced_low_lp_cluster_stays_invalid():
     assert rep.n_invalid == 300
     assert rep.invalid_reason_counts == {"raw-z": 300}
     assert rep.n_modes == 1
+
+
+# ----------------------------------------------------------------------
+# Mode-transition bookkeeping and the occupancy weights' error bar
+#
+# Occupancy weighting is unbiased when the sampler mixes between modes, but
+# its PRECISION is set by the number of independent mode transitions, not by
+# the number of draws: a 50000-draw run that switched five times knows the
+# weight to roughly 40%.  Nothing reported that, so "0.7" and "0.7 +/- 0.3"
+# were indistinguishable in every output format.
+# ----------------------------------------------------------------------
+
+
+def _two_state_chain(n, p01, p10, rng):
+    """Two-state Markov chain; the indicator's IACT is 2/(p01+p10) - 1."""
+    s = np.zeros(n, dtype=int)
+    s[0] = rng.random() < p01 / (p01 + p10)
+    for i in range(1, n):
+        s[i] = (rng.random() >= p10) if s[i - 1] else (rng.random() < p01)
+    return s.astype(int)
+
+
+def test_transition_stats_counts_per_chain_and_round_trips():
+    """
+    Given label sequences with hand-countable mode changes -- one chain that
+      never leaves mode 0, one that crosses once, one that goes 0 -> 1 -> 0,
+    When transition_stats runs,
+    Then the total, the per-chain counts and the round trips (k -> j -> k)
+      are each exactly what the sequences show, and unassigned (-1) draws are
+      skipped rather than counted as a visit to a third state.
+    """
+    labels = np.array(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 1, 1],
+            [0, 0, 1, 1, 0, 0],
+            [0, -1, -1, 0, 0, 0],
+        ]
+    )
+
+    total, per_chain, round_trips = transition_stats(labels)
+
+    assert per_chain.tolist() == [0, 1, 2, 0]
+    assert total == 3
+    assert round_trips == 1  # only chain 2 returns to where it started
+
+
+def test_weight_ess_recovers_a_known_transition_rate():
+    """
+    Given a two-state chain whose mode-label transition probabilities are
+      known, so the indicator's IACT is exactly 2/(p01+p10) - 1,
+    When weight_ess measures it as a time series,
+    Then the recovered IACT matches the analytic Markov value, and N_eff and
+      sigma_w follow -- N_eff is thousands of draws below the raw draw count.
+    """
+    rng = np.random.default_rng(5)
+    p01, p10 = 0.005, 0.015
+    labels = np.array(
+        [_two_state_chain(20000, p01, p10, rng) for _ in range(4)]
+    )
+    analytic_tau = 2.0 / (p01 + p10) - 1.0  # = 99
+
+    n_eff, tau = weight_ess(labels, 1)
+
+    assert tau == pytest.approx(analytic_tau, rel=0.25)
+    assert n_eff == pytest.approx(labels.size / analytic_tau, rel=0.3)
+    w = float((labels == 1).mean())
+    sigma_w = np.sqrt(w * (1 - w) / n_eff)
+    # the naive "sqrt(w(1-w)/N)" over all 80000 draws would be ~10x tighter
+    assert sigma_w > 5 * np.sqrt(w * (1 - w) / labels.size)
+
+
+def test_time_series_and_markov_iact_agree():
+    """
+    Given synthetic two-state chains spanning fast and slow mixing,
+    When the time-series IACT estimate and the closed-form two-state Markov
+      value 2/(p01+p10) - 1 are compared,
+    Then they agree -- an independent cross-check that the time-series
+      estimator is measuring what it claims to.
+    """
+    rng = np.random.default_rng(9)
+    for p01, p10 in [(0.3, 0.3), (0.02, 0.02), (0.005, 0.015)]:
+        labels = np.array(
+            [_two_state_chain(20000, p01, p10, rng) for _ in range(4)]
+        )
+
+        _n_eff, tau = weight_ess(labels, 1)
+        tau_markov = markov_indicator_iact(labels, 1)
+
+        assert tau_markov == pytest.approx(2.0 / (p01 + p10) - 1.0, rel=0.3)
+        assert tau == pytest.approx(tau_markov, rel=0.3)
+
+
+def test_thinning_does_not_manufacture_independence():
+    """
+    Given one two-state chain set, and the SAME series thinned by 5, 10 and
+      50 -- thinning makes consecutive stored draws further apart, so the
+      thinned series genuinely looks less autocorrelated,
+    When weight_ess measures each,
+    Then N_eff (and therefore sigma_w) is unchanged: the IACT falls by the
+      thinning factor exactly as the draw count does, so no thinning factor
+      can be mistaken for extra information.
+    """
+    rng = np.random.default_rng(13)
+    labels = np.array(
+        [_two_state_chain(20000, 0.005, 0.005, rng) for _ in range(4)]
+    )
+    n_eff_full, tau_full = weight_ess(labels, 1)
+
+    for thin in (5, 10, 50):
+        n_eff, tau = weight_ess(labels[:, ::thin], 1)
+
+        assert tau == pytest.approx(tau_full / thin, rel=0.5)
+        assert n_eff == pytest.approx(n_eff_full, rel=0.25)
+
+
+def test_chains_that_never_switch_get_no_spuriously_tight_weight():
+    """
+    Given chains that each sit in one mode for their entire length -- the
+      case evidence weighting exists for -- so there is no information at all
+      about the relative masses beyond "each chain landed somewhere",
+    When identify_modes runs,
+    Then the report says zero transitions and every chain stuck, N_eff is of
+      order the number of chains rather than the number of draws, and the
+      weight's 1-sigma is comparable to the weight itself.
+    """
+    rng = np.random.default_rng(3)
+    chain_mode = np.repeat([0] * 4 + [1] * 4, N_DRAW)
+    a = rng.normal(0, 1, N) + 10 * chain_mode
+    idata = _make_idata({"a_raw": a}, rng.normal(0, 1, N))
+
+    rep = identify_modes(idata)
+
+    assert rep.n_modes == 2
+    assert rep.n_transitions == 0
+    assert rep.n_round_trips == 0
+    assert rep.transitions_per_chain.tolist() == [0] * N_CHAIN
+    assert rep.n_chains_no_switch == N_CHAIN
+    assert rep.modes[0].weight_ess < 4 * N_CHAIN
+    assert rep.modes[0].weight_err > 0.2
+    assert not rep.weights_reliable
+    text = rep.to_text()
+    assert "chains that never changed mode: 8/8" in text
+    assert "mode-weight precision" in " ".join(rep.notes)
+
+
+def test_mixing_transitions_give_a_tight_weight():
+    """
+    Given two modes that every chain visits repeatedly (draw-by-draw mixing),
+    When identify_modes runs,
+    Then the transition count is large, the weights are validated, and the
+      weight uncertainty is small -- the advisory low-N_eff note does not
+      fire on a run that genuinely mixed.
+    """
+    rng = np.random.default_rng(21)
+    labels = (rng.random(N) < 0.3).astype(int)
+    a = rng.normal(0, 1, N) + 10 * labels
+    idata = _make_idata({"a_raw": a}, rng.normal(0, 1, N))
+
+    rep = identify_modes(idata)
+
+    assert rep.n_modes == 2
+    assert rep.n_transitions > 1000
+    assert rep.n_round_trips > 500
+    assert rep.n_chains_no_switch == 0
+    assert rep.weights_reliable
+    assert rep.modes[0].weight_err < 0.02
+    assert not any("mode-weight precision" in n for n in rep.notes)
+
+
+def test_transition_diagnostics_reach_latex_and_csv(tmp_path):
+    """
+    Given a report whose chains never switched mode,
+    When the LaTeX table comments and the CSV header block are built,
+    Then both carry the weight uncertainty and the transition/no-switch
+      counts, so the numbers a reader needs to judge the weights travel with
+      them into every output format.
+    """
+    rng = np.random.default_rng(3)
+    chain_mode = np.repeat([0] * 6 + [1] * 2, N_DRAW)
+    a = rng.normal(0, 1, N) + 10 * chain_mode
+    rep = identify_modes(_make_idata({"a_raw": a}, rng.normal(0, 1, N)))
+
+    var_file = tmp_path / "defs.tex"
+    tmpl_file = tmp_path / "table.tex"
+    csv_file = tmp_path / "results.csv"
+    build_latex_output(
+        _StubSystem(),
+        var_filename=str(var_file),
+        template_filename=str(tmpl_file),
+        mode_report=rep,
+    )
+    build_csv_output(_StubSystem(), str(csv_file), mode_report=rep)
+
+    tmpl = tmpl_file.read_text()
+    assert r"\ezmodeweighterrone" in var_file.read_text()
+    assert r"\ezmodeweighterrone" in tmpl
+    assert "Mode changes in the stored draws: 0" in tmpl
+    assert "2 chains never changed mode" not in tmpl  # it is 8 of 8
+    assert "8 of 8 chains never changed mode" in tmpl
+    csv_text = csv_file.read_text()
+    assert "weight_err" in csv_text.splitlines()[0]
+    assert "Mode changes in the stored draws: 0" in csv_text
+
+
+def test_thin_factor_read_from_the_trace_and_reported():
+    """
+    Given a trace stamped by run.py with its storage thinning,
+    When identify_modes runs,
+    Then the report carries the factor and says out loud that the transition
+      count is a lower bound; an unstamped trace says the thinning is unknown
+      rather than quietly asserting it was 1.
+    """
+    rng = np.random.default_rng(31)
+    labels = (rng.random(N) < 0.3).astype(int)
+    a = rng.normal(0, 1, N) + 10 * labels
+
+    unstamped = _make_idata({"a_raw": a}, rng.normal(0, 1, N))
+    rep_unstamped = identify_modes(unstamped)
+
+    stamped = _make_idata({"a_raw": a}, rng.normal(0, 1, N))
+    stamped.posterior.attrs["nthin"] = 10
+    rep_stamped = identify_modes(stamped)
+
+    assert rep_unstamped.thin_factor == 1
+    assert not rep_unstamped.thin_known
+    assert "does not record its storage thinning" in rep_unstamped.to_text()
+    assert rep_stamped.thin_factor == 10
+    assert rep_stamped.thin_known
+    assert "LOWER BOUND" in rep_stamped.to_text()
+
+
+def test_ladder_round_trips_quoted_separately_from_mode_changes():
+    """
+    Given a PTDE trace stamped with the ladder's own temperature round trips,
+    When the mode report renders,
+    Then it quotes them as sampler context and says explicitly that they are
+      temperature round trips and NOT mode changes -- "swap" is ambiguous
+      between the two and conflating them would misstate the weights.
+    """
+    rng = np.random.default_rng(41)
+    labels = (rng.random(N) < 0.3).astype(int)
+    a = rng.normal(0, 1, N) + 10 * labels
+    idata = _make_idata({"a_raw": a}, rng.normal(0, 1, N))
+    idata.posterior.attrs["ptde_ladder_round_trips"] = 77
+    idata.posterior.attrs["ptde_swap_rounds"] = 5000
+
+    rep = identify_modes(idata)
+    text = rep.to_text()
+
+    assert rep.ladder_round_trips == 77
+    assert rep.ladder_swap_rounds == 5000
+    assert "temperature round trips" in text
+    assert "NOT mode changes" in text
+    assert "77" in text

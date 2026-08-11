@@ -158,7 +158,12 @@ def build_mode_reports(
             )
 
             evidences = estimate_mode_evidences(model, idata, mode_report)
-            applied = apply_evidence_weighting(mode_report, evidences)
+            # idata= keeps posterior['mode'].attrs in step with the rewritten
+            # weights/provenance instead of leaving the occupancy values
+            # attached to the trace that ships to disk.
+            applied = apply_evidence_weighting(
+                mode_report, evidences, idata=idata
+            )
             # Refresh the human-readable mode report with the new weights.
             modes_path.write_text(mode_report.to_text(), encoding="utf-8")
             logger.info(

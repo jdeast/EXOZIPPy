@@ -568,6 +568,12 @@ def _run_fit(config, gui, user_params=None):
                     signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
+            # Record the storage thinning on the trace.  Consecutive stored
+            # draws that are really nthin sampler steps apart make mode
+            # changes look more independent than they are, so outputs.modes
+            # must be told rather than left to assume 1 (see
+            # ModeReport.thin_factor / thin_known).
+            idata.posterior.attrs["nthin"] = int(nthin)
             # Ensure lp is in sample_stats; compute and persist if missing.
             ss_vars = (
                 list(idata.sample_stats.data_vars)

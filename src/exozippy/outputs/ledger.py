@@ -272,10 +272,12 @@ def ledger_to_text(ledger):
 def append_ledger_csv(ledger, csv_filename):
     """Append rejected-mode Laplace rows to the results CSV.
 
-    Row shape matches build_csv_output: name, mode, weight, value, +err,
-    -err -- with mode = 'rejected-seed<k>' and weight the Laplace weight
-    relative to the best seed (an upper-bound-flavored estimate, labeled
-    by the mode column itself).
+    Row shape matches build_csv_output: name, mode, weight, weight_err,
+    value, +err, -err -- with mode = 'rejected-seed<k>' and weight the
+    Laplace weight relative to the best seed (an upper-bound-flavored
+    estimate, labeled by the mode column itself).  weight_err is left blank:
+    a Laplace ratio carries no sampling error bar of the kind the surviving
+    modes' weights do.
     """
     rej = rejected_records(ledger)
     if not rej:
@@ -289,7 +291,7 @@ def append_ledger_csv(ledger, csv_filename):
                 sigs = np.asarray(r.phys_sigma[name]).reshape(-1)
                 for i in r.sampled_idx.get(name, range(vals.size)):
                     f.write(
-                        f"{name},rejected-seed{r.seed_index},{w:.3g},"
+                        f"{name},rejected-seed{r.seed_index},{w:.3g},,"
                         f"{vals[i]:.6g},{sigs[i]:.3g},{sigs[i]:.3g}\n"
                     )
     logger.info(
