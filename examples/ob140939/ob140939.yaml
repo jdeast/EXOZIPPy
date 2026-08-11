@@ -34,7 +34,7 @@ mulensinstrument:
   - name: "OGLE4"
     file: "n20100310.I.OGLE.OB140939.dat"
     zero_point: ""
-    observer_location: "earth" # earth, spitzer, kepler, roman, lat/lon, or filename of horizons ephemeris to interpolate
+    observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
     reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"

@@ -73,9 +73,11 @@ class MulensInstrument(Instrument):
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Observer location for parallax: 'earth' or an "
-                    "ephemeris name for a space-based observatory. Default "
-                    "'earth'."
+                    "Observer location for parallax: 'earth', an ephemeris "
+                    "name for a space-based observatory, an astropy site "
+                    "name (e.g. 'CTIO'), or a geodetic "
+                    "'lon_deg,lat_deg[,height_m]' string (lon FIRST) for "
+                    "terrestrial parallax. Default 'earth'."
                 ),
             },
             {
@@ -1233,7 +1235,7 @@ class MulensInstrument(Instrument):
 
         Model lines are one per unique observer_location: multiple earth
         instruments share one model curve (parallax between terrestrial sites
-        is negligible unless lat/lon is explicitly specified, in which case
+        is negligible unless a specific site is given, in which case
         each site is a distinct string).
         """
         unique_observers = []

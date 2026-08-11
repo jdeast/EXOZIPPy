@@ -23,7 +23,9 @@ def get_ephemeris(target_id, start_time, stop_time, step="1h", outfile=None):
     step : str
         Time step (e.g., '1h', '1d', '10m')
     outfile : str
-        Filename to save the results. Defaults to target_ephemeris.txt
+        Filename to save the results. Defaults to
+        ephemeris_<target_id>.txt, with '-' replaced by 'm'
+        (e.g. '-79' -> ephemeris_m79.txt).
     """
 
     logger.info(f"Querying JPL Horizons for {target_id}...")
@@ -42,7 +44,9 @@ def get_ephemeris(target_id, start_time, stop_time, step="1h", outfile=None):
     # coordinates, rotated 23.4 deg from what the projection math assumes.
     vecs = obj.vectors(refplane="earth")
 
-    # Convert dates to MJD for easy interpolation later
+    # Keep the dates as full (unoffset) BJD_TDB: that is what
+    # ephemeris.interpolate_ephemeris expects in column 0, and what the
+    # data times are converted to.
     # vecs['datetime_jd'] is the Julian Date
     t_tdb = Time(vecs["datetime_jd"], format="jd", scale="tdb")
     bjd_tdb = t_tdb.value
