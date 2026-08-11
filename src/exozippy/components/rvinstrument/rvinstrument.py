@@ -18,7 +18,9 @@ class RVInstrument(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
-        self.units = [c.get("unit", u.m / u.s) for c in self.config]
+        self.units = [
+            self._parse_rv_unit(i, c) for i, c in enumerate(self.config)
+        ]
         # Which star the RVs are of; its Doppler signal is the sum over
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
@@ -44,6 +46,26 @@ class RVInstrument(Instrument):
     @property
     def prefix(self):
         return "rvinstrument"
+
+    def _parse_rv_unit(self, i, entry):
+        """Resolve a file's ``unit:`` key to an astropy Unit.
+
+        The YAML value is a plain string (``unit: km/s``), so it has to go
+        through ``u.Unit`` before ``load_data`` can call ``.to()`` on it --
+        exactly what ``astrometryinstrument`` does for its ``sep_unit``.
+        Anything astropy accepts as a velocity works; the default is m/s.
+        """
+        raw = entry.get("unit", "m/s")
+        name = entry.get("name", i)
+        try:
+            unit = u.Unit(raw)
+            unit.to(u.m / u.s)
+        except Exception as exc:
+            raise ValueError(
+                f"[{self.prefix}] {name}: unit: {raw!r} is not a velocity "
+                f"astropy can parse (e.g. 'm/s', 'km/s', 'km s-1')."
+            ) from exc
+        return unit
 
     @classmethod
     def get_utilities(cls):
