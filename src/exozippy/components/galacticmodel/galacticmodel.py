@@ -1,10 +1,8 @@
 import logging
 
-import astropy.units as u
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
-from astropy.coordinates import CartesianDifferential, Galactocentric, SkyCoord
 from scipy.special import erf, erfc
 
 from exozippy.components.component import Component
@@ -31,9 +29,7 @@ from exozippy.constants import (
     DISK_VELOCITY_SIGMA_W,
     K_VEL_CONVERSION,
     SALPETER_IMF_SLOPE,
-    SUN_GALCEN_V,
     SUN_GC_DISTANCE,
-    SUN_Z_OFFSET,
     THICK_DISK_LOCAL_NUMBER_DENSITY,
     THICK_DISK_ROTATION_VELOCITY,
     THICK_DISK_SCALE_HEIGHT,
@@ -65,15 +61,13 @@ stays microlensing-agnostic.
 
 logger = logging.getLogger(__name__)
 
-# One consistent galactocentric frame for the velocity transform, matching
-# the density grid's R0/z_sun (genulens: R0 = 8160 pc, zsun = 25 pc,
-# vsun = (10, 243, 7) km/s toward-GC/rotation/up).  Astropy's default
-# Galactocentric (R0 = 8.122 kpc) would put the velocities in a slightly
-# different frame than the densities.
-GALACTOCENTRIC_FRAME = Galactocentric(
-    galcen_distance=SUN_GC_DISTANCE * u.kpc,
-    z_sun=SUN_Z_OFFSET * u.kpc,
-    galcen_v_sun=CartesianDifferential(list(SUN_GALCEN_V) * (u.km / u.s)),
+# The frame, the line-of-sight basis and the position transform live in
+# physics.py (the numpy layer) so the start-value hints in
+# mulensing/lens.py use exactly the code this likelihood uses.
+from .physics import (  # noqa: E402
+    GALACTOCENTRIC_FRAME,
+    galactic_xyz as _galactic_xyz_np,
+    line_of_sight_basis,
 )
 
 
@@ -352,45 +346,23 @@ class GalacticModel(Component):
         ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
         dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
 
-        sc = SkyCoord(ra=ra_rad * u.rad, dec=dec_rad * u.rad)
-        d = 1.0  # kpc, arbitrary distance for velocity basis projection
-        pm_1 = 1.0 / (K_VEL_CONVERSION * d)  # mas/yr
-
-        def _basis(pm_ra_cosdec, pm_dec, rv):
-            return SkyCoord(
-                ra=sc.ra,
-                dec=sc.dec,
-                distance=d * u.kpc,
-                pm_ra_cosdec=pm_ra_cosdec * u.mas / u.yr,
-                pm_dec=pm_dec * u.mas / u.yr,
-                radial_velocity=rv * u.km / u.s,
-            ).transform_to(GALACTOCENTRIC_FRAME)
-
-        gal0 = _basis(0, 0, 0)
-        gal1 = _basis(pm_1, 0, 0)
-        gal2 = _basis(0, pm_1, 0)
-        gal3 = _basis(0, 0, 1)
-
-        v0_arr = np.array([gal0.v_x.value, gal0.v_y.value, gal0.v_z.value])
-        v1 = (
-            np.array([gal1.v_x.value, gal1.v_y.value, gal1.v_z.value]) - v0_arr
-        )
-        v2 = (
-            np.array([gal2.v_x.value, gal2.v_y.value, gal2.v_z.value]) - v0_arr
-        )
-        v3 = (
-            np.array([gal3.v_x.value, gal3.v_y.value, gal3.v_z.value]) - v0_arr
-        )
-
-        l_rad = sc.galactic.l.rad
-        b_rad = sc.galactic.b.rad
+        # Shared with the start-value hints (physics.line_of_sight_basis):
+        # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,
+        # as one offset plus three unit-response columns.
+        (
+            m_rot_np,
+            v0_arr,
+            cosl_cosb_np,
+            sinl_cosb_np,
+            sinb_np,
+        ) = line_of_sight_basis(ra_rad, dec_rad)
 
         # Convert to tensors for graph injection
-        M_rot = pt.as_tensor_variable(np.column_stack([v1, v2, v3]))  # (3, 3)
+        M_rot = pt.as_tensor_variable(m_rot_np)  # (3, 3)
         v0 = pt.as_tensor_variable(v0_arr)  # (3,)
-        cosl_cosb = pt.as_tensor_variable(np.cos(l_rad) * np.cos(b_rad))
-        sinl_cosb = pt.as_tensor_variable(np.sin(l_rad) * np.cos(b_rad))
-        sinb = pt.as_tensor_variable(np.sin(b_rad))
+        cosl_cosb = pt.as_tensor_variable(cosl_cosb_np)
+        sinl_cosb = pt.as_tensor_variable(sinl_cosb_np)
+        sinb = pt.as_tensor_variable(sinb_np)
 
         # 2. PyTensor Math Helpers
         def get_galactocentric_velocity(dist_kpc, pm_ra, pm_dec, rv_ms):
@@ -404,15 +376,9 @@ class GalacticModel(Component):
             return v0 + v_gal_offset
 
         def get_galactic_xyz(dist):
-            # genulens Dlb2xyz: the Sun sits SUN_Z_OFFSET above the plane,
-            # handled as a small rotation of z by bsun = z_sun/R0 (so a
-            # star at d=0 lands at z = +z_sun).  x and y keep the flat
-            # convention (Sun at x = +R0, GC at the origin).
-            x = SUN_GC_DISTANCE - dist * cosl_cosb
-            y = dist * sinl_cosb
-            bsun = SUN_Z_OFFSET / SUN_GC_DISTANCE
-            z = dist * sinb * np.cos(bsun) + x * np.sin(bsun)
-            return x, y, z
+            # physics.galactic_xyz is pure arithmetic, so the same function
+            # serves numpy scalars (the hints) and tensors (here).
+            return _galactic_xyz_np(dist, cosl_cosb, sinl_cosb, sinb)
 
         def get_polar_velocity(x, y, r, v_x, v_y):
             cos_phi = x / r  # unitless

@@ -5,6 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.config import RANK_DERIVED_DATA
 from exozippy.constants import KAPPA
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
@@ -12,6 +13,7 @@ from exozippy.corner_utils import (
 )
 from exozippy.potentials import soft_lower_bound
 
+from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
 from .physics import MU_REL_FLOOR, THETA_E_FLOOR
@@ -768,6 +770,14 @@ class Lens(Component):
             alpha_deg = float(np.arctan2(float(sa), float(ca)) * 180.0 / np.pi)
             self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
 
+        # Expected proper motions from the galactic model, for the seeds below.
+        # None when the line of sight is not known yet, in which case the pm
+        # hints are simply skipped (the old behavior).
+        pm_expected = self._galactic_pm_expectations(system)
+
+        # (helpers for the pm seeding live at _galactic_pm_expectations /
+        # _seed_expected_pm, below this method.)
+
         # Inject per-event physical hints
         for i in range(self.n_elements):
             l_type, l_idx = self._primary_lens(i)
@@ -785,6 +795,7 @@ class Lens(Component):
             self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
             self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
             self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
+            self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0)
 
             # Every source body gets the same bulge-source seeding: each source
             # has its own trajectory chain (distance, pm) to initialize.
@@ -802,6 +813,7 @@ class Lens(Component):
                 self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
                 self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
                 self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
+                self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0)
 
             # Companion lens bodies (everything beyond the primary)
             for l2_type, l2_idx in self.lens_bodies[i][1:]:
@@ -838,6 +850,109 @@ class Lens(Component):
                     self.config_manager.add_scale_hint(
                         f"star.{l_idx}.logmass", scale
                     )
+
+    def _galactic_pm_expectations(self, system):
+        """Line of sight for the galactic-model proper-motion seeds.
+
+        Returns ``(ra_rad, dec_rad)``, or None when the coordinates are still
+        the defaults.yaml placeholder -- the galactic model's mean velocity is a
+        function of direction, so seeding off a placeholder would be worse than
+        not seeding at all.
+        """
+        if "galacticmodel" not in getattr(system, "config", {}):
+            # No galactic model in the topology: nothing to take the mean of.
+            return None
+        try:
+            n_stars = system.star.n_elements
+            source_ndx = int(system.lens.source_map[0])
+            ra_all = self.config_manager.resolve(
+                "star", "ra", shape=(n_stars,)
+            )["initval"]
+            dec_all = self.config_manager.resolve(
+                "star", "dec", shape=(n_stars,)
+            )["initval"]
+        except Exception as exc:  # pragma: no cover - seeds are optional
+            logger.debug(
+                f"[lens] could not resolve the line of sight for the "
+                f"galactic-model proper-motion seeds: {exc!r}"
+            )
+            return None
+
+        keys = [f"star.{source_ndx}.ra", "star.ra"]
+        names = getattr(system.star, "names", None)
+        if names:
+            keys.append(f"star.{names[source_ndx]}.ra")
+        if not any(k in self.config_manager.user_params for k in keys):
+            logger.debug(
+                "[lens] no user-set RA/Dec; skipping the galactic-model "
+                "proper-motion seeds."
+            )
+            return None
+
+        # resolve() hands back the value in the parameter's USER unit, which for
+        # ra/dec is degrees (Parameter.__post_init__ is what converts to the
+        # internal radians, and it has not run at stage 2).  The galactic-model
+        # helpers take radians.
+        return (
+            float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
+            float(np.radians(np.atleast_1d(dec_all)[source_ndx])),
+        )
+
+    def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
+        """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
+
+        RANK_DERIVED_DATA: this is derived from the galactic model the same way
+        an RV offset is derived from the data, so it belongs in that tier and
+        must yield to anything in params.yaml.
+
+        It ties with the MMEXOFAST seeds (also RANK_DERIVED_DATA), which is the
+        point.  Both proper-motion components are now pinned, so ``mu_rel`` has
+        a magnitude AND a direction, and the engine no longer has to invert
+        ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in two
+        unknowns -- by choosing a point on a circle (issue #93).  Where that
+        disagrees with the seeded ``t_E``, Condition B rewrites the lowest-rank
+        symbol in ``t_E = theta_E / |mu_rel_geo|``, which is ``theta_E`` via the
+        lens mass (defaults.yaml, rank 20) and distance (rank 25).  So ``t_E``
+        keeps its measured value, the proper motion keeps the prior's, and the
+        lens mass absorbs the difference -- which is the standard microlensing
+        chain (a measured t_E plus an assumed mu_rel implies theta_E, hence a
+        mass) and is the quantity a light curve genuinely cannot pin down.
+
+        `dist_pc` must match the distance hint seeded for the same star: the
+        mean velocity is position-dependent, so a mismatch would seed a proper
+        motion for a place the star is not.
+        """
+        if line_of_sight is None:
+            return
+        ra_rad, dec_rad = line_of_sight
+        try:
+            pm_ra, pm_dec, _rv = expected_proper_motion(
+                ra_rad, dec_rad, dist_pc, population
+            )
+        except Exception as exc:
+            # WARNING, not debug: this silently disabled the whole feature once
+            # already (degrees were passed where radians were wanted, astropy
+            # raised, and the seeds just quietly never happened).  A failure
+            # here is not fatal -- the old arbitrary start still works -- but it
+            # must be visible.
+            logger.warning(
+                f"[lens] could not seed star.{star_idx}'s proper motion from "
+                f"the galactic model ({population} at {dist_pc:.0f} pc): "
+                f"{exc!r}.  Falling back to the defaults.yaml value; the "
+                f"direction of mu_rel will be arbitrary (see issue #93)."
+            )
+            return
+        self.config_manager.add_hint(
+            f"star.{star_idx}.pm_ra", pm_ra, rank=RANK_DERIVED_DATA
+        )
+        self.config_manager.add_hint(
+            f"star.{star_idx}.pm_dec", pm_dec, rank=RANK_DERIVED_DATA
+        )
+        logger.info(
+            f"[lens] star.{star_idx} proper motion seeded at the "
+            f"{population} prior mean for {dist_pc:.0f} pc: "
+            f"pm_ra={pm_ra:+.3f}, pm_dec={pm_dec:+.3f} mas/yr."
+        )
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         """Inject the Earth-velocity context constants for the mu_rel_geo
