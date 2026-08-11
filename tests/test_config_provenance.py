@@ -236,3 +236,138 @@ def test_seed_hints_do_not_change_the_mmexofast_auto_trigger():
 
     assert before == set(paths)
     assert after == before
+
+
+# ---------------------------------------------------------------------------
+# 2.1.3  a typo'd instance name must be loud
+# ---------------------------------------------------------------------------
+
+
+def test_typoed_instance_name_raises_and_names_the_valid_instances():
+    """
+    Given a params key whose INSTANCE name is a typo ('star.Aa.teff' for
+    'star.A.teff'),
+    When the ConfigManager standardizes the names,
+    Then it raises a STRICT NAMING ERROR listing the valid instance names --
+    rather than keeping the key as an inert leaf and silently discarding the
+    user's value, prior and sigma.
+    """
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+    params = {
+        "star.Aa.teff": {"initval": 4000.0, "mu": 4000.0, "sigma": 100.0}
+    }
+
+    with pytest.raises(ValueError, match="STRICT NAMING ERROR") as exc:
+        ConfigManager(params, system_config=config)
+
+    msg = str(exc.value)
+    assert "star.Aa.teff" in msg
+    assert "'A'" in msg and "'B'" in msg
+
+
+def test_numeric_index_and_named_instances_still_pass():
+    """
+    Given the legitimate 3-part spellings -- a numeric index and a real
+    instance name --
+    When the names are standardized,
+    Then both resolve to index form and neither raises.
+    """
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+    cm = ConfigManager(
+        {
+            "star.0.teff": {"initval": 5000.0},
+            "star.B.teff": {"initval": 4000.0},
+        },
+        system_config=config,
+    )
+
+    assert set(cm.user_params) == {"star.0.teff", "star.1.teff"}
+
+
+def test_flat_dict_component_three_part_key_does_not_raise():
+    """
+    Given a 3-part key naming a flat-dict (non-list) component,
+    When the names are standardized,
+    Then the key is kept as-is: there are no instances to check it against.
+    """
+    config = {"sed": {"file": "x.sed"}}
+    cm = ConfigManager(
+        {"sed.whatever.errscale": {"initval": 1.0}}, system_config=config
+    )
+
+    assert "sed.whatever.errscale" in cm.user_params
+
+
+def test_name_borrowed_from_another_component_is_accepted():
+    """
+    Given a mann block that has not derived its `name:` yet -- ConfigManager
+    is built BEFORE the component loop in System.__init__, and Mann.__init__
+    is what copies `star: "A"` into `name: "A"` --
+    When 'mann.A.ks_offset' is standardized,
+    Then it is kept rather than rejected: 'A' is declared somewhere in the
+    config (as a star), and the legal-name universe is every declared name,
+    not just the addressed component's own list.
+    """
+    config = {
+        "star": [{"name": "A"}],
+        "mann": [{"star": "A", "constrain": ["mass"], "ks": 8.782}],
+    }
+    cm = ConfigManager(
+        {"mann.A.ks_offset": {"initval": 0.1}}, system_config=config
+    )
+
+    assert "mann.A.ks_offset" in cm.user_params
+
+
+def test_lens_per_source_element_name_is_accepted():
+    """
+    Given the NSNL spelling examples/ob161003 ships -- 'lens.SourceA.t_0'
+    addresses element j of the lens's PER-SOURCE vectors by the source star's
+    name, while the lens block itself has a single entry named 'Lens' --
+    When the names are standardized,
+    Then the key survives.  A per-parameter `names` list is a manifest option
+    resolved at stage 2, so a check restricted to the lens block's own entry
+    names would reject a shipped, working example.
+    """
+    config = {
+        "star": [
+            {"name": "Lens"},
+            {"name": "LensB"},
+            {"name": "SourceA"},
+            {"name": "SourceB"},
+        ],
+        "lens": [
+            {
+                "name": "Lens",
+                "lenses": ["star.0", "star.1"],
+                "sources": ["star.2", "star.3"],
+            }
+        ],
+    }
+    cm = ConfigManager(
+        {"lens.SourceA.t_0": {"initval": 2457551.04}}, system_config=config
+    )
+
+    assert "lens.SourceA.t_0" in cm.user_params
+
+
+def test_name_declared_nowhere_raises_even_for_a_borrowing_component():
+    """
+    Given the same lens topology but a source name that appears nowhere in
+    the config,
+    When the names are standardized,
+    Then it raises: the accepted set is wide (any declared name) but not
+    unbounded, so a real typo is still caught.
+    """
+    config = {
+        "star": [{"name": "Lens"}, {"name": "SourceA"}],
+        "lens": [
+            {"name": "Lens", "lenses": ["star.0"], "sources": ["star.1"]}
+        ],
+    }
+
+    with pytest.raises(ValueError, match="STRICT NAMING ERROR"):
+        ConfigManager(
+            {"lens.SourceZ.t_0": {"initval": 2457551.04}},
+            system_config=config,
+        )

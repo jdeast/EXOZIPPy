@@ -241,6 +241,26 @@ def canonical_param_key(key, system_config):
     return key
 
 
+def _declared_instance_names(system_config):
+    """Every ``name:`` declared by any list-instanced component in the config.
+
+    This is the universe of legal instance names in a 3-part parameter key.
+    It is deliberately NOT per component: a component's per-element names are
+    a manifest option that may borrow another component's instance names --
+    the lens's per-source vectors are addressed by the SOURCE STAR's name
+    (``lens.SourceA.t_0``), for instance.  Used by
+    ``standardize_param_names`` to reject typo'd instance names.
+    """
+    names = set()
+    for entries in (system_config or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                names.add(entry["name"])
+    return names
+
+
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
 RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
@@ -1047,9 +1067,68 @@ class ConfigManager:
                 standardized[key] = copy.deepcopy(val)
                 continue
 
-            # Numeric index or unknown name: canonical_param_key returns the
-            # key unchanged and it is stored as-is.  deepcopy so broadcast
-            # instances never share one dict (see the aliasing fix in #76).
+            # An UNKNOWN INSTANCE NAME is as fatal as an unknown component
+            # prefix, and for the same reason.  canonical_param_key returns
+            # such a key unchanged (deliberately -- it is also the lookup
+            # helper behind ConfigManager.canonical_key, which must stay
+            # total), so it used to be stored verbatim, registered as an inert
+            # leaf symbol by finalize_user_params, and never reach any
+            # parameter: `star.Aa.teff` silently dropped the user's value,
+            # bounds, mu and sigma.  A typo'd PRIOR that changes the posterior
+            # without a word is the worst version of this, so refuse to run.
+            #
+            # The accepted name set is every `name:` DECLARED ANYWHERE in the
+            # config, not just this component's own list, and that width is
+            # load-bearing -- a component's per-element names need not be its
+            # config entries' names:
+            #   * `lens.SourceA.t_0` (examples/ob161003) addresses element j
+            #     of the lens's per-source vectors by the SOURCE STAR's name;
+            #     the lens block itself has one entry, named "Lens".  The
+            #     per-parameter `names` list is a manifest option and is not
+            #     known until stage 2, long after this runs.
+            #   * `mann.B.ks_offset` names a mann block that has no `name:`
+            #     yet: this ConfigManager is built BEFORE the component loop
+            #     in System.__init__, and mann/torres derive their name from
+            #     their `star:` key inside their own __init__.
+            # Both are covered because the borrowed name is always some other
+            # component's instance name.  A genuine typo is a string that
+            # appears nowhere, which is what we reject.  Numeric index forms
+            # (`star.0.teff`) are pass-through by design.
+            if (
+                not comp_name.isdigit()
+                and canonical_param_key(key, config) == key
+                and comp_name not in _declared_instance_names(config)
+            ):
+                own = [
+                    e["name"]
+                    for e in comp_list
+                    if isinstance(e, dict) and e.get("name") is not None
+                ]
+                own_msg = (
+                    f"'{comp_type}' instances are: "
+                    f"{', '.join(repr(n) for n in own)}."
+                    if own
+                    else f"No '{comp_type}' entry declares a 'name:', so its "
+                    f"instances are addressable by index only."
+                )
+                raise ValueError(
+                    f"\n!!! STRICT NAMING ERROR !!!\n"
+                    f"Parameter '{key}' names the instance '{comp_name}', "
+                    f"which is not declared by any component in your system "
+                    f"configuration.\n"
+                    f"{own_msg} "
+                    f"Indices 0-{len(comp_list) - 1} also work "
+                    f"(e.g. '{comp_type}.0.{param_name}'), as does the "
+                    f"instance-less broadcast form "
+                    f"'{comp_type}.{param_name}'.\n"
+                    f"Fix the spelling, or delete the entry: it is otherwise "
+                    f"ignored outright, silently discarding its value, bounds "
+                    f"and prior."
+                )
+
+            # Numeric index or resolved name: canonical_param_key returns the
+            # index form.  deepcopy so broadcast instances never share one
+            # dict (see the aliasing fix in #76).
             standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
         # Pass 2: expand 2-part keys for list components.
