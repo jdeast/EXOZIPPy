@@ -129,7 +129,11 @@ Data manager (G9): `GET /api/files`, `POST /api/files/eligible`,
 `GET /api/files/associations`, `POST /api/preview`.
 
 Run controls (G11): `POST /api/run` (one active run per project; copies the
-exact config/params into the output dir as `.used.*` for reproducibility),
+exact config/params into the output dir as `.used.*` for reproducibility -- the
+params file is the config's own `parameter_file`, the one the fit subprocess
+reads, unless the request names another; this is content, complementary to the
+structural fingerprint `trace_meta.py` stamps into the trace, which is a hash
+and is deliberately blind to initval/mu values),
 `GET /api/run/status`, `POST /api/run/stop`, `GET /api/run/plots`,
 `GET /api/run/image?path=` (path-restricted to the run tree via
 realpath+commonpath), `POST /api/utilities/run`.

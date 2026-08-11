@@ -347,6 +347,35 @@ def _list_prefix_images(handle, pattern):
     return out
 
 
+def _params_file_of(config_path, cwd):
+    """Absolute path of the params file a run of ``config_path`` will read.
+
+    Read from the config on disk rather than taken from the caller: the fit
+    subprocess resolves ``config['parameter_file']`` relative to its own cwd
+    (System.__init__), so this is by construction the file the fit uses, and it
+    cannot drift from it the way a separately-passed path can. Returns None
+    when the config names no parameter_file or cannot be read -- the snapshot
+    is best-effort and never blocks a run.
+    """
+    path = (
+        config_path
+        if os.path.isabs(config_path)
+        else os.path.join(cwd, config_path)
+    )
+    try:
+        with open(path, "r") as fh:
+            config = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    params = config.get("parameter_file")
+    if not params:
+        return None
+    params = str(params)
+    return params if os.path.isabs(params) else os.path.join(cwd, params)
+
+
 def _snapshot_run_inputs(handle, params_path=None):
     """Copy the exact config/params used into the output dir for reproducibility.
 
@@ -354,6 +383,12 @@ def _snapshot_run_inputs(handle, params_path=None):
     carries a frozen copy of what produced it, even if the source yaml is later
     edited. Copying onto the source path is skipped. Best-effort: an I/O error
     never blocks the run. Returns the list of copies made.
+
+    ``params_path`` is an explicit override; with none given the config's own
+    ``parameter_file`` is followed. That default is the point: no caller ever
+    passed the argument, so the params half of the snapshot never happened, and
+    the params file is precisely where the start values, priors and fixed flags
+    that a rerun must reproduce are written.
     """
     results_dir = _results_dir(handle)
     try:
@@ -364,6 +399,9 @@ def _snapshot_run_inputs(handle, params_path=None):
     src_config = handle.config_path
     if not os.path.isabs(src_config):
         src_config = os.path.join(handle.cwd, src_config)
+
+    if params_path is None:
+        params_path = _params_file_of(src_config, handle.cwd)
 
     copied = []
     for src in (src_config, params_path):
@@ -862,10 +900,12 @@ def create_app(project_dir=None, initial_config=None):
         except Exception as exc:  # start_run failures surface as a 400
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+        # None (the usual case) -> the snapshot follows the config's own
+        # parameter_file, which is what the fit subprocess reads.
         params_path = req.params
         if params_path and not os.path.isabs(params_path):
             params_path = os.path.join(cwd, params_path)
-        _snapshot_run_inputs(new_handle, params_path)
+        _snapshot_run_inputs(new_handle, params_path or None)
 
         run_state["handle"] = new_handle
         return JSONResponse(run_status_payload(new_handle))
