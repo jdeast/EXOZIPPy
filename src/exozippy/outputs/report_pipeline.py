@@ -32,6 +32,7 @@ def build_mode_reports(
     raise_on_invalid=True,
     evidence_weights=False,
     seed_ledger=None,
+    hot_status=None,
 ):
     """Identify posterior modes, distribute the posterior, write tables.
 
@@ -87,6 +88,13 @@ def build_mode_reports(
         CSV and a standalone <prefix>_rejected_modes.tex table. Absent for
         single-seed fits and for the trace-reprocessing CLI (the seeds no
         longer exist there).
+    hot_status : dict, optional
+        Outcome of the hot-chain suppressed-mode search
+        (outputs.ledger.discover_hot_modes / hot_status_to_text), as built
+        by run.py.  Rendered into <prefix>_modes.txt INDEPENDENTLY of
+        ``seed_ledger``: "never searched" and "search failed" are exactly
+        the states in which no ledger records exist, and they are precisely
+        the states the report must not render as silence.
 
     Returns
     -------
@@ -178,6 +186,25 @@ def build_mode_reports(
                 exc_info=True,
             )
 
+    # Hot-chain suppressed-mode search outcome.  Written whether or not a
+    # ledger exists: the states worth distinguishing most ("never searched",
+    # "search failed") are the ones that produce no ledger records at all,
+    # so gating this on `seed_ledger` would silence exactly the cases it is
+    # here to surface.
+    if hot_status:
+        try:
+            from .ledger import hot_status_to_text
+
+            if modes_path is None:
+                modes_path = Path(str(prefix) + "_modes.txt")
+            with open(modes_path, "a", encoding="utf-8") as f:
+                f.write(hot_status_to_text(hot_status))
+        except Exception:
+            logger.warning(
+                "Hot-chain status reporting failed; continuing without it",
+                exc_info=True,
+            )
+
     # Seeded-solution ledger: match every (polished) seed to a surviving
     # mode or mark it rejected, and report the rejected ones -- the
     # "considered and rejected" record that pure T=1 occupancy loses.
@@ -200,7 +227,9 @@ def build_mode_reports(
             n_rej = len(rejected_records(seed_ledger))
             if n_rej:
                 write_rejected_latex(
-                    seed_ledger, str(prefix) + "_rejected_modes.tex"
+                    seed_ledger,
+                    str(prefix) + "_rejected_modes.tex",
+                    hot_status=hot_status,
                 )
                 logger.info(
                     f"Seed ledger: {n_rej} seeded solution(s) rejected by "

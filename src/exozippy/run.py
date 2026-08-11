@@ -645,18 +645,19 @@ def _run_fit(config, gui, user_params=None):
     # never held still shows up as "considered and rejected" in the final
     # report. Runs BEFORE burn-in trimming (hot draws are detectors; no
     # burn-in semantics) and tolerates a missing/empty group.
-    if hasattr(idata, "posterior_hot"):
-        try:
-            from .outputs.ledger import discover_hot_modes
+    # The outcome is recorded in `hot_status` and rendered into
+    # <prefix>_modes.txt: "searched and found nothing", "never searched"
+    # (store_hot_chains defaults to OFF, so this is the common case) and
+    # "the search crashed" used to be indistinguishable in every output the
+    # user reads, which turns a silent failure into false assurance that a
+    # candidate mode was considered.  The catch stays broad and stays
+    # NON-FATAL -- a wrap-up diagnostic must not kill a finished multi-day
+    # fit -- but the exception type and message now reach the report.
+    from .outputs.ledger import run_hot_mode_discovery
 
-            seed_ledger = discover_hot_modes(
-                system, model, idata.posterior_hot, seed_ledger
-            )
-        except Exception:
-            logger.warning(
-                "Hot-chain mode discovery failed; continuing without it",
-                exc_info=True,
-            )
+    seed_ledger, hot_status = run_hot_mode_discovery(
+        system, model, idata, seed_ledger
+    )
 
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
@@ -686,6 +687,7 @@ def _run_fit(config, gui, user_params=None):
         evidence_weights=str(modes_cfg.get("weights", "")).lower()
         == "evidence",
         seed_ledger=seed_ledger,
+        hot_status=hot_status,
     )
 
     summary_path = Path(str(prefix) + "_summary.txt")

@@ -299,11 +299,31 @@ def append_ledger_csv(ledger, csv_filename):
     )
 
 
-def write_rejected_latex(ledger, filename):
-    """Standalone LaTeX table of the rejected solutions (Laplace)."""
+def write_rejected_latex(ledger, filename, hot_status=None):
+    """Standalone LaTeX table of the rejected solutions (Laplace).
+
+    ``hot_status`` (see hot_status_to_text) adds a RENDERED caption sentence
+    -- not a % comment -- whenever the hot-chain suppressed-mode search did
+    not run or did not complete.  This table is what goes into a paper, and
+    a reader must not read its completeness as "these are all the
+    alternatives that were considered" when the search for the others never
+    happened.
+    """
     rej = rejected_records(ledger)
     if not rej:
         return False
+    caveat = ""
+    state = (hot_status or {}).get("state")
+    if state == HOT_NOT_SEARCHED:
+        caveat = (
+            r" No search for posterior-suppressed modes was performed, so "
+            r"this list covers only the explicitly seeded solutions."
+        )
+    elif state == HOT_FAILED:
+        caveat = (
+            r" The search for additional posterior-suppressed modes did not "
+            r"complete, so this list may be incomplete."
+        )
     lines = []
     lines.append(r"% Considered-and-rejected solutions (Laplace")
     lines.append(r"% approximations at each seeded basin's polished optimum;")
@@ -314,7 +334,7 @@ def write_rejected_latex(ledger, filename):
         r"\caption{Solutions considered and rejected by the posterior. "
         r"Values are Laplace approximations at each seeded basin's "
         r"optimum; $\Delta \ln \mathcal{L}$ is measured against the best "
-        r"seeded solution.}"
+        r"seeded solution." + caveat + r"}"
     )
     cols = "l" + "c" * len(rej)
     lines.append(r"\begin{tabular}{" + cols + "}")
@@ -369,6 +389,141 @@ HOT_LP_MARGIN = 50.0
 # Fewer near-viable points than this cannot support a cluster.
 HOT_MIN_POINTS = 25
 
+# The four distinguishable outcomes of the hot-chain suppressed-mode search.
+#
+# "no suppressed modes exist" and "the search never ran" and "the search
+# crashed" all used to render identically in the final report -- nothing at
+# all -- which manufactures exactly the false assurance this whole feature
+# exists to prevent: a user reads "no other modes" and believes it was
+# checked.  run.py owns the state machine (it is the only place that knows
+# whether the group exists and whether the call raised); ledger.py owns the
+# vocabulary and the rendering.
+HOT_NOT_SEARCHED = "not-searched"
+HOT_NONE_FOUND = "none-found"
+HOT_FAILED = "failed"
+HOT_FOUND = "found"
+
+
+def run_hot_mode_discovery(system, model, idata, seed_ledger=None, **kwargs):
+    """Run the hot-chain suppressed-mode search and CLASSIFY its outcome.
+
+    Returns ``(seed_ledger, status)``.  The status dict always carries a
+    ``state`` (one of the four HOT_* constants) so the final report can tell
+    "no hot draws were kept, so nothing was searched for" from "we searched
+    and found nothing" from "the search crashed".  Those three used to be
+    indistinguishable in every output a user reads, which turns a silent
+    failure into false assurance that a candidate mode was considered and
+    rejected -- the exact thing this feature exists to provide.
+
+    Non-fatal by contract: a wrap-up diagnostic must never take down a
+    finished multi-day fit, so the catch stays broad -- but the exception's
+    type and message go into the status rather than only into a log line.
+    """
+    if not hasattr(idata, "posterior_hot"):
+        return seed_ledger, {
+            "state": HOT_NOT_SEARCHED,
+            "detail": (
+                "no posterior_hot group in the trace (sampler config "
+                "`store_hot_chains` is off by default)"
+            ),
+        }
+    status = {}
+    try:
+        seed_ledger = discover_hot_modes(
+            system,
+            model,
+            idata.posterior_hot,
+            seed_ledger,
+            status=status,
+            **kwargs,
+        )
+    except Exception as exc:
+        status = {
+            "state": HOT_FAILED,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+        logger.warning(
+            "Hot-chain mode discovery failed; the final report will record "
+            "that the suppressed-mode search did NOT complete",
+            exc_info=True,
+        )
+    return seed_ledger, status
+
+
+def hot_status_to_text(status):
+    """Render the hot-chain search outcome for <prefix>_modes.txt.
+
+    ``status`` is the dict discover_hot_modes fills in (plus a ``state`` set
+    by the caller for the states discovery never reaches: it did not run, or
+    it raised).  Returns "" for a falsy status so callers can pass it
+    unconditionally.
+    """
+    if not status:
+        return ""
+    state = status.get("state", HOT_NOT_SEARCHED)
+    detail = status.get("detail", "")
+    lines = [
+        "",
+        "Hot-chain suppressed-mode search",
+        "--------------------------------",
+    ]
+    if state == HOT_NOT_SEARCHED:
+        lines.append(
+            "NOT PERFORMED -- no hot-rung draws were available, so NO search "
+            "for posterior-"
+        )
+        lines.append(
+            "suppressed modes was made. The absence of extra solutions below "
+            "is not evidence"
+        )
+        lines.append(
+            "that none exist. Enable it with sampler config "
+            "`store_hot_chains: true`."
+        )
+    elif state == HOT_FAILED:
+        lines.append(
+            "FAILED -- hot-rung draws were available but the search did not "
+            "complete, so"
+        )
+        lines.append(
+            "no conclusion can be drawn about posterior-suppressed modes. "
+            "This is NOT the"
+        )
+        lines.append("same as having searched and found none.")
+    elif state == HOT_NONE_FOUND:
+        lines.append(
+            "PERFORMED -- hot-rung draws were clustered and no candidate "
+            "solution survived"
+        )
+        lines.append(
+            "as a new basin. Within the limits of the Laplace/clustering "
+            "approximations,"
+        )
+        lines.append("no additional mode was found.")
+    elif state == HOT_FOUND:
+        n = int(status.get("n_new", 0))
+        lines.append(
+            f"PERFORMED -- {n} candidate solution(s) found and recorded "
+            f"below with source"
+        )
+        lines.append(
+            "'hot-chain'. A candidate is a basin the T=1 posterior never "
+            "held; whether it"
+        )
+        lines.append("survived is given by its own ledger entry.")
+    else:  # unknown state -- never silently swallow it
+        lines.append(f"UNKNOWN state '{state}'.")
+    counts = [
+        f"{k} = {status[k]}"
+        for k in ("n_hot_draws", "n_viable", "n_clusters", "n_new")
+        if k in status
+    ]
+    if counts:
+        lines.append("  " + ", ".join(counts))
+    if detail:
+        lines.append(f"  {detail}")
+    return "\n".join(lines) + "\n"
+
 
 def discover_hot_modes(
     system,
@@ -381,6 +536,7 @@ def discover_hot_modes(
     subsample=20000,
     seed=20260711,
     polish_steps=150,
+    status=None,
 ):
     """Find posterior-suppressed modes in the thinned hot-rung draws.
 
@@ -402,15 +558,51 @@ def discover_hot_modes(
     modes like any other record -- a hot-chain record matching a surviving
     mode is simply confirmation; an unmatched one is a mode the T=1
     posterior never held.
+
+    ``status``, if given, is a dict this function fills with the outcome
+    (``state`` in HOT_NONE_FOUND/HOT_FOUND, ``detail``, and the draw/cluster
+    counts) so the final report can say WHICH of the four outcomes occurred
+    instead of rendering "searched and found nothing" and "never searched"
+    and "crashed" identically.  See hot_status_to_text.
     """
     from .modes import _dip_merge, _kmeans_bic
 
+    if status is None:
+        status = {}
     ledger = list(seed_ledger) if seed_ledger else []
+    n_before = len(ledger)
+
+    def _finish(state, detail=""):
+        status["state"] = state
+        status["detail"] = detail
+        status["n_new"] = len(ledger) - n_before
+        return ledger
 
     raw_keys = [str(v) for v in hot.data_vars if str(v) != "lp"]
     if not raw_keys or "lp" not in hot.data_vars:
-        return ledger
+        logger.warning(
+            "Hot-chain discovery: the posterior_hot group carries no raw "
+            "variables and/or no lp; no suppressed-mode search was made."
+        )
+        return _finish(
+            HOT_FAILED, "the posterior_hot group has no raw variables or no lp"
+        )
     lp = np.asarray(hot["lp"].values, dtype=float).reshape(-1)
+    status["n_hot_draws"] = int(lp.size)
+    if lp.size == 0:
+        # An empty group is what a mis-sliced posterior_hot looks like (the
+        # burn-in/stuck-chain trim used to index it by T=1 chains and draws
+        # -- notes/code_review_20260808.txt 2.9.2).  Report it as a FAILED
+        # search, never as "searched and found nothing".
+        logger.warning(
+            "Hot-chain discovery: the posterior_hot group holds no draws; "
+            "no suppressed-mode search was performed. This group must reach "
+            "discovery UNTRIMMED (samplers.convergence._TRIMMED_GROUPS)."
+        )
+        return _finish(
+            HOT_FAILED,
+            "the posterior_hot group reached discovery with 0 draws",
+        )
 
     cols, names, shapes = [], [], {}
     for key in raw_keys:
@@ -425,15 +617,27 @@ def discover_hot_modes(
 
     good = np.isfinite(lp) & np.all(np.isfinite(X), axis=1)
     if not good.any():
-        return ledger
+        logger.warning(
+            "Hot-chain discovery: every hot draw is non-finite in lp or in "
+            "at least one variable; no suppressed-mode search was made."
+        )
+        return _finish(HOT_FAILED, "no finite hot draws to cluster")
     viable = good & (lp >= np.nanmax(lp[good]) - margin_nats)
     n_viable = int(viable.sum())
+    status["n_viable"] = n_viable
     if n_viable < min_points:
+        # Genuinely searched: the hot rungs simply never came near the best
+        # solution, which IS the "nothing else is competitive" answer.
         logger.info(
             f"Hot-chain discovery: only {n_viable} near-viable hot draws "
             f"(need {min_points}); nothing to cluster."
         )
-        return ledger
+        return _finish(
+            HOT_NONE_FOUND,
+            f"only {n_viable} of {lp.size} hot draws came within "
+            f"{margin_nats:g} nats of the best (need {min_points} to "
+            f"cluster)",
+        )
     Xv, lpv = X[viable], lp[viable]
 
     rng = np.random.default_rng(seed)
@@ -454,6 +658,7 @@ def discover_hot_modes(
         if not changed:
             break
     n_clusters = len(np.unique(labels[labels >= 0]))
+    status["n_clusters"] = int(n_clusters)
     logger.info(
         f"Hot-chain discovery: {n_viable} near-viable draws -> "
         f"{n_clusters} cluster(s)."
@@ -514,4 +719,15 @@ def discover_hot_modes(
         best_lp = max(r.lp_max for r in ledger)
         for r in ledger:
             r.delta_lp = best_lp - r.lp_max
-    return ledger
+    n_new = len(ledger) - n_before
+    if n_new:
+        return _finish(
+            HOT_FOUND,
+            f"{n_clusters} hot cluster(s) -> {n_new} new basin(s) after "
+            f"dedup against the existing ledger",
+        )
+    return _finish(
+        HOT_NONE_FOUND,
+        f"{n_clusters} hot cluster(s), all of them rediscoveries of basins "
+        f"already in the ledger",
+    )
