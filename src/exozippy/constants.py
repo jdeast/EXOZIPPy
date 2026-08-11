@@ -110,6 +110,28 @@ SALPETER_IMF_SLOPE = -2.35  # Salpeter IMF
 # brown dwarf, not a star, and a STELLAR IMF has no claim on it.
 HYDROGEN_BURNING_LIMIT = 0.075  # solMass
 
+# Free-floating-planet mass function, Sumi et al. 2023 (AJ 166, 108;
+# arXiv:2303.08280), from the MOA-II 9-year survey toward the Galactic bulge.
+# Their planetary-mass population is quoted already as a density in LOG mass:
+#     dN_4/dlog M = 2.18(+0.52/-1.40) * (M / 8 M_Earth)^-alpha_4
+#                   dex^-1 star^-1,   alpha_4 = 0.96(+0.47/-0.27),
+# measured over 0.33 < M/M_Earth < 6660 (i.e. 1e-6 < M/Msun < 0.02).
+#
+# Only the SLOPE survives into a mass prior: the pivot (8 M_Earth) and the
+# amplitude (2.18 dex^-1 star^-1) are both absorbed by normalizing the density
+# over the sampled support.  The amplitude -- equivalently f = 21(+23/-13)
+# FFPs per star over the fitted range -- is an ABUNDANCE, and would only
+# matter to a model that weighed the FFP and stellar lens populations against
+# each other.  See galacticmodel.ffp_logmass_logp.
+#
+# The fitted range is NOT imposed as a bound anywhere: sub-stellar masses are
+# this relation's domain, so where to cut its support off is the user's prior
+# choice (star.<name>.logmass's `lower`), not ours.  The number below is
+# carried only so the warning in Star._warn_ffp_logmass_bound can quote it as
+# a concrete candidate.
+FFP_MASS_FUNCTION_SLOPE = 0.96  # alpha_4, the exponent of dN/dlog M ~ M^-alpha
+FFP_MASS_FUNCTION_MIN_MEARTH = 0.33  # lowest mass Sumi+2023 fit, in M_Earth
+
 # --- 7. SUN CONSTANTS ---
 SUN_GC_DISTANCE = 8.16  # in kpc (genulens/Koshimoto+21 R0 = 8160 pc)
 SUN_Z_OFFSET = 0.025  # in kpc, Sun's height above the plane (genulens zsun)

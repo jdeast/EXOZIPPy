@@ -1,5 +1,21 @@
 star:
   logmass:
+    # -9.0 dex is 1e-9 solMass, about two Ceres masses.  Absurd for a star --
+    # that is the point, and it is NOT a sloppy wide default.  Do not raise it.
+    # A planetary-mass microlensing lens must be declared in a 'star' block: a
+    # planet PRIMARY is rejected (see Lens._validate_bodies) because a planet
+    # body has no distance or proper motion of its own, and
+    # galacticmodel.build_likelihood reads system.star only, so a free-floating
+    # planet declared as a 'planet' would get neither the galactic density
+    # prior nor the kinematic one.  As a star it inherits both correctly; they
+    # are mass-independent.  The DEFAULT has to be this low because user bounds
+    # may only ever be TIGHTENED -- raise it here and FFP lenses become
+    # unmodelable with no user-side recourse.  What makes such a body plausible
+    # is the mass PRIOR, not the bound: give that star 'mass_function: ffp'
+    # (galacticmodel.ffp_logmass_logp).  Note the deliberate asymmetry --
+    # IMF: Salpeter raises this floor to the hydrogen-burning limit because a
+    # STELLAR IMF has no claim below it, while the FFP mass function leaves it
+    # alone because sub-stellar masses are exactly its domain.
     lower: -9.0
     upper: 2.5
     initval: 0.0
