@@ -20,6 +20,7 @@ import pytensor.tensor as pt
 from astropy import units as u
 
 from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
+from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 logger = logging.getLogger(__name__)
@@ -1894,6 +1895,11 @@ class Parameter:
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
+        # The Description column is prose (defaults.yaml), not LaTeX -- and
+        # several descriptions do contain raw underscores ('t0_par',
+        # 'M_2 / M_1', 'f_s / (f_s + f_b)'), which are a hard compile error
+        # in text mode.  The math belongs in `latex` (the symbol column).
+        desc = latex_escape(self.description)
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
 
@@ -1903,7 +1909,7 @@ class Parameter:
 
             if n_elements > 1:
                 if self.names and i < len(self.names):
-                    clean_name = str(self.names[i]).replace("_", r"\_")
+                    clean_name = latex_escape(str(self.names[i]))
                     symbol = self.latex + r"_{\rm " + clean_name + r"}"
                 else:
                     symbol = f"{self.latex}_{{{i}}}"
@@ -1932,7 +1938,7 @@ class Parameter:
 
             lines.append(
                 rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
-                rf"{self.description}{unit_text}\dotfill & "
+                rf"{desc}{unit_text}\dotfill & "
                 rf"{val_txt} & "
                 rf"{prior_text} \\" + "\n"
             )
@@ -1961,6 +1967,7 @@ class Parameter:
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
+        desc = latex_escape(self.description)  # prose, not LaTeX
 
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)
@@ -1983,7 +1990,7 @@ class Parameter:
 
         return (
             rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
-            rf"{self.description}{unit_text}\dotfill & "
+            rf"{desc}{unit_text}\dotfill & "
             rf"{val_txt} & "
             rf"{prior_text} \\" + "\n"
         )

@@ -2,11 +2,14 @@
 polished seed, matched to surviving posterior modes or reported as
 "considered and rejected"."""
 
+import csv
+
 import numpy as np
 import pymc as pm
 import pytest
 
 from exozippy.components.parameter import Parameter
+from exozippy.outputs.latex import build_csv_output
 from exozippy.outputs.ledger import (
     append_ledger_csv,
     build_seed_ledger,
@@ -16,6 +19,18 @@ from exozippy.outputs.ledger import (
     write_rejected_latex,
 )
 from exozippy.outputs.modes import ModeInfo, ModeReport
+
+# The mode-keyed results.csv layout, spelled out rather than imported so
+# these tests pin the contract instead of whatever the code defines.
+MODE_COLUMNS = (
+    "parname",
+    "mode",
+    "weight",
+    "weight_err",
+    "value",
+    "up_err",
+    "low_err",
+)
 
 
 def _two_basin_model():
@@ -145,7 +160,7 @@ def test_text_csv_and_latex_report_the_rejected_solution(tmp_path):
     # ACT
     text = ledger_to_text(ledger)
     csv_path = tmp_path / "results.csv"
-    csv_path.write_text("name,mode,weight,value,hi,lo\n")
+    csv_path.write_text("# " + ", ".join(MODE_COLUMNS) + "\n")
     append_ledger_csv(ledger, str(csv_path))
     tex_path = tmp_path / "rejected.tex"
     wrote = write_rejected_latex(ledger, str(tex_path))
@@ -227,3 +242,130 @@ def test_matching_uses_the_modes_marginal_scale():
     # ASSERT
     assert ledger[0].matched_mode == 0  # matched despite 20 seed-widths
     assert ledger[1].matched_mode is None  # other basin: still rejected
+
+
+# ----------------------------------------------------------------------
+# The results CSV stays rectangular when the ledger writes into it
+#
+# Review item 2.8.1: append_ledger_csv always writes mode-keyed rows, but
+# build_csv_output only emitted the mode columns for a MULTIMODAL report.
+# A multi-seed fit whose surviving posterior is unimodal (the ob140939
+# setup) therefore got a 4-column header over a mix of 4- and 7-column
+# rows -- unparseable by pandas, csv.DictReader or any spreadsheet.
+# ----------------------------------------------------------------------
+
+
+class _FakeComp:
+    label = "toy"
+
+
+def _fake_system(comp):
+    class _Sys:
+        name = "test"
+
+        def get_all_components(self):
+            return [comp]
+
+    return _Sys()
+
+
+def _one_rejected_ledger():
+    """A two-seed ledger against a unimodal report: seed 1 is rejected."""
+    model, p = _two_basin_model()
+    raw0 = np.asarray(p.raw_from_initval(np.array([2.0])))
+    raw1 = np.asarray(p.raw_from_initval(np.array([7.0])))
+    ledger = build_seed_ledger(
+        _StubSystem([p]),
+        model,
+        [{"toy.x_raw": raw0}, {"toy.x_raw": raw1}],
+        [0, 1],
+    )
+    match_ledger_to_modes(ledger, _fake_report([float(raw0[0])], "toy.x_raw"))
+    return ledger
+
+
+def _data_rows(path):
+    """Every non-comment row of a CSV, parsed (not eyeballed)."""
+    with open(path, newline="") as f:
+        return [
+            row
+            for row in csv.reader(f)
+            if row and not row[0].lstrip().startswith("#")
+        ]
+
+
+def test_unimodal_posterior_plus_ledger_writes_a_rectangular_csv(tmp_path):
+    """
+    Given a UNIMODAL surviving posterior and a seed ledger with one
+      rejected seed (a multi-seed fit whose rejected seeds are the only
+      mode-keyed rows),
+    When build_csv_output writes the results CSV and append_ledger_csv
+      adds the rejected-seed rows,
+    Then every row in the file has the same width, the header comment names
+      exactly those columns, and csv.DictReader reads the rejected row back
+      with its mode key and Laplace weight.
+    """
+    # ARRANGE
+    ledger = _one_rejected_ledger()
+    comp = _FakeComp()
+    comp.x = Parameter(
+        label="toy.x",
+        latex="x",
+        description="toy parameter",
+        initval=2.0,
+        lower=0.0,
+        upper=10.0,
+    )
+    csv_path = tmp_path / "results.csv"
+
+    # ACT
+    build_csv_output(_fake_system(comp), str(csv_path), mode_columns=True)
+    append_ledger_csv(ledger, str(csv_path))
+
+    # ASSERT
+    rows = _data_rows(csv_path)
+    assert {len(r) for r in rows} == {len(MODE_COLUMNS)}
+
+    header = csv_path.read_text().splitlines()[0]
+    assert header.startswith("# ")
+    assert [c.strip() for c in header[2:].split(",")] == list(MODE_COLUMNS)
+
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(
+            (ln for ln in f if not ln.startswith("#")),
+            fieldnames=MODE_COLUMNS,
+        )
+        parsed = list(reader)
+    assert all(None not in d and "" not in d.keys() for d in parsed)
+    rejected = [d for d in parsed if d["mode"] == "rejected-seed1"]
+    assert len(rejected) == 1
+    assert float(rejected[0]["value"]) == pytest.approx(7.0, abs=0.01)
+    assert float(rejected[0]["weight"]) < 1.0
+    assert [d for d in parsed if d["mode"] == "all"]  # posterior rows kept
+
+
+def test_ledger_refuses_to_append_to_a_plain_layout_csv(tmp_path):
+    """
+    Given a results CSV written WITHOUT the mode columns,
+    When append_ledger_csv tries to add its mode-keyed rows,
+    Then it raises rather than making the file ragged, and names the fix.
+    """
+    # ARRANGE
+    ledger = _one_rejected_ledger()
+    comp = _FakeComp()
+    comp.x = Parameter(
+        label="toy.x",
+        latex="x",
+        description="toy parameter",
+        initval=2.0,
+        lower=0.0,
+        upper=10.0,
+    )
+    csv_path = tmp_path / "results.csv"
+    build_csv_output(_fake_system(comp), str(csv_path))
+    before = csv_path.read_text()
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="mode_columns=True"):
+        append_ledger_csv(ledger, str(csv_path))
+    assert csv_path.read_text() == before  # untouched, still rectangular

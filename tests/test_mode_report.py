@@ -616,6 +616,75 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
     text = tmpl_path.read_text()
     assert "5 draws" in text
     assert "model or sampler bug" in text
+    # A bare % starts a LaTeX comment and would swallow the closing brace
+    # of \tablecomments{...}: the percentage must arrive escaped.
+    comments = next(
+        ln for ln in text.splitlines() if ln.startswith(r"\tablecomments")
+    )
+    assert r"5.00\%" in comments
+    assert "%" not in comments.replace(r"\%", "")
+
+
+# ----------------------------------------------------------------------
+# Non-LaTeX strings reaching LaTeX (review 2.8.2, generalized)
+#
+# Every user- or YAML-supplied string in the table -- the output prefix,
+# instance (instrument/band/star) names, component section labels,
+# parameter descriptions -- is data, not markup.  Real generated tables
+# under examples/ carry `\textit{MEARTH_20090513:}` and a description
+# column reading `Binary lens mass ratio (M_2 / M_1)`; neither compiles.
+# `Parameter.latex`, `unit_latex` and `table_note` ARE markup and must stay
+# unescaped.
+# ----------------------------------------------------------------------
+
+
+def test_instance_names_and_descriptions_are_escaped(tmp_path):
+    """
+    Given a vector parameter whose instance names and description contain
+      underscores (MEARTH_20090513; 'ratio (M_2 / M_1)'),
+    When build_latex_output writes the table,
+    Then the instance sub-header, the symbol subscript and the description
+      column all carry \\_ and no bare underscore survives outside math --
+      while the parameter's own latex symbol is passed through untouched.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="transit.depth",
+        latex=r"\delta_{\rm t}",
+        description="Binary lens mass ratio (M_2 / M_1)",
+        initval=np.array([0.01, 0.02]),
+        lower=0.0,
+        upper=1.0,
+        names=["MEARTH_20090513", "FLWO_20090601"],
+        shape=(2,),
+    )
+    comp = _FakeComp()
+    comp.label = "Transit_Parameters"
+    comp.depth = p
+    tmpl_path = tmp_path / "t.tex"
+
+    # ACT
+    build_latex_output(
+        _fake_system(comp),
+        var_filename=str(tmp_path / "v.tex"),
+        template_filename=str(tmpl_path),
+    )
+
+    # ASSERT
+    text = tmpl_path.read_text()
+    assert r"\textit{MEARTH\_20090513:}" in text
+    assert r"Binary lens mass ratio (M\_2 / M\_1)" in text
+    assert r"\sidehead{Transit\_Parameters:}" in text
+    assert r"\delta_{\rm t}" in text  # the symbol is markup: untouched
+    body = [
+        ln
+        for ln in text.splitlines()
+        if ln.startswith(("~~~~", r"\multicolumn", r"\sidehead"))
+    ]
+    for ln in body:
+        # drop the math spans, then no bare underscore may remain
+        stripped = "".join(ln.split("$")[::2]).replace(r"\_", "")
+        assert "_" not in stripped, ln
 
 
 # ----------------------------------------------------------------------
