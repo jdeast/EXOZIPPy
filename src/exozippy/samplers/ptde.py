@@ -617,14 +617,14 @@ def ptde_sample(
         _common.compile_conversions(model)
     )
 
-    if n_chains is None:
-        n_chains = 2 * n_params  # standard DE minimum for good mixing
+    # 2 * n_params is the standard DE population for good mixing; the floor
+    # and the warning both live in _common.resolve_n_chains.
+    n_chains = _common.resolve_n_chains(n_chains, n_params, "PTDE", logger)
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * n_params)
     logger.info(
         f"PTDE: {n_params} params, {n_chains} chains/rung, γ={gamma:.4f}"
     )
-    _common.warn_if_population_degenerate(n_chains, n_params, "PTDE", logger)
 
     # initialize populations
     t1_starts, chain_seed_index = _common.resolve_start_population(

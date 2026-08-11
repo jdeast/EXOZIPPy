@@ -293,11 +293,68 @@ def _map_logp_timeout(pool, proposals, timeout):
 # warn_if_population_degenerate for the mixing side).
 DE_JITTER = 1e-4
 
+# Smallest DE population this code will run with.
+#
+# A DE proposal for member i is x_i + gamma*(x_j1 - x_j2) with j1 != j2 != i,
+# so it needs two OTHER members: n = 2 has only one other and _pick_two used
+# to die inside numpy with "Cannot take a larger sample than population when
+# replace is False" (notes/code_review_20260808.txt 2.9.4).  n = 2 is not a
+# perverse setting -- it is what the DEFAULT n_chains = 2 * n_params produces
+# for a one-parameter model.  n = 3 is the smallest population that can move
+# at all, but the two others are then FORCED, so every proposal for member i
+# lies along the single direction +/-(x_j1 - x_j2); 4 is the smallest that
+# offers any choice of difference vector, and is what the default is floored
+# at.  This is a hard floor on the MOVE being defined, not a mixing
+# recommendation -- warn_if_population_degenerate below owns that, and it
+# asks for a great deal more (n_params + 2).
+MIN_DE_CHAINS = 4
+
 
 def _pick_two(rng, n, exclude):
     """Pick two distinct indices from [0, n) excluding `exclude`."""
+    if n < 3:
+        raise ValueError(
+            f"A DE proposal needs two other population members, but n={n} "
+            f"leaves only {max(n - 1, 0)}. There is no meaningful "
+            f"difference vector to propose with -- raise n_chains to at "
+            f"least {MIN_DE_CHAINS} (the default is 2 x n_params, floored "
+            f"at {MIN_DE_CHAINS})."
+        )
     idx = rng.choice(n - 1, 2, replace=False)
     return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
+
+
+def resolve_n_chains(n_chains, n_params, label, log):
+    """Resolve and validate the DE population size for one rung.
+
+    ``None`` takes the default 2 * n_params, floored at MIN_DE_CHAINS so the
+    default can never land on a population too small to form a difference
+    vector (n_params = 1 -> 2; see MIN_DE_CHAINS).  An explicit value below 3
+    RAISES rather than being silently bumped: the user asked for something
+    the DE move cannot do, and quietly running a different sampler than the
+    one requested is worse than stopping.  Also emits the
+    warn_if_population_degenerate mixing warning.
+    """
+    if n_chains is None:
+        n_chains = max(2 * n_params, MIN_DE_CHAINS)
+        if n_chains > 2 * n_params:
+            log.info(
+                f"{label}: default n_chains = 2 x n_params = "
+                f"{2 * n_params} is below the DE minimum; using "
+                f"{n_chains} chains/rung."
+            )
+    else:
+        n_chains = int(n_chains)
+        if n_chains < 3:
+            raise ValueError(
+                f"{label}: n_chains={n_chains} is too small for a DE "
+                f"proposal, which needs two OTHER population members "
+                f"(x_i + gamma*(x_j1 - x_j2), j1 != j2 != i). Use "
+                f"n_chains >= {MIN_DE_CHAINS}, or omit n_chains for the "
+                f"default 2 x n_params."
+            )
+    warn_if_population_degenerate(n_chains, n_params, label, log)
+    return n_chains
 
 
 def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):

@@ -200,15 +200,13 @@ def ptde_async_sample(
         _common.compile_conversions(model)
     )
 
-    if n_chains is None:
-        n_chains = 2 * n_params
+    n_chains = _common.resolve_n_chains(
+        n_chains, n_params, "PTDE-async", logger
+    )
     if gamma is None:
         gamma = 2.38 / np.sqrt(2 * n_params)
     logger.info(
         f"PTDE-async: {n_params} params, {n_chains} chains/rung, gamma={gamma:.4f}"
-    )
-    _common.warn_if_population_degenerate(
-        n_chains, n_params, "PTDE-async", logger
     )
 
     t1_starts, chain_seed_index = _common.resolve_start_population(
