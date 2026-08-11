@@ -869,10 +869,29 @@ class Parameter:
                 sv_gaussian_scales = pt.as_tensor_variable(gaussian_scales)
 
             # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
+            #
+            # The bound constants are SANITIZED on the non-logit elements
+            # (dummy [0, 1]) before they enter the graph.  Their real bounds
+            # are infinite there, and -inf + inf*sigmoid = NaN (or +inf for a
+            # half-bounded element): a NaN/inf sitting in the UNSELECTED
+            # branch of the pt.where below, which is the where-trap -- the
+            # switch VJP multiplies it by a zero and 0*inf = NaN poisons the
+            # gradient of the whole vector on every backend.  (A
+            # canonicalization rewrite currently sinks that zero into the
+            # switch and hides it, but a rewriter is not a correctness
+            # guarantee; with rewrites off the NaN is right there.)  Section
+            # A already sanitizes its sigmas the same way.  keep_bounds is a
+            # superset of use_logit, so every logit element is untouched and
+            # the selected branch is bit-for-bit what it always was.
+            keep_bounds = use_logit | (
+                np.isfinite(lowers) & np.isfinite(uppers)
+            )
+            safe_lowers = np.where(keep_bounds, lowers, 0.0)
+            safe_uppers = np.where(keep_bounds, uppers, 1.0)
             lq = sv_logit_q_inits + sv_scale_logits * raw_vector
-            phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
-                uppers - lowers
-            ) * pt.sigmoid(
+            phys_logit = pt.as_tensor_variable(
+                safe_lowers
+            ) + pt.as_tensor_variable(safe_uppers - safe_lowers) * pt.sigmoid(
                 pt.clip(lq, -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
             )
 

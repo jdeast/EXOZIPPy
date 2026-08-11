@@ -1254,3 +1254,108 @@ def test_derived_star_mass_builds_no_barrier_potentials():
     assert star.mass.lower is None and star.mass.upper is None
     assert np.allclose(np.atleast_1d(star.logmass.lower), -9.0)
     assert np.allclose(np.atleast_1d(star.logmass.upper), 2.5)
+
+
+# ---------------------------------------------------------------------------
+# Review 2.10.2 / 2.10.3 / 2.10.5
+# ---------------------------------------------------------------------------
+
+
+def _mixed_bounded_unbounded_model(sigma_on_unbounded):
+    """A single vector Parameter whose element 0 is logit-bounded and whose
+    element 1 has infinite bounds (the only construction that reaches
+    build_pymc's pt.where over the two branches)."""
+    p = Parameter(
+        label="mix",
+        initval=[0.5, 1.0],
+        init_scale=[0.1, 1.0],
+        sigma=[np.nan, sigma_on_unbounded],
+        lower=[0.0, -np.inf],
+        upper=[1.0, np.inf],
+        shape=(2,),
+        unit="",
+        internal_unit="",
+    )
+    with pm.Model() as model:
+        p.build_pymc()
+        pm.Potential("like", pt.sum(p.value**2))
+    return model, p
+
+
+@pytest.mark.parametrize("sigma_on_unbounded", [2.0, np.nan])
+def test_mixed_bounded_unbounded_vector_gradient_is_finite(sigma_on_unbounded):
+    """
+    Given a vector parameter mixing a logit-bounded element with an element
+    whose bounds are +/-inf (CLAUDE.md: "+/-inf is a real bound and is
+    applied"),
+    When the logp gradient is compiled on the C backend, the JAX backend and
+    with graph rewrites DISABLED,
+    Then it is finite on all three.
+
+    Regression: the infinite bounds were fed straight into the *unselected*
+    logit branch of the pt.where, where -inf + inf*sigmoid = NaN.  The switch
+    VJP then multiplies that by zero and 0*inf = NaN poisons the gradient of
+    the whole vector.  FAST_RUN and JAX happened to survive because a
+    canonicalization rewrite sinks the zero into the switch -- a rewriter is
+    not a correctness guarantee, so the unoptimized mode is the one that
+    pins the fix.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, _ = _mixed_bounded_unbounded_model(sigma_on_unbounded)
+    raw = model.value_vars[0]
+    grad = pt.grad(model.logp(), raw)
+    point = np.array([0.3, 0.7])
+
+    # Act / Assert
+    for mode in ["FAST_RUN", Mode(linker="py", optimizer="None"), "JAX"]:
+        fn = pytensor.function(
+            [raw], grad, mode=mode, on_unused_input="ignore"
+        )
+        got = np.asarray(fn(point))
+        assert np.all(np.isfinite(got)), f"mode={mode}: dlogp = {got}"
+
+
+def test_unselected_logit_branch_carries_no_nan_or_inf():
+    """
+    Given the same mixed vector,
+    When the raw (unrewritten) physical value of BOTH branches is evaluated,
+    Then neither branch holds a NaN or an inf -- the where-trap is removed at
+    the source rather than papered over downstream.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, p = _mixed_bounded_unbounded_model(2.0)
+    raw = model.value_vars[0]
+    node = model.replace_rvs_by_values([p.value])[0]
+
+    # Act
+    fn = pytensor.function(
+        [raw],
+        node,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+    # Every intermediate elemwise result feeding the value must be finite.
+    from pytensor.graph.traversal import ancestors
+
+    inner = [
+        v
+        for v in ancestors([node])
+        if v.owner is not None and v.dtype.startswith("float")
+    ]
+    probe = pytensor.function(
+        [raw],
+        inner,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+
+    # Assert
+    assert np.all(np.isfinite(np.asarray(fn(np.array([0.3, 0.7])))))
+    for var, val in zip(inner, probe(np.array([0.3, 0.7]))):
+        assert np.all(np.isfinite(np.asarray(val))), (
+            f"non-finite intermediate {var}: {val}"
+        )
