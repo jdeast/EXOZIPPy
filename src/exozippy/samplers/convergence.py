@@ -270,6 +270,88 @@ def find_burnin(posterior, lp=None, var_names=None):
     return diag
 
 
+# Groups the burn-in / stuck-chain trim is allowed to slice.  ALLOW-LIST,
+# not "every group that happens to have chain/draw dims": the trim's indices
+# mean "T=1 chain k" and "T=1 draw n", so they are only meaningful for groups
+# indexed by the SAME axes as `posterior`.
+#
+# `posterior_hot` (ptde_async store_hot_chains) is the counter-example that
+# motivated this (notes/code_review_20260808.txt 2.9.2): its chain axis is
+# (n_temps-1) x n_chains hot-rung chains, and its draw axis is its own thinned
+# one, so slicing it by T=1 good-chain indices and a T=1 burn-in silently
+# returned a handful of arbitrary hot chains with their heads cut off.  It is
+# a live input -- outputs.ledger.discover_hot_modes clusters it to record
+# posterior-suppressed modes as "considered and rejected" -- and today that
+# consumer only escapes because it runs BEFORE this call in run.py.  An
+# allow-list makes the invariant hold by construction instead of by statement
+# ordering.
+#
+# Why an allow-list and not a deny-list naming `posterior_hot`: a deny-list
+# has to be extended for every future group or that group is silently
+# mangled, which is exactly the failure being fixed.  The allow-list fails
+# the other way -- a new group is left untrimmed, which is visible in the
+# data rather than a silent corruption -- and _warn_untrimmed_groups makes
+# even that loud for any group that does carry chain/draw dims.
+_TRIMMED_GROUPS = (
+    "posterior",
+    "sample_stats",
+    "log_likelihood",
+    "posterior_predictive",
+)
+
+# Groups known NOT to share the T=1 draw axes; excluded silently.
+_UNTRIMMED_GROUPS = ("posterior_hot",)
+
+
+def _group_names(idata):
+    """Group names present on an InferenceData/DataTree, root excluded."""
+    try:
+        names = [str(g).strip("/") for g in idata.groups]
+    except TypeError:  # legacy arviz: groups() is a method
+        names = [str(g).strip("/") for g in idata.groups()]
+    return [n for n in names if n]
+
+
+def _warn_untrimmed_groups(idata, names):
+    """Loudly surface any unrecognized group carrying chain/draw dims."""
+    for name in names:
+        if name in _TRIMMED_GROUPS or name in _UNTRIMMED_GROUPS:
+            continue
+        dims = getattr(idata[name], "sizes", {})
+        if "chain" in dims or "draw" in dims:
+            logger.warning(
+                "Convergence trim: group '%s' has chain/draw dims but is not "
+                "in _TRIMMED_GROUPS; it is being carried across UNTRIMMED "
+                "(still holds burn-in and stuck chains). Add it to "
+                "samplers/convergence._TRIMMED_GROUPS if it shares the T=1 "
+                "draw axes, or to _UNTRIMMED_GROUPS if it does not.",
+                name,
+            )
+
+
+def trim_groups(idata, good_idx, burnin):
+    """Drop stuck chains + burn-in draws from the T=1 groups only.
+
+    Returns a new InferenceData in which every group named in
+    ``_TRIMMED_GROUPS`` is sliced to ``good_idx`` chains and draws from
+    ``burnin`` on, and EVERY other group -- ``posterior_hot`` above all -- is
+    carried across byte-for-byte.
+    """
+    names = _group_names(idata)
+    _warn_untrimmed_groups(idata, names)
+    trimmed = idata.copy()
+    idx = list(good_idx)
+    for name in names:
+        if name not in _TRIMMED_GROUPS:
+            continue
+        group = idata[name]
+        ds = group.to_dataset() if hasattr(group, "to_dataset") else group
+        trimmed[name] = ds.isel(
+            chain=idx, draw=slice(burnin, None), missing_dims="ignore"
+        )
+    return trimmed
+
+
 def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     """Find burn-in + stuck chains on an InferenceData and return a trimmed view.
 
@@ -278,7 +360,9 @@ def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     :func:`find_burnin`, tags the diagnostics with a ``converged`` verdict
     against the thresholds (informational only -- nothing is discarded), and
     returns ``(trimmed_idata, diag)`` where ``trimmed_idata`` has the stuck
-    chains and the burn-in draws removed from every group that has those dims.
+    chains and the burn-in draws removed from the T=1 groups
+    (``_TRIMMED_GROUPS``).  Every other group is carried across untouched --
+    see that constant for why this is an allow-list.
     """
     posterior = idata.posterior
     var_names = var_names or default_var_names(posterior)
@@ -300,13 +384,7 @@ def analyze_idata(idata, min_ess=None, max_rhat=None, var_names=None):
     diag["min_ess_threshold"] = min_ess
 
     good_idx = np.nonzero(diag["good_mask"])[0]
-    # isel across the whole InferenceData; missing_dims="ignore" leaves groups
-    # without chain/draw (e.g. observed_data) untouched.
-    trimmed = idata.isel(
-        chain=good_idx.tolist(),
-        draw=slice(diag["burnin"], None),
-        missing_dims="ignore",
-    )
+    trimmed = trim_groups(idata, good_idx, diag["burnin"])
     return trimmed, diag
 
 
