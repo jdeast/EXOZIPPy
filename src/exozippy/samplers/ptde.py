@@ -146,6 +146,30 @@ def ladder_health_report(temperatures, n_swap_accept, n_swap_propose):
     return lam
 
 
+# Gradient-free polish stopping rule: stop when the best point found has
+# gained less than POLISH_TOL_NATS over the last POLISH_TOL_WINDOW sweeps.
+#
+# ABSOLUTE nats, never relative to |lp|: logp carries an arbitrary additive
+# normalization, so a relative threshold means something different for every
+# model -- the exact trap documented on polish._LBFGS_FTOL, where scipy's
+# relative ftol quit whenever an iteration gained < 1e-3*|lp| (~2 nats at
+# lp ~ 1900) and stranded ob140939's seeds ~15 nats below their peaks.
+#
+# 0.05 nats: the polish exists to put the start inside its basin, close
+# enough that the whitening probe measures honest curvature.  That probe
+# works in 0.5-nat steps, so a tenth of one probe step is already far below
+# anything downstream can resolve, and the remaining climb to the exact MAP
+# is not wanted anyway (polish.py: the exact MAP of a scale-like parameter
+# is not in the typical set).
+#
+# Over a WINDOW of sweeps, never per sweep: best_lp is a running maximum of a
+# stochastic search, so single quiet sweeps are routine even while the search
+# is still climbing.  10 sweeps is >= 80 proposals (pop_size >= 8), enough
+# that a genuinely climbing search cannot look flat across all of them.
+POLISH_TOL_NATS = 0.05
+POLISH_TOL_WINDOW = 10
+
+
 def polish_seed_starts(
     raw_starts,
     logp_fn,
@@ -154,14 +178,21 @@ def polish_seed_starts(
     n_steps=150,
     pop_size=None,
     gamma=None,
+    tol=POLISH_TOL_NATS,
+    tol_window=POLISH_TOL_WINDOW,
 ):
     """T=1 differential-evolution polish of each seed's raw start.
 
     For each seed: spawn a small population jittered at ONE scale unit
     around the seed (staying inside its own basin -- this is a local
-    refiner, not a search), run ``n_steps`` of DE-MC at T=1 (Metropolis
-    acceptance on difference-vector proposals, the same move the sampler
-    itself uses), and return the best-lp point visited as the new seed.
+    refiner, not a search), run DE-MC at T=1 (Metropolis acceptance on
+    difference-vector proposals, the same move the sampler itself uses), and
+    return the best-lp point visited as the new seed.
+
+    Stopping is by TOLERANCE, with ``n_steps`` as the safety cap: the sweeps
+    end as soon as the best point has gained less than ``tol`` nats over the
+    last ``tol_window`` sweeps (see POLISH_TOL_NATS).  ``tol=None`` restores
+    the old fixed ``n_steps`` sweeps.
 
     Rationale: an unpolished solution-estimate seed (e.g. a raw MMEXOFAST
     fit) can start hundreds of nats below its own basin's optimum, and
@@ -207,6 +238,10 @@ def polish_seed_starts(
         best_lp = float(lps[best_i])
         lp0 = float(lps[0])  # the seed's own lp (member 0 = exact center)
 
+        # best_lp after each completed sweep; the tolerance test reads it
+        # tol_window sweeps back.
+        history = []
+        steps_taken, stop = 0, "cap"
         for _ in range(int(n_steps)):
             for i in range(pop_size):
                 j1, j2 = _pick_two(rng, pop_size, i)
@@ -224,11 +259,27 @@ def polish_seed_starts(
                     if lp > best_lp:
                         best_lp = lp
                         best = {k: v.copy() for k, v in prop.items()}
+            steps_taken += 1
+            if tol is None or not tol_window:
+                continue
+            history.append(best_lp)
+            if (
+                len(history) > tol_window
+                and history[-1] - history[-1 - tol_window] < tol
+            ):
+                stop = "tol"
+                break
         polished.append(best)
         dlps.append(best_lp - lp0)
+        reason = (
+            f"converged: < {tol} nats over {tol_window} sweeps"
+            if stop == "tol"
+            else f"hit the {int(n_steps)}-step cap"
+        )
         logger.info(
             f"PTDE seed polish: seed {s} lp {lp0:.1f} -> {best_lp:.1f} "
-            f"(dlp=+{best_lp - lp0:.1f}, {n_steps} steps x {pop_size} pop)"
+            f"(dlp=+{best_lp - lp0:.1f}, {steps_taken} steps x {pop_size} "
+            f"pop, {reason})"
         )
     return polished, dlps
 

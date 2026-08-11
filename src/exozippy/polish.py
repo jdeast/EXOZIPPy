@@ -29,6 +29,27 @@ Two engines, dispatched on gradient availability:
   the gradient graph cannot be built or is non-finite at the start -- e.g.
   the binary-lens magnification Op has no analytic gradient.
 
+Stopping: BOTH engines stop on a tolerance and treat the configured step
+count (`seed_polish: N`, default DEFAULT_POLISH_STEPS) as a safety cap only.
+The two tolerances are deliberately different because the two engines see
+different information, and neither measure exists on the other path:
+
+- L-BFGS-B stops on the GRADIENT NORM (_LBFGS_GTOL, nats per raw unit).
+  That is the strongest available statement of "this is the top of the
+  basin" and it needs no history; the gradient is right there.  It is also
+  the reason a logp-improvement rule must NOT be layered on here -- see the
+  _LBFGS_FTOL note below for what per-iteration improvement tests do to a
+  curved valley.
+- The gradient-free DE polish (samplers.ptde.polish_seed_starts) has no
+  gradient by construction -- it exists because the binary-lens
+  magnification Op has none -- so it stops on the ABSOLUTE logp gain of the
+  best point over a WINDOW of sweeps (ptde.POLISH_TOL_NATS /
+  POLISH_TOL_WINDOW).  Absolute, not relative to |lp|, for the same reason
+  ftol is disabled below.
+
+The cap always remains: neither rule can run away, and a pathological
+surface stops at N steps as before.
+
 Seed-provenance gate (resolve_polish_steps): 'auto' polishes SOLUTION
 ESTIMATES -- the single canonical start (user/literature initvals, the
 relaxation engine's solution) and MMEXOFAST seed sets -- but never a
@@ -44,6 +65,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Safety CAP on the polish, not a target: both engines stop on their own
+# tolerance well before this on any well-behaved surface (see "Stopping" in
+# the module docstring).
 DEFAULT_POLISH_STEPS = 150
 
 # L-BFGS stopping: terminate on the GRADIENT (plus the maxiter cap),
@@ -65,22 +89,43 @@ _LBFGS_GTOL = 1e-2
 # toward the last finite iterate's neighborhood (gradient points home).
 _NONFINITE_PENALTY = 1e15
 
+# Sentinel: "caller said nothing", so the DE engine's own defaults apply.
+# `None` cannot serve -- tol=None is the meaningful "disable the tolerance,
+# run the full n_steps" request.
+_UNSET = object()
+
 
 def resolve_polish_steps(spec, n_seeds, has_seed_hints):
-    """Map the sampler-config `seed_polish` value to a step count.
+    """Map the sampler-config `seed_polish` value to a step CAP.
 
     'auto' (default): DEFAULT_POLISH_STEPS when the starts are solution
     estimates -- a single canonical start (n_seeds == 1) or component-pushed
     seed hints (MMEXOFAST) -- and 0 for a multi-seed set without hints
     (posterior-draw restarts; see module docstring).  True/'on' and
-    False/None/'off' force it; an int gives the step count directly.
+    False/None/'off' force it; an int gives the cap directly (`seed_polish: N`
+    = "at most N steps", not "exactly N" -- both engines stop on their own
+    tolerance first; see "Stopping" in the module docstring).
+
+    The bool test comes FIRST and by isinstance.  `spec in (True, "on")`
+    matched the integer 1 (1 == True in Python), so `seed_polish: 1` asked
+    for one step and got 150 (notes/code_review_20260808.txt 2.9.1).  The
+    symmetric `0 == False` match was harmless -- 0 steps IS off -- and stays
+    harmless here: 0 now falls through to the int path and returns 0.
     """
-    if isinstance(spec, str) and spec.lower() == "auto":
-        return DEFAULT_POLISH_STEPS if (n_seeds == 1 or has_seed_hints) else 0
-    if spec in (True, "on"):
-        return DEFAULT_POLISH_STEPS
-    if spec in (False, None, "off"):
+    if isinstance(spec, bool):
+        return DEFAULT_POLISH_STEPS if spec else 0
+    if spec is None:
         return 0
+    if isinstance(spec, str):
+        key = spec.lower()
+        if key == "auto":
+            return (
+                DEFAULT_POLISH_STEPS if (n_seeds == 1 or has_seed_hints) else 0
+            )
+        if key == "on":
+            return DEFAULT_POLISH_STEPS
+        if key == "off":
+            return 0
     return max(0, int(spec))
 
 
@@ -108,8 +153,10 @@ def _compile_logp_grad(model):
 
 
 def _lbfgs_polish_one(center, fn_lp_grad, keys, shapes, sizes, maxiter):
-    """L-BFGS-B ascent of logp from one raw start dict.  Returns
-    (polished_dict, lp0, lp_best, n_evals)."""
+    """L-BFGS-B ascent of logp from one raw start dict.
+
+    Stops on the gradient norm (_LBFGS_GTOL); `maxiter` is the safety cap.
+    Returns (polished_dict, lp0, lp_best, n_evals, n_iter, hit_cap)."""
     from scipy.optimize import minimize
 
     def flatten(d):
@@ -159,13 +206,17 @@ def _lbfgs_polish_one(center, fn_lp_grad, keys, shapes, sizes, maxiter):
     # res.x is the best iterate L-BFGS-B saw; never worse than the start
     # except pathological line-search exits -- guard anyway.
     lp_best = -float(res.fun)
+    n_iter = int(getattr(res, "nit", 0))
+    hit_cap = n_iter >= int(maxiter)
     if np.isfinite(lp_best) and lp_best >= lp0:
-        return unflatten(res.x), lp0, lp_best, n_evals[0]
+        return unflatten(res.x), lp0, lp_best, n_evals[0], n_iter, hit_cap
     return (
         {k: np.array(v, dtype=float, copy=True) for k, v in center.items()},
         lp0,
         lp0,
         n_evals[0],
+        n_iter,
+        hit_cap,
     )
 
 
@@ -176,6 +227,8 @@ def polish_raw_starts(
     seed_indices=None,
     logp_fn=None,
     rng=None,
+    tol=_UNSET,
+    tol_window=_UNSET,
 ):
     """Polish each raw start toward its own basin's optimum.
 
@@ -184,6 +237,12 @@ def polish_raw_starts(
     (samplers/ptde.polish_seed_starts) with unit jitter scales (one raw unit
     = one preliminary whitening scale, DE's population self-adapts from
     there).
+
+    ``n_steps`` is the safety CAP for either engine; each stops on its own
+    tolerance first (see "Stopping" in the module docstring).  ``tol`` /
+    ``tol_window`` override the DE engine's tolerance (``tol=None`` restores
+    a fixed ``n_steps`` sweeps); they do not reach the L-BFGS path, which
+    stops on _LBFGS_GTOL.
 
     Returns (polished_starts, dlps, method) with method in
     {"lbfgs", "de", "none"}.  A seed is never made worse: any engine result
@@ -213,15 +272,20 @@ def polish_raw_starts(
     if fn_lp_grad is not None:
         polished, dlps = [], []
         for s, center in enumerate(raw_starts):
-            best, lp0, lp_best, n_evals = _lbfgs_polish_one(
+            best, lp0, lp_best, n_evals, n_iter, hit_cap = _lbfgs_polish_one(
                 center, fn_lp_grad, keys, shapes, sizes, maxiter=n_steps
             )
             polished.append(best)
             dlps.append(lp_best - lp0)
+            reason = (
+                f"hit the {int(n_steps)}-iteration cap"
+                if hit_cap
+                else f"converged: |grad| < {_LBFGS_GTOL} nats/unit"
+            )
             logger.info(
                 f"Seed polish (L-BFGS): seed {seed_indices[s]} lp "
                 f"{lp0:.1f} -> {lp_best:.1f} (dlp=+{lp_best - lp0:.1f}, "
-                f"{n_evals} evaluations)"
+                f"{n_iter} iterations / {n_evals} evaluations, {reason})"
             )
         return polished, dlps, "lbfgs"
 
@@ -235,7 +299,12 @@ def polish_raw_starts(
     scales = {
         k: np.ones(np.shape(raw_starts[0][k]), dtype=float) for k in keys
     }
+    de_kwargs = {}
+    if tol is not _UNSET:
+        de_kwargs["tol"] = tol
+    if tol_window is not _UNSET:
+        de_kwargs["tol_window"] = tol_window
     polished, dlps = polish_seed_starts(
-        raw_starts, logp_fn, rng, scales, n_steps=n_steps
+        raw_starts, logp_fn, rng, scales, n_steps=n_steps, **de_kwargs
     )
     return polished, dlps, "de"
