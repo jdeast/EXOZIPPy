@@ -266,3 +266,28 @@ def test_apass_bv_sentinel_error_is_skipped(tmp_path, patched_catalogs):
     # Assert
     assert "Generic/Bessell.B" not in rows
     assert "Generic/Bessell.V" not in rows
+
+
+def test_apass_bv_kept_when_no_tycho_source_exists(tmp_path, patched_catalogs):
+    """
+    Given APASS B/V photometry and no Tycho-2 source anywhere in the cone,
+    When mkticsed writes the SED,
+    Then the Bessell B and V rows are written -- with no Tycho counterpart
+      there is nothing to deduplicate against, so the NaN reference must not
+      suppress them (mkticsed.pro uses a -99 sentinel and keeps them).
+    """
+    # Arrange: no "I/259/TYC2" entry at all -> the query returns None.
+    patched_catalogs["UCAC4"] = _ucac_table(bmag=11.0, vmag=10.5)
+
+    # Act
+    rows = _run(tmp_path, priorfile=str(tmp_path / "p.yaml"))
+
+    # Assert
+    assert rows["Generic/Bessell.B"] == (
+        pytest.approx(11.0),
+        pytest.approx(0.03),
+    )
+    assert rows["Generic/Bessell.V"] == (
+        pytest.approx(10.5),
+        pytest.approx(0.03),
+    )

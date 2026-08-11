@@ -86,6 +86,20 @@ def _gets(table, col, row=0):
         return ""
 
 
+def _is_distinct(mag, ref, tol=0.01):
+    """True if `mag` is a different measurement from the reference `ref`.
+
+    Used to keep a catalog's photometry from entering the SED twice when two
+    catalogs report the same measurement. A non-finite `ref` means the
+    comparison star was never found, so there is nothing to duplicate and the
+    magnitude is kept -- the NaN must not silently vote "drop it", which is
+    what a bare ``abs(mag - ref) > tol`` does.
+    """
+    if not np.isfinite(ref):
+        return True
+    return abs(mag - ref) > tol
+
+
 def _sep(ra1, dec1, ra2, dec2):
     """Angular separation in arcseconds; inf if any coordinate is NaN."""
     if not all(np.isfinite(v) for v in (ra1, dec1, ra2, dec2)):
@@ -749,7 +763,7 @@ def mkticsed(
             np.isfinite(B_mag)
             and np.isfinite(eB)
             and eB != 99
-            and abs(B_mag - bt_ref) > 0.01
+            and _is_distinct(B_mag, bt_ref)
         ):
             sed_entries.append(
                 _sed_entry(
@@ -763,7 +777,7 @@ def mkticsed(
             np.isfinite(V_mag)
             and np.isfinite(eV)
             and eV != 99
-            and abs(V_mag - vt_ref) > 0.01
+            and _is_distinct(V_mag, vt_ref)
         ):
             sed_entries.append(
                 _sed_entry(
