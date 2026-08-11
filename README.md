@@ -34,8 +34,9 @@ poetry install --extras gui
 poetry run pre-commit install
 ```
 
-`--extras gui` is worth taking even if you never open the GUI: ruamel-yaml lives
-in that extra, and without it roughly 30 tests fail at import.
+`--extras gui` is worth taking even if you never open the GUI (and you probably
+should not -- see "The GUI is experimental" below): ruamel-yaml lives in that
+extra, and without it roughly 30 tests fail at import.
 
 See CONTRIBUTING.md for the workflow (`master` is protected; changes go through
 a pull request with a passing test suite).
@@ -49,46 +50,86 @@ Every push and pull request runs the full test suite on:
 | Linux (ubuntu-latest) | 3.12, 3.13, 3.14 |
 | macOS (arm64) | 3.12 |
 
-Windows is **not currently tested and not supported.** It is not merely
-unverified -- the test suite takes over 90 minutes there against ~16 minutes on
-Linux and has never completed a CI run, so the job was removed rather than left
-producing no signal. Three real Windows bugs were found and fixed along the way
-(an unsatisfiable mkl pin, a POSIX-only `SIGALRM` in the symbolic solver, and
-the GUI's cross-process stop signal), so basic use may well work. But the PTDE
-sampler will not: it builds worker pools with multiprocessing's `fork` start
-method, which does not exist on Windows. See `notes/todo.txt` if you want to
-pick this up -- patches welcome.
+### Windows: supported through WSL2
 
-The practical route on a Windows machine is WSL2, where an Ubuntu distro is
-simply the supported Linux platform above -- runtime requirements, PTDE
-sampler and all. Open an administrator PowerShell (from the Start menu, type
-"powershell", then click "Run as administrator") and run:
+**Windows is supported, via WSL2** (Windows Subsystem for Linux) -- not natively.
+That is not a hedge: inside WSL2 you are running a real Linux kernel with a
+genuine Ubuntu userspace, so it *is* the Linux platform in the table above,
+`fork`-based samplers and all. A full development setup there passes **1272 of
+1272 tests**. The step-by-step runbook, verified end to end on a real machine
+(Windows 11 -> Ubuntu 26.04 -> Python 3.14 -> Poetry), is
+[`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
+
+**Why not natively?** Two independent reasons:
+
+1. **The PTDE sampler cannot work.** It builds worker pools with
+   multiprocessing's `fork` start method so children inherit the compiled
+   PyTensor logp function without pickling it -- cloudpickle cannot serialize
+   one. Windows has no `fork`, only `spawn`.
+2. **The suite never finished.** It took over 90 minutes against ~16 on Linux
+   and never completed a CI run, so the job was removed rather than left
+   producing no signal. Three real Windows bugs were found and fixed along the
+   way (an unsatisfiable mkl pin, a POSIX-only `SIGALRM` in the symbolic solver,
+   and a cross-process stop signal), so basic use may well work -- but nothing
+   verifies it.
+
+Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
+runtime compilation (MSVC will not do), which we have never tested. See
+`notes/todo.txt` if you want to pick native Windows up -- patches welcome.
+
+#### Quickstart
+
+Open an administrator PowerShell (Start menu, type "powershell", then "Run as
+administrator") and run:
 
 ```
-wsl --install -d Ubuntu-24.04
+wsl --install
 ```
 
-Reboot if prompted, open the Ubuntu app once to create a Unix user, and then
-inside Ubuntu (whose default python3 is 3.12):
+**Reboot** -- the optional components only activate then, and without it
+`wsl --status` claims virtualization is disabled even when it is not. Open the
+Ubuntu app once to create a Unix user, then inside Ubuntu:
 
 ```
 sudo apt update
-sudo apt install g++ python3-dev python3-venv
+sudo apt install -y g++ python3-dev python3-venv
 python3 -m venv ~/exozippy-env
 source ~/exozippy-env/bin/activate
 pip install --pre exozippy
 ```
 
-That is the end-user path (installing the published package). If you are
-setting up a **development** checkout on Windows -- git clone plus Poetry, and
-running the test suite -- follow `WINDOWS_INSTALL.md` instead. It is a
-step-by-step runbook verified on a real machine, and it covers two WSL-specific
-traps that will otherwise cost you an afternoon (Windows `PATH` interop
-shadowing `python`/`pip`/`npm` with unusable Windows shims, and the missing
-`ensurepip` that breaks the Poetry installer).
+Note `python3`, not `python`: see the `PATH` note below. `python3-venv` is not
+optional -- without it `python3 -m venv` fails on `ensurepip`.
 
-Native Windows would additionally need a GCC-style C++ compiler for PyTensor's
-runtime compilation (MSVC will not do), which we have never tested.
+#### What WSL2 costs you
+
+One thing genuinely bites, and it is a resource default rather than a missing
+feature:
+
+- **Memory.** WSL2 takes **50% of host RAM** by default. On a 16 GB laptop that
+  is ~7.6 GB, while `pyproject.toml` asks for `-n 6` test workers that each peak
+  at 1-2 GB compiling PyTensor graphs. Measured on that machine, available
+  memory bottomed out at **41 MB**: workers were killed (`[gwN] node down`),
+  xdist died in its own scheduler, and one run hung for hours. Fix it with a
+  `.wslconfig` (see the runbook) or run `-n 2` as CI does.
+
+Smaller, setup-time only:
+
+- Windows `PATH` is appended to the Linux one, so bare `python`/`pip`/`npm`
+  resolve to *Windows* executables -- which is how `poetry install` can install
+  nothing and still exit 0.
+- There is no full systemd session, so `apt` prints harmless
+  `Failed to connect to system scope bus` warnings.
+- Keep the repo on the Linux filesystem, not `/mnt/c`, where I/O is far slower.
+
+Not limitations: `fork` works (so PTDE and its tests run), PyTensor compiles C
+at runtime, and the whole suite passes. GPU/CUDA for the JAX samplers is
+untested.
+
+The end-user path above (`pip install --pre exozippy` inside WSL) is enough to
+run fits. For a development checkout -- git clone plus Poetry plus the test
+suite -- follow [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md), which covers the
+traps above in order.
 
 Intel macOS is untested here and needs a C++ compiler: exoplanet-core publishes
 wheels for CPython 3.12-3.14 on Linux (glibc 2.28+), Apple Silicon macOS and
@@ -138,8 +179,18 @@ cd examples/ob140939
 exozippy ob140939.yaml
 ```
 
-The optional browser GUI (installed by the `gui` extra) starts with:
+### The GUI is experimental
+
+There is an optional browser GUI (installed by the `gui` extra), started with:
 
 ```
 exozippy-gui
 ```
+
+**Treat it as experimental on every platform, including Linux and macOS.** It is
+still buggy and has never been verified driving a real fit end to end, so it is
+not part of what "supported" means above -- unlike the CLI, nothing in CI
+exercises it beyond unit tests of its own modules. Use it to look around; do not
+rely on it for science.
+
+Note this is a statement about the GUI everywhere, not a WSL caveat.
