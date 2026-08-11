@@ -33,12 +33,8 @@ percent-level absolute calibration is needed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -54,6 +50,7 @@ from .bc_grid import (
     resolve_filter_name,
 )
 from ...filters.filter import Filter
+from ...utilities.zenodo import fetch_assets
 
 logger = logging.getLogger(__name__)
 
@@ -101,129 +98,39 @@ _DOWNSAMPLING_WARNING = (
 
 _warned_models: set[str] = set()
 
-# Zenodo is a free academic host and 5xx-es under load. Four attempts with
-# doubling backoff spans ~35s, which covers the transient gateway errors seen
-# in CI without making a genuinely dead URL take minutes to report.
-_DOWNLOAD_ATTEMPTS = 4
-_RETRY_BACKOFF = 5  # seconds; doubles each attempt
 
-
-def _md5(path: Path, chunk: int = 1 << 20) -> str:
-    """Streaming md5 of a file (the spectra grid is ~250 MB)."""
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(chunk), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
-def ensure_model_data(model: str, model_root: Path | str = DEFAULT_MODEL_ROOT):
+def ensure_model_data(
+    model: str, model_root: Path | str = DEFAULT_MODEL_ROOT
+):
     """Download large model data files from Zenodo if not present locally.
 
     These are the raw model spectra used to synthesize bolometric corrections
     for filters with no precomputed BC table. They are far too large to ship
     in the package (~300 MB) and are git-ignored, so they are fetched on first
-    use and cached in place. See _DOWNSAMPLING_WARNING for their accuracy.
+    use and cached alongside the model's BC tables. See _DOWNSAMPLING_WARNING
+    for their accuracy.
 
-    Integrity is enforced, because the failure mode without it is silent and
-    lasting: urlretrieve happily writes a truncated body to the destination,
-    and every later run then reads that half-file. It surfaced as
-    `pandas.errors.ParserError: EOF inside string starting at row 11248`, in a
-    test that has nothing to do with downloading. So:
-
-    * a cached file is size-checked on every call (cheap, and truncation --
-      the observed failure -- always changes the size);
-    * a download lands on a .part file, is checked for size AND md5, and only
-      then atomically renamed into place, so an interrupted fetch can never be
-      mistaken for a cached one;
-    * a corrupt cached file is re-fetched rather than raising, since the
-      recovery is unambiguous.
+    This is the NextGen-specific half of the fetch: it owns the _MODEL_DATA
+    URL table and the downsampling warning. The mechanics -- retries, the
+    .part-then-rename, the size/md5 checks -- live in
+    utilities.zenodo.fetch_assets, which the MIST EEP grid also calls.
     """
-    files = _MODEL_DATA.get(model, {})
-    # The spectra sit next to the model's BC tables ({model}/BCs/), which is
-    # where plot.py and _load_spectra both look for them.
-    model_dir = Path(model_root) / model / "BCs"
-    for filename, meta in files.items():
-        dest = model_dir / filename
-        if dest.exists():
-            actual = dest.stat().st_size
-            if actual == meta["size"]:
-                continue
-            logger.warning(
-                "Cached %s is %d bytes, expected %d -- it is truncated or "
-                "stale. Re-downloading.",
-                dest,
-                actual,
-                meta["size"],
-            )
-            dest.unlink()
 
+    def _warn_once(_filename: str) -> None:
+        # The warning is about THESE spectra, not about downloading in
+        # general, so it belongs here rather than in the shared core. Once
+        # per model per process, and only when something is really fetched.
         if model not in _warned_models:
             _warned_models.add(model)
             logger.warning(_DOWNSAMPLING_WARNING, model, model)
 
-        logger.info(f"Downloading {filename} from Zenodo...")
-        model_dir.mkdir(parents=True, exist_ok=True)
-        part = dest.with_name(dest.name + ".part")
-
-        # Retried with backoff. Zenodo is a free academic host serving a 250 MB
-        # file, and it returns 5xx under load -- observed as
-        # `HTTPError: HTTP Error 504: Gateway Time-out` failing CI on pull
-        # requests that had touched nothing related. A transient gateway error
-        # should cost a few seconds, not a whole run.
-        #
-        # Only transport and integrity errors are retried. A 404 means the URL
-        # or record is wrong, and retrying that just delays a real failure by
-        # _RETRY_BACKOFF seconds, so it is re-raised at once.
-        last_error = None
-        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
-            try:
-                urllib.request.urlretrieve(meta["url"], part)
-                size = part.stat().st_size
-                if size != meta["size"]:
-                    raise RuntimeError(
-                        f"{filename} downloaded {size} bytes, expected "
-                        f"{meta['size']}. The download was truncated; retry."
-                    )
-                digest = _md5(part)
-                if digest != meta["md5"]:
-                    raise RuntimeError(
-                        f"{filename} has md5 {digest}, expected "
-                        f"{meta['md5']}. The file on Zenodo may have been "
-                        f"replaced, or the download was corrupted."
-                    )
-                part.replace(dest)  # atomic within the same directory
-                last_error = None
-                break
-            except urllib.error.HTTPError as e:
-                if e.code < 500:
-                    raise
-                last_error = e
-            except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
-                last_error = e
-            finally:
-                part.unlink(missing_ok=True)
-
-            if attempt < _DOWNLOAD_ATTEMPTS:
-                delay = _RETRY_BACKOFF * 2 ** (attempt - 1)
-                logger.warning(
-                    "Download of %s failed (attempt %d/%d): %s. "
-                    "Retrying in %ds.",
-                    filename,
-                    attempt,
-                    _DOWNLOAD_ATTEMPTS,
-                    last_error,
-                    delay,
-                )
-                time.sleep(delay)
-
-        if last_error is not None:
-            raise RuntimeError(
-                f"Could not download {filename} from Zenodo after "
-                f"{_DOWNLOAD_ATTEMPTS} attempts: {last_error}"
-            ) from last_error
-
-        logger.info(f"Saved {filename} to {dest}")
+    # The spectra sit next to the model's BC tables ({model}/BCs/), which is
+    # where plot.py and _load_spectra both look for them.
+    fetch_assets(
+        _MODEL_DATA.get(model, {}),
+        Path(model_root) / model / "BCs",
+        on_fetch=_warn_once,
+    )
 
 
 def _load_spectra(
