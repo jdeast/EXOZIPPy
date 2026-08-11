@@ -379,9 +379,19 @@ class Planet(Component):
         # inside an unselected jnp.where branch of pytensor's softplus): any
         # system with m_total > 1.42 Msun silently froze every numpyro chain
         # at its starting point.  See potentials.py.
+        #
+        # The barrier is applied to the UNCLIPPED sum, not to self.m_total:
+        # calc_m_total clips at 1e-9, so feeding the clipped node here made
+        # the whole m_total < 0 region a constant log(sigmoid(~0)) = -0.693
+        # with exactly zero gradient -- a flat plateau with no restoring
+        # force, which is precisely the pathology the log_q notes warn about
+        # and is reachable in 'linear' mass mode (planet.mass's lower bound
+        # is -1000 Mjup, more than a solar mass below zero).
+        star = system.active_components["star"]
+        m_total_unclipped = star.mass.value[self.star_map] + self.mass.value
         pm.Potential(
             f"{self.prefix}.m_pos_constraint",
-            soft_lower_bound(self.m_total.value, 0.0, scale=0.88),
+            soft_lower_bound(m_total_unclipped, 0.0, scale=0.88),
         )
 
         self._add_chen_potential()
