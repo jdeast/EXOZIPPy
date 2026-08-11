@@ -412,7 +412,20 @@ class ConfigManager:
 
         components_dir = Path(__file__).parent / "components"
 
-        for py_file in components_dir.rglob("symbolic_physics.py"):
+        # Sorted: rglob yields entries in filesystem directory order, which is
+        # stable on one machine but differs between machines (ext4's hashed
+        # btree vs xfs/NFS), so it survives PYTHONHASHSEED randomization and
+        # looks perfectly reproducible until you compare two boxes.  This order
+        # sets all_relations order, which sets the order the relaxation engine
+        # visits equations, which decides WHICH member of a symmetric pair it
+        # solves for -- e.g. mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2 and
+        # pi_rel = KAPPA*m*(pi_E_N**2 + pi_E_E**2) are both symmetric under
+        # swapping the pair, so nothing in the equation itself breaks the tie.
+        # Unsorted, an Ubuntu 26.04 box transposed (pm_ra, pm_dec),
+        # (mu_ra_rel, mu_dec_rel) and (pi_E_N, pi_E_E) relative to a RHEL8 box:
+        # t_E came out 11.54 d instead of 18.29 d and DC2018_128's logp at the
+        # pinned GOOD_RAW went -945.57 -> -113614.65.
+        for py_file in sorted(components_dir.rglob("symbolic_physics.py")):
             module_name = (
                 f"exozippy.components.{py_file.parent.name}.symbolic_physics"
             )
@@ -482,7 +495,12 @@ class ConfigManager:
                             if rel_inst not in self.all_relations:
                                 self.all_relations.append(rel_inst)
 
-        for defaults_file in components_dir.rglob("defaults.yaml"):
+        # Sorted for the same reason as the symbolic_physics walk above.  No
+        # root-level key is currently defined by two components (a test pins
+        # that), so today this is future-proofing rather than a live fix --
+        # _deep_merge is last-writer-wins, so the first such collision would
+        # otherwise resolve by walk order.
+        for defaults_file in sorted(components_dir.rglob("defaults.yaml")):
             with open(defaults_file, "r") as f:
                 comp_defaults = yaml.safe_load(f) or {}
                 self._deep_merge(self.base_defaults, comp_defaults)
@@ -2604,7 +2622,10 @@ class ConfigManager:
     def _attempt_rank_upgrade(
         self, eq, resolved, provenance, resolved_scales, scale_provenance
     ):
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+        # Sorted for the same reason as _execute_solve's walk: free_symbols is a
+        # set of Symbols whose hashes include the PYTHONHASHSEED-randomized name
+        # string, so bare iteration order varies per process.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         def get_rank(s):
             return provenance.get(s, RANK_DEFAULT)
@@ -2615,8 +2636,10 @@ class ConfigManager:
             return False
 
         # 2. Identify the target:
-        # Pick the symbol with the lowest provenance.
-        target = min(symbols_in_eq, key=get_rank)
+        # Pick the symbol with the lowest provenance, breaking rank ties
+        # alphabetically -- a bare min() returns the first minimum it meets, so
+        # on tied ranks the winner would follow iteration order.
+        target = min(symbols_in_eq, key=lambda s: (get_rank(s), s))
 
         # 3. Check dependencies: Are all inputs known?
         inputs = [s for s in symbols_in_eq if s != target]
