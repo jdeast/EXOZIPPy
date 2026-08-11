@@ -167,6 +167,67 @@ def test_unknown_population_is_rejected():
     assert "thin_disk" in POPULATIONS
 
 
+def test_seeds_are_skipped_when_parallax_is_already_measured():
+    """
+    Given a config that supplies pi_E_N/pi_E_E (a measured parallax vector),
+    When start values are resolved,
+    Then the proper motions are NOT seeded from the prior.
+
+    pi_E is parallel to mu_rel, so a measured pi_E already fixes the direction.
+    Seeding the prior's direction on top of it contradicts the measurement:
+    on examples/ob140939 (Yee+2015 pi_E) doing so took chi2/N at the seed from
+    3.04 to 179.1.
+    """
+    # Arrange
+    config, user_params = _inputs()
+    user_params["lens.Lens.pi_E_N"] = {"initval": -0.2}
+    user_params["lens.Lens.pi_E_E"] = {"initval": 0.1}
+
+    ra, dec = np.radians(267.595), np.radians(-28.982)
+    prior_pm_dec = expected_proper_motion(ra, dec, 4000.0, "thin_disk")[1]
+
+    # Act
+    params = _prepared(config, user_params)
+
+    # Assert: whatever the engine derives from the measured pi_E, it is NOT the
+    # prior's mean.  (It need not be the bare default either -- deriving the
+    # proper motion FROM the measurement is the desired outcome; the point is
+    # that the prior did not overwrite it.)
+    pm_dec = np.atleast_1d(np.asarray(params["star.pm_dec"].initval, float))
+    assert pm_dec[0] != pytest.approx(prior_pm_dec, rel=1e-3), (
+        "the galactic-model mean overrode a measured pi_E direction"
+    )
+
+
+def test_seeds_are_skipped_for_a_multi_source_event():
+    """
+    Given more than one source body,
+    When start values are resolved,
+    Then the proper motions are NOT seeded from the prior.
+
+    Every source would take the same bulge mean, tying their mu_rel together;
+    a resolved binary source distinguishes them.  On examples/ob161003 (two
+    sources, t_E and rho pinned for each) seeding took chi2/N from 1.72 to 3.9.
+    """
+    # Arrange: add a second source body to the lens block.
+    config, user_params = _inputs()
+    lens_block = config["lens"][0] if isinstance(config["lens"], list) else config["lens"]
+    sources = lens_block.get("sources")
+    if not sources:
+        pytest.skip("example does not use the explicit sources: list")
+    star_entries = config["star"]
+    star_entries.append(copy.deepcopy(star_entries[int(sources[0].split(".")[1])]))
+    star_entries[-1]["name"] = "SourceB"
+    lens_block["sources"] = list(sources) + [f"star.{len(star_entries) - 1}"]
+
+    # Act
+    params = _prepared(config, user_params)
+
+    # Assert
+    pm_dec = np.atleast_1d(np.asarray(params["star.pm_dec"].initval, float))
+    assert pm_dec[0] == pytest.approx(-3.0)
+
+
 def test_seeds_are_skipped_without_user_coordinates():
     """
     Given a config whose RA/Dec are left at the defaults.yaml placeholder,

@@ -854,13 +854,56 @@ class Lens(Component):
     def _galactic_pm_expectations(self, system):
         """Line of sight for the galactic-model proper-motion seeds.
 
-        Returns ``(ra_rad, dec_rad)``, or None when the coordinates are still
-        the defaults.yaml placeholder -- the galactic model's mean velocity is a
-        function of direction, so seeding off a placeholder would be worse than
-        not seeding at all.
+        Returns ``(ra_rad, dec_rad)``, or None when the seeding does not apply.
+
+        The prior is only allowed to FILL A GAP, never to contradict.  What is
+        open here is the physical side: no example pins the lens mass or
+        distance, because a published light-curve solution (t_0, u_0, t_E, s, q,
+        alpha, rho, sometimes pi_E) does not close the system -- t_E and pi_E
+        without theta_E leave mass, distance and proper motion free.  That gap
+        is what the engine used to fill by inventing a direction (issue #93).
+
+        But where a config DOES imply the proper motion, a prior mean dropped on
+        top fights it.  Measured at the seed (raw = 0), chi2/N ungated vs gated:
+
+            ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
+            ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
+            DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
+            ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
+
+        So the gates below are what keeps this from making published solutions
+        worse.  Filling only the *direction* and leaving the magnitude to the
+        data would serve every case at once, but the direction is not a symbol,
+        so provenance cannot express it per-symbol; that needs a basis change
+        (mu_rel_mag, mu_rel_pa) which is a sampling-geometry question and does
+        not belong here.  tests/test_seed_quality.py pins all four numbers.
         """
         if "galacticmodel" not in getattr(system, "config", {}):
             # No galactic model in the topology: nothing to take the mean of.
+            return None
+        # Skip when something already implies the direction or the magnitude.
+        up = self.config_manager.user_params
+        blockers = [
+            k
+            for k in up
+            if k.endswith((".pi_E_N", ".pi_E_E")) or ".pm_ra" in k or ".pm_dec" in k
+        ]
+        if blockers:
+            logger.info(
+                f"[lens] proper motion or parallax already given "
+                f"({', '.join(sorted(blockers))}); not seeding from the "
+                f"galactic model, which would contradict it."
+            )
+            return None
+        if self.n_sources > 1:
+            # Every source would be seeded at the same bulge mean, forcing one
+            # mu_rel for all of them.  A resolved binary source distinguishes
+            # them, so do not impose it.
+            logger.info(
+                f"[lens] {self.n_sources} sources; not seeding proper motions "
+                f"from the galactic model (one mean would tie their mu_rel "
+                f"together)."
+            )
             return None
         try:
             n_stars = system.star.n_elements
