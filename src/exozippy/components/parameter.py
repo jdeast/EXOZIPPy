@@ -639,7 +639,12 @@ class Parameter:
 
         # 2. IDENTIFY ROLES
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
-        is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
+        # sigma == 0 is the ONE way to pin an element.  A tiny init_scale used
+        # to pin one too (`scales <= 1e-12`), which contradicted the premise
+        # that init_scale never affects the posterior -- it is a preliminary
+        # whitening scale the startup probe supersedes, not a modeling
+        # statement -- and gave pinning a second, undocumented spelling.
+        is_fixed = (sigmas == 0) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
 
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
@@ -647,7 +652,13 @@ class Parameter:
         # missing entry falls back to a fraction of the bound span, or sigma
         # when unbounded.  Non-sampled elements just need a finite
         # placeholder (a NaN scale would poison phys_linear via NaN * raw=0).
-        for i in np.where(~np.isfinite(scales))[0]:
+        # A non-POSITIVE scale takes the same fallback: a whitening scale of
+        # zero is not a scale, it is a degenerate raw direction the sampler
+        # cannot move (and it used to be silently reinterpreted as a pin --
+        # the `scales <= 1e-12` clause deleted above).  The user's sigma is
+        # synced into init_scale, so `sigma: 0` lands here; that element is
+        # already is_fixed and the placeholder never reaches the posterior.
+        for i in np.where(~(np.isfinite(scales) & (scales > 0)))[0]:
             if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
                 scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
                     uppers[i] - lowers[i]
@@ -691,6 +702,10 @@ class Parameter:
         # Gaussian: val = gaussian_mus + gaussian_scales * raw
         gaussian_mus = np.copy(inits)
         gaussian_scales = np.copy(scales)
+
+        # Sampled elements with neither two finite bounds nor a sigma: their
+        # prior is the uncancelled raw N(0,1), i.e. N(initval, init_scale).
+        implicit_prior_idx = []
 
         for i in range(n_elements):
             if not is_sampled[i]:
@@ -753,9 +768,27 @@ class Parameter:
                 gaussian_mus[i] = mus[i] if has_mu else inits[i]
                 gaussian_scales[i] = sigmas[i]
             else:
-                # Unbounded, no sigma: fall back to linear with N(0,1)
+                # No two finite bounds and no sigma: fall back to linear with
+                # N(0,1).  Nothing cancels that raw prior, so this element's
+                # prior IS N(initval, init_scale) -- the one place where
+                # init_scale is a posterior term rather than pure
+                # conditioning.  set_whitening therefore refuses to rescale
+                # it (a data-measured multiplier would make the prior width
+                # data-dependent), so say so once per parameter.
                 gaussian_mus[i] = inits[i]
                 gaussian_scales[i] = scales[i]
+                implicit_prior_idx.append(i)
+
+        if implicit_prior_idx:
+            logger.warning(
+                f"Parameter '{self.label}': element(s) {implicit_prior_idx} "
+                f"are sampled with no finite lower/upper pair and no sigma, "
+                f"so their prior is N(initval, init_scale) from defaults -- "
+                f"init_scale is a real prior width here, and the whitening "
+                f"probe deliberately leaves it alone. Give the element two "
+                f"finite bounds (uniform prior) or a sigma (explicit "
+                f"Gaussian prior) to state the prior yourself."
+            )
 
         # 4. BUILD RAW VARIABLES
         raw_elements = [None] * n_elements
@@ -847,10 +880,29 @@ class Parameter:
                 sv_gaussian_scales = pt.as_tensor_variable(gaussian_scales)
 
             # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
+            #
+            # The bound constants are SANITIZED on the non-logit elements
+            # (dummy [0, 1]) before they enter the graph.  Their real bounds
+            # are infinite there, and -inf + inf*sigmoid = NaN (or +inf for a
+            # half-bounded element): a NaN/inf sitting in the UNSELECTED
+            # branch of the pt.where below, which is the where-trap -- the
+            # switch VJP multiplies it by a zero and 0*inf = NaN poisons the
+            # gradient of the whole vector on every backend.  (A
+            # canonicalization rewrite currently sinks that zero into the
+            # switch and hides it, but a rewriter is not a correctness
+            # guarantee; with rewrites off the NaN is right there.)  Section
+            # A already sanitizes its sigmas the same way.  keep_bounds is a
+            # superset of use_logit, so every logit element is untouched and
+            # the selected branch is bit-for-bit what it always was.
+            keep_bounds = use_logit | (
+                np.isfinite(lowers) & np.isfinite(uppers)
+            )
+            safe_lowers = np.where(keep_bounds, lowers, 0.0)
+            safe_uppers = np.where(keep_bounds, uppers, 1.0)
             lq = sv_logit_q_inits + sv_scale_logits * raw_vector
-            phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
-                uppers - lowers
-            ) * pt.sigmoid(
+            phys_logit = pt.as_tensor_variable(
+                safe_lowers
+            ) + pt.as_tensor_variable(safe_uppers - safe_lowers) * pt.sigmoid(
                 pt.clip(lq, -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
             )
 
@@ -1358,10 +1410,14 @@ class Parameter:
         anchor) is rescaled by 1/multiplier in the same pass -- lq = lq0 +
         scale*raw is invariant under (scale, raw) -> (scale*m, raw/m) -- so
         the start stays the same PHYSICAL point the probe measured around.
-        Elements whose raw N(0,1) IS the prior (unbounded with sigma) are
-        never touched -- their scale is the prior sigma, not a whitening
-        choice.  Non-finite or non-positive entries (a failed probe) leave
-        that element's scale unchanged.
+        Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
+        i.e. anything without two finite bounds -- are never touched.  Their
+        scale is the prior width (sigma when one was given, init_scale when
+        the bounds are infinite and none was), not a whitening choice; only
+        the logit branch's correction potential cancels the raw N(0,1), and
+        only there is the rescale provably posterior-preserving.  Non-finite
+        or non-positive entries (a failed probe) leave that element's scale
+        unchanged.
 
         Because the scales live in pytensor.shared variables, every function
         already compiled from this model sees the new values immediately;
@@ -1402,10 +1458,17 @@ class Parameter:
             if tf["use_logit"][i]:
                 scale_logits[i] *= m
                 rescaled[j] = True
-            elif not ws["has_sigma_prior"][i]:
-                gauss_scales[i] *= m
-                rescaled[j] = True
             else:
+                # NON-LOGIT elements are never rescaled.  Nothing cancels
+                # their raw N(0,1) (section C fires only for use_logit), so
+                # the raw prior IS this element's prior: N(mu, sigma) when a
+                # sigma was given, N(initval, init_scale) when the bounds are
+                # infinite and no sigma was.  The multiplier is measured from
+                # the data, so rescaling would make the prior WIDTH
+                # data-dependent -- circular, and a violation of the
+                # "posterior provably unchanged" invariant that only holds
+                # for the logit branch.  Report the measured scale instead
+                # (PTDE uses it to disperse chains).
                 post[j] = m
 
         # Keep a polished (nonzero) raw start pinned to the same physical
@@ -1852,20 +1915,34 @@ class Parameter:
         return ""
 
     def to_latex_prior_def(self) -> str:
-        """Generate a \\providecommand for the prior column value.
+        """Generate the \\providecommand(s) for the prior column value.
 
-        The command name is ``\\<latex_varname>prior`` so the table body can
-        reference it symbolically rather than inlining the prior string.  A
-        single command is generated per parameter (not per element) because
-        all elements of a vector parameter share the same prior.
+        The command name is ``\\<latex_varname><idx>prior`` -- the same
+        ``<idx>`` word suffix ``to_latex_def`` puts on the value macros -- so
+        the table body can reference the prior symbolically rather than
+        inlining the string.  A scalar parameter keeps the unsuffixed
+        ``\\<latex_varname>prior``.
+
+        ONE COMMAND PER ELEMENT, not per parameter: elements of a vector
+        stopped sharing a prior when the manifest's per-element "overrides"
+        channel arrived (GP and robust-likelihood hyperparameters are
+        full-length vectors with the files that did not opt in pinned via
+        ``sigma: 0``).  Reading element 0 and reusing it made such a vector
+        report "Fixed" for its genuinely sampled elements -- a false
+        statement of the prior in a published table.
         """
-        prior_str = self.get_prior_str(index=0, latex=True)
-        if not prior_str:
-            return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
-        return (
-            rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}"
-            + "\n"
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
         )
+        lines = []
+        for i in range(n_elements):
+            idx_str = _idx_to_words(i) if n_elements > 1 else ""
+            prior_str = self.get_prior_str(index=i, latex=True)
+            lines.append(
+                rf"\providecommand{{\{self.latex_varname}{idx_str}prior}}"
+                rf"{{{prior_str}}}" + "\n"
+            )
+        return "".join(lines)
 
     def _value_cells(self, idx_str: str, mode_suffixes: Optional[list]) -> str:
         """The Value column(s) of a table row.
@@ -1934,7 +2011,9 @@ class Parameter:
                     + r"\dotfill"
                 )
 
-            prior_text = "\\" + self.latex_varname + "prior"
+            # Per-element prior macro (see to_latex_prior_def): a vector's
+            # elements may carry different priors.
+            prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
             lines.append(
                 rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
@@ -1986,7 +2065,7 @@ class Parameter:
                 + r"\dotfill"
             )
 
-        prior_text = "\\" + self.latex_varname + "prior"
+        prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
         return (
             rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
