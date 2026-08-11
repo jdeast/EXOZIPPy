@@ -1099,6 +1099,14 @@ def ptde_sample(
         logger,
     )
 
+    # Ladder communication statistics, stamped on the trace so the mode
+    # report can quote them as context.  These are TEMPERATURE round trips of
+    # a replica (T=1 -> T=max -> T=1), NOT mode changes: outputs.modes counts
+    # the latter itself from the stored T=1 labels and labels the two
+    # separately, because "swap" is ambiguous between them.
+    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips[0])
+    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds)
+
     ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
     sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
     rt_rate = round_trips[0] / max(n_swap_rounds, 1)

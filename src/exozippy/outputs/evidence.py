@@ -50,6 +50,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .autocorr import iact as _iact
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,45 +95,57 @@ def _logmeanexp(a):
     return m + np.log(np.mean(np.exp(a - m)))
 
 
-def _iact(x):
-    """Integrated autocorrelation time of a 1-D series (>= 1).
+# Fixed-point convergence tolerance, RELATIVE to the magnitude of lr itself.
+# lr is a log-evidence at raw model-logp scale (|lr| ~ 1e4..1e6 on real
+# datasets), and it is only ever known to float64 relative precision: at
+# |lr| = 1e6 one ULP is already 1.2e-10, so the ABSOLUTE 1e-10 test this
+# replaced sat inside the round-off floor of its own arithmetic and reported
+# spurious non-convergence on ~25% of otherwise perfect estimates (measured;
+# see tests).  1e-10 relative is ~4.5e5 ULPs -- comfortably above the
+# sqrt(N)-term summation noise of the two _logmeanexp calls -- while the
+# absolute step it admits, 1e-10 * |lnZ|, is 1e-4 nat even at |lnZ| = 1e6:
+# four orders of magnitude below the 0.5-nat error bar at which a mode is
+# refused, so nothing statistically meaningful can hide under it.  A bridge
+# iteration that has genuinely not converged is still moving by O(0.01-1)
+# nat per step, which is many orders above this at any scale.
+DEFAULT_BRIDGE_RTOL = 1e-10
 
-    Sums the normalized autocorrelation with Geyer's initial-positive-sequence
-    truncation.  Used to inflate the bridge error bar for autocorrelated
-    posterior draws; returns ~1 for i.i.d. input.
+
+def _segments(values, mask, lengths):
+    """Split ``values`` (already reduced by ``mask``) back into chain segments.
+
+    ``lengths`` describes the un-filtered array; ``mask`` says which of its
+    entries survived.  Returns one 1-D array per chain, in sampling order.
     """
-    x = np.asarray(x, dtype=float)
-    n = x.size
-    if n < 4:
-        return 1.0
-    x = x - x.mean()
-    var = np.dot(x, x) / n
-    if var <= 0:
-        return 1.0
-    # autocovariance via FFT
-    nfft = 1
-    while nfft < 2 * n:
-        nfft *= 2
-    f = np.fft.rfft(x, nfft)
-    acov = np.fft.irfft(f * np.conjugate(f), nfft)[:n] / n
-    rho = acov / acov[0]
-    tau = 1.0
-    for k in range(1, n):
-        if rho[k] <= 0:
-            break
-        tau += 2.0 * rho[k]
-    return max(tau, 1.0)
+    if lengths is None:
+        return [values]
+    out = []
+    pos = 0  # cursor in the original array
+    fpos = 0  # cursor in the filtered array
+    for length in lengths:
+        kept = int(mask[pos : pos + length].sum())
+        out.append(values[fpos : fpos + kept])
+        pos += length
+        fpos += kept
+    return out
 
 
-def bridge_lnZ(l1, l2, maxiter=1000, tol=1e-10):
+def bridge_lnZ(l1, l2, maxiter=1000, tol=DEFAULT_BRIDGE_RTOL, l1_chains=None):
     """Optimal iterative bridge-sampling estimate of a log normalizing constant.
 
     Parameters
     ----------
     l1 : array, log(unnormalized target) - log(proposal) at the *posterior*
-        draws (samples from the target).
+        draws (samples from the target), **in sampling order**.
     l2 : array, the same log-ratio at fresh draws from the *proposal*.
-    maxiter, tol : iteration controls for the fixed-point update.
+    l1_chains : sequence of int, optional -- the per-chain lengths that
+        partition ``l1`` (they must sum to ``len(l1)``).  Given, the IACT that
+        inflates the posterior-side error term is measured chain by chain and
+        combined; omitted, ``l1`` is treated as one long chain, which
+        concatenates independent chains end to end and biases the IACT.
+    maxiter : maximum fixed-point iterations.
+    tol : RELATIVE convergence tolerance on lr (see DEFAULT_BRIDGE_RTOL);
+        the effective absolute threshold is ``tol * max(1, |lr|)``.
 
     Returns
     -------
@@ -140,11 +154,34 @@ def bridge_lnZ(l1, l2, maxiter=1000, tol=1e-10):
         (normalized) proposal; re2 is the approximate relative mean-squared
         error of the Z estimate (Fruhwirth-Schnatter 2004) and
         lnZ_err = sqrt(re2).
+
+    Notes
+    -----
+    Everything downstream of the fixed point is computed **recentered by lr**.
+    The textbook bridge diagnostic is written with
+
+        f1 = exp(l2) / (s1 exp(l2) + s2 r),   f2 = 1 / (s1 exp(l1) + s2 r)
+
+    at r = exp(lr), and both expressions overflow or underflow to nan/inf as
+    soon as |lr| or |l| exceeds ~709 -- which is *always*, since l1 and l2
+    carry the raw model logp (-1e4 .. -1e6 for any real dataset).  Dividing
+    through by exp(l2) and by r respectively gives the algebraically identical
+
+        f1 = 1 / (s1 + s2 exp(lr - l2)),      f2' = 1 / (s1 exp(l1 - lr) + s2)
+
+    where every exponent is a *difference* of same-scale log quantities and so
+    stays O(1).  f1 is unchanged; f2' = r * f2 is f2 rescaled by a constant,
+    and only the scale-free ratios ``var/mean^2`` (and the IACT, which is
+    computed from the normalized autocorrelation) enter re2 -- so re2 and
+    lnZ_err are exactly the quantities the unrecentered form intends, and
+    reproduce it to float precision wherever it was representable at all.
     """
     l1 = np.asarray(l1, dtype=float)
     l2 = np.asarray(l2, dtype=float)
-    l1 = l1[np.isfinite(l1)]
-    l2 = l2[np.isfinite(l2)]
+    finite1 = np.isfinite(l1)
+    finite2 = np.isfinite(l2)
+    l1 = l1[finite1]
+    l2 = l2[finite2]
     N1, N2 = l1.size, l2.size
     if N1 < 2 or N2 < 2:
         return np.nan, np.inf, np.inf, False
@@ -161,22 +198,29 @@ def bridge_lnZ(l1, l2, maxiter=1000, tol=1e-10):
         lr_new = _logmeanexp(log_num) - _logmeanexp(log_den)
         if not np.isfinite(lr_new):
             return np.nan, np.inf, np.inf, False
-        if abs(lr_new - lr) < tol:
+        if abs(lr_new - lr) < tol * max(1.0, abs(lr_new)):
             lr = lr_new
             converged = True
             break
         lr = lr_new
 
-    r = np.exp(lr)
     s1 = N1 / (N1 + N2)
     s2 = N2 / (N1 + N2)
-    # f1 over proposal samples, f2 over posterior samples (converged r)
-    f1 = np.exp(l2) / (s1 * np.exp(l2) + s2 * r)
-    f2 = 1.0 / (s1 * np.exp(l1) + s2 * r)
+    # Recentered bridge functions -- see the Notes above.  f1 lives on the
+    # proposal draws (i.i.d. by construction), f2 on the posterior draws.
+    with np.errstate(over="ignore"):
+        f1 = 1.0 / (s1 + s2 * np.exp(lr - l2))
+        f2 = 1.0 / (s1 * np.exp(l1 - lr) + s2)
     m1, m2 = f1.mean(), f2.mean()
     if not (np.isfinite(m1) and np.isfinite(m2)) or m1 <= 0 or m2 <= 0:
-        return lr, np.inf, np.inf, converged
-    tau = _iact(f2)
+        return float(lr), np.inf, np.inf, converged
+    # f2 is a POSTERIOR-draw series: it inherits the sampler's
+    # autocorrelation, so its contribution to the estimator variance is
+    # inflated by the IACT.  The caller must hand the posterior draws over in
+    # sampling order, one entry per chain (see _posterior_chains); measuring
+    # the IACT of a reordered series silently returns ~1 and understates the
+    # error bar by sqrt(tau).
+    tau = _iact(_segments(f2, finite1, l1_chains))
     term1 = (f1.var() / m1**2) / N2
     term2 = tau * (f2.var() / m2**2) / N1
     re2 = float(term1 + term2)
@@ -355,6 +399,43 @@ def _get_labels(idata, mode_report):
     return np.asarray(mode_report.labels, dtype=int).reshape(-1)
 
 
+def _mode_draw_index(labels, mode, n_chain, n_draw, max_draws):
+    """Row indices of ``mode``'s draws, in sampling order, thinned by stride.
+
+    Returns ``(index, chain_lengths)``: ``index`` selects rows of the
+    (chain, draw) row-major posterior matrix, grouped by chain and ascending
+    in draw within each chain; ``chain_lengths`` partitions it back into
+    chains for the IACT.
+
+    The thinning is a **uniform stride applied within each chain**, never an
+    unsorted ``rng.choice``: the retained series has to stay a time series or
+    the IACT of the bridge function reads ~1 whatever the sampler did, and
+    the posterior-side error term is then understated by sqrt(tau) (a factor
+    of ~20 on a chain with tau ~ 400).  No separate thinning correction is
+    needed downstream -- the mean the estimator forms is the mean of exactly
+    this strided series, so its own IACT is the right inflation factor.
+
+    A mode's draws within a chain need not be contiguous (the chain may have
+    left and returned); the retained subsequence is treated as a stationary
+    series, which is the same approximation the stride already makes.
+    """
+    sel_idx = np.flatnonzero(labels == mode)
+    if sel_idx.size == 0:
+        return sel_idx, []
+    stride = max(1, int(np.ceil(sel_idx.size / max(max_draws, 1))))
+    chain_of = sel_idx // n_draw
+    kept = []
+    chain_lengths = []
+    for c in range(n_chain):
+        idx_c = sel_idx[chain_of == c][::stride]
+        if idx_c.size:
+            kept.append(idx_c)
+            chain_lengths.append(int(idx_c.size))
+    if not kept:
+        return np.zeros(0, dtype=int), []
+    return np.concatenate(kept), chain_lengths
+
+
 def estimate_mode_evidences(
     model,
     idata,
@@ -374,8 +455,9 @@ def estimate_mode_evidences(
     mode_report : the ModeReport whose modes are to be weighted.
     n_proposal : proposal draws per mode (default: match the mode's posterior
         draw count, capped at max_posterior_draws).
-    max_posterior_draws : subsample each mode's posterior draws to at most this
-        many for the (many) logp evaluations.
+    max_posterior_draws : thin each mode's posterior draws to at most this
+        many for the (many) logp evaluations.  Thinning is a per-chain stride
+        so the retained draws stay a time series (see _mode_draw_index).
     re2_max : refuse a mode whose bridge relative-MSE exceeds this.
     seed : RNG seed for reproducible proposal draws.
 
@@ -410,25 +492,26 @@ def estimate_mode_evidences(
 
     Xall = _posterior_matrix(idata, layout, D)
     labels = _get_labels(idata, mode_report)
+    n_chain = int(idata.posterior.sizes["chain"])
+    n_draw = int(idata.posterior.sizes["draw"])
 
     # Fit proposals and stage every point that needs a logp evaluation, so all
     # modes' posterior + proposal points share a single fork-parallel logp pass.
-    stage = []  # (mode, kind, X1, Y, mu, S)
+    stage = []  # (mode, kind, X1, Y, mu, S, chain_lengths)
     all_points = []
     for k in range(mode_report.n_modes):
-        sel = labels == k
-        X1 = Xall[sel]
+        sel_idx, chain_lengths = _mode_draw_index(
+            labels, k, n_chain, n_draw, max_posterior_draws
+        )
+        X1 = Xall[sel_idx]
         if X1.shape[0] < 4:
-            stage.append((k, None, X1, None, None, None))
+            stage.append((k, None, X1, None, None, None, None))
             continue
-        if X1.shape[0] > max_posterior_draws:
-            idx = rng.choice(X1.shape[0], max_posterior_draws, replace=False)
-            X1 = X1[idx]
         mu, S = _fit_gaussian(X1)
         n2 = n_proposal or X1.shape[0]
         n2 = int(min(n2, max_posterior_draws))
         Y = _sample_gaussian(mu, S, n2, rng)
-        stage.append((k, "ok", X1, Y, mu, S))
+        stage.append((k, "ok", X1, Y, mu, S, chain_lengths))
         all_points.append(X1)
         all_points.append(Y)
 
@@ -439,7 +522,7 @@ def estimate_mode_evidences(
         logp_all = np.zeros(0)
 
     cursor = 0
-    for k, kind, X1, Y, mu, S in stage:
+    for k, kind, X1, Y, mu, S, chain_lengths in stage:
         if kind is None:
             results.append(
                 EvidenceResult(
@@ -465,7 +548,9 @@ def estimate_mode_evidences(
         l1 = logp1 - logq1
         l2 = logp2 - logq2
 
-        lnZ, lnZ_err, re2, converged = bridge_lnZ(l1, l2)
+        lnZ, lnZ_err, re2, converged = bridge_lnZ(
+            l1, l2, l1_chains=chain_lengths
+        )
 
         refused = False
         reason = ""
@@ -511,7 +596,9 @@ def softmax_weights(lnZ, lnZ_err):
     return w, dw
 
 
-def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
+def apply_evidence_weighting(
+    mode_report, results, re2_max=DEFAULT_RE2_MAX, idata=None
+):
     """Replace occupancy weights with softmax evidence weights, if confident.
 
     Softmax evidence weights need every mode's lnZ, so a single refused mode
@@ -519,6 +606,16 @@ def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
     provenance are kept unchanged (with a note), honoring the project
     invariant that a shaky weight is never emitted.  Returns True iff evidence
     weights were applied.
+
+    Each mode's occupancy weight and its mixing-derived error bar survive on
+    ``ModeInfo.occ_weight`` / ``occ_weight_err`` either way, so the report can
+    print the two side by side -- evidence weighting is a CROSS-CHECK on
+    occupancy, and the comparison is the point.
+
+    ``idata``, when given, has its ``posterior['mode'].attrs`` refreshed: that
+    variable is built by ``ModeReport.attach`` at identify_modes time and
+    would otherwise keep advertising the superseded occupancy weights and
+    provenance to anything reading the trace back from disk.
     """
     if not results or len(results) != mode_report.n_modes:
         return False
@@ -541,12 +638,19 @@ def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
             "falling back to occupancy",
             ids,
         )
+        if idata is not None:
+            mode_report.attach(idata)
         return False
 
     lnZ = np.array([r.lnZ for r in results], dtype=float)
     err = np.array([r.lnZ_err for r in results], dtype=float)
     w, dw = softmax_weights(lnZ, err)
     for k, m in enumerate(mode_report.modes):
+        if not np.isfinite(m.occ_weight):
+            # Reports built before this ran (or by hand) still get a record
+            # of what occupancy said, so the cross-check stays possible.
+            m.occ_weight = float(m.weight)
+            m.occ_weight_err = float(m.weight_err)
         m.weight = float(w[k])
         m.weight_err = float(dw[k])
         m.lnZ = float(lnZ[k])
@@ -567,6 +671,35 @@ def apply_evidence_weighting(mode_report, results, re2_max=DEFAULT_RE2_MAX):
             for r in results
         )
     )
+    # Cross-check line: evidence weighting needs no mode transitions at all,
+    # occupancy needs them and reports its own mixing-derived error bar, so
+    # disagreement beyond the two error bars localizes the problem (ladder
+    # tuning on the occupancy side, proposal fit on the evidence side).
+    disagree = []
+    for m in mode_report.modes:
+        if not np.isfinite(m.occ_weight):
+            continue
+        spread = np.hypot(
+            m.weight_err if np.isfinite(m.weight_err) else 0.0,
+            m.occ_weight_err if np.isfinite(m.occ_weight_err) else 0.0,
+        )
+        gap = abs(m.weight - m.occ_weight)
+        disagree.append(
+            f"mode {m.index + 1}: evidence {m.weight:.3f}+/-"
+            f"{m.weight_err:.3f} vs occupancy {m.occ_weight:.3f}+/-"
+            f"{m.occ_weight_err:.3f}"
+            + (
+                "  <-- differ by > 3 sigma"
+                if gap > 3 * max(spread, 1e-12)
+                else ""
+            )
+        )
+    if disagree:
+        mode_report.notes.append(
+            "evidence-vs-occupancy cross-check -- " + "; ".join(disagree)
+        )
+    if idata is not None:
+        mode_report.attach(idata)
     logger.info(
         "evidence weighting applied: weights=%s", [f"{x:.3f}" for x in w]
     )
