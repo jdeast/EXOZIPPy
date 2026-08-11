@@ -28,18 +28,30 @@ vectors), and an isolated single-parameter toy model does not reproduce the
 cancellation at all (see git history of this file/commit message for the
 toy-model dead end). The real draw sidesteps both problems.
 
-Note: the "good" draw's lp is pinned to the CURRENT model's value, not the
-historical stored lp (~2982.18) -- the model has legitimately changed since
-that trace (log_s sampling, pinned source mass, planet log_q default).  The
-check used to be finite-only because System.prepare() was not deterministic
-across process runs; that turned out to be PYTHONHASHSEED-ordered iteration
-of eq.free_symbols in the relaxation engine's (since-deleted) sympy scale
-passes, scattering init_scale by orders of magnitude and with it the
-raw->physical map.  The whitening refactor removed the broken passes and
-config.py now sorts every free_symbols walk, so the build is bit-for-bit
-reproducible and the value check is back.  If a deliberate model change
-moves the value, re-measure it at this exact raw point and update
-GOOD_EXPECTED_LP.
+GOOD_RAW is a fresh ordinary draw (chain 35, draw 1689 of a short run under the
+current code), not the historical one, and the fixture restores the whitening it
+was sampled under.  Both details are load-bearing, and the reason is the same:
+a raw vector is not a portable description of a physical state.  It is a
+coordinate in the WHITENED space and an offset from the initvals, so it moves if
+either changes.  Evaluated without this run's whitening, this draw gives logp
+-1.6e6 and chi2/N 3671 instead of 2979.9175 and 1.002.  The previous historical
+draw stopped being "good" the same way, when #99 changed the proper-motion start
+values under it.
+
+So there are two distinct failure modes, and the fix differs:
+  - the MODEL changed on purpose -> re-measure GOOD_EXPECTED_LP at this same raw
+    point (the git log of this file lists the earlier such re-measurements);
+  - the START VALUES changed -> the raw point now decodes elsewhere, and the
+    honest fix is a fresh draw from a fresh run, not a new constant pinned to a
+    stale point.  test_good_draw_is_actually_a_good_fit below is what tells the
+    two apart: it fails only in the second case.
+
+The value check used to be finite-only because System.prepare() was not
+deterministic across process runs; that turned out to be PYTHONHASHSEED-ordered
+iteration of eq.free_symbols in the relaxation engine's (since-deleted) sympy
+scale passes.  The whitening refactor removed those and config.py now sorts
+every free_symbols walk (and, since #92, every component-discovery walk), so the
+build is bit-for-bit reproducible and the value check is back.
 
 Marked 'slow' (builds a full System + compiles PyTensor graphs).
 """
@@ -48,9 +60,11 @@ import os
 import shutil
 
 import numpy as np
+import pytensor
 import pytest
 import yaml
 
+from exozippy import whitening
 from exozippy.system import System
 
 pytestmark = pytest.mark.slow
@@ -88,33 +102,53 @@ RUNAWAY_RAW = {
     "star.rv_raw": [2201.98526294, -691.32034664],
 }
 
-# Same chain, draw 46660 (20 steps earlier): the last ordinary, non-runaway
-# state (historical stored lp ~= 2982.18).
+# An ORDINARY, well-fitting draw from a fresh run under the current code:
+# chain 35, draw 1689 of a short (4-temp, 500-tune, 2000-draw) fit of this same
+# example, whose stored lp was 2979.9175 and whose mulens chi2/N is 1.002.
+#
+# Why a fresh draw rather than the historical one (chain 23, draw 46660): raw
+# values are coordinates in the WHITENED space, so they only mean anything under
+# the whitening they were sampled with, and they are offsets from the initvals,
+# so they also move when a start value changes.  The galactic-model proper-motion
+# seeding (#99) changed the initvals, which left the old draw decoding to a state
+# with chi2/N ~ 261 -- still fine as a determinism probe, but no longer the
+# "good draw" its name promised.  Evaluated WITHOUT the run's whitening this
+# draw gives logp -1.6e6 and chi2/N 3671, which is what makes the fixture below
+# restore it; with it, logp reproduces the trace's stored lp exactly.
 GOOD_RAW = {
-    "band.u1_raw": [6.124144468621876],
-    # log_s coordinate (was lens.s_raw pre-P2); extreme-negative raw pins the
-    # logit at the shared lower endpoint (10**-1 = 0.1).
-    "lens.log_s_raw": [-14.73579507774429],
-    "lens.t_0_raw": [0.21660909850932655],
-    "lens.u_0_raw": [-0.3258404381227836],
-    "lens.xalpha_raw": [-4.220453654077744],
-    "lens.yalpha_raw": [9.819914800098061],
-    "mulensinstrument.err_scale_raw": [0.6809652656825157],
-    "mulensinstrument.log_f_total_raw": [-0.21104036781220858],
-    "mulensinstrument.q_source_raw": [-0.31134542581872854],
-    "planet.mass_raw": [-0.9441505502539654],
-    "star.distance_raw": [-345.90821049, 91.83850293],
-    # star.1 (Source)'s mass is now pinned (see RUNAWAY_RAW's comment above).
-    "star.logmass_raw": [87.18591661],
-    "star.pm_dec_raw": [-5.27994699, 0.40483486],
-    "star.pm_ra_raw": [2.99778494, 1.37559868],
-    "star.rv_raw": [2.36402842, -1.05406419],
+    "band.u1_raw": [0.2176204790834511],
+    "lens.log_s_raw": [-16.184426615189963],
+    "lens.t_0_raw": [4.88478412864818],
+    "lens.u_0_raw": [-42.52723267883055],
+    "lens.xalpha_raw": [-109.86398001224084],
+    "lens.yalpha_raw": [123.27869830685752],
+    "mulensinstrument.err_scale_raw": [2.786029660640395],
+    "mulensinstrument.log_f_total_raw": [0.6041700945394],
+    "mulensinstrument.q_source_raw": [-38.74145614466925],
+    "planet.mass_raw": [20.294111688917543],
+    "star.distance_raw": [530.3867500365418, 353.39006307342015],
+    "star.logmass_raw": [267.0717585861006],
+    "star.pm_dec_raw": [71.60334495785527, 4.5867354001178064],
+    "star.pm_ra_raw": [5.123900807437569, 23.36953273281145],
+    "star.rv_raw": [-0.8192451905245356, -0.7059124589883945],
 }
+
+# The whitening the draws above were sampled under, as run.py persists it.
+# Restoring it is what makes a raw-space point mean the same thing here as it
+# did in the fit; without it the same numbers decode to a different physical
+# state entirely.
+WHITENING_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "fixtures", "DC2018_128_whitening.json"
+)
 
 
 @pytest.fixture(scope="module")
-def dc2018_128_logp(tmp_path_factory):
-    """Build the DC2018_128 model once; return (compile_logp fn, model)."""
+def dc2018_128_system(tmp_path_factory):
+    """Build the DC2018_128 model once; return (system, model).
+
+    The whitening the pinned raw points were sampled under is restored here, so
+    a raw vector means the same thing as it did in the run it came from.
+    """
     work_dir = tmp_path_factory.mktemp("dc2018_128_work") / "DC2018_128"
     shutil.copytree(
         EXAMPLE_DIR,
@@ -130,66 +164,58 @@ def dc2018_128_logp(tmp_path_factory):
         with open("DC2018_128.params.yaml") as f:
             user_params = yaml.safe_load(f)
 
-        # The historical draws below were recorded when the planet mass was
-        # sampled linearly; a lens body now defaults to log_q.  Unlike the
-        # s -> log_s rename, the raw values cannot be carried across: the
-        # runaway value pins the logit at an upper bound that means 260000
-        # Mjup in one coordinate and q = 10 in the other, and the good draw
-        # sits mid-range, where the two coordinates share nothing.  Pin the
-        # coordinate the draws came from -- what this file regression-tests
-        # (the unclipped raw**2 in the logit-uniform prior correction) lives
-        # in Parameter.build_pymc and is the same in either parameterization.
+        # Both pinned draws were sampled in the LINEAR planet-mass coordinate:
+        # the historical runaway predates log_q, and the fresh good draw was
+        # taken from a run configured this way to match it.  A lens body now
+        # defaults to log_q, and the raw values cannot be carried across -- the
+        # runaway value pins the logit at an upper bound meaning 260000 Mjup in
+        # one coordinate and q = 10 in the other, and the good draw sits
+        # mid-range, where the two share nothing.  What this file regression-
+        # tests (the unclipped raw**2 in the logit-uniform prior correction)
+        # lives in Parameter.build_pymc and is the same either way.
         for entry in config.get("planet", []):
             entry.setdefault("mass_parameterization", "linear")
 
         system = System(config, user_params)
         system.prepare()
         model = system.build_model()
-        logp_fn = model.compile_logp()
+        # build_model leaves the PRELIMINARY scales in place; run.py measures
+        # the real ones at startup.  The pinned raw points come from a run, so
+        # restore that run's whitening or they decode to the wrong state.
+        assert whitening.load_whitening(system, WHITENING_FIXTURE), (
+            f"could not restore the whitening fixture {WHITENING_FIXTURE}; "
+            f"the pinned raw points are meaningless without it"
+        )
     finally:
         os.chdir(orig_cwd)
 
-    return logp_fn
+    return system, model
+
+
+@pytest.fixture(scope="module")
+def dc2018_128_logp(dc2018_128_system):
+    """The compiled logp of the model above."""
+    _system, model = dc2018_128_system
+    return model.compile_logp()
 
 
 def _point(raw_dict):
     return {k: np.asarray(v, dtype=float) for k, v in raw_dict.items()}
 
 
-# Measured at this exact raw point on a deterministic build (2026-08-07,
-# post free_symbols-sort hardening).  Differs from the historical stored lp
-# (~2982.18) because the model itself has changed since that trace; see the
-# module docstring.
-# Re-measured 2026-08-08 four times: the Op-path annual parallax fix
-# (review 1.1) moved the mulens likelihood (-934.604); the galacticmodel
-# prior normalization (reviews 1.3/1.4: pm->velocity Jacobian + mixture
-# branch normalization) shifted it to -952.076; the genulens-fidelity
-# upgrade (thick disk branch, bar cutoff, disk plateau, number-density
-# anchors, R0 = 8.16 frame) nudged it to -953.817; the mu_rel helio->geo
-# frame fix (t_E/pi_E now derive from mu_rel_geo at t0_par) moved the
-# mulens likelihood at this raw point to -944.858.
-# Re-measured 2026-08-10: normalizing the galacticmodel Chabrier IMF prior
-# over the sampled logmass support (so it is comparable with the new
-# IMF: Salpeter option) subtracts the truncated-lognormal constant
-# log(sigma*sqrt(2pi)*(Phi(u_hi) - Phi(u_lo))) = +0.3568196 nats PER STAR.
-# This config has two (star.Lens, star.Source), so the shift is exactly
-# -0.7136392 and nothing else moved.
-# Re-measured 2026-08-11: star.pm_ra/pm_dec are now seeded at the galactic
-# model's prior mean instead of being left at defaults.yaml for the t_E
-# constraint to absorb (issue #93).  This is the largest re-measurement in the
-# list and needs the caveat spelled out: RAW values are offsets from the
-# initvals, so changing a start value changes which PHYSICAL point a pinned raw
-# vector decodes to.  These raw numbers came from a trace taken under the old
-# seeding, so the point they now land on is no longer the well-fitting draw the
-# name suggests -- chi2/N there is ~261, against ~1.2 at the new seed itself
-# (raw = 0), which is better than either arbitrary branch the old seeding could
-# produce (~1.42 and ~1.51).
+# The lp this draw had in the run it came from, reproduced exactly here once the
+# run's whitening is restored (see WHITENING_FIXTURE).  It is a genuinely good
+# state, not merely a pinned one: mulens chi2/N at this point is 1.002.
 #
-# The test therefore still does the job it was written for -- pinning that
-# System.prepare() is bit-for-bit reproducible, and that GOOD_RAW is read
-# against the right free_RVs -- but it is no longer a statement about fit
-# quality.  Do not read this number as one.
-GOOD_EXPECTED_LP = -109962.6577
+# This value tracks the MODEL, so a deliberate physics change moves it -- the
+# earlier history of re-measurements (annual parallax on the Op path, the
+# galacticmodel prior normalizations, the genulens fidelity upgrade, the
+# mu_rel helio->geo frame fix, the Chabrier IMF normalization) is in the git log
+# of this file.  If a change moves it, re-measure at this exact raw point.  If
+# a change moves the START VALUES instead, that is different: the raw point then
+# decodes somewhere else, and the honest fix is a fresh draw from a fresh run
+# rather than a new constant on a stale point.
+GOOD_EXPECTED_LP = 2979.9175
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
@@ -211,6 +237,47 @@ def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
         f"{GOOD_EXPECTED_LP} +/- 5. Either build reproducibility broke "
         f"(PYTHONHASHSEED sensitivity) or the model changed deliberately -- "
         f"if the latter, re-measure and update GOOD_EXPECTED_LP."
+    )
+
+
+def test_good_draw_is_actually_a_good_fit(dc2018_128_system):
+    """
+    Given the good draw,
+    When the microlensing light curve is evaluated there,
+    Then it fits to about one chi2 per point.
+
+    Guards the word "good".  A pinned lp alone cannot do that: it stays
+    self-consistent even when the start values move under it and the point
+    quietly stops describing a good state, which is exactly what happened when
+    #99 reseeded the proper motions (chi2/N went to ~261 while the lp check was
+    simply re-pinned).  chi2 is measured against the data, so it cannot drift
+    along with the model.
+    """
+    # Arrange
+    system, model = dc2018_128_system
+
+    # Act
+    obs = [v for v in model.observed_RVs if "mulens" in v.name][0]
+    ins = obs.owner.inputs
+    fn = pytensor.function(
+        model.value_vars,
+        model.replace_rvs_by_values([ins[-2], ins[-1]]),
+        on_unused_input="ignore",
+    )
+    point = _point(GOOD_RAW)
+    mu, sigma = [
+        np.asarray(a, dtype=float).ravel()
+        for a in fn(*[point[v.name] for v in model.value_vars])
+    ]
+    data = np.asarray(obs.tag.observations.eval(), dtype=float).ravel()
+    reduced = float(np.sum(((data - mu) / sigma) ** 2)) / data.size
+
+    # Assert
+    assert reduced < 1.5, (
+        f"chi2/N at the 'good' draw is {reduced:.3f}, not ~1.  The raw point no "
+        f"longer describes a good state -- most likely the start values moved "
+        f"under it, in which case take a fresh draw from a fresh run rather "
+        f"than re-pinning GOOD_EXPECTED_LP."
     )
 
 
