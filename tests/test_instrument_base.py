@@ -10,6 +10,7 @@ by their own integration suites; here we pin the shared scaffolding directly.
 
 import inspect
 
+import astropy.units as u
 import numpy as np
 import pytest
 
@@ -156,12 +157,15 @@ def test_register_noise_additive_adds_jitter_variance_and_jitter():
     """
     Given the default jitter_variance noise model,
     When _register_noise runs with a floor,
-    Then the manifest gains jitter_variance (with the lower floor) and jitter.
+    Then the manifest gains jitter_variance and jitter, and the computed floor
+    rides the "overrides" channel (clipped against the user's own bound in
+    ConfigManager.resolve) rather than a plain manifest option (which would
+    replace the resolved bound outright).
     """
     inst = _make([{"file": "a.dat"}])
     manifest = {}
     inst._register_noise(manifest, jittervar_lower=[-0.1])
-    assert manifest["jitter_variance"] == {"lower": [-0.1]}
+    assert manifest["jitter_variance"] == {"overrides": {"lower": [-0.1]}}
     assert manifest["jitter"] == "default"
     assert "err_scale" not in manifest
 
@@ -187,6 +191,107 @@ def test_register_noise_additive_requires_a_floor():
     inst = _make([{"file": "a.dat"}])
     with pytest.raises(ValueError):
         inst._register_noise({})
+
+
+# ---------------------------------------------------------------------------
+# The computed jitter floor vs the user's own bound (end to end through System)
+#
+# The floor is a validity limit: below -min(err)**2 the total sigma is NaN.  So
+# the user may TIGHTEN jitter_variance's lower bound freely, and is clipped
+# (loudly) only when asking to go below the floor.  Before the fix the floor
+# rode the manifest's plain options, which replace the resolved array, so every
+# user bound was discarded silently.
+# ---------------------------------------------------------------------------
+JITTERVAR_TO_INTERNAL = ((u.m / u.s).to(u.solRad / u.d)) ** 2
+# The fixture's errors are a flat 3 m/s, so the floor is -0.95 * 3**2.
+EXPECTED_FLOOR = -0.95 * 9.0
+
+
+@pytest.fixture(scope="module")
+def rv_file(tmp_path_factory):
+    rng = np.random.default_rng(11)
+    t = np.sort(rng.uniform(2455000.0, 2455400.0, 40))
+    rv = 30.0 * np.sin(2 * np.pi * t / 17.0) + rng.normal(0, 3.0, 40)
+    err = np.full(40, 3.0)
+    path = tmp_path_factory.mktemp("jitter_rv") / "a.rv"
+    np.savetxt(path, np.column_stack([t, rv, err]))
+    return str(path)
+
+
+def _jittervar_lower(rv_file, user_entry=None):
+    """Resolved jitter_variance lower bound (user units, m2/s2)."""
+    from exozippy.system import System
+
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+        "rvinstrument": [{"name": "A_inst", "file": rv_file}],
+    }
+    params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.05},
+        "orbit.b.logP": {"initval": np.log10(17.0)},
+        "orbit.b.tc": {"initval": 2455010.0},
+    }
+    if user_entry is not None:
+        params["rvinstrument.A_inst.jitter_variance"] = user_entry
+    system = System(config, params)
+    system.prepare()
+    system.build_model()
+    assert system.rvinstrument.jittervar_lower[0] == pytest.approx(
+        EXPECTED_FLOOR
+    )
+    return system.rvinstrument.jitter_variance.lower[0] / JITTERVAR_TO_INTERNAL
+
+
+def test_jitter_floor_applies_when_the_user_sets_no_bound(rv_file):
+    """
+    Given an RV instrument whose params file says nothing about jitter_variance,
+    When the model is built,
+    Then the resolved lower bound is the data-derived floor (which is tighter
+    than the defaults.yaml -1000 m2/s2).
+    """
+    assert _jittervar_lower(rv_file) == pytest.approx(EXPECTED_FLOOR)
+
+
+def test_user_lower_above_the_floor_wins(rv_file):
+    """
+    Given a user who explicitly sets jitter_variance lower: 0 (no negative
+    jitter), which is above the computed floor,
+    When the model is built,
+    Then the user's bound survives instead of being replaced by the floor.
+    """
+    assert _jittervar_lower(rv_file, {"lower": 0.0}) == pytest.approx(0.0)
+
+
+def test_user_lower_between_floor_and_default_wins(rv_file):
+    """
+    Given a user bound that is tighter than the floor but looser than zero,
+    When the model is built,
+    Then it is used verbatim -- the clip is one-sided.
+    """
+    assert _jittervar_lower(rv_file, {"lower": -1.0}) == pytest.approx(-1.0)
+
+
+def test_user_lower_below_the_floor_is_clipped_and_warned(rv_file, caplog):
+    """
+    Given a user bound BELOW the computed floor, where err**2 +
+    jitter_variance can go negative and the likelihood is NaN,
+    When the model is built,
+    Then the floor wins (it is a validity limit, not a preference) and the
+    clip is reported rather than applied silently.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.config"):
+        lower = _jittervar_lower(rv_file, {"lower": -1.0e6})
+
+    assert lower == pytest.approx(EXPECTED_FLOOR)
+    assert any(
+        "jitter_variance" in r.message and "validity bound" in r.message
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

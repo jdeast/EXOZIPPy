@@ -1355,6 +1355,13 @@ class Instrument(Component):
         Keeps the total variance ``err**2 + jitter_variance`` strictly
         positive.  ``factor`` converts the raw error column to the internal
         unit first (rv scales to m/s; transit/astrometry use factor 1).
+
+        This is a **validity** bound, not a preference: at exactly
+        ``-min(err)**2`` the best-measured point's sigma is zero (infinite
+        logp), and below it ``total_sigma``'s ``sqrt`` is NaN for that point
+        and its gradient with it.  The 0.95 keeps 5% of the variance as
+        margin.  Hence it is applied as a floor the user may tighten but not
+        loosen -- see ``_register_noise``.
         """
         scaled_min = np.min(np.asarray(err, dtype=float)) * factor
         return -0.95 * scaled_min**2
@@ -1366,6 +1373,18 @@ class Instrument(Component):
         ``jittervar_lower`` floor) plus a reported ``jitter``.
         ``"err_scale"``: a single multiplicative scale.
         Returns ``manifest`` for chaining.
+
+        The computed floor goes through the ``"overrides"`` channel, NOT the
+        plain manifest options: options are merged as ``{**cfg, **options}``
+        and so REPLACE the resolved array, which silently discarded a user's
+        explicit ``jitter_variance: {lower: ...}``.  ``"overrides"`` are
+        applied inside ``ConfigManager.resolve``, which special-cases bounds
+        (``lower`` -> ``max``, ``upper`` -> ``min``), so the resolved lower is
+        ``max(defaults.yaml, floor, user)`` regardless of application order:
+        the user can tighten the bound freely, and can only be clipped by the
+        floor, which is a hard validity limit (see ``_jitter_floor``) -- below
+        it the likelihood is NaN, so there is nothing there to sample.  That
+        clip is warned about, not silent (ConfigManager.resolve).
         """
         if self.noise_model == "err_scale":
             manifest["err_scale"] = None
@@ -1375,7 +1394,9 @@ class Instrument(Component):
                     f"[{self.prefix}] jitter_variance noise model requires a "
                     f"jittervar_lower floor."
                 )
-            manifest["jitter_variance"] = {"lower": jittervar_lower}
+            manifest["jitter_variance"] = {
+                "overrides": {"lower": jittervar_lower}
+            }
             manifest["jitter"] = "default"
         return manifest
 
