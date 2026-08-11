@@ -479,3 +479,80 @@ def test_whitening_persistence_round_trip(tmp_path):
     np.testing.assert_array_equal(
         p_x._whiten_state["sv_scale_logits"].get_value(), before
     )
+
+
+# ---------------------------------------------------------------------------
+# Review 2.10.1 / 2.10.4
+# ---------------------------------------------------------------------------
+
+
+def test_unbounded_no_sigma_posterior_invariant_under_rescale():
+    """Given a sampled element with INFINITE bounds and no sigma -- so
+    nothing cancels its raw N(0,1) and that raw prior IS its prior,
+    When set_whitening applies a probe-measured multiplier,
+    Then the logp as a function of the PHYSICAL value is unchanged.
+
+    Review 2.10.1: the rescale used to multiply this element's linear scale,
+    turning its prior from N(initval, init_scale) into N(initval,
+    m*init_scale) -- and m is measured from the data, so the prior width
+    became data-dependent.  The neighbouring unbounded-WITH-sigma case was
+    already excluded for exactly this reason; the guard was written as "has
+    an explicit sigma" instead of "the raw N(0,1) is the prior".
+    """
+    # Arrange
+    p = Parameter(
+        label="toy.u",
+        initval=0.0,
+        init_scale=1.0,
+        lower=-np.inf,
+        upper=np.inf,
+    )
+    with pm.Model() as model:
+        p.build_pymc()
+    logp = model.compile_logp()
+
+    def lp_at_physical(v):
+        gs = p._whiten_state["sv_gaussian_scales"].get_value()[0]
+        mu = p._raw_transform["gaussian_mus"][0]
+        return float(logp({"toy.u_raw": np.array([(v - mu) / gs])}))
+
+    physical = [0.0, 1.0, 2.0]
+    before = np.array([lp_at_physical(v) for v in physical])
+
+    # Act
+    p.set_whitening(np.array([3.0]))
+
+    # Assert -- same density over physical space, up to a constant
+    after = np.array([lp_at_physical(v) for v in physical])
+    np.testing.assert_allclose(
+        after - after[0], before - before[0], rtol=1e-10, atol=1e-10
+    )
+
+
+def test_unbounded_no_sigma_scale_is_reported_not_applied():
+    """Given the same element,
+    When set_whitening runs,
+    Then the shared linear scale is untouched and the measured value comes
+    back in the returned post-rescale scales (what PTDE disperses chains by).
+    """
+    # Arrange
+    p = Parameter(
+        label="toy.u",
+        initval=0.0,
+        init_scale=1.0,
+        lower=-np.inf,
+        upper=np.inf,
+    )
+    with pm.Model():
+        p.build_pymc()
+    before = p._whiten_state["sv_gaussian_scales"].get_value().copy()
+
+    # Act
+    post = p.set_whitening(np.array([7.0]))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p._whiten_state["sv_gaussian_scales"].get_value(), before
+    )
+    np.testing.assert_array_equal(p._raw_transform["gaussian_scales"], before)
+    assert post.tolist() == [7.0]

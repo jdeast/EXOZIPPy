@@ -398,7 +398,9 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
     updates the shared whitening scales so the same compiled model is now
     whitened by the data-driven scales.  Elements whose probe failed (flat
     both ways) keep their preliminary scale; elements whose raw N(0,1) is the
-    prior (unbounded Gaussians) are never rescaled.
+    prior -- every NON-LOGIT element, i.e. anything without two finite
+    bounds, whether its width came from a sigma or from init_scale -- are
+    never rescaled.
 
     Elements whose first-round multiplier hit the probe's dynamic-range
     limits (a preliminary scale off by more than ~9-14 orders of magnitude,
@@ -415,9 +417,10 @@ def apply_measured_whitening(system, model, raw_start=None, logp_fn=None):
                       scale was already right; NaN = flat direction)
       raw_scales   -- {raw_name: array} per-element scale in the FINAL raw
                       units (1.0 for rescaled elements by construction; the
-                      measured value for deliberately-untouched Gaussian-
-                      prior elements) -- what PTDE's chain dispersion uses
-                      instead of re-probing.
+                      measured value for the deliberately-untouched
+                      non-logit elements, whose raw N(0,1) IS their prior)
+                      -- what PTDE's chain dispersion uses instead of
+                      re-probing.
     """
     if raw_start is None:
         raw_start = system.get_raw_start(model)

@@ -692,6 +692,10 @@ class Parameter:
         gaussian_mus = np.copy(inits)
         gaussian_scales = np.copy(scales)
 
+        # Sampled elements with neither two finite bounds nor a sigma: their
+        # prior is the uncancelled raw N(0,1), i.e. N(initval, init_scale).
+        implicit_prior_idx = []
+
         for i in range(n_elements):
             if not is_sampled[i]:
                 continue
@@ -753,9 +757,27 @@ class Parameter:
                 gaussian_mus[i] = mus[i] if has_mu else inits[i]
                 gaussian_scales[i] = sigmas[i]
             else:
-                # Unbounded, no sigma: fall back to linear with N(0,1)
+                # No two finite bounds and no sigma: fall back to linear with
+                # N(0,1).  Nothing cancels that raw prior, so this element's
+                # prior IS N(initval, init_scale) -- the one place where
+                # init_scale is a posterior term rather than pure
+                # conditioning.  set_whitening therefore refuses to rescale
+                # it (a data-measured multiplier would make the prior width
+                # data-dependent), so say so once per parameter.
                 gaussian_mus[i] = inits[i]
                 gaussian_scales[i] = scales[i]
+                implicit_prior_idx.append(i)
+
+        if implicit_prior_idx:
+            logger.warning(
+                f"Parameter '{self.label}': element(s) {implicit_prior_idx} "
+                f"are sampled with no finite lower/upper pair and no sigma, "
+                f"so their prior is N(initval, init_scale) from defaults -- "
+                f"init_scale is a real prior width here, and the whitening "
+                f"probe deliberately leaves it alone. Give the element two "
+                f"finite bounds (uniform prior) or a sigma (explicit "
+                f"Gaussian prior) to state the prior yourself."
+            )
 
         # 4. BUILD RAW VARIABLES
         raw_elements = [None] * n_elements
@@ -1358,10 +1380,14 @@ class Parameter:
         anchor) is rescaled by 1/multiplier in the same pass -- lq = lq0 +
         scale*raw is invariant under (scale, raw) -> (scale*m, raw/m) -- so
         the start stays the same PHYSICAL point the probe measured around.
-        Elements whose raw N(0,1) IS the prior (unbounded with sigma) are
-        never touched -- their scale is the prior sigma, not a whitening
-        choice.  Non-finite or non-positive entries (a failed probe) leave
-        that element's scale unchanged.
+        Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
+        i.e. anything without two finite bounds -- are never touched.  Their
+        scale is the prior width (sigma when one was given, init_scale when
+        the bounds are infinite and none was), not a whitening choice; only
+        the logit branch's correction potential cancels the raw N(0,1), and
+        only there is the rescale provably posterior-preserving.  Non-finite
+        or non-positive entries (a failed probe) leave that element's scale
+        unchanged.
 
         Because the scales live in pytensor.shared variables, every function
         already compiled from this model sees the new values immediately;
@@ -1402,10 +1428,17 @@ class Parameter:
             if tf["use_logit"][i]:
                 scale_logits[i] *= m
                 rescaled[j] = True
-            elif not ws["has_sigma_prior"][i]:
-                gauss_scales[i] *= m
-                rescaled[j] = True
             else:
+                # NON-LOGIT elements are never rescaled.  Nothing cancels
+                # their raw N(0,1) (section C fires only for use_logit), so
+                # the raw prior IS this element's prior: N(mu, sigma) when a
+                # sigma was given, N(initval, init_scale) when the bounds are
+                # infinite and no sigma was.  The multiplier is measured from
+                # the data, so rescaling would make the prior WIDTH
+                # data-dependent -- circular, and a violation of the
+                # "posterior provably unchanged" invariant that only holds
+                # for the logit branch.  Report the measured scale instead
+                # (PTDE uses it to disperse chains).
                 post[j] = m
 
         # Keep a polished (nonzero) raw start pinned to the same physical
