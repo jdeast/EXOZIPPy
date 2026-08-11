@@ -174,7 +174,22 @@ def _point(raw_dict):
 # log(sigma*sqrt(2pi)*(Phi(u_hi) - Phi(u_lo))) = +0.3568196 nats PER STAR.
 # This config has two (star.Lens, star.Source), so the shift is exactly
 # -0.7136392 and nothing else moved.
-GOOD_EXPECTED_LP = -945.5716
+# Re-measured 2026-08-11: star.pm_ra/pm_dec are now seeded at the galactic
+# model's prior mean instead of being left at defaults.yaml for the t_E
+# constraint to absorb (issue #93).  This is the largest re-measurement in the
+# list and needs the caveat spelled out: RAW values are offsets from the
+# initvals, so changing a start value changes which PHYSICAL point a pinned raw
+# vector decodes to.  These raw numbers came from a trace taken under the old
+# seeding, so the point they now land on is no longer the well-fitting draw the
+# name suggests -- chi2/N there is ~261, against ~1.2 at the new seed itself
+# (raw = 0), which is better than either arbitrary branch the old seeding could
+# produce (~1.42 and ~1.51).
+#
+# The test therefore still does the job it was written for -- pinning that
+# System.prepare() is bit-for-bit reproducible, and that GOOD_RAW is read
+# against the right free_RVs -- but it is no longer a statement about fit
+# quality.  Do not read this number as one.
+GOOD_EXPECTED_LP = -109962.6577
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):
