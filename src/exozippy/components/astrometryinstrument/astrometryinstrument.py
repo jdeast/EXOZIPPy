@@ -350,7 +350,19 @@ class AstrometryInstrument(Instrument):
                 d["err_pa"] = (
                     df.iloc[:, 4].values.astype(float) * np.pi / 180.0
                 )
-                min_err = np.min(d["err_sep"])
+                # BOTH rel channels constrain the jitter floor.  The PA
+                # channel's variance is err_pa**2 + jv/sep**2 (see
+                # build_likelihood), i.e. in mas the tangential error is
+                # err_pa*sep -- so a jitter that is legal for the
+                # separation channel can still drive the PA variance
+                # negative (sqrt -> NaN logp and NaN gradient) whenever
+                # err_pa*sep < sqrt(0.95)*min(err_sep).  That is the
+                # common case for interferometric data, whose tangential
+                # error is far better than its radial one.  Floor on
+                # whichever channel is tighter.
+                min_err = min(
+                    np.min(d["err_sep"]), np.min(d["err_pa"] * d["sep"])
+                )
 
             # Parallax factors (needed for gaia/abs only)
             if mode in ("gaia", "abs"):
@@ -741,9 +753,16 @@ class AstrometryInstrument(Instrument):
     # Plotting
     # ------------------------------------------------------------------
     def compile_plotters(self, model, system):
-        """Compile fast PyTensor functions for plotting."""
-        if not hasattr(system, "orbit") or not hasattr(system.orbit, "arsun"):
-            return
+        """Compile fast PyTensor functions for plotting.
+
+        An orbit is NOT required: a gaia/abs fit for proper motion and
+        parallax alone is legal, and its data, its linear model and its
+        sky plot need no orbit.  The per-instrument slots are therefore
+        always populated (with None where nothing is compiled), so plot()
+        and plot_data() render the same charts either way; only the
+        orbit-dependent pieces are skipped.
+        """
+        has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "arsun")
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
@@ -756,7 +775,7 @@ class AstrometryInstrument(Instrument):
         self._compiled_photo = []
         self._photo_nodes = []
         for i in range(self.n_elements):
-            if self.modes[i] == "rel":
+            if self.modes[i] == "rel" or not has_orbit:
                 self._compiled_photo.append(None)
                 self._photo_nodes.append(None)
                 continue
@@ -787,7 +806,9 @@ class AstrometryInstrument(Instrument):
         self._compiled_rel = []
         self._rel_nodes = []
         for i in range(self.n_elements):
-            if self.modes[i] != "rel":
+            # rel data always require an orbit (build_likelihood raises
+            # without one), so has_orbit only ever skips an empty list here.
+            if self.modes[i] != "rel" or not has_orbit:
                 self._compiled_rel.append(None)
                 self._rel_nodes.append(None)
                 continue
@@ -802,19 +823,22 @@ class AstrometryInstrument(Instrument):
             )
 
         # Orbital elements in internal units (all orbits), for the node/
-        # direction annotations of the sky plot.
-        orb = system.orbit
-        self._compiled_elements = pytensor.function(
-            inputs=param_symbols,
-            outputs=[
-                orb.tp.value,
-                orb.n.value,
-                orb.ecc.value,
-                orb.omega.value,
-                orb.bigomega.value,
-            ],
-            on_unused_input="ignore",
-        )
+        # direction annotations of the sky plot.  None with no orbit: the
+        # sky plot then drops its orbit panel (see plot_sky).
+        self._compiled_elements = None
+        if has_orbit:
+            orb = system.orbit
+            self._compiled_elements = pytensor.function(
+                inputs=param_symbols,
+                outputs=[
+                    orb.tp.value,
+                    orb.n.value,
+                    orb.ecc.value,
+                    orb.omega.value,
+                    orb.bigomega.value,
+                ],
+                on_unused_input="ignore",
+            )
 
     def _point_values(self, system, point):
         vals = []
@@ -836,19 +860,37 @@ class AstrometryInstrument(Instrument):
             return z, z.copy()
         return fn(np.asarray(t, dtype=np.float64), *vals)
 
+    # Star parameters the numpy _linear_terms model reads.  Kept next to it
+    # because _linear_term_deps has to declare exactly these labels: the
+    # function is NumPy, not pytensor, so there is no graph for
+    # _model_trace_param_deps to walk.
+    _LINEAR_STAR_PARAMS = ("ra", "dec", "pm_ra", "pm_dec", "distance")
+
     def _linear_terms(self, d, t, point, system):
         """Numpy pm+parallax+offset model (mas) at the reference point."""
         star = system.star
         s = d["star_ndx"]
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
-        def get(label, default):
-            return np.atleast_1d(point.get(label, default))[s]
+        def get(param):
+            """This star's value of ``param`` from the point, else its own
+            initval -- the same fallback _point_values uses.
 
-        ra = get(star.ra.label, d["ra_ref"])
-        dec = get(star.dec.label, d["dec_ref"])
-        pm_ra = get(star.pm_ra.label, 0.0)
-        pm_dec = get(star.pm_dec.label, 0.0)
+            A ``point.get(label, 0.0)`` here silently substituted ZERO for
+            any parameter absent from the draws, and pinned (``sigma: 0``)
+            parameters are always absent: a fit with a fixed nonzero proper
+            motion plotted a star that does not move while the likelihood
+            used the pinned value.
+            """
+            val = point.get(param.label)
+            if val is None:
+                val = param.initval
+            return np.atleast_1d(val)[s]
+
+        ra = get(star.ra)
+        dec = get(star.dec)
+        pm_ra = get(star.pm_ra)
+        pm_dec = get(star.pm_dec)
         # parallax is a derived parameter and is usually absent from
         # posterior draws; falling back to 0 silently removed the parallax
         # wiggles from the plots.  Recover it from the sampled distance.
@@ -856,10 +898,7 @@ class AstrometryInstrument(Instrument):
         if plx is not None:
             plx = np.atleast_1d(plx)[s]
         else:
-            dist = get(
-                star.distance.label, np.atleast_1d(star.distance.initval)[s]
-            )
-            plx = 1000.0 / dist
+            plx = 1000.0 / get(star.distance)
 
         dE = (
             (ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
@@ -880,6 +919,45 @@ class AstrometryInstrument(Instrument):
                     deps.append(label)
         return deps
 
+    @staticmethod
+    def _merge_deps(*dep_lists):
+        """Order-preserving union of param_deps lists."""
+        deps = []
+        for lst in dep_lists:
+            for label in lst:
+                if label not in deps:
+                    deps.append(label)
+        return deps
+
+    def _linear_term_deps(self, system):
+        """param_deps of the numpy pm+parallax model (``_linear_terms``).
+
+        ``_model_trace_param_deps`` walks a pytensor graph, and this model
+        has none: ``_linear_terms`` reads the point with NumPy, which is
+        what lets the chart be drawn straight after ``load_data``, before
+        any model exists.  The dependencies are therefore declared
+        explicitly, from the one list (``_LINEAR_STAR_PARAMS``) that
+        ``_linear_terms`` itself reads, and filtered to labels the
+        Evaluator can actually send (``system.plot_params``;
+        ``star.parallax`` is derived, so ``distance`` is the sampled
+        coordinate that moves it).
+
+        Without these the Evaluator's ``changed_label`` filter skipped
+        this component for every ra/dec/pm/distance slider -- and in an
+        orbit-less gaia/abs fit those are ALL the parameters that move the
+        star, so the live chart froze completely.
+        """
+        star = getattr(system, "star", None)
+        if star is None or not hasattr(system, "plot_params"):
+            return []
+        known = {p.label for p in system.plot_params}
+        deps = []
+        for attr in self._LINEAR_STAR_PARAMS:
+            label = getattr(getattr(star, attr, None), "label", None)
+            if label in known and label not in deps:
+                deps.append(label)
+        return deps
+
     def plot(self, system, points, filename_prefix="debug"):
         """Render the per-dataset PDFs from plot_data specs, then the
         hand-drawn two-panel sky diagnostics for gaia/abs datasets.
@@ -888,6 +966,11 @@ class AstrometryInstrument(Instrument):
         the GUI draws the same ones via plotly (see plotrender.py's module
         docstring).  plot_sky stays hand-drawn: its arrows and node
         annotations are outside the PlotSpec vocabulary.
+
+        The guard below means "compile_plotters has not run yet", nothing
+        more: an orbit is not required (review 2.6.3) -- compile_plotters
+        populates both lists for every topology, so a pm+parallax fit
+        renders exactly the same charts, minus the orbit pieces.
         """
         if not hasattr(self, "_compiled_photo") and not hasattr(
             self, "_compiled_rel"
@@ -919,6 +1002,7 @@ class AstrometryInstrument(Instrument):
 
         sysname = getattr(system, "name", "")
         photo_nodes = getattr(self, "_photo_nodes", None)
+        photo_fns = getattr(self, "_compiled_photo", None)
         rel_nodes = getattr(self, "_rel_nodes", None)
         rel_fns = getattr(self, "_compiled_rel", None)
 
@@ -956,8 +1040,14 @@ class AstrometryInstrument(Instrument):
                     w_model = (dE_lin + dE_orb) * d["sin_psi"] + (
                         dN_lin + dN_orb
                     ) * d["cos_psi"]
-                    deps = self._node_pair_deps(
-                        photo_nodes[i] if photo_nodes else None, system
+                    # The model is linear terms + photocenter orbit, so the
+                    # deps are the union of both -- and with no orbit the
+                    # linear ones are all there is (see _linear_term_deps).
+                    deps = self._merge_deps(
+                        self._linear_term_deps(system),
+                        self._node_pair_deps(
+                            photo_nodes[i] if photo_nodes else None, system
+                        ),
                     )
                     traces.append(
                         Trace(
@@ -998,22 +1088,30 @@ class AstrometryInstrument(Instrument):
                     )
                 )
                 if point is not None:
-                    vals = self._point_values(system, point)
-                    t_pretty = np.linspace(t.min(), t.max(), 2000)
-                    dE_p, dN_p = self._eval_photo(i, t_pretty, vals)
-                    deps = self._node_pair_deps(
-                        photo_nodes[i] if photo_nodes else None, system
+                    # The DATA trace subtracts the linear terms (see
+                    # dynamic_data below), so this chart moves with the
+                    # ra/dec/pm/distance sliders even when the model trace
+                    # is the orbit alone -- or absent.
+                    deps = self._merge_deps(
+                        self._linear_term_deps(system),
+                        self._node_pair_deps(
+                            photo_nodes[i] if photo_nodes else None, system
+                        ),
                     )
-                    traces.append(
-                        Trace(
-                            name="photocenter orbit",
-                            role="model",
-                            kind="line",
-                            x=dE_p,
-                            y=dN_p,
-                            style={"legend": True, "lw": 1},
+                    if photo_fns and photo_fns[i] is not None:
+                        vals = self._point_values(system, point)
+                        t_pretty = np.linspace(t.min(), t.max(), 2000)
+                        dE_p, dN_p = self._eval_photo(i, t_pretty, vals)
+                        traces.append(
+                            Trace(
+                                name="photocenter orbit",
+                                role="model",
+                                kind="line",
+                                x=dE_p,
+                                y=dN_p,
+                                style={"legend": True, "lw": 1},
+                            )
                         )
-                    )
                 meta["x_inverted"] = True  # East to the left
                 meta["aspect_equal"] = True
                 # The data trace subtracts the point's pm+plx linear terms,
@@ -1101,11 +1199,27 @@ class AstrometryInstrument(Instrument):
         Right: the photocenter orbit alone, with the barycenter, the line
         of nodes, the ascending node (where the photocenter recedes from
         the observer), and the direction of motion.
+
+        The right panel is dropped -- and the figure becomes a single
+        panel -- when no orbit moves this dataset's star (a pm+parallax
+        fit, or an orbit that has the star in its companion group): its
+        curve would be identically zero and the left panel's "with orbit"
+        trace would duplicate the "pm + parallax" one.
         """
         d = self.datasets[i]
         t = d["time"]
         vals = self._point_values(system, point)
-        fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6))
+        photo = getattr(self, "_compiled_photo", None)
+        has_orbit = (
+            getattr(self, "_compiled_elements", None) is not None
+            and photo is not None
+            and photo[i] is not None
+        )
+        if has_orbit:
+            fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 6))
+        else:
+            fig, axL = plt.subplots(1, 1, figsize=(7, 6))
+            axR = None
 
         # ---------------- left: full path over the data span ----------------
         t_dense = np.linspace(t.min(), t.max(), 4000)
@@ -1131,15 +1245,16 @@ class AstrometryInstrument(Instrument):
             zorder=1,
             label="pm + parallax",
         )
-        axL.plot(
-            dE_lin + dE_orb,
-            dN_lin + dN_orb,
-            "-",
-            color="0.4",
-            lw=0.8,
-            zorder=2,
-            label="pm + parallax + orbit",
-        )
+        if has_orbit:
+            axL.plot(
+                dE_lin + dE_orb,
+                dN_lin + dN_orb,
+                "-",
+                color="0.4",
+                lw=0.8,
+                zorder=2,
+                label="pm + parallax + orbit",
+            )
 
         dE_lin_o, dN_lin_o = self._linear_terms(d, t, point, system)
         dE_orb_o, dN_orb_o = self._eval_photo(i, t, vals)
@@ -1172,96 +1287,101 @@ class AstrometryInstrument(Instrument):
         axL.set_title("Path on sky")
         axL.legend(loc="best", fontsize="small")
 
-        # ---------------- right: orbit alone, with annotations --------------
-        # elements in internal units (per planet)
-        tp_arr, n_arr, ecc_arr, w_arr, bigom_arr = self._compiled_elements(
-            *vals
-        )
-        P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
-        t1 = t.max()
-        t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
-        dE_o, dN_o = self._eval_photo(i, t_orb, vals)
-        axR.plot(dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit")
-        dE_ep, dN_ep = self._eval_photo(i, t, vals)
-        axR.plot(
-            dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs"
-        )
-        axR.plot(0, 0, "k+", ms=12, mew=2, zorder=4)  # barycenter
-
-        n_planets = len(np.atleast_1d(tp_arr))
-        if n_planets == 1:
-            tp = float(np.atleast_1d(tp_arr)[0])
-            n_mm = float(np.atleast_1d(n_arr)[0])
-            ecc = float(np.atleast_1d(ecc_arr)[0])
-            w = float(np.atleast_1d(w_arr)[0])
-            bigom = float(np.atleast_1d(bigom_arr)[0])
-            P = 2.0 * np.pi / n_mm
-
-            # Line of nodes: through the barycenter at PA = bigomega
-            r_max = 1.1 * np.max(np.hypot(dE_o, dN_o))
+        if has_orbit:
+            # ---------------- right: orbit alone, with annotations --------------
+            # elements in internal units (per planet)
+            tp_arr, n_arr, ecc_arr, w_arr, bigom_arr = self._compiled_elements(
+                *vals
+            )
+            P_orb = 2.0 * np.pi / np.atleast_1d(n_arr)
+            t1 = t.max()
+            t_orb = np.linspace(t1 - np.max(P_orb), t1, 2000)
+            dE_o, dN_o = self._eval_photo(i, t_orb, vals)
             axR.plot(
-                [r_max * np.sin(bigom), -r_max * np.sin(bigom)],
-                [r_max * np.cos(bigom), -r_max * np.cos(bigom)],
-                "--",
-                color="0.5",
-                lw=1,
-                zorder=1,
-                label="line of nodes",
+                dE_o, dN_o, "k-", lw=1.2, zorder=2, label="photocenter orbit"
             )
-
-            # Ascending node: f = -omega_*; with our conventions the
-            # photocenter crosses it moving AWAY from the observer (max RV)
-            f_node = -w
-            E_node = 2.0 * np.arctan2(
-                np.sqrt(1 - ecc) * np.sin(f_node / 2.0),
-                np.sqrt(1 + ecc) * np.cos(f_node / 2.0),
-            )
-            M_node = E_node - ecc * np.sin(E_node)
-            t_node = tp + M_node / n_mm
-            # shift into the plotted window
-            t_node += np.ceil((t_orb[0] - t_node) / P) * P
-            (xn,), (yn,) = self._eval_photo(
-                i, np.array([t_node], dtype=np.float64), vals
-            )
+            dE_ep, dN_ep = self._eval_photo(i, t, vals)
             axR.plot(
-                xn,
-                yn,
-                "o",
-                color="tab:blue",
-                ms=10,
-                mfc="none",
-                mew=2,
-                zorder=5,
-                label="ascending node",
+                dE_ep, dN_ep, "r.", ms=5, zorder=3, label="observation epochs"
             )
+            axR.plot(0, 0, "k+", ms=12, mew=2, zorder=4)  # barycenter
 
-            # Direction of motion: a curved arrow tracing the orbit away
-            # from the ascending node, drawn 25% outside the orbit itself.
-            t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
-            xa, ya = self._eval_photo(i, t_arc, vals)
-            xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
-            axR.plot(xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6)
-            axR.annotate(
-                "",
-                xy=(xa[-1], ya[-1]),
-                xytext=(xa[-2], ya[-2]),
-                zorder=6,
-                arrowprops=dict(
-                    arrowstyle="-|>",
+            n_planets = len(np.atleast_1d(tp_arr))
+            if n_planets == 1:
+                tp = float(np.atleast_1d(tp_arr)[0])
+                n_mm = float(np.atleast_1d(n_arr)[0])
+                ecc = float(np.atleast_1d(ecc_arr)[0])
+                w = float(np.atleast_1d(w_arr)[0])
+                bigom = float(np.atleast_1d(bigom_arr)[0])
+                P = 2.0 * np.pi / n_mm
+
+                # Line of nodes: through the barycenter at PA = bigomega
+                r_max = 1.1 * np.max(np.hypot(dE_o, dN_o))
+                axR.plot(
+                    [r_max * np.sin(bigom), -r_max * np.sin(bigom)],
+                    [r_max * np.cos(bigom), -r_max * np.cos(bigom)],
+                    "--",
+                    color="0.5",
+                    lw=1,
+                    zorder=1,
+                    label="line of nodes",
+                )
+
+                # Ascending node: f = -omega_*; with our conventions the
+                # photocenter crosses it moving AWAY from the observer (max RV)
+                f_node = -w
+                E_node = 2.0 * np.arctan2(
+                    np.sqrt(1 - ecc) * np.sin(f_node / 2.0),
+                    np.sqrt(1 + ecc) * np.cos(f_node / 2.0),
+                )
+                M_node = E_node - ecc * np.sin(E_node)
+                t_node = tp + M_node / n_mm
+                # shift into the plotted window
+                t_node += np.ceil((t_orb[0] - t_node) / P) * P
+                (xn,), (yn,) = self._eval_photo(
+                    i, np.array([t_node], dtype=np.float64), vals
+                )
+                axR.plot(
+                    xn,
+                    yn,
+                    "o",
                     color="tab:blue",
-                    lw=2,
-                    mutation_scale=22,
-                    shrinkA=0,
-                    shrinkB=0,
-                ),
-            )
+                    ms=10,
+                    mfc="none",
+                    mew=2,
+                    zorder=5,
+                    label="ascending node",
+                )
 
-        axR.invert_xaxis()  # East to the left
-        axR.set_aspect("equal", adjustable="datalim")
-        axR.set_xlabel(r"$\Delta\alpha^*$ [mas]")
-        axR.set_ylabel(r"$\Delta\delta$ [mas]")
-        axR.set_title("Photocenter orbit")
-        axR.legend(loc="best", fontsize="small")
+                # Direction of motion: a curved arrow tracing the orbit away
+                # from the ascending node, drawn 25% outside the orbit itself.
+                t_arc = np.linspace(t_node, t_node + 0.06 * P, 60)
+                xa, ya = self._eval_photo(i, t_arc, vals)
+                xa, ya = 1.25 * np.asarray(xa), 1.25 * np.asarray(ya)
+                axR.plot(
+                    xa[:-1], ya[:-1], "-", color="tab:blue", lw=2, zorder=6
+                )
+                axR.annotate(
+                    "",
+                    xy=(xa[-1], ya[-1]),
+                    xytext=(xa[-2], ya[-2]),
+                    zorder=6,
+                    arrowprops=dict(
+                        arrowstyle="-|>",
+                        color="tab:blue",
+                        lw=2,
+                        mutation_scale=22,
+                        shrinkA=0,
+                        shrinkB=0,
+                    ),
+                )
+
+            axR.invert_xaxis()  # East to the left
+            axR.set_aspect("equal", adjustable="datalim")
+            axR.set_xlabel(r"$\Delta\alpha^*$ [mas]")
+            axR.set_ylabel(r"$\Delta\delta$ [mas]")
+            axR.set_title("Photocenter orbit")
+            axR.legend(loc="best", fontsize="small")
 
         fig.suptitle(f"{d['name']} ({system.name})")
         fig.tight_layout()
