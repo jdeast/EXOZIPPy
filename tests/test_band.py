@@ -88,6 +88,84 @@ def test_register_parameters_linear_law_samples_u1_directly():
     assert "u2" not in band.manifest
 
 
+@pytest.mark.parametrize("bad", ["quadratik", "Quadratic LD", "kipping", ""])
+def test_unknown_ld_law_raises_naming_value_and_accepted_set(bad):
+    """
+    Given a Band whose ld_law is not one of the implemented laws,
+    When load_data is called,
+    Then it raises, naming the offending value and every accepted law.
+
+    Pre-fix, `has_quadratic = any(law != "linear")` made any typo silently
+    select the quadratic law -- the same silent-ignore class as `IMF:
+    Salpeter` (review 2.4.4).
+    """
+    band = _make_band([{"name": "V", "ld_law": bad}])
+    with pytest.raises(ValueError) as excinfo:
+        band.load_data(system=None)
+    msg = str(excinfo.value)
+    assert repr(bad) in msg, f"error does not name the bad value: {msg}"
+    assert "quadratic" in msg and "linear" in msg, (
+        f"error does not name the accepted set: {msg}"
+    )
+
+
+@pytest.mark.parametrize("law", ["quadratic", "linear", " LINEAR "])
+def test_known_ld_law_is_accepted_and_normalized(law):
+    """
+    Given a Band whose ld_law is a recognized law (in any case/whitespace),
+    When load_data is called,
+    Then it is accepted and stored in canonical lowercase form.
+    """
+    band = _make_band([{"ld_law": law}])
+    band.load_data(system=None)
+    assert band.ld_laws == [law.strip().lower()]
+
+
+def test_mixed_ld_laws_raise_instead_of_promoting_linear_bands():
+    """
+    Given two bands declaring different limb-darkening laws,
+    When load_data is called,
+    Then it raises, naming each band and its law.
+
+    Pre-fix this configuration was accepted and `any(law != "linear")` chose
+    the quadratic manifest for the whole vector, so the band the user declared
+    linear silently got a free u2 and was modelled as quadratic (review
+    2.4.4). Per-element derivation is not expressible in the manifest, so the
+    honest behavior is a hard error.
+    """
+    band = _make_band(
+        [
+            {"name": "V", "ld_law": "linear"},
+            {"name": "Sloani", "ld_law": "quadratic"},
+        ]
+    )
+    with pytest.raises(ValueError) as excinfo:
+        band.load_data(system=None)
+    msg = str(excinfo.value)
+    assert "ld_law" in msg
+    assert "V" in msg and "Sloani" in msg, (
+        f"error does not name the conflicting bands: {msg}"
+    )
+
+
+def test_uniform_ld_law_across_several_bands_is_allowed():
+    """
+    Given several bands that all declare the same law,
+    When load_data and register_parameters run,
+    Then no error is raised and the manifest matches that one law.
+    """
+    band = _make_band(
+        [
+            {"name": "V", "ld_law": "linear"},
+            {"name": "Sloani", "ld_law": "linear"},
+        ]
+    )
+    band.load_data(system=None)
+    band.register_parameters(system=None)
+    assert "u2" not in band.manifest
+    assert band.manifest["u1"] is None
+
+
 def test_build_likelihood_adds_no_potentials():
     """
     Given any Band configuration,

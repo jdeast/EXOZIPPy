@@ -226,6 +226,49 @@ def test_rm_system_logp_finite():
     assert np.isfinite(lp), f"RM example logp not finite: {lp}"
 
 
+def test_rm_system_with_linear_ld_builds():
+    """Given the KELT-17 RM example with every band on `ld_law: linear` (so
+    Band's manifest has no u2 at all), When the model is built, Then it builds
+    and yields a finite logp AND a finite gradient.
+
+    compute_rm_rv used to read band.u2 unconditionally and die with an
+    AttributeError before the model existed (review 2.4.3). The gradient is
+    asserted too: a linear-LD fit still has to reach the sampler.
+    """
+    import os
+
+    import yaml
+
+    from exozippy.system import System
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exdir = os.path.join(root, "examples", "kelt17")
+    if not os.path.exists(os.path.join(exdir, "kelt17.yaml")):
+        pytest.skip("kelt17 example not present")
+    with open(os.path.join(exdir, "kelt17.yaml")) as fh:
+        cfg = yaml.safe_load(fh)
+    for band_cfg in cfg["band"]:
+        band_cfg["ld_law"] = "linear"
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(exdir)  # config data paths are relative
+        s = System(cfg)
+        s.prepare()
+        assert "u2" not in s.band.manifest  # the configuration under test
+        model = s.build_model()
+        point = model.initial_point()
+        lp = float(model.compile_logp()(point))
+        grad = np.asarray(model.compile_dlogp()(point))
+    finally:
+        os.chdir(cwd)
+
+    assert np.isfinite(lp), f"linear-LD RM example logp not finite: {lp}"
+    assert np.all(np.isfinite(grad)), (
+        "linear-LD RM example has a non-finite gradient"
+    )
+
+
 # --------------------------------------------------------------------------
 # 5. Hirano+2010 fast closed-form kernel (rm_delta_v_hirano2010), selectable
 #    via `rm_model: hirano2010`. ~25x faster than the H2011 disk integral; a
