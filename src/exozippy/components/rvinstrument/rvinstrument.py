@@ -499,8 +499,24 @@ class RVInstrument(Instrument):
         return out
 
     def _instrument_gamma(self, point, i):
-        """The reference-point gamma for instrument i, in internal units."""
-        gamma_vals = np.atleast_1d(point.get(self.gamma.label, 0.0))
+        """The reference-point gamma for instrument i, in internal units.
+
+        The value comes from the point when it is there, else from the
+        gamma Parameter's own initval -- the same fallback
+        _point_to_plot_params uses for every other plotted parameter.
+
+        A ``point.get(label, 0.0)`` here silently substituted ZERO for any
+        parameter absent from the draws, and pinned (``sigma: 0``)
+        parameters are always absent (an all-fixed vector never becomes a
+        pm.Deterministic, so it is in neither model.deterministics nor the
+        posterior).  A fit with a pinned nonzero offset therefore plotted
+        every point of that instrument shifted by the whole gamma away
+        from the model curve the likelihood actually fit.
+        """
+        vals = point.get(self.gamma.label)
+        if vals is None:
+            vals = self.gamma.initval
+        gamma_vals = np.atleast_1d(vals)
         return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
 
     def _phased_arrays(self, system, point, col, o_idx):
