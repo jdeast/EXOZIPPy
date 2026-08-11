@@ -860,6 +860,12 @@ class AstrometryInstrument(Instrument):
             return z, z.copy()
         return fn(np.asarray(t, dtype=np.float64), *vals)
 
+    # Star parameters the numpy _linear_terms model reads.  Kept next to it
+    # because _linear_term_deps has to declare exactly these labels: the
+    # function is NumPy, not pytensor, so there is no graph for
+    # _model_trace_param_deps to walk.
+    _LINEAR_STAR_PARAMS = ("ra", "dec", "pm_ra", "pm_dec", "distance")
+
     def _linear_terms(self, d, t, point, system):
         """Numpy pm+parallax+offset model (mas) at the reference point."""
         star = system.star
@@ -911,6 +917,45 @@ class AstrometryInstrument(Instrument):
             for label in self._model_trace_param_deps(node, system):
                 if label not in deps:
                     deps.append(label)
+        return deps
+
+    @staticmethod
+    def _merge_deps(*dep_lists):
+        """Order-preserving union of param_deps lists."""
+        deps = []
+        for lst in dep_lists:
+            for label in lst:
+                if label not in deps:
+                    deps.append(label)
+        return deps
+
+    def _linear_term_deps(self, system):
+        """param_deps of the numpy pm+parallax model (``_linear_terms``).
+
+        ``_model_trace_param_deps`` walks a pytensor graph, and this model
+        has none: ``_linear_terms`` reads the point with NumPy, which is
+        what lets the chart be drawn straight after ``load_data``, before
+        any model exists.  The dependencies are therefore declared
+        explicitly, from the one list (``_LINEAR_STAR_PARAMS``) that
+        ``_linear_terms`` itself reads, and filtered to labels the
+        Evaluator can actually send (``system.plot_params``;
+        ``star.parallax`` is derived, so ``distance`` is the sampled
+        coordinate that moves it).
+
+        Without these the Evaluator's ``changed_label`` filter skipped
+        this component for every ra/dec/pm/distance slider -- and in an
+        orbit-less gaia/abs fit those are ALL the parameters that move the
+        star, so the live chart froze completely.
+        """
+        star = getattr(system, "star", None)
+        if star is None or not hasattr(system, "plot_params"):
+            return []
+        known = {p.label for p in system.plot_params}
+        deps = []
+        for attr in self._LINEAR_STAR_PARAMS:
+            label = getattr(getattr(star, attr, None), "label", None)
+            if label in known and label not in deps:
+                deps.append(label)
         return deps
 
     def plot(self, system, points, filename_prefix="debug"):
@@ -995,8 +1040,14 @@ class AstrometryInstrument(Instrument):
                     w_model = (dE_lin + dE_orb) * d["sin_psi"] + (
                         dN_lin + dN_orb
                     ) * d["cos_psi"]
-                    deps = self._node_pair_deps(
-                        photo_nodes[i] if photo_nodes else None, system
+                    # The model is linear terms + photocenter orbit, so the
+                    # deps are the union of both -- and with no orbit the
+                    # linear ones are all there is (see _linear_term_deps).
+                    deps = self._merge_deps(
+                        self._linear_term_deps(system),
+                        self._node_pair_deps(
+                            photo_nodes[i] if photo_nodes else None, system
+                        ),
                     )
                     traces.append(
                         Trace(
@@ -1037,8 +1088,15 @@ class AstrometryInstrument(Instrument):
                     )
                 )
                 if point is not None:
-                    deps = self._node_pair_deps(
-                        photo_nodes[i] if photo_nodes else None, system
+                    # The DATA trace subtracts the linear terms (see
+                    # dynamic_data below), so this chart moves with the
+                    # ra/dec/pm/distance sliders even when the model trace
+                    # is the orbit alone -- or absent.
+                    deps = self._merge_deps(
+                        self._linear_term_deps(system),
+                        self._node_pair_deps(
+                            photo_nodes[i] if photo_nodes else None, system
+                        ),
                     )
                     if photo_fns and photo_fns[i] is not None:
                         vals = self._point_values(system, point)
