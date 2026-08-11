@@ -556,3 +556,93 @@ def test_unbounded_no_sigma_scale_is_reported_not_applied():
     )
     np.testing.assert_array_equal(p._raw_transform["gaussian_scales"], before)
     assert post.tolist() == [7.0]
+
+
+def test_load_whitening_rejects_a_file_missing_a_barrier_only_parameter(
+    tmp_path,
+):
+    """Given a persisted state that omits a DERIVED, barrier-only parameter
+    (no _whiten_state, so the old coverage check never looked at it),
+    When it is loaded,
+    Then the load is rejected and the caller re-measures.
+
+    Review 2.10.4: barriers ARE posterior terms, so a file that does not
+    describe every barrier describes a different logp than the one that
+    produced the trace being reused.
+    """
+    import json
+
+    from exozippy.whitening import (
+        load_whitening,
+        measure_and_whiten,
+        save_whitening,
+    )
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    raw_start = model.initial_point()
+    report = measure_and_whiten(system, model, raw_start)
+    path = tmp_path / "wh.json"
+    save_whitening(system, str(path), map_lp=report["map_lp"])
+
+    assert p_d._whiten_state is None and p_d._barrier_state is not None
+    data = json.loads(path.read_text())
+    assert "toy.d" in data["params"]
+    del data["params"]["toy.d"]
+    path.write_text(json.dumps(data))
+    barrier_before = p_d._barrier_state["sv"].get_value().copy()
+
+    # Act
+    ok = load_whitening(system, str(path))
+
+    # Assert
+    assert ok is False
+    np.testing.assert_array_equal(
+        p_d._barrier_state["sv"].get_value(), barrier_before
+    )
+
+
+def test_load_whitening_never_applies_a_state_partially(tmp_path):
+    """Given a persisted state whose FIRST parameter is valid and whose
+    second carries a mismatched vector,
+    When it is loaded,
+    Then nothing at all is applied -- the earlier parameter keeps its own
+    scales instead of being left half-restored.
+
+    Review 2.10.4: only scale_logits was validated up front, so a bad
+    gaussian_scales aborted inside the apply loop, after earlier parameters
+    had already been written, and the function still returned True.
+    """
+    import json
+
+    from exozippy.whitening import (
+        load_whitening,
+        measure_and_whiten,
+        save_whitening,
+    )
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    raw_start = model.initial_point()
+    report = measure_and_whiten(system, model, raw_start)
+    path = tmp_path / "wh.json"
+    save_whitening(system, str(path), map_lp=report["map_lp"])
+
+    data = json.loads(path.read_text())
+    # A value that would be visible if it were applied.
+    data["params"]["toy.x"]["scale_logits"] = [123.0]
+    # ...and a second parameter the apply loop would choke on.
+    data["params"]["toy.y"]["gaussian_scales"] = [1.0, 2.0]
+    path.write_text(json.dumps(data))
+    x_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    ok = load_whitening(system, str(path))
+
+    # Assert
+    assert ok is False
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), x_before
+    )

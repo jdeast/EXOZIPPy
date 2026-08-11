@@ -699,13 +699,88 @@ def save_whitening(system, path, map_lp=None):
     logger.debug(f"Whitening: state saved to {path}")
 
 
+def _validate_whitening_state(system, saved, lookup):
+    """Check a persisted params mapping against the current build.
+
+    Returns None when it applies cleanly, or a human-readable reason string.
+    Every vector the apply step will touch is checked here -- both whitening
+    vectors AND the barrier vector -- so the apply step below cannot fail
+    part way through and leave the model in a half-restored state (the two
+    are different measures: rescaling the whitening is posterior-preserving,
+    but the barrier IS a posterior term, so a model carrying one file's
+    barriers and another's whitening has a logp that was never sampled).
+    """
+    # Coverage: every parameter that carries restorable state must appear in
+    # the file.  Barrier-ONLY parameters (derived ones: no _whiten_state, a
+    # soft bound) count -- their barrier steepness is a posterior term, so a
+    # file that predates them describes a different logp than the one that
+    # produced the trace being reused.
+    stateful_now = {
+        p.label
+        for p in system.get_all_parameters()
+        if getattr(p, "_whiten_state", None) is not None
+        or getattr(p, "_barrier_state", None) is not None
+    }
+    missing = sorted(stateful_now - set(saved))
+    if missing:
+        return f"persisted state does not cover {missing}"
+
+    for label, state in saved.items():
+        par = lookup.get(label)
+        if par is None:
+            return f"persisted parameter '{label}' no longer exists"
+        ws = getattr(par, "_whiten_state", None)
+        bs = getattr(par, "_barrier_state", None)
+
+        has_whiten_keys = "scale_logits" in state or "gaussian_scales" in state
+        if has_whiten_keys:
+            if ws is None:
+                return f"'{label}' is no longer whitened"
+            # BOTH vectors are validated: Parameter.load_whitening applies
+            # them together, and checking only scale_logits let a bad
+            # gaussian_scales abort mid-loop after earlier parameters had
+            # already been written.
+            for key, sv in (
+                ("scale_logits", ws["sv_scale_logits"]),
+                ("gaussian_scales", ws["sv_gaussian_scales"]),
+            ):
+                if key not in state:
+                    return f"'{label}' is missing '{key}'"
+                if len(state[key]) != np.asarray(sv.get_value()).size:
+                    return f"'{label}' {key} does not match the model"
+        elif ws is not None:
+            return f"'{label}' is whitened now but was not when saved"
+
+        if "barrier_scales" in state:
+            if bs is None:
+                return f"'{label}' no longer has a soft bound"
+            if (
+                len(state["barrier_scales"])
+                != np.asarray(bs["sv"].get_value()).size
+            ):
+                return f"'{label}' barrier state does not match the model"
+        elif bs is not None:
+            return f"'{label}' has a soft bound that the persisted state omits"
+
+    return None
+
+
 def load_whitening(system, path):
     """Apply a persisted whitening state.  Returns True on success.
 
-    Validates EVERYTHING up front (every persisted parameter must exist with
-    matching shapes, and every currently-whitened parameter must be covered)
-    before touching any shared variable, so a mismatch -- a changed model --
-    leaves the build untouched and the caller falls back to a fresh probe.
+    Validates EVERYTHING up front -- every persisted parameter must exist,
+    every vector it carries must match the built shape, and every parameter
+    that carries whitening OR barrier state now must appear in the file --
+    before touching any shared variable, so a mismatch (a changed model, a
+    truncated file) leaves the build untouched and the caller falls back to
+    a fresh probe.
+
+    A mismatch WARNS and re-measures rather than raising, matching what
+    ``measure_and_whiten`` does downstream: unlike foreign posterior draws,
+    whitening and barrier scales can be honestly recomputed from the model
+    at load time, so there is nothing to salvage by stopping the run.  What
+    must not happen is a PARTIAL apply, which is why nothing is written
+    until the whole file has been checked.
     """
     try:
         with open(path) as f:
@@ -719,53 +794,20 @@ def load_whitening(system, path):
     saved = data.get("params", {})
     lookup = {p.label: p for p in system.get_all_parameters()}
 
-    # Validate coverage and shapes before applying anything.
-    whitened_now = {
-        p.label
-        for p in system.get_all_parameters()
-        if getattr(p, "_whiten_state", None) is not None
-    }
-    if not whitened_now.issubset(saved.keys()):
-        missing = sorted(whitened_now - set(saved))
-        logger.warning(
-            f"Whitening: persisted state does not cover {missing}; "
-            f"re-measuring."
-        )
+    reason = _validate_whitening_state(system, saved, lookup)
+    if reason is not None:
+        logger.warning(f"Whitening: {reason}; re-measuring.")
         return False
-    for label, state in saved.items():
-        par = lookup.get(label)
-        if par is None:
-            logger.warning(
-                f"Whitening: persisted parameter '{label}' no longer exists; "
-                f"re-measuring."
-            )
-            return False
-        ws = getattr(par, "_whiten_state", None)
-        bs = getattr(par, "_barrier_state", None)
-        if "scale_logits" in state:
-            if (
-                ws is None
-                or len(state["scale_logits"])
-                != np.asarray(ws["sv_scale_logits"].get_value()).size
-            ):
-                logger.warning(
-                    f"Whitening: persisted state for '{label}' does not "
-                    f"match the model; re-measuring."
-                )
-                return False
-        if "barrier_scales" in state:
-            if (
-                bs is None
-                or len(state["barrier_scales"])
-                != np.asarray(bs["sv"].get_value()).size
-            ):
-                logger.warning(
-                    f"Whitening: persisted barrier state for '{label}' does "
-                    f"not match the model; re-measuring."
-                )
-                return False
 
     for label, state in saved.items():
-        lookup[label].load_whitening(state)
+        if not lookup[label].load_whitening(state):
+            # Unreachable: the validation above covers every shape
+            # load_whitening checks.  Loud rather than silent if it ever is.
+            logger.warning(
+                f"Whitening: applying persisted state for '{label}' failed "
+                f"after validation; the build may be partially restored. "
+                f"Re-measuring."
+            )
+            return False
     logger.debug(f"Whitening: state restored from {path} (no probe needed).")
     return True
