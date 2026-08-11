@@ -321,7 +321,15 @@ def compute_rm_rv(
     ar = planet.ar.value[planet_idx]  # a / Rstar
     rprs = planet.p.value[planet_idx]  # Rp / Rstar
     u1 = band.u1.value[band_idx]
-    u2 = band.u2.value[band_idx]
+    # With ld_law: linear the Band manifest has no u2 at all (same guard
+    # transit.py uses). The quadratic term is then exactly zero, which the
+    # Green's-basis coefficients in quad_limb_darkened_flux handle natively
+    # (c2 = 0, c1 = u1, c0 = 1 - u1), as does the _m_kernel broadening
+    # profile below -- neither needs a separate linear formula.
+    if "u2" in band.manifest:
+        u2 = band.u2.value[band_idx]
+    else:
+        u2 = pt.zeros_like(u1)
 
     f = orbit.get_true_anomaly(time)[:, orbit_idx]
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)

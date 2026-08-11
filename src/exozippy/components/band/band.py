@@ -19,6 +19,9 @@ class Band(Component):
 
     One Band instance per filter. Instruments reference a band by name.
     Supports linear (sample u1) and quadratic Kipping (sample q1/q2, derive u1/u2) laws.
+    All bands must declare the same law: the limb-darkening manifest is
+    shared by the whole band vector, so the two laws cannot coexist (see
+    `_parse_ld_laws`).
 
     Band is the single carrier of filter identity for instruments: each
     element's user-facing `filter:` string is resolved through the SED
@@ -29,6 +32,12 @@ class Band(Component):
     """
 
     yaml_key = "band"
+
+    # Accepted `ld_law:` spellings. An unrecognized value raises rather than
+    # falling through to the quadratic branch: a silently ignored law key is
+    # the same bug class as `IMF: Salpeter` (PR #82), and here it would also
+    # silently change the sampled parameter set (q1/q2 instead of u1).
+    LD_LAWS = ("quadratic", "linear")
 
     @property
     def prefix(self):
@@ -61,9 +70,16 @@ class Band(Component):
             {
                 "key": "ld_law",
                 "kind": "option",
-                "accepts": ["quadratic", "linear"],
+                "accepts": list(cls.LD_LAWS),
                 "required": False,
-                "doc": "Limb-darkening law. Default 'quadratic'.",
+                "doc": (
+                    "Limb-darkening law. Default 'quadratic' (Kipping "
+                    "q1/q2, deriving u1/u2); 'linear' samples u1 directly. "
+                    "Every band must declare the same law -- the "
+                    "limb-darkening manifest is shared by the whole band "
+                    "vector. An unrecognized value, or a mix of laws, "
+                    "raises."
+                ),
             },
             {
                 "key": "fitthermal",
@@ -83,7 +99,7 @@ class Band(Component):
     def load_data(self, system):
         self.filter_names = [c.get("filter", "") for c in self.config]
         self.star_indices = [c.get("star_ndx", 0) for c in self.config]
-        self.ld_laws = [c.get("ld_law", "quadratic") for c in self.config]
+        self.ld_laws = self._parse_ld_laws()
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
         ]
@@ -118,21 +134,72 @@ class Band(Component):
                     f"BC-table/SVO name."
                 )
 
+    def _parse_ld_laws(self):
+        """Per-band ``ld_law:``, validated, and required to be uniform.
+
+        Two things are deliberately hard errors here rather than defaults:
+
+        * **An unrecognized law.** ``ld_law: quadratik`` used to satisfy
+          ``law != "linear"`` and be modelled as quadratic -- a typo silently
+          selecting a different sampled parameter set.
+        * **A mix of laws across bands.** The manifest is per *parameter*, not
+          per element: ``Parameter.build_pymc`` derives ``is_derived`` from
+          ``expression is not None`` for the whole vector, so one Band cannot
+          hold a derived ``u1`` (Kipping, quadratic) for some elements and a
+          sampled ``u1`` for others. The old ``any(law != "linear")`` picked
+          the quadratic manifest for everyone, which handed every band a free
+          ``u2`` -- silently modelling a user's declared-linear band as
+          quadratic. Per-element derivation would need the manifest ``mask``
+          field (declared in ``Parameter``, not yet consumed); until that
+          exists, raising is the only non-silent option.
+        """
+        laws = []
+        for i, c in enumerate(self.config):
+            law = c.get("ld_law", "quadratic")
+            norm = str(law).strip().lower()
+            if norm not in self.LD_LAWS:
+                raise ValueError(
+                    f"{self.prefix}.{self.names[i]}: unknown ld_law "
+                    f"{law!r}. Accepted: {', '.join(self.LD_LAWS)} "
+                    f"('quadratic' = Kipping q1/q2, the default; 'linear' = "
+                    f"sample u1 directly)."
+                )
+            laws.append(norm)
+
+        if len(set(laws)) > 1:
+            detail = ", ".join(
+                f"{name}: {law}" for name, law in zip(self.names, laws)
+            )
+            raise ValueError(
+                f"[{self.prefix}] all bands must use the same ld_law; got "
+                f"{detail}. A mixed-law system is not supported: the "
+                f"limb-darkening manifest is shared by every band element, so "
+                f"one law has to be chosen for the whole vector, and the "
+                f"quadratic choice would give the 'linear' bands a free u2 "
+                f"(silently modelling them as quadratic). Use one law "
+                f"everywhere -- 'quadratic' with the linear bands' q2 pinned "
+                f"at 0.5 in the params file reproduces a linear law exactly "
+                f"(u2 = sqrt(q1)*(1 - 2*q2) = 0), at the cost of a prior "
+                f"uniform in q1 rather than in u1."
+            )
+        return laws
+
     def build_maps(self):
         self.star_map = np.array(self.star_indices, dtype=int)
 
     def register_parameters(self, system):
-        has_quadratic = any(law != "linear" for law in self.ld_laws)
-        if has_quadratic:
+        # Uniform by construction (_parse_ld_laws raises on a mix), so the
+        # first element's law is the system's law.
+        if self.ld_laws and self.ld_laws[0] == "linear":
+            self.manifest = {
+                "u1": None,
+            }
+        else:
             self.manifest = {
                 "q1": None,
                 "q2": None,
                 "u1": "default",
                 "u2": "default",
-            }
-        else:
-            self.manifest = {
-                "u1": None,
             }
 
         # thermal (secondary-eclipse depth, ppm) is opt-in per band via
