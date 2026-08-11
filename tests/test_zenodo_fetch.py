@@ -1,8 +1,7 @@
 """
 Tests for the shared Zenodo fetch-verify-cache core
 (utilities/zenodo.py) and the two wrappers that own asset tables
-(components/sed/make_bc.ensure_model_data for now; the MIST EEP
-grid is the second).
+(components/sed/make_bc.ensure_model_data, models/MIST/eep_grid).
 
 Nothing here touches the network: urlretrieve is always monkeypatched.
 """
@@ -253,7 +252,7 @@ def test_a_truncated_cached_file_is_refetched_not_raised(
     assert (tmp_path / "f.csv").read_bytes() == payload
 
 
-# --- the NextGen wrapper -----------------------------------------------------
+# --- the two wrappers -----------------------------------------------------
 
 
 def test_make_bc_warns_about_downsampling_only_when_it_really_fetches(
@@ -292,3 +291,85 @@ def test_make_bc_warns_about_downsampling_only_when_it_really_fetches(
     assert len(first) == 1
     assert second == []
     assert (tmp_path / "M" / "BCs" / "f.csv").read_bytes() == payload
+
+
+def test_mist_grid_fetch_does_not_emit_the_spectra_warning(
+    tmp_path, monkeypatch, caplog
+):
+    """
+    Given the MIST EEP grid is missing,
+    When ensure_eep_grid runs,
+    Then it downloads through the same core but says nothing about
+    downsampled spectra -- that warning is about the NextGen spectra
+    specifically, not about Zenodo fetches in general.
+    """
+    # ARRANGE
+    from exozippy.models.MIST import eep_grid
+
+    payload = b"parquet-bytes"
+    assets = _fake_assets(payload, name="afe_p0_vvcrit0.0.grid.parquet")
+    monkeypatch.setattr(eep_grid, "_EEP_GRID_ASSETS", assets)
+    monkeypatch.setattr(eep_grid, "EEP_GRID_DIR", tmp_path)
+    monkeypatch.setattr(
+        zenodo.urllib.request,
+        "urlretrieve",
+        lambda url, dest: Path(dest).write_bytes(payload),
+    )
+
+    # ACT
+    with caplog.at_level("WARNING"):
+        path = eep_grid.ensure_eep_grid()
+
+    # ASSERT
+    assert path == tmp_path / "afe_p0_vvcrit0.0.grid.parquet"
+    assert path.read_bytes() == payload
+    assert not [r for r in caplog.records if "DOWNSAMPLED" in r.getMessage()]
+
+
+def test_mist_grid_is_not_refetched_when_already_cached(
+    tmp_path, monkeypatch
+):
+    """
+    Given the EEP grid parquet is already cached at the pinned size,
+    When ensure_eep_grid runs,
+    Then it returns the cached path without downloading.
+    """
+    # ARRANGE
+    from exozippy.models.MIST import eep_grid
+
+    payload = b"parquet-bytes"
+    name = "afe_p0_vvcrit0.0.grid.parquet"
+    (tmp_path / name).write_bytes(payload)
+    monkeypatch.setattr(
+        eep_grid, "_EEP_GRID_ASSETS", _fake_assets(payload, name=name)
+    )
+    monkeypatch.setattr(eep_grid, "EEP_GRID_DIR", tmp_path)
+
+    calls = []
+    monkeypatch.setattr(
+        zenodo.urllib.request,
+        "urlretrieve",
+        lambda url, dest: calls.append(url),
+    )
+
+    # ACT
+    path = eep_grid.ensure_eep_grid()
+
+    # ASSERT
+    assert calls == []
+    assert path == tmp_path / name
+
+
+def test_an_unknown_alpha_vvcrit_combination_raises(monkeypatch):
+    """
+    Given a (alpha, vvcrit) pair with no published grid,
+    When ensure_eep_grid is asked for it,
+    Then it raises a KeyError naming what is available, rather than
+    attempting a download of a URL that does not exist.
+    """
+    # ARRANGE
+    from exozippy.models.MIST import eep_grid
+
+    # ACT / ASSERT
+    with pytest.raises(KeyError, match="afe_p0_vvcrit0.0"):
+        eep_grid.ensure_eep_grid(alpha=0.4, vvcrit=0.4)
