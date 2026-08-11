@@ -106,7 +106,15 @@ Core (G7):
   pre-select in the Config tab.
 - `GET /api/schema` -- `introspect.full_schema()`.
 - `GET /api/utilities` -- utility argument schemas (G2 registry).
-- `POST /api/project/open` `{path}` -- classify a dir's yaml/data files.
+- `POST /api/project/open` `{path}` -- classify a dir's yaml/data files, and
+  RESET the per-project server state: the Tune session (closed on a detached
+  thread, since its worker may be mid-solve), the preview cache, and the open
+  document when it lives outside the newly opened project (autosaved first if
+  dirty). Each of those describes the project that was open; leaving them made
+  project B show A's solved values and plots, and let an edit typed against them
+  land in B's params file. The frontend mirrors this: `TuneTab` is keyed by
+  `configPath` so a switch remounts it, and its `ensureDoc` re-opens the
+  document whenever the server's open path is not the config it is tuning.
 - `WS  /api/logs?file=...` -- tail a log file (follows rotation/truncation).
 
 Config document (G8): `POST /api/doc/open`, `GET /api/doc`,

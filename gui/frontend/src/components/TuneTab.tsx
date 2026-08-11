@@ -68,17 +68,25 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
 
   const pollTimer = useRef<number | null>(null);
 
-  // Ensure a document is open on the server (Solve and the edit commands both
-  // read/write it). Opening is idempotent enough for one project.
+  // Ensure OUR config is the document open on the server (Solve and every edit
+  // command read/write that one slot). Checking the path matters: after a
+  // project switch the server may still hold the previous project's document,
+  // and reusing it would solve -- and save edits into -- the wrong files.
+  // Re-opening the same path is edit-preserving on the server, so this is
+  // idempotent for the config we are actually tuning.
   const ensureDoc = useCallback(async () => {
     if (!configPath) return;
     try {
       const d = await api.doc();
-      setDocDirty(d.dirty);
+      if (d.config_path === configPath) {
+        setDocDirty(d.dirty);
+        return;
+      }
     } catch {
-      const d = await api.docOpen(configPath);
-      setDocDirty(d.dirty);
+      /* nothing open -- fall through and open ours */
     }
+    const d = await api.docOpen(configPath);
+    setDocDirty(d.dirty);
   }, [configPath]);
 
   // One data-plots fetch per solve: the worker ships data-only specs with its
@@ -647,6 +655,21 @@ function DetailPanel({
     [onCommand, path]
   );
 
+  // Bounds/prior fields commit onBlur, which fires on a plain click-through
+  // with nothing typed. Writing the field back unchanged would turn whatever
+  // the panel happens to be showing -- a component default, or another
+  // project's solved bound -- into a RANK_USER override in the params file.
+  // Only a real edit is a command.
+  const setFieldIfChanged = useCallback(
+    (field: string, raw: string, current: number | null | undefined) => {
+      const v = raw === "" ? null : Number(raw);
+      if (v !== null && !Number.isFinite(v)) return;
+      if (v === (current ?? null)) return;
+      setField(field, v);
+    },
+    [setField]
+  );
+
   // Pointer-driven drag: the anchor window is snapshotted at drag start and
   // stays fixed for the whole gesture, so continuing to drag past the rail's
   // visual edge keeps extending the value smoothly (unclamped fraction t)
@@ -739,7 +762,12 @@ function DetailPanel({
           className="detail-value-input"
           value={Number.isFinite(value) ? value : ""}
           step={stepSize}
-          disabled={!sampled}
+          // Same gate as the slider (canLiveEdit), NOT just `sampled`: this
+          // input commits a RANK_USER initval into the params file, so it must
+          // be dead whenever the number on screen does not belong to the model
+          // the server would write it against -- not live yet, gone stale, or
+          // (before the remount fix) left over from another project.
+          disabled={!canLiveEdit}
           onChange={(e) => {
             const v = Number(e.target.value);
             if (Number.isFinite(v)) {
@@ -764,9 +792,7 @@ function DetailPanel({
             type="number"
             defaultValue={lower ?? ""}
             key={`lo-${path}-${lower}`}
-            onBlur={(e) =>
-              setField("lower", e.target.value === "" ? null : Number(e.target.value))
-            }
+            onBlur={(e) => setFieldIfChanged("lower", e.target.value, lower)}
           />
         </label>
         <label>
@@ -775,9 +801,7 @@ function DetailPanel({
             type="number"
             defaultValue={upper ?? ""}
             key={`hi-${path}-${upper}`}
-            onBlur={(e) =>
-              setField("upper", e.target.value === "" ? null : Number(e.target.value))
-            }
+            onBlur={(e) => setFieldIfChanged("upper", e.target.value, upper)}
           />
         </label>
       </div>
@@ -790,9 +814,7 @@ function DetailPanel({
             type="number"
             defaultValue={param.mu ?? ""}
             key={`mu-${path}-${param.mu}`}
-            onBlur={(e) =>
-              setField("mu", e.target.value === "" ? null : Number(e.target.value))
-            }
+            onBlur={(e) => setFieldIfChanged("mu", e.target.value, param.mu)}
           />
         </label>
         <label>
@@ -801,9 +823,7 @@ function DetailPanel({
             type="number"
             defaultValue={param.sigma ?? ""}
             key={`sig-${path}-${param.sigma}`}
-            onBlur={(e) =>
-              setField("sigma", e.target.value === "" ? null : Number(e.target.value))
-            }
+            onBlur={(e) => setFieldIfChanged("sigma", e.target.value, param.sigma)}
           />
         </label>
       </div>
