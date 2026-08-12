@@ -207,6 +207,34 @@ def to_vec(val, n_elements, fill=np.nan):
     return res
 
 
+def sampled_bounds(param):
+    """(lower, upper) of a Parameter's hard support as float arrays.
+
+    Returns ``None`` when the bounds are missing, non-finite, or symbolic.
+    Every caller so far is a prior NORMALIZER (the galacticmodel IMF
+    branches, ``star``'s volume prior), and all of them treat ``None`` as
+    "leave this prior unnormalized" -- a constant offset never changes the
+    sampling, so a bound the component cannot read is not worth failing a
+    fit over.
+
+    NOTE this reads the STATIC bounds.  An element carrying a dynamic
+    (linked) ``lower``/``upper`` -- ``element_links`` -- has its real
+    support re-mapped inside ``build_pymc``; callers that care must check
+    ``param.element_links`` themselves.
+    """
+    try:
+        # atleast_1d: a scalar bound must still broadcast against the
+        # (n_elements,) sampled vector, and np.select wants real arrays.
+        lower = np.atleast_1d(np.asarray(param.lower, dtype=float))
+        upper = np.atleast_1d(np.asarray(param.upper, dtype=float))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+        return None
+    return lower, upper
+
+
 class UnitTranslator:
     # Essential "Pretty" Mapping
     SOLAR_DENSITY_UNIT = u.def_unit(

@@ -43,9 +43,11 @@ Parameterization
 ``out_frac`` is sampled linearly on [0, 0.5] -- above one half the "outlier"
 population would be the majority and the two components swap roles.
 ``out_scale`` is sampled linearly in the data's own units (m/s for RVs,
-relative flux for a transit curve, magnitudes for a microlensing curve --
-each instrument overrides the unit in its defaults.yaml exactly like the GP
-amplitudes), and Instrument pushes a data-driven hint of ``10 x median(err)``
+relative flux for a transit curve, flux in the file's own arbitrary system
+for a microlensing curve -- each instrument overrides the unit in its
+defaults.yaml exactly like the GP amplitudes, and MulensInstrument
+additionally rescales the bounds per light curve), and Instrument pushes a
+data-driven hint of ``10 x median(err)``
 so the background component starts well separated from the inlier scatter.
 ``nu`` is sampled as ``t_log_nu`` (base 10) because it spans decades and only
 its order of magnitude matters (nu ~ 2 is very heavy-tailed, nu >~ 50 is

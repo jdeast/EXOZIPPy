@@ -335,12 +335,23 @@ class AstrometryInstrument(Instrument):
             "abs": ("time", "ra", "dec", "err_e", "err_n"),
             "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
         }
+        # Roles a columns: spec may point at the SAME file column
+        # (everything else collides -- Instrument._check_no_duplicate_columns).
+        # One symmetric per-epoch uncertainty serving both sky axes is a
+        # common abs-mode catalog layout; rel's err_sep/err_pa are in
+        # different units (mas vs deg) and are deliberately NOT shareable.
+        mode_shared = {"abs": (("err_e", "err_n"),)}
         for i in range(self.n_elements):
             mode = self.modes[i]
             # Shared reader: columns:, mask:, time_* conversion, then sort
             # before the parallax factors are computed from t, so every
             # per-epoch quantity stays aligned regardless of mode.
-            df = self._read_data(i, roles=mode_roles[mode], detrend=False)
+            df = self._read_data(
+                i,
+                roles=mode_roles[mode],
+                detrend=False,
+                shared_roles=mode_shared.get(mode, ()),
+            )
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))
@@ -426,7 +437,23 @@ class AstrometryInstrument(Instrument):
             c.get("epoch") for c in self.config if c.get("epoch") is not None
         ]
         if epochs:
-            self.epoch = float(epochs[0])
+            # `epoch:` is advertised per instrument but there is only ONE
+            # reference epoch, because there is only one star.ra/dec/pm to
+            # propagate from.  Taking epochs[0] and ignoring the rest gave
+            # every later dataset a proper-motion lever arm (t - epoch) short
+            # by the difference -- the Hipparcos (1991.25) + Gaia (2016.0)
+            # case, i.e. the whole reason two datasets are combined, was off
+            # by pm * 24.75 yr with no message.
+            distinct = sorted({float(e) for e in epochs})
+            if len(distinct) > 1:
+                raise ValueError(
+                    f"[{self.prefix}] conflicting `epoch:` values "
+                    f"{distinct}: ra/dec/pm_ra/pm_dec are one shared set of "
+                    f"parameters with one reference epoch, so every dataset "
+                    f"must name the same one (or none, and let the mean "
+                    f"observation time be used)."
+                )
+            self.epoch = distinct[0]
         else:
             t_all = [
                 d["time"]

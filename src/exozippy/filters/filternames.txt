@@ -114,7 +114,7 @@ gPS	        PS_g	            Unsupported	PAN-STARRS/PS1.g	    PS1.g
 iPS	        PS_i	            Unsupported	PAN-STARRS/PS1.i	    PS1.i
 Unsupported	PS_open	            Unsupported	PAN-STARRS/PS1.open	    PS1.open
 rPS	        PS_r	            Unsupported	PAN-STARRS/PS1.r	    PS1.r
-iPS	        PS_w	            Unsupported	PAN-STARRS/PS1.w	    PS1.w
+wPS	        PS_w	            Unsupported	PAN-STARRS/PS1.w	    PS1.w
 yPS	        PS_y	            Unsupported	PAN-STARRS/PS1.y	    PS1.y
 zPS	        PS_z	            Unsupported	PAN-STARRS/PS1.z	    PS1.z
 Unsupported	R062	            Unsupported	WFIRST/WFI.R062	        WFI.R062

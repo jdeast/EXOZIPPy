@@ -9,6 +9,23 @@ from .component import Component
 logger = logging.getLogger(__name__)
 # import ipdb
 
+# Modules that failed to import during the last discover_components() sweep,
+# keyed by the module's file stem -- which is also, for every component in the
+# tree, its YAML key (lens.py -> `lens:`, sed.py -> `sed:`).  A tolerated
+# ImportError is fine for a component nobody asked for, but if the user's
+# config names that key the model would silently be built WITHOUT it: the
+# key falls through System.__init__'s "does not match any registered
+# component and will be ignored" warning, which reads like a typo and says
+# nothing about the import.  Blocking VBMicrolensing (imported at module
+# scope in mulensing/op.py, and not a declared dependency) turned a
+# microlensing config into a star-only fit that ran to completion.
+_IMPORT_FAILURES = {}
+
+
+def import_failures():
+    """Module stem -> (module_path, exception) for the last sweep."""
+    return dict(_IMPORT_FAILURES)
+
 
 def discover_components():
     """
@@ -16,6 +33,7 @@ def discover_components():
     to their lowercase class names. Also triggers local physics registration.
     """
     registry = {}
+    _IMPORT_FAILURES.clear()
 
     # 1. Start at the components directory
     components_dir = Path(__file__).parent
@@ -57,7 +75,14 @@ def discover_components():
                     registry[key] = obj
 
         except ImportError as e:
-            # a developer might push an unused, broken component. that shouldn't break the code
+            # a developer might push an unused, broken component. that
+            # shouldn't break the code -- but it MUST break the code if a
+            # config actually asks for it.  System.__init__ consults
+            # import_failures() before dismissing an unmatched YAML key.
+            _IMPORT_FAILURES[rel_path.with_suffix("").parts[-1]] = (
+                module_path,
+                e,
+            )
             logger.warning(
                 f"Failed to load component module {module_path}: {e}"
             )

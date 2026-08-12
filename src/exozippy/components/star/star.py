@@ -1,8 +1,11 @@
 import logging
 
 import numpy as np
+import pymc as pm
+import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.parameter import sampled_bounds
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -136,7 +139,7 @@ class Star(Component):
                 "doc": (
                     "Constrain this star with the MIST evolutionary model "
                     "(default true).  Only consulted when an "
-                    "evolutionary_model block exists."
+                    "evolutionarymodel block exists."
                 ),
             },
             {
@@ -147,7 +150,7 @@ class Star(Component):
                 "doc": (
                     "Constrain this star with the PARSEC evolutionary model "
                     "(default false).  Only consulted when an "
-                    "evolutionary_model block exists."
+                    "evolutionarymodel block exists."
                 ),
             },
             {
@@ -551,7 +554,7 @@ class Star(Component):
                 }
             )
 
-        if in_system("evolutionary_model"):
+        if in_system("evolutionarymodel"):
             mask = [m or p for m, p in zip(self.mist, self.parsec)]
             self.manifest.update(
                 {"age": {"mask": mask}, "initfeh": {"mask": mask}}
@@ -658,6 +661,138 @@ class Star(Component):
             _pin_sigma("ra", abs_astrom_idx)
             _pin_sigma("dec", abs_astrom_idx)
 
+    # Floor inside the volume prior's log, in pc.  The same clip
+    # galacticmodel applies before its own volume element
+    # (``pt.maximum(stars.distance.value, 1e-3)``), and equal to
+    # defaults.yaml's lower bound on star.distance, so it is inert for any
+    # ordinary fit: the logit transform already keeps a sampled element
+    # strictly inside its bounds.  It only matters if a hard link ever
+    # drives an element to zero, where a bare log(0) would be a -inf wall
+    # with no gradient for the sampler to follow.
+    DISTANCE_FLOOR_PC = 1.0e-3
+
+    def _volume_prior_log_norm(self):
+        """log Z of p(d) ~ d^2 over star.distance's hard support.
+
+        Z = int_lower^upper d^2 dd = (upper^3 - lower^3) / 3, per element,
+        which is finite (and positive) for any finite bounds.  Evaluated as
+        ``3 log(upper) + log1p(-(lower/upper)^3) - log 3`` so the cube never
+        has to be formed at the far end of a wide support.
+
+        WHY NORMALIZE, when the galacticmodel-or-not choice is topology-
+        driven rather than user-selected (so the PR #82/#86 argument -- make
+        two user-selectable IMFs comparable -- does not apply)?  Three
+        reasons, none of which is comparability across topologies:
+
+        1. The prior this REPLACES is normalized.  A bounded, no-sigma
+           element's logit reparameterization gives exactly U(lower, upper),
+           an honest density integrating to 1 (see parameter.py section 5b's
+           note on why no extra -log(span) belongs there).  Dropping the
+           normalizer here would quietly demote star.distance's prior from a
+           density to an unnormalized reweighting -- a regression in a
+           property the code currently has.
+        2. The bounds ARE user-settable even though the prior choice is not.
+           Today, tightening `star.distance: {upper: ...}` moves logp by
+           exactly the -log(span) that the tightening is worth; unnormalized,
+           it would move it by an arbitrary offset instead.
+        3. It is one closed-form constant with no runtime cost and no
+           gradient.
+
+        Returns 0.0 (unnormalized, with a warning) when the bounds cannot be
+        read as finite floats, matching the IMF normalizers: a constant can
+        never change the sampling, so it is not worth failing a fit over.
+        """
+        bounds = sampled_bounds(self.distance)
+        if bounds is None:
+            logger.warning(
+                f"[{self.prefix}] Cannot read finite bounds on "
+                f"{self.prefix}.distance; the d^2 volume prior is left "
+                f"unnormalized (harmless for sampling, but its logp is "
+                f"offset by an unknown constant)."
+            )
+            return 0.0
+        lower, upper = bounds
+
+        # Bounds may only be tightened and defaults.yaml's are (1e-3, 1e5)
+        # pc, so this is belt and braces.
+        bad = (upper <= 0.0) | (lower < 0.0) | (upper <= lower)
+        if np.any(bad):
+            logger.warning(
+                f"[{self.prefix}] Non-positive or inverted bounds on "
+                f"{self.prefix}.distance; the d^2 volume prior is left "
+                f"unnormalized."
+            )
+            return 0.0
+
+        # A dynamic (linked) bound is re-mapped inside build_pymc, so the
+        # static bounds read above are not that element's real support and
+        # this constant does not normalize it.  Say so rather than pretend.
+        links = getattr(self.distance, "element_links", None) or {}
+        if links.get("lower") or links.get("upper"):
+            logger.warning(
+                f"[{self.prefix}] {self.prefix}.distance carries a linked "
+                f"lower/upper bound, so its support is dynamic; the d^2 "
+                f"volume prior is normalized over the STATIC bounds and is "
+                f"therefore an unnormalized reweighting inside the dynamic "
+                f"interval."
+            )
+
+        return (
+            3.0 * np.log(upper)
+            + np.log1p(-((lower / upper) ** 3))
+            - np.log(3.0)
+        )
+
     def build_likelihood(self, model, system):
-        # Explicit pass-through!
-        pass
+        """Stage 6: the constant-space-density (volume) prior on distance.
+
+        A bounded element with no sigma is sampled UNIFORM in its own
+        coordinate -- parameter.py's logit transform implies exactly
+        U(lower, upper) -- so ``star.distance`` defaulted to uniform in d
+        over defaults.yaml's [1e-3, 1e5] pc.  Nobody chose that: it is what
+        fell out of the default machinery.  Transformed, it is
+        p(plx) ~ plx^-2, whereas an object drawn from a locally constant
+        space density gives p(d) ~ d^2, i.e. p(plx) ~ plx^-4 -- the volume
+        of the shell it could have come from.  The two disagree by exactly
+        d^2, which is negligible for a well-measured parallax and dominant
+        for a poor one (plx/sigma below ~10), the Lutz-Kelker regime.
+
+        DEFER TO galacticmodel WHERE ONE EXISTS.  Its ``kinematic_prior``
+        already carries ``volume_element = 2*log(d)`` over the SAME full
+        ``star.distance`` vector this covers -- it reads ``system.star`` and
+        sums with no mask, lens and source and every other star alike -- so
+        adding a second copy would apply d^4.  A galactic model is also a
+        strictly stronger statement than constant space density (it has the
+        disk/bulge density profiles along the actual sight line), so where
+        one exists it wins outright and this term stays out of the way.
+
+        The term applies to every element of the vector, including pinned
+        and hard-linked ones, exactly as the galacticmodel priors do.  For a
+        pinned element it is a constant and cannot change the posterior.
+
+        Note this applies on top of a user's Gaussian ``sigma`` on distance,
+        and that is deliberate: such a constraint is a parallax MEASUREMENT,
+        and multiplying it by the volume prior is the standard treatment.
+        The shift is ~2*(sigma/d)^2 in fractional distance -- 2e-4 for a
+        1% parallax, 18% for a 30% one, which is precisely the regime where
+        the volume prior is the correct thing to do.
+        """
+        if "distance" not in self.manifest:
+            # No distance parameter in this topology at all (no sed, mann,
+            # lens, galacticmodel or astrometry) -- nothing to weight.
+            return
+
+        has_galacticmodel, _ = self._galactic_imf(system)
+        if has_galacticmodel:
+            logger.debug(
+                f"[{self.prefix}] galacticmodel present -- deferring the "
+                f"distance prior to its density/kinematic mixture, which "
+                f"already carries the d^2 volume element."
+            )
+            return
+
+        distance = pt.maximum(self.distance.value, self.DISTANCE_FLOOR_PC)
+        pm.Potential(
+            f"{self.prefix}.volume_prior",
+            pt.sum(2.0 * pt.log(distance) - self._volume_prior_log_norm()),
+        )

@@ -21,6 +21,54 @@ class SymbolicTimeout(Exception):
     pass
 
 
+def parse_unit(unit_str, where):
+    """Parse a unit string strictly, or raise naming the offending string.
+
+    An unparseable ``unit:`` used to be swallowed here (the conversion
+    factor silently fell back to 1.0), which does not mean "no conversion"
+    -- it means the user's number is reinterpreted in whatever the internal
+    unit happens to be.  ``planet.b.mass: {initval: 1.0, unit: earthMasses}``
+    (note the typo) became one SOLAR mass, a factor of 333000, with no
+    message anywhere.  Same policy as ``rvinstrument._parse_rv_unit`` and
+    ``Parameter.__post_init__``: an unrecognized unit is an error.
+    """
+    try:
+        return u.Unit(unit_str)
+    except Exception as exc:
+        raise ValueError(
+            f"[{where}] unit: {unit_str!r} is not a unit astropy can parse "
+            f"(e.g. 'earthMass', 'jupiterMass', 'deg', 'm/s', 'd')."
+        ) from exc
+
+
+def unit_conversion(from_str, to_str, where):
+    """Multiplier converting a value in ``from_str`` to ``to_str``.
+
+    Both strings must parse and must be mutually convertible; either
+    failure raises, naming ``where`` (the parameter path the unit came
+    from).  Log-space units short-circuit to 1.0 exactly as they always
+    have -- ``dex`` conversions are handled by the physics, not here -- but
+    the strings are still validated first.
+    """
+    if from_str == to_str:
+        return 1.0
+
+    from_u = parse_unit(from_str, where)
+    to_u = parse_unit(to_str, where)
+
+    if "dex" in str(from_str) or "dex" in str(to_str):
+        return 1.0
+
+    try:
+        return float(from_u.to(to_u))
+    except Exception as exc:
+        raise ValueError(
+            f"[{where}] cannot convert '{from_str}' to '{to_str}': the two "
+            f"units are not compatible.  Check the unit: key on this "
+            f"parameter."
+        ) from exc
+
+
 import contextlib
 
 # SIGALRM is POSIX-only -- Windows has no such signal, and touching
@@ -771,9 +819,17 @@ class ConfigManager:
             return element if (element is not None and n_elements == 1) else i
 
         base_unit_str = base.get("unit", "")
-        new_unit_str = None
 
-        keys_to_check_global = []
+        # The `unit:` override is resolved PER ELEMENT.  It used to be a
+        # single global scan that stopped at the first element carrying one
+        # and applied that element's unit -- and its scaling -- to the whole
+        # vector: `planet.b.mass: {unit: earthMass}` silently relabeled
+        # planet.c as earthMass too, so its defaults.yaml bounds (the actual
+        # uniform prior range) came out 318x too wide and its start value
+        # disagreed with what get_conversion_factor, which IS per element,
+        # told the relaxation engine.
+        elem_units = []
+        elem_scaling = np.ones(n_elements, dtype=float)
         for i in range(n_elements):
             keys = [
                 f"{component_type}.{param_name}",
@@ -781,26 +837,39 @@ class ConfigManager:
             ]
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
-            keys_to_check_global.extend(keys)
 
-        for k in keys_to_check_global:
-            if k in self.user_params and isinstance(self.user_params[k], dict):
-                if "unit" in self.user_params[k]:
-                    new_unit_str = self.user_params[k]["unit"]
+            u_str = None
+            u_src = None
+            for k in keys:
+                entry = self.user_params.get(k)
+                if isinstance(entry, dict) and "unit" in entry:
+                    u_str = entry["unit"]
+                    u_src = k
                     break
 
-        unit_scaling = 1.0
-        if new_unit_str and base_unit_str and new_unit_str != base_unit_str:
-            try:
-                unit_scaling = u.Unit(base_unit_str).to(u.Unit(new_unit_str))
-            except Exception:
-                unit_scaling = 1.0
+            if u_str:
+                # A user `unit:` that astropy cannot parse, or that is not
+                # convertible to the parameter's own unit, RAISES.  Falling
+                # back to 1.0 silently reinterpreted the user's number in
+                # the wrong unit -- see unit_conversion's docstring.  A
+                # dimensionless parameter (base_unit_str == "") is included
+                # deliberately: a unit on it cannot mean anything.
+                elem_scaling[i] = unit_conversion(base_unit_str, u_str, u_src)
+                elem_units.append(u_str)
+            else:
+                elem_units.append(base_unit_str)
+
+        # Keep the scalar spelling when every element agrees, so the common
+        # case is byte-for-byte what it always was; Parameter accepts either.
+        unit_field = (
+            elem_units[0] if len(set(elem_units)) == 1 else list(elem_units)
+        )
 
         resolved = {
             "shape": shape,
             "user_modified": False,
             "user_prior_modified": False,
-            "unit": new_unit_str if new_unit_str else base_unit_str,
+            "unit": unit_field,
             "internal_unit": base.get("internal_unit"),
             "latex": base.get("latex", ""),
             "description": base.get("description", ""),
@@ -819,9 +888,7 @@ class ConfigManager:
         for key in all_numeric:
             val = base.get(key)
             if val is not None:
-                resolved[key] = np.full(
-                    n_elements, float(val) * unit_scaling, dtype=float
-                )
+                resolved[key] = float(val) * elem_scaling
             else:
                 resolved[key] = None
 
@@ -870,9 +937,9 @@ class ConfigManager:
                         if np.isnan(v):
                             continue
                         resolved["auto_estimated"] = True
-                        apply_value(key, resolved[key], i, v * unit_scaling)
+                        apply_value(key, resolved[key], i, v * elem_scaling[i])
                         if key in ("lower", "upper"):
-                            override_bounds[(key, i)] = v * unit_scaling
+                            override_bounds[(key, i)] = v * elem_scaling[i]
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
@@ -1014,6 +1081,7 @@ class ConfigManager:
         self, component_type, param_name, full_path=None
     ):
         u_str = None
+        user_supplied = False
         # 1. Check if the user explicitly provided a unit in their config
         if (
             full_path
@@ -1021,6 +1089,7 @@ class ConfigManager:
             and isinstance(self.user_params[full_path], dict)
         ):
             u_str = self.user_params[full_path].get("unit")
+            user_supplied = bool(u_str)
 
         # 2. Fallback to defaults
         comp_cfg = self.base_defaults.get(component_type, {})
@@ -1031,15 +1100,25 @@ class ConfigManager:
         i_str = param_cfg.get("internal_unit", "")
 
         if not u_str or not i_str:
+            # No declared pair -> genuinely nothing to convert.  But a unit
+            # the USER supplied on a parameter that declares no
+            # internal_unit cannot be honored, and returning 1.0 would read
+            # their number as if it had been written in the default unit.
+            if user_supplied and not i_str:
+                raise ValueError(
+                    f"[{full_path}] unit: {u_str!r} was given, but "
+                    f"{component_type}.{param_name} declares no "
+                    f"internal_unit, so the value cannot be converted.  "
+                    f"Remove the unit: key or give the parameter an "
+                    f"internal_unit in its defaults.yaml."
+                )
             return 1.0
 
-        try:
-            if "dex" in u_str or "dex" in i_str:
-                return 1.0
-            # Returns the multiplier to convert FROM user TO internal
-            return u.Unit(u_str).to(u.Unit(i_str))
-        except Exception:
-            return 1.0
+        # Multiplier to convert FROM user TO internal.  Raises on an
+        # unparseable or incompatible unit rather than silently using 1.0.
+        return unit_conversion(
+            u_str, i_str, full_path or f"{component_type}.{param_name}"
+        )
 
     def canonical_key(self, key):
         """Index-form spelling of ``key`` under THIS manager's system config.
@@ -1743,6 +1822,22 @@ class ConfigManager:
 
         return result
 
+    # Every mutable ConfigManager attribute the relaxation engine writes to.
+    # probe_derivable deep-copies each one before running the engine and puts
+    # the copy back in a finally block, which is what makes a probe genuinely
+    # read-only.  If the engine ever starts writing somewhere new, it belongs
+    # in this tuple -- a mutation missing from it silently survives the probe.
+    _PROBE_SNAPSHOT_ATTRS = (
+        "user_params",  # _execute_solve syncs solved init_scale back
+        "diagnostics",  # _record_diagnostic appends contradictions
+        "propagated_scales",  # refreshed at the end of every solve
+        "symbolic_blacklist",  # a 2 s sp.solve timeout adds the target
+        "_last_provenance",
+        "_last_scale_provenance",
+        "_last_resolved",
+        "_last_solved_by",
+    )
+
     def probe_derivable(self, paths, tolerance=1e-3):
         """Which of `paths` the relaxation engine can pin down from what is
         known now, as opposed to falling back on a bare defaults.yaml value.
@@ -1782,17 +1877,17 @@ class ConfigManager:
             flat[str(sym)] = float(val) * factor
 
         # The engine writes back init_scale into user_params, appends
-        # diagnostics, and refreshes the export snapshots.  None of that may
-        # leak out of a probe.
-        saved = (
-            copy.deepcopy(self.user_params),
-            list(self.diagnostics),
-            dict(self.propagated_scales),
-            dict(self._last_provenance),
-            dict(self._last_scale_provenance),
-            dict(self._last_resolved),
-            dict(self._last_solved_by),
-        )
+        # diagnostics, blacklists any inversion whose sp.solve hits the 2 s
+        # alarm, and refreshes the export snapshots.  None of that may leak
+        # out of a probe -- least of all the blacklist, which is consulted
+        # for the rest of the process: one slow inversion during this
+        # throwaway stage-1a probe would otherwise disable that relation for
+        # the real stage-3 solve, which has different inputs and might well
+        # have solved it in time.
+        saved = {
+            attr: copy.deepcopy(getattr(self, attr))
+            for attr in self._PROBE_SNAPSHOT_ATTRS
+        }
         prev_level = logger.level
         try:
             logger.setLevel(logging.WARNING)
@@ -1805,23 +1900,8 @@ class ConfigManager:
             ranks = {}
         finally:
             logger.setLevel(prev_level)
-            (
-                self.user_params,
-                self.diagnostics,
-                self.propagated_scales,
-                self._last_provenance,
-                self._last_scale_provenance,
-                self._last_resolved,
-                self._last_solved_by,
-            ) = (
-                saved[0],
-                saved[1],
-                saved[2],
-                saved[3],
-                saved[4],
-                saved[5],
-                saved[6],
-            )
+            for attr, value in saved.items():
+                setattr(self, attr, value)
 
         return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
 
@@ -2628,8 +2708,23 @@ class ConfigManager:
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_scale_rank
 
-                    if target_str in self.user_params and isinstance(
-                        self.user_params[target_str], dict
+                    # Sync the solved scale back into user_params -- but only
+                    # when there IS one.  init_scale is optional at every
+                    # source (defaults.yaml, component hints, user sigmas), so
+                    # a target whose parents are ALL scale-less scores
+                    # new_scale_rank == 0, fails the guard above, and has no
+                    # entry from the default-armor pass either: reading
+                    # resolved_scales[target_str] here used to raise KeyError
+                    # straight out of prepare().  (Reproduced by naming
+                    # `orbit.<name>.arsun` in a params file -- it is solved
+                    # from m_total and period, and none of the three carries
+                    # an init_scale default.)  Skipping leaves the parameter
+                    # with no preliminary scale, which is the documented and
+                    # handled state: build_pymc falls back to a fraction of
+                    # the bound span, and the startup whitening probe measures
+                    # the real scale from the data regardless.
+                    if target_str in resolved_scales and isinstance(
+                        self.user_params.get(target_str), dict
                     ):
                         factor = self.get_conversion_factor(
                             parts[0], parts[-1], full_path=target_str

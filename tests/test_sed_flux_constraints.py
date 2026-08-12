@@ -53,6 +53,17 @@ def kmt_system(monkeypatch_module_cwd=None):
 
 
 def _eval(model, node, point):
+    """Evaluate a model node at ``point``.
+
+    ``replace_rvs_by_values`` is not optional.  A Deterministic's graph is
+    written over the RandomVariables, so compiling it against value_vars
+    leaves the RVs in place and the function DRAWS FROM THE PRIOR instead of
+    reading the point.  Within one process that is invisible -- pytensor.function
+    does not advance the shared rng, so every call returns the same draw and
+    two nodes compared against each other still agree -- but the value has
+    nothing to do with ``point``, and two different models draw differently.
+    """
+    (node,) = model.replace_rvs_by_values([node])
     f = pytensor.function(model.value_vars, node, on_unused_input="ignore")
     return f(*[point[v.name] for v in model.value_vars])
 
@@ -117,6 +128,70 @@ def test_kmt_model_logp_is_finite(kmt_system):
     _, model, point = kmt_system
     logp = model.compile_logp()(point)
     assert np.isfinite(logp)
+
+
+def test_zeropoint_is_unchanged_by_a_flux_format_light_curve(
+    kmt_system, tmp_path
+):
+    """
+    Given the same event with every light curve rewritten in flux format
+    (F = 10**(-0.4 m), sigma_F = F*sigma_m*ln(10)/2.5),
+    When the model is built,
+    Then each zeropoint Deterministic, and the whole logp, match the
+    magnitude-format build to round-off.
+
+    The microlensing likelihood is Gaussian in flux, and f_source lives in the
+    data file's own flux system -- which for a magnitude file is the system in
+    which F = 10**(-0.4 m).  The zeropoint is exactly what absorbs that
+    arbitrary offset, so the SED tie must not notice which format the file was
+    written in.  If it ever does, the zp prior (0 +/- 0.2 mag) is silently
+    constraining a different quantity than it claims to.
+    """
+    import os
+    import shutil
+
+    if not _KMT_DIR.is_dir():
+        pytest.skip("KMT-2019-BLG-1806 example not present")
+
+    mag_system, mag_model, mag_point = kmt_system
+
+    work = tmp_path / "flux_twin"
+    shutil.copytree(_KMT_DIR, work)
+
+    cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        with open("KMT-2019-BLG-1806.yaml") as f:
+            config = yaml.safe_load(f)
+        with open(config["parameter_file"]) as f:
+            user_params = yaml.safe_load(f)
+        for k in ("run", "prefix", "parameter_file", "sampler"):
+            config.pop(k, None)
+
+        for entry in config["mulensinstrument"]:
+            rows = np.loadtxt(entry["file"])
+            flux = 10.0 ** (-0.4 * rows[:, 1])
+            err = flux * rows[:, 2] * np.log(10.0) / 2.5
+            np.savetxt(entry["file"], np.column_stack([rows[:, 0], flux, err]))
+            entry["data_format"] = "flux"
+
+        flux_system = System(config, user_params=user_params)
+        flux_system.prepare()
+        flux_model = flux_system.build_model()
+        flux_point = flux_model.initial_point()
+    finally:
+        os.chdir(cwd)
+
+    for inst in ("KMTC04", "KMTS04", "KMTA04"):
+        name = f"mulensinstrument.{inst}.zeropoint"
+        zp_mag = _eval(mag_model, mag_model[name], mag_point)
+        zp_flux = _eval(flux_model, flux_model[name], flux_point)
+        assert float(zp_flux) == pytest.approx(float(zp_mag), rel=1e-9), inst
+
+    lp_mag = float(np.asarray(mag_model.compile_logp()(mag_point)))
+    lp_flux = float(np.asarray(flux_model.compile_logp()(flux_point)))
+    assert np.isfinite(lp_mag)
+    assert lp_flux == pytest.approx(lp_mag, rel=1e-9)
 
 
 def test_zeropoint_sigma_zero_raises():
