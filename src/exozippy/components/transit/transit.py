@@ -116,13 +116,6 @@ class Transit(Instrument):
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
-        all_times, all_fluxes, all_errs, inst_indices, all_detrend = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -157,6 +150,7 @@ class Transit(Instrument):
             self.exptime_min[i] = exptime
             self.ninterp[i] = ninterp
 
+        blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
@@ -164,39 +158,24 @@ class Transit(Instrument):
             df = self._read_data(
                 i, roles=("time", "flux", "err"), detrend=True
             )
-            n_obs = len(df)
-            all_times.append(df.iloc[:, 0].values)
-            all_fluxes.append(df.iloc[:, 1].values)
-            all_errs.append(df.iloc[:, 2].values)
-            inst_indices.append(np.full(n_obs, i))
-
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
             self.jittervar_lower[i] = self._jitter_floor(df.iloc[:, 2].values)
 
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((n_obs, 0)))
+            blocks.add(
+                i,
+                time=df.iloc[:, 0].values,
+                obs=df.iloc[:, 1].values,
+                err=df.iloc[:, 2].values,
+                df=df,
+            )
 
-        self.time = np.concatenate(all_times).astype(float)
-        self.flux = np.concatenate(all_fluxes).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.n_total_obs = len(self.time)
+        # Shared accumulator: concatenation (time/flux/err), inst_map, the
+        # per-file row ranges, the block-diagonal detrend matrix, and the
+        # optional GP / robust-likelihood hooks.  No user_factor: the errors
+        # are already in the amplitude parameters' unit (relative flux).
+        blocks.finalize("flux")
 
         self._build_oversample_grid()
-
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # Errors are already in the amplitude parameter's unit (relative flux).
-        self._prepare_gp(self.time, self.err, self.inst_map)
-        self._prepare_robust(self.err, self.inst_map)
 
     def _build_oversample_grid(self):
         """

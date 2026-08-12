@@ -10,6 +10,15 @@ common machinery so it is written and tested once; the physics (RV curve vs
 transit light curve vs magnification vs astrometric position) stays in each
 child.
 
+Reading a file is ``_read_data``; turning the per-file blocks into this
+component's concatenated arrays is ``ConcatenatedData`` (below), the shared
+template the three single-observable children drive from their own
+``load_data``.  ``astrometryinstrument`` is deliberately not one of them: it
+models TWO observables per epoch (dE/dN or sep/PA) in different units, so it
+keeps one dict per file rather than concatenating -- the same asymmetry that
+makes it set ``supports_gp = False`` and ``supports_robust_likelihood =
+False``.
+
 This class is deliberately NOT a discoverable component: it declares none of
 ``Component``'s abstract methods (``prefix``, ``register_parameters``,
 ``build_likelihood``), so it stays abstract and ``factory.discover_components``
@@ -189,6 +198,190 @@ JITTER_RELATIONS = [
 ]
 
 
+class ConcatenatedData:
+    """Per-file accumulator for the arrays an instrument concatenates.
+
+    Every child that models ONE observable per epoch (rv, transit, mulens)
+    builds the same things in ``load_data``: one concatenated time /
+    observable / error array, the ``inst_map`` naming which file each row came
+    from, the block-diagonal detrend design matrix, and -- last -- the GP and
+    robust-likelihood indices derived from all of the above.  This class owns
+    that template so it exists once.
+
+    Usage (the child keeps only its own per-file physics)::
+
+        blocks = self._concat_blocks()
+        for i in range(self.n_elements):
+            df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
+            ...per-file work...
+            blocks.add(i, time=..., obs=..., err=..., df=df)
+        blocks.finalize("rv", user_factor=...)
+
+    WHY AN ACCUMULATOR AND NOT A TEMPLATE METHOD WITH A PER-FILE HOOK.  The
+    three children disagree about *when* the files are read:
+    ``mulensinstrument`` reads every file in a first pass because the Skowron
+    reference epoch (``t0_par``) is resolved from ALL the times before the
+    per-file observer positions can be computed in a second.  A template method
+    owning the loop would have to grow a "read everything first" mode for that
+    one caller; an accumulator the child feeds is indifferent to the loop
+    structure, which is the part that genuinely differs.
+
+    THE ROW-RANGE INVARIANT IS ENFORCED, NOT ASSUMED.  Each instrument's rows
+    must be a single contiguous block, in config order, in every concatenated
+    array simultaneously: ``Instrument._build_block_detrend`` lays its blocks
+    on the diagonal by walking the per-file row counts in order, and
+    ``mulensinstrument.observer_pos`` is addressed row-for-row against
+    ``time``.  Both break silently if a file is added out of order or a side
+    array disagrees in length, so ``add`` rejects both, and ``finalize``
+    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``
+    rather than leaving every consumer to re-derive them from ``inst_map``.
+    """
+
+    def __init__(self, owner, n_roles=3):
+        self.owner = owner
+        # Number of canonical (non-detrend) columns in the child's `roles`
+        # tuple: the detrend columns are whatever follows them.
+        self.n_roles = int(n_roles)
+        self.times = []
+        self.obs = []
+        self.errs = []
+        self.detrend = []
+        self.counts = []
+        self.sides = {}
+
+    # -- per file --------------------------------------------------------
+    def add(self, i, time, obs, err, df=None, detrend=None, **sides):
+        """Append file ``i``'s block to every array.
+
+        ``time``/``obs``/``err`` are the per-file arrays in the units the
+        child wants concatenated (any unit conversion is the child's, applied
+        before the call).  ``df`` is the DataFrame ``_read_data`` returned:
+        its columns past ``n_roles`` become this file's detrend block.  Pass
+        ``detrend`` explicitly to override that, or leave both unset for a
+        file with no detrend columns.  Extra keyword arguments are per-epoch
+        SIDE ARRAYS (mulensing's ``observer_pos``): they are concatenated
+        along axis 0 and set on the owner under their keyword name, so they
+        stay row-aligned with ``time`` by construction.
+        """
+        if i != len(self.counts):
+            raise ValueError(
+                f"[{self.owner.prefix}] data blocks must be added in config "
+                f"order: expected element {len(self.counts)}, got {i}. The "
+                f"concatenated arrays address each instrument as one "
+                f"contiguous row range (block-diagonal detrending, per-epoch "
+                f"side arrays), which out-of-order blocks break silently."
+            )
+        time = np.asarray(time)
+        n_obs = len(time)
+        for name, arr in (("obs", obs), ("err", err)):
+            if len(np.asarray(arr)) != n_obs:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] "
+                    f"{name} has {len(np.asarray(arr))} rows but time has "
+                    f"{n_obs}."
+                )
+
+        if detrend is None:
+            if df is not None and df.shape[1] > self.n_roles:
+                detrend = df.iloc[:, self.n_roles :].values.astype(float)
+            else:
+                detrend = np.empty((n_obs, 0))
+        detrend = np.asarray(detrend)
+        if detrend.shape[0] != n_obs:
+            raise ValueError(
+                f"[{self.owner.prefix}[{self.owner.names[i]}]] detrend block "
+                f"has {detrend.shape[0]} rows but time has {n_obs}."
+            )
+
+        for name, arr in sides.items():
+            arr = np.asarray(arr)
+            if arr.shape[0] != n_obs:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] per-epoch "
+                    f"array '{name}' has {arr.shape[0]} rows but time has "
+                    f"{n_obs}; side arrays must stay row-aligned with the "
+                    f"observations."
+                )
+            if i == 0:
+                self.sides[name] = []
+            elif name not in self.sides:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] per-epoch "
+                    f"array '{name}' was not supplied for earlier files; a "
+                    f"side array must cover every element or none."
+                )
+            self.sides[name].append(arr)
+        missing = set(self.sides) - set(sides)
+        if missing:
+            raise ValueError(
+                f"[{self.owner.prefix}[{self.owner.names[i]}]] missing "
+                f"per-epoch array(s) {sorted(missing)} supplied by earlier "
+                f"files; a side array must cover every element or none."
+            )
+
+        self.times.append(time)
+        self.obs.append(obs)
+        self.errs.append(err)
+        self.detrend.append(detrend)
+        self.counts.append(n_obs)
+
+    # -- after the loop --------------------------------------------------
+    def finalize(self, observable, user_factor=1.0):
+        """Concatenate, publish on the owner, and run the optional hooks.
+
+        Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
+        ``n_total_obs``, ``row_ranges``, every side array, and the
+        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols``
+        triple; then calls ``_prepare_gp`` and ``_prepare_robust``, which are
+        no-ops unless a file set ``gp:`` / ``likelihood:``.
+
+        ``user_factor`` converts the concatenated error from the internal unit
+        it is held in to the user unit the GP amplitude and the robust
+        ``out_scale`` are declared in (both are declared in the same unit as
+        the data, so one factor serves both).
+        """
+        owner = self.owner
+        if len(self.counts) != owner.n_elements:
+            raise ValueError(
+                f"[{owner.prefix}] {len(self.counts)} of {owner.n_elements} "
+                f"elements contributed data blocks; every element must."
+            )
+
+        owner.time = np.concatenate(self.times).astype(float)
+        setattr(owner, observable, np.concatenate(self.obs).astype(float))
+        owner.err = np.concatenate(self.errs).astype(float)
+        # Named `inst_map` so Component.build_tensor_maps auto-generates
+        # `inst_map_tensor` in stage 4.
+        owner.inst_map = np.repeat(
+            np.arange(owner.n_elements), self.counts
+        ).astype(int)
+        owner.n_total_obs = int(owner.inst_map.size)
+        owner.row_ranges = self.row_ranges()
+
+        for name, blocks in self.sides.items():
+            setattr(owner, name, np.concatenate(blocks, axis=0).astype(float))
+
+        (
+            owner.detrend_matrix,
+            owner.n_detrend_per_inst,
+            owner.total_detrend_cols,
+        ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
+
+        owner._prepare_gp(
+            owner.time, owner.err, owner.inst_map, user_factor=user_factor
+        )
+        owner._prepare_robust(
+            owner.err, owner.inst_map, user_factor=user_factor
+        )
+
+    def row_ranges(self):
+        """``[(start, stop), ...]``: file ``i``'s rows in every array."""
+        edges = np.concatenate(([0], np.cumsum(self.counts))).astype(int)
+        return [
+            (int(edges[i]), int(edges[i + 1])) for i in range(len(self.counts))
+        ]
+
+
 class Instrument(Component):
     # Noise parameterization: "jitter_variance" (additive) or "err_scale"
     # (multiplicative).  Subclasses override; the default matches the majority
@@ -212,6 +405,10 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # Per-element (start, stop) row ranges into the concatenated arrays,
+        # published by ConcatenatedData.finalize.  Empty for a child that does
+        # not concatenate (astrometryinstrument keeps per-file datasets).
+        self.row_ranges = []
         # Optional per-file exclusion mask (see _apply_mask). Parsed here so a
         # malformed spec fails at construction, not mid-load.
         self.mask_specs = [c.get("mask") for c in self.config]
@@ -287,6 +484,15 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared data loading
     # ------------------------------------------------------------------
+    def _concat_blocks(self, n_roles=3):
+        """A fresh ``ConcatenatedData`` accumulator for this component.
+
+        ``n_roles`` is the number of canonical columns in the child's
+        ``_read_data(roles=...)`` tuple; anything past them is that file's
+        detrend block.
+        """
+        return ConcatenatedData(self, n_roles=n_roles)
+
     @staticmethod
     def _sort_by_time(df, time_col=0):
         """Return ``df`` sorted ascending by its time column.

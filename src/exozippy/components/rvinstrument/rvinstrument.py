@@ -126,27 +126,16 @@ class RVInstrument(Instrument):
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
-        all_times, all_rvs, all_errs, inst_indices, all_detrend = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+        blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
             df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
-            n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
-            all_times.append(df.iloc[:, 0].values)
-            all_rvs.append(df.iloc[:, 1].values * factor)
-            all_errs.append(df.iloc[:, 2].values * factor)
-            inst_indices.append(np.full(n_obs, i))
 
             m_s_factor = self.units[i].to(u.m / u.s)
             self.gamma_init[i] = np.mean(df.iloc[:, 1].values) * m_s_factor
@@ -154,43 +143,22 @@ class RVInstrument(Instrument):
                 df.iloc[:, 2].values, factor=m_s_factor
             )
 
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((n_obs, 0)))
+            blocks.add(
+                i,
+                time=df.iloc[:, 0].values,
+                obs=df.iloc[:, 1].values * factor,
+                err=df.iloc[:, 2].values * factor,
+                df=df,
+            )
 
-        self.time = np.concatenate(all_times).astype(float)
-        self.rv = np.concatenate(all_rvs).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
+        # Shared accumulator: concatenation (time/rv/err), inst_map, the
+        # per-file row ranges, the block-diagonal detrend matrix, and the
+        # optional GP / robust-likelihood hooks.  self.err ends up in
+        # solRad/d while the GP amplitude and out_scale are declared in m/s,
+        # hence user_factor.
+        blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
 
-        # By naming this `inst_map`, the base class auto-generates `inst_map_tensor`
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-
-        self.n_total_obs = len(self.time)
         self.k_init = self._estimate_k_init()
-
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # self.err is in solRad/d; the amplitude parameter is declared in m/s.
-        self._prepare_gp(
-            self.time,
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
-        # Optional per-file robust likelihood (no-op unless `likelihood:` is
-        # set).  Same unit conversion: out_scale is declared in m/s.
-        self._prepare_robust(
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
 
     def _estimate_k_init(self):
         """Seed for the planetary RV semi-amplitude, in m/s.
