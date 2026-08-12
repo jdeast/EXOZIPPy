@@ -169,7 +169,9 @@ Planet-as-lens was **not** implemented, deliberately. A planet body has no `dist
 
 **`star.logmass` bounds.** The `-9.0` floor in `star/defaults.yaml` is deliberate and load-bearing, not a sloppy wide default -- the reasoning is in the comment on the key itself; read it before tightening it. `star.mass`'s `lower`/`upper` were **deleted**: `mass` is derived (`10**logmass`), so `logmass`'s bounds are the real hard support enforced exactly by the logit transform, and bounds on `mass` could only act as soft barriers layered on top, disagreeing with it by eight orders of magnitude. To change the allowed mass range, change `logmass`.
 
-Tests: `tests/test_galactic_model.py`, `tests/test_ffp_mass_function.py`.
+Both potentials **declare themselves to the reporting layer** (`_declare_mass_prior`, `_declare_kinematic_prior`), so the tables name the IMF actually applied, the FFP function with the slope actually used, and the galactic model on `distance`/`pm_ra`/`pm_dec`/`rv` -- instead of "Uniform" on all of them. See "Reporting component-added priors". The per-element split is the point: one `pt.sum` carries two different densities when a star opts into `ffp`, and the Prior column has to say which is which.
+
+Tests: `tests/test_galactic_model.py`, `tests/test_ffp_mass_function.py`, `tests/test_prior_reporting.py`.
 
 ### The stellar distance prior (`components/star/star.py`)
 
@@ -184,7 +186,7 @@ Details worth not rediscovering:
 - It applies **on top of** a user's Gaussian `sigma` on distance, and that is right: such an entry is a parallax *measurement*, and multiplying it by the volume prior is the standard treatment. The shift is `~2*(sigma/d)^2` in fractional distance -- 2e-4 for a 1% parallax, 18% for a 30% one, i.e. it only bites exactly where the volume prior is what you want.
 - **Nothing else carries a distance Jacobian or volume term.** SED (`calc_appmag`'s distance modulus), mann (`calc_absmag`), and astrometry (parallax scaling) use distance only in forward models; `lens.event_rate_prior`'s `log(mu_rel * theta_E)` is a rate *selection* factor, not a volume element, and it is applied whether or not a galacticmodel exists.
 - Reading a Parameter's hard support has one owner, `parameter.sampled_bounds` (galacticmodel's IMF normalizers call it too). Unreadable/non-finite bounds fall back to unnormalized with a warning rather than failing a fit.
-- Like `star.logmass` under the IMF, the LaTeX prior macro still reports `star.distance` as Uniform: a component-level `pm.Potential` is invisible to `Parameter`'s own prior description. Pre-existing behavior, not introduced here.
+- `Star.build_likelihood` also **declares** the term to the reporting layer (`self.distance.add_prior_contribution(...)`), so the tables read `p(d) propto d^2 on [lower, upper]` rather than "Uniform"; where a galacticmodel exists the star component declares nothing and galacticmodel declares its own. See "Reporting component-added priors" below.
 
 Every pinned logp for a topology with a star and no galacticmodel moves by exactly `2*sum(log d) - n_star*log Z` (`log Z = 33.44017` at the defaults.yaml bounds, so `-28.835` nats per star at the 10 pc default start). `tests/test_runaway_logp_regression.py` has a galacticmodel and is therefore the unchanged control.
 
@@ -227,6 +229,20 @@ Tests: `tests/test_robust_likelihood.py`.
 - The LaTeX prior macro is emitted **per element** (`\<varname><idx>prior`, mirroring the value macros), not once per parameter: elements of a vector stopped sharing a prior when the per-element `"overrides"` channel arrived (GP / robust-likelihood vectors pin the non-opted-in files with `sigma: 0`), and reading element 0 made such a vector report "Fixed" for its sampled elements.
 - Symbolic PyTensor nodes passed as `initval` are preserved as-is (no unit conversion applied).
 - `build_pymc()` uses non-centered parameterization: raw `N(0, 1)` mapped to physical space via logit or linear scale + shift.
+
+### Reporting component-added priors (`parameter.py`, `PriorContribution`)
+
+`get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 6 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.
+
+A component **declares** its term next to the `pm.Potential` it is adding: `param.add_prior_contribution(latex, text=None, elements=None, supersedes_bounds=False)`. `elements` is `None` (whole vector), an index list or a boolean mask -- per element because the choice genuinely is per element (`mass_function: ffp` swaps one star off the IMF). `supersedes_bounds` says the term **replaces** the implicit uniform-over-bounds rather than multiplying a prior the parameter states itself; the rendered text is then the term plus the interval it is a density over (`p(d) propto d^2 on [0.001, 1.00e+05]`), so the support survives and the word "Uniform" never appears. An explicit Gaussian `sigma` is **never** dropped -- a parallax measurement times the volume prior is two statements and the table makes both, joined with `x` / `\times`. A pinned element (`sigma: 0`) still reports "Fixed": the potential is a constant there. Calls are idempotent, so a second `build_model()` on one System (the GUI) cannot accumulate copies.
+
+Design points:
+- **The registration call is the seam.** `parameter.py` never learns a component's name, and no component-specific case lives in the reporting layer -- the same mechanism serves distance, both IMFs, the FFP function and anything added later. It is deliberately the same shape as `table_note` (a component annotating a Parameter for the tables), minus the tensor-graph walk: a prior contribution knows its target by name, so nothing has to be inferred from ancestors.
+- **One function serves both reports.** `run.py`'s startup audit table asks `get_prior_str(latex=False)` and `outputs/latex.py`'s `\<varname><idx>prior` macros ask `get_prior_str(latex=True)` per element; those are the only two consumers. `<prefix>_results.csv` (`build_csv_output`, `ledger.append_ledger_csv`) and `<prefix>_modes.txt` carry **no prior column at all**, so there is nothing to thread through there.
+- With no contribution declared, `get_prior_str` returns `_own_prior_str` verbatim -- the historical body, untouched -- so the composition step is inert unless something opted in.
+- A component that adds a prior and forgets to declare it is now the only way to get a wrong Prior column. Declare it in the same place you call `pm.Potential`.
+
+Tests: `tests/test_prior_reporting.py`.
 
 ### Whitening (`whitening.py`)
 

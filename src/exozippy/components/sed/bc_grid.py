@@ -64,6 +64,27 @@ DEFAULT_FILTER_ROOT = source_code_dir / "filters"
 
 _FILTERNAMES_ = "filternames.txt"
 
+# Bare filter labels that name more than one row of the alias table, mapped
+# to the MIST name of the row they resolve to.  The MIST column is unique
+# per row (verified by tests/test_filter_aliases.py), so one MIST name picks
+# exactly one row and the choice applies to every alias column at once.
+#
+# "I" and "R" appear twice in the Claret column -- Bessell and Cousins -- and
+# once more in the Keivan column (Bessell).  ``resolve_filter_name`` scans the
+# table row by row and takes the first hit, so before this map a bare "I"
+# resolved to Bessell purely because Bessell_I is typed above Cousins_I in
+# filternames.txt: an accident of file order, not a decision.  The project
+# convention is that a bare "I"/"R" means the COUSINS band -- that is what
+# the ground-based surveys these labels come from (OGLE, KMTNet, MOA, MEarth)
+# actually observe in, and what the other shipped configs spell out as
+# "Generic/Cousins.I".  Spell the filter out ("Bessell.I", "Cousins.I", or
+# any full SVO id) whenever you mean something else; the map is only ever
+# consulted for the bare label.
+AMBIGUOUS_FILTER_ALIASES = {
+    "I": "Cousins_I",
+    "R": "Cousins_R",
+}
+
 
 def _load_alias_table(path: Path = DEFAULT_FILTER_ROOT) -> pd.DataFrame | None:
     """Load the VOID<->MIST<->SVO name alias table, if present."""
@@ -112,6 +133,10 @@ def resolve_filter_name(
     unchanged; for alias 'MIST', synthesize a column name (see
     synthesize_mist_name) if the input looks like an SVO ID (has a "/"),
     else assume it's already a bare column name and return it unchanged.
+
+    A label listed in AMBIGUOUS_FILTER_ALIASES (a bare "I" or "R", which
+    name two rows each) is resolved through that map instead of by table
+    order -- see the comment on the map.
     """
 
     def _mist_fallback():
@@ -121,6 +146,17 @@ def resolve_filter_name(
 
     if alias_df is None:
         return _mist_fallback() if alias == "MIST" else user_name
+
+    # Ambiguous bare labels: pick the row by name, never by file order.
+    disambiguated = AMBIGUOUS_FILTER_ALIASES.get(user_name)
+    if disambiguated is not None:
+        try:
+            row = alias_df[alias_df["MIST"] == disambiguated]
+            if len(row):
+                return str(row[alias].values[0])
+        except Exception:
+            pass
+
     try:
         rename = alias_df[alias_df.eq(user_name).any(axis=1)][alias].values[0]
         if rename in ("Unsupported", None) or pd.isna(rename):

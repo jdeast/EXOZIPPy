@@ -8,7 +8,7 @@ import pymc as pm
 import pytensor.tensor as pt
 import pytest
 
-from conftest import _DummyConfigManager, _DummySystem
+from conftest import _DummyConfigManager, _DummySystem, _MockParam
 from exozippy.components.galacticmodel.galacticmodel import GalacticModel
 
 # RA/Dec for a typical Galactic-bulge microlensing field (Galactic center area).
@@ -21,30 +21,6 @@ _DEC_RAD = np.deg2rad(-29.0)
 _LOGMASS_LOWER = -9.0
 _LOGMASS_UPPER = 2.5
 
-
-class _MockParam:
-    """Minimal Parameter stand-in with initval (numpy), value (PyTensor
-    tensor) and the optional hard bounds a power-law prior integrates over."""
-
-    def __init__(self, initval, lower=None, upper=None, is_sampled=None):
-        self.initval = np.atleast_1d(np.asarray(initval, dtype=np.float64))
-        self.value = pt.as_tensor_variable(self.initval)
-        self.lower = lower
-        self.upper = upper
-        # build_pymc's per-element sampled mask.  None = the model has not
-        # been built, which Parameter.element_is_sampled reads as "not
-        # sampled" -- the same conservative answer.
-        self.is_sampled = is_sampled
-
-    def element_start(self, index=0):
-        arr = self.initval
-        return float(arr[index] if arr.size > index else arr[0])
-
-    def element_is_sampled(self, index=0):
-        if self.is_sampled is None:
-            return False
-        mask = np.atleast_1d(self.is_sampled)
-        return bool(mask[index] if mask.size > index else mask[0])
 
 
 class _MockStar:

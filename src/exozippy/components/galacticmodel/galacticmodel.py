@@ -315,6 +315,86 @@ class GalacticModel(Component):
         """No parameters to sample! Just an empty manifest."""
         self.manifest = {}
 
+    # ------------------------------------------------------------------
+    # Reporting: tell the tables what these potentials are.
+    #
+    # Both potentials below act on parameters this component does not own
+    # and does not sample -- they are `pm.Potential`s over star.logmass and
+    # over (star.distance, pm_ra, pm_dec, rv).  `Parameter.get_prior_str`
+    # can only see a parameter's OWN fields, so without these declarations
+    # every one of them is reported as "Uniform" (a bounded element with no
+    # sigma), which is exactly the prior these terms replace.  See
+    # parameter.PriorContribution.
+    # ------------------------------------------------------------------
+
+    def _declare_mass_prior(self, stars, ffp_mask):
+        """Describe the imf_prior potential, per star.
+
+        Two descriptions, because the potential really is two densities: the
+        stellar IMF selected by ``IMF:``, and the FFP mass function on the
+        stars whose ``mass_function:`` opted out of it.  Both are normalized
+        over star.logmass's own support, so both supersede the uniform.
+        """
+        logmass = getattr(stars, "logmass", None)
+        if logmass is None:
+            return
+
+        if self.imf == "salpeter":
+            imf_latex = r"Salpeter (1955) IMF in $\log_{10} M$"
+            imf_text = "Salpeter (1955) IMF in log10 M"
+        else:
+            imf_latex = r"Chabrier (2003) IMF in $\log_{10} M$"
+            imf_text = "Chabrier (2003) IMF in log10 M"
+
+        imf_elements = np.nonzero(~ffp_mask)[0] if ffp_mask.size else None
+        if imf_elements is None or len(imf_elements):
+            logmass.add_prior_contribution(
+                latex=imf_latex,
+                text=imf_text,
+                elements=imf_elements,
+                supersedes_bounds=True,
+            )
+
+        # The FFP slope is per star, so a system with two differently-sloped
+        # FFPs gets two contributions, each naming its own elements.
+        alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
+        for i in np.nonzero(ffp_mask)[0]:
+            alpha = float(alphas[i]) if i < alphas.size else float("nan")
+            logmass.add_prior_contribution(
+                latex=(
+                    r"Sumi et al. (2023) FFP mass function "
+                    rf"($\alpha = {alpha:g}$)"
+                ),
+                text=f"Sumi+2023 FFP mass function (alpha = {alpha:g})",
+                elements=[int(i)],
+                supersedes_bounds=True,
+            )
+
+    def _declare_kinematic_prior(self, stars):
+        """Describe the kinematic_prior potential.
+
+        One joint density over distance and the velocity coordinates, so the
+        same term is declared against each of them; distance additionally
+        carries the ``2 log d`` volume element, which is why
+        ``Star.build_likelihood`` stands down where this component exists.
+        """
+        distance = getattr(stars, "distance", None)
+        if distance is not None:
+            distance.add_prior_contribution(
+                latex=(
+                    r"Galactic density $\times$ kinematics "
+                    r"(incl. $d^{2}$ volume element)"
+                ),
+                text="Galactic density x kinematics (incl. d^2 volume)",
+                supersedes_bounds=True,
+            )
+        for name in ("pm_ra", "pm_dec", "rv"):
+            param = getattr(stars, name, None)
+            if param is not None:
+                param.add_prior_contribution(
+                    latex="Galactic kinematic model",
+                    supersedes_bounds=True,
+                )
     def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
         """Warn once if the anchor star's ra/dec are SAMPLED, since the
         line-of-sight basis below is built from their start values and frozen.
@@ -484,6 +564,8 @@ class GalacticModel(Component):
             )
 
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
+
+        self._declare_mass_prior(stars, ffp_mask)
         ######
 
         # even though non-physical values will be rejected
@@ -635,6 +717,8 @@ class GalacticModel(Component):
             + velocity_jacobian
         )
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
+
+        self._declare_kinematic_prior(stars)
 
         # check parameters for debugging
         # pm.Deterministic(f"{self.prefix}.gal_x", x)
