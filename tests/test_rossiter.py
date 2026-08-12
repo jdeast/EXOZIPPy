@@ -477,4 +477,11 @@ def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(tmp_path):
     # Assert
     assert np.isfinite(lp_c) and np.all(np.isfinite(grad_c))
     assert np.isfinite(lp_jax) and np.all(np.isfinite(grad_jax))
-    assert lp_jax == pytest.approx(lp_c, rel=1e-8)
+    # rel=1e-6, not tighter: the two backends sum the 201x64 RM quadrature
+    # over 40 rows in different orders, so they agree to ~2e-8 relative
+    # (measured 2.9e-5 nats absolute on a logp of ~1492) rather than bit for
+    # bit.  1e-8 fails on some platforms for that reason alone.  The point of
+    # this assertion is that JAX evaluates the same MODEL, and 1e-6 is still
+    # four orders below the ~0.01 nat scale at which a logp difference could
+    # affect sampling.
+    assert lp_jax == pytest.approx(lp_c, rel=1e-6)
