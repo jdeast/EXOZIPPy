@@ -540,8 +540,13 @@ class ConfigManager:
                         for rel in getattr(module, "RELATIONS", []):
                             module_symbols.update(rel.free_symbols)
 
+                        # Sorted: module_symbols is a set, so its walk order
+                        # is PYTHONHASHSEED-dependent, and `subs` below is
+                        # applied as an unordered mapping.  The renaming is
+                        # order-independent today (disjoint symbols), but the
+                        # cost of stating the order is zero.
                         subs = {}
-                        for sym in module_symbols:
+                        for sym in sorted(module_symbols, key=str):
                             if sym.name in instance_map:
                                 subs[sym] = sp.Symbol(instance_map[sym.name])
 
@@ -2264,7 +2269,12 @@ class ConfigManager:
         one held at RANK_DERIVED_MIXED or below (including the solver's own
         previous answer) still re-fires as its inputs refine.
         """
-        for lookup_key in self.standalone_solvers:
+        # Sorted: standalone_solvers is a set, and each solver both reads and
+        # writes `resolved`, so with two of them registered the walk order
+        # decides whether one sees the other's answer from this iteration or
+        # the last -- feeding _meaningful_change, the provenance ranks and
+        # the cycle history.  Only orbit.m_total is registered today.
+        for lookup_key in sorted(self.standalone_solvers):
             solver_func = self.custom_solvers[lookup_key]
             comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
             for path in list(self.master_symbol_map):
@@ -2910,9 +2920,13 @@ class ConfigManager:
         if not solutions:
             try:
                 guess = float(resolved.get(target_str, 1.0))
+                # Sorted: sympy applies an unordered subs mapping in its own
+                # canonical order, but the dict's own insertion order comes
+                # straight off a hash-randomized set -- do not rely on a
+                # third party to launder that for us.
                 sub_dict = {
                     s: resolved[str(s)]
-                    for s in eq.free_symbols
+                    for s in sorted(eq.free_symbols, key=str)
                     if str(s) != target_str
                 }
                 expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
@@ -2940,7 +2954,15 @@ class ConfigManager:
             # Propagate Scale (Calculus-based)
             if hasattr(valid_sol, "free_symbols"):
                 scale_variance = 0.0
-                for parent_sym in valid_sol.free_symbols:
+                # Sorted for the same reason as _execute_solve's walk (whose
+                # `inputs` list is already derived from a sorted
+                # symbols_in_eq): free_symbols is a set of Symbols whose
+                # hashes include the PYTHONHASHSEED-randomized name string.
+                # Here the order is doubly load-bearing -- it is the
+                # SUMMATION order of the float accumulation below, so an
+                # unsorted walk makes init_scale differ in its last bits
+                # between two processes running identical code.
+                for parent_sym in sorted(valid_sol.free_symbols, key=str):
                     parent_str = str(parent_sym)
                     # Fallback to a small epsilon if parent scale is missing
                     parent_scale = resolved_scales.get(parent_str, 1e-9)

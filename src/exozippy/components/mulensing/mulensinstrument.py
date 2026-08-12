@@ -11,6 +11,7 @@ import pytensor
 import pytensor.tensor as pt
 from scipy.optimize import nnls
 
+from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
@@ -674,6 +675,15 @@ class MulensInstrument(Instrument):
         alpha = _get("lens.0.alpha")
         if s_val is None or q_val is None or alpha is None:
             return None
+
+        # Idempotent, and self-guarding if MulensModel is missing; op.py has
+        # normally applied it already.  Repeated here because this is the
+        # OTHER place exozippy calls MulensModel, and the fluxes bootstrapped
+        # below land in the model's start values -- an unpatched call here
+        # makes the whole build PYTHONHASHSEED-dependent.  Outside the try:
+        # a failure to patch must not be swallowed into the silent
+        # fall-back-to-PSPL path below.
+        patch_mulensmodel_method_order()
 
         try:
             import MulensModel as mm
