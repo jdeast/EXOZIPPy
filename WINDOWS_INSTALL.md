@@ -101,7 +101,35 @@ Keep a second Ubuntu window open for the `sudo` steps. [VERIFIED -- hit here]
 
 ## Prerequisites
 
-- Windows 11 (this was set up on Windows 11 Pro). [VERIFIED]
+- **Windows build 19041 or newer.** That is Windows 10 version 2004 (the May
+  2020 Update) or any Windows 11. Windows 11 Pro is what this runbook was
+  verified on [VERIFIED]; Windows 10 at build 19041+ is expected to work but
+  has not been reproduced here [EXPECTED].
+
+  Note: Microsoft numbers Windows 10 releases `YYMM`, so "version 2004" is
+  April 2020, not the year 2004. This document uses build numbers, which are
+  unambiguous.
+
+  Builds 18362 and 18363 (versions 1903 and 1909) can also run WSL2 on x64 if
+  fully patched, but `wsl --install` (Step 1) does not exist there -- the
+  manual setup is enabling two optional Windows features, installing the
+  kernel update package, then `wsl --set-default-version 2`. Not covered here.
+
+  Below 18362 there is no WSL2, and therefore no supported way to run EXOZIPPy
+  on Windows: native Windows cannot run the samplers (no `fork` -- see "Why
+  not native Windows?" above), and WSL1 is a syscall translation layer rather
+  than a Linux kernel. Windows 7, 8 and 8.1 are out. Windows 10 reached end of
+  support in October 2025, so an unpatched Windows 10 machine is a security
+  question as well as a compatibility one. On hardware that cannot take a
+  current Windows, install Linux directly -- it is the platform EXOZIPPy is
+  developed and tested on, and it will outperform a VM on old machines.
+
+  Check the build from PowerShell, or run `winver`:
+
+  ```powershell
+  [System.Environment]::OSVersion.Version    # want: Build 19041 or higher
+  ```
+
 - CPU virtualization enabled in firmware. On this machine
   `Win32_Processor.VirtualizationFirmwareEnabled` was already `True`, so **no
   BIOS trip was needed**. [VERIFIED]
