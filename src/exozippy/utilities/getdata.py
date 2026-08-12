@@ -388,6 +388,24 @@ def run(args):
                         )[0]
                     if len(match3) == 1:
                         to_download.append(match[match2[match3[0]]])
+                    else:
+                        # Every other skip in this loop prints; this one
+                        # dropped a whole sector from the download in
+                        # silence, so the light curve came back short with
+                        # no indication that anything was missing.
+                        print(
+                            f"WARNING: {len(match3)} products remain for "
+                            f"sector {sector} after author priority "
+                            f"filtering; skipping this sector.  Authors: "
+                            f"{list(search_results[match[match2]].author)}"
+                        )
+                if len(match2) == 0:
+                    print(
+                        f"WARNING: no product with a recognized exposure "
+                        f"time for sector {sector}; skipping it. "
+                        f"Exposure times offered: "
+                        f"{list(search_results[match].exptime.value)}"
+                    )
 
     for search_result in search_results[to_download]:
         author = search_result.author[0]  # SPOC, QLP, etc

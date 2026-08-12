@@ -256,6 +256,27 @@ def rm_planet_xyz(true_anom, ecc, omega, ar, inc, lam):
     return x, y, z
 
 
+def rm_primary_star_index(orbit, orbit_idx):
+    """Index of the transited star -- the star in this orbit's PRIMARY group.
+
+    Deliberately has no `next(..., 0)` default.  "There is no star in this
+    orbit's primary group" is not "use star 0": star 0's macroturbulence,
+    line dispersion and microturbulence would go into the Hirano broadening
+    kernel and bias exactly the two numbers an RM fit exists to measure,
+    vsini and lambda.  In a single-star system the fallback was harmless,
+    which is why it survived; in a multi-star one it is silent and wrong.
+    """
+    for ctype, idx in orbit.primary_bodies[orbit_idx]:
+        if ctype == "star":
+            return idx
+    raise ValueError(
+        f"[rm] orbit {orbit_idx} has no star in its primary body group, so "
+        f"there is no transited star whose line broadening the "
+        f"Rossiter-McLaughlin model can use.  Put the transited star in the "
+        f"orbit's `primary:` group."
+    )
+
+
 def resolve_rm_indices(system, orbit_name, band_name=None):
     """(orbit_idx, planet_idx, band_idx) for an rvinstrument `rm:` request.
 
@@ -342,14 +363,7 @@ def compute_rm_rv(
 
     # Broadening (vmacro/vbeta/vmicro) belongs to the transited star -- the
     # primary of this orbit -- not necessarily star 0 (multi-star systems).
-    star_idx = next(
-        (
-            idx
-            for (ctype, idx) in orbit.primary_bodies[orbit_idx]
-            if ctype == "star"
-        ),
-        0,
-    )
+    star_idx = rm_primary_star_index(orbit, orbit_idx)
     vsini = orbit.vsini.value[orbit_idx]
     vzeta = star.vmacro.value[star_idx]
     vbeta = star.vbeta.value[star_idx]

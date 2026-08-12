@@ -38,6 +38,12 @@ from astroquery.vizier import Vizier
 try:
     from zero_point import zpt as _gaia_zpt
 
+    # get_zpt() raises "The table of coefficients have not been
+    # initialized!!" until this runs.  It never ran, so the Lindegren+2021
+    # parallax zero point silently evaluated to 0.0 on every target, for
+    # every run, and the uncorrected parallax became the star's distance
+    # PRIOR (mu/sigma) in the params file the user then fits with.
+    _gaia_zpt.load_tables()
     HAS_GAIADR3_ZPT = True
 except ImportError:
     HAS_GAIADR3_ZPT = False
@@ -152,14 +158,16 @@ def schlegel_av(ra, dec):
         for col in ("ext SFD mean", "EBV_SFD", "ext SFD", "E(B-V)"):
             if col in t.colnames:
                 return float(t[col][0]) * 3.1
-        # last resort: first finite positive column value
-        for col in t.colnames:
-            try:
-                val = float(t[col][0])
-                if 0 < val < 50:
-                    return val * 3.1
-            except Exception:
-                pass
+        # No "last resort: first column that parses in (0, 50)".  That
+        # returned an arbitrary column -- a coordinate, or SandF rather than
+        # SFD -- times 3.1, and the caller writes the result as a HARD upper
+        # bound on star.av (the logit transform truncates the posterior
+        # there) under a note claiming Schlegel+1998 provenance it does not
+        # have.  Returning None is handled by the caller.
+        warnings.warn(
+            f"IRSA dust table has none of the expected E(B-V) columns "
+            f"(got {list(t.colnames)}); no Av upper limit will be written."
+        )
     except Exception as e:
         warnings.warn(f"Dust map query failed: {e}")
     return None
@@ -444,18 +452,38 @@ def mkticsed(
                         and 6 <= g3_gmag <= 21
                     ):
                         try:
-                            zp = _gaia_zpt.get_zpt(
-                                g3_gmag,
-                                g3_nueff,
-                                g3_pscol,
-                                g3_elat,
-                                int(g3_solv),
+                            # numpy scalars, not Python floats: under NEP 50
+                            # (numpy >= 2, our floor) zpt's internal
+                            # np.can_cast(inp, float) raises TypeError on a
+                            # Python float.  That was the second reason the
+                            # correction never once applied.
+                            zp = float(
+                                _gaia_zpt.get_zpt(
+                                    np.float64(g3_gmag),
+                                    np.float64(g3_nueff),
+                                    np.float64(g3_pscol),
+                                    np.float64(g3_elat),
+                                    np.int64(int(g3_solv)),
+                                )
                             )
                             zp_msg = (
-                                f"corrected by -{zp:.5f} mas (Lindegren+2021)"
+                                f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
                             )
-                        except Exception:
-                            zp_msg = "correction failed; using raw"
+                        except Exception as exc:
+                            # Do NOT fall through with zp = 0.  The result
+                            # here is not a missing number, it is a distance
+                            # PRIOR biased by the whole zero point (~0.02-0.05
+                            # mas, i.e. several sigma at 1 kpc) with nothing
+                            # but a note string to say so.  The out-of-range
+                            # case is handled by the else branch below and is
+                            # a legitimate "no published correction".
+                            raise RuntimeError(
+                                f"Gaia DR3 parallax zero-point correction "
+                                f"failed for this target "
+                                f"({type(exc).__name__}: {exc}).  Refusing to "
+                                f"write a distance prior from the uncorrected "
+                                f"parallax."
+                            ) from exc
                     else:
                         zp_msg = "out of Lindegren+2021 range; using raw"
 
@@ -827,16 +855,27 @@ def mkticsed(
             and np.isfinite(by)
             and np.isfinite(m1)
             and np.isfinite(c1)
+            # A finite uncertainty is a PRECONDITION for inclusion, exactly
+            # as it is for every other photometry block in this file.  The
+            # old `evmag if np.isfinite(evmag) else 0.01` turned an ABSENT
+            # uncertainty into an implausibly tight one (0.01 mag is near
+            # the best achievable in Stromgren V), which then over-weighted
+            # this photometry in the SED likelihood and biased Teff, radius
+            # and Av.
+            and np.isfinite(evmag)
+            and np.isfinite(eby)
+            and np.isfinite(em1)
+            and np.isfinite(ec1)
         ):
             u_m, su, v_m, sv, b_m, sb, y_m, sy = strom_conv(
                 vmag,
-                max(0.01, evmag if np.isfinite(evmag) else 0.01),
+                max(0.01, evmag),
                 by,
-                max(0.02, eby if np.isfinite(eby) else 0.02),
+                max(0.02, eby),
                 m1,
-                max(0.02, em1 if np.isfinite(em1) else 0.02),
+                max(0.02, em1),
                 c1,
-                max(0.02, ec1 if np.isfinite(ec1) else 0.02),
+                max(0.02, ec1),
             )
             if np.isfinite(u_m):
                 sed_entries.append(

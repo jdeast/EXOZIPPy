@@ -13,7 +13,7 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.factory import discover_components
+from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
@@ -103,6 +103,21 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
+                # Distinguish "you typo'd a key" from "the component you
+                # asked for failed to import".  The old code said the
+                # former for both and then fitted a model missing an
+                # entire component and its data, quietly.
+                failed = import_failures().get(key)
+                if failed is not None:
+                    module_path, exc = failed
+                    raise ImportError(
+                        f"YAML key '{key}' names the component module "
+                        f"{module_path}, which failed to import: "
+                        f"{type(exc).__name__}: {exc}.  A missing optional "
+                        f"dependency is the usual cause.  Fix the import or "
+                        f"remove the '{key}' block -- continuing would fit a "
+                        f"model without it."
+                    ) from exc
                 logger.warning(
                     f"YAML key '{key}' does not match any registered component and will be ignored."
                 )

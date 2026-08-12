@@ -175,6 +175,10 @@ class SED(Component):
                 f"SED could not peek grid axes for model={self.sedmodel} "
                 f"at {self.bc_root}: {e}. Skipping bound injection."
             )
+            # The `return` was missing, so the handler never worked: `axes`
+            # is unbound on this path and the next line raised
+            # UnboundLocalError immediately after promising to skip.
+            return
 
         self.grid_axes = axes
 
