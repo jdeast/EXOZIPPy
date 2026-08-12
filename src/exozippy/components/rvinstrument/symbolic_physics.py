@@ -34,9 +34,16 @@ def get_symbol_map(config):
 # gamma and jitter are typically in m/s (or whatever your global RV unit is).
 
 RELATIONS = [
-    # Reparameterization Bridge (Base-10)
-    # Allows the user to provide 'jitter' but the sampler to step in 'logjitter'
-    sp.Eq(jitter_variance, jitter**2)
+    # Reparameterization bridge: the user may provide 'jitter' while the
+    # sampler steps in 'jitter_variance'.  It is the SIGNED square, because
+    # the runtime relation is the signed square root
+    # (components/instrument.py:calc_jitter) and jitter_variance is
+    # deliberately allowed to go negative down to Instrument._jitter_floor.
+    # Written as jitter**2 it would fold a negative 'jitter' seed onto a
+    # POSITIVE variance -- a silent sign flip on the one direction of this
+    # relation that matters (the user seeds jitter, the engine derives the
+    # sampled variance).
+    sp.Eq(jitter_variance, jitter * sp.Abs(jitter))
 ]
 
 

@@ -57,6 +57,7 @@ import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
 
+from ..physics_registry import register_physics
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
@@ -76,6 +77,51 @@ _TIME_FRAMES = {"jd": None, "hjd": "heliocentric", "bjd": "barycentric"}
 # anything below this is a truncated time (BJD-2450000, MJD, ...) that
 # needs time_offset first.
 _MIN_ABS_JD = 2_000_000.0
+
+# Radicand floor for the reported jitter's square root, in the parameter's
+# INTERNAL units.  Two knobs in one number: the reported jitter is quantized
+# to sqrt(eps) = 1e-15 near zero (8e-12 m/s for rv, 1e-15 in relative flux for
+# transit, 1e-15 mas for astrometry -- all far below any real error bar), and
+# the slope is capped at 0.5/sqrt(eps).  Only |jitter_variance| < 1e-30 sees
+# either, and at exactly zero the sign factor makes both the value and the
+# gradient exactly zero.
+_JITTER_EPS = 1e-30
+
+
+@register_physics
+def calc_jitter(jitter_variance):
+    """Reported jitter: the SIGNED square root of ``jitter_variance``.
+
+    ``sign(v) * sqrt(|v|)``, so the reported jitter stays in the data's own
+    units, is monotonic in the sampled ``jitter_variance``, and has a finite
+    gradient everywhere.
+
+    ``jitter_variance`` is deliberately allowed to go negative -- down to
+    ``Instrument._jitter_floor``'s validity limit, ``-0.95 * min(err)**2``,
+    which is what keeps ``total_sigma``'s own ``sqrt`` real.  A negative
+    jitter variance is a *result*, not a pathology: it says the quoted error
+    bars are too large.  Clamping the report to zero there (what this did
+    until 2026-08) cost two things: a Lucy-Sweeney-style upward bias on a
+    marginally detected jitter, exactly as forcing e >= 0 biases
+    eccentricity; and a zero-gradient plateau over the whole negative
+    half-axis, so a user prior or link on ``jitter`` had nothing to push
+    against over half of the parameter's legal range.
+
+    The floor goes on the RADICAND, following ``calc_theta_E``: ``sqrt'(0)``
+    is infinite, and clamping the result afterwards multiplies that infinity
+    by ``pt.maximum``'s zero gradient to give NaN.  Flooring the argument
+    instead keeps the derivative finite.  It has to be floored at all because
+    ``jitter_variance``'s defaults.yaml initval is exactly 0.0, i.e. every
+    fit starts on the cusp: the pre-fix ``pt.switch`` reported
+    ``d jitter / d jitter_variance = inf`` there.
+
+    One function, three components (rv/transit/astrometry): it is pure
+    algebra on the shared noise model this module owns, so it lives here
+    rather than as three byte-identical copies under three registry names.
+    """
+    return pt.sign(jitter_variance) * pt.sqrt(
+        pt.maximum(pt.abs(jitter_variance), _JITTER_EPS)
+    )
 
 
 class Instrument(Component):
