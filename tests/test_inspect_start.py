@@ -59,8 +59,20 @@ def _build_star_mass(user_params, model_name, system_config=CONFIG):
         # defaults.yaml gives it no bounds -- logmass carries the hard
         # support.  This manifest entry deliberately makes it a FREE
         # parameter as a test vehicle, and a free parameter must declare
-        # its own lower/upper.
-        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
+        # its own lower/upper AND a start for EVERY element.  The
+        # "overrides" initval supplies the latter and layers UNDER the
+        # params file, so an element the caller seeded keeps its own value:
+        # star.mass carries no defaults.yaml initval, so the unseeded
+        # element used to build with a NaN start, which the transform turned
+        # into log(NaN/(1-NaN)) behind a "nudged" warning.  What these tests
+        # are about is the user_params key lookup, not the start value.
+        star.manifest = {
+            "mass": {
+                "lower": 0.1,
+                "upper": 250.0,
+                "overrides": {"initval": 1.0},
+            }
+        }
         star.add_parameter(model=model, param_name="mass", system=None)
     p = star.mass
     return model, _Sys(cm, [p]), p

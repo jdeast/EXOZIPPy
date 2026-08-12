@@ -541,6 +541,12 @@ class Parameter:
     # forwards ConfigManager.param_file).  Metadata only -- it is quoted in
     # the "pinned with no value" error so the user is told which file to edit.
     source_file: Optional[str] = None
+    # Optional callable (component, param, element=i) -> "user" | "data" |
+    # "solved" | "default": ConfigManager.initval_source, forwarded by
+    # Component.add_parameter.  Metadata only -- it is quoted in the
+    # "start value outside its hard bounds" error so the message can say
+    # whether the offending number was written by the user or derived.
+    initval_source: Any = None
 
     # LaTeX/table metadata
     latex: Optional[str] = ""
@@ -777,6 +783,162 @@ class Parameter:
 
         return self.label
 
+    # What to do about an out-of-bounds start, keyed on where the number came
+    # from (ConfigManager.initval_source).  The user wrote one of these
+    # numbers; they did not write the other three, and telling them to "fix
+    # the initval in your params file" for a value the relaxation engine
+    # derived sends them looking for a line that is not there.
+    _OUT_OF_BOUNDS_ADVICE = {
+        "user": (
+            "This start value is the 'initval' in your params file. Change it "
+            "to a value inside the bounds, or -- if the value is right -- "
+            "widen the bound. Note bounds may only be TIGHTENED by a params "
+            "file, so a value outside the range in the component's "
+            "defaults.yaml cannot be reached by editing bounds alone."
+        ),
+        "solved": (
+            "This start value was DERIVED by the relaxation engine from your "
+            "other inputs -- it is not written anywhere, so there is no line "
+            "to edit. Landing outside the bound means the inputs it was "
+            "solved from are inconsistent with that bound. Either seed this "
+            "parameter directly with an in-bounds 'initval' (that outranks "
+            "the derivation), or revisit the values it was derived from."
+        ),
+        "data": (
+            "This start value was estimated from your DATA by the component "
+            "that loaded it, not written in your params file. Either seed "
+            "this parameter directly with an in-bounds 'initval' (a user "
+            "value outranks a data-derived hint), or widen the bound if the "
+            "estimate is right."
+        ),
+        "default": (
+            "This start value is the default from the component's "
+            "defaults.yaml, and the bound excluding it was tightened "
+            "elsewhere (most likely a 'lower'/'upper' in your params file). "
+            "Add an explicit 'initval' inside the new bound, or relax the "
+            "bound."
+        ),
+    }
+
+    def _element_initval_source(self, i):
+        """Classify where element ``i``'s start came from.
+
+        Returns "user", "data", "solved" or "default" (see
+        ConfigManager.initval_source).  Pure metadata for an error message,
+        so a fault in the lookup must never replace the diagnosis it is
+        decorating: anything that goes wrong degrades to "default".
+        """
+        if not callable(self.initval_source):
+            return "default"
+        comp, _, pname = self.label.rpartition(".")
+        name = (
+            self.names[i]
+            if self.names is not None and i < len(self.names)
+            else None
+        )
+        try:
+            return self.initval_source(comp, pname, element=int(i), name=name)
+        except Exception:  # noqa: BLE001 -- metadata only, never fatal
+            return "default"
+
+    def _unit_suffix(self):
+        """The user unit as a message suffix (e.g. ' solMass'), or ''."""
+        try:
+            unit_str = str(self.unit[0]) if self.unit else ""
+        except (TypeError, IndexError):
+            return ""
+        if not unit_str or unit_str == "dimensionless":
+            return ""
+        return f" {unit_str}"
+
+    def _out_of_bounds_message(self, offenders, inits, lowers, uppers):
+        """Render the fatal 'start value outside its hard bounds' error.
+
+        ``offenders`` is the list of element indices; the three arrays are the
+        build's internal-unit vectors.  Values are reported in the USER unit
+        so the numbers match what the user typed, and every offending element
+        is listed.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            lines.append(
+                f"  {self.get_display_label(int(i))}: start "
+                f"{user_units(inits[i], i):.10g}{unit} is outside its bounds "
+                f"[{user_units(lowers[i], i):.10g}, "
+                f"{user_units(uppers[i], i):.10g}]{unit} (start value from: "
+                f"{src})"
+            )
+
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        advice = "\n".join(
+            self._OUT_OF_BOUNDS_ADVICE[s] for s in sorted(sources)
+        )
+        return (
+            f"Start value outside its hard bounds{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + f"These bounds are the parameter's SUPPORT, not a preference: "
+            f"'{self.label}' is sampled through a logit transform onto "
+            f"[lower, upper], so a start outside it has no raw coordinate at "
+            f"all. EXOZIPPy used to move such a start onto the bound and "
+            f"carry on, which produced a plausible-looking fit from a point "
+            f"nobody chose; it now refuses.\n" + advice
+        )
+
+    def _no_start_value_message(self, offenders, lowers, uppers):
+        """Render the fatal 'sampled element with a non-finite start' error.
+
+        Same family as the out-of-bounds error and caught in the same place,
+        but a genuinely different mistake, so it says so.  NaN satisfies no
+        bound and is no start: the old code sent it through ``np.clip``,
+        which returns NaN, warned that it had "nudged" it, and then wrote
+        ``log(NaN/(1-NaN))`` into the transform -- so the model was built
+        with a NaN start and died later inside PyMC's initial-point check,
+        naming a raw variable rather than the parameter the user has to fix.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        lines = [
+            f"  {self.get_display_label(int(i))}: no usable start value "
+            f"(bounds [{user_units(lowers[i], i):.10g}, "
+            f"{user_units(uppers[i], i):.10g}]{unit})"
+            for i in offenders
+        ]
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        return (
+            f"Sampled parameter with a non-finite start value{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + f"Nothing supplied a start for the element(s) above -- not the "
+            f"params file, not {self.label.split('.')[0]}/defaults.yaml, and "
+            f"nothing derived one -- so the logit transform would be built "
+            f"around NaN and every logp evaluated from it would be NaN. "
+            f"Fix: give the element an 'initval' inside its bounds."
+        )
+
     def build_pymc(self, ndx=0, expression=None):
         """
         Materializes the Parameter in the PyMC graph.
@@ -920,6 +1082,55 @@ class Parameter:
                     f"'lower' and 'upper' bounds defined in its defaults.yaml."
                 )
 
+        # A START OUTSIDE THE HARD BOUNDS IS FATAL.  Two finite bounds mean the
+        # element is logit-transformed below and [lower, upper] IS its support
+        # -- there is no representable raw coordinate for a value outside it,
+        # and the transform's own inverse diverges at the wall.  The old code
+        # clipped such a start onto the wall (np.clip on q) behind a warning
+        # that described a different, benign situation, so a fit that began
+        # somewhere the user never asked for looked exactly like a fit that
+        # began where they did.  Refuse instead: a start value nobody chose is
+        # not a model, and no amount of sampling recovers the fact that the
+        # question asked was not the question answered.
+        #
+        # Deliberately NOT covered here:
+        #   - SOFT barriers (a single finite bound, or a derived element):
+        #     those are penalties, not support.  A start on the wrong side of
+        #     one is legal and merely improbable, and the barrier's gradient
+        #     is what pulls it back.
+        #   - EXACTLY ON a bound: representable as a physical value, just
+        #     infinitely far away in logit space, so such a start HAS to move.
+        #     Section 3 nudges those inward to the q_floor and logs the exact
+        #     displacement; see the q_floor comment there.
+        #   - FIXED elements (`sigma: 0`): not sampled, so no transform and no
+        #     barrier ever reads their bounds.  Nothing is clipped there.
+        # Every offending element of a vector is reported, not just the first.
+        #
+        # A NON-FINITE start is split out into its own message: NaN satisfies
+        # no bound either, but "you asked to start outside the bounds" is the
+        # wrong diagnosis for "nothing gave this element a start at all", and
+        # the fixes differ.
+        two_finite = np.isfinite(lowers) & np.isfinite(uppers)
+        checkable = is_sampled & two_finite & (uppers > lowers)
+        no_start = [
+            int(i) for i in np.where(checkable)[0] if not np.isfinite(inits[i])
+        ]
+        if no_start:
+            raise ValueError(
+                self._no_start_value_message(no_start, lowers, uppers)
+            )
+        bound_violations = [
+            int(i)
+            for i in np.where(checkable)[0]
+            if not (lowers[i] <= inits[i] <= uppers[i])
+        ]
+        if bound_violations:
+            raise ValueError(
+                self._out_of_bounds_message(
+                    bound_violations, inits, lowers, uppers
+                )
+            )
+
         # 3. PER-ELEMENT PARAMETERIZATION
         # use_logit[i]: finite bounds → logit transform (hard bounds). A sigma
         #   prior on a bounded element is applied as a Gaussian potential on
@@ -976,14 +1187,39 @@ class Parameter:
                 # "essentially at the bound" in problem units); a span-based
                 # floor would be arbitrarily large for wide bounds. The 1e-12
                 # absolute floor keeps logit(q) within the ±30 sigmoid clip.
+                #
+                # q_raw is guaranteed to be in [0, 1] here: the pre-pass above
+                # made anything outside the bounds fatal.  So this clip is
+                # exactly and only the ON-THE-BOUND case -- a value that IS in
+                # the support but sits at (or unrepresentably close to) a
+                # wall, where logit(q) diverges and there is no raw coordinate
+                # to start from.  Such a start HAS to move; a start from
+                # outside does not have to be moved, it has to be refused,
+                # which is why one warns and the other raises.  A default that
+                # sits on its own bound (an angle defaulting to 0 on a
+                # [0, 2pi) range) is common and legitimate; raising on it
+                # would be noise.  The warning reports the actual displacement
+                # rather than a rule of thumb: the floor is the LARGER of
+                # 1e-6 * whitening scale and 1e-12 * span, and on a parameter
+                # whose span dwarfs its scale (transit jitter_variance, span
+                # 1e5, scale ~1e-8) it is the span term that binds, so the
+                # move can be a sizeable fraction of the start value itself.
                 q_floor = min(max(1e-6 * whiten / span, 1e-12), 0.25)
                 q_floors[i] = q_floor
                 q_init = np.clip(q_raw, q_floor, 1.0 - q_floor)
                 if q_init != q_raw:
+                    nudged_to = lowers[i] + q_init * span
                     logger.warning(
-                        f"Parameter '{self.label}'[{i}]: initval {inits[i]} is at or "
-                        f"within 1e-6*init_scale of bounds [{lowers[i]}, {uppers[i]}]; "
-                        f"starting value nudged to {lowers[i] + q_init * span}."
+                        f"Parameter '{self.label}'[{i}]: start value "
+                        f"{inits[i]} sits on (or unrepresentably close to) "
+                        f"its bounds [{lowers[i]}, {uppers[i]}], where the "
+                        f"logit transform diverges and no raw start exists; "
+                        f"nudged inward to {nudged_to}, a move of "
+                        f"{abs(nudged_to - inits[i]):.3g} (internal units). "
+                        f"This is the ON-THE-BOUND case only -- a start "
+                        f"OUTSIDE the bounds is refused outright, never "
+                        f"clipped. Set an 'initval' further inside the bound "
+                        f"to remove this nudge."
                     )
                 logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
                 jac = (
