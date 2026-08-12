@@ -72,7 +72,15 @@ push it into one of these contracts instead.
   `star_ndx`/`orbit:` keys, and `linking.py` expressions) purely from the
   schema -- no hardcoded component names. Undo uses TEXT snapshots, not
   `deepcopy` (ruamel drops comments on deepcopy). `command_from_json` dispatches
-  the API command payloads.
+  the API command payloads. Both files are screened on the read from disk by
+  the shared `exozippy.yamlio.check_yaml_booleans`, which refuses YAML-1.1-only
+  boolean spellings (`yes/no/on/off`): ruamel is YAML **1.2** and reads those as
+  strings while the fit's PyYAML is YAML **1.1** and reads them as booleans, so
+  `finite_source: no` was `False` to the fit and the truthy string `"no"` here
+  -- the editor showed, and could save, the opposite of what the fit does. The
+  fit's own loaders call the same guard, so neither side can accept a spelling
+  the other reads differently; `true/True/TRUE/false/False/FALSE` are the
+  agreement set, and quoting is the escape hatch when a string was meant.
 - `datafiles.py` (G9) -- pure, component-agnostic helpers: `list_directory`
   (project-rooted browser that cannot escape the root), `eligible_associations`
   (which instance/key a filename may attach to, by matching the schema's

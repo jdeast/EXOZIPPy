@@ -33,13 +33,13 @@ from exozippy.outputs.modes import (
 )
 from exozippy.samplers import convergence
 from exozippy.trace_meta import check_trace_freshness
+from exozippy.yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
 
 
 def _load_yaml(path):
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+    return load_yaml(path) or {}
 
 
 def _get_instance_names(config, comp_key):

@@ -180,6 +180,30 @@ def _merged_param_block(cls, yaml_key):
     return merged
 
 
+def boolean_option_keys():
+    """Config keys the components declare as boolean -> the components owning them.
+
+    A ``config_schema()`` entry marks its key boolean by declaring
+    ``"accepts": [True, False]``; this reads that declaration rather than any
+    hand-maintained list, so a newly declared boolean option is covered the
+    moment it is declared. Returns ``{key: [yaml_key, ...]}``.
+    """
+    registry = discover_components()
+    out = {}
+    for yaml_key, cls in sorted(registry.items()):
+        for entry in cls.config_schema() or []:
+            accepts = entry.get("accepts")
+            if not isinstance(accepts, (list, tuple)):
+                continue
+            # The isinstance pass matters: [1, 0] equals [True, False] as a set.
+            if not all(isinstance(v, bool) for v in accepts):
+                continue
+            if set(accepts) != {True, False}:
+                continue
+            out.setdefault(str(entry.get("key")), []).append(yaml_key)
+    return out
+
+
 def list_components():
     """Return a summary of every discoverable component.
 
