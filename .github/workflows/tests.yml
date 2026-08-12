@@ -3,8 +3,18 @@ name: Tests
 on:
   push:
     branches: [master]
+  # NO `branches:` filter here, deliberately. With `branches: [master]` a pull
+  # request targeting anything else got NO CI AT ALL -- and retargeting it to
+  # master afterwards did not start one, because GitHub dispatches on opened /
+  # reopened / synchronize and a base change is none of those. Such a PR sat
+  # at "no checks reported", which reads as "not finished yet" rather than
+  # "never tested", and the only way to start it was to close and reopen the
+  # PR by hand. That is a footgun aimed squarely at stacked pull requests.
+  #
+  # The cost is running the suite on PRs between topic branches too, which is
+  # the point: a stacked PR is exactly where a bad merge hides, since its diff
+  # is read against its parent rather than against master.
   pull_request:
-    branches: [master]
   # Nightly, for the unlocked-resolution job below -- it catches an upstream
   # release breaking us, which has nothing to do with when we push.
   schedule:
