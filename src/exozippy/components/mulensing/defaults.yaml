@@ -1,8 +1,19 @@
 lens:
+  # t_0 and u_0 are DATA-DERIVED: their real start comes from the NNLS/grid
+  # bootstrap or from MMEXOFAST seeds, both of which enter at
+  # RANK_DERIVED_DATA (60) and so beat these RANK_DEFAULT (20) values in
+  # every topology that supplies one.  The static numbers are a backstop for
+  # the case where nothing does -- every sampled parameter must carry an
+  # initval from somewhere, or `sigma: 0` on it would pin it at 0.0 (see the
+  # "pinned with no value" check in Parameter.build_pymc).  Neither symbol
+  # appears in any RELATION, so a defaults seed here cannot propagate into
+  # another parameter's provenance and cannot change what
+  # mmexofast_support.user_hints_sufficient concludes.
   t_0:
     unit: "d"
     lower: 2400000
     upper: 3000000
+    initval: 2460000  # a BJD_TDB inside the bounds; the data always override
     init_scale: 0.01
     internal_unit: "d"
     latex: "t_0"
@@ -11,6 +22,7 @@ lens:
     unit: ""
     lower: -18 # ~20 ppm peak magnification
     upper: 18 # ~20 ppm peak magnification
+    initval: 0.5  # a mid-range, unambiguously magnified trajectory
     init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
@@ -400,6 +412,14 @@ mulensinstrument:
   # mulensinstrument._build_sed_flux_constraint). Override per light curve
   # in params.yaml; sigma must be nonzero.
   zeropoint:
+    # Purely defensive, and equal to mu so it can never move anything.  Today
+    # zeropoint never becomes a Parameter at all: _build_sed_flux_constraint
+    # resolves this block itself, reads only mu/sigma, and builds a
+    # pm.Deterministic -- so nothing reads this initval.  It is here so that
+    # "every sampled parameter carries an initval" stays an invariant if that
+    # ever changes (see the pinned-with-no-value check in
+    # Parameter.build_pymc).
+    initval: 0.0
     mu: 0.0
     sigma: 0.2
     unit: "mag"

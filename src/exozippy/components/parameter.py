@@ -537,6 +537,10 @@ class Parameter:
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
+    # Params file these values came from, if any (Component.add_parameter
+    # forwards ConfigManager.param_file).  Metadata only -- it is quoted in
+    # the "pinned with no value" error so the user is told which file to edit.
+    source_file: Optional[str] = None
 
     # LaTeX/table metadata
     latex: Optional[str] = ""
@@ -718,6 +722,44 @@ class Parameter:
                 return float(arr[index] if arr.size > index else arr[0])
         return float(np.atleast_1d(self.value[index].eval())[0])
 
+    def _initval_present(self, n_elements):
+        """Per-element mask: does this parameter actually carry a start value?
+
+        ``build_pymc`` reads ``initval`` through ``to_vec(..., fill=0.0)``, so
+        by the time it has a vector, "no value" and "the value 0.0" look
+        identical.  This answers the question *before* that fill, mirroring
+        ``to_vec``'s own broadcasting rules so the mask lines up element for
+        element with the vector ``to_vec`` returns:
+
+        - ``None``          -> nothing anywhere; every element absent.
+        - a symbolic node   -> a value (a linked/derived start); every element
+                               present.  It is deliberately not evaluated.
+        - a length-1 array  -> broadcast, so every element takes its value.
+        - a longer array    -> element-wise; elements past its end are absent
+                               (``to_vec`` fills them), and ``NaN`` means
+                               absent (``ConfigManager.resolve`` writes NaN
+                               into an array for "this element was never set").
+        """
+        init = self.initval
+        if init is None:
+            return np.zeros(n_elements, dtype=bool)
+        raw = getattr(init, "value", init)
+        if hasattr(raw, "owner") or "TensorVariable" in str(type(raw)):
+            return np.ones(n_elements, dtype=bool)
+        try:
+            arr = np.atleast_1d(np.asarray(raw, dtype=float))
+        except (TypeError, ValueError):
+            # Not numeric and not obviously symbolic: assume it is a value.
+            return np.ones(n_elements, dtype=bool)
+        if arr.size == 0:
+            return np.zeros(n_elements, dtype=bool)
+        if arr.size == 1:
+            return np.full(n_elements, not bool(np.isnan(arr[0])))
+        present = np.zeros(n_elements, dtype=bool)
+        n_copy = min(n_elements, arr.size)
+        present[:n_copy] = ~np.isnan(arr[:n_copy])
+        return present
+
     def get_display_label(self, index=0):
         parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
@@ -784,6 +826,63 @@ class Parameter:
         # statement -- and gave pinning a second, undocumented spelling.
         is_fixed = (sigmas == 0) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
+
+        # A PIN MUST SAY WHAT IT PINS TO.  `sigma: 0` is the one way to fix an
+        # element, and there is no second channel for the value it is fixed
+        # AT: the physical value of a fixed element is exactly inits[i], and
+        # to_vec fills a missing initval with 0.0.  So an element pinned with
+        # no value from ANY source -- the params file, defaults.yaml, a
+        # component "overrides" entry or hint, a link, or the relaxation
+        # engine's solution -- is silently held at zero in whatever internal
+        # unit it happens to carry, and nothing downstream can tell that apart
+        # from a deliberate pin at zero.  It also cannot be reported: for a
+        # fixed element with no initval to_latex_def emits no macro at all
+        # while latex.py's _value_cells still references one, so the generated
+        # table is an undefined control sequence by construction.
+        #
+        # Refuse, for the same reason validate_sigma_has_center refuses a
+        # sigma with no center: it does not describe a model.  If the user is
+        # fixing a parameter they should know what they are fixing it to.
+        #
+        # This runs at stage 5, which is deliberate: it is the earliest point
+        # that sees EVERY channel a value can arrive through.  The manifest
+        # "overrides" channel that pins whole vectors (GP, robust likelihood,
+        # band LD) and the plain manifest options that carry data-derived
+        # starts (transit's per-file median `baseline`) are both applied
+        # inside this stage; a check at ConfigManager construction or at
+        # stage 3 would have to guess about them and would fire falsely.
+        #
+        # Two exemptions, both because the value comes from somewhere other
+        # than initval:
+        #   - DERIVED elements: their value is the expression.  `sigma: 0`
+        #     there is a no-op, already warned about below -- a different
+        #     mistake with a different fix, so it keeps its own message.
+        #   - HARD-LINKED elements: the link expression IS the value.
+        pinned_no_value = [
+            i
+            for i in np.where(is_fixed & ~self._initval_present(n_elements))[0]
+            if i not in set((self.element_links or {}).get("hard", {}))
+        ]
+        if pinned_no_value:
+            where = (
+                f" (params file: {self.source_file})"
+                if self.source_file
+                else ""
+            )
+            offenders = ", ".join(
+                self.get_display_label(int(i)) for i in pinned_no_value
+            )
+            raise ValueError(
+                f"Pinned parameter with no value{where}: {offenders}. "
+                f"'sigma: 0' fixes a parameter, but no start value was "
+                f"supplied for it anywhere -- not in the params file, not in "
+                f"{self.label.split('.')[0]}/defaults.yaml, and nothing "
+                f"derived one -- so it would be held at 0.0 in internal "
+                f"units, a value nobody chose. "
+                f"Fix: add an explicit 'initval' (the value you mean to fix "
+                f"it at) to the same params-file entry as the 'sigma: 0', or "
+                f"drop the 'sigma: 0' and let it be fitted."
+            )
 
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
         # rescale in set_whitening supersedes it), so it is optional: a
