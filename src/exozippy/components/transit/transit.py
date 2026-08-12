@@ -740,9 +740,27 @@ class Transit(Instrument):
     # always draw the exact same arrays (see plotspec.PlotSpec).
     # ------------------------------------------------------------------
     def _baseline_for(self, point, i):
-        """Baseline flux for instrument i from a point (default 1.0)."""
-        base_vals = np.atleast_1d(point.get(self.baseline.label, 1.0))
-        return float(base_vals[i])
+        """Baseline flux for instrument i, in internal units.
+
+        The value comes from the point when it is there, else from the
+        baseline Parameter's own initval -- the same fallback
+        _point_to_plot_params uses for every other plotted parameter.
+
+        A ``point.get(label, 1.0)`` here silently substituted UNITY for any
+        parameter absent from the draws, and pinned (``sigma: 0``)
+        parameters are always absent (an all-fixed vector never becomes a
+        pm.Deterministic, so it is in neither model.deterministics nor the
+        posterior).  Unity is not a neutral default: load_data seeds each
+        baseline with the light curve's own median flux, so on an
+        un-normalized light curve (raw counts) a pinned baseline plotted
+        the model curve and the phased panel's cleaned flux off by the
+        entire flux scale.
+        """
+        vals = point.get(self.baseline.label)
+        if vals is None:
+            vals = self.baseline.initval
+        base_vals = np.atleast_1d(vals)
+        return float(base_vals[i] if i < len(base_vals) else base_vals[0])
 
     def _eval_unphased_lc(self, system, point, i):
         """Full model light curve for instrument i: baseline + transit + GP.
