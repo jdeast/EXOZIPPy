@@ -176,6 +176,75 @@ def _sed_entry(svo_name, mag, used_err, enabled=True, magsys="Vega"):
     }
 
 
+def _write_parallax_prior(yaml_data, notes, key, plx, uplx):
+    """Record the astrometric measurement as a prior in PARALLAX space.
+
+    The measurement is Gaussian in parallax, so that is where the prior
+    belongs.  Propagating it into a distance prior
+    (``d = 1000/plx``, ``sigma_d = 1000*sigma_plx/plx**2``) is a
+    first-order expansion of a nonlinear map: it is symmetric in distance
+    while the true distance posterior implied by a Gaussian parallax is
+    skewed with a long far-side tail, so it biases whenever
+    ``plx/sigma_plx`` is not large (Lutz & Kelker 1973; Bailer-Jones 2015).
+    EXOFASTv2's ``mkticsed.pro`` writes ``parallax`` too; the distance
+    conversion was introduced by the Python port.
+
+    ``star.parallax`` is a derived parameter (``1000/distance``) and takes
+    an ordinary ``mu``/``sigma`` Gaussian prior through the standard
+    machinery -- ``Parameter.build_pymc`` adds ``gaussian_prior.<label>``
+    for derived elements with a sigma.  The relaxation engine then
+    inverts ``Eq(parallax, 1000/distance)`` to seed ``distance``, so no
+    distance entry is written here.
+
+    A NEGATIVE parallax is written live rather than commented out.  It is
+    a perfectly good measurement, and in parallax space it is well
+    defined: ``distance`` is the sampled coordinate and is bounded
+    positive, so ``1000/distance`` is always positive and a Gaussian
+    centered below zero is a finite one-sided penalty favoring large
+    distances -- nothing ever inverts a negative parallax at runtime.
+    (``mkticsed.pro`` comments the line out with "Negative parallax is not
+    allowed"; that reflects EXOFASTv2 sampling distance directly.)  The
+    relaxation engine declines to seed a distance from it, so ``distance``
+    keeps its defaults.yaml start -- which can be a poor one, hence the
+    suggested seed in the notes.
+    """
+    yaml_data[key("parallax")] = {
+        "mu": round(float(plx), 5),
+        "sigma": round(float(uplx), 5),
+    }
+    if plx > 0:
+        notes.append(
+            f"parallax prior N({plx:.5f}, {uplx:.5f}) mas -> "
+            f"distance ~ {1000.0 / plx:.3f} pc.  The prior is applied in "
+            f"parallax space (star.parallax = 1000/distance): a distance "
+            f"prior from first-order propagation biases below "
+            f"plx/sigma ~ 10"
+        )
+        return
+    notes.append(
+        f"WARNING: the corrected parallax is NEGATIVE ({plx:.5f} +/- "
+        f"{uplx:.5f} mas).  It is still applied, as a prior on "
+        f"star.parallax: distance is the sampled coordinate and is bounded "
+        f"positive, so the prior is a finite one-sided penalty favoring "
+        f"large distances."
+    )
+    hi = plx + 3.0 * uplx
+    if hi > 0:
+        notes.append(
+            f"WARNING: no distance start can be derived from a negative "
+            f"parallax, so star.distance keeps its 10 pc default -- a very "
+            f"poor start here.  To start at the 3-sigma minimum distance "
+            f"instead, add:  {key('distance')}: {{initval: "
+            f"{1000.0 / hi:.3f}}}"
+        )
+    else:
+        notes.append(
+            "WARNING: the 3-sigma upper limit on the parallax is still "
+            "negative; the astrometry constrains the distance only very "
+            "weakly.  Set a star.distance initval by hand."
+        )
+
+
 def _write_sed_yaml(path, sed_entries, model="NextGen", nstars=1, notes=None):
     """
     Write an EXOZIPPy SED YAML.
@@ -379,7 +448,6 @@ def mkticsed(
     target_dec = tic_dec
     target_pmra = float("nan")
     target_pmdec = float("nan")
-    target_plx = float("nan")
     gaia_dr3_done = False
 
     if qgaia3 is not None and len(qgaia3) > 0:
@@ -419,7 +487,9 @@ def mkticsed(
                     "RUWE > 1.4 is a strong indicator of stellar multiplicity"
                 )
 
-            if np.isfinite(g3_plx) and np.isfinite(g3_eplx) and g3_plx > 0:
+            # No positivity gate: the prior is written in PARALLAX space, so
+            # a negative measured parallax is representable (see below).
+            if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
                 uplx = math.sqrt(
                     g3_eplx**2 + 0.01**2
                 )  # 0.01 mas systematic floor
@@ -454,8 +524,15 @@ def mkticsed(
                             zp_msg = (
                                 f"corrected by -{zp:.5f} mas (Lindegren+2021)"
                             )
-                        except Exception:
-                            zp_msg = "correction failed; using raw"
+                        except Exception as exc:
+                            zp = 0.0
+                            zp_msg = (
+                                f"WARNING: the Lindegren+2021 zero-point "
+                                f"correction FAILED "
+                                f"({type(exc).__name__}: {exc}), so the RAW, "
+                                f"UNCORRECTED parallax is used"
+                            )
+                            print(zp_msg, file=sys.stderr)
                     else:
                         zp_msg = "out of Lindegren+2021 range; using raw"
 
@@ -465,16 +542,10 @@ def mkticsed(
                     f"uncertainty {g3_eplx:.5f} + 0.01 mas systematic = {uplx:.5f}"
                 )
 
-                if corrected_plx > 0:
-                    d_pc = 1000.0 / corrected_plx
-                    d_sig = 1000.0 * uplx / corrected_plx**2
-                    target_plx = corrected_plx
-                    yaml_data[key("distance")] = {
-                        "initval": round(d_pc, 3),
-                        "mu": round(d_pc, 3),
-                        "sigma": round(d_sig, 3),
-                    }
-                    gaia_dr3_done = True
+                _write_parallax_prior(
+                    yaml_data, notes, key, corrected_plx, uplx
+                )
+                gaia_dr3_done = True
 
                 target_ra = _get(qgaia3, "RA_ICRS", g3row)
                 target_dec = _get(qgaia3, "DE_ICRS", g3row)
@@ -503,13 +574,9 @@ def mkticsed(
         notes.append(
             "DR3 parallax unavailable; using Gaia DR2 with Lindegren+2018 correction"
         )
-        d_pc = 1000.0 / dr2_fallback_plx
-        d_sig = 1000.0 * dr2_fallback_uplx / dr2_fallback_plx**2
-        yaml_data[key("distance")] = {
-            "initval": round(d_pc, 3),
-            "mu": round(d_pc, 3),
-            "sigma": round(d_sig, 3),
-        }
+        _write_parallax_prior(
+            yaml_data, notes, key, dr2_fallback_plx, dr2_fallback_uplx
+        )
 
     # --- 4. 2MASS photometry --------------------------------------------------
     print("Querying 2MASS ...", flush=True)
