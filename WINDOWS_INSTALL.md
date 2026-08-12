@@ -101,41 +101,39 @@ Keep a second Ubuntu window open for the `sudo` steps. [VERIFIED -- hit here]
 
 ## Prerequisites
 
-- **Windows 10 version 2004 (build 19041) or newer, or Windows 11.** WSL2 does
-  not exist below that, and since WSL2 is the only supported way to run
-  EXOZIPPy on Windows, **neither does EXOZIPPy**. There is no workaround short
-  of upgrading Windows or installing Linux: native Windows cannot run the
-  samplers (no `fork` -- see "Why not native Windows?" above), and the older
-  WSL1 is a syscall translation layer, not a Linux kernel, so it does not give
-  you the platform this document assumes.
+- **Windows build 19041 or newer.** That is Windows 10 version 2004 (the May
+  2020 Update) or any Windows 11. Windows 11 Pro is what this runbook was
+  verified on [VERIFIED]; Windows 10 at build 19041+ is expected to work but
+  has not been reproduced here [EXPECTED].
 
-  Worth stating plainly because observational astronomy runs on old hardware:
-  Windows 7, 8, 8.1, and any Windows 10 older than the May 2020 update are all
-  out. Windows 10 reached end of support in October 2025, so an unpatched
-  machine is a security question as well as a compatibility one. On hardware
-  that cannot take a supported Windows, installing Linux directly is the
-  better answer anyway -- it is the platform EXOZIPPy is developed and tested
-  on, and it will be faster on old silicon than a VM would be.
+  Note: Microsoft numbers Windows 10 releases `YYMM`, so "version 2004" is
+  April 2020, not the year 2004. This document uses build numbers, which are
+  unambiguous.
 
-  Check your version from PowerShell (`winver` in the Run box shows the same
-  thing):
+  Builds 18362 and 18363 (versions 1903 and 1909) can also run WSL2 on x64 if
+  fully patched, but `wsl --install` (Step 1) does not exist there -- the
+  manual setup is enabling two optional Windows features, installing the
+  kernel update package, then `wsl --set-default-version 2`. Not covered here.
+
+  Below 18362 there is no WSL2, and therefore no supported way to run EXOZIPPy
+  on Windows: native Windows cannot run the samplers (no `fork` -- see "Why
+  not native Windows?" above), and WSL1 is a syscall translation layer rather
+  than a Linux kernel. Windows 7, 8 and 8.1 are out. Windows 10 reached end of
+  support in October 2025, so an unpatched Windows 10 machine is a security
+  question as well as a compatibility one. On hardware that cannot take a
+  current Windows, install Linux directly -- it is the platform EXOZIPPy is
+  developed and tested on, and it will outperform a VM on old machines.
+
+  Check the build from PowerShell, or run `winver`:
 
   ```powershell
   [System.Environment]::OSVersion.Version    # want: Build 19041 or higher
   ```
 
-- Windows 11 is what this runbook was verified on (Windows 11 Pro). [VERIFIED]
-  Windows 10 build 19041+ is expected to work but has not been reproduced
-  here. [EXPECTED]
 - CPU virtualization enabled in firmware. On this machine
   `Win32_Processor.VirtualizationFirmwareEnabled` was already `True`, so **no
   BIOS trip was needed**. [VERIFIED]
 - Admin access (for `wsl --install`) and one reboot.
-
-  Note the one-command `wsl --install` used in Step 1 needs Windows 10 build
-  19041+ or Windows 11. On older-but-still-supported builds you would be doing
-  the retired manual install (enable two optional features, download a kernel
-  update, `wsl --set-default-version 2`), which is not covered here.
 
 Check virtualization from PowerShell (non-elevated is fine):
 

@@ -60,15 +60,30 @@ genuine Ubuntu userspace, so it *is* the Linux platform in the table above,
 (Windows 11 -> Ubuntu 26.04 -> Python 3.14 -> Poetry), is
 [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
 
-**This needs Windows 10 version 2004 (build 19041) or newer, or Windows 11.**
-WSL2 does not exist below that, and WSL2 is the only supported route, so on an
-older Windows there is no way to run EXOZIPPy at all -- native Windows cannot
-run the samplers (below), and WSL1 is a syscall translation layer rather than
-a Linux kernel. Worth saying out loud because observational astronomy runs on
-old hardware: Windows 7/8/8.1 and pre-2004 Windows 10 are out. If the machine
-cannot take a supported Windows, install Linux on it directly -- that is the
-platform EXOZIPPy is developed and tested on, and on old silicon it will beat
-a VM anyway.
+#### Minimum Windows version
+
+WSL2 requires **build 19041 or newer** (Windows 10 version 2004, the May 2020
+Update) or any Windows 11. Check with `winver`, or from PowerShell:
+
+```
+[System.Environment]::OSVersion.Version
+```
+
+Note: Microsoft numbers Windows 10 releases `YYMM`, so "version 2004" means
+April 2020, not the year 2004. Build numbers are less ambiguous and are what
+this document uses.
+
+Builds 18362 and 18363 (versions 1903 and 1909) can also run WSL2 on x64 if
+fully patched, but `wsl --install` does not exist there and the manual setup is
+not covered here.
+
+Below that there is no way to run EXOZIPPy on Windows: native Windows cannot
+run the samplers (below), and WSL1 is a syscall translation layer rather than a
+Linux kernel. Windows 7, 8, 8.1 and early Windows 10 are therefore unsupported,
+as is any Windows 10 after its October 2025 end of support. On hardware that
+cannot take a current Windows, install Linux directly -- it is the platform
+EXOZIPPy is developed and tested on, and it will outperform a VM on old
+machines.
 
 **Why not natively?** Two independent reasons:
 
