@@ -25,10 +25,29 @@ def calc_n(period):
     return TWOPI / period
 
 
+# Hard ceiling on the eccentricity handed to the forward model.  A Kepler
+# solve is meaningless at e >= 1, and calc_K's sqrt(1 - e^2) / calc_tp's
+# sqrt(1 - e) are NaN there, so calc_ecc clips.  The soft bound that is
+# supposed to keep the sampler out of that region must NOT be applied to the
+# clipped node -- see Orbit._add_eccentricity_bound.
+MAX_ECC = 0.9999
+
+
+def ecc_from_sqrte(secosw, sesinw):
+    """Unclipped eccentricity, secosw^2 + sesinw^2.
+
+    This is what a soft bound must see: the clipped calc_ecc below is flat
+    above MAX_ECC, and a flat penalty has no gradient for NUTS to follow.
+    """
+    return pt.sqr(sesinw) + pt.sqr(secosw)
+
+
 @register_physics
 def calc_ecc(secosw, sesinw):
-    e_raw = pt.sqr(sesinw) + pt.sqr(secosw)
-    return pt.clip(e_raw, 0.0, 0.9999)
+    # Clipped for the FORWARD MODEL only (see MAX_ECC above).  The lower clip
+    # never binds -- a sum of squares is already >= 0 -- but is kept so a
+    # future parameterization cannot sneak a negative e into the Kepler solve.
+    return pt.clip(ecc_from_sqrte(secosw, sesinw), 0.0, MAX_ECC)
 
 
 @register_physics
