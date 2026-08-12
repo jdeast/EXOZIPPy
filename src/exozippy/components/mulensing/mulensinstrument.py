@@ -413,7 +413,10 @@ class MulensInstrument(Instrument):
 
         - explicit file path: the JSON's bad-data mask (``excluded_points``)
           and error factors (``errfacs``) are applied to this component's
-          files; the seed hints are pushed by Lens at stage 2 as before.
+          files; the seed hints are pushed by Lens at stage 2 as before. An
+          absent file warns and skips; an unparseable one raises (see
+          ``mmexofast_support.load_json``) rather than dropping the mask and
+          the error factors along with the seeds.
         - absent (default) or ``auto``: when the params file lacks start
           values for the microlensing parameters (or always, for ``auto``),
           MMEXOFAST is run on the raw light curves -- renormalize_errors on,
