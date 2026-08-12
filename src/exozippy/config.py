@@ -396,6 +396,14 @@ class ConfigManager:
         self.custom_solvers = {}
         self.standalone_solvers = set()
 
+        # Path of the params FILE these entries were read from, set by System
+        # only when it actually read one -- it stays None when the caller
+        # passed user_params in memory, even if the config happens to name a
+        # parameter_file it did not use.  Metadata only: error messages that
+        # ask the user to edit an entry quote it so they know which file to
+        # open.
+        self.param_file = None
+
         # User-defined parameter links (expression strings in numeric fields).
         # Populated by extract_links, which also strips the strings from
         # user_params so downstream numeric code never sees them.

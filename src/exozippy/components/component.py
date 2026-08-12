@@ -317,6 +317,7 @@ class Component(ABC):
             expression=expression,
             element_links=element_links,
             user_params=self.config_manager.user_params,
+            source_file=getattr(self.config_manager, "param_file", None),
             **full_params,
         )
 

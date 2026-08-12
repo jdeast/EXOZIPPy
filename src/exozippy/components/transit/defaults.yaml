@@ -2,6 +2,17 @@ transit:
   baseline:
     lower: -1000000.0
     upper: 1000000.0
+    # Unity relative flux: the out-of-transit level of a normalized light
+    # curve.  Inert in any real fit -- Transit.register_parameters puts the
+    # per-file median flux in the manifest as a plain option, which
+    # add_parameter layers OVER the resolved config (`{**cfg, **options}`),
+    # and its own fallback for a file it never read is this same 1.0.  It is
+    # here so that every sampled parameter carries an initval from somewhere,
+    # which is what makes the "pinned with no value" check in
+    # Parameter.build_pymc an invariant rather than a rule with exceptions.
+    # `baseline` appears in no RELATION, so this cannot change any other
+    # parameter's provenance either.
+    initval: 1.0
     init_scale: 0.01
     unit: ""
     internal_unit: ""

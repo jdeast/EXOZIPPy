@@ -95,6 +95,11 @@ class System(Component):
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
+        # Record the params file ONLY when one was really read: an in-memory
+        # user_params dict must not be blamed on a parameter_file the config
+        # happens to name but System never opened.
+        if user_params is None:
+            self.config_manager.param_file = str(user_params_file)
         self.registry = discover_components()
         self.active_components = {}
 
