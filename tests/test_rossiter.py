@@ -358,3 +358,123 @@ def test_hirano2010_agrees_with_2011_at_low_vsini():
     a11 = f11(xv, yv, zv)
     a10 = f10(xv, yv, zv)
     assert np.max(np.abs(a10 - a11)) / np.max(np.abs(a11)) < 0.10
+
+
+# --------------------------------------------------------------------------
+# 6. The RM term is INDEXED to its own instrument's rows, not switched over
+#    every instrument's (review 3.6).
+# --------------------------------------------------------------------------
+def _kelt17_two_instrument_system(tmp_path, n_rm=40):
+    """The KELT-17 example with its RV file split across two instruments:
+    only the first is tagged `rm: b`.  Returns (system, model, n_rm, n_other).
+    """
+    import os
+    import shutil
+
+    import yaml
+
+    from exozippy.system import System
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exdir = os.path.join(root, "examples", "kelt17")
+    if not os.path.exists(os.path.join(exdir, "kelt17.yaml")):
+        pytest.skip("kelt17 example not present")
+    work = str(tmp_path)
+    for name in os.listdir(exdir):
+        shutil.copy(os.path.join(exdir, name), work)
+
+    rv = np.loadtxt(os.path.join(exdir, "KELT-17.TRES.rv"))
+    np.savetxt(os.path.join(work, "rm_inst.rv"), rv[:n_rm])
+    np.savetxt(os.path.join(work, "orb_inst.rv"), rv[n_rm:])
+
+    with open(os.path.join(exdir, "kelt17.yaml")) as fh:
+        cfg = yaml.safe_load(fh)
+    cfg["rvinstrument"] = [
+        {"name": "TRES_RM", "file": "rm_inst.rv", "rm": "b", "rm_band": "V"},
+        {"name": "TRES_ORB", "file": "orb_inst.rv"},
+    ]
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(work)
+        system = System(cfg)
+        system.prepare()
+        model = system.build_model()
+    finally:
+        os.chdir(cwd)
+    return system, model, n_rm, len(rv) - n_rm
+
+
+def test_rm_is_evaluated_only_on_its_own_instrument_rows(
+    tmp_path, monkeypatch
+):
+    """
+    Given: two RV instruments, only one of them tagged `rm: b`
+    When: the RV likelihood is built
+    Then: compute_rm_rv is evaluated over exactly that instrument's rows
+
+    A pt.switch over the branch VALUES evaluated the Hirano kernel at every
+    instrument's timestamps and masked the result -- the JAX where-trap, and
+    83% wasted work on this split (the H2011 kernel is a 201 x 64 quadrature
+    per row).
+    """
+    # Arrange: spy on the shared kernel entry point
+    from exozippy.components import rm as rm_module
+
+    seen = []
+    original = rm_module.compute_rm_rv
+
+    def _spy(system, time, *args, **kwargs):
+        seen.append(time)
+        return original(system, time, *args, **kwargs)
+
+    monkeypatch.setattr(rm_module, "compute_rm_rv", _spy)
+
+    # Act
+    _system, _model, n_rm, n_other = _kelt17_two_instrument_system(tmp_path)
+
+    # Assert: the build_likelihood call (the one with a concrete length) sees
+    # only the RM instrument's rows.  The plotting call takes a symbolic grid.
+    concrete = []
+    for t in seen:
+        try:
+            concrete.append(int(t.shape[0].eval()))
+        except Exception:
+            pass
+    assert concrete, "compute_rm_rv was never called on concrete times"
+    assert n_other > 0  # the split really does hold back rows
+    assert concrete == [n_rm], (
+        f"RM kernel evaluated over {concrete} rows; the RM instrument has "
+        f"{n_rm} of {n_rm + n_other}"
+    )
+
+
+def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(tmp_path):
+    """
+    Given: the same two-instrument RM system
+    When: logp and dlogp are evaluated on the C backend and on JAX
+    Then: both are finite
+
+    The JAX evaluation is the regression guard for the where-trap; the JAX
+    SAMPLER path was verified separately by actually sampling this model with
+    nuts_sampler="numpyro" (the standing house rule).
+    """
+    # Arrange
+    _system, model, _n_rm, _n_other = _kelt17_two_instrument_system(tmp_path)
+    point = model.initial_point()
+
+    # Act
+    lp_c = float(model.compile_logp()(point))
+    grad_c = np.asarray(model.compile_dlogp()(point))
+    lp_jax = float(np.asarray(model.compile_logp(mode="JAX")(point)))
+    grad_jax = np.concatenate(
+        [
+            np.atleast_1d(np.asarray(g)).ravel()
+            for g in [model.compile_dlogp(mode="JAX")(point)]
+        ]
+    )
+
+    # Assert
+    assert np.isfinite(lp_c) and np.all(np.isfinite(grad_c))
+    assert np.isfinite(lp_jax) and np.all(np.isfinite(grad_jax))
+    assert lp_jax == pytest.approx(lp_c, rel=1e-8)

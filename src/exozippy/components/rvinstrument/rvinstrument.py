@@ -322,6 +322,16 @@ class RVInstrument(Instrument):
         # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
         # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
         # the internal RV unit (solRad/d) and add only to that file's rows.
+        #
+        # INDEX, do not pt.switch. A switch over the branch VALUES would
+        # evaluate the Hirano kernel at every instrument's timestamps and then
+        # throw away the rows it does not apply to -- the JAX where-trap
+        # (CLAUDE.md): a `where` whose unselected branch can be invalid poisons
+        # the gradient of the selected one too. Slicing the RM instrument's own
+        # rows makes the unselected rows unreachable by construction instead of
+        # merely masked, and is cheaper by exactly the fraction of the data
+        # that is not the RM file (the H2011 kernel is a 201 x 64 quadrature
+        # PER ROW; on a 40-of-73-row example it was 83% wasted work).
         if any(self.rm_orbit):
             from ..rm import compute_rm_rv, resolve_rm_indices
 
@@ -329,15 +339,22 @@ class RVInstrument(Instrument):
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
+                rows = np.flatnonzero(self.inst_map == i)
+                if rows.size == 0:
+                    continue
                 oidx, pidx, bidx = resolve_rm_indices(
                     system, oname, self.rm_band[i]
                 )
                 rm_ms = compute_rm_rv(
-                    system, time, oidx, pidx, bidx, model=self.rm_model[i]
-                )  # (N_obs,) m/s
-                rm_internal = rm_ms / rv_ms_per_internal
-                rv_model += pt.switch(
-                    pt.eq(self.inst_map_tensor, i), rm_internal, 0.0
+                    system,
+                    time[rows],
+                    oidx,
+                    pidx,
+                    bidx,
+                    model=self.rm_model[i],
+                )  # (len(rows),) m/s
+                rv_model = pt.inc_subtensor(
+                    rv_model[rows], rm_ms / rv_ms_per_internal
                 )
 
         # detrending
