@@ -1677,6 +1677,56 @@ class ConfigManager:
             return "solved"
         return "default"
 
+    def initval_source(self, component, param, element=None, name=None):
+        """Where did this element's START VALUE come from?
+
+        Returns one of the ``_provenance_label`` strings -- "user" (written in
+        the params file), "data" (a component's data-derived hint), "solved"
+        (the relaxation engine derived it from other inputs) or "default"
+        (defaults.yaml) -- for the parameter ``component.param`` at element
+        index ``element``.
+
+        This exists so an error about a start value can say WHOSE start value
+        it is: blaming a user's params file for a number the engine derived is
+        worse than saying nothing.  Parameter.build_pymc is the only caller
+        (Component.add_parameter hands it this bound method).
+
+        Two known limits, both of which only soften the wording of a message
+        and never change a decision:
+          - it reports the provenance of the engine's LAST solve, so a
+            parameter the engine rewrote after reading a user value reports
+            the rewrite ("solved"), not "user";
+          - a parameter with no symbol in the master symbol map has no rank at
+            all, so it falls back to looking for the user's own numeric
+            ``initval`` in the params file (safe there: the inject-back only
+            writes into mapped paths).
+        """
+        # Index form first (what _last_provenance and a standardized
+        # user_params are keyed on), then the instance-name form (which
+        # survives when no system_config was attached, e.g. a unit test or a
+        # component driven directly), then the 2-part broadcast form.
+        paths = []
+        if element is not None:
+            paths.append(f"{component}.{element}.{param}")
+        if name is not None:
+            paths.append(f"{component}.{name}.{param}")
+        paths.append(f"{component}.{param}")
+
+        for path in paths:
+            rank = (self._last_provenance or {}).get(path)
+            if rank is not None:
+                return self._provenance_label(rank)
+
+        for path in paths:
+            entry = (self.user_params or {}).get(path)
+            if isinstance(entry, dict) and entry.get("initval") is not None:
+                return "user"
+            if path in (self.links or {}) and (
+                "initval" in self.links[path] or "mu" in self.links[path]
+            ):
+                return "user"
+        return "default"
+
     def export_solution(self, derived_params=None):
         """Export the resolved parameter solution as JSON-friendly dicts.
 
