@@ -796,3 +796,17 @@ class Star(Component):
             f"{self.prefix}.volume_prior",
             pt.sum(2.0 * pt.log(distance) - self._volume_prior_log_norm()),
         )
+
+        # Tell the reported tables what was just added.  Without this the
+        # Prior column reads whatever star.distance's own fields imply --
+        # "Uniform" for a bounded element with no sigma -- which is exactly
+        # the prior this potential replaces.  supersedes_bounds: the term IS
+        # a normalized density over star.distance's own support, so the
+        # rendered text is "p(d) propto d^2 on [lower, upper]"; a user's
+        # Gaussian sigma (a parallax measurement) is kept alongside it,
+        # matching the "applies on top of" note above.
+        self.distance.add_prior_contribution(
+            latex=r"$p(d) \propto d^{2}$",
+            text="p(d) propto d^2",
+            supersedes_bounds=True,
+        )

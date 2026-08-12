@@ -52,6 +52,16 @@ class _MockParam:
         self.value = pt.as_tensor_variable(self.initval)
         self.lower = lower
         self.upper = upper
+        self.prior_contributions = []
+
+    def add_prior_contribution(self, *args, **kwargs):
+        """Reporting-only hook (see parameter.PriorContribution).
+
+        build_likelihood declares what its potentials ARE so the reported
+        tables can describe them; the declaration changes no math.  Recorded
+        rather than dropped so a test could assert on it.
+        """
+        self.prior_contributions.append((args, kwargs))
 
 
 class _MockStar:

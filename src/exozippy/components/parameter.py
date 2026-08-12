@@ -10,7 +10,16 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import pymc as pm
@@ -386,6 +395,83 @@ def _broadcast_to_shape(val, shape, label, name):
     )
 
 
+def _fmt_prior_value(val, is_latex=True):
+    """Format one number for the Prior column (shared by every branch)."""
+    if val is None or np.isnan(val):
+        return "nan"
+    if np.isinf(val):
+        return (
+            (r"\infty" if val > 0 else r"-\infty")
+            if is_latex
+            else ("inf" if val > 0 else "-inf")
+        )
+    if 0.001 <= abs(val) < 10000:
+        return f"{val:.4f}".rstrip("0").rstrip(".")
+    return f"{val:.2e}"
+
+
+def _normalize_prior_elements(elements):
+    """Element selector for a PriorContribution -> frozenset of ints, or None.
+
+    Accepts None (every element), a boolean mask, or any iterable of indices.
+    """
+    if elements is None:
+        return None
+    arr = np.atleast_1d(np.asarray(elements))
+    if arr.dtype == bool:
+        return frozenset(int(i) for i in np.nonzero(arr)[0])
+    return frozenset(int(i) for i in arr.ravel())
+
+
+@dataclass(frozen=True, slots=True)
+class PriorContribution:
+    """A prior term a COMPONENT adds, declared against a Parameter.
+
+    ``Parameter.get_prior_str`` describes a prior from the Parameter's own
+    fields -- ``sigma``, ``mu``, ``lower``/``upper``.  A ``pm.Potential`` a
+    component adds in stage 6 is invisible to that, so a parameter carrying
+    one was reported as whatever its own fields implied, which for a bounded
+    no-sigma element is "Uniform".  Three shipped priors were misreported
+    that way: ``star.distance``'s d^2 volume prior, ``star.logmass``'s IMF,
+    and the free-floating-planet mass function that replaces the IMF per
+    star.
+
+    A component declares one of these next to the potential it is adding
+    (``Parameter.add_prior_contribution``) and both report paths -- run.py's
+    startup audit table and the LaTeX ``\\...prior`` macros -- compose it
+    with the parameter's own fields.  Reporting therefore stays completely
+    component-agnostic: ``parameter.py`` never learns a component's name,
+    and a component that adds a prior and forgets to declare it is the only
+    way to get a wrong table.
+
+    Fields:
+
+    ``latex`` / ``text``
+        The two renderings of the term.
+
+    ``elements``
+        Which elements of a vector parameter the term covers, as a frozenset
+        of indices, or None for all of them.  Per-element because the choice
+        genuinely is per element: ``mass_function: ffp`` swaps ONE star off
+        the stellar IMF.
+
+    ``supersedes_bounds``
+        True when the term replaces the uniform-over-bounds prior the logit
+        transform would otherwise imply, rather than multiplying a prior the
+        Parameter states itself.  The volume prior and the IMFs are of this
+        kind -- they are densities over exactly the parameter's own support,
+        which they normalize over -- so the rendered text is the term plus
+        that support, and the word "Uniform" never appears.  An explicit
+        Gaussian ``sigma`` is NOT dropped: a parallax measurement times the
+        volume prior is two statements and the table must make both.
+    """
+
+    latex: str
+    text: str
+    elements: Optional[frozenset] = None
+    supersedes_bounds: bool = False
+
+
 # ----------------------------
 # Parameter
 # ----------------------------
@@ -491,6 +577,12 @@ class Parameter:
     # compute_mode_summaries when a mode report exists
     mode_summaries: Optional[list] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # Prior terms added from OUTSIDE this Parameter -- a component's
+    # pm.Potential -- declared via add_prior_contribution so the reported
+    # tables can describe them. See PriorContribution.
+    prior_contributions: List["PriorContribution"] = field(
+        default_factory=list
+    )
 
     def __post_init__(self) -> None:
         """
@@ -1839,7 +1931,136 @@ class Parameter:
             else ""
         )
 
+    # ------------------------------------------------------------------
+    # Component-declared prior contributions (see PriorContribution).
+    # ------------------------------------------------------------------
+
+    def add_prior_contribution(
+        self,
+        latex,
+        text=None,
+        elements=None,
+        supersedes_bounds=False,
+    ):
+        """Declare that something outside this Parameter adds a prior term.
+
+        Call this next to the ``pm.Potential`` it describes, in the
+        component's ``build_likelihood``.  ``latex``/``text`` are the two
+        renderings of the term ("$\\propto d^{2}$" / "propto d^2"); ``text``
+        defaults to ``latex`` with its ``$`` stripped.  ``elements`` selects
+        which elements of a vector the term covers -- ``None`` for all, or an
+        index iterable / boolean mask (the FFP mass function applies per
+        star).  ``supersedes_bounds`` says the term REPLACES the implicit
+        uniform prior over the element's bounds rather than multiplying an
+        explicit prior of this Parameter's own; see PriorContribution.
+
+        Idempotent: re-declaring an identical contribution (a second
+        ``build_model()`` on the same System, as the GUI does) is a no-op,
+        so priors cannot accumulate copies of themselves.
+        """
+        if text is None:
+            text = str(latex).replace("$", "")
+        contribution = PriorContribution(
+            latex=str(latex),
+            text=str(text),
+            elements=_normalize_prior_elements(elements),
+            supersedes_bounds=bool(supersedes_bounds),
+        )
+        if contribution in self.prior_contributions:
+            return contribution
+        self.prior_contributions.append(contribution)
+        return contribution
+
+    def prior_contributions_at(self, index=0):
+        """The declared contributions that cover element ``index``."""
+        return [
+            c
+            for c in self.prior_contributions
+            if c.elements is None or index in c.elements
+        ]
+
+    def _prior_scalar(self, val, index):
+        """One element of a numeric prior field, in USER units (or None)."""
+        if val is None:
+            return None
+        arr = np.atleast_1d(val)
+        raw = arr[index] if index < len(arr) else arr[0]
+        if hasattr(raw, "eval"):
+            try:
+                raw = raw.eval()
+            except Exception:
+                return None
+        try:
+            f_val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if np.isnan(f_val):
+            return None
+        if self.unit is None or self.internal_unit is None:
+            return f_val
+        f = np.atleast_1d(self._get_conversion_factors())
+        return f_val * float(f[index] if index < len(f) else f[0])
+
+    def _support_str(self, index, latex):
+        """``[lower, upper]`` for this element, or '' when not both finite.
+
+        Used to keep the support in the rendered prior when a component
+        contribution supersedes the bounds-derived uniform: the term is a
+        density over exactly that interval (both the volume prior and the
+        IMF branches normalize over it), and dropping the numbers would make
+        the new text less informative than the "Uniform" it replaces.
+        """
+        lo = self._prior_scalar(self.lower, index)
+        hi = self._prior_scalar(self.upper, index)
+        if lo is None or hi is None or np.isinf(lo) or np.isinf(hi):
+            return ""
+        l_s = _fmt_prior_value(lo, latex)
+        h_s = _fmt_prior_value(hi, latex)
+        return rf" on $[{l_s}, {h_s}]$" if latex else f" on [{l_s}, {h_s}]"
+
     def get_prior_str(self, index=0, latex=True):
+        """The Prior column text for one element.
+
+        Composes what this Parameter knows about its own prior (a Gaussian
+        ``sigma``, a pin, or the uniform implied by its bounds) with any
+        prior contributions a component declared against it
+        (``add_prior_contribution``).  Both report paths go through here --
+        run.py's startup audit table asks for ``latex=False`` and
+        ``to_latex_prior_def`` for ``latex=True`` -- so a component that
+        declares its potential is described in both.
+        """
+        own, kind = self._own_prior_str(index=index, latex=latex)
+
+        contributions = self.prior_contributions_at(index)
+        if not contributions:
+            return own
+
+        # A pinned element is a delta function; a potential evaluated on it
+        # is a constant that cannot move the posterior, so "Fixed" stays the
+        # honest and complete statement.
+        if kind == "fixed":
+            return own
+
+        parts = []
+        supersede = any(c.supersedes_bounds for c in contributions)
+        if own and not (supersede and kind == "bounds"):
+            parts.append(own)
+        parts.extend(c.latex if latex else c.text for c in contributions)
+        rendered = (r" $\times$ " if latex else " * ").join(parts)
+        if supersede and kind == "bounds":
+            rendered += self._support_str(index, latex)
+        return rendered
+
+    def _own_prior_str(self, index=0, latex=True):
+        """This Parameter's own prior text, plus which branch produced it.
+
+        Returns ``(text, kind)`` with ``kind`` in
+        ``{"fixed", "gaussian", "bounds", "none"}``.  The body is the
+        historical ``get_prior_str``, unchanged apart from reporting the
+        branch it took; ``get_prior_str`` returns it verbatim whenever no
+        component has declared a contribution.
+        """
+
         def _scalar(val):
             if val is None:
                 return None
@@ -1873,7 +2094,7 @@ class Parameter:
 
         sig = _scalar(self.sigma)
         if sig == 0:
-            return "Fixed"
+            return "Fixed", "fixed"
 
         lo = _scalar(self.lower)
         hi = _scalar(self.upper)
@@ -1884,7 +2105,7 @@ class Parameter:
 
         # Derived parameters with no custom constraint have no prior to display.
         if self.expression is not None and not (has_prior or has_bounds):
-            return ""
+            return "", "none"
 
         mu = _scalar(self.mu)
         if mu is None:
@@ -1895,7 +2116,7 @@ class Parameter:
             if has_prior:
                 strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
             if strs:
-                return " * ".join(strs)
+                return " * ".join(strs), "gaussian"
 
             if has_bounds:
                 l_s = (
@@ -1909,14 +2130,14 @@ class Parameter:
                     else ""
                 )
                 if l_s and h_s:
-                    return f"U({l_s}, {h_s})"
+                    return f"U({l_s}, {h_s})", "bounds"
                 if l_s:
-                    return f"> {l_s}"
+                    return f"> {l_s}", "bounds"
                 if h_s:
-                    return f"< {h_s}"
+                    return f"< {h_s}", "bounds"
 
             if self.expression is not None:
-                return ""
+                return "", "none"
 
         # --- LaTeX Formatting Block ---
         strs = []
@@ -1924,7 +2145,7 @@ class Parameter:
             strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
 
         if strs:
-            return r" $\times$ ".join(strs)
+            return r" $\times$ ".join(strs), "gaussian"
 
         if has_bounds:
             l_s, h_s = _fmt(lo), _fmt(hi)
@@ -1934,13 +2155,13 @@ class Parameter:
             hi_is_inf = (hi is None) or np.isinf(hi)
 
             if not lo_is_inf and not hi_is_inf:
-                return rf"$\mathcal{{U}}({l_s}, {h_s})$"
+                return rf"$\mathcal{{U}}({l_s}, {h_s})$", "bounds"
             if not lo_is_inf:
-                return rf"$> {l_s}$"
+                return rf"$> {l_s}$", "bounds"
             if not hi_is_inf:
-                return rf"$< {h_s}$"
+                return rf"$< {h_s}$", "bounds"
 
-        return ""
+        return "", "none"
 
     def to_latex_prior_def(self) -> str:
         """Generate the \\providecommand(s) for the prior column value.
