@@ -1,6 +1,7 @@
 """
-Tests for per-mode local evidence estimation via warp bridge sampling
-(outputs/evidence.py).
+Tests for per-mode local evidence estimation by bridge sampling
+(outputs/evidence.py) -- the plain Meng & Wong optimal bridge against a fitted
+Gaussian proposal; no warp is involved.
 
 The bridge estimator returns each mode's local log-evidence relative to a
 Gaussian proposal fit in raw (unconstrained) space; softmax of the lnZ values

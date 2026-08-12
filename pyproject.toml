@@ -116,6 +116,10 @@ dependencies = [
     # traces.
     "h5netcdf>=1.8.1,<2.0.0",
     "lxml>=5.0",
+    # Parquet engine for the MIST EEP track grid (src/exozippy/models/MIST);
+    # pandas.read_parquet needs one and does not ship it. Was `pyarrow =
+    # "^25.0.0"` in the old [tool.poetry.dependencies] table.
+    "pyarrow>=25.0.0,<26.0.0",
 ]
 
 # NOTE: the microlensing tools (mmexofast, sfit-minimizer, emcee) used to live

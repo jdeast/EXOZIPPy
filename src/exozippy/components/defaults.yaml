@@ -8,8 +8,10 @@
 # key).  Each instrument overrides only what is genuinely instrument-specific
 # in its own defaults.yaml -- in practice just the scale-carrying parameters'
 # unit and bounds, since "GP amplitude" or "outlier scatter" means m/s for
-# RVs, relative flux for a light curve, and magnitudes for a microlensing
-# curve.
+# RVs, relative flux for a transit light curve, and flux in the file's own
+# (arbitrary) flux system for a microlensing curve -- the last of which
+# MulensInstrument rescales per light curve, because no fixed number can
+# serve both a magnitude file and difference-imaging counts.
 #
 # Only files with the corresponding key register these at all; a fit with
 # neither has zero extra parameters.  Elements of an instrument that did not

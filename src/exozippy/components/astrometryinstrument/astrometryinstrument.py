@@ -305,12 +305,23 @@ class AstrometryInstrument(Instrument):
             "abs": ("time", "ra", "dec", "err_e", "err_n"),
             "rel": ("time", "sep", "err_sep", "pa", "err_pa"),
         }
+        # Roles a columns: spec may point at the SAME file column
+        # (everything else collides -- Instrument._check_no_duplicate_columns).
+        # One symmetric per-epoch uncertainty serving both sky axes is a
+        # common abs-mode catalog layout; rel's err_sep/err_pa are in
+        # different units (mas vs deg) and are deliberately NOT shareable.
+        mode_shared = {"abs": (("err_e", "err_n"),)}
         for i in range(self.n_elements):
             mode = self.modes[i]
             # Shared reader: columns:, mask:, time_* conversion, then sort
             # before the parallax factors are computed from t, so every
             # per-epoch quantity stays aligned regardless of mode.
-            df = self._read_data(i, roles=mode_roles[mode], detrend=False)
+            df = self._read_data(
+                i,
+                roles=mode_roles[mode],
+                detrend=False,
+                shared_roles=mode_shared.get(mode, ()),
+            )
             t = df.iloc[:, 0].values.astype(float)
 
             star_ndx = int(self.config[i].get("star_ndx", 0))

@@ -1,5 +1,6 @@
 """mkparam - Seed a params.yaml from the MAP of a previous trace."""
 
+import copy
 import logging
 import re
 from pathlib import Path
@@ -224,7 +225,12 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
 
 
 def mkprior(
-    config, base_dir=None, trace_path=None, output_path=None, n_seeds=None
+    config,
+    base_dir=None,
+    trace_path=None,
+    output_path=None,
+    n_seeds=None,
+    user_params=None,
 ):
     """
     Write a params.yaml seeded from a previous trace.
@@ -253,6 +259,16 @@ def mkprior(
     n_seeds : int, optional
         Number of multi-seed start points to emit. When None, read from
         ``config['mkprior']['n_seeds']`` (default 1 = legacy scalar behavior).
+    user_params : dict, optional
+        The parameter overrides the fit actually ran with, for the in-memory
+        entry point ``run_fit(config, user_params=<dict>)``. When omitted,
+        ``config['parameter_file']`` is read from disk -- which is right for a
+        file-driven run and WRONG for a dict-driven one: the restart file
+        merges the trace MAP into these entries, so priors and bounds would
+        come from whatever stale file happened to sit at that path (or be
+        silently dropped when no such file exists). It is also the fingerprint
+        this function checks the trace against, so the mismatch surfaces as a
+        StaleTraceError rather than a quietly wrong restart file.
 
     Returns
     -------
@@ -282,7 +298,15 @@ def mkprior(
 
     param_file = config.get("parameter_file")
     existing_params = {}
-    if param_file:
+    if user_params is not None:
+        # In-memory run: these ARE the fit's parameter overrides, and the file
+        # at config['parameter_file'] (if any) is not.  Copied so nothing here
+        # can write back into the caller's dict.
+        existing_params = copy.deepcopy(user_params)
+        validate_sigma_has_center(
+            existing_params, source="the in-memory user_params"
+        )
+    elif param_file:
         param_path = base_dir / param_file
         if param_path.exists():
             existing_params = _load_yaml(str(param_path))

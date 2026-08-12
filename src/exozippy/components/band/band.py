@@ -24,8 +24,8 @@ class Band(Component):
     `_parse_ld_laws`).
 
     Band is the single carrier of filter identity for instruments: each
-    element's user-facing `filter:` string is resolved through the SED
-    component's alias table (filters/filternames.txt) into canonical
+    element's user-facing `filter:` string is resolved through the shared
+    filter alias table (exozippy/filters/filternames.txt) into canonical
     MIST (`filter_mist`) and SVO (`filter_svo`) names, which the SED
     flux-prediction hooks (mulensing f_source constraint, transit
     deblending, astrometry fluxfrac) key on.
@@ -52,8 +52,8 @@ class Band(Component):
                 "accepts": None,
                 "required": True,
                 "doc": (
-                    "Filter/bandpass name; resolved through the SED filter "
-                    "alias table (components/sed/filters/filternames.txt) "
+                    "Filter/bandpass name; resolved through the shared "
+                    "filter alias table (exozippy/filters/filternames.txt) "
                     "into a canonical name at load time."
                 ),
             },
@@ -129,7 +129,7 @@ class Band(Component):
             ):
                 logger.warning(
                     f"Band '{band_name}': filter '{filt}' is not in the "
-                    f"filter alias table (components/sed/filters/"
+                    f"filter alias table (exozippy/filters/"
                     f"filternames.txt); assuming it is already a canonical "
                     f"BC-table/SVO name."
                 )

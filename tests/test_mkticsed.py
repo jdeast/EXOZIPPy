@@ -58,6 +58,38 @@ def _tycho_table(rows):
     )
 
 
+def _gaia_dr3_table(plx=4.587, e_plx=0.0143):
+    """One-row Gaia DR3 cone result for the target, out of zero-point range.
+
+    Solved = 3 keeps it outside the Lindegren+2021 prescription, so the
+    zero point is 0 and the written prior is the raw catalog parallax --
+    which keeps the assertions on the value/error, not on gaiadr3-zeropoint
+    (an optional dependency).
+    """
+    return Table(
+        {
+            "Source": ["999"],
+            "RA_ICRS": [TARGET_RA],
+            "DE_ICRS": [TARGET_DEC],
+            "Plx": [plx],
+            "e_Plx": [e_plx],
+            "Gmag": [10.0],
+            "e_Gmag": [0.002],
+            "BPmag": [10.4],
+            "e_BPmag": [0.003],
+            "RPmag": [9.5],
+            "e_RPmag": [0.003],
+            "RUWE": [1.0],
+            "nueff": [1.5],
+            "pscol": [1.4],
+            "ELAT": [0.0],
+            "Solved": [3],
+            "pmRA": [10.0],
+            "pmDE": [-5.0],
+        }
+    )
+
+
 def _ucac_table(bmag=11.0, vmag=10.5, eg=3.0, er=3.0, ei=3.0):
     """One-row UCAC4/APASS cone result centered on the target.
 
@@ -143,6 +175,31 @@ def _run(tmp_path, **kwargs):
         **kwargs,
     )
     return _read_sed_rows(tmp_path / "12345678.sed")
+
+
+def _read_priors(path):
+    """Parse a written params YAML into {param path: {field: float}}."""
+    out = {}
+    key = None
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" ") and line.rstrip().endswith(":"):
+            key = line.rstrip()[:-1]
+            out[key] = {}
+        elif key is not None and ":" in line:
+            field, val = line.split(":", 1)
+            out[key][field.strip()] = float(val)
+    return out
+
+
+def _prior_notes(path):
+    """The commented header lines of a written params YAML."""
+    return [
+        ln.lstrip("# ").rstrip()
+        for ln in path.read_text().splitlines()
+        if ln.startswith("#")
+    ]
 
 
 # --- 2.5.5: APASS-vs-Tycho dedup must use the matched Tycho row ---------------
@@ -291,3 +348,96 @@ def test_apass_bv_kept_when_no_tycho_source_exists(tmp_path, patched_catalogs):
         pytest.approx(10.5),
         pytest.approx(0.03),
     )
+
+
+# --- 3.9: the astrometric prior belongs in parallax space ---------------------
+
+
+def test_gaia_parallax_written_as_a_parallax_prior(tmp_path, patched_catalogs):
+    """
+    Given a Gaia DR3 row with a positive parallax,
+    When mkticsed writes the params file,
+    Then it carries a Gaussian prior on star.<name>.parallax whose mu is
+      the (zero-point-corrected) measurement in mas and whose sigma is
+      sqrt(e_Plx^2 + 0.01^2) -- and no distance prior, which was a
+      first-order propagation of a nonlinear map (EXOFASTv2's
+      mkticsed.pro writes `parallax`, never a distance prior).
+    """
+    # Arrange
+    patched_catalogs["I/355/gaiadr3"] = _gaia_dr3_table(
+        plx=4.587, e_plx=0.0143
+    )
+    priorfile = tmp_path / "p.yaml"
+
+    # Act
+    _run(tmp_path, priorfile=str(priorfile))
+    priors = _read_priors(priorfile)
+
+    # Assert
+    assert "star.Host.parallax" in priors
+    assert priors["star.Host.parallax"]["mu"] == pytest.approx(4.587)
+    assert priors["star.Host.parallax"]["sigma"] == pytest.approx(
+        np.sqrt(0.0143**2 + 0.01**2), abs=1e-5
+    )
+    assert "star.Host.distance" not in priors
+
+
+def test_negative_parallax_is_still_written_as_a_prior(
+    tmp_path, patched_catalogs
+):
+    """
+    Given a Gaia DR3 row whose parallax is negative,
+    When mkticsed writes the params file,
+    Then the prior is written live with the negative mu (in parallax
+      space `distance` is the sampled, positive-bounded coordinate, so a
+      Gaussian centred below zero is a finite one-sided penalty), no
+      distance seed is written -- nothing may invert a negative parallax
+      -- and the header says so.
+    """
+    # Arrange
+    patched_catalogs["I/355/gaiadr3"] = _gaia_dr3_table(plx=-0.5, e_plx=0.2)
+    priorfile = tmp_path / "p.yaml"
+
+    # Act
+    _run(tmp_path, priorfile=str(priorfile))
+    priors = _read_priors(priorfile)
+    notes = " ".join(_prior_notes(priorfile))
+
+    # Assert
+    assert priors["star.Host.parallax"]["mu"] == pytest.approx(-0.5)
+    assert priors["star.Host.parallax"]["sigma"] == pytest.approx(
+        np.sqrt(0.2**2 + 0.01**2), abs=1e-5
+    )
+    assert "star.Host.distance" not in priors
+    assert "NEGATIVE" in notes
+
+
+def test_dr2_fallback_also_writes_a_parallax_prior(tmp_path, patched_catalogs):
+    """
+    Given no Gaia DR3 row but a matched Gaia DR2 one,
+    When mkticsed writes the params file,
+    Then the Lindegren+2018-corrected DR2 parallax is written as a
+      parallax prior too, with sigma = sqrt((1.08*e_Plx)^2 + sigma_s^2)
+      exactly as mkticsed.pro writes it.
+    """
+    # Arrange: DR2 only. Gmag > 13 selects the 0.043 mas systematic.
+    patched_catalogs["I/345/gaia2"] = Table(
+        {
+            "Source": ["999"],
+            "Plx": [2.0],
+            "e_Plx": [0.05],
+            "Gmag": [14.0],
+        }
+    )
+    priorfile = tmp_path / "p.yaml"
+
+    # Act
+    _run(tmp_path, priorfile=str(priorfile))
+    priors = _read_priors(priorfile)
+
+    # Assert
+    assert priors["star.Host.parallax"]["mu"] == pytest.approx(2.030)
+    assert priors["star.Host.parallax"]["sigma"] == pytest.approx(
+        np.sqrt((1.08 * 0.05) ** 2 + 0.043**2), abs=1e-5
+    )
+    assert "star.Host.distance" not in priors

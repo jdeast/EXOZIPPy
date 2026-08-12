@@ -271,8 +271,10 @@ lens:
     description: "y-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
 mulensinstrument:
   # Optional detrending coefficients, one per extra data column per
-  # instrument, applied to the model magnitude (see rvinstrument/transit for
-  # the same block-diagonal scheme).
+  # instrument (see rvinstrument/transit for the same block-diagonal scheme).
+  # These stay MAGNITUDE-space coefficients -- a throughput/extinction trend
+  # is multiplicative in flux -- so the flux model is scaled by
+  # 10**(-0.4 * X.c).  Unchanged by the move to a flux likelihood.
   detrend_coeffs:
     initval: 0.0
     init_scale: 0.01
@@ -282,31 +284,50 @@ mulensinstrument:
     internal_unit: "mag"
     latex: "c"
     description: "Detrending Coefficients"
-  # Optional GP amplitudes, in magnitudes (the observable this component
-  # models).  The rest of the GP blueprint is in components/defaults.yaml.
+  # UNIT CHANGE: these three amplitudes used to be in MAGNITUDES and are now
+  # in FLUX -- the observable this component models and fits (see
+  # MulensInstrument's class docstring).  A prior written against the old
+  # magnitude units means something different now; rewrite it.
+  #
+  # A light curve's flux zeropoint is arbitrary (10**(-0.4 m) ~ 1e-8 for a
+  # magnitude file, O(1) or O(1e4) counts for difference imaging), so the
+  # bounds and starts below are only ceilings and last-resort fallbacks:
+  # MulensInstrument._scale_flux_amplitudes installs the usable per-light-curve
+  # upper/initval from that file's bootstrapped baseline flux, through the
+  # "overrides" channel, i.e. still under any user override.
+  # The rest of the GP blueprint is in components/defaults.yaml.
   gp_rot_sigma:
     lower: 0.0
-    upper: 5.0
+    upper: 1.0e30
     initval: 0.02
     init_scale: 0.01
-    unit: "mag"
-    internal_unit: "mag"
+    unit: ""
+    internal_unit: ""
+    description: >-
+      GP rotation-term amplitude, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
   gp_sho_sigma:
     lower: 0.0
-    upper: 5.0
+    upper: 1.0e30
     initval: 0.02
     init_scale: 0.01
-    unit: "mag"
-    internal_unit: "mag"
-  # Optional hogg-mixture outlier scatter, in magnitudes (the rest of the
-  # robust-likelihood blueprint lives in components/defaults.yaml).
+    unit: ""
+    internal_unit: ""
+    description: >-
+      GP SHO-term amplitude, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
+  # Optional hogg-mixture outlier scatter; the rest of the robust-likelihood
+  # blueprint lives in components/defaults.yaml.
   out_scale:
     lower: 0.0
-    upper: 10.0
+    upper: 1.0e30
     initval: 0.2
     init_scale: 0.1
-    unit: "mag"
-    internal_unit: "mag"
+    unit: ""
+    internal_unit: ""
+    description: >-
+      Outlier-component scatter, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
   log_f_total:
     initval: -6
     init_scale: 3e-4
@@ -356,6 +377,14 @@ mulensinstrument:
       default:
         func_name: "calc_f_blend"
         deps: [ "log_f_total", "q_source" ]
+  # Multiplicative error scale: sigma = err * err_scale.  It is dimensionless
+  # in flux for the same reason it was dimensionless in magnitudes -- it
+  # multiplies whatever error bar the file reports -- so unlike the three
+  # amplitudes above it did not need a unit change.  It now scales the FLUX
+  # error; for a magnitude file that is the propagated sigma_F = F*sigma_m/K,
+  # so to first order an existing prior still says what it said.
+  # mulensinstrument has no jitter_variance (noise_model = "err_scale"), so
+  # there is no additive noise term to re-unit either.
   err_scale:
     initval: 1.0
     init_scale: 0.1
@@ -364,7 +393,8 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "k"
-    description: "Error scaling factor"
+    description: >-
+      Multiplicative scale on the reported FLUX errors (dimensionless)
   # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
   # with this Gaussian prior as a potential (see
   # mulensinstrument._build_sed_flux_constraint). Override per light curve

@@ -1,5 +1,7 @@
 """Tests for mkparam MAP-seeding logic."""
 
+import copy
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -667,3 +669,107 @@ def test_standardize_param_names_flat_dict_component_no_crash(tmp_path):
 
     # The key should pass through unchanged (no list to look up names in)
     assert "sed.0.errscale" in result
+
+
+# ---------------------------------------------------------------------------
+# In-memory user_params (run_fit(config, user_params=<dict>))
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_user_params_beat_the_file_on_disk(tmp_path):
+    """
+    Given a fit driven by an in-memory user_params dict while a DIFFERENT
+    params file happens to sit at config['parameter_file'],
+    When mkprior is given those in-memory params,
+    Then the restart file carries the priors that were actually fitted and
+    none of the on-disk file's.
+
+    The two differ only in the magnitudes of mu/sigma, which
+    evaluator.structural_hash deliberately does not cover -- so nothing else
+    in the pipeline would have caught the substitution.
+    """
+    import yaml
+
+    stale_on_disk = {"star.Host.teff": {"mu": 4000.0, "sigma": 500.0}}
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(stale_on_disk, f)
+
+    fitted = {"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}}
+
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+        user_params=fitted,
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["mu"] == pytest.approx(5800.0), (
+        "prior center must be the one fitted"
+    )
+    assert entry["sigma"] == pytest.approx(100.0)
+    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6)
+
+
+def test_in_memory_user_params_are_not_mutated(tmp_path):
+    """
+    Given an in-memory user_params dict,
+    When mkprior consumes it,
+    Then the caller's dict is untouched -- run_fit hands over the same object
+    the live System was built from.
+    """
+    fitted = {"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}}
+    before = copy.deepcopy(fitted)
+
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": None,
+        "star": [{"name": "Host"}],
+    }
+
+    mkprior(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+        user_params=fitted,
+    )
+
+    assert fitted == before
+
+
+def test_in_memory_user_params_still_validated(tmp_path):
+    """
+    Given in-memory params with a centerless Gaussian prior (sigma, no
+    mu/initval),
+    When mkprior consumes them,
+    Then the same fatal check the on-disk path runs fires, naming the source.
+    """
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": None,
+        "star": [{"name": "Host"}],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        mkprior(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+            user_params={"star.Host.teff": {"sigma": 100.0}},
+        )
+
+    assert "star.Host.teff" in str(exc.value)
+    assert "in-memory" in str(exc.value)

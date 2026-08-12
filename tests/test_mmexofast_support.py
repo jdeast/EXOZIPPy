@@ -217,12 +217,51 @@ def test_probe_derivable_leaves_no_trace():
         list(cm.diagnostics),
         dict(cm._last_resolved),
     )
+    # Every attribute the engine is declared to write, not just the three
+    # spelled out above: "rolls every mutation back" is the contract, so the
+    # sweep is what actually pins it.
+    all_before = {
+        attr: copy.deepcopy(getattr(cm, attr))
+        for attr in cm._PROBE_SNAPSHOT_ATTRS
+    }
 
     cm.probe_derivable(["lens.0.t_E"])
 
     assert cm.user_params == before[0]
     assert cm.diagnostics == before[1]
     assert cm._last_resolved == before[2]
+    for attr, value in all_before.items():
+        assert getattr(cm, attr) == value, f"probe leaked {attr}"
+
+
+def test_probe_derivable_rolls_back_a_solver_timeout_blacklist(monkeypatch):
+    """
+    Given every sympy inversion times out while the derivability probe runs,
+    When probe_derivable returns,
+    Then symbolic_blacklist is unchanged.
+
+    The blacklist is consulted for the rest of the process, so a 2 s timeout
+    inside this throwaway stage-1a probe would otherwise permanently disable
+    that inversion for the real stage-3 solve -- which runs against different
+    inputs and might well have solved it in time.
+    """
+    import exozippy.config as cfgmod
+
+    def _always_times_out(*args, **kwargs):
+        raise TimeoutError("Symbolic solver timed out!")
+
+    cm = _cm(_full_pspl_params(), _BINARY_CONFIG)
+    monkeypatch.setattr(cfgmod.sp, "solve", _always_times_out)
+
+    cm.probe_derivable(["lens.0.t_E"])
+
+    assert cm.symbolic_blacklist == set()
+
+    # The blacklisting itself still works; it is only the probe that must not
+    # keep it.  This also proves the timeout path was reached at all, so the
+    # assertion above cannot pass vacuously.
+    cm.resolve_and_validate_parameters({})
+    assert cm.symbolic_blacklist
 
 
 # ---------------------------------------------------------------------------

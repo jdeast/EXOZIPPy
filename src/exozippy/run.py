@@ -766,9 +766,15 @@ def _run_fit(config, gui, user_params=None):
 
     try:
         # mkprior re-derives the structural fingerprint from this config and
-        # the parameter_file itself; measured to reproduce the System
-        # snapshot exactly (see the note at mkparam.mkprior's check).
-        mkprior(config, trace_path=trace_path)
+        # the params, not from the live System; measured to reproduce the
+        # System snapshot exactly (see the note at mkparam.mkprior's check).
+        # The params half has to be handed over when run_fit was called with
+        # an in-memory dict: the file at config['parameter_file'] is then not
+        # what was fitted (it may be stale, or absent), and mkprior would
+        # merge ITS priors and bounds into the restart file.  Left None for a
+        # file-driven run, so that path still reads the file itself and its
+        # error messages still name it.
+        mkprior(config, trace_path=trace_path, user_params=user_params)
     except Exception:
         logger.exception("mkprior failed (non-fatal)")
 
