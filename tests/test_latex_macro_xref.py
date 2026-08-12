@@ -23,9 +23,11 @@ actually defined by the generated variable file, verified statically and,
 where a TeX installation exists, by really compiling them.
 """
 
+import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -287,9 +289,10 @@ def test_generated_macros_actually_compile(tmp_path):
     Then it compiles -- proving the names really do resolve, rather than
       merely matching a regex.
 
-    The deluxetable template itself needs aastex, which is not assumed to
-    be installed; the cross-reference is what this checks, and that lives
-    entirely in the macro names.
+    This is the cheap half, and it runs wherever there is any TeX at all:
+    the cross-reference lives entirely in the macro names, so a minimal
+    article is enough to prove they resolve. The test below compiles the
+    real deluxetable against the vendored aastex701 class.
     """
     var_text, tmpl_text = _generate(tmp_path, _mode_report())
     referenced = sorted(set(EZ_MACRO.findall(tmpl_text)))
@@ -321,3 +324,66 @@ def test_generated_macros_actually_compile(tmp_path):
     ]
     assert result.returncode == 0, "pdflatex failed:\n" + "\n".join(errors)
     assert (tmp_path / "doc.pdf").exists()
+
+
+AASTEX_CLS = Path(__file__).parent / "fixtures" / "tex" / "aastex701.cls"
+
+
+@pytest.mark.skipif(
+    shutil.which("pdflatex") is None, reason="no TeX installation"
+)
+@pytest.mark.skipif(
+    not AASTEX_CLS.exists(), reason="vendored aastex701.cls is missing"
+)
+def test_generated_template_compiles_as_a_real_aastex_document(tmp_path):
+    """
+    Given the generated deluxetable template and its variable file,
+    When they are compiled as an actual aastex701 document,
+    Then pdflatex produces a PDF with no errors.
+
+    This is the check the previous test cannot make. That one typesets the
+    cited macros in a minimal `article`, which proves the NAMES resolve; it
+    says nothing about whether the table body is valid AASTeX -- a stray
+    unescaped `%`, a `&` count that disagrees with the column spec, or a
+    \\tablecomments{} that swallows the rest of its line all compile
+    perfectly well as a list of \\noindent macros and fail here.
+
+    That is not hypothetical. The template shipped a `\\usepackage{apjfonts}`
+    line for years; apjfonts is a legacy AASTeX v5 package that is on
+    neither CTAN nor TeX Live, so its absence is a fatal "Emergency stop"
+    and the generated template could not compile at all except on a machine
+    that happened to carry the file. Removing that line is what makes this
+    test possible, and this test is what stops it coming back.
+
+    aastex701.cls is vendored under tests/fixtures/tex/ (LPPL 1.3c, ~375 kB)
+    so this runs out of the box rather than asking every developer to
+    install AASTeX. TEXINPUTS points there; nothing is installed.
+    """
+    _, tmpl_text = _generate(tmp_path, _mode_report())
+    shutil.copy(AASTEX_CLS, tmp_path / AASTEX_CLS.name)
+    # _generate writes tmpl.tex next to vars.tex, and the template \inputs
+    # the variable file by stem -- so both must be compiled in place.
+
+    assert r"\documentclass{aastex701}" in tmpl_text
+    assert "apjfonts" not in tmpl_text, (
+        "the template loads apjfonts again -- it is not on CTAN or in TeX "
+        "Live, so this makes the generated file uncompilable for anyone "
+        "who does not already have that file (see build_latex_output)"
+    )
+
+    env = dict(os.environ, TEXINPUTS=f".:{tmp_path}:")
+    result = subprocess.run(
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "tmpl"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    errors = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("!") or "Undefined control sequence" in line
+    ]
+    assert result.returncode == 0, "pdflatex failed:\n" + "\n".join(errors)
+    assert (tmp_path / "tmpl.pdf").exists()
