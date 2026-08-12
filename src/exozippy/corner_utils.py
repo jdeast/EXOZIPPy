@@ -105,6 +105,75 @@ def collect_parameter_corner_samples(param_specs):
     return _flatten_arrays(items)
 
 
+def _label_at(labels, j):
+    return labels[j] if j < len(labels) else f"column {j}"
+
+
+def _drop_undrawable(samples, labels, filename):
+    """Drop what corner.corner() cannot draw, naming every omission.
+
+    corner builds its panels from np.histogram, so it raises outright -- and
+    takes the WHOLE corner plot down -- on a column with no dynamic range
+    ("It looks like the parameter(s) in column(s) N have no dynamic range")
+    and on one holding any non-finite value at all ("Axis limits cannot be
+    NaN or Inf", since its default range is the column's raw min/max).  Both
+    shapes are things a real fit produces: an element pinned with
+    ``sigma: 0`` inside an otherwise sampled vector is exactly constant
+    across every draw, and a short or stopped run leaves variables that never
+    moved.
+
+    Three passes, in this order so each terminates:
+
+      1. columns with no finite draw at all -- else pass 2 would delete
+         every row;
+      2. rows (draws) still carrying a non-finite value -- such a draw
+         cannot be placed in any 2-D panel involving that column anyway;
+      3. columns that are constant over the surviving rows.
+
+    Dropping beats passing an artificial ``range``: corner's ``range``
+    argument also sets ``force_range``, which changes the axis limits of the
+    panels that were fine, and a widened range around a constant would draw
+    a spike that reads as a measured posterior.
+    """
+    finite = np.isfinite(samples)
+    keep = [j for j in range(samples.shape[1]) if finite[:, j].any()]
+    for j in range(samples.shape[1]):
+        if j not in keep:
+            logger.warning(
+                f"corner plot ({filename}): omitting "
+                f"{_label_at(labels, j)} (no finite draws); the remaining "
+                "parameters are still plotted"
+            )
+    samples = samples[:, keep]
+    labels = [_label_at(labels, j) for j in keep]
+    if samples.shape[1] == 0:
+        return samples, labels
+
+    good_rows = np.isfinite(samples).all(axis=1)
+    n_bad = int((~good_rows).sum())
+    if n_bad:
+        logger.warning(
+            f"corner plot ({filename}): dropping {n_bad} of "
+            f"{samples.shape[0]} draws that hold a non-finite value"
+        )
+        samples = samples[good_rows]
+    if samples.shape[0] == 0:
+        return samples, labels
+
+    keep = []
+    for j in range(samples.shape[1]):
+        col = samples[:, j]
+        if col.min() == col.max():
+            logger.warning(
+                f"corner plot ({filename}): omitting {labels[j]} (constant "
+                f"at {float(col.min()):.10g}); the remaining parameters are "
+                "still plotted"
+            )
+        else:
+            keep.append(j)
+    return samples[:, keep], [labels[j] for j in keep]
+
+
 def save_corner_plot(samples, labels, filename, max_samples=1000):
     """Render a corner plot of ``samples`` (n_samples, n_dims) to ``filename``.
 
@@ -125,6 +194,14 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         idx = rng.choice(samples.shape[0], size=max_samples, replace=False)
         idx.sort()
         samples = samples[idx]
+
+    samples, labels = _drop_undrawable(samples, labels, filename)
+    if samples.shape[0] == 0 or samples.shape[1] == 0:
+        logger.warning(
+            f"save_corner_plot: nothing left to plot for {filename} after "
+            "dropping flat / non-finite parameters and draws; skipping"
+        )
+        return
 
     minrank = 0.5 - math.erf(1.0 / math.sqrt(2)) / 2.0
     maxrank = 0.5 + math.erf(1.0 / math.sqrt(2)) / 2.0
