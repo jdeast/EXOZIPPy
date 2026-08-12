@@ -33,3 +33,10 @@ src/exozippy/components/evolutionarymodel/missing_grid_points_afe0_vvcrit0_inter
 src/exozippy/models/find_interpolatable_missing_grid_points.py
 /src/exozippy/models/MIST/MISTv2.5/EEPs/MissingGridPoints
 src/exozippy/models/MIST/MISTv2.5/EEPs/afe_p0_vvcrit0.0.grid.parquet
+
+# Pre-restructure location of the downloaded NextGen spectra (~250 MB).  The
+# live path is ignored above; this one is a leftover that make_bc wrote to
+# before the models/ tree moved, and it is still populated in working trees
+# that ran the SED tests.  Unignored, a `git add -A` in any worktree tries to
+# commit a 247 MB file and GitHub rejects the push.
+src/exozippy/components/sed/models/
