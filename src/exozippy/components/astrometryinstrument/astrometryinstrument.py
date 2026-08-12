@@ -402,7 +402,23 @@ class AstrometryInstrument(Instrument):
             c.get("epoch") for c in self.config if c.get("epoch") is not None
         ]
         if epochs:
-            self.epoch = float(epochs[0])
+            # `epoch:` is advertised per instrument but there is only ONE
+            # reference epoch, because there is only one star.ra/dec/pm to
+            # propagate from.  Taking epochs[0] and ignoring the rest gave
+            # every later dataset a proper-motion lever arm (t - epoch) short
+            # by the difference -- the Hipparcos (1991.25) + Gaia (2016.0)
+            # case, i.e. the whole reason two datasets are combined, was off
+            # by pm * 24.75 yr with no message.
+            distinct = sorted({float(e) for e in epochs})
+            if len(distinct) > 1:
+                raise ValueError(
+                    f"[{self.prefix}] conflicting `epoch:` values "
+                    f"{distinct}: ra/dec/pm_ra/pm_dec are one shared set of "
+                    f"parameters with one reference epoch, so every dataset "
+                    f"must name the same one (or none, and let the mean "
+                    f"observation time be used)."
+                )
+            self.epoch = distinct[0]
         else:
             t_all = [
                 d["time"]

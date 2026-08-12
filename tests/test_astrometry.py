@@ -1085,3 +1085,69 @@ def test_gaia_param_deps_include_the_linear_terms(pm_only_gaia_system):
     # every declared dep must be a label the Evaluator can actually send
     known = {p.label for p in system.plot_params}
     assert set(spec.param_deps) <= known
+
+
+def test_conflicting_per_dataset_epochs_raise(tmp_path):
+    """
+    Given: two astrometry datasets that each declare a different `epoch:`
+    When: load_data resolves the reference epoch for ra/dec/pm
+    Then: it raises naming both epochs
+
+    Regression (silent-bandaid audit): `epoch:` is advertised per instrument
+    in config_schema, but there is only ONE reference epoch because there is
+    only one star.ra/dec/pm to propagate from.  The code took epochs[0] and
+    dropped the rest, so the canonical Hipparcos (1991.25) + Gaia (2016.0)
+    combination silently propagated the second dataset from the first one's
+    epoch -- an offset of pm * 24.75 yr, absorbed by ra/dec/pm.
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "A",
+                "file": str(f1),
+                "mode": "rel",
+                "epoch": 2448349.0625,
+            },
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match=r"conflicting `epoch:` values"):
+        comp.load_data(system)
+
+
+def test_repeated_identical_epochs_are_accepted(tmp_path):
+    """
+    Given: two datasets that name the SAME epoch
+    When: load_data runs
+    Then: it is accepted and used -- the guard only rejects disagreement
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {"name": "A", "file": str(f1), "mode": "rel", "epoch": 2457389.0},
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+
+    # Assert
+    assert comp.epoch == pytest.approx(2457389.0)
