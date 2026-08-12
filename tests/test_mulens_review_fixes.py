@@ -603,7 +603,8 @@ def _make_inst_with_q_source_data(
 
     The synthetic light curve has f_baseline everywhere except for `peak_width`
     consecutive points near t_0 which are set to f_baseline * A_peak, simulating
-    a sharp caustic crossing.  Magnitudes are pre-converted from flux.
+    a sharp caustic crossing.  The bootstrap consumes flux directly (the whole
+    component fits in flux now), so the curve is handed over as-is.
     """
     inst = MulensInstrument.__new__(MulensInstrument)
     inst.config_manager = _DummyConfigManager()
@@ -620,9 +621,8 @@ def _make_inst_with_q_source_data(
     # sharp caustic peak: `peak_width` points near t_0 boosted to A_peak * f_baseline
     peak_mask = np.abs(t - t0) < (peak_width * (t[1] - t[0]))
     flux[peak_mask] = f_baseline * A_peak
-    m = -2.5 * np.log10(np.maximum(flux, 1e-30))
     xyz = np.zeros((n, 3))
-    return inst, t, m, xyz
+    return inst, t, flux, xyz
 
 
 def test_q_source_estimate_pspl_broad_peak():
@@ -631,10 +631,10 @@ def test_q_source_estimate_pspl_broad_peak():
     When _estimate_flux_components runs,
     Then q_source is close to 1 (no blending, source is fully dominant).
     """
-    inst, t, m, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
+    inst, t, f, xyz = _make_inst_with_q_source_data(A_peak=7.0, peak_width=60)
     ra, dec = 0.0, 0.0
     _f_total, q, _q_flux = inst._estimate_flux_components(
-        t, m, xyz, ra, dec, inst_idx=0
+        t, f, xyz, ra, dec, inst_idx=0
     )
     assert 0.7 < q <= 1.0, f"Expected q_source near 1, got {q:.3f}"
 
@@ -652,12 +652,12 @@ def test_flux_total_estimate_sharp_caustic_crossing():
     well-constrained because the sum f_source + f_blend ≈ f_baseline.
     """
     f_baseline = 0.62
-    inst, t, m, xyz = _make_inst_with_q_source_data(
+    inst, t, f, xyz = _make_inst_with_q_source_data(
         A_peak=6.0, peak_width=5, f_baseline=f_baseline
     )
     ra, dec = 0.0, 0.0
     f_total, _q, _q_flux = inst._estimate_flux_components(
-        t, m, xyz, ra, dec, inst_idx=0
+        t, f, xyz, ra, dec, inst_idx=0
     )
     assert 0.5 * f_baseline < f_total < 2.0 * f_baseline, (
         f"f_total should be within 2x of the true baseline {f_baseline:.3f}; "
@@ -1026,22 +1026,29 @@ class _SeedOnlyConfigManager(_DummyConfigManager):
 
 def _flux_labelled_as_magnitudes(t0=2458554.89, u0=0.14, tE=18.0, n=600):
     """A light curve in normalized FLUX that a user forgot to declare, so it
-    reaches _check_data_format as 'magnitudes' and gets BRIGHTER (larger
-    value) at peak -- exactly what the check exists to catch."""
+    is read as 'magnitudes'.  The file's values get LARGER at peak, so
+    load_data's mag->flux conversion turns the peak into the FAINTEST part of
+    the curve -- exactly what the check exists to catch.
+
+    Returns the post-conversion arrays load_data would hand _check_data_format
+    (which now works entirely in flux, like the rest of the component)."""
     t = np.linspace(t0 - 60, t0 + 60, n)
     tau = (t - t0) / tE
     u = np.sqrt(tau**2 + u0**2)
-    flux = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
-    err = np.full(n, 0.001)
+    file_values = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    file_err = np.full(n, 0.001)
+    # load_data's magnitude branch, applied to values that are really flux.
+    flux = 10.0 ** (-0.4 * file_values)
+    err = (np.log(10.0) / 2.5) * flux * file_err
     return t, flux, err, np.zeros((n, 3))
 
 
 def _run_check(config_manager, caplog):
     inst = MulensInstrument.__new__(MulensInstrument)
     inst.config_manager = config_manager
-    t, m, e, xyz = _flux_labelled_as_magnitudes()
+    t, f, e, xyz = _flux_labelled_as_magnitudes()
     with caplog.at_level(logging.WARNING):
-        inst._check_data_format(t, m, e, xyz, 0.0, 0.0, "OGLE-I")
+        inst._check_data_format(t, f, e, xyz, 0.0, 0.0, "OGLE-I")
     return caplog.text
 
 

@@ -215,7 +215,19 @@ def _point(raw_dict):
 # a change moves the START VALUES instead, that is different: the raw point then
 # decodes somewhere else, and the honest fix is a fresh draw from a fresh run
 # rather than a new constant on a stale point.
-GOOD_EXPECTED_LP = 2979.9175
+#
+# 2979.9175 -> 3398.8805 when the microlensing likelihood moved from magnitudes
+# to flux.  That is a CHANGE OF MEASURE, not a change of fit: the density is now
+# over F rather than over m = -2.5*log10(F), and the two differ by the constant
+# Jacobian sum_i log|dm/dF|_i = N*log(2.5/ln10) - sum_i log(F_i) = +419.378 nats
+# over this file's 870 epochs.  The measured move is +418.963, so all but -0.415
+# nats of it is that constant; the -0.415 is the genuine second-order difference
+# between a Gaussian in flux and a Gaussian in magnitudes -- 0.05% of a chi2 of
+# ~870, i.e. the O(sigma_m) agreement the conversion promises.  The physical
+# state at GOOD_RAW is untouched (the flux bootstrap that sets the start values
+# always worked in flux internally and is bit-identical), which is why the
+# chi2/N check below still passes at the same point.
+GOOD_EXPECTED_LP = 3398.8805
 
 
 def test_good_draw_logp_matches_deterministic_build(dc2018_128_logp):

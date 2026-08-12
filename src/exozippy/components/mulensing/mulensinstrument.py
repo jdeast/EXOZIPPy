@@ -32,6 +32,34 @@ def _raw_initval(data, default=None):
 
 
 class MulensInstrument(Instrument):
+    """Microlensing photometry, modeled and fit entirely in FLUX.
+
+    The likelihood is Gaussian in flux, never in magnitudes.  Photon-counting
+    noise is (approximately) Gaussian in flux; a magnitude is a logarithm of
+    it, so a Gaussian in magnitudes is only a first-order approximation that
+    degrades exactly where the data are faint -- and is undefined for the
+    non-positive fluxes difference imaging routinely produces.  Since the
+    model itself is linear in flux (F = f_s*A + f_b), flux is also the natural
+    internal quantity: the old code computed F and then took -2.5*log10 of it
+    only to hand the result to a Normal.
+
+    ``data_format`` is therefore purely a statement about the FILE:
+
+    - ``flux`` (difference imaging and simulated data): used as given.
+      Negative and zero fluxes are first class -- nothing is clamped.
+    - ``magnitude`` (the default; the usual survey format): converted at load
+      to ``F = 10**(-0.4 m)``, exact for the value, with the error propagated
+      to first order as ``sigma_F = ln(10)/2.5 * F_obs * sigma_m`` evaluated
+      at the OBSERVED flux (so sigma stays a fixed constant, not a function of
+      the model).  The resulting posterior differs from the old magnitude-space
+      one only at O(sigma_m) -- ~1% for 0.01 mag photometry.
+
+    ``f_source``/``f_blend``/``log_f_total`` are unchanged: they live in the
+    file's own flux system, which for a magnitude file is the system in which
+    ``F = 10**(-0.4 m)`` (i.e. an instrumental zeropoint of 0), exactly as
+    before.  ``err_scale`` is dimensionless and its meaning is unchanged.
+    """
+
     # Multiplicative per-instrument error scale (not additive jitter).
     noise_model = "err_scale"
 
@@ -57,7 +85,8 @@ class MulensInstrument(Instrument):
                     "are time, flux-or-magnitude, error (see data_format), "
                     "then optional detrend columns. Each extra column gets "
                     "its own coefficient for this instrument, applied to the "
-                    "model magnitude. Comment lines start with '#'."
+                    "model magnitude (i.e. multiplicatively in flux). Comment "
+                    "lines start with '#'."
                 ),
             },
             {
@@ -65,7 +94,13 @@ class MulensInstrument(Instrument):
                 "kind": "option",
                 "accepts": ["magnitude", "flux"],
                 "required": False,
-                "doc": "Photometry format of the data file. Default 'magnitude'.",
+                "doc": (
+                    "Photometry format of the data FILE. Default 'magnitude'. "
+                    "The fit is always done in flux; magnitude files are "
+                    "converted at load (F = 10**(-0.4 m), sigma_F = "
+                    "ln(10)/2.5 * F * sigma_m). With 'flux', non-positive "
+                    "fluxes are kept as-is -- nothing is clamped."
+                ),
             },
             {
                 "key": "observer_location",
@@ -161,7 +196,7 @@ class MulensInstrument(Instrument):
         only event, so the event-0 source, t0_par, and magnification are used
         throughout.
         """
-        all_times, all_mags, all_errs, inst_indices = [], [], [], []
+        all_times, all_flux, all_errs, inst_indices = [], [], [], []
         all_detrend = []
         self.fs_init = []
         self.q_source_init = []
@@ -198,20 +233,22 @@ class MulensInstrument(Instrument):
                 roles=("time", "flux" if fmt == "flux" else "mag", "err"),
                 detrend=True,
             )
-            t, m, e = (
-                df.iloc[:, 0].values,
-                df.iloc[:, 1].values,
-                df.iloc[:, 2].values,
+            t, f, e = (
+                df.iloc[:, 0].values.astype(float),
+                df.iloc[:, 1].values.astype(float),
+                df.iloc[:, 2].values.astype(float),
             )
 
-            if fmt == "flux":
-                # Convert normalized flux to instrumental magnitudes.
-                # mag = -2.5*log10(flux);  err = (2.5/ln10) * flux_err/flux
-                safe_f = np.maximum(m, 1e-30)
-                e = (2.5 / np.log(10)) * np.maximum(e, 0.0) / safe_f
-                m = -2.5 * np.log10(safe_f)
+            if fmt != "flux":
+                # Magnitudes -> flux.  Exact for the value; the error is the
+                # first-order propagation evaluated at the OBSERVED flux, so
+                # sigma stays a data constant (using the model flux instead
+                # would make sigma a function of the parameters and bias the
+                # fit toward faint models).
+                f = 10.0 ** (-0.4 * f)
+                e = (np.log(10.0) / 2.5) * f * np.maximum(e, 0.0)
 
-            per_file.append((t, m, e, df))
+            per_file.append((t, f, e, df))
 
         # Geocentric reference (Skowron+2011 convention): Earth's position and
         # velocity at t_0_par define the inertial frame.  All observer positions
@@ -242,7 +279,7 @@ class MulensInstrument(Instrument):
         self.inst_ref_pos = []
 
         # Pass 2: observer positions, flux bootstraps, and sanity checks.
-        for i, (t, m, e, df) in enumerate(per_file):
+        for i, (t, f, e, df) in enumerate(per_file):
             obs_loc = self.config[i].get("observer_location", "earth")
             xyz_abs = self.get_observer_position(t, observer_location=obs_loc)
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
@@ -251,7 +288,7 @@ class MulensInstrument(Instrument):
             all_obspos.append(xyz_delta)
 
             f_total, q_source, q_flux = self._estimate_flux_components(
-                t, m, xyz_delta, ra_rad, dec_rad, i
+                t, f, xyz_delta, ra_rad, dec_rad, i
             )
             self.fs_init.append(f_total)
             self.q_source_init.append(q_source)
@@ -259,7 +296,7 @@ class MulensInstrument(Instrument):
 
             self._check_data_format(
                 t,
-                m,
+                f,
                 e,
                 xyz_delta,
                 ra_rad,
@@ -269,7 +306,7 @@ class MulensInstrument(Instrument):
             )
 
             all_times.append(t)
-            all_mags.append(m)
+            all_flux.append(f)
             all_errs.append(e)
             inst_indices.append(np.full(len(t), i))
             self._raw_time_list.append(t)
@@ -277,9 +314,12 @@ class MulensInstrument(Instrument):
             # Optional detrending against extra data columns (columns 4+ of
             # the file), exactly as rvinstrument/transit do: one coefficient
             # per column per instrument, kept from mixing across instruments
-            # by the block-diagonal design matrix built below.  Applied to
-            # the model MAGNITUDE, so a column is a magnitude-space trend
-            # (airmass, seeing, ...), independent of the file's data_format.
+            # by the block-diagonal design matrix built below.  A column is a
+            # magnitude-space trend (airmass, seeing, ...), i.e. it enters the
+            # flux model MULTIPLICATIVELY as 10**(-0.4 * X.c) -- algebraically
+            # identical to the additive magnitude detrending this component
+            # used before it moved to a flux likelihood, and the right form
+            # for a throughput/extinction trend either way.
             if df.shape[1] > 3:
                 all_detrend.append(df.iloc[:, 3:].values.astype(float))
             else:
@@ -289,7 +329,11 @@ class MulensInstrument(Instrument):
             self.inst_ref_pos
         )  # (n_inst, 3) absolute AU
         self.time = np.concatenate(all_times).astype(float)
-        self.mag = np.concatenate(all_mags).astype(float)
+        # The modeled observable, in the file's own flux system.  Magnitude
+        # files were converted above; flux files are untouched, negatives and
+        # all.  There is deliberately no `self.mag`: nothing downstream may
+        # reintroduce a magnitude-space likelihood.
+        self.flux = np.concatenate(all_flux).astype(float)
         self.err = np.concatenate(all_errs).astype(float)
         self.inst_map = np.concatenate(inst_indices).astype(int)
         self.observer_pos = np.vstack(all_obspos).astype(
@@ -305,7 +349,8 @@ class MulensInstrument(Instrument):
         ) = self._build_block_detrend(all_detrend, self.n_total_obs)
 
         # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # Errors are already in the amplitude parameter's unit (mag).
+        # Errors are already in the amplitude parameter's unit (flux, in each
+        # file's own flux system).
         self._prepare_gp(self.time, self.err, self.inst_map)
         self._prepare_robust(self.err, self.inst_map)
 
@@ -509,7 +554,7 @@ class MulensInstrument(Instrument):
     def _check_data_format(
         self,
         t,
-        m,
+        f,
         e,
         xyz_delta,
         ra_rad,
@@ -519,14 +564,17 @@ class MulensInstrument(Instrument):
     ):
         """Warn if data appears fainter at peak than at baseline.
 
-        By the time this runs m is always in magnitudes (flux data has already been
-        converted).  A valid microlensing event must show brightening (smaller mag
-        value) near peak.  If the data instead grows fainter, either:
-          - data_format is 'magnitude' but the data are really in flux units, or
-          - data_format is 'flux' but the data are really in magnitudes.
+        By the time this runs ``f`` is always the modeled observable, flux
+        (magnitude files have already been converted).  A valid microlensing
+        event must show brightening (LARGER flux) near peak.  If the data
+        instead grow fainter, either:
+          - data_format is 'magnitude' but the data are really in flux units
+            (values rise at peak, so 10**(-0.4 value) falls), or
+          - data_format is 'flux' but the data are really in magnitudes
+            (values rise at peak in the file, and are taken at face value).
 
         Returns silently when the dataset has fewer than 3 epochs near baseline
-        (e.g., Spitzer peak-only data) — no comparison is possible there.
+        (e.g., Spitzer peak-only data) -- no comparison is possible there.
         """
         cm = self.config_manager
 
@@ -572,27 +620,31 @@ class MulensInstrument(Instrument):
         if np.sum(baseline_mask) < 3 or np.sum(peak_mask) < 3:
             return
 
-        m_baseline = float(np.median(m[baseline_mask]))
-        m_peak = float(np.median(m[peak_mask]))
+        f_baseline = float(np.median(f[baseline_mask]))
+        f_peak = float(np.median(f[peak_mask]))
 
-        # In magnitudes, brighter = smaller value.  Peak must be brighter.
-        if m_peak > m_baseline:
+        # In flux, brighter = larger value.  Peak must be brighter.
+        if f_peak < f_baseline:
             typical_err = float(np.median(np.abs(e)))
-            n_sigma = (m_peak - m_baseline) / max(typical_err, 0.001)
+            n_sigma = (f_baseline - f_peak) / max(typical_err, 1e-30)
             if n_sigma > 10.0:
                 if data_format == "flux":
                     logger.warning(
-                        f"[{label}] After flux→mag conversion, data appears fainter at "
-                        f"peak ({m_peak:.3g}) than at baseline ({m_baseline:.3g}) — "
-                        f"{n_sigma:.0f}σ offset.  Data may actually be in magnitudes; "
-                        f"remove 'data_format: flux' from the YAML config block if so."
+                        f"[{label}] Data appear fainter at peak "
+                        f"({f_peak:.3g}) than at baseline "
+                        f"({f_baseline:.3g}) in flux -- {n_sigma:.0f} sigma "
+                        f"offset.  Data may actually be in magnitudes; "
+                        f"remove 'data_format: flux' from the YAML config "
+                        f"block if so."
                     )
                 else:
                     logger.warning(
-                        f"[{label}] Data appears fainter at peak ({m_peak:.3g}) than at "
-                        f"baseline ({m_baseline:.3g}) — {n_sigma:.0f}σ offset.  "
-                        f"Data may be in flux units; add 'data_format: flux' to the "
-                        f"YAML config block for this instrument if so."
+                        f"[{label}] After the mag->flux conversion, data "
+                        f"appear fainter at peak ({f_peak:.3g}) than at "
+                        f"baseline ({f_baseline:.3g}) -- {n_sigma:.0f} sigma "
+                        f"offset.  Data may be in flux units; add "
+                        f"'data_format: flux' to the YAML config block for "
+                        f"this instrument if so."
                     )
 
     @staticmethod
@@ -667,8 +719,26 @@ class MulensInstrument(Instrument):
             )
             return None
 
+    @staticmethod
+    def _baseline_flux_fallback(f):
+        """A strictly positive flux scale for one file, however odd the data.
+
+        The median flux is the honest baseline; difference-imaging data can
+        sit at (or below) zero, so fall back to the median |flux| and finally
+        to 1.0 rather than returning something non-positive -- ``log_f_total``
+        and every flux-scaled bound downstream need a positive number.
+        """
+        f = np.asarray(f, dtype=float)
+        med = float(np.median(f))
+        if med > 0.0 and np.isfinite(med):
+            return med
+        mad = float(np.median(np.abs(f)))
+        if mad > 0.0 and np.isfinite(mad):
+            return mad
+        return 1.0
+
     def _estimate_flux_components(
-        self, t, m, xyz_au, ra_rad, dec_rad, inst_idx
+        self, t, f_obs, xyz_au, ra_rad, dec_rad, inst_idx
     ):
         """Estimate (f_total, q_source, q_flux) for one instrument.
 
@@ -688,6 +758,9 @@ class MulensInstrument(Instrument):
           - f_source only → fix it and solve for f_blend via median residuals
           - f_blend only  → fix it and solve for f_source via NNLS
           - neither       → solve everything via NNLS
+
+        ``f_obs`` is the file's flux (the modeled observable), so the NNLS
+        design matrix acts on it directly -- there is no magnitude round trip.
 
         Falls back to the data median / q=0.95 when t_0 or u_0 are absent.
         """
@@ -731,8 +804,7 @@ class MulensInstrument(Instrument):
             return f_total, q_source, q_flux_fallback
 
         if t0 is None or u0 is None:
-            f_total = 10.0 ** (-0.4 * np.median(m))
-            return f_total, 0.95, q_flux_fallback
+            return self._baseline_flux_fallback(f_obs), 0.95, q_flux_fallback
 
         x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
@@ -770,7 +842,8 @@ class MulensInstrument(Instrument):
                 )
 
         A_traj = A_cols[0]
-        F_obs = 10.0 ** (-0.4 * m)
+        # The observable already IS the flux the linear model predicts.
+        F_obs = np.asarray(f_obs, dtype=float)
 
         q_flux_est = q_flux_fallback
         if len(A_cols) > 1:
@@ -810,8 +883,11 @@ class MulensInstrument(Instrument):
 
         f_total = f_source_est + f_blend_est
         if f_total < 1e-30 or f_source_est < 1e-30:
-            f_total = 10.0 ** (-0.4 * np.median(m))
-            return f_total, 0.95, q_flux_est
+            return (
+                self._baseline_flux_fallback(f_obs),
+                0.95,
+                q_flux_est,
+            )
 
         q_source = float(np.clip(f_source_est / f_total, 0.05, 0.95))
         logger.debug(
@@ -884,6 +960,7 @@ class MulensInstrument(Instrument):
         self._register_noise(self.manifest)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
+        self._scale_flux_amplitudes(self.manifest, f_total_init)
 
         if self.total_detrend_cols > 0:
             self.manifest["detrend_coeffs"] = {
@@ -934,11 +1011,54 @@ class MulensInstrument(Instrument):
         else:
             self.band_map = np.full(self.n_elements, -1, dtype=int)
 
+    # Flux-space images of the magnitude caps these amplitudes used to carry:
+    # a 5 mag GP amplitude is a factor 10**(0.4*5) = 100 in flux, and a 10 mag
+    # outlier scale a factor 10**(0.4*10) = 1e4.  Applied per light curve
+    # against its own bootstrapped baseline flux, because a microlensing file's
+    # flux zeropoint is arbitrary (10**(-0.4 m) ~ 1e-8 for a magnitude file,
+    # O(1) or O(1e4) counts for difference imaging) and no single number in
+    # defaults.yaml can serve both.
+    _FLUX_AMPLITUDE_CAPS = {
+        "gp_rot_sigma": (1.0e2, 1.85e-2),
+        "gp_sho_sigma": (1.0e2, 1.85e-2),
+        "out_scale": (1.0e4, 2.0e-1),
+    }
+
+    def _scale_flux_amplitudes(self, manifest, f_total_init):
+        """Put the optional noise amplitudes on each light curve's flux scale.
+
+        ``gp_*_sigma`` and ``out_scale`` are additive amplitudes in the
+        observable's own units, which for this component is now flux in the
+        FILE's arbitrary flux system.  Their defaults.yaml ``upper``/``initval``
+        are therefore only ceilings; the usable per-element values are derived
+        here from the bootstrapped baseline flux and installed through the
+        ``overrides`` channel, i.e. layered UNDER the user's params file so an
+        explicit bound or start still wins.
+
+        The multipliers are the flux-space images of the magnitude caps these
+        parameters carried before the switch (see ``_FLUX_AMPLITUDE_CAPS``).
+        The ``initval`` is only a fallback -- ``Instrument._prepare_gp`` and
+        ``_prepare_robust`` push data-driven hints (median error bar, and 10x
+        that) which outrank it -- but it matters when a file has degenerate
+        errors and those hints are skipped.
+        """
+        scale = np.asarray(f_total_init, dtype=float)
+        for param, (cap, start) in self._FLUX_AMPLITUDE_CAPS.items():
+            if param not in manifest:
+                continue
+            entry = dict(manifest[param] or {})
+            overrides = dict(entry.get("overrides") or {})
+            overrides["upper"] = (cap * scale).tolist()
+            overrides["initval"] = (start * scale).tolist()
+            entry["overrides"] = overrides
+            manifest[param] = entry
+        return manifest
+
     def build_likelihood(self, model, system):
 
         # 1. Constants
         t = pm.Data("mu_time", self.time)
-        obs_mag = pm.Data("mu_obs_mag", self.mag)
+        obs_flux = pm.Data("mu_obs_flux", self.flux)
         obs_err = pm.Data("mu_obs_err", self.err)
 
         # 2. Magnification — both symbolic and Op paths take Skowron+2011
@@ -1002,15 +1122,20 @@ class MulensInstrument(Instrument):
                 + fb
             )
 
-        # Guard against negative flux causing log10(NaN) crash during tuning
-        safe_flux = pt.maximum(model_flux, 1e-12)
-        model_mag = -2.5 * pt.log10(safe_flux)
+        # No clamp: model_flux may legitimately be <= 0 (f_blend is allowed to
+        # be negative, and difference-imaging data live around zero).  The
+        # likelihood is Gaussian in flux, so nothing here takes a logarithm.
 
-        # Optional detrending against extra data columns, in magnitude space
-        # (block-diagonal, so coefficients never mix across instruments).
+        # Optional detrending against extra data columns.  The coefficients are
+        # magnitude-space (airmass, seeing, ...), so they enter multiplicatively
+        # in flux -- algebraically the same model as the additive magnitude
+        # detrending used before, and well defined for negative fluxes.
+        # Block-diagonal, so coefficients never mix across instruments.
         if self.total_detrend_cols > 0:
             detrend = pm.Data("mu_detrend", self.detrend_matrix)
-            model_mag = model_mag + pt.dot(detrend, self.detrend_coeffs.value)
+            model_flux = model_flux * pt.power(
+                10.0, -0.4 * pt.dot(detrend, self.detrend_coeffs.value)
+            )
 
         # 4. Error scaling & Likelihood (shared base helper: err * err_scale).
         # The shared dispatcher is the plain Normal unless a light curve asked
@@ -1019,7 +1144,10 @@ class MulensInstrument(Instrument):
         sigma = self.total_sigma(obs_err)
 
         self.add_observation_likelihood(
-            f"{self.prefix}.model", mu=model_mag, sigma=sigma, observed=obs_mag
+            f"{self.prefix}.model",
+            mu=model_flux,
+            sigma=sigma,
+            observed=obs_flux,
         )
 
         # 5. SED-based source flux constraint (issue #18)
@@ -1031,10 +1159,12 @@ class MulensInstrument(Instrument):
         Tie each instrument's calibrated baseline source flux to the
         SED-predicted source magnitude (issue #18).
 
-        The light curve's fluxes live in the data file's magnitude system
-        (F = 10**(-0.4 m)), so -2.5*log10(f_source) is the instrumental
-        source magnitude. A per-lightcurve zeropoint links it to the
-        calibrated SED prediction:
+        The light curve's fluxes live in the data file's own flux system --
+        for a magnitude file that is the system in which F = 10**(-0.4 m),
+        for a flux file it is whatever the file uses -- so
+        -2.5*log10(f_source) is the instrumental source magnitude and the
+        arbitrary zeropoint is exactly what zp absorbs. A per-lightcurve
+        zeropoint links it to the calibrated SED prediction:
 
             m_SED = -2.5*log10(f_source) + zp
 
@@ -1173,6 +1303,16 @@ class MulensInstrument(Instrument):
             on_unused_input="ignore",
         )
 
+        # The same curve before the delta-mag normalization: the model flux in
+        # instrument inst_idx's own flux system.  The GP conditional mean is
+        # additive there, so this is what the "physical + GP" plot curve is
+        # built on (see plot_data).
+        self._compiled_model_flux = pytensor.function(
+            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
+            outputs=model_flux,
+            on_unused_input="ignore",
+        )
+
         # Baseline flux at a given parameter point, used by plot() to normalize
         # the data onto the same Δmag scale as the model curves.
         self._compiled_f_total = pytensor.function(
@@ -1251,8 +1391,24 @@ class MulensInstrument(Instrument):
         }
         return unique_observers, obs_to_inst, inst_obs_loc
 
+    @staticmethod
+    def _flux_to_mag(f):
+        """Magnitudes of a flux array; NaN where the flux is not positive.
+
+        Only ever used for DISPLAY.  The likelihood never calls this: a
+        magnitude is undefined for the non-positive fluxes difference imaging
+        produces, and the old code's clamp turned those points into ~75 mag
+        spikes that both entered the fit and wrecked the plot's y axis.  NaN
+        is what both renderers already skip.
+        """
+        f = np.asarray(f, dtype=np.float64)
+        out = np.full(f.shape, np.nan)
+        pos = f > 0.0
+        out[pos] = -2.5 * np.log10(f[pos])
+        return out
+
     def _flux_alignment(self, param_values):
-        """Reference flux system and the magnitude aligner onto it.
+        """Reference flux system and the aligner onto it.
 
         Peg everything to the reference data set's flux system (the first
         instrument by default, or one flagged 'reference: true').  Each
@@ -1262,11 +1418,20 @@ class MulensInstrument(Instrument):
         re-inject it into the reference system (f_source_ref, f_blend_ref):
           A_obs = (F_i - f_blend_i) / f_source_i
           F_aln = f_source_ref * A_obs + f_blend_ref
-        so all data lands on the reference delta-mag scale, matching the model
-        (also drawn in the reference system).  Errors are propagated through
-        the same affine flux transform (asymmetric in magnitudes).  Using the
-        plotted point's fitted fluxes keeps the alignment tied to the model
-        rather than a stage-1 estimate.
+        so all data lands on the reference scale, matching the model (also
+        drawn in the reference system).  Using the plotted point's fitted
+        fluxes keeps the alignment tied to the model rather than a stage-1
+        estimate.
+
+        In flux this map is AFFINE -- F_aln = (fs_ref/fs_i)*(F_i - fb_i) +
+        fb_ref -- so errors propagate by a single symmetric factor and the GP
+        conditional mean, being additive in flux, may be added to the model in
+        instrument i's own system before the map (where it is the GP the
+        likelihood fitted) or scaled by fs_ref/fs_i after it, equivalently.
+        The remaining nonlinearity is purely presentational: the plot is drawn
+        in delta-magnitudes, which is the convention microlensing light curves
+        are read in, so ``align`` converts at the very end and returns NaN for
+        any point whose aligned flux is not positive.
         """
         ref_idx = self._reference_index()
         fs_vec, fb_vec = self._compiled_flux(*param_values)
@@ -1276,27 +1441,35 @@ class MulensInstrument(Instrument):
         fb_ref = float(fb_vec[ref_idx])
         baseline_ref = -2.5 * np.log10(max(fs_ref + fb_ref, 1e-30))
 
-        def align(mag_arr, i):
-            """Map instrument-i magnitudes onto the reference flux system."""
+        def align_flux(flux_arr, i):
+            """Map instrument-i fluxes onto the reference flux system."""
             fs_i = max(float(fs_vec[i]), 1e-30)
             fb_i = float(fb_vec[i])
-            F = 10.0 ** (-0.4 * np.asarray(mag_arr, dtype=np.float64))
+            F = np.asarray(flux_arr, dtype=np.float64)
             A_obs = (F - fb_i) / fs_i
-            F_aln = np.maximum(fs_ref * A_obs + fb_ref, 1e-30)
-            return -2.5 * np.log10(F_aln) - baseline_ref
+            return fs_ref * A_obs + fb_ref
+
+        def align(flux_arr, i):
+            """Instrument-i fluxes -> reference-system delta-magnitudes."""
+            return self._flux_to_mag(align_flux(flux_arr, i)) - baseline_ref
 
         return {
             "ref_idx": ref_idx,
             "fs_vec": fs_vec,
             "fb_vec": fb_vec,
             "align": align,
+            "align_flux": align_flux,
+            "baseline_ref": baseline_ref,
         }
 
     def plot_data(self, system, point=None):
         """GUI/PDF plot specs: the aligned delta-mag lightcurve, plus a zoom
         copy (x_range +/-3 tE) when t_0/t_E seeds are known.
 
-        With point=None each instrument's raw magnitudes are returned in its
+        The chart is drawn in magnitudes even though the fit is in flux -- that
+        is the convention these curves are read in -- so any point whose (in
+        general aligned) flux is not positive comes back as NaN and is simply
+        not drawn.  With point=None each instrument's data are returned in its
         own system (no fitted fluxes exist to align them onto one scale).
         See Component.plot_data and plotspec.PlotSpec.
         """
@@ -1317,14 +1490,26 @@ class MulensInstrument(Instrument):
             traces = []
             for i in range(self.n_elements):
                 mask = self.inst_map == i
+                # The fit is in flux, but the chart stays in magnitudes (the
+                # convention these curves are read in).  Points whose flux is
+                # not positive have no magnitude and are dropped as NaN rather
+                # than clamped to a ~75 mag spike.
+                f_i = self.flux[mask]
+                e_i = self.err[mask]
+                mag_i = self._flux_to_mag(f_i)
                 traces.append(
                     Trace(
                         name=self.names[i],
                         role="data",
                         kind="scatter",
                         x=self.time[mask],
-                        y=self.mag[mask],
-                        yerr=self.err[mask],
+                        y=mag_i,
+                        yerr=np.vstack(
+                            [
+                                mag_i - self._flux_to_mag(f_i + e_i),
+                                self._flux_to_mag(f_i - e_i) - mag_i,
+                            ]
+                        ),
                         style=_data_style(i),
                     )
                 )
@@ -1395,22 +1580,19 @@ class MulensInstrument(Instrument):
             )
 
         # One "physical + GP" curve per light curve that requested a GP.
-        # The GP is additive in that instrument's own magnitudes, so it is
-        # added there and the sum is then mapped onto the reference flux
-        # system -- adding it to an already-aligned curve would be wrong,
-        # since the aligner is nonlinear in magnitude.
+        # The GP is additive in that instrument's own FLUX (that is the space
+        # celerite2 conditioned in), so it is added to the model flux there and
+        # the sum is then mapped onto the reference flux system.
         for i in sorted(getattr(self, "_gp_pred_on_grid", {})):
             obs_pretty = obs_model_pos.get(inst_obs_loc[i])
             if obs_pretty is None:
                 continue
-            fs_i = max(float(fs_vec[i]), 1e-30)
-            baseline_i = -2.5 * np.log10(max(fs_i + float(fb_vec[i]), 1e-30))
             try:
-                delta_i = self._compiled_delta_mag(
+                flux_i = self._compiled_model_flux(
                     t_model, obs_pretty, i, *param_values
                 )
                 gp_i = self.gp_mean_on_grid(system, point, i, t_model)
-                y_gp = align(delta_i + baseline_i + gp_i, i)
+                y_gp = align(np.asarray(flux_i, dtype=float) + gp_i, i)
             except Exception as e:
                 logger.warning(
                     f"GP model eval failed for '{self.names[i]}': {e}"
@@ -1429,12 +1611,13 @@ class MulensInstrument(Instrument):
 
         for i in range(self.n_elements):
             mask = self.inst_map == i
-            mag_i = self.mag[mask]
+            flux_i = self.flux[mask]
             err_i = self.err[mask]
-            delta_mag = align(mag_i, i)
-            # Brighter (mag - err) -> smaller aligned mag (lower error bar).
-            lo = delta_mag - align(mag_i - err_i, i)
-            hi = align(mag_i + err_i, i) - delta_mag
+            delta_mag = align(flux_i, i)
+            # Brighter (flux + err) -> smaller aligned mag (lower error bar).
+            # NaN wherever the aligned flux is not positive.
+            lo = delta_mag - align(flux_i + err_i, i)
+            hi = align(flux_i - err_i, i) - delta_mag
             traces.append(
                 Trace(
                     name=self.names[i],
