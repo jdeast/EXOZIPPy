@@ -608,6 +608,45 @@ class Parameter:
             f"Parameter {self.label} not found in point and has no expression."
         )
 
+    def element_is_sampled(self, index=0):
+        """True if element ``index`` is a FREE sampled element of this vector.
+
+        ``build_pymc`` writes the per-element ``is_sampled`` mask (neither
+        pinned by ``sigma: 0`` nor derived from an expression), so this is the
+        authoritative answer to "will the sampler move this?" -- as opposed to
+        guessing from the topology, which cannot see a user's ``sigma: 0`` or
+        a component's per-element ``"overrides"`` pin.
+
+        Callable only after the model has been built (stage 5 onwards); before
+        that the mask does not exist and this conservatively returns False.
+        """
+        mask = getattr(self, "is_sampled", None)
+        if mask is None:
+            return False
+        mask = np.atleast_1d(mask)
+        if mask.size == 0:
+            return False
+        return bool(mask[index] if mask.size > index else mask[0])
+
+    def element_start(self, index=0):
+        """Element ``index``'s start value, in INTERNAL units.
+
+        Prefer this over ``float(param.value[index].eval())`` whenever a
+        build-time constant is wanted: ``value`` of a *sampled* element is a
+        random variable, so ``.eval()`` DRAWS FROM ITS PRIOR rather than
+        returning the start value.  Falls back to evaluating the node only
+        when ``initval`` is not a plain number (a linked/symbolic initval).
+        """
+        init = getattr(self, "initval", None)
+        if init is not None:
+            try:
+                arr = np.atleast_1d(np.asarray(init, dtype=float))
+            except (TypeError, ValueError):
+                arr = None
+            if arr is not None and arr.size:
+                return float(arr[index] if arr.size > index else arr[0])
+        return float(np.atleast_1d(self.value[index].eval())[0])
+
     def get_display_label(self, index=0):
         parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'

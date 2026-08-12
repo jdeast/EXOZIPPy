@@ -1114,3 +1114,121 @@ def test_check_data_format_silent_without_any_trajectory(caplog):
 
     # Assert
     assert text == ""
+
+
+# ---------------------------------------------------------------------------
+# Review 3.4: the Op's line of sight is frozen at build time -- keep the
+# freeze, but say so when (and only when) ra/dec are actually sampled.
+# ---------------------------------------------------------------------------
+def _build_ob08092_with_op(sampled_coords):
+    """Build the OB08092 example on the MulensModel Op path.
+
+    ``sampled_coords`` gives the microlensing SOURCE star a positive sigma on
+    ra/dec, standing in for the mulens + gaia/abs astrometry topology that is
+    the only way those coordinates ever get sampled (a microlensing-only
+    source star is auto-pinned by Star.register_parameters).
+    """
+    import os
+
+    import yaml
+
+    from exozippy.system import System
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    exdir = os.path.join(root, "examples", "ob08092")
+    if not os.path.exists(os.path.join(exdir, "ob08092.yaml")):
+        pytest.skip("ob08092 example not present")
+    with open(os.path.join(exdir, "ob08092.yaml")) as fh:
+        cfg = yaml.safe_load(fh)
+    with open(os.path.join(exdir, "ob08092.params.yaml")) as fh:
+        user_params = yaml.safe_load(fh)
+
+    cfg["lens"][0]["use_op"] = True  # the Op path is what bakes the coords
+    if sampled_coords:
+        user_params["star.Source.ra"] = {
+            "initval": 266.872583333,
+            "sigma": 0.5,
+        }
+        user_params["star.Source.dec"] = {
+            "initval": -34.7265555556,
+            "sigma": 0.5,
+        }
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(exdir)  # config data paths are relative
+        system = System(cfg, user_params)
+        system.prepare()
+        system.build_model()
+    finally:
+        os.chdir(cwd)
+    return system
+
+
+def test_op_coords_warn_when_ra_dec_are_sampled(caplog):
+    """
+    Given: a microlensing topology whose SOURCE star has sampled ra/dec
+    When: the model is built on the MulensModel Op path
+    Then: both the lens and the galactic model warn that the line of sight is
+          frozen, quoting the frozen coordinates
+
+    The freeze itself is correct and deliberate (the parallax projection moves
+    ~1e-5 per arcsec of coordinate error); what was missing was saying so.
+    """
+    # Arrange / Act
+    with caplog.at_level(logging.WARNING):
+        system = _build_ob08092_with_op(sampled_coords=True)
+    text = caplog.text
+
+    # Assert
+    assert "[lens]" in text and "FROZEN at the start value" in text
+    assert "[galacticmodel]" in text and "FROZEN at the start value" in text
+    assert "266.872583" in text  # the START value, not a prior draw
+    # and the configuration under test really does sample them
+    source_ndx = int(system.lens.source_map[0])
+    assert bool(np.atleast_1d(system.star.ra.is_sampled)[source_ndx])
+
+
+def test_op_coords_do_not_warn_when_ra_dec_are_pinned(caplog):
+    """
+    Given: an ordinary microlensing fit, whose ra/dec are pinned
+    When: the model is built on the MulensModel Op path
+    Then: nothing is said -- a warning on every microlensing fit is a warning
+          nobody reads
+    """
+    # Arrange / Act
+    with caplog.at_level(logging.WARNING):
+        system = _build_ob08092_with_op(sampled_coords=False)
+    text = caplog.text
+
+    # Assert
+    source_ndx = int(system.lens.source_map[0])
+    assert not np.atleast_1d(system.star.ra.is_sampled)[source_ndx]
+    assert not np.atleast_1d(system.star.dec.is_sampled)[source_ndx]
+    assert "FROZEN at the start value" not in text
+
+
+def test_op_coords_are_the_start_value_not_a_prior_draw():
+    """
+    Given: a microlensing topology with SAMPLED source ra/dec
+    When: the coordinates baked into the Op are read
+    Then: they are the resolved START value
+
+    The old code read ``float(star.ra.value[i].eval())``.  A sampled element's
+    value node is a random variable, so ``.eval()`` draws from its prior: the
+    coordinates were not frozen at the start value at all, they were frozen at
+    an arbitrary draw (measured 0.36 deg away for this configuration).
+    """
+    # Arrange
+    system = _build_ob08092_with_op(sampled_coords=True)
+    source_ndx = int(system.lens.source_map[0])
+
+    # Act
+    ra_deg, dec_deg = system.lens._frozen_op_coords_deg(system, source_ndx)
+    drawn_deg = float(system.star.ra.value[source_ndx].eval()) * 180.0 / np.pi
+
+    # Assert
+    assert ra_deg == pytest.approx(266.872583333, abs=1e-6)
+    assert dec_deg == pytest.approx(-34.7265555556, abs=1e-6)
+    # and the draw really is somewhere else, so this is not a vacuous test
+    assert abs(drawn_deg - ra_deg) > 1e-3

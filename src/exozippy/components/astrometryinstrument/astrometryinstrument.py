@@ -97,6 +97,36 @@ DAYS_PER_YEAR = 365.25
 VALID_MODES = ("gaia", "abs", "rel")
 
 
+def wrap_ra_diff(delta_rad):
+    """Wrap an RA *difference* (radians) into [-pi, pi]. NumPy version.
+
+    An absolute RA lives in [0, 360) and stays there -- this is only ever for
+    the DIFFERENCE ``ra - ra_ref``, which is a signed offset on the sky and
+    must be able to go negative: a star 0.2 deg west of the reference reads
+    -0.2, not 359.8.  Without the wrap a target straddling RA = 0 gets an
+    offset of -359.8 deg (1.1e9 mas) instead of +0.2, which is catastrophic
+    twice over -- the offset is ~1e9 sigma from the model at the start, and a
+    dataset with epochs on both sides of the branch cut jumps 360 deg between
+    consecutive rows, so NO value of ``star.ra`` fits it.  The model side is
+    wrapped identically (``wrap_ra_diff_pt``), and it has to be: ``star.ra``
+    carries hard bounds [0, 360] from star/defaults.yaml, so with a reference
+    near 0 the unwrapped model term simply cannot produce a negative offset.
+    """
+    return (delta_rad + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def wrap_ra_diff_pt(delta_rad):
+    """``wrap_ra_diff`` for PyTensor, via arctan2 rather than a modulo.
+
+    Same wrap, but smooth: ``pt.mod``'s value jump at the branch cut would be
+    a logp discontinuity, while ``arctan2(sin, cos)`` has derivative 1
+    everywhere (the same trick the rel-mode PA residual already uses).  It
+    introduces no new sampling difficulty -- the sampler would have to move
+    the star half the sky to walk the offset across +/-180 deg.
+    """
+    return pt.arctan2(pt.sin(delta_rad), pt.cos(delta_rad))
+
+
 class AstrometryInstrument(Instrument):
     # No per-file Gaussian process here.  Unlike the other instruments, an
     # astrometric dataset carries two observables per epoch -- (dE, dN) in
@@ -347,8 +377,13 @@ class AstrometryInstrument(Instrument):
             elif mode == "abs":
                 ra_obs = df.iloc[:, 1].values.astype(float) * np.pi / 180.0
                 dec_obs = df.iloc[:, 2].values.astype(float) * np.pi / 180.0
-                # Small-angle offsets from the reference position, in mas
-                d["dE_obs"] = (ra_obs - ra_ref) * np.cos(dec_ref) * RAD2MAS
+                # Small-angle offsets from the reference position, in mas.
+                # RA differences wrap (see wrap_ra_diff); Dec does not -- it
+                # is confined to [-90, 90], so dec_obs - dec_ref is already
+                # in [-180, 180] and has no branch cut to cross.
+                d["dE_obs"] = (
+                    wrap_ra_diff(ra_obs - ra_ref) * np.cos(dec_ref) * RAD2MAS
+                )
                 d["dN_obs"] = (dec_obs - dec_ref) * RAD2MAS
                 d["err_E"] = df.iloc[:, 3].values.astype(float)  # mas
                 d["err_N"] = df.iloc[:, 4].values.astype(float)  # mas
@@ -666,7 +701,9 @@ class AstrometryInstrument(Instrument):
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
         dE = (
-            (star.ra.value[s] - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
+            wrap_ra_diff_pt(star.ra.value[s] - d["ra_ref"])
+            * np.cos(d["dec_ref"])
+            * RAD2MAS
             + star.pm_ra.value[s] * dt_yr
             + star.parallax.value[s] * d["P_E"]
         )
@@ -930,7 +967,7 @@ class AstrometryInstrument(Instrument):
             plx = 1000.0 / get(star.distance)
 
         dE = (
-            (ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
+            wrap_ra_diff(ra - d["ra_ref"]) * np.cos(d["dec_ref"]) * RAD2MAS
             + pm_ra * dt_yr
             + plx * d["P_E"]
         )
