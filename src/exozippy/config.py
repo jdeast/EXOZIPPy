@@ -1452,7 +1452,33 @@ class ConfigManager:
                     break
 
             if existing_key is None:
-                self.user_params[final_path] = {
+                # A NEW entry is written in the INDEX form (`path`), never the
+                # config-instance-name form (`final_path`).  resolve() looks a
+                # per-element entry up under three keys -- `comp.param`,
+                # `comp.<i>.param` and `comp.<names[i]>.param` -- and only the
+                # index one is guaranteed to address element i: `names` is a
+                # manifest option, so a component may label its elements with
+                # something other than its own config instances' names.
+                #
+                # `lens` does exactly that (examples/ob161003): its per-source
+                # vectors are named for the SOURCE STARS ("SourceA",
+                # "SourceB"), while the lens block has a single entry named
+                # "Lens" at index 0.  So the engine's answer for source slot 0
+                # -- `lens.0.theta_E` -- used to be filed as
+                # `lens.Lens.theta_E`, which matches none of element 0's three
+                # keys, and the solved value was silently dropped.  With no
+                # `initval` in mulensing/defaults.yaml (theta_E is derived) and
+                # element 1 filed readably as `lens.1.theta_E`, apply_value
+                # allocated a NaN-filled vector and wrote only element 1:
+                # `lens.theta_E.initval == [nan, 0.839]`.  Element 0 was the
+                # only one affected because index 0 is the only index a lens
+                # instance name collides with.
+                #
+                # The index form is also the documented internal spelling (see
+                # standardize_param_names) and is what get_conversion_factor,
+                # propagated_scales, scale_hints and the engine's own symbol
+                # paths already use.
+                self.user_params[path] = {
                     "initval": user_val,
                     "derived": True,
                 }
