@@ -165,7 +165,8 @@ def _do_eval(state, msg):
         for name, xy in traces.items():
             entry = {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
             # dynamic_data specs re-ship their data traces, whose errors can
-            # move too (the mulens flux alignment is nonlinear in magnitude).
+            # move too (mulens re-aligns every data set onto the reference
+            # instrument's flux system and then plots delta-magnitudes).
             if xy.get("yerr") is not None:
                 entry["yerr"] = _round_list(xy["yerr"])
             packed[name] = entry

@@ -198,8 +198,13 @@ def test_introspection_reports_the_robust_parameters_with_merged_units():
     assert rv_scale["internal_unit"] == "solRad/d"
     assert rv_scale["description"]  # inherited from the root file
 
+    # Microlensing is fit in flux, in the data file's own (arbitrary) flux
+    # system, so out_scale is a bare flux with no unit string; the usable
+    # per-light-curve bound is installed from the data by
+    # MulensInstrument._scale_flux_amplitudes.
     mu_scale = component_schema("mulensinstrument")["parameters"]["out_scale"]
-    assert mu_scale["unit"] == "mag"
+    assert mu_scale["unit"] == ""
+    assert mu_scale["description"]  # still inherited from the root file
 
     astro = component_schema("astrometryinstrument")["parameters"]
     assert not (expected & set(astro))
