@@ -32,7 +32,11 @@ Bash
 
     poetry env use python3.12
 
-    poetry install
+    poetry install --extras gui
+
+`--extras gui` is worth taking even if you never open the GUI: ruamel-yaml lives
+in that extra, and without it roughly 30 tests fail at import. CI installs it
+for exactly that reason.
 
 When you git pull, be sure to install any new dependencies:
 
@@ -57,22 +61,49 @@ Update dependencies:
 
 # 2. Automated Checks with Pre-commit
 
-We use pre-commit to (enforce style guidelines?) and catch common errors before they are committed to the repository. These checks run automatically every time you type git commit.
+We use pre-commit to enforce style guidelines and catch common errors before
+they reach the repository. It runs at two different moments, and the split is
+deliberate.
 
 Installation & Setup
 
-Pre-commit is included in our development dependencies. Once you have run "poetry install", you just need to install the git hooks:
+Pre-commit is included in our development dependencies. Once you have run
+"poetry install", you just need to install the git hooks:
 
     poetry run pre-commit install
 
-You should see a message saying pre-commit installed at .git/hooks/pre-commit.
+You should see it report that hooks were installed at BOTH .git/hooks/pre-commit
+and .git/hooks/pre-push.
+
+IF YOU ALREADY HAD PRE-COMMIT INSTALLED, RUN THAT COMMAND AGAIN ANYWAY. The
+config gained a pre-push hook, and which hook files exist on disk is decided
+when you run `pre-commit install`, not when you pull. Pulling the new config
+alone leaves you with no .git/hooks/pre-push, and the test hook silently never
+fires. Re-running is harmless if you're already set up.
+
+Do NOT run `pre-commit autoupdate`. The tool versions in
+.pre-commit-config.yaml are pinned on purpose (see section 3).
+
 How it Works
 
-When you commit code, pre-commit will run a series of tools (defined in .pre-commit-config.yaml) over your staged files.
+On `git commit`, over your staged files:
 
-If everything passes: Your commit succeeds.
+    isort, then black -- these rewrite your files rather than just complaining.
+    If either changes anything the commit aborts; `git add` the result and
+    commit again. Fast, a second or two.
 
-If a check fails: The commit is aborted.
+On `git push`, over the whole repo:
+
+    the full pytest suite, ~3 minutes locally. A failure aborts the push.
+
+Tests run on push rather than on commit because paying three minutes per commit
+is what pushes people toward giant commits and habitual --no-verify. Per push
+it's affordable.
+
+One hazard worth knowing: pre-commit stashes your unstaged changes while hooks
+run and restores them afterwards. Killing a hook mid-run can leave that stash
+unrestored. The work is recoverable from the patch it prints under
+~/.cache/pre-commit/, but let a run finish rather than Ctrl-C it.
 
 Common Pre-commit Commands (bash)
 
@@ -84,20 +115,58 @@ Run checks on specific files:
 
     poetry run pre-commit run --files src/my_script.py
 
+Run the push-stage hook without pushing:
+
+    poetry run pre-commit run --hook-stage pre-push --all-files
+
 # 3. Style Guidelines
 
-We don't actually do this. Should we?
-
 We follow standard Python conventions to ensure readability and maintainability.
-The "Big Three" Formatters
 
-You rarely need to worry about formatting code manually. Our pre-commit hooks will automatically format your code using the following tools:
+ruff does all three jobs
 
-    Black: The uncompromising code formatter. We use Black's default rules (e.g., 88-character line length, double quotes for strings). If Black formats it, that is the standard.
+You rarely need to worry about formatting code manually. One tool -- ruff --
+handles linting, import sorting and formatting, via two pre-commit hooks:
 
-    isort: Automatically sorts your imports alphabetically and separates them into logical sections (standard library, third-party, first-party).
+    ruff-check: sorts imports (rule `I`, replacing isort) and reports bugs.
+    Its --fix is scoped to `--fixable I`, so it may reorder imports and
+    nothing else.
 
-    Ruff / Flake8: Used for linting to catch unused imports, undefined variables, and stylistic issues that Black doesn't cover.
+    ruff-format: the formatter, replacing black. Note line-length = 79, NOT
+    the default 88 -- it matches the width this codebase's comments and
+    docstrings already wrap at. If ruff formats it, that is the standard.
+
+ruff-check runs before ruff-format: the linter decides which lines exist, the
+formatter decides how they wrap.
+
+The rev is pinned exactly in .pre-commit-config.yaml and must stay that way.
+Everyone has to produce byte-identical output, or merging a long-running branch
+conflicts on formatting rather than on content. Keeping one tool aligned across
+contributors instead of three is most of why ruff replaced black and isort.
+
+`ruff format` is used, but there is deliberately NO second formatter. Do not
+add [tool.black] or [tool.isort] back.
+
+The lint rule set (pyproject.toml, [tool.ruff.lint]) is deliberately narrow:
+undefined names, syntax errors, `is` against a literal, broken format strings,
+pylint's error category, and import order. Every one had zero violations when
+adopted, so it exists to stop regressions rather than to relitigate style.
+pyproject.toml lists the rules that are switched OFF and why -- including
+several that look useful but produce only false positives here -- so read that
+before widening the set.
+
+Unused imports (F401) are NOT checked yet. Enabling that rule needs care: the
+`from . import physics` lines in eight components look unused but populate
+PHYSICS_REGISTRY via @register_physics, and ruff considers them auto-fixable.
+Never broaden the hook's --fix beyond `I`.
+
+Note on `git blame`: two commits reformatted the tree wholesale -- 536c2da
+(black and isort, 176 files) and the ruff-format adoption (49 files) -- so
+naive blame attributes many lines to them. .git-blame-ignore-revs fixes this.
+GitHub's blame view honours it automatically; locally it takes one opt-in per
+clone:
+
+    git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 General Conventions:
 
@@ -122,12 +191,91 @@ Following python conventions, this test suite
   - Has Given/When/Then doc strings
   - follows the AAA (Arrange, Act, Assert) organizational scheme
 
-Developers are forced to pass all unit tests before pushing a commit via git hooks
+Developers are forced to pass all unit tests before pushing a commit via git
+hooks -- and, since the hook can be skipped with --no-verify or simply never
+installed, again on the server before anything can reach `master` (section 5).
 
 Anytime a developer fixes a bug, a new unit test following the above convention should be added.
 The test should demonstrate failure before the fix and success after the fix.
 
-# 5. AI use:
+# 5. Project stage & workflow
+
+EXOZIPPy is pre-1.0 and not yet formally released. Expect breaking changes and
+rough edges; that's normal at this stage, not a bug in the process.
+
+`master` is protected by a GitHub ruleset. There are no bypass actors -- this
+applies to every contributor including the repository owner. Concretely:
+
+- You cannot push to `master`. Every change, including a one-line typo fix,
+  goes through a pull request.
+- A PR cannot merge until the `test` check passes. That check is pinned to
+  GitHub Actions, so it can only be satisfied by a real CI run.
+- No force-pushes and no deleting `master`. Anything that lands is undone by a
+  revert commit, never by rewriting history.
+- Reviews are NOT required (0 approvals). Self-merging your own PR is expected
+  and fine. The gate is CI, not gatekeeping by a human.
+
+The normal loop:
+
+    git checkout -b some-change
+    # ... work, commit ...
+    git push -u origin some-change     # feature branches are unrestricted
+    gh pr create --fill
+    gh pr merge --auto --squash
+
+`--auto` is the part that makes this cheap: it queues the merge and it fires by
+itself the moment CI goes green, so you don't sit watching a 15-minute run. The
+branch is deleted automatically on merge.
+
+Other workflow notes:
+
+- Open a GitHub issue for anything worth a durable record: a design decision,
+  a bug a student/collaborator reports, or multi-step work you might pause or
+  hand off. Don't feel obligated to file one for every change — a good commit
+  message already covers most of what a trivial-fix issue would say.
+- Every push and PR against `master` runs the test suite via GitHub Actions
+  (`.github/workflows/tests.yml`). CI runs pytest with `-n 2`, overriding the
+  `-n 6` in pyproject's addopts: six workers suit a workstation but exhaust a
+  GitHub runner's memory, which shows up as "worker 'gwN' crashed" on whichever
+  heavy test drew the short straw rather than as an honest failure.
+- Contributing from a fork works the same way, and is the right approach if you
+  don't have write access. Note that auto-delete-on-merge cannot reach a fork's
+  branches, so clean those up yourself after merge.
+
+If CI is ever broken for reasons unrelated to your change (a runner outage, an
+Actions incident), nothing can merge and no one can override it. The escape
+hatch is to set the ruleset to `evaluate` or `disabled`, merge, and re-enable
+it. That is a deliberate cost of having no bypass actor, and it should be rare.
+
+# 6. Versioning & releases
+
+There is no version string anywhere to bump. `pyproject.toml` declares
+`dynamic = ["version"]`, and poetry-dynamic-versioning derives the version from
+`git describe` at build time. (The `version = "0.0.0"` under `[tool.poetry]` is
+a placeholder poetry-core insists on -- never edit it.) A release is a tag and
+nothing else.
+
+To cut a release, push a `v`-prefixed tag:
+
+    git tag v0.1.0
+    git push origin v0.1.0
+
+That triggers .github/workflows/publish.yml, which runs the full test suite,
+builds the sdist and wheel, checks that the built version matches the tag, and
+publishes to PyPI, then opens a GitHub Release. Publishing uses PyPI Trusted
+Publishing (OIDC) -- there is no API token in the repository secrets, and the
+trust is registered against the workflow's filename, so renaming publish.yml
+breaks releases until PyPI is updated to match.
+
+To rehearse without releasing, run the workflow manually from the Actions tab
+with the TestPyPI option; that builds and verifies without touching PyPI.
+
+Never put two tags on one commit -- setuptools_scm and poetry-dynamic-versioning
+both pick one arbitrarily and you get a build labelled with the wrong version.
+
+Installed releases so far: 0.1.0rc1 on PyPI (`pip install --pre exozippy`).
+
+# 7. AI use:
 
 AI use is encouraged, but thorough review and testing is essential. Create unit tests that verify/confirm the output for all essential code (see above). Unit testing is especially critical with AI generated code, as it is often tunnel visioned and drops important features not relevant to the bug.
 

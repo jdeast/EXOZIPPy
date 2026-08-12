@@ -1,7 +1,17 @@
-import pytensor.tensor as pt
 import numpy as np
-from ...physics_registry import register_physics
+import pytensor.tensor as pt
+
 from ...constants import KAPPA, RSUN_TO_AU
+from ...physics_registry import register_physics
+
+# Positive floors for the two quantities whose logarithm the event-rate prior
+# takes (lens.build_likelihood).  Both are ~6 orders of magnitude below the
+# 1e-6 turn-on of the matching soft bounds there, so the barrier is already
+# fully engaged wherever the floor bites and no reachable posterior region is
+# affected -- the floors only replace a -inf/NaN wall with a finite plateau
+# the soft bounds can push off of.
+THETA_E_FLOOR = 1e-12  # mas
+MU_REL_FLOOR = 1e-12  # mas/yr
 
 
 @register_physics
@@ -12,6 +22,7 @@ def calc_pi_rel(dist_lens, dist_source):
     # then introduce penalties (see lens.build_likelihood) that will reject such non-physical solutions
     return (1000.0 / dist_lens) - (1000.0 / dist_source)
 
+
 @register_physics
 def calc_theta_E(mass_lens, pi_rel):
     # Angular Einstein Radius in mas.
@@ -19,24 +30,74 @@ def calc_theta_E(mass_lens, pi_rel):
     # but we must return a finite value so downstream parameters (rho, pi_E) don't
     # propagate NaN into the Op.  The lens.build_likelihood potentials penalise
     # this unphysical configuration so the sampler rejects it.
-    return pt.sqrt(KAPPA * mass_lens * pt.maximum(pi_rel, 0.0))
+    #
+    # mass_lens is guarded for the same reason: a lens body sampling a linear
+    # mass may go negative (planet.mass allows it), and mlens_total is a plain
+    # sum, so sqrt() would return NaN -- which build_likelihood then feeds to
+    # log(theta_E), poisoning the logp and its gradient over a whole region
+    # instead of penalising it.  The theta_E_singularity soft bound there does
+    # the penalising once the value is finite.
+    #
+    # The whole radicand is floored at THETA_E_FLOOR**2 rather than clipping
+    # theta_E afterwards: sqrt'(0) is infinite, and pt.maximum's zero gradient
+    # on the clamped side then makes 0 * inf = NaN, so log(theta_E) had a NaN
+    # gradient over the entire pi_rel <= 0 region even with a floor applied
+    # downstream.  Flooring the argument keeps sqrt' finite, so the gradient
+    # is a clean zero there and the source_behind_lens bound supplies the
+    # restoring force.
+    radicand = KAPPA * pt.maximum(mass_lens, 1e-12) * pt.maximum(pi_rel, 0.0)
+    return pt.sqrt(pt.maximum(radicand, THETA_E_FLOOR**2))
+
 
 @register_physics
 def calc_mu_ra_rel(pm_ra_lens, pm_ra_source):
     return pm_ra_lens - pm_ra_source
 
+
 @register_physics
 def calc_mu_dec_rel(pm_dec_lens, pm_dec_source):
     return pm_dec_lens - pm_dec_source
 
+
 @register_physics
 def calc_mu_rel_mag(mu_ra_rel, mu_dec_rel):
-    return pt.sqrt(pt.sqr(mu_ra_rel) + pt.sqr(mu_dec_rel))
+    # Floored for the same reason as calc_theta_E's radicand: the two
+    # components start equal (star pm_ra/pm_dec share one default), so an
+    # exactly-zero relative proper motion is reachable, and sqrt'(0) = inf
+    # poisons log(mu_rel_geo) in the event-rate prior -- and every
+    # mu_*_rel / mu_rel_mag ratio -- with a NaN gradient.
+    return pt.sqrt(
+        pt.maximum(pt.sqr(mu_ra_rel) + pt.sqr(mu_dec_rel), MU_REL_FLOOR**2)
+    )
+
+
+# Heliocentric -> geocentric frame conversion (Gould 2004):
+#   mu_geo = mu_helio - pi_rel * v_earth_perp(t0_par) / AU
+# The star pm_ra/pm_dec are barycentric observables (what the galactic
+# kinematic prior and any Gaia prior constrain), but the light-curve
+# trajectory is in the Skowron+2011 GEOCENTRIC convention (Earth's position
+# AND velocity at t0_par define the frame; see MulensInstrument), so t_E and
+# the pi_E direction must use the geocentric relative proper motion.
+# earth_vperp_* are Earth's velocity at t0_par projected on the sky
+# (East, North) in AU/yr -- context constants injected by Lens.add_parameter
+# (pi_rel in mas makes the product mas/yr).  The SIGN is pinned numerically
+# against the trajectory formula in tests/test_mu_rel_geo.py: the flipped
+# sign changes t_E by tens of percent at pi_rel ~ 0.35 mas.
+@register_physics
+def calc_mu_ra_rel_geo(mu_ra_rel, pi_rel, earth_vperp_e):
+    return mu_ra_rel - pi_rel * earth_vperp_e
+
+
+@register_physics
+def calc_mu_dec_rel_geo(mu_dec_rel, pi_rel, earth_vperp_n):
+    return mu_dec_rel - pi_rel * earth_vperp_n
+
 
 @register_physics
 def calc_t_E(theta_E, mu_rel_mag):
     # Convert mu_rel_mag from mas/yr to mas/day, then divide theta_E
     return theta_E / (mu_rel_mag / 365.25)
+
 
 @register_physics
 def calc_pi_E_N(pi_rel, theta_E, mu_dec_rel, mu_rel_mag):
@@ -44,22 +105,45 @@ def calc_pi_E_N(pi_rel, theta_E, mu_dec_rel, mu_rel_mag):
     pi_E_mag = pi_rel / theta_E
     return pi_E_mag * (mu_dec_rel / mu_rel_mag)
 
+
 @register_physics
 def calc_pi_E_E(pi_rel, theta_E, mu_ra_rel, mu_rel_mag):
     pi_E_mag = pi_rel / theta_E
     return pi_E_mag * (mu_ra_rel / mu_rel_mag)
 
+
 @register_physics
-def calc_q(mass_companion, mass_lens):
-    return mass_companion / mass_lens
+def calc_q(*masses):
+    # (companion_1, ..., companion_k, primary) -> per-companion mass ratios
+    # q_j = M_companion_j / M_primary.  Each dep arrives as a length-1 slice
+    # (scalar bracket maps in Lens.build_maps); k companions concatenate to a
+    # shape-(k,) vector.
+    companions, primary = masses[:-1], masses[-1]
+    if len(companions) == 1:
+        return companions[0] / primary
+    return pt.concatenate([pt.atleast_1d(c) for c in companions]) / primary
+
+
+@register_physics
+def calc_mlens_total(*masses):
+    # Total lens mass: sum over all lens bodies.  theta_E, t_E, rho, and pi_E
+    # are referenced to the TOTAL mass for multi-body lenses (community
+    # convention for binary-lens parameters).
+    total = masses[0]
+    for m in masses[1:]:
+        total = total + m
+    return total
+
 
 @register_physics
 def calc_f_source(log_f_total, q_source):
     return pt.power(10, log_f_total) * q_source
 
+
 @register_physics
 def calc_f_blend(log_f_total, q_source):
     return pt.power(10, log_f_total) * (1.0 - q_source)
+
 
 @register_physics
 def calc_rho(radius, distance, theta_E):
@@ -67,6 +151,15 @@ def calc_rho(radius, distance, theta_E):
     theta_E_safe = pt.maximum(pt.nan_to_num(theta_E, nan=0.0), 1e-10)
     return theta_star_mas / theta_E_safe
 
+
 @register_physics
-def calc_alpha(cosalpha, sinalpha):
-    return pt.arctan2(sinalpha, cosalpha)
+def calc_alpha(xalpha, yalpha):
+    return pt.arctan2(yalpha, xalpha)
+
+
+@register_physics
+def calc_s(log_s):
+    # Projected binary separation from the sampled log10(s).  Sampling log_s
+    # makes close/wide an exact reflection log_s -> -log_s (|J| = 1); see
+    # notes/multimode_implementation.txt P2.
+    return pt.power(10.0, log_s)

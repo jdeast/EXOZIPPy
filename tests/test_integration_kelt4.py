@@ -9,42 +9,48 @@ source tree. run_fit is called once (module scope) and all tests share the resul
 
 Marked 'slow'; excluded from fast CI with ``pytest -m "not slow"``.
 """
+
 import os
 import shutil
-import yaml
+from pathlib import Path
+
+import arviz as az
 import numpy as np
 import pytest
-import arviz as az
-from pathlib import Path
+import yaml
 
 from exozippy.run import run_fit
 
 pytestmark = pytest.mark.slow
 
-EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4rvonly"
+EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
 
 @pytest.fixture(scope="module")
 def kelt4_result(tmp_path_factory):
     """
-    Copy the kelt4rvonly example to a temp directory, run run_fit once with minimal
-    sampler settings, and return (out_dir, work_dir) for all tests to share.
+    Copy the kelt4 example to a temp directory, run run_fit once (on the
+    RV-only config, kelt4_rvonly.yaml) with minimal sampler settings, and
+    return (out_dir, work_dir) for all tests to share.
 
     work_dir — copy of the example directory (data files, params yaml)
     out_dir  — where trace, plots, and mkprior output are written
     """
-    work_dir = tmp_path_factory.mktemp("kelt4_work") / "kelt4rvonly"
+    work_dir = tmp_path_factory.mktemp("kelt4_work") / "kelt4"
     out_dir = tmp_path_factory.mktemp("kelt4_out")
 
     shutil.copytree(
-        EXAMPLE_DIR, work_dir,
-        ignore=shutil.ignore_patterns("fitresults"),
+        EXAMPLE_DIR,
+        work_dir,
+        # ".#*"/"#*#" are emacs lock/autosave droppings; the lock is a
+        # dangling symlink that would abort the copy.
+        ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
 
     orig_cwd = os.getcwd()
     os.chdir(work_dir)
     try:
-        with open("kelt4.yaml") as f:
+        with open("kelt4_rvonly.yaml") as f:
             config = yaml.safe_load(f)
 
         config["prefix"] = str(out_dir / "KELT-4A")
@@ -54,7 +60,7 @@ def kelt4_result(tmp_path_factory):
             "draws": 1,
             "chains": 1,
             "cores": 1,
-            "check_curvatures": False,
+            "measure_scales": False,
             "recompute_trace": True,
         }
 
@@ -68,6 +74,7 @@ def kelt4_result(tmp_path_factory):
 # ---------------------------------------------------------------------------
 # Tests — all read from the shared kelt4_result fixture
 # ---------------------------------------------------------------------------
+
 
 def test_run_fit_kelt4_trace_file_written(kelt4_result):
     """
@@ -104,7 +111,7 @@ def test_run_fit_kelt4_trace_has_expected_variables(kelt4_result):
 
 def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
     """
-    Given the kelt4rvonly example seeded at the MAP from kelt4.params.2.yaml,
+    Given the kelt4rvonly example seeded at the MAP from kelt4.params.yaml,
     When run_fit completes with 1 draw starting near MAP,
     Then key parameters are within physically plausible ranges (user units).
     """
@@ -114,15 +121,21 @@ def test_run_fit_kelt4_posterior_in_sane_range(kelt4_result):
 
     # logP ≈ log10(3 d) ≈ 0.476 for KELT-4Ab
     logP = float(post["orbit.logP"].values.mean())
-    assert 0.2 < logP < 0.7, f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    assert 0.2 < logP < 0.7, (
+        f"logP={logP:.4f} outside plausible range [0.2, 0.7]"
+    )
 
     # Planet mass ≈ 0.9 Mjup; allow a broad range given only 1 draw
     planet_mass = float(post["planet.mass"].values.mean())
-    assert 0.3 < planet_mass < 2.5, f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    assert 0.3 < planet_mass < 2.5, (
+        f"planet mass={planet_mass:.3f} Mjup outside [0.3, 2.5]"
+    )
 
     # Star logmass ≈ 0.08 (≈1.2 Msun)
     star_logmass = float(post["star.logmass"].values.mean())
-    assert -0.3 < star_logmass < 0.5, f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    assert -0.3 < star_logmass < 0.5, (
+        f"star logmass={star_logmass:.4f} outside [-0.3, 0.5]"
+    )
 
 
 def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):
@@ -147,13 +160,13 @@ def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):
 
 def test_run_fit_kelt4_mkprior_written(kelt4_result):
     """
-    Given the kelt4rvonly example with parameter_file: kelt4.params.2.yaml,
+    Given the kelt4rvonly example with parameter_file: kelt4.params.yaml,
     When run_fit completes,
     Then mkprior writes the next versioned params file in the work directory.
     """
     _, work_dir = kelt4_result
-    # kelt4.params.2.yaml → next version is kelt4.params.3.yaml
-    expected = work_dir / "kelt4.params.3.yaml"
+    # kelt4.params.yaml → next version is kelt4.params.2.yaml
+    expected = work_dir / "kelt4.params.2.yaml"
     assert expected.exists(), (
         f"mkprior did not write {expected.name}; "
         f"yaml files present: {[f.name for f in work_dir.glob('*.yaml')]}"

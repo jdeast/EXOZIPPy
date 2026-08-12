@@ -1,8 +1,8 @@
 """
 Bolometric Correction (BC) grid loader and pytensor interpolator.
 
-Given a set of filter names and a model name ("NextGen" in v1), 
-it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/` 
+Given a set of filter names and a model name ("NextGen" in v1),
+it loads the matching per-feh BC files from the `{MODEL}/BCs/{FACILITY}/`
 tree and builds a pytensor-compatible RegularGridInterpolator over
 (lgTeff, logg, feh, Av) returning a vector of BC values, one per
 requested filter.
@@ -36,14 +36,13 @@ from __future__ import annotations
 import itertools
 import os
 import re
-from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Literal
 import warnings
+from pathlib import Path
+from typing import Dict, List, Literal, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import pytensor.tensor as pt
-
 
 # -------------------------------------------------------------------
 # Filter name plumbing
@@ -67,40 +66,70 @@ _FILTERNAMES_ = "filternames.txt"
 
 
 def _load_alias_table(path: Path = DEFAULT_FILTER_ROOT) -> pd.DataFrame | None:
-    """Load the VOID↔MIST↔SVO name alias table, if present."""
+    """Load the VOID<->MIST<->SVO name alias table, if present."""
     _FILTERNAMES_TXT = path / _FILTERNAMES_
     if not _FILTERNAMES_TXT.exists():
         return None
-    return pd.read_csv(
+    df = pd.read_csv(
         _FILTERNAMES_TXT, sep="\t", comment="#", skipinitialspace=True
     )
+    # Columns are hand-aligned with literal spaces for readability, which
+    # leaves stray leading/trailing whitespace in individual cells (e.g.
+    # "TESS/TESS.Red     "); strip it so downstream lookups/comparisons
+    # match cleanly.
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+    return df
 
 
-def resolve_filter_name(user_name: str, alias_df: pd.DataFrame | None, 
-                        alias: Literal["MIST", "SVO"]) -> str:
+def synthesize_mist_name(svo_id: str) -> str:
+    """Derive a MIST-style BC-column name from an SVO filter ID when the
+    alias table has no entry for it, e.g. "Keck/NIRC2.Kp" -> "NIRC2_Kp".
+
+    Used consistently by both the BC-table generator (make_bc.py, which
+    writes columns under this name) and the BC-grid loader (build_bc_grid
+    below, which looks columns up by this name) so an arbitrary SVO
+    filter with no alias-table row round-trips correctly.
+    """
+    return svo_id.split("/")[-1].replace(".", "_")
+
+
+def resolve_filter_name(
+    user_name: str,
+    alias_df: pd.DataFrame | None,
+    alias: Literal["MIST", "SVO"],
+) -> str:
     """
     Translate a user-facing filter label (e.g. "2MASS.J", "Gaia.G")
     into the corresponding MIST/SVO filter label.
 
-    Examples: 
+    Examples:
         "2MASS.J" --> "2MASS_J" | "2MASS/2MASS.J"
         "Gaia.G" --> "Gaia_G_DR2Rev" | "GAIA/GAIA2r.G"
 
-    If the alias table is missing or doesn't know the name, assume the
-    user has already provided the MIST/SVO column name and return it.
+    If the alias table is missing or doesn't know the name: for alias
+    'SVO', assume the user has already provided the SVO ID and return it
+    unchanged; for alias 'MIST', synthesize a column name (see
+    synthesize_mist_name) if the input looks like an SVO ID (has a "/"),
+    else assume it's already a bare column name and return it unchanged.
     """
+
+    def _mist_fallback():
+        return (
+            synthesize_mist_name(user_name) if "/" in user_name else user_name
+        )
+
     if alias_df is None:
-        return user_name
+        return _mist_fallback() if alias == "MIST" else user_name
     try:
         rename = alias_df[alias_df.eq(user_name).any(axis=1)][alias].values[0]
         if rename in ("Unsupported", None) or pd.isna(rename):
-            # No alias column — fall back to the user string so the
-            # caller gets a clear KeyError later instead of a silent
-            # mismatch.
-            return user_name
+            # No alias column — fall back so the caller gets a clear
+            # KeyError later instead of a silent mismatch.
+            return _mist_fallback() if alias == "MIST" else user_name
         return str(rename)
     except Exception:
-        return user_name
+        return _mist_fallback() if alias == "MIST" else user_name
 
 
 def facility_from_svo_name(svo_name: str) -> str:
@@ -128,7 +157,9 @@ def facility_from_svo_name(svo_name: str) -> str:
 DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
 # compile pattern for bolometric correction tables
-_FEH_FILENAME_RE = re.compile(r"feh(?P<feh>[+-]\d+\.\d+)_afe(?P<alpha>[+-]\d+\.\d+)\.(?P<facility>\w+)")
+_FEH_FILENAME_RE = re.compile(
+    r"feh(?P<feh>[+-]\d+\.\d+)_afe(?P<alpha>[+-]\d+\.\d+)\.(?P<facility>\w+)"
+)
 
 
 def _parse_feh_from_filename(name: str) -> float:
@@ -156,7 +187,7 @@ def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
             if stripped.startswith("filters"):
                 line_numfilters = l + 1
             if l == line_numfilters:
-                numfilters = int(stripped[0])
+                numfilters = int(stripped.split()[0])
             if stripped.startswith("lgTef"):
                 header_line = stripped
                 break
@@ -174,10 +205,12 @@ def _read_single_bc_file(path: Path) -> Tuple[pd.DataFrame, List[str]]:
     )
 
     # make changes to the columns' name
-    df.insert(0, 'teff', round(10**df['lgTef']))
-    df.rename(columns={'Fe_H': 'feh', 'a_Fe': 'alpha'}, inplace=True)
-    df.drop(columns=['lgTef'], inplace=True)
-    filter_cols = col_names[-numfilters:]  # after teff, logg, feh, alpha, Av, Rv
+    df.insert(0, "teff", round(10 ** df["lgTef"]))
+    df.rename(columns={"Fe_H": "feh", "a_Fe": "alpha"}, inplace=True)
+    df.drop(columns=["lgTef"], inplace=True)
+    filter_cols = col_names[
+        -numfilters:
+    ]  # after teff, logg, feh, alpha, Av, Rv
 
     return df, filter_cols
 
@@ -188,12 +221,14 @@ def _collect_facility_files(
     subdir = model_root / model / "BCs"
     if not subdir.is_dir():
         raise FileNotFoundError(
-            f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model.")
+            f"Bolometric corrections not calculated for ``{model}`` model. Specify a different model."
+        )
     subdir = subdir / facility
     if not subdir.is_dir():
         raise NotImplementedError(
-            f"Bolometric corrections not calculated for ``{facility}``. Specify a different filter set.\n Future implementation will automate this step.")
-    
+            f"Bolometric corrections not calculated for ``{facility}``. Specify a different filter set.\n Future implementation will automate this step."
+        )
+
     return sorted(subdir.glob(f"feh*_afe+0.0.{facility}"))
 
 
@@ -232,9 +267,7 @@ def peek_grid_axes(
     model_root = Path(model_root)
     model_dir = model_root / model / "BCs"
     if not model_dir.is_dir():
-        raise FileNotFoundError(
-            f"BC model directory not found: {model_dir}"
-        )
+        raise FileNotFoundError(f"BC model directory not found: {model_dir}")
 
     # Pick the first facility subdir that actually has feh*_afe*.<FAC>
     # files. We don't care which facility; axes are identical across.
@@ -274,6 +307,7 @@ def peek_grid_axes(
         "feh_pts": feh_pts,
         "av_pts": av_pts,
     }
+
 
 # -------------------------------------------------------------------
 # Grid assembly
@@ -316,8 +350,14 @@ def build_bc_grid(
     alias_df = _load_alias_table()
 
     # 1. Resolve user names -> MIST column names and group by facility.
-    mist_names = [resolve_filter_name(n, alias_df, alias='MIST') for n in user_filter_names]
-    svo_names = [resolve_filter_name(n, alias_df, alias='SVO') for n in user_filter_names]
+    mist_names = [
+        resolve_filter_name(n, alias_df, alias="MIST")
+        for n in user_filter_names
+    ]
+    svo_names = [
+        resolve_filter_name(n, alias_df, alias="SVO")
+        for n in user_filter_names
+    ]
     facilities = [facility_from_svo_name(s) for s in svo_names]
     by_facility: Dict[str, List[Tuple[int, str]]] = {}
     for idx, (fac, mist) in enumerate(zip(facilities, mist_names)):
@@ -325,30 +365,68 @@ def build_bc_grid(
 
     # 2. For each facility, load all feh files, keeping only the
     # requested columns. We stash them per feh so we can later stack
-    # into one monolithic grid.
+    # into one monolithic grid. Missing facilities/columns trigger
+    # one-time auto-generation from the model spectra (make_bc.py).
     per_facility_frames: Dict[str, Dict[float, pd.DataFrame]] = {}
     for fac, items in by_facility.items():
-        feh_files = _collect_facility_files(model_root, model, fac)
+        fac_svo = [svo_names[idx] for idx, _ in items]
+        wanted_cols = [mist for _, mist in items]
+
+        try:
+            feh_files = _collect_facility_files(model_root, model, fac)
+        except (FileNotFoundError, NotImplementedError):
+            from .make_bc import generate_missing_facility
+
+            if not generate_missing_facility(fac, fac_svo, model, model_root):
+                raise
+            feh_files = _collect_facility_files(model_root, model, fac)
         if not feh_files:
             file_dir = model_root / model / "BCs" / fac
             raise FileNotFoundError(
-                f"No BC files for facility '{fac}' under "
-                f"{file_dir}"
+                f"No BC files for facility '{fac}' under {file_dir}"
             )
-        wanted_cols = [mist for _, mist in items]
+
+        def _read_all(files):
+            frames_ = {}
+            missing_ = set()
+            for p in files:
+                feh = _parse_feh_from_filename(p.name)
+                df, file_filters = _read_single_bc_file(p)
+                missing_ |= set(wanted_cols) - set(file_filters)
+                frames_[feh] = df
+            return frames_, missing_
+
+        raw_frames, missing = _read_all(feh_files)
+        if missing:
+            # Facility exists but lacks some requested columns; generate
+            # the missing ones (make_bc merges into the existing files
+            # without touching the existing columns).
+            from .make_bc import generate_missing_facility
+
+            miss_svo = [
+                svo_names[idx] for idx, mist in items if mist in missing
+            ]
+            if generate_missing_facility(fac, miss_svo, model, model_root):
+                raw_frames, missing = _read_all(
+                    _collect_facility_files(model_root, model, fac)
+                )
+        if missing:
+            raise NotImplementedError(
+                f"Bolometric corrections unavailable for ``{sorted(missing)}`` "
+                f"and auto-generation failed; see the log above, or run "
+                f"scripts/make_bc_tables.py manually."
+            )
+
+        # Dedupe: the same MIST column may be requested by more than one
+        # .sed row (e.g. two independent V-band measurements, or the same
+        # filter used for both a blend row and a differential row).
+        # df[keep] with a repeated name would return a 2-D slice for that
+        # column, breaking the by-name lookup in step 4 below.
+        unique_wanted_cols = list(dict.fromkeys(wanted_cols))
+
         frames: Dict[float, pd.DataFrame] = {}
-        for p in feh_files:
-            feh = _parse_feh_from_filename(p.name)
-            df, file_filters = _read_single_bc_file(p)
-            missing = set(wanted_cols) - set(file_filters)
-            if missing:
-                warnings.warn(
-                    f"Bolometric corrections not calculated for "
-                    f"``{sorted(missing)}``.\n Removing ``{sorted(missing)}`` from fit. "
-                    f"Future implementation will automate filter calculations.", 
-                    UserWarning)
-                wanted_cols = set(wanted_cols) - missing
-            keep = ["teff", "logg", "feh", "Av"] + wanted_cols
+        for feh, df in raw_frames.items():
+            keep = ["teff", "logg", "feh", "Av"] + unique_wanted_cols
             frames[feh] = df[keep].copy()
         per_facility_frames[fac] = frames
 
@@ -408,9 +486,11 @@ def build_bc_grid(
         "filter_order": mist_names,
     }
 
+
 # -------------------------------------------------------------------
 # Slicing BC Grid depending on user-specified bounds
 # -------------------------------------------------------------------
+
 
 def _range_indices(pts, lo, hi):
     """
@@ -423,7 +503,7 @@ def _range_indices(pts, lo, hi):
     if lo is None:
         i_lo = 0
     else:
-        i_lo = int(np.searchsorted(pts, lo, side='left'))
+        i_lo = int(np.searchsorted(pts, lo, side="left"))
         # If lo lands exactly on a grid point, i_lo is already correct.
         # If lo falls between pts[i_lo-1] and pts[i_lo], we need pts[i_lo-1]
         # to bracket lo from below.
@@ -433,7 +513,7 @@ def _range_indices(pts, lo, hi):
     if hi is None:
         i_hi = n - 1
     else:
-        i_hi = int(np.searchsorted(pts, hi, side='right')) - 1
+        i_hi = int(np.searchsorted(pts, hi, side="right")) - 1
         # Symmetric: if hi falls between pts[i_hi] and pts[i_hi+1],
         # we need pts[i_hi+1] to bracket hi from above.
         if i_hi < n - 1 and pts[i_hi] < hi:
@@ -461,9 +541,9 @@ def slice_bc(grid_dict, bc_values, **bounds):
             - ``NextGen.grid.yaml``  in components.sed
             - ``MISTv1.2.grid.yaml`` in components.sed
     bc_values : np.ndarray, shape (len(grid_dict.get("grid")[axis]), ... , nfilters)
-        Example: 
+        Example:
             # len(teff)=60, len(logg)=11, len(feh)=11, len(av)=13, nfilters=9
-            bc_values.shape = (60, 11, 11, 13, 9) 
+            bc_values.shape = (60, 11, 11, 13, 9)
     **bounds : keyword arguments of the form
         param=value          # nearest single point
         param=(lo, hi)       # inclusive range [lo, hi]
@@ -485,7 +565,7 @@ def slice_bc(grid_dict, bc_values, **bounds):
     sliced, info = slice_bc(bc_values, teff=(5000, 6000), feh=(-1.0, 0.0))
     sliced, info = slice_bc(bc_values, teff=5800)          # nearest point
     """
-    idx = [slice(None)] * (bc_values.ndim - 1)   # one entry per grid axis
+    idx = [slice(None)] * (bc_values.ndim - 1)  # one entry per grid axis
     selected = {}
 
     AXES = _create_AXES(grid_dict)
@@ -500,7 +580,7 @@ def slice_bc(grid_dict, bc_values, **bounds):
         # ---- single value: find nearest grid points --------------------
         if not isinstance(bound, (tuple, list)):
             nearest_idx = int(np.argmin(np.abs(pts - bound)))
-            idx[axis] = np.array([nearest_idx])   # keep axis with length 1
+            idx[axis] = np.array([nearest_idx])  # keep axis with length 1
             selected[param] = pts[nearest_idx : nearest_idx + 1]
             continue
 
@@ -518,10 +598,16 @@ def slice_bc(grid_dict, bc_values, **bounds):
 
     # np.ix_ lets us index multiple axes simultaneously with fancy indexing.
     # Build the full cross-product index, keeping the filter axis intact.
-    grid_idx = np.ix_(*[
-        idx[ax] if isinstance(idx[ax], np.ndarray) else np.arange(bc_values.shape[ax])
-        for ax in range(bc_values.ndim - 1)
-    ])
+    grid_idx = np.ix_(
+        *[
+            (
+                idx[ax]
+                if isinstance(idx[ax], np.ndarray)
+                else np.arange(bc_values.shape[ax])
+            )
+            for ax in range(bc_values.ndim - 1)
+        ]
+    )
     # Append a full slice for the filter axis
     full_idx = grid_idx + (slice(None),)
 
@@ -538,7 +624,7 @@ class RegularGridInterpolator:
     Linear N-D interpolation on a regular grid, pytensor-compatible.
     Spacing may be uneven in any dimension, as long as the grid is filled.
 
-    The values array may carry trailing "output" axes 
+    The values array may carry trailing "output" axes
     (e.g. n_filters) that ride along with the interpolation.
 
     Parameters
@@ -563,13 +649,13 @@ class RegularGridInterpolator:
         Perform a linear interpolation in N-dimensions on a regular grid.
         Works within a PyMC model where coords is a stacked tensor of random variables
         that may have shape=1 or shape=N.
-        
+
         Args:
-            coords: A tensor of shape (ntest, ndim) or (ndim,) 
+            coords: A tensor of shape (ntest, ndim) or (ndim,)
                 Example:
                     coords = pt.stack([teff_coord, logg_coord, feh_coord, Av_coord], axis=-1)
         """
-        coords = pt.atleast_2d(coords)                        # (N, ndim)
+        coords = pt.atleast_2d(coords)  # (N, ndim)
         n_points = coords.shape[0]
 
         indices = []

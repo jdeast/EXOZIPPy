@@ -24,7 +24,7 @@ band:
   #   quadratic   — derived via Kipping: 2 * sqrt(q1) * q2
   u1:
     lower: 0.0
-    upper: 1.0
+    upper: 2.0
     initval: 0.3
     init_scale: 0.05
     unit: ""
@@ -36,6 +36,8 @@ band:
         func_name: "calc_u1_from_kipping"
         deps: ["q1", "q2"]
   u2:
+    lower: -1.0
+    upper: 1.0
     unit: ""
     internal_unit: ""
     latex: "u_2"
@@ -44,3 +46,20 @@ band:
       default:
         func_name: "calc_u2_from_kipping"
         deps: ["q1", "q2"]
+  # Constant secondary-eclipse thermal emission, in ppm (EXOFASTv2's
+  # ss.band[i].thermal). Off by default (pinned to 0 in Band.register_parameters
+  # unless the band sets fitthermal: true) so the transit model is unchanged
+  # when the feature isn't used. Values are plain ppm, not an astropy-unit
+  # conversion (matches exofast_tran.pro's 1d-6*thermal literal) since "ppm"
+  # isn't a valid astropy unit string.
+  # PR 1.a: constant emission + secondary eclipse only. Phase-curve variation
+  # (BEER: reflection, ellipsoidal, beaming) is deferred to PR 1.b.
+  thermal:
+    lower: 0.0
+    upper: 1.0e6
+    initval: 0.0
+    init_scale: 100.0
+    unit: ""
+    internal_unit: ""
+    latex: "A_T"
+    description: "Constant thermal emission from the planet (ppm)"

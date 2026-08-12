@@ -1,19 +1,23 @@
+import argparse
 import os
 import re
-import argparse
 from pathlib import Path
 
 # Pre-defined presets
-PRESETS = {
-    "core": ['src/exozippy'],
-    "all": ['src', 'examples', 'tests']
-}
+PRESETS = {"core": ["src/exozippy"], "all": ["src", "examples", "tests"]}
 
 # Folders to completely ignore during normal sweeps
 EXCLUDE_DIRS = {
-    '.git', '.venv', '__pycache__', '.pytest_cache',
-    'build', 'dist', 'runs', 'docs', 'data',
-    'evolutionary_model'
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "runs",
+    "docs",
+    "data",
+    "evolutionarymodel",
 }
 
 
@@ -22,7 +26,7 @@ def parse_traceback(tb_file, project_root):
     paths = set()
     pattern = re.compile(r'File "([^"]+)"')
 
-    with open(tb_file, 'r', encoding='utf-8') as f:
+    with open(tb_file, "r", encoding="utf-8") as f:
         content = f.read()
 
     for match in pattern.finditer(content):
@@ -64,9 +68,11 @@ def get_smart_files(traceback_file, project_root):
 
         # If the traceback touched a specific component subfolder (e.g. components/planet/)
         # We want to grab that whole subfolder so the LLM has its physics and defaults.
-        if len(parts) >= 4 and parts[:3] == ('src', 'exozippy', 'components'):
+        if len(parts) >= 4 and parts[:3] == ("src", "exozippy", "components"):
             comp_name = parts[3]
-            comp_dir = project_root / 'src' / 'exozippy' / 'components' / comp_name
+            comp_dir = (
+                project_root / "src" / "exozippy" / "components" / comp_name
+            )
 
             if comp_dir.is_dir():
                 files_to_dump.update(comp_dir.glob("*.py"))
@@ -74,7 +80,10 @@ def get_smart_files(traceback_file, project_root):
         else:
             # Otherwise, just add the specific file that crashed (e.g., tests/test_foo.py)
             specific_file = project_root / rel_path
-            if specific_file.exists() and specific_file.suffix in ['.py', '.yaml']:
+            if specific_file.exists() and specific_file.suffix in [
+                ".py",
+                ".yaml",
+            ]:
                 files_to_dump.add(specific_file)
 
     return sorted(list(files_to_dump))
@@ -92,7 +101,7 @@ def get_preset_files(include_dirs, project_root):
         for root, dirs, files in os.walk(full_target_path):
             dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
             for file in files:
-                if file.endswith(('.py', '.yaml')):
+                if file.endswith((".py", ".yaml")):
                     files_to_dump.add(Path(root) / file)
 
     return sorted(list(files_to_dump))
@@ -106,13 +115,13 @@ def dump_code(output_file, target_files, project_root):
 
     print(f"Dumping {len(target_files)} files to {out_path}...")
 
-    with open(out_path, 'w', encoding='utf-8') as out:
+    with open(out_path, "w", encoding="utf-8") as out:
         for file_path in target_files:
             rel_path = file_path.relative_to(project_root)
             out.write(f"\n--- FILE: {rel_path} ---\n")
 
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     # Enumerate tracks the TRUE line number in the source file
                     for i, line in enumerate(f, 1):
                         # Still strip empty lines to save LLM tokens
@@ -128,8 +137,14 @@ def dump_code(output_file, target_files, project_root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dump code for LLM context.")
     parser.add_argument("-o", "--output", default="repo_dump.txt")
-    parser.add_argument("-p", "--preset", choices=PRESETS.keys(), default="core")
-    parser.add_argument("-t", "--traceback", help="Path to a text file containing the traceback")
+    parser.add_argument(
+        "-p", "--preset", choices=PRESETS.keys(), default="core"
+    )
+    parser.add_argument(
+        "-t",
+        "--traceback",
+        help="Path to a text file containing the traceback",
+    )
 
     args = parser.parse_args()
 

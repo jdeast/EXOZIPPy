@@ -1,12 +1,22 @@
 import logging
-import pytensor.tensor as pt
-import pymc as pm
+
 import numpy as np
+import pymc as pm
+import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.config import RANK_DERIVED_DATA
 from exozippy.constants import KAPPA
+from exozippy.corner_utils import (
+    collect_parameter_corner_samples,
+    save_corner_plot,
+)
 from exozippy.potentials import soft_lower_bound
-from .op import MulensMagOp, BinaryLensMagOp
+
+from ..galacticmodel.physics import expected_proper_motion
+from . import mmexofast_support
+from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
+from .physics import MU_REL_FLOOR, THETA_E_FLOOR
 
 logger = logging.getLogger(__name__)
 
@@ -25,15 +35,35 @@ def _parse_body_ref(ref):
 class Lens(Component):
     """Microlensing lens component.
 
-    Supports PSPL (1 lens body) and binary lens (2 lens bodies via planet or star).
-    Bodies are specified in the YAML config as:
+    Supports N sources and up to 2 lens bodies (NSNL; the MulensModel backend
+    caps the lens side at binary for now).  Bodies are specified in the YAML
+    config as:
         lenses:  ["star.0", "planet.0"]   # 2-body binary
-        sources: ["star.1"]
+        sources: ["star.1", "star.2"]     # binary source (2S)
+
+    The FIRST entry of ``lenses`` is the primary and must be a ``star``:
+    the lens maps carry only an index and the primary-side physics resolves
+    through star.mass/star.distance/star.pm_*, so a non-star primary is
+    rejected in _validate_bodies rather than silently modeling the star at
+    that index.  Companions may be ``planet`` or ``star``.  A
+    planetary-mass lens is modeled as a ``star`` block with a low logmass --
+    and, if it is a free-floating planet, with ``mass_function: ffp`` so that
+    it draws the FFP mass function rather than the stellar IMF.
+
+    Each source follows its own trajectory: t_0, u_0, rho and the derived
+    chain (t_E, theta_E, pi_rel, pi_E_*, mu_*) are vectors with one element
+    per source, sharing the lens-side parameters (masses, s, alpha).  In the
+    params file, address element j either by slot index (lens.1.t_0) or by
+    the source star's instance name (lens.SourceB.t_0).
 
     Backward-compatible shorthand (single-star PSPL):
         lens_ndx:   0
         source_ndx: 1
     """
+
+    # Deps satisfied by context-node injection in add_parameter (constants,
+    # not manifest parameters); graph.py skips them when ordering the build.
+    context_dep_names = frozenset({"earth_vperp_e", "earth_vperp_n"})
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -44,12 +74,13 @@ class Lens(Component):
         if self.n_elements > 1:
             raise ValueError(
                 "Only one lensing event may be modeled at a time. Define a single "
-                "lens block and list all bodies in 'lenses'/'sources' "
-                "(e.g. lenses: ['star.0', 'planet.0', 'planet.1'])."
+                "lens block and list all bodies in 'lenses'/'sources', primary "
+                "first (e.g. lenses: ['star.0', 'planet.0', 'planet.1'] -- the "
+                "primary must be a star; companions may be planets or stars)."
             )
 
         # Parse lens / source body lists per event
-        self.lens_bodies = []    # list of lists of (comp_type, ndx) per event
+        self.lens_bodies = []  # list of lists of (comp_type, ndx) per event
         self.source_bodies = []  # list of lists of (comp_type, ndx) per event
 
         for c in self.config:
@@ -74,45 +105,277 @@ class Lens(Component):
         # bodies' masses.
         self.n_companions = self.n_lens_bodies[0] - 1
 
-        if any(n > 1 for n in self.n_source_bodies):
-            raise NotImplementedError("Binary source is not yet supported.")
+        # Sources: single event ⇒ one flat list of source bodies; per-source
+        # parameters (t_0, u_0, rho, ...) are vectors of this length.
+        self.n_sources = self.n_source_bodies[0]
+
+        # Translate lens.<SourceStarName>.<param> user keys to the canonical
+        # slot-index form lens.<j>.<param> so resolve() and the relaxation
+        # engine see one naming scheme.  Must happen before any stage-1 code
+        # (e.g. MulensInstrument.load_data) reads user_params.
+        self._rewrite_source_param_keys(config_manager)
 
         # Convenience maps: primary lens and source (index 0 of each list)
-        self.finite_source = [c.get("finite_source", False) for c in self.config]
-        self.t0_par = [self._resolve_t0_par(i, c, config_manager)
-                       for i, c in enumerate(self.config)]
-
-        self.mag_method = [
-            c.get("mag_method",
-                  "auto_vbbl" if (c.get("finite_source", False)
-                                  or self.n_lens_bodies[i] > 1)
-                  else "point_source")
+        self.finite_source = [
+            c.get("finite_source", False) for c in self.config
+        ]
+        self.t0_par = [
+            self._resolve_t0_par(i, c, config_manager)
             for i, c in enumerate(self.config)
         ]
+
+        # One magnification method per source (each source has its own
+        # trajectory and caustic-crossing times); all sources start from the
+        # event-level config value, and resolve_auto_vbbl refines each slot.
+        event_method = self.config[0].get(
+            "mag_method",
+            (
+                "auto_vbbl"
+                if (self.finite_source[0] or self.n_lens_bodies[0] > 1)
+                else "point_source"
+            ),
+        )
+        self.mag_method = [event_method] * self.n_sources
 
         # use_op: force the MulensModel Op even for point-source PSPL.
         # Default False for PSPL (symbolic is NUTS-friendly); True forces the Op
         # (useful for testing or when MulensModel's parallax handling is needed).
         self.use_op = [c.get("use_op", False) for c in self.config]
 
+        # backend: which magnification engine the multi-lens Op path uses.
+        #   vbm_direct  — call VBMicrolensing directly (default; ~5x faster,
+        #                 supports 2+ lens bodies)
+        #   mulensmodel — rebuild an mm.Model per call (A/B reference; binary only)
+        self.backend = self.config[0].get("backend", "vbm_direct")
+        if self.backend not in ("vbm_direct", "mulensmodel"):
+            raise ValueError(
+                f"lens.backend must be 'vbm_direct' or 'mulensmodel', "
+                f"got '{self.backend}'."
+            )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
+    def _rewrite_source_param_keys(self, config_manager):
+        """Rewrite lens.<SourceStarName>.<param> → lens.<j>.<param>.
+
+        The generic standardize_param_names pass only knows the lens event's
+        own instance name; addressing a per-source element by the source
+        star's name (lens.SourceB.t_0) is lens-specific knowledge, so the
+        translation lives here.  Keys already in index or event-name form are
+        untouched (event-name form was standardized to lens.0.* and refers to
+        source slot 0).
+        """
+        system_config = getattr(config_manager, "system_config", None) or {}
+        slot_by_name = {}
+        for j, (comp_type, ndx) in enumerate(self.source_bodies[0]):
+            entries = system_config.get(comp_type, [])
+            if ndx < len(entries) and isinstance(entries[ndx], dict):
+                name = entries[ndx].get("name")
+                if name is not None:
+                    slot_by_name[str(name)] = j
+
+        up = config_manager.user_params
+        for key in list(up.keys()):
+            parts = key.split(".")
+            if (
+                len(parts) == 3
+                and parts[0] == self.prefix
+                and parts[1] in slot_by_name
+            ):
+                new_key = f"{self.prefix}.{slot_by_name[parts[1]]}.{parts[2]}"
+                if new_key in up:
+                    logger.warning(
+                        f"Parameter '{key}' duplicates '{new_key}'; keeping '{new_key}'."
+                    )
+                    del up[key]
+                else:
+                    up[new_key] = up.pop(key)
+
+    def _translate_s_bounds_to_log_s(self):
+        """Rewrite user-supplied lens.<j>.s lower/upper bounds onto log_s.
+
+        s is now a derived parameter (s = 10**log_s); the sampling bounds live
+        on log_s.  A user who constrains lens.s expects the sampler to respect
+        it, so translate lower/upper -> log10(bound) onto the log_s entry and
+        drop them from the s entry (an initval on s is left in place -- the
+        relaxation engine translates it through the s <-> log_s relation).
+        Keys are already standardized to lens.<j>.<param> form.
+        """
+        up = self.config_manager.user_params
+        for j in range(self.n_companions):
+            entry = up.get(f"lens.{j}.s")
+            if not isinstance(entry, dict):
+                continue
+            if "lower" not in entry and "upper" not in entry:
+                continue
+            log_key = f"lens.{j}.log_s"
+            log_entry = up.get(log_key)
+            if not isinstance(log_entry, dict):
+                log_entry = {}
+            for bound in ("lower", "upper"):
+                if bound not in entry:
+                    continue
+                val = float(entry.pop(bound))
+                if val <= 0.0:
+                    raise ValueError(
+                        f"lens.{j}.s {bound} bound must be positive (s > 0); "
+                        f"got {val}."
+                    )
+                log_entry[bound] = float(np.log10(val))
+            up[log_key] = log_entry
+            logger.info(
+                f"Translated lens.{j}.s bound(s) to log_s "
+                f"(log10): {log_key} = "
+                f"{{{', '.join(f'{b}: {log_entry[b]:.4f}' for b in ('lower', 'upper') if b in log_entry)}}}."
+            )
+
+    def _source_instance_names(self):
+        """Display names for per-source vector elements (source star names)."""
+        system_config = (
+            getattr(self.config_manager, "system_config", None) or {}
+        )
+        names = []
+        for comp_type, ndx in self.source_bodies[0]:
+            entries = system_config.get(comp_type, [])
+            if (
+                ndx < len(entries)
+                and isinstance(entries[ndx], dict)
+                and entries[ndx].get("name")
+            ):
+                names.append(str(entries[ndx]["name"]))
+            else:
+                names.append(f"{comp_type}{ndx}")
+        return names
+
     @staticmethod
     def _resolve_t0_par(i, c, config_manager):
-        if 't0_par' in c:
-            return float(c['t0_par'])
+        if "t0_par" in c:
+            return float(c["t0_par"])
         entry = config_manager.user_params.get(f"lens.{i}.t_0")
         if isinstance(entry, dict):
-            val = entry.get('initval')
+            val = entry.get("initval")
         else:
             val = entry
+        # List-valued initval (P4 multi-seed sampling): t0_par is just a
+        # numeric reference epoch, not a per-seed value, so use seed 0 -- the
+        # same convention the relaxation engine uses for bounds/scales.
+        if isinstance(val, (list, tuple)):
+            val = val[0]
         return float(val) if val is not None else 2450000.0
 
     @property
     def prefix(self):
         return "lens"
+
+    @classmethod
+    def get_utilities(cls):
+        from ...utilities import mmexofast_to_params
+        from ...utilities.registry import (
+            UtilitySpec,
+            argparse_subprocess_runner,
+        )
+
+        return [
+            UtilitySpec(
+                name="mmexofast_to_params",
+                label="MMEXOFAST -> params.yaml",
+                description=(
+                    "Convert an MMEXOFAST fit-results JSON into an EXOZIPPy "
+                    "params.yaml seeding the lens parameters."
+                ),
+                component_keys=["lens"],
+                available=True,
+                build_parser=mmexofast_to_params.build_parser,
+                run=argparse_subprocess_runner(
+                    "exozippy.utilities.mmexofast_to_params"
+                ),
+            ),
+        ]
+
+    @classmethod
+    def config_schema(cls):
+        return [
+            {
+                "key": "lens_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": "Index or name of the lens star. Default 0.",
+            },
+            {
+                "key": "source_ndx",
+                "kind": "ref",
+                "accepts": ["star"],
+                "required": False,
+                "doc": "Index or name of the source star. Default 1.",
+            },
+            {
+                "key": "mmexofast",
+                "kind": "datafile",
+                "accepts": "*.json",
+                "required": False,
+                "doc": (
+                    "MMEXOFAST integration: a fit-results JSON path provides "
+                    "seed initvals/scales for the microlensing parameters "
+                    "plus the bad-data mask and error factors; 'auto' forces "
+                    "an MMEXOFAST run on the raw light curves (cached at "
+                    "<prefix>_mmexofast.json); false disables the automatic "
+                    "run that otherwise happens when the params file lacks "
+                    "start values for the microlensing parameters."
+                ),
+            },
+            {
+                "key": "mmexofast_options",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Extra MMEXOFASTFitter keyword arguments for the "
+                    "automatic run (e.g. {no_parallax: false, "
+                    "limb_darkening_coeffs_gamma: {W149: 0.3}}), forwarded "
+                    "verbatim."
+                ),
+            },
+            {
+                "key": "mag_method",
+                "kind": "option",
+                "accepts": ["point_source", "auto_vbbl"],
+                "required": False,
+                "doc": (
+                    "Magnification method. Defaults to 'auto_vbbl' for "
+                    "finite-source or multi-body lenses, else 'point_source'."
+                ),
+            },
+            {
+                "key": "backend",
+                "kind": "option",
+                "accepts": ["vbm_direct", "mulensmodel"],
+                "required": False,
+                "doc": (
+                    "Magnification engine for the multi-lens Op path. "
+                    "Default 'vbm_direct'."
+                ),
+            },
+            {
+                "key": "finite_source",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": "Model finite-source effects. Default false.",
+            },
+            {
+                "key": "use_op",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Force the MulensModel Op even for point-source PSPL "
+                    "(default false uses the NUTS-friendly symbolic path)."
+                ),
+            },
+        ]
 
     def _primary_lens(self, event_idx):
         """Return (comp_type, star_ndx) for the primary lens of event i."""
@@ -126,13 +389,28 @@ class Lens(Component):
         """Return the PyTensor mass node for a given body."""
         return getattr(system, comp_type).mass.value[ndx]
 
+    def _mass_initval(self, comp_type, ndx):
+        """Best-effort mass initval (solMass) for a body at stage 2, from
+        user_params mass or logmass entries; None when neither is given."""
+        up = self.config_manager.user_params
+        entry = up.get(f"{comp_type}.{ndx}.mass")
+        val = entry.get("initval") if isinstance(entry, dict) else entry
+        if val is not None:
+            return float(val)
+        entry = up.get(f"{comp_type}.{ndx}.logmass")
+        val = entry.get("initval") if isinstance(entry, dict) else entry
+        return float(10.0 ** float(val)) if val is not None else None
+
     def _validate_bodies(self, system):
         """Fail at registration time if a body reference points to a component
         or instance that does not exist (instead of an AttributeError deep in
-        the model build)."""
+        the model build), if the PRIMARY lens body is not a star, or if any
+        SOURCE body is not a star."""
         for i in range(self.n_elements):
-            for role, bodies in (("lens", self.lens_bodies[i]),
-                                 ("source", self.source_bodies[i])):
+            for role, bodies in (
+                ("lens", self.lens_bodies[i]),
+                ("source", self.source_bodies[i]),
+            ):
                 for comp_type, ndx in bodies:
                     comp = getattr(system, comp_type, None)
                     if comp is None:
@@ -148,35 +426,228 @@ class Lens(Component):
                             f"instance(s) are configured."
                         )
 
+            # The primary lens body must be a star.  build_maps stores only
+            # the INDEX (lens_map / primary_lens_map), and every primary-side
+            # dependency in defaults.yaml is hard-coded to the star component
+            # -- star.mass[lens_map], star.distance[lens_map],
+            # star.pm_ra[lens_map], star.pm_dec[lens_map] -- as is
+            # build_likelihood's d_l.  A 'planet.0' primary therefore silently
+            # models star.0 instead: measured on examples/ob08092, a config
+            # with lenses: ["planet.0"] builds a theta_E bit-identical to
+            # lenses: ["star.0"], responds to that star's mass, and is
+            # completely insensitive to the planet's -- a fit that completes
+            # and reports a lens mass which never touched the photometry.
+            # Companions ARE type-aware (their mass deps carry the component
+            # type), so only this slot is restricted.
+            p_type, p_ndx = self._primary_lens(i)
+            if p_type != "star":
+                raise ValueError(
+                    f"lens.{i}: the primary (first) lens body is "
+                    f"'{p_type}.{p_ndx}', but it must be a star.  The lens "
+                    f"maps carry only an index, and the lens-side physics "
+                    f"resolves the primary through star.mass / star.distance "
+                    f"/ star.pm_ra / star.pm_dec, so a non-star primary would "
+                    f"silently model star.{p_ndx} instead of "
+                    f"'{p_type}.{p_ndx}' and report a lens mass that never "
+                    f"entered the likelihood.  Planet COMPANIONS are "
+                    f"supported -- put the star first, e.g. "
+                    f"lenses: ['star.0', '{p_type}.{p_ndx}'].  To model a "
+                    f"very low-mass (even planetary-mass) lens, declare it as "
+                    f"a 'star' block with a low star.<name>.logmass instead; "
+                    f"logmass reaches -9 dex (1e-9 solMass).  For a "
+                    f"FREE-FLOATING planet that is only half the recipe: give "
+                    f"that star block 'mass_function: ffp' as well, or it "
+                    f"draws the stellar IMF and is penalized for having the "
+                    f"mass you told it to have."
+                )
+
+            # EVERY source body must be a star -- unlike the lens side there
+            # is no companion position to spare.  source_map is index-only
+            # exactly like lens_map, and the whole source-side chain resolves
+            # through the star component: star.distance[source_map],
+            # star.pm_ra/pm_dec[source_map], star.radius[source_map], and
+            # get_magnification's star.ra/dec[source_ndx].  The multi-source
+            # (2S) case does not change this: each source body is an
+            # independently monitored luminous star with its own trajectory
+            # and flux ratio, so every slot is star-only.
+            for s_type, s_idx in self.source_bodies[i]:
+                if s_type != "star":
+                    raise ValueError(
+                        f"lens.{i}: source body '{s_type}.{s_idx}' must be a "
+                        f"star -- a microlensing source is the background "
+                        f"star being monitored for magnification, and a "
+                        f"planet is not a self-luminous point source at "
+                        f"bulge distances, so a non-star source is "
+                        f"physically meaningless rather than merely "
+                        f"unimplemented.  source_map carries only an index "
+                        f"and the source-side physics resolves through "
+                        f"star.distance / star.pm_ra / star.pm_dec / "
+                        f"star.radius / star.ra / star.dec, so this would "
+                        f"silently model star.{s_idx} instead of "
+                        f"'{s_type}.{s_idx}'.  A genuinely faint source (a "
+                        f"brown dwarf, say) is a 'star' block with a low "
+                        f"star.<name>.logmass."
+                    )
+
+            # A body cannot lens itself.  pi_rel = 1000/d_L - 1000/d_S is
+            # then identically 0, so theta_E collapses onto its floor and
+            # the likelihood is NaN at the very first evaluation -- which
+            # today surfaces as a baffling sampler-initialization failure
+            # far from the config line that caused it.  Both spellings are
+            # covered for free: the legacy lens_ndx/source_ndx keys are
+            # normalized into lens_bodies/source_bodies in __init__, so
+            # comparing those two lists catches `lens_ndx: 0, source_ndx: 0`
+            # as well as an explicit overlap between the lists (including a
+            # body repeated across a multi-source 2S list).
+            shared = [
+                b for b in self.lens_bodies[i] if b in self.source_bodies[i]
+            ]
+            if shared:
+                shared_txt = ", ".join(f"'{t}.{n}'" for t, n in shared)
+                raise ValueError(
+                    f"lens.{i}: {shared_txt} is listed as BOTH a lens body "
+                    f"and a source body.  A lens and its source must be "
+                    f"distinct objects at different distances: with the same "
+                    f"body on both sides, pi_rel = 1000/d_L - 1000/d_S is "
+                    f"identically 0, so theta_E is 0 and the likelihood is "
+                    f"NaN from the first evaluation.  Give the lens and the "
+                    f"source separate entries (via 'lenses:'/'sources:', or "
+                    f"distinct 'lens_ndx:'/'source_ndx:' values)."
+                )
+
     # ------------------------------------------------------------------
     # Lifecycle stages
     # ------------------------------------------------------------------
 
     def build_maps(self):
-        """Stage 1b: Build integer index arrays for primary lens and source."""
-        _, l_ndxs = zip(*[self._primary_lens(i) for i in range(self.n_elements)])
-        _, s_ndxs = zip(*[self._primary_source(i) for i in range(self.n_elements)])
+        """Stage 1b: Build integer index arrays for lens and source bodies.
+
+        source_map has one entry per SOURCE BODY (not per event): it drives the
+        shapes of the per-source parameter chain (pi_rel, t_E, rho, ...) via the
+        star.<param>[source_map] dependency slices.
+
+        lens_map carries TWO conceptually different roles that happen to
+        share one index:
+
+          1. the LENSING MASS -- star.mass[lens_map] feeds theta_E;
+          2. the KINEMATIC HOST -- star.distance[lens_map] and
+             star.pm_ra/pm_dec[lens_map] feed pi_rel and mu_rel.
+
+        They coincide only because the primary lens body is always a star,
+        which _validate_bodies now enforces.  The conflation is exactly what
+        let the silent planet-primary bug through: a planet has a mass but
+        no distance or proper motion of its own, so a planet primary
+        resolved role 1 to the planet (had the deps been typed) and role 2
+        to whatever star sat at the same index.  Splitting the two would
+        mean inventing a "kinematic host star" for a body that by
+        definition has no host -- which is why planet-as-lens was abandoned
+        in favor of declaring a low-mass lens as a star.  Under the guards
+        the roles can never diverge, so this stays one index; the note is
+        here so the next reader does not have to rediscover why.
+        """
+        _, l_ndxs = zip(
+            *[self._primary_lens(i) for i in range(self.n_elements)]
+        )
         self.lens_map = np.array(l_ndxs, dtype=int)
-        self.source_map = np.array(s_ndxs, dtype=int)
+        self.source_map = np.array(
+            [ndx for (_, ndx) in self.source_bodies[0]], dtype=int
+        )
 
         if self.n_companions >= 1:
             # Scalar maps (length-1) so the bracket-slice dep yields a scalar
-            # mass rather than a full-component mass array.
+            # mass rather than a full-component mass array.  One map per
+            # companion: companions may live in different component types
+            # (star vs planet), so each mass needs its own bracket dep.
             _, p_ndx = self.lens_bodies[0][0]
             self.primary_lens_map = np.array([p_ndx], dtype=int)
-            _, c_ndx = self.lens_bodies[0][1]
-            self.companion_mass_map = np.array([c_ndx], dtype=int)
+            for j, (_, c_ndx) in enumerate(self.lens_bodies[0][1:]):
+                setattr(
+                    self,
+                    f"companion{j}_mass_map",
+                    np.array([c_ndx], dtype=int),
+                )
+
+    def _load_mmexofast_seeds(self):
+        """Read an optional MMEXOFAST solutions file and push each fit as a
+        per-seed hint set for multi-seed sampling (P4).
+
+        MMEXOFAST emits multiple lightly-optimized solutions spanning the
+        standard microlensing degeneracies. Each fit's observable-space values
+        (t_0, u_0, t_E, s, q, alpha, rho) are seeded into the relaxation engine,
+        which back-solves the physical parameters (distances/masses/PMs) exactly
+        as a user typing them into params.yaml K times would. Enabled by a
+        `mmexofast: <file>` key on the lens config block (path relative to the
+        run cwd, same as the light-curve `file:` key).
+
+        The translation itself (seed sets, scale hints, jd_offset handling,
+        alpha/log_s conventions) lives in mmexofast_support.push_seed_hints,
+        shared with MulensInstrument's stage-1a auto-initialization (which
+        also applies the JSON's bad-data mask and error factors -- masks must
+        exist before the photometry is read, which is why the instrument owns
+        that half).
+        """
+        mmx_file = self.config[0].get("mmexofast") if self.config else None
+        # Only an explicit file path is handled here. "auto" / absent-key
+        # auto-initialization is owned by MulensInstrument (stage 1a), which
+        # pushes the seed hints itself before this method ever runs; False
+        # opts out entirely.
+        if not isinstance(mmx_file, str) or mmx_file == "auto":
+            return
+
+        data = mmexofast_support.load_json(mmx_file)
+        if data is None:
+            logger.warning(f"No seeds loaded from '{mmx_file}'.")
+            return
+
+        mmexofast_support.push_seed_hints(
+            data,
+            self.config_manager,
+            want_rho=any(self.finite_source),
+            is_binary=self.n_companions >= 1,
+            source=mmx_file,
+        )
 
     def register_parameters(self, system):
         """Stage 2: Declare the manifest."""
         self._validate_bodies(system)
 
+        # s is derived from the sampled log_s; move any user s bounds onto log_s
+        # before the manifest/relaxation engine run.
+        self._translate_s_bounds_to_log_s()
+
+        # Optional multi-seed sampling from a MMEXOFAST solutions file (P4).
+        self._load_mmexofast_seeds()
+
+        # Per-source vector parameters: one element per source body.  Elements
+        # are displayed and addressed by the source star's instance name
+        # (lens.SourceB.t_0) or slot index (lens.1.t_0).
+        src_shape = (self.n_sources,)
+        src_names = (
+            self._source_instance_names() if self.n_sources > 1 else None
+        )
+
+        def per_source(expr_key=None):
+            entry = {"shape": src_shape}
+            if expr_key is not None:
+                entry["expr_key"] = expr_key
+            if src_names is not None:
+                entry["names"] = src_names
+            return entry
+
         self.manifest = {
-            "t_0": None, "u_0": None,
-            "pi_rel": "default", "theta_E": "default",
-            "mu_ra_rel": "default", "mu_dec_rel": "default",
-            "mu_rel_mag": "default", "t_E": "default",
-            "pi_E_N": "default", "pi_E_E": "default",
+            "t_0": per_source(),
+            "u_0": per_source(),
+            "pi_rel": per_source("default"),
+            "theta_E": per_source("default"),
+            "mu_ra_rel": per_source("default"),
+            "mu_dec_rel": per_source("default"),
+            "mu_rel_mag": per_source("default"),
+            "mu_ra_rel_geo": per_source("default"),
+            "mu_dec_rel_geo": per_source("default"),
+            "mu_rel_geo_mag": per_source("default"),
+            "t_E": per_source("default"),
+            "pi_E_N": per_source("default"),
+            "pi_E_E": per_source("default"),
         }
 
         # Companion geometry: one (s, alpha) pair per lens body beyond the
@@ -184,74 +655,188 @@ class Lens(Component):
         # than by component element count.
         if self.n_companions >= 1:
             companion_shape = (self.n_companions,)
-            self.manifest["s"] = {"shape": companion_shape}
-            self.manifest["cosalpha"] = {"shape": companion_shape}
-            self.manifest["sinalpha"] = {"shape": companion_shape}
-            # alpha derived from cosalpha/sinalpha; internal unit = rad, display = deg
-            self.manifest["alpha"] = {"expr_key": "default", "shape": companion_shape}
-            # q = M_companion / M_primary; companion component type varies by config
-            companion_type = self.lens_bodies[0][1][0]
+            # log_s is the sampled coordinate; s = 10**log_s is derived (the
+            # close/wide degeneracy is then an exact reflection log_s -> -log_s).
+            self.manifest["log_s"] = {"shape": companion_shape}
+            self.manifest["s"] = {
+                "expr_key": "default",
+                "shape": companion_shape,
+            }
+            self.manifest["xalpha"] = {"shape": companion_shape}
+            self.manifest["yalpha"] = {"shape": companion_shape}
+            # alpha derived from xalpha/yalpha via arctan2; internal unit = rad, display = deg
+            self.manifest["alpha"] = {
+                "expr_key": "default",
+                "shape": companion_shape,
+            }
+            # q_j = M_companion_j / M_primary; companion component types vary
+            # by config, hence one scalar bracket dep per companion.
+            companion_mass_deps = [
+                f"{c_type}.mass[companion{j}_mass_map]"
+                for j, (c_type, _) in enumerate(self.lens_bodies[0][1:])
+            ]
             self.manifest["q"] = {
                 "expr_key": "default",
                 "shape": companion_shape,
-                "deps": [f"{companion_type}.mass[companion_mass_map]",
-                         "star.mass[primary_lens_map]"],
+                "deps": companion_mass_deps + ["star.mass[primary_lens_map]"],
             }
+            # Multi-lens convention: theta_E (and hence t_E, rho, pi_E) is
+            # referenced to the TOTAL lens mass, matching the published
+            # parameterization.  mlens_total sums the body masses and replaces
+            # the primary mass in the theta_E dependency chain.
+            self.manifest["mlens_total"] = {
+                "expr_key": "default",
+                "shape": (1,),
+                "deps": ["star.mass[primary_lens_map]"] + companion_mass_deps,
+            }
+            theta_entry = dict(self.manifest["theta_E"])
+            theta_entry["deps"] = ["mlens_total", "pi_rel"]
+            self.manifest["theta_E"] = theta_entry
+
+        if self.n_companions >= 2:
+            # The symbolic relaxation engine only knows the binary mass-sum
+            # and q relations (see symbolic_physics.get_symbol_map), so for
+            # 3+ lens bodies the mlens_total and per-slot q initvals are
+            # seeded from the per-body mass initvals instead — body masses
+            # (or logmass) must be supplied in the params file; a user q
+            # cannot back-propagate to a companion mass here.  Rank 40
+            # (derived-mixed): overrides defaults, yields to explicit user
+            # values.
+            body_masses = [
+                self._mass_initval(c_type, c_ndx)
+                for c_type, c_ndx in self.lens_bodies[0]
+            ]
+            if any(m is None for m in body_masses):
+                missing = [
+                    f"{ct}.{cn}"
+                    for (ct, cn), m in zip(self.lens_bodies[0], body_masses)
+                    if m is None
+                ]
+                logger.info(
+                    f"No mass initval for lens body/bodies {missing}; cannot "
+                    "seed lens.0.mlens_total or per-companion q — supply body "
+                    "masses (or logmass) in the params file for 3+ body lenses."
+                )
+            else:
+                self.config_manager.add_hint(
+                    "lens.0.mlens_total", float(sum(body_masses)), rank=40
+                )
+                for j, m_c in enumerate(body_masses[1:]):
+                    q_j = m_c / body_masses[0]
+                    self.config_manager.add_hint(f"lens.{j}.q", q_j, rank=40)
+                    self.config_manager.add_scale_hint(
+                        f"lens.{j}.q", 0.1 * q_j
+                    )
+
+            # The s <-> log_s relation is mapped only for companion slot 0, so
+            # for 3+ body lenses seed the remaining companions' log_s from any
+            # user s initval (same fallback rationale as q/mlens_total above).
+            up = self.config_manager.user_params
+            for j in range(1, self.n_companions):
+                entry = up.get(f"lens.{j}.s")
+                s_val = (
+                    entry.get("initval") if isinstance(entry, dict) else entry
+                )
+                if s_val is None or float(s_val) <= 0.0:
+                    continue
+                self.config_manager.add_hint(
+                    f"lens.{j}.log_s", float(np.log10(float(s_val))), rank=40
+                )
 
         if any(self.finite_source):
-            self.manifest["rho"] = "default"
+            self.manifest["rho"] = per_source("default")
 
         # Seed alpha hint (degrees, user unit) so inspect_start can display it
         # even before the expression graph is built.
         inst = self.names[0] if self.names else "0"
-        ca_entry = (self.config_manager.user_params.get(f"lens.{inst}.cosalpha")
-                    or self.config_manager.user_params.get(f"lens.0.cosalpha") or {})
-        sa_entry = (self.config_manager.user_params.get(f"lens.{inst}.sinalpha")
-                    or self.config_manager.user_params.get(f"lens.0.sinalpha") or {})
+        ca_entry = (
+            self.config_manager.user_params.get(f"lens.{inst}.xalpha")
+            or self.config_manager.user_params.get(f"lens.0.xalpha")
+            or {}
+        )
+        sa_entry = (
+            self.config_manager.user_params.get(f"lens.{inst}.yalpha")
+            or self.config_manager.user_params.get(f"lens.0.yalpha")
+            or {}
+        )
         ca = ca_entry.get("initval")
         sa = sa_entry.get("initval")
+        # List-valued initval (P4 multi-seed sampling): use seed 0.
+        if isinstance(ca, (list, tuple)):
+            ca = ca[0] if ca else None
+        if isinstance(sa, (list, tuple)):
+            sa = sa[0] if sa else None
         if ca is not None and sa is not None:
             alpha_deg = float(np.arctan2(float(sa), float(ca)) * 180.0 / np.pi)
             self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
 
+        # Expected proper motions from the galactic model, for the seeds below.
+        # None when the line of sight is not known yet, in which case the pm
+        # hints are simply skipped (the old behavior).
+        pm_expected = self._galactic_pm_expectations(system)
+
+        # (helpers for the pm seeding live at _galactic_pm_expectations /
+        # _seed_expected_pm, below this method.)
+
         # Inject per-event physical hints
         for i in range(self.n_elements):
             l_type, l_idx = self._primary_lens(i)
-            s_type, s_idx = self._primary_source(i)
 
             # Rank 25: overrides the 10 pc defaults.yaml default (rank 20) but yields
             # to any value the relaxation engine derives from pi_rel+d_S (rank 30).
             # This breaks the d_L↔parallax cycle: pi_rel drives d_L to rank 30 via
             # Condition B, then parallax (rank 25) is corrected as the weaker symbol.
-            self.config_manager.add_hint(f"star.{l_idx}.distance", 4000.0, rank=25)
+            self.config_manager.add_hint(
+                f"star.{l_idx}.distance", 4000.0, rank=25
+            )
             self.config_manager.add_scale_hint(f"star.{l_idx}.distance", 5.0)
             self.config_manager.add_hint(f"star.{l_idx}.logmass", -0.5)
             self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", 0.001)
             self.config_manager.add_scale_hint(f"star.{l_idx}.pm_ra", 3.0)
             self.config_manager.add_scale_hint(f"star.{l_idx}.pm_dec", 3.0)
             self.config_manager.add_scale_hint(f"star.{l_idx}.rv", 1e5)
+            self._seed_expected_pm(pm_expected, l_idx, "thin_disk", 4000.0)
 
-            self.config_manager.add_hint(f"star.{s_idx}.distance", 8000.0, rank=30)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.distance", 5.0)
-            self.config_manager.add_hint(f"star.{s_idx}.logmass", -0.5)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.logmass", 0.3)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
-            self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
+            # Every source body gets the same bulge-source seeding: each source
+            # has its own trajectory chain (distance, pm) to initialize.
+            for s_type, s_idx in self.source_bodies[i]:
+                self.config_manager.add_hint(
+                    f"star.{s_idx}.distance", 8000.0, rank=30
+                )
+                self.config_manager.add_scale_hint(
+                    f"star.{s_idx}.distance", 5.0
+                )
+                self.config_manager.add_hint(f"star.{s_idx}.logmass", -0.5)
+                self.config_manager.add_scale_hint(
+                    f"star.{s_idx}.logmass", 0.3
+                )
+                self.config_manager.add_scale_hint(f"star.{s_idx}.pm_ra", 3.0)
+                self.config_manager.add_scale_hint(f"star.{s_idx}.pm_dec", 3.0)
+                self.config_manager.add_scale_hint(f"star.{s_idx}.rv", 1e5)
+                self._seed_expected_pm(pm_expected, s_idx, "bulge", 8000.0)
 
             # Companion lens bodies (everything beyond the primary)
             for l2_type, l2_idx in self.lens_bodies[i][1:]:
                 if l2_type == "star":
-                    self.config_manager.add_hint(f"star.{l2_idx}.distance", 4000.0, rank=25)
-                    self.config_manager.add_scale_hint(f"star.{l2_idx}.distance", 5.0)
+                    self.config_manager.add_hint(
+                        f"star.{l2_idx}.distance", 4000.0, rank=25
+                    )
+                    self.config_manager.add_scale_hint(
+                        f"star.{l2_idx}.distance", 5.0
+                    )
 
         # Tighten lens logmass scale when satellite parallax is available
-        if hasattr(system, 'mulensinstrument') and hasattr(system.mulensinstrument, 'inst_ref_pos'):
+        if hasattr(system, "mulensinstrument") and hasattr(
+            system.mulensinstrument, "inst_ref_pos"
+        ):
             ref_pos = system.mulensinstrument.inst_ref_pos
             max_sep = max(
-                (float(np.linalg.norm(ref_pos[ii] - ref_pos[jj]))
-                 for ii in range(len(ref_pos)) for jj in range(ii + 1, len(ref_pos))),
-                default=0.0
+                (
+                    float(np.linalg.norm(ref_pos[ii] - ref_pos[jj]))
+                    for ii in range(len(ref_pos))
+                    for jj in range(ii + 1, len(ref_pos))
+                ),
+                default=0.0,
             )
             if max_sep > 0.5:
                 scale = 0.0005
@@ -262,15 +847,225 @@ class Lens(Component):
             if scale is not None:
                 for i in range(self.n_elements):
                     _, l_idx = self._primary_lens(i)
-                    self.config_manager.add_scale_hint(f"star.{l_idx}.logmass", scale)
+                    self.config_manager.add_scale_hint(
+                        f"star.{l_idx}.logmass", scale
+                    )
+
+    def _galactic_pm_expectations(self, system):
+        """Line of sight for the galactic-model proper-motion seeds.
+
+        Returns ``(ra_rad, dec_rad)``, or None when the seeding does not apply.
+
+        The prior is only allowed to FILL A GAP, never to contradict.  What is
+        open here is the physical side: no example pins the lens mass or
+        distance, because a published light-curve solution (t_0, u_0, t_E, s, q,
+        alpha, rho, sometimes pi_E) does not close the system -- t_E and pi_E
+        without theta_E leave mass, distance and proper motion free.  That gap
+        is what the engine used to fill by inventing a direction (issue #93).
+
+        But where a config DOES imply the proper motion, a prior mean dropped on
+        top fights it.  Measured at the seed (raw = 0), chi2/N ungated vs gated:
+
+            ob140939 (pi_E_N/pi_E_E measured, Yee+2015)  3.04 -> 179.1 | 3.04
+            ob161003 (two sources, t_E + rho each)       1.72 ->   3.9 | 1.72
+            DC2018_128 (t_0/u_0/t_E/s/q/alpha/rho)       1.42 ->   1.21 (kept)
+            ob08092 (t_0/u_0/t_E only, PSPL)             1.50 ->   1.42 (kept)
+
+        So the gates below are what keeps this from making published solutions
+        worse.  Filling only the *direction* and leaving the magnitude to the
+        data would serve every case at once, but the direction is not a symbol,
+        so provenance cannot express it per-symbol; that needs a basis change
+        (mu_rel_mag, mu_rel_pa) which is a sampling-geometry question and does
+        not belong here.  tests/test_seed_quality.py pins all four numbers.
+        """
+        if "galacticmodel" not in getattr(system, "config", {}):
+            # No galactic model in the topology: nothing to take the mean of.
+            return None
+        # Skip when something already implies the direction or the magnitude.
+        up = self.config_manager.user_params
+        blockers = [
+            k
+            for k in up
+            if k.endswith((".pi_E_N", ".pi_E_E")) or ".pm_ra" in k or ".pm_dec" in k
+        ]
+        if blockers:
+            logger.info(
+                f"[lens] proper motion or parallax already given "
+                f"({', '.join(sorted(blockers))}); not seeding from the "
+                f"galactic model, which would contradict it."
+            )
+            return None
+        if self.n_sources > 1:
+            # Every source would be seeded at the same bulge mean, forcing one
+            # mu_rel for all of them.  A resolved binary source distinguishes
+            # them, so do not impose it.
+            logger.info(
+                f"[lens] {self.n_sources} sources; not seeding proper motions "
+                f"from the galactic model (one mean would tie their mu_rel "
+                f"together)."
+            )
+            return None
+        try:
+            n_stars = system.star.n_elements
+            source_ndx = int(system.lens.source_map[0])
+            ra_all = self.config_manager.resolve(
+                "star", "ra", shape=(n_stars,)
+            )["initval"]
+            dec_all = self.config_manager.resolve(
+                "star", "dec", shape=(n_stars,)
+            )["initval"]
+        except Exception as exc:  # pragma: no cover - seeds are optional
+            logger.debug(
+                f"[lens] could not resolve the line of sight for the "
+                f"galactic-model proper-motion seeds: {exc!r}"
+            )
+            return None
+
+        keys = [f"star.{source_ndx}.ra", "star.ra"]
+        names = getattr(system.star, "names", None)
+        if names:
+            keys.append(f"star.{names[source_ndx]}.ra")
+        if not any(k in self.config_manager.user_params for k in keys):
+            logger.debug(
+                "[lens] no user-set RA/Dec; skipping the galactic-model "
+                "proper-motion seeds."
+            )
+            return None
+
+        # resolve() hands back the value in the parameter's USER unit, which for
+        # ra/dec is degrees (Parameter.__post_init__ is what converts to the
+        # internal radians, and it has not run at stage 2).  The galactic-model
+        # helpers take radians.
+        return (
+            float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
+            float(np.radians(np.atleast_1d(dec_all)[source_ndx])),
+        )
+
+    def _seed_expected_pm(self, line_of_sight, star_idx, population, dist_pc):
+        """Seed one star's pm_ra/pm_dec at the galactic model's prior mean.
+
+        RANK_DERIVED_DATA: this is derived from the galactic model the same way
+        an RV offset is derived from the data, so it belongs in that tier and
+        must yield to anything in params.yaml.
+
+        It ties with the MMEXOFAST seeds (also RANK_DERIVED_DATA), which is the
+        point.  Both proper-motion components are now pinned, so ``mu_rel`` has
+        a magnitude AND a direction, and the engine no longer has to invert
+        ``mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2`` -- one equation in two
+        unknowns -- by choosing a point on a circle (issue #93).  Where that
+        disagrees with the seeded ``t_E``, Condition B rewrites the lowest-rank
+        symbol in ``t_E = theta_E / |mu_rel_geo|``, which is ``theta_E`` via the
+        lens mass (defaults.yaml, rank 20) and distance (rank 25).  So ``t_E``
+        keeps its measured value, the proper motion keeps the prior's, and the
+        lens mass absorbs the difference -- which is the standard microlensing
+        chain (a measured t_E plus an assumed mu_rel implies theta_E, hence a
+        mass) and is the quantity a light curve genuinely cannot pin down.
+
+        `dist_pc` must match the distance hint seeded for the same star: the
+        mean velocity is position-dependent, so a mismatch would seed a proper
+        motion for a place the star is not.
+        """
+        if line_of_sight is None:
+            return
+        ra_rad, dec_rad = line_of_sight
+        try:
+            pm_ra, pm_dec, _rv = expected_proper_motion(
+                ra_rad, dec_rad, dist_pc, population
+            )
+        except Exception as exc:
+            # WARNING, not debug: this silently disabled the whole feature once
+            # already (degrees were passed where radians were wanted, astropy
+            # raised, and the seeds just quietly never happened).  A failure
+            # here is not fatal -- the old arbitrary start still works -- but it
+            # must be visible.
+            logger.warning(
+                f"[lens] could not seed star.{star_idx}'s proper motion from "
+                f"the galactic model ({population} at {dist_pc:.0f} pc): "
+                f"{exc!r}.  Falling back to the defaults.yaml value; the "
+                f"direction of mu_rel will be arbitrary (see issue #93)."
+            )
+            return
+        self.config_manager.add_hint(
+            f"star.{star_idx}.pm_ra", pm_ra, rank=RANK_DERIVED_DATA
+        )
+        self.config_manager.add_hint(
+            f"star.{star_idx}.pm_dec", pm_dec, rank=RANK_DERIVED_DATA
+        )
+        logger.info(
+            f"[lens] star.{star_idx} proper motion seeded at the "
+            f"{population} prior mean for {dist_pc:.0f} pc: "
+            f"pm_ra={pm_ra:+.3f}, pm_dec={pm_dec:+.3f} mas/yr."
+        )
+
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Inject the Earth-velocity context constants for the mu_rel_geo
+        chain (see context_dep_names); everything else is generic."""
+        if param_name in ("mu_ra_rel_geo", "mu_dec_rel_geo"):
+            context_nodes = dict(context_nodes or {})
+            if "earth_vperp_e" not in context_nodes:
+                vperp_e, vperp_n = self._earth_vperp_en(system)
+                context_nodes["earth_vperp_e"] = pt.as_tensor_variable(vperp_e)
+                context_nodes["earth_vperp_n"] = pt.as_tensor_variable(vperp_n)
+        return super().add_parameter(model, param_name, system, context_nodes)
+
+    def _earth_vperp_en(self, system):
+        """Earth's velocity at t0_par projected on the sky, (East, North),
+        in AU/yr (numerically 1/yr once divided by the 1-AU baseline --
+        multiplying by pi_rel in mas gives mas/yr).
+
+        This is the Gould (2004) mu_helio -> mu_geo conversion constant:
+        mu_geo = mu_helio - pi_rel * v_perp / AU.  The velocity and the
+        (ra, dec) used for the projection come from MulensInstrument -- the
+        SAME anchor epoch and sky position its Skowron deltas use, so the
+        conversion and the trajectory share one frame by construction.
+        Without microlensing data there is no t0_par to anchor the frame;
+        the term is dropped (mu_geo == mu_helio) with a warning.
+        """
+        inst = getattr(system, "mulensinstrument", None)
+        vel = getattr(inst, "_earth_vel_ref", None)
+        radec = getattr(inst, "_source_radec_rad", None)
+        if vel is None or radec is None:
+            logger.warning(
+                f"[{self.prefix}] No microlensing data to anchor t0_par; "
+                "mu_rel_geo falls back to the heliocentric value (Earth-"
+                "velocity term dropped)."
+            )
+            return 0.0, 0.0
+        v = np.asarray(vel, dtype=float) * 365.25  # AU/day -> AU/yr
+        ra, dec = radec
+        e_hat = np.array([-np.sin(ra), np.cos(ra), 0.0])
+        n_hat = np.array(
+            [
+                -np.cos(ra) * np.sin(dec),
+                -np.sin(ra) * np.sin(dec),
+                np.cos(dec),
+            ]
+        )
+        return float(v @ e_hat), float(v @ n_hat)
 
     def build_likelihood(self, model, system):
         """Stage 6: Observational penalties on the lensing geometry."""
-        mu_rel = self.mu_rel_mag.value
+        # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
+        # in the frame the event is observed in (rp.py used the geocentric
+        # value at t0_par; Batista+2011's rate is in the frame of the
+        # measured t_E), and it is also the divisor of t_E/pi_E, so the
+        # singularity guard belongs on it.
+        mu_rel_geo = self.mu_rel_geo_mag.value
         theta_E = self.theta_E.value
 
-        pm.Potential(f"{self.prefix}.event_rate_prior",
-                     pt.sum(pt.log(mu_rel) + pt.log(theta_E)))
+        # Both logs are floored (belt and braces -- calc_theta_E and
+        # calc_mu_rel_mag already floor their radicands, see physics.py).  A
+        # bare log(0) is a -inf wall with no gradient for NUTS to follow,
+        # which is exactly what the soft bounds below exist to avoid; the
+        # floors are ~6 decades below their 1e-6 turn-on, so the prior is
+        # untouched wherever it was already finite.
+        pm.Potential(
+            f"{self.prefix}.event_rate_prior",
+            pt.sum(
+                pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
+                + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
+            ),
+        )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and
         # asymptotically linear, so the sampler feels a restoring gradient
@@ -279,20 +1074,29 @@ class Lens(Component):
         # mas/yr), matching the previous steepness.
         d_l = system.star.distance.value[self.lens_map]
         d_s = system.star.distance.value[self.source_map]
-        pm.Potential(f"{self.prefix}.source_behind_lens",
-                     pt.sum(soft_lower_bound(d_s - d_l, 10.0, scale=440.0)))
+        pm.Potential(
+            f"{self.prefix}.source_behind_lens",
+            pt.sum(soft_lower_bound(d_s - d_l, 10.0, scale=440.0)),
+        )
 
-        pm.Potential(f"{self.prefix}.mu_rel_singularity",
-                     pt.sum(soft_lower_bound(mu_rel, 1e-6, scale=1e-5)))
+        pm.Potential(
+            f"{self.prefix}.mu_rel_singularity",
+            pt.sum(soft_lower_bound(mu_rel_geo, 1e-6, scale=1e-5)),
+        )
 
-        pm.Potential(f"{self.prefix}.theta_E_singularity",
-                     pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)))
+        pm.Potential(
+            f"{self.prefix}.theta_E_singularity",
+            pt.sum(soft_lower_bound(theta_E, 1e-6, scale=1e-5)),
+        )
 
     # ------------------------------------------------------------------
     # Magnification
     # ------------------------------------------------------------------
 
     def _get_safe_mm_params(self, index=0):
+        """Sanitized single-source params.  ``index`` is the SOURCE slot: the
+        per-source vector parameters (t_0, u_0, t_E, pi_E_*) hold one element
+        per source body of the single event."""
         tE_raw = self.t_E.value[index]
         u0_raw = self.u_0.value[index]
         theta_E_raw = self.theta_E.value[index]
@@ -310,88 +1114,77 @@ class Lens(Component):
         is_physical = pt.gt(theta_E_scrubbed, 1e-6)
 
         return {
-            't0': self.t_0.value[index],
-            'u0': u0_safe,
-            'tE': tE_safe,
-            'pi_N': pt.switch(is_physical, pi_N_scrubbed, 0.0),
-            'pi_E': pt.switch(is_physical, pi_E_scrubbed, 0.0),
+            "t0": self.t_0.value[index],
+            "u0": u0_safe,
+            "tE": tE_safe,
+            "pi_N": pt.switch(is_physical, pi_N_scrubbed, 0.0),
+            "pi_E": pt.switch(is_physical, pi_E_scrubbed, 0.0),
         }
 
     def _get_binary_mm_params(self, system, index=0):
-        """Build corrected params for a binary lens event (total mass theta_E)."""
+        """Params for a binary lens.  ``index`` is the SOURCE slot; the lens
+        bodies are shared by all sources (single event ⇒ event index 0).
+
+        The derived chain (theta_E, t_E, rho, pi_E) is already referenced to
+        the TOTAL lens mass via mlens_total, so the safe single-source params
+        pass straight through — only the companion geometry (s, q, alpha) is
+        added here.
+        """
         s = self._get_safe_mm_params(index)
 
-        l2_type, l2_idx = self.lens_bodies[index][1]
-        m1 = self._body_mass(system, *self.lens_bodies[index][0])
+        l2_type, l2_idx = self.lens_bodies[0][1]
+        m1 = self._body_mass(system, *self.lens_bodies[0][0])
         m2 = self._body_mass(system, l2_type, l2_idx)
         q = m2 / pt.maximum(m1, 1e-10)
+        q_safe = pt.clip(pt.nan_to_num(q, nan=1e-9), 1e-9, 100.0)
 
-        pi_rel = self.pi_rel.value[index]
-        mu = self.mu_rel_mag.value[index]
-        mu_safe = pt.maximum(pt.nan_to_num(mu, nan=0.0), 1e-10)
-
-        theta_E_tot = pt.sqrt(KAPPA * (m1 + m2) * pi_rel)
-        theta_E_tot_safe = pt.maximum(pt.nan_to_num(theta_E_tot, nan=0.0), 1e-10)
-        is_physical = pt.gt(theta_E_tot_safe, 1e-6)
-
-        t_E_tot = pt.maximum(theta_E_tot_safe / (mu_safe / 365.25), 1e-4)
-        pi_E_N_tot = pt.switch(is_physical,
-            pi_rel / theta_E_tot_safe * self.mu_dec_rel.value[index] / mu_safe, 0.0)
-        pi_E_E_tot = pt.switch(is_physical,
-            pi_rel / theta_E_tot_safe * self.mu_ra_rel.value[index] / mu_safe, 0.0)
-
-        # s/cosalpha/sinalpha are indexed by companion (binary = companion 0),
-        # not by event.
-        alpha_deg = pt.arctan2(self.sinalpha.value[0],
-                               self.cosalpha.value[0]) * (180.0 / np.pi)
+        # s/xalpha/yalpha are indexed by companion (binary = companion 0),
+        # not by event or source.
+        alpha_deg = pt.arctan2(self.yalpha.value[0], self.xalpha.value[0]) * (
+            180.0 / np.pi
+        )
 
         return {
-            't0': s['t0'], 'u0': s['u0'],
-            'tE': t_E_tot, 'pi_N': pi_E_N_tot, 'pi_E': pi_E_E_tot,
-            's': self.s.value[0], 'q': q, 'alpha': alpha_deg,
+            **s,
+            "s": self.s.value[0],
+            "q": q_safe,
+            "alpha": alpha_deg,
         }
 
-    def get_magnification(self, times, obs_pos_abs, system, index=0):
+    def get_magnification(self, times, obs_pos, system, index=0):
         """Symbolic Paczynski magnification including parallax (PSPL only).
 
-        obs_pos_abs : (N, 3) absolute barycentric positions in AU — the same
-        convention as MulensModel's satellite_skycoord, so this function and
-        the MulensModel Op are interchangeable callers.
+        ``index`` is the SOURCE slot (one trajectory per source body).
 
-        Internally converts to Skowron+2011 geocentric deviations using the
-        reference constants stored on the MulensInstrument.  When no
-        instrument is present (e.g. unit tests with zero positions) the
-        positions are treated as already-centered deviations (no parallax).
+        obs_pos : (N, 3) Skowron+2011 geocentric deviations in AU --
+        the observer's offset from the linear Earth trajectory anchored at
+        t0_par (MulensInstrument._abs_to_delta).  The MulensModel Op path
+        consumes the exact same array (fed as satellite_skycoord), so the
+        two paths are interchangeable.  Zero rows mean no parallax.
         """
         source_ndx = self.source_map[index]
         ra = system.star.ra.value[source_ndx]
         dec = system.star.dec.value[source_ndx]
 
-        instr = getattr(system, 'mulensinstrument', None)
-        if instr is not None:
-            # Convert absolute barycentric → Skowron+2011 geocentric deviations:
-            #   delta(t) = xyz_obs(t) - [xyz_earth(t0_par) + v_earth(t0_par)*(t - t0_par)]
-            t_delta = times - instr._t0_par          # (N,)
-            ref = (instr._earth_pos_ref[None, :]     # (1, 3) constant
-                   + instr._earth_vel_ref[None, :] * t_delta[:, None])  # (N, 3)
-            obs_pos = obs_pos_abs - ref
-        else:
-            obs_pos = obs_pos_abs
-
         x, y, z = obs_pos[:, 0], obs_pos[:, 1], obs_pos[:, 2]
         delta_e = -x * pt.sin(ra) + y * pt.cos(ra)
-        delta_n = (-x * pt.cos(ra) * pt.sin(dec)
-                   - y * pt.sin(ra) * pt.sin(dec)
-                   + z * pt.cos(dec))
+        delta_n = (
+            -x * pt.cos(ra) * pt.sin(dec)
+            - y * pt.sin(ra) * pt.sin(dec)
+            + z * pt.cos(dec)
+        )
 
         p = self._get_safe_mm_params(index)
         # MulensModel convention: delta_tau = -delta_N*pi_E_N - delta_E*pi_E_E
         # (negative on both N and E, matching Skowron+2011 via MulensModel's
         # sign choice). MMEXOFAST calls MulensModel, so published pi_E values
         # are calibrated to this convention.
-        tau_p = ((times - p['t0']) / p['tE']
-                 - delta_n * p['pi_N'] - delta_e * p['pi_E'])
-        u_p = p['u0'] + delta_n * p['pi_E'] - delta_e * p['pi_N']
+        tau_p = (
+            (times - p["t0"]) / p["tE"]
+            - delta_n * p["pi_N"]
+            - delta_e * p["pi_E"]
+        )
+        u_p = p["u0"] + delta_n * p["pi_E"] - delta_e * p["pi_N"]
 
         u2 = pt.sqr(tau_p) + pt.sqr(u_p)
         return (u2 + 2.0) / pt.sqrt(u2 * (u2 + 4.0))
@@ -399,13 +1192,15 @@ class Lens(Component):
     def uses_op(self, index=0):
         """Return True if get_magnification_op will dispatch to the MulensModel Op.
 
-        Callers use this to decide which obs_pos convention to pass:
-        - True  → absolute barycentric AU (MulensModel satellite_skycoord)
-        - False → Skowron+2011 geocentric deviations (symbolic get_magnification)
+        Event-level property (the lens bodies and finite_source flag are shared
+        by all sources), so ``index`` is ignored beyond backward compatibility.
+
+        Both paths take the same obs_pos convention (Skowron+2011 geocentric
+        deviations); callers use this only to pick a sampler-compatible path.
         """
-        n_lenses = self.n_lens_bodies[index]
-        use_rho = self.finite_source[index]
-        forced = self.use_op[index]
+        n_lenses = self.n_lens_bodies[0]
+        use_rho = self.finite_source[0]
+        forced = self.use_op[0]
         return forced or (n_lenses > 1) or use_rho
 
     def sampler_requirements(self):
@@ -413,16 +1208,19 @@ class Lens(Component):
 
         Binary/finite-source lenses use the MulensModel Op, which is not
         differentiable.  Gradient-based samplers (NUTS, numpyro, blackjax)
-        will produce invalid results; PTDE is required.
+        will produce invalid results; PTDE is required.  The asynchronous
+        dispatch loop (ptde_async) is recommended: near-caustic evaluations
+        concentrate in the hot rungs and stall the synchronous sampler's
+        every step behind the slowest proposal (samplers/ptde_async.py).
 
         PSPL lenses use a symbolic PyTensor formula and are NUTS-compatible,
         so no constraints are returned.
         """
         if any(self.uses_op(i) for i in range(len(self.n_lens_bodies))):
             return {
-                'incompatible': {'nuts', 'numpyro', 'blackjax'},
-                'recommended': 'ptde',
-                'reason': (
+                "incompatible": {"nuts", "numpyro", "blackjax"},
+                "recommended": "ptde_async",
+                "reason": (
                     "binary/finite-source microlensing uses the MulensModel Op, "
                     "which is not differentiable — gradient-based samplers produce "
                     "invalid results"
@@ -430,19 +1228,26 @@ class Lens(Component):
             }
         return {}
 
-    def get_magnification_op(self, times, obs_pos, system, index=0, u1=None, bandpass=None):
+    def get_magnification_op(
+        self, times, obs_pos, system, index=0, u1=None, bandpass=None
+    ):
         """Magnification dispatcher.
+
+        ``index`` is the SOURCE slot: each source body has its own trajectory
+        (t_0, u_0, rho, ...) but shares the lens bodies.  Multi-source callers
+        (MulensInstrument) invoke this once per source and combine the returned
+        magnifications with per-source fluxes.
 
         For point-source PSPL (n_lenses==1, finite_source=False, use_op=False)
         falls back to the symbolic PyTensor formula so NUTS can differentiate
         through it without the O(N_params) numerical-gradient overhead of
         _MagGradOp.
 
-        obs_pos convention is caller's responsibility and must match:
-        - Symbolic path: Skowron+2011 geocentric deviations (AU)
-        - Op path:       absolute barycentric positions (AU); the Op
-          converts them to geocentric (satellite - earth_actual) before
-          passing to MulensModel, which expects geocentric input.
+        obs_pos: (N, 3) Skowron+2011 geocentric deviations in AU
+        (MulensInstrument._abs_to_delta) for BOTH paths -- the symbolic
+        formula projects them directly, and the Op path feeds them to
+        MulensModel as satellite_skycoord (whose satellite channel then
+        carries all parallax, annual + satellite).
 
         u1/bandpass: when finite_source is True and a Band component is wired,
         u1 (a PyTensor scalar) and bandpass (str) are passed so the Op can call
@@ -452,25 +1257,27 @@ class Lens(Component):
         Set ``use_op: true`` in the lens YAML block to force the Op (e.g. for
         testing or when MulensModel's finite-source parallax is needed).
         """
-        if self.n_lens_bodies[index] > 2:
+        if self.n_lens_bodies[0] > 2 and self.backend != "vbm_direct":
             raise NotImplementedError(
-                f"{self.n_lens_bodies[index]}-lens magnification is not yet "
-                "available: the MulensModel backend supports at most 2 lens "
-                "bodies. The N-lens parameters (per-companion s/alpha, "
-                "per-body masses) are wired; a triple+ backend (e.g. "
-                "VBMicrolensing) still needs to be integrated here."
+                f"{self.n_lens_bodies[0]}-lens magnification requires "
+                "backend: vbm_direct (VBMicrolensing MultiMag2); the "
+                "MulensModel backend supports at most 2 lens bodies."
             )
 
         if not self.uses_op(index):
             return self.get_magnification(times, obs_pos, system, index)
 
         source_ndx = self.source_map[index]
-        ra_deg = float(system.star.ra.value[source_ndx].eval()) * (180.0 / np.pi)
-        dec_deg = float(system.star.dec.value[source_ndx].eval()) * (180.0 / np.pi)
+        ra_deg = float(system.star.ra.value[source_ndx].eval()) * (
+            180.0 / np.pi
+        )
+        dec_deg = float(system.star.dec.value[source_ndx].eval()) * (
+            180.0 / np.pi
+        )
         coords = f"{ra_deg}d {dec_deg}d"
 
-        use_rho = self.finite_source[index]
-        n_lenses = self.n_lens_bodies[index]
+        use_rho = self.finite_source[0]
+        n_lenses = self.n_lens_bodies[0]
 
         # Apply LD only for finite-source and when a band is connected.
         effective_bandpass = bandpass if (use_rho and u1 is not None) else None
@@ -478,25 +1285,54 @@ class Lens(Component):
         times_tensor = pt.as_tensor_variable(times)
         obs_tensor = pt.as_tensor_variable(obs_pos)
 
-        if n_lenses == 2:
-            bp = self._get_binary_mm_params(system, index)
-            param_list = [bp['t0'], bp['u0'], bp['tE'], bp['pi_N'], bp['pi_E']]
+        if n_lenses >= 2 and self.backend == "vbm_direct":
+            sp = self._get_safe_mm_params(index)
+            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
             if use_rho:
                 param_list.append(self.rho.value[index])
-            param_list.extend([bp['s'], bp['q'], bp['alpha']])
+            for j in range(self.n_companions):
+                q_j = pt.clip(
+                    pt.nan_to_num(self.q.value[j], nan=1e-9), 1e-9, 100.0
+                )
+                alpha_deg_j = pt.arctan2(
+                    self.yalpha.value[j], self.xalpha.value[j]
+                ) * (180.0 / np.pi)
+                param_list.extend([self.s.value[j], q_j, alpha_deg_j])
             if effective_bandpass is not None:
                 param_list.append(u1)
-            mag_op = BinaryLensMagOp(coords=coords, mag_method=self.mag_method[index],
-                                     use_rho=use_rho, bandpass=effective_bandpass)
+            mag_op = VBMDirectMagOp(
+                coords=coords,
+                n_companions=self.n_companions,
+                use_rho=use_rho,
+                bandpass=effective_bandpass,
+            )
+        elif n_lenses == 2:
+            bp = self._get_binary_mm_params(system, index)
+            param_list = [bp["t0"], bp["u0"], bp["tE"], bp["pi_N"], bp["pi_E"]]
+            if use_rho:
+                param_list.append(self.rho.value[index])
+            param_list.extend([bp["s"], bp["q"], bp["alpha"]])
+            if effective_bandpass is not None:
+                param_list.append(u1)
+            mag_op = BinaryLensMagOp(
+                coords=coords,
+                mag_method=self.mag_method[index],
+                use_rho=use_rho,
+                bandpass=effective_bandpass,
+            )
         else:
             sp = self._get_safe_mm_params(index)
-            param_list = [sp['t0'], sp['u0'], sp['tE'], sp['pi_N'], sp['pi_E']]
+            param_list = [sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]
             if use_rho:
                 param_list.append(self.rho.value[index])
             if effective_bandpass is not None:
                 param_list.append(u1)
-            mag_op = MulensMagOp(coords=coords, mag_method=self.mag_method[index],
-                                 use_rho=use_rho, bandpass=effective_bandpass)
+            mag_op = MulensMagOp(
+                coords=coords,
+                mag_method=self.mag_method[index],
+                use_rho=use_rho,
+                bandpass=effective_bandpass,
+            )
 
         return mag_op(pt.stack(param_list), times_tensor, obs_tensor)
 
@@ -504,143 +1340,130 @@ class Lens(Component):
     # Auto method brackets
     # ------------------------------------------------------------------
 
-    def _get_initval(self, param, event_idx=0):
-        """Look up a resolved initval from config_manager, checking name and index forms."""
+    def _get_initval(self, param, slot=0):
+        """Look up a resolved initval from config_manager, checking name and index forms.
+
+        ``slot`` is the element index within the parameter's own vector:
+        source slot for per-source params (t_0, u_0, rho, ...), companion slot
+        for per-companion params (s, alpha, q).
+        """
         cm = self.config_manager
-        name = self.names[event_idx] if event_idx < len(self.names) else str(event_idx)
-        for key in [f"lens.{name}.{param}", f"lens.{event_idx}.{param}"]:
+        name = self.names[slot] if slot < len(self.names) else str(slot)
+        for key in [f"lens.{name}.{param}", f"lens.{slot}.{param}"]:
             entry = cm.user_params.get(key)
             if entry is not None:
-                val = entry.get("initval") if isinstance(entry, dict) else entry
+                val = (
+                    entry.get("initval") if isinstance(entry, dict) else entry
+                )
+                if isinstance(val, (list, tuple)):
+                    val = val[0] if val else None
                 if val is not None:
                     return float(val)
         return None
 
-    def resolve_auto_vbbl(self, times_np, index=0, threshold=0.001,
-                          buffer=0.1, max_eval=2000):
-        """Replace 'auto_vbbl' with a concrete bracket list computed at initvals.
+    def resolve_auto_vbbl(self, times_np, index=0):
+        """Replace 'auto_vbbl' with a concrete method list for multi-body lenses.
+        Historically this computed hexadecapole-vs-VBM brackets on a time
+        grid, but MulensModel implements binary-lens hexadecapole as 13
+        python-level VBM.BinaryMag0 calls per epoch while VBM's BinaryMag2
+        runs the equivalent quadrupole safety test internally in C++ and
+        short-circuits to point-source when safe.  Measured on DC2018_128:
+        hexadecapole 32.9 ms vs VBM-everywhere 7.7 ms per 870-point call, at
+        equal or better accuracy — so the bracket machinery optimized for the
+        wrong cost model and was removed (see hpc_optimization.txt, P1).
 
-        Runs hexadecapole and VBM on a time grid, finds intervals where they
-        differ by more than `threshold` (fractional), pads each interval by
-        `buffer` days, and stores the result in self.mag_method[index].
+        Single-lens events are left untouched: 'auto_vbbl' is resolved inside
+        the PSPL model builder (point_source + finite-source window), and the
+        VBM/VBBL methods emitted here are binary-lens-only.
 
-        `buffer` covers two effects: (1) the sharp transition zone where
-        hexadecapole begins to fail (~rho*t_E wide, typically 0.05-0.2 d), and
-        (2) gaps in the evaluation grid when data is subsampled (max_eval).
-        0.1 d is appropriate for a well-initialised model; increase to 0.2-0.5 d
-        if initvals are rough.
-
-        Intentionally skips parallax — we only need approximate caustic-crossing
-        timing for method selection, not a precise fit.
+        Only the mulensmodel backend consumes the resulting method list; the
+        default vbm_direct backend always calls BinaryMag2/MultiMag2.
         """
         if self.mag_method[index] != "auto_vbbl":
             return
-
-        import MulensModel as mm
-
-        g = self._get_initval
-        t_0   = g("t_0",   index)
-        u_0   = g("u_0",   index)
-        t_E   = g("t_E",   index)
-        s_val = g("s",     index)
-        q_val = g("q",     index)
-        # alpha in degrees; try direct value first, fall back to cosalpha/sinalpha
-        alpha_deg = g("alpha", index)
-        if alpha_deg is None:
-            ca = g("cosalpha", index)
-            sa = g("sinalpha", index)
-            if ca is not None and sa is not None:
-                alpha_deg = float(np.degrees(np.arctan2(sa, ca)))
-
-        if any(v is None for v in [t_0, u_0, t_E, s_val, q_val, alpha_deg]):
-            logger.warning("auto_vbbl: missing initvals for bracket computation; "
-                           "falling back to VBM everywhere.")
-            self.mag_method[index] = [float(times_np.min()) - 1.0, "VBM",
-                                      float(times_np.max()) + 1.0]
+        if self.n_lens_bodies[0] < 2:
             return
 
-        params = {
-            "t_0":   t_0,
-            "u_0":   max(abs(u_0), 1e-9) * (1 if u_0 >= 0 else -1),
-            "t_E":   max(t_E, 1e-4),
-            "s":     max(s_val, 1e-6),
-            "q":     float(np.clip(q_val, 1e-9, 1.0)),
-            "alpha": alpha_deg,
-        }
-        if self.finite_source[index]:
-            rho = g("rho", index)
-            if rho is not None:
-                params["rho"] = max(rho, 1e-9)
-
-        # Build eval grid: subsample if data is very dense
-        if len(times_np) > max_eval:
-            step = len(times_np) // max_eval
-            eval_times = np.sort(times_np[::step])
-        else:
-            eval_times = np.sort(times_np)
-
-        t_lo = float(eval_times[0])
-        t_hi = float(eval_times[-1])
-
-        try:
-            model_hex = mm.Model(parameters=params)
-            model_vbm = mm.Model(parameters=params)
-            model_hex.set_magnification_methods([t_lo - 1.0, "hexadecapole", t_hi + 1.0])
-            model_vbm.set_magnification_methods([t_lo - 1.0, "VBM",          t_hi + 1.0])
-
-            A_hex = np.asarray(model_hex.get_magnification(eval_times))
-            A_vbm = np.asarray(model_vbm.get_magnification(eval_times))
-
-            diff = np.abs(A_hex - A_vbm) / np.maximum(np.abs(A_vbm), 1.0)
-            needs_vbm = diff > threshold
-
-        except Exception as e:
-            logger.warning(f"auto_vbbl: bracket computation failed ({e}); "
-                           "falling back to VBM everywhere.")
-            self.mag_method[index] = [t_lo - 1.0, "VBM", t_hi + 1.0]
-            return
-
-        if not np.any(needs_vbm):
-            self.mag_method[index] = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
-            logger.info("auto_vbbl: hexadecapole sufficient everywhere "
-                        f"(max diff {diff.max():.4f} < threshold {threshold})")
-            return
-
-        # Build contiguous VBM intervals with buffer
-        brackets = []
-        in_vbm = False
-        for i, t in enumerate(eval_times):
-            if needs_vbm[i] and not in_vbm:
-                t_start = max(t_lo - 1.0, t - buffer)
-                if brackets:
-                    brackets.append(t_start)
-                    brackets.append("VBM")
-                else:
-                    brackets = [t_lo - 1.0, "hexadecapole", t_start, "VBM"]
-                in_vbm = True
-            elif not needs_vbm[i] and in_vbm:
-                t_end = min(t_hi + 1.0, t + buffer)
-                brackets.append(t_end)
-                brackets.append("hexadecapole")
-                in_vbm = False
-
-        if in_vbm:
-            brackets.append(t_hi + 1.0)
-
-        # Ensure the bracket list ends with a sentinel time
-        if not brackets:
-            brackets = [t_lo - 1.0, "hexadecapole", t_hi + 1.0]
-        elif not isinstance(brackets[-1], float):
-            brackets.append(t_hi + 1.0)
-
-        n_vbm = sum(1 for b in brackets if b == "VBM")
-        logger.info(f"auto_vbbl: {n_vbm} VBM interval(s) "
-                    f"(threshold={threshold}, buffer={buffer} d, "
-                    f"max diff={diff.max():.4f})")
-        self.mag_method[index] = brackets
+        t_lo = float(np.min(times_np))
+        t_hi = float(np.max(times_np))
+        method = "VBM"  # if self.finite_source[0] else "VBBL"
+        self.mag_method[index] = [t_lo - 1.0, method, t_hi + 1.0]
+        # logger.info(f"auto_vbbl: using {method} everywhere for source {index} "
+        #            "(hexadecapole bracketing removed — VBM's internal C++ "
+        #            "point-source test is faster; see hpc_optimization.txt P1)")
 
     def compile_plotters(self, model, system):
         pass
 
     def plot(self, system, points, filename_prefix="debug"):
         pass
+
+    def _companion_instance_names(self):
+        """Display names for per-companion vector elements (companion lens bodies)."""
+        system_config = (
+            getattr(self.config_manager, "system_config", None) or {}
+        )
+        names = []
+        for comp_type, ndx in self.lens_bodies[0][1:]:
+            entries = system_config.get(comp_type, [])
+            if (
+                ndx < len(entries)
+                and isinstance(entries[ndx], dict)
+                and entries[ndx].get("name")
+            ):
+                names.append(str(entries[ndx]["name"]))
+            else:
+                names.append(f"{comp_type}{ndx}")
+        return names
+
+    def plot_corner(self, idata, filename_prefix="debug"):
+        """Corner plot of the fitted lensing geometry: t_0, u_0, t_E, s, q,
+        alpha, rho -- whichever of these the event actually has (rho only for
+        finite-source events; s/q/alpha only when there is at least one lens
+        companion). Only meaningful with the full posterior, so this is
+        called once, after sampling, via plot_corner (not the twice-called
+        plot() hook, which also runs pre-flight on a single point).
+
+        t_E (and, for multi-body lenses, q and alpha) are pure physics
+        expressions with no sampled elements of their own, so they never get
+        a pm.Deterministic node and never appear in idata.posterior directly
+        (see Parameter.build_pymc's ``track_node`` logic) -- this reads each
+        Parameter's ``.posterior`` instead, which System.distribute_posterior
+        (already called earlier in run_fit, before this hook) reconstructs
+        for both tracked and pure-expression parameters alike.
+        """
+        src_names = (
+            self._source_instance_names() if self.n_sources > 1 else None
+        )
+        comp_names = (
+            self._companion_instance_names() if self.n_companions > 1 else None
+        )
+
+        def per_source_labels(param):
+            return (
+                [f"{param}[{name}]" for name in src_names]
+                if src_names
+                else None
+            )
+
+        def per_companion_labels(param):
+            return (
+                [f"{param}[{name}]" for name in comp_names]
+                if comp_names
+                else None
+            )
+
+        param_specs = [
+            (self.t_0, per_source_labels("t_0")),
+            (self.u_0, per_source_labels("u_0")),
+            (self.t_E, per_source_labels("t_E")),
+        ]
+        if hasattr(self, "rho"):
+            param_specs.append((self.rho, per_source_labels("rho")))
+        if self.n_companions >= 1:
+            param_specs.append((self.s, per_companion_labels("s")))
+            param_specs.append((self.q, per_companion_labels("q")))
+            param_specs.append((self.alpha, per_companion_labels("alpha")))
+
+        samples, labels = collect_parameter_corner_samples(param_specs)
+        save_corner_plot(samples, labels, f"{filename_prefix}_lens_corner.png")

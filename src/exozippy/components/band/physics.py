@@ -1,4 +1,5 @@
 import pytensor.tensor as pt
+
 from exozippy.physics_registry import register_physics
 
 

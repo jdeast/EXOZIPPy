@@ -1,12 +1,11 @@
 import numpy as np
 from astropy import units as u
 
-from exozippy.physics_registry import PHYSICS_REGISTRY
-from exozippy.constants import KEPLER_CONST
-import exozippy.components.planet.physics
-#import exozippy.components.celestial_body.physics
+# import exozippy.components.celestial_body.physics
 import exozippy.components.planet.physics
 import exozippy.components.star.physics
+from exozippy.constants import KEPLER_CONST
+from exozippy.physics_registry import PHYSICS_REGISTRY
 
 
 def test_rv_semi_amplitude_matches_jupiter_sun_benchmark():
@@ -45,7 +44,7 @@ def test_stellar_density_matches_solar_benchmark():
 
     # ACT
     rho_internal = calc_rho(1.0, 1.0).eval()
-    rho_cgs = (rho_internal * u.M_sun / u.R_sun ** 3).to(u.g / u.cm ** 3).value
+    rho_cgs = (rho_internal * u.M_sun / u.R_sun**3).to(u.g / u.cm**3).value
 
     # ASSERT
     np.testing.assert_allclose(rho_cgs, 1.4097, rtol=1e-3)

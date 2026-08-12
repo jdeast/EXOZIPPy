@@ -1,4 +1,5 @@
 """Tests for potentials.py: soft_lower_bound and soft_upper_bound."""
+
 import numpy as np
 import pytensor
 import pytensor.tensor as pt
@@ -86,9 +87,27 @@ def test_softness_parameter_controls_turn_on_width():
     # val below threshold → testing lower bound penalty approaching from inside (above threshold)
     val_tight = t + scale * softness_tight
     val_wide = t + scale * softness_wide
-    pen_tight = _eval(soft_lower_bound(pt.constant(val_tight), threshold=t, scale=scale, softness=softness_tight))
-    pen_wide = _eval(soft_lower_bound(pt.constant(val_wide), threshold=t, scale=scale, softness=softness_wide))
+    pen_tight = _eval(
+        soft_lower_bound(
+            pt.constant(val_tight),
+            threshold=t,
+            scale=scale,
+            softness=softness_tight,
+        )
+    )
+    pen_wide = _eval(
+        soft_lower_bound(
+            pt.constant(val_wide),
+            threshold=t,
+            scale=scale,
+            softness=softness_wide,
+        )
+    )
     # both are inside the bound so both should be negative but pen_tight ≈ -0.012, pen_wide also ≈ -0.012
     # The key property: at (threshold + scale*softness) the penalty is ~ -0.012 regardless of softness
-    np.testing.assert_allclose(pen_tight, np.log(pt.sigmoid(4.4).eval()), rtol=0.01)
-    np.testing.assert_allclose(pen_wide, np.log(pt.sigmoid(4.4).eval()), rtol=0.01)
+    np.testing.assert_allclose(
+        pen_tight, np.log(pt.sigmoid(4.4).eval()), rtol=0.01
+    )
+    np.testing.assert_allclose(
+        pen_wide, np.log(pt.sigmoid(4.4).eval()), rtol=0.01
+    )

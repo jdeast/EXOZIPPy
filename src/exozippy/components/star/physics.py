@@ -1,6 +1,8 @@
 import pytensor.tensor as pt
-from ...constants import LUM_CONST, FBOL_CONST, DENSITY_CONST, LOGG_CONST
+
+from ...constants import DENSITY_CONST, FBOL_CONST, LOGG_CONST, LUM_CONST
 from ...physics_registry import register_physics
+
 
 @register_physics
 def calc_density(mass, radius):
@@ -12,8 +14,9 @@ def calc_density(mass, radius):
     """
     return DENSITY_CONST * mass / (radius * pt.sqr(radius))
 
+
 @register_physics
-def calc_logg(logmass, radius):
+def calc_logg_from_logmass(logmass, radius):
     """
     Calculates surface gravity (logg) from mass and radius.
     logmass: log_10 of stellar mass, in solar masses
@@ -22,6 +25,7 @@ def calc_logg(logmass, radius):
     Note: this odd form of logg is designed to simplify the symbolic math and chain rule derivatives
     """
     return LOGG_CONST + logmass - 2.0 * pt.log10(radius)
+
 
 @register_physics
 def calc_mass(logmass):
@@ -34,17 +38,21 @@ def calc_mass(logmass):
     """
     return 10**logmass
 
+
 @register_physics
 def calc_luminosity(radius, teff):
     return LUM_CONST * pt.sqr(radius) * pt.sqr(pt.sqr(teff))
+
 
 @register_physics
 def calc_fbol(luminosity, distance):
     return FBOL_CONST * luminosity / pt.sqr(distance)
 
+
 @register_physics
 def calc_parallax(distance):
     return 1e3 / distance
+
 
 @register_physics
 def calc_absmag(appmag, distance):

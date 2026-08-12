@@ -17,6 +17,7 @@ differentiates through it in the backward pass, giving exp(820)=inf and
 then 0*inf=NaN.  Capping at 700 keeps exp(arg) finite everywhere (exp(700)
 ~ 1e304), so the unselected branch contributes 0, not NaN, to every VJP.
 """
+
 import numpy as np
 import pytensor.tensor as pt
 
@@ -24,7 +25,10 @@ _MAX_ARG = 700.0  # exp(700) ~ 1e304, finite in float64; exp(710+) = inf
 
 
 def _steepness(scale, softness):
-    return 4.4 / (np.maximum(scale, 1e-12) * softness)
+    # pt.maximum (not np.maximum) so `scale` may be a pytensor.shared vector
+    # (the barrier scales are measured at startup and set in place); it
+    # accepts plain numpy input just the same.
+    return 4.4 / (pt.maximum(scale, 1e-12) * softness)
 
 
 def soft_lower_bound(val, threshold, scale, softness=0.01):

@@ -1,0 +1,41 @@
+run:
+  name: "GaiaBH1"
+
+prefix: "fitresults/GaiaBH1"
+logger_level: INFO
+
+# Gaia BH1 (El-Badry et al. 2023, MNRAS 518, 1057): a 0.93 Msun G star in a
+# 185.6-day orbit around a dark 9.6 Msun black hole at 480 pc.
+# Real published RVs + simulated Gaia epoch astrometry on the real Gaia
+# scanning law (see simulate_gaia_astrometry.py and README.md).
+
+star:
+  - name: "G"
+    mist: False
+
+planet:
+  - name: "BH"
+
+orbit:
+  - name: "BH"
+
+rvinstrument:
+  - name: "AllRV"
+    file: "GaiaBH1.RV.rv"
+
+astrometryinstrument:
+  - name: "GaiaDR4sim"
+    file: "GaiaBH1.GaiaDR4sim.astrom"
+    mode: "gaia"                 # 1-D along-scan epoch astrometry
+    observer_location: "gaia"    # spacecraft ephemeris for parallax factors
+    epoch: 2457389.0             # J2016.0: reference epoch of ra/dec
+
+parameter_file: "gaiabh1.params.yaml"
+
+sampler:
+  method: numpyro
+  tune: 1000
+  draws: 3000
+  init: adapt_diag
+  target_accept: 0.95
+  recompute_trace: True

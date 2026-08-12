@@ -1,0 +1,802 @@
+"""
+Shared, zero-statistical-risk scaffolding for the PTDE samplers.
+
+exozippy.samplers.ptde (synchronous) and exozippy.samplers.ptde_async
+(asynchronous) are two dispatch loops over the same non-sampling machinery:
+worker-pool plumbing, compiled raw -> physical conversion, start-population
+generation, signal handling, posterior assembly, and diagnostics. That
+machinery lives here exactly once so the two samplers cannot drift apart
+again (they did -- see notes/code_review_20260808.txt section 4: the sync
+sampler grew the lp-plausibility guard while async had neither the parameter
+nor the check, and log_interval silently meant different things in the two).
+
+The sampling LOOPS stay separate by design: this module must never grow
+accept/reject, temperature-swap, or adaptation logic. Anything statistical
+belongs in the sampler that owns it.
+
+Helpers that log take the calling sampler's ``log`` (a logging.Logger) so
+messages appear under "exozippy.samplers.ptde" / "...ptde_async" -- the
+logger names tests and users filter on.
+"""
+
+import gc
+import logging
+import multiprocessing as mp
+import os
+import signal
+import threading
+import time
+
+import arviz as az
+import numpy as np
+import pytensor
+import pytensor.tensor as pt
+from pytensor.graph.replace import vectorize_graph
+
+# Force single-threaded BLAS/OMP in every forked worker.  Without this,
+# numpy (OpenBLAS/MKL) and C extensions (VBBinaryLensing) each spawn their
+# own thread pool, producing n_workers x n_blas_threads threads on a fixed
+# number of physical cores and causing catastrophic scheduler thrash -- and,
+# separately, each with a memory arena sized to the (over-subscribed) thread
+# count, which is what actually blows up h_vmem once forked N-ways.
+# exozippy/__init__.py already sets these before numpy/pytensor/pymc/arviz/
+# jax are imported at all -- the only point where it's effective, since a
+# native thread pool can't be shrunk after the fact by setting os.environ
+# once numpy et al. are already loaded (import exozippy always runs
+# __init__.py first, before this module). This block is redundant there;
+# kept as a guard for any environment that imports the samplers without
+# ever importing the exozippy package proper.
+for _tvar in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "BLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_tvar, "1")
+
+logger = logging.getLogger(__name__)
+
+# Shared with outputs.modes.identify_modes: |lp| above this is numerically
+# broken, not a real posterior mode (no realistic dataset's logp reaches
+# 1e12). Imported (not duplicated) so the two ceilings can't drift apart.
+from exozippy.outputs.modes import DEFAULT_LP_ABS_MAX  # noqa: E402
+
+# The chain-initialization probe lives in exozippy.whitening (it is also the
+# engine behind the data-driven whitening rescale done at model setup); PTDE
+# re-probes the already-whitened model, where every scale is ~1, so the
+# default (narrow) dynamic range is the right one here.
+from exozippy.whitening import probe_scales as _probe_scales  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Worker-side logp evaluation (fork-inherited globals)
+# ---------------------------------------------------------------------------
+
+# Module-level logp function: set in the parent process (set_worker_globals)
+# before the Pool is forked.  Fork children inherit the compiled PyTensor
+# function via copy-on-write without pickling.  Proposals (dicts of numpy
+# arrays) are the only IPC payload.
+_PTDE_LOGP_FN = None
+
+# Diagnostic flag (see collect_rung_timing in the samplers and
+# hpc_optimization.txt P13): set in the parent before forking, like
+# _PTDE_LOGP_FN, so workers inherit it via copy-on-write. When True,
+# _eval_logp times its own call and returns (lp, elapsed_seconds) instead of
+# a bare float, so the parent can attribute wall time to a rung.
+_PTDE_COLLECT_TIMING = False
+
+
+def set_worker_globals(logp_fn, collect_timing=False):
+    """Install the compiled logp function (and the timing flag) in this
+    module's namespace BEFORE the worker pool is forked, so children inherit
+    both via copy-on-write. Both samplers must call this instead of writing
+    the globals directly -- _eval_logp's __globals__ point here."""
+    global _PTDE_LOGP_FN, _PTDE_COLLECT_TIMING
+    _PTDE_LOGP_FN = logp_fn
+    _PTDE_COLLECT_TIMING = collect_timing
+
+
+def timing_enabled():
+    """Whether _eval_logp currently returns (lp, elapsed) tuples."""
+    return _PTDE_COLLECT_TIMING
+
+
+def _eval_logp(proposal):
+    """Worker: evaluate logp for one raw-space proposal dict.
+
+    Returns a bare float normally. When _PTDE_COLLECT_TIMING is set, returns
+    (lp, elapsed_seconds) instead (diagnostic mode; see the comment above
+    _PTDE_COLLECT_TIMING).
+    """
+    if _PTDE_COLLECT_TIMING:
+        t0 = time.perf_counter()
+        try:
+            lp = float(_PTDE_LOGP_FN(proposal))
+        except Exception:
+            lp = -np.inf
+        return lp, time.perf_counter() - t0
+    try:
+        return float(_PTDE_LOGP_FN(proposal))
+    except Exception:
+        return -np.inf
+
+
+# ---------------------------------------------------------------------------
+# Worker pool lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _worker_init():
+    """Pool worker: ignore SIGINT/SIGTERM so only the parent handles graceful
+    stop. A batch scheduler typically signals the whole process group, and a
+    worker that died mid pool.map() would break the parent's current step
+    (BrokenProcessPool) instead of letting it finish and wrap up cleanly."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _shutdown_pool(pool, grace=1.0):
+    """terminate() a Pool, escalating to SIGKILL for workers that outlive the
+    grace period.
+
+    _worker_init has the workers ignore SIGTERM (so a batch scheduler signalling
+    the whole process group cannot break the parent mid-step). But pool.terminate()
+    kills workers *by sending SIGTERM*, then joins them -- so a worker stuck in a
+    pathological logp evaluation ignores the terminate and the join blocks forever.
+    That is the "recycling worker pool" hang: a timed-out worker is exactly the
+    one that can never be reaped this way.
+
+    The SIGKILL is issued from a watchdog thread rather than up front, because it
+    must land only AFTER terminate() is past its _help_stuff_finish step. That
+    step drains inqueue while holding inqueue._rlock; a worker blocked in
+    inqueue.get() holds that same lock, so SIGKILLing it before terminate()
+    reaches _help_stuff_finish wedges the lock and deadlocks terminate() even
+    earlier. Waiting `grace` seconds lets a well-behaved terminate() finish
+    untouched (the escalation never fires), and only forces the issue when a
+    worker is genuinely wedged.
+    """
+    done = threading.Event()
+
+    def _reaper():
+        if done.wait(grace):
+            return  # terminate()/join() completed cleanly; no escalation needed
+        for p in pool._pool:
+            if p.exitcode is None:
+                try:
+                    os.kill(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+    watchdog = threading.Thread(target=_reaper, daemon=True)
+    watchdog.start()
+    try:
+        pool.terminate()
+        pool.join()
+    finally:
+        done.set()
+        watchdog.join()
+
+
+def create_pool(cores, total_proposals, label, log):
+    """Resolve the core count and fork the worker pool.
+
+    Must be called AFTER set_worker_globals so fork children inherit the
+    compiled logp function. Returns (pool_or_None, actual_cores); pool is
+    None in serial mode (actual_cores <= 1).
+    """
+    phys_cores = mp.cpu_count()
+    if cores is None:
+        # Fallback if called directly (not via run.py): same 75% formula.
+        cores = max(1, min(int(phys_cores * 0.75), phys_cores - 1))
+    actual_cores = min(cores, total_proposals)
+    if cores > phys_cores:
+        log.warning(
+            f"{label}: cores={cores} exceeds physical core count ({phys_cores}); "
+            f"over-subscription will slow sampling via context switching."
+        )
+    pool = (
+        mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
+        if actual_cores > 1
+        else None
+    )
+    return pool, actual_cores
+
+
+def recycle_pool(pool, actual_cores):
+    """Tear down a pool with a possibly-hung worker and fork a fresh one.
+
+    Terminated Pools sit in reference cycles (handler threads, worker
+    sentinels, queue pipes) that only the cyclic GC frees; without an
+    explicit collect each recycle leaks ~2 fds per worker until the process
+    hits EMFILE ("Too many open files") after enough timeouts.
+    """
+    _shutdown_pool(pool)
+    gc.collect()
+    return mp.get_context("fork").Pool(actual_cores, initializer=_worker_init)
+
+
+def warn_serial_eval_timeout(eval_timeout, pool, actual_cores, label, log):
+    """One-time startup warning: eval_timeout is unenforceable without a pool."""
+    if eval_timeout is not None and pool is None:
+        log.warning(
+            f"{label}: eval_timeout={eval_timeout:.0f}s has no effect with a "
+            f"single core (cores={actual_cores}) -- there is no worker process "
+            f"to enforce a wall-clock timeout against a hung logp call."
+        )
+
+
+def _map_logp(pool, proposals):
+    if pool is None:
+        return [_eval_logp(p) for p in proposals]
+    return pool.map(_eval_logp, proposals)
+
+
+def _map_logp_timeout(pool, proposals, timeout):
+    """Evaluate logps with a per-call wall-clock timeout.
+
+    Each proposal individually gets up to `timeout` seconds (not a deadline
+    shared across the whole batch -- a slow-but-legitimate early proposal must
+    not eat into the budget of proposals evaluated later in the same step).
+    A proposal that doesn't complete in time receives -inf, so the caller's
+    normal Metropolis accept/reject logic rejects it automatically.
+
+    A logp evaluation can call into external/compiled code that occasionally
+    enters a genuine infinite loop for some pathological parameter
+    combination. When that happens the worker process that drew the
+    timed-out proposal is stuck forever and never becomes available again;
+    this function has no way to kill a single worker without tearing down
+    the whole Pool, so the caller is responsible for recycling `pool`
+    whenever `timed_out` is non-empty. Without that, a long run slowly
+    bleeds workers, one per hang, until the pool is exhausted.
+
+    With no pool (single-core / serial mode), there is no subprocess to time
+    out, so `timeout` cannot be enforced -- proposals run to completion as
+    before. The caller should warn about this once at startup if cores<=1
+    (warn_serial_eval_timeout).
+
+    Returns (lps, timed_out) where timed_out is a list of indices into
+    `proposals`.
+    """
+    if pool is None:
+        return [_eval_logp(p) for p in proposals], []
+
+    async_results = [pool.apply_async(_eval_logp, (p,)) for p in proposals]
+    lps = []
+    timed_out = []
+    # Keep the timeout sentinel the same shape _eval_logp returns (a bare
+    # float, or (lp, elapsed) in collect_rung_timing diagnostic mode) so
+    # every entry in `lps` is uniformly typed for the caller to unpack.
+    timeout_val = (-np.inf, timeout) if _PTDE_COLLECT_TIMING else -np.inf
+    for idx, r in enumerate(async_results):
+        try:
+            lps.append(r.get(timeout=timeout))
+        except mp.TimeoutError:
+            lps.append(timeout_val)
+            timed_out.append(idx)
+    return lps, timed_out
+
+
+# ---------------------------------------------------------------------------
+# DE proposal construction
+# ---------------------------------------------------------------------------
+
+# ter Braak 2006 epsilon term: without it a DE proposal is a pure linear
+# combination of population states, so sampling is confined to the affine
+# hull of the initial T=1 starts FOREVER (swaps only exchange states within
+# the same hull). With the default n_chains = 2*n_params the hull is almost
+# surely full-rank and this never bites, but a user setting
+# n_chains <= n_params would otherwise silently explore a proper subspace
+# and get a wrong posterior. Raw (whitened) space has scales ~1 by
+# construction, so a fixed 1e-4 is small against any posterior width --
+# a correctness backstop, not a mixing mechanism (see
+# warn_if_population_degenerate for the mixing side).
+DE_JITTER = 1e-4
+
+
+def _pick_two(rng, n, exclude):
+    """Pick two distinct indices from [0, n) excluding `exclude`."""
+    idx = rng.choice(n - 1, 2, replace=False)
+    return tuple(int(i + (1 if i >= exclude else 0)) for i in idx)
+
+
+def de_proposal(rng, pop, i, gamma, keys, jitter=DE_JITTER):
+    """One ter Braak DE-MC proposal for population member `i`:
+    x_i + gamma * (x_j1 - x_j2) + jitter * N(0, 1), j1 != j2 != i.
+
+    THE single owner of the production proposal formula -- both samplers
+    call this so the move (and its epsilon term) cannot drift between them.
+    """
+    j1, j2 = _pick_two(rng, len(pop), i)
+    prop = {}
+    for key in keys:
+        step = gamma * (pop[j1][key] - pop[j2][key])
+        if jitter:
+            step = step + jitter * rng.standard_normal(np.shape(pop[i][key]))
+        prop[key] = pop[i][key] + step
+    return prop
+
+
+def warn_if_population_degenerate(n_chains, n_params, label, log):
+    """Warn when the DE population cannot span parameter space.
+
+    With n_chains < n_params + 2 the difference vectors span a proper
+    subspace, and the epsilon jitter (DE_JITTER) is the only escape from
+    it -- ergodic in principle, hopeless in practice. The default
+    n_chains = 2 * n_params never triggers this.
+    """
+    if n_chains < n_params + 2:
+        log.warning(
+            f"{label}: n_chains={n_chains} < n_params + 2 = {n_params + 2}; "
+            f"DE difference vectors cannot span parameter space and mixing "
+            f"across the missing directions relies on the tiny epsilon "
+            f"jitter alone. Raise n_chains (default 2 x n_params)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Compiled conversions (logp is compiled by the caller; see set_worker_globals)
+# ---------------------------------------------------------------------------
+
+
+def compile_conversions(model):
+    """Compile the raw -> physical conversion functions ONCE.
+
+    raw_to_phys is the single-sample form, kept for the (rare) eval_timeout
+    diagnostic log path, which converts exactly one proposal at a time.
+    raw_to_phys_batched vectorizes the same graph over an extra leading
+    sample axis (pytensor's vectorize_graph -- adds the batch dim to every
+    op in the graph rather than looping in Python) and is what the
+    ensemble-start-plot and final posterior conversions use, since those
+    can be tens of thousands to millions of samples: the free_RVs +
+    deterministics graph is pure elementwise/indexing math (each
+    Parameter's physical-unit conversion; verified empirically that no
+    deterministic here touches the magnification Ops, which only feed the
+    likelihood), so it vectorizes cleanly and cuts what was a
+    Python-level per-sample loop (dominant cost: interpreter + pytensor
+    call overhead, not the underlying math) down to a handful of batched
+    calls. See hpc_optimization.txt PROMPT 7.
+
+    Returns (raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names).
+    """
+    output_vars = model.free_RVs + model.deterministics
+    raw_to_phys = pytensor.function(
+        inputs=model.free_RVs,
+        outputs=output_vars,
+        on_unused_input="ignore",
+    )
+    batched_inputs = [
+        pt.tensor(
+            name=f"batched_{v.name}",
+            dtype=v.type.dtype,
+            shape=(None,) + v.type.shape,
+        )
+        for v in model.free_RVs
+    ]
+    raw_to_phys_batched = pytensor.function(
+        inputs=batched_inputs,
+        outputs=vectorize_graph(
+            output_vars, replace=dict(zip(model.free_RVs, batched_inputs))
+        ),
+        on_unused_input="ignore",
+    )
+    raw_var_names = [v.name for v in model.free_RVs]  # ordered input names
+    out_var_names = [v.name for v in output_vars]  # ordered output names
+    return raw_to_phys, raw_to_phys_batched, raw_var_names, out_var_names
+
+
+def describe_proposal(prop, raw_to_phys, raw_var_names, out_var_names):
+    """Render one raw proposal as (physical_params, raw_params) dicts of
+    plain lists, for the eval-timeout diagnostic log."""
+    raw_vals = [prop[k] for k in raw_var_names]
+    phys_vals = raw_to_phys(*raw_vals)
+    phys_params = {
+        name: np.asarray(val).tolist()
+        for name, val in zip(out_var_names, phys_vals)
+    }
+    raw_params = {k: np.asarray(v).tolist() for k, v in prop.items()}
+    return phys_params, raw_params
+
+
+# ---------------------------------------------------------------------------
+# Start-population generation + ensemble plots
+# ---------------------------------------------------------------------------
+
+
+def _make_starts(
+    n_chains,
+    raw_starts,
+    logp_fn,
+    rng,
+    seed_indices=None,
+    system=None,
+    raw_scales=None,
+):
+    """Generate n_chains starting points near one or more seeds (P4).
+
+    `raw_starts` is a single raw-start dict (legacy) or a LIST of K raw-start
+    dicts (multi-seed sampling). Chains are assigned to seeds round-robin
+    (chain j -> seed j % K); the first chain of each seed group starts exactly
+    at that seed's solved point, the rest jitter around their seed's center.
+
+    Mirrors EXOFASTv2: scatter chains by factor x scale where
+    factor = min(sqrt(500/n_params), 3), accept any finite logp (no proximity
+    threshold), and apply exponential decay only when proposals hit hard prior
+    boundaries (lp=-inf).  Raises RuntimeError if a chain cannot be initialized
+    within max_iter retries.
+
+    The scatter is delegated to `system.jitter_raw_start` when the system
+    provides it, which draws in physical space from a Gaussian truncated to
+    each parameter's bounds.  Scattering in raw space instead saturates the
+    logit transform and starts a large fraction of chains pinned at the bounds
+    (31.5% within 1% of a bound for a parameter whose logp is flat out to them,
+    against uniform's 2.0%); see System.jitter_raw_start.  Systems without that
+    method (minimal test stubs) fall back to the historical raw-space jitter.
+
+    ``raw_scales`` (optional) is the per-element dispersion scale in current
+    raw units, as measured by the startup whitening pass (run.py passes
+    whiten_report["raw_scales"]).  When given, the probe is skipped entirely
+    -- the model was just whitened against the very same start, so re-probing
+    would re-derive ~1.0 everywhere at n_elements x O(10) logp calls.  When
+    absent (measure_scales: false, or standalone use), the probe runs as
+    before.
+
+    Returns (starts, chain_seed_index) where chain_seed_index[j] is the original
+    seed index that chain j was drawn from (for trace-attr provenance).
+    """
+    if isinstance(raw_starts, dict):
+        raw_starts = [raw_starts]
+    K = len(raw_starts)
+    if seed_indices is None:
+        seed_indices = list(range(K))
+
+    if raw_scales is not None:
+        map_lp = float(logp_fn(raw_starts[0]))
+        scales = {
+            k: np.asarray(
+                raw_scales.get(k, np.ones_like(np.asarray(v, dtype=float))),
+                dtype=float,
+            ).reshape(np.shape(v))
+            for k, v in raw_starts[0].items()
+        }
+    else:
+        # Probe scales once from seed 0 (the canonical MAP-ish start); the same
+        # per-parameter jitter scale is reused around every seed.
+        map_lp, scales = _probe_scales(raw_starts[0], logp_fn)
+    n_params = sum(v.size for v in raw_starts[0].values())
+    factor = min(np.sqrt(500.0 / max(n_params, 1)), 3.0)
+    max_iter = 1000
+
+    _jitter = (
+        getattr(system, "jitter_raw_start", None)
+        if system is not None
+        else None
+    )
+    logger.info(
+        f"PTDE init: MAP lp={map_lp:.1f}, n_params={n_params}, factor={factor:.2f}, "
+        f"jitter={'physical (truncated)' if _jitter else 'raw (fallback)'}"
+        + (
+            f", {K} seeds (round-robin over {n_chains} chains)"
+            if K > 1
+            else ""
+        )
+    )
+
+    starts = []
+    chain_seed_index = []
+    seed_seen = set()
+    # Cap the number of chains that start EXACTLY at a seed. With K ~
+    # n_chains (a params.2-style posterior-draw seed set), every chain
+    # would otherwise start at a previous-run posterior draw with zero
+    # jitter -- and since the DE population's spread IS the proposal
+    # generator, the restart could then never explore beyond the previous
+    # posterior, entrenching whatever that run missed. At least half the
+    # chains always get the factor-scaled jitter.
+    max_exact = max(1, n_chains // 2)
+    n_exact = 0
+    if K > max_exact:
+        logger.info(
+            f"PTDE init: {K} seeds > {max_exact} exact-start budget "
+            f"(half the {n_chains} chains); the rest start jittered around "
+            f"their seed to keep restart overdispersion."
+        )
+    for j in range(n_chains):
+        s = j % K
+        center = raw_starts[s]
+        # First chain of each seed group starts exactly at the solved seed
+        # (up to the overdispersion budget above).
+        if s not in seed_seen and n_exact < max_exact:
+            lp0 = float(logp_fn(center))
+            if np.isfinite(lp0):
+                starts.append({k: v.copy() for k, v in center.items()})
+                chain_seed_index.append(seed_indices[s])
+                seed_seen.add(s)
+                n_exact += 1
+                logger.debug(
+                    f"PTDE init chain {j}: exact seed {seed_indices[s]} "
+                    f"(lp={lp0:.1f})"
+                )
+                continue
+            logger.warning(
+                f"PTDE init: seed {seed_indices[s]} exact start has non-finite "
+                f"lp; jittering to find a finite start."
+            )
+        for niter in range(max_iter):
+            eff = factor / np.exp(niter / 1000.0)
+            if _jitter is not None:
+                prop = _jitter(center, scales, eff, rng)
+            else:
+                prop = {
+                    k: v + eff * scales[k] * rng.standard_normal(v.shape)
+                    for k, v in center.items()
+                }
+            lp = float(logp_fn(prop))
+            if np.isfinite(lp):
+                starts.append(prop)
+                chain_seed_index.append(seed_indices[s])
+                seed_seen.add(s)
+                logger.debug(
+                    f"PTDE init chain {j} (seed {seed_indices[s]}): accepted after "
+                    f"{niter} retries (lp={lp:.1f}, dlp={lp - map_lp:.1f})"
+                )
+                break
+            if niter % 200 == 0 and niter > 0:
+                logger.warning(
+                    f"PTDE init chain {j}: {niter} retries still seeking finite lp "
+                    f"(eff={eff:.3g})"
+                )
+        else:
+            raise RuntimeError(
+                f"PTDE chain {j} initialization failed after {max_iter} retries. "
+                f"Check initval/bounds in your params.yaml -- a parameter may be "
+                f"starting outside its prior bounds."
+            )
+    return starts, chain_seed_index
+
+
+def resolve_start_population(
+    model,
+    system,
+    n_chains,
+    logp_fn,
+    rng,
+    raw_start,
+    initvals=None,
+    raw_starts=None,
+    seed_indices=None,
+    raw_scales=None,
+):
+    """Resolve the T=1 chain starts: explicit initvals, or multi-seed
+    round-robin via _make_starts (P4).
+
+    raw_starts/seed_indices come from run.py when available; else fall back
+    to system.get_raw_starts, and further to a bare raw_start (single start)
+    for minimal test/system stubs that don't implement get_raw_starts at all.
+
+    Returns (t1_starts, chain_seed_index).
+    """
+    if initvals is not None:
+        assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
+        return initvals, [0] * n_chains
+    if raw_starts is None:
+        if hasattr(system, "get_raw_starts"):
+            raw_starts, seed_indices = system.get_raw_starts(model)
+        else:
+            raw_starts, seed_indices = [raw_start], [0]
+    return _make_starts(
+        n_chains,
+        raw_starts,
+        logp_fn,
+        rng,
+        seed_indices,
+        system=system,
+        raw_scales=raw_scales,
+    )
+
+
+def plot_start_ensemble(
+    system,
+    t1_starts,
+    raw_to_phys_batched,
+    raw_var_names,
+    out_var_names,
+    plot_prefix,
+    log,
+):
+    """Ensemble start plots (T=1 starts only; raw -> physical via the
+    batched fn). No-op when plot_prefix is None."""
+    if plot_prefix is None:
+        return
+    log.info("Generating ensemble start plots...")
+    batched_vals = raw_to_phys_batched(
+        *[np.stack([s[k] for s in t1_starts], axis=0) for k in raw_var_names]
+    )
+    internal_starts = [
+        {
+            name: np.asarray(val)[i]
+            for name, val in zip(out_var_names, batched_vals)
+        }
+        for i in range(len(t1_starts))
+    ]
+    for comp in system.active_components.values():
+        comp.plot(
+            system,
+            internal_starts,
+            filename_prefix=plot_prefix + "_start_ensemble",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Signal handling
+# ---------------------------------------------------------------------------
+
+
+def install_stop_handlers(handler):
+    """Route SIGINT/SIGTERM (and Windows SIGBREAK) to `handler`.
+
+    SIGTERM gets the same handler as SIGINT so a batch scheduler (e.g.
+    `qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`) can request the same
+    graceful stop-after-this-step behavior as a Ctrl+C at a terminal,
+    instead of Python's default SIGTERM action (immediate termination,
+    discarding whatever draws were already collected).  Windows delivers
+    the GUI's stop request as CTRL_BREAK_EVENT, which arrives as SIGBREAK
+    rather than SIGINT (see gui/runner.py); without wiring it the request
+    is received and silently ignored.
+
+    Returns an opaque token for restore_stop_handlers.
+    """
+    old_sigint = signal.signal(signal.SIGINT, handler)
+    old_sigterm = signal.signal(signal.SIGTERM, handler)
+    old_sigbreak = (
+        signal.signal(signal.SIGBREAK, handler)
+        if hasattr(signal, "SIGBREAK")
+        else None
+    )
+    return old_sigint, old_sigterm, old_sigbreak
+
+
+def restore_stop_handlers(token):
+    old_sigint, old_sigterm, old_sigbreak = token
+    signal.signal(signal.SIGINT, old_sigint)
+    signal.signal(signal.SIGTERM, old_sigterm)
+    if old_sigbreak is not None:
+        signal.signal(signal.SIGBREAK, old_sigbreak)
+
+
+# ---------------------------------------------------------------------------
+# Runaway-lp guard
+# ---------------------------------------------------------------------------
+
+
+class LpPlausibilityGuard:
+    """Warn ONCE when a T=1 chain's accepted lp exceeds the plausibility
+    ceiling.
+
+    A T=1 chain's lp this large always indicates a model bug (an unbounded/
+    uncancelled logp term), never real physics -- no finite dataset's logp
+    reaches 1e12. PTDE accepts on lp_new > lp_old, so such a bug is a
+    ratchet: once a chain's lp is inflated this way it can only climb
+    further, wasting the rest of the run (see examples/DC2018_128, a real
+    occurrence of exactly this failure mode). Warn once so it's noticed
+    immediately rather than discovered post-hoc via identify_modes, which
+    rejects draws on the same ceiling (outputs.modes.DEFAULT_LP_ABS_MAX).
+    """
+
+    def __init__(self, ceiling, label, log):
+        self.ceiling = DEFAULT_LP_ABS_MAX if ceiling is None else ceiling
+        self.label = label
+        self.log = log
+        self.warned = False
+
+    def check(self, chain_i, lp):
+        """Call with every ACCEPTED T=1 (chain index, lp)."""
+        if self.warned or abs(lp) <= self.ceiling:
+            return
+        self.log.warning(
+            f"{self.label}: T=1 chain {chain_i} lp={lp:.3e} exceeds "
+            f"the plausibility ceiling "
+            f"(|lp| > {self.ceiling:g}); this "
+            "almost always means a model bug (e.g. an "
+            "unbounded logp term), not physics -- since "
+            "PTDE only accepts lp increases, this chain "
+            "will likely keep climbing for the rest of the "
+            "run. See outputs.modes.identify_modes, which "
+            "rejects draws on the same ceiling post-hoc."
+        )
+        self.warned = True
+
+
+# ---------------------------------------------------------------------------
+# Posterior assembly + diagnostics reports
+# ---------------------------------------------------------------------------
+
+
+def assemble_inference_data(
+    stored_raw,
+    stored_lp,
+    actual_draws,
+    n_chains,
+    raw_start,
+    raw_var_names,
+    out_var_names,
+    raw_to_phys_batched,
+    chain_seed_index,
+    label,
+    log,
+):
+    """Convert the stored T=1 raw draws to physical space and build the
+    arviz.InferenceData (posterior + sample_stats.lp + multi-seed attrs).
+
+    Flattens (n_chains, draws) -> (n_total,) per raw variable and runs the
+    batched converter in chunks (bounds memory for large n_params/draws;
+    chunk_size is independent of param count/shape, only of sample count).
+    """
+    log.info(
+        f"{label}: converting {n_chains} x {actual_draws} draws to "
+        f"physical space..."
+    )
+    n_total = n_chains * actual_draws
+    flat_raw = {
+        k: stored_raw[k][:, :actual_draws].reshape(
+            (n_total,) + raw_start[k].shape
+        )
+        for k in raw_var_names
+    }
+    chunk_size = 20000
+    out_chunks = {name: [] for name in out_var_names}
+    for start in range(0, n_total, chunk_size):
+        end = min(start + chunk_size, n_total)
+        chunk_out = raw_to_phys_batched(
+            *[flat_raw[k][start:end] for k in raw_var_names]
+        )
+        for name, val in zip(out_var_names, chunk_out):
+            out_chunks[name].append(np.asarray(val, dtype=float))
+
+    # assemble posterior dict: (n_chains, draws, ...) per variable
+    posterior_dict = {}
+    for name in out_var_names:
+        arr = np.concatenate(out_chunks[name], axis=0)  # (n_total, ...)
+        arr = arr.reshape((n_chains, actual_draws) + arr.shape[1:])
+        # old per-sample path ran every value through atleast_1d then squeezed
+        # a trailing dim-1 for scalar params -- match that convention here.
+        if arr.ndim > 2 and arr.shape[-1] == 1:
+            arr = arr.squeeze(-1)
+        posterior_dict[name] = arr
+
+    idata = az.from_dict(
+        {
+            "posterior": posterior_dict,
+            "sample_stats": {"lp": stored_lp[:, :actual_draws]},
+        }
+    )
+
+    # Multi-seed provenance (P4): record which solved seed each T=1 chain was
+    # started from.  With seeded starts, occupancy weights are initialization
+    # artifacts BY DESIGN unless chains mix, so downstream reporting must be
+    # able to say "chains 0-3 at seed 0, 4-7 at seed 1".
+    # TODO(P4): surface this in outputs/modes.py ModeReport once chains->modes
+    # attribution is wired; for now the per-chain attr is the source of truth.
+    idata.posterior.attrs["chain_seed_index"] = list(chain_seed_index)
+    if len(set(chain_seed_index)) > 1:
+        log.info(
+            f"{label} multi-seed provenance (chain -> seed): "
+            f"{list(chain_seed_index)}"
+        )
+    return idata
+
+
+def log_rung_timing(rung_times, temperatures, label, log):
+    """Per-rung logp wall-time summary (collect_rung_timing diagnostic)."""
+    log.info(f"{label} per-rung logp timing (seconds):")
+    for k, times in enumerate(rung_times):
+        if not times:
+            log.info(f"  rung {k} (T={temperatures[k]:.1f}): no calls")
+            continue
+        arr = np.asarray(times)
+        n_slow = int((arr > 0.1).sum())
+        log.info(
+            f"  rung {k} (T={temperatures[k]:.1f}): n={len(arr)}  "
+            f"median={np.median(arr):.3f}  mean={arr.mean():.3f}  "
+            f"p90={np.percentile(arr, 90):.3f}  max={arr.max():.3f}  "
+            f"n_slow(>0.1s)={n_slow}"
+        )

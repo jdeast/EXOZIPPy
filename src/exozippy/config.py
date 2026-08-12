@@ -1,19 +1,265 @@
 # src/exozippy/config.py
-import logging
-import numpy as np
-import yaml
 import copy
-from pathlib import Path
-import sympy as sp
-import astropy.units as u
 import importlib
+import logging
 import signal
 import time
+from pathlib import Path
+
+import astropy.units as u
+import numpy as np
+import sympy as sp
+import yaml
 
 logger = logging.getLogger(__name__)
 import re
 
-class SymbolicTimeout(Exception): pass
+from exozippy.linking import extract_links
+
+
+class SymbolicTimeout(Exception):
+    pass
+
+
+import contextlib
+
+# SIGALRM is POSIX-only -- Windows has no such signal, and touching
+# signal.SIGALRM there raises AttributeError at import-adjacent call time.
+# Guarding on the attribute rather than on sys.platform keeps this honest on
+# any other platform that lacks it.
+#
+# The consequence on Windows is real and worth stating: the symbolic solver
+# runs WITHOUT a wall-clock timeout. A pathological equation/target pair that
+# would be abandoned after 2s on Linux can hang instead. The alternative --
+# a thread-based timeout -- cannot actually interrupt sympy once it is down
+# in C, so it would provide the appearance of a limit rather than a limit.
+_HAS_SIGALRM = hasattr(signal, "SIGALRM")
+
+
+def _arm_alarm(seconds, handler):
+    """Arm a SIGALRM timeout. No-op (returns None) where SIGALRM is absent."""
+    if not _HAS_SIGALRM:
+        return None
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    return old_handler
+
+
+def _disarm_alarm(old_handler=None):
+    """Cancel a pending SIGALRM and optionally restore the prior handler."""
+    if not _HAS_SIGALRM:
+        return
+    signal.alarm(0)
+    if old_handler is not None:
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+@contextlib.contextmanager
+def _sympy_time_limit(seconds=2):
+    """Hard wall-clock limit for a block of symbolic work.
+
+    sp.solve (and evalf on its solutions) can hang effectively forever on
+    certain equation/target pairs, and which pairs get attempted depends on
+    hash-seed-sensitive iteration order -- so an unguarded call is a latent
+    intermittent hang.  Raises SymbolicTimeout when the limit is hit.
+
+    The handler re-arms the alarm before raising: if the exception fires
+    while the interpreter is inside a C-level frame that discards it (seen
+    in practice with JAX's gc callback -- "Exception ignored in
+    _xla_gc_callback" -- after which the guarded solve ran unbounded), the
+    next alarm gets another chance to land in interpretable bytecode.
+    """
+
+    def handler(signum, frame):
+        signal.alarm(1)
+        raise SymbolicTimeout()
+
+    old_handler = _arm_alarm(seconds, handler)
+    try:
+        yield
+    finally:
+        _disarm_alarm(old_handler)
+
+
+# Instance names appear as the middle part of dotted parameter paths
+# (star.MyName.teff), so they must be safe to split on "." and must not
+# collide with the internal index notation (star.0.teff).
+_VALID_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_instance_names(system_config):
+    """Fatal-error check on user-supplied component instance names.
+
+    Rejects names that would corrupt parameter-path parsing:
+      - non-string names (YAML ``name: 128`` arrives as an int)
+      - characters outside [A-Za-z0-9_-] ("." splits paths; whitespace,
+        brackets, etc. break resolve()/mkparam key matching)
+      - all-digit names, which alias the internal index notation
+        (a component named "1" would silently resolve to instance index 1)
+    """
+    for comp_key, entries in (system_config or {}).items():
+        if not isinstance(entries, list):
+            continue
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict) or "name" not in entry:
+                continue
+            name = entry["name"]
+            where = f"{comp_key}[{i}]"
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"Invalid name {name!r} for {where}: names must be strings. "
+                    f'Quote it in your config YAML (name: "{name}").'
+                )
+            if not _VALID_INSTANCE_NAME.match(name):
+                raise ValueError(
+                    f"Invalid name '{name}' for {where}: names may only contain "
+                    f"letters, digits, underscores, and hyphens. Characters like "
+                    f"'.' or spaces would break parameter-path parsing "
+                    f"(e.g. '{comp_key}.{name}.param')."
+                )
+            if name.isdigit():
+                raise ValueError(
+                    f"Invalid name '{name}' for {where}: purely numeric names "
+                    f"collide with the internal index notation "
+                    f"({comp_key}.0, {comp_key}.1, ...). Add a non-digit "
+                    f'character (e.g. name: "{comp_key}_{name}").'
+                )
+
+
+def _sigma_is_zero(value):
+    """True only if ``value`` is definitively zero (scalar or all-zero list).
+
+    Anything unparseable -- a link expression string, None-free junk -- returns
+    False, i.e. "treat as a real prior width", which is the conservative answer
+    for validate_sigma_has_center.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        try:
+            return all(float(v) == 0.0 for v in value)
+        except (TypeError, ValueError):
+            return False
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_sigma_has_center(user_params, links=None, source=None):
+    """Fatal-error check: a Gaussian prior must have an explicit center.
+
+    ``sigma > 0`` on a user parameter asks for a Gaussian prior.  When neither
+    ``mu`` nor ``initval`` is given, Parameter.build_pymc centers that prior on
+    whatever start value the system resolved (``prior_mus = np.where(~isnan(mus),
+    mus, inits)``) -- and that start is frequently DERIVED FROM THE DATA: a
+    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or an
+    mkprior MAP.  A prior centered on the data's own best fit double-counts the
+    data, so there is no configuration in which it is what the user meant.  We
+    refuse to run rather than silently produce it.
+
+    Legitimate, and NOT flagged:
+      - ``sigma: 0`` (any all-zero form) -- a fixed pin, not a prior.  It means
+        "hold this at whatever it resolves to", which double-counts nothing.
+      - a LINK expression in ``mu`` or ``initval`` -- a center is specified, it
+        is just computed from another parameter.
+
+    A ``sigma`` that is itself a link expression still requires a center: its
+    width is dynamic but its center is no less obliged to be independent.
+
+    Parameters
+    ----------
+    user_params : dict
+        Standardized user params.  Entries that are not dicts are skipped.
+    links : dict, optional
+        ``{target_path: {field: ParamLink}}`` from ``extract_links``, which
+        DELETES the link string from the entry -- so a linked mu/sigma is
+        invisible in ``user_params`` and must be read from here instead.
+    source : str, optional
+        File the params came from, quoted in the error message.
+    """
+    links = links or {}
+    offenders = []
+    for key, entry in (user_params or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        entry_links = links.get(key, {})
+        sigma_linked = "sigma" in entry_links
+        sigma_val = entry.get("sigma")
+        if not sigma_linked and ("sigma" not in entry or sigma_val is None):
+            continue  # no sigma at all (an absent or null sigma is not a prior)
+        if not sigma_linked and _sigma_is_zero(sigma_val):
+            continue  # fixed pin, not a Gaussian prior
+        if {"mu", "initval"} & (set(entry) | set(entry_links)):
+            continue  # a center is specified (numerically or via a link)
+        offenders.append(key)
+
+    if offenders:
+        where = f" in {source}" if source else ""
+        raise ValueError(
+            f"Gaussian prior with no center{where}: "
+            f"{', '.join(sorted(offenders))}. "
+            f"A 'sigma' greater than 0 asks for a Gaussian prior, but with "
+            f"neither 'mu' nor 'initval' given the prior is centered on "
+            f"whatever start value the system resolves -- and that start is "
+            f"frequently derived FROM THE DATA (a component's data hint, a "
+            f"relaxation-engine solution, or an mkprior MAP). A prior "
+            f"centered on the data's own best fit double-counts that data, "
+            f"so it can never be justified. "
+            f"Fix: give an explicit 'mu' (the independent prior center you "
+            f"actually mean), or use 'sigma: 0' to hold the parameter fixed "
+            f"at its resolved value (a pin, which applies no prior)."
+        )
+
+
+def canonical_param_key(key, system_config):
+    """Canonical (index-form) spelling of a user-facing parameter key.
+
+    ``star.A.mass`` -> ``star.0.mass`` when the config's ``star`` list has an
+    entry named ``A``.  This is the ONE place the name -> index translation
+    lives: ``standardize_param_names`` uses it to store ``user_params``, and
+    anything looking a key up in ``user_params`` must go through it too --
+    otherwise the lookup silently depends on whether the user named their
+    instances.
+
+    Keys that are not 3-part, that name a flat-dict (non-list) component, or
+    that name an instance the config does not define are returned unchanged,
+    which is exactly how ``standardize_param_names`` stores them.
+    """
+    parts = key.split(".", 2)
+    if len(parts) != 3:
+        return key
+
+    comp_type, comp_name, param_name = parts
+    comp_list = (system_config or {}).get(comp_type)
+    if not isinstance(comp_list, list):
+        return key
+
+    for idx, entry in enumerate(comp_list):
+        if isinstance(entry, dict) and entry.get("name") == comp_name:
+            return f"{comp_type}.{idx}.{param_name}"
+    return key
+
+
+def _declared_instance_names(system_config):
+    """Every ``name:`` declared by any list-instanced component in the config.
+
+    This is the universe of legal instance names in a 3-part parameter key.
+    It is deliberately NOT per component: a component's per-element names are
+    a manifest option that may borrow another component's instance names --
+    the lens's per-source vectors are addressed by the SOURCE STAR's name
+    (``lens.SourceA.t_0``), for instance.  Used by
+    ``standardize_param_names`` to reject typo'd instance names.
+    """
+    names = set()
+    for entries in (system_config or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                names.add(entry["name"])
+    return names
+
 
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
@@ -21,6 +267,7 @@ RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
 RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
+
 
 class ProvenanceState:
     def __init__(self):
@@ -33,6 +280,7 @@ class ProvenanceState:
             self.ranks[path] = rank
             return True
         return False
+
 
 """ 
 This class is the reconciliation engine to determine the sole source of truth 
@@ -51,9 +299,11 @@ It makes use of each component's symbolic_physics.py to derive the sampled param
 above, iteratively replacing the lowest ranked parameter with the re-derived value, and updating its weight the 
 average of its constituent weights. 
 
-It repeats the process independently for init_scale, automatically differentiating the relations in 
-symbolic_physics.py to propagate uncertainties, and recognizing that any parameter may have an override for the initval, 
-init_scale, or both.
+It repeats the process for init_scale, automatically differentiating the relations in symbolic_physics.py
+to propagate uncertainties.  These scales are only PRELIMINARY (they seed the whitening probe, which
+measures the real per-parameter scales from the data -- see exozippy/whitening.py) and they set the
+soft-bound barrier steepness on derived parameters.  init_scale is NOT user-facing: entries in a user
+params file are stripped with a warning at construction.
 
 3) warns the user if there are conflicting user-specified constraints that cannot be reconciled.
 
@@ -61,8 +311,16 @@ The logic of the config manager is independent of any specific components.
 """
 
 
-def _meaningful_change(new_val, old_val, new_rank, old_rank, tolerance,
-                       resolved, provenance, target_str):
+def _meaningful_change(
+    new_val,
+    old_val,
+    new_rank,
+    old_rank,
+    tolerance,
+    resolved,
+    provenance,
+    target_str,
+):
     """Return True iff _execute_solve should apply this update and signal progress.
 
     Propagates a rank improvement silently (updates provenance but returns False)
@@ -72,10 +330,10 @@ def _meaningful_change(new_val, old_val, new_rank, old_rank, tolerance,
     same variable.
     """
     if old_val is None:
-        return True   # Condition A: variable was previously unknown — always an update
+        return True  # Condition A: variable was previously unknown — always an update
     ref = max(abs(new_val), abs(old_val), 1e-9)
     if abs(new_val - old_val) / ref >= tolerance:
-        return True   # value changed meaningfully
+        return True  # value changed meaningfully
     # Value unchanged; propagate rank silently if it improved
     if new_rank > old_rank:
         provenance[target_str] = new_rank
@@ -86,12 +344,30 @@ class ConfigManager:
     def __init__(self, user_params, system_config=None):
         self.raw_user_params = user_params
         self.custom_solvers = {}
+        self.standalone_solvers = set()
 
-        # If config is provided, standardize right away
+        # User-defined parameter links (expression strings in numeric fields).
+        # Populated by extract_links, which also strips the strings from
+        # user_params so downstream numeric code never sees them.
+        self.links = {}
+
+        # If config is provided, validate names then standardize right away
         if system_config is not None:
-            self.user_params = self.standardize_param_names(user_params, system_config)
+            validate_instance_names(system_config)
+            self.user_params = self.standardize_param_names(
+                user_params, system_config
+            )
+            self._strip_user_init_scales()
+            self.links = extract_links(self.user_params, system_config)
         else:
             self.user_params = user_params
+            self._strip_user_init_scales()
+
+        # Must run AFTER extract_links: that call deletes the link string from
+        # the entry, so a linked mu/initval is only visible in self.links.  In
+        # the no-system_config branch extract_links never ran and the link
+        # strings are still in the entries, which the same check accepts.
+        validate_sigma_has_center(self.user_params, self.links)
 
         self.system_config = system_config or {}
         self.base_defaults = {}
@@ -101,18 +377,62 @@ class ConfigManager:
         # Storage for hints passed by components during Registration Sweep
         self.hints = {}
         self.hint_ranks = {}
-        self.scale_hints = {}   # path -> init_scale in internal units
+
+        # Multi-seed sampling (P4).  seed_resolved holds K fully-solved start
+        # points (list of {internal_path: internal_value} dicts) after
+        # finalize_user_params runs the relaxation engine once per seed; it
+        # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
+        # is a per-seed observable channel that components (e.g. the MMEXOFAST
+        # loader) push into; it feeds the relaxation engine at RANK_DERIVED_DATA
+        # -- MMEXOFAST is a (very fancy) derivation FROM THE DATA, not a user
+        # statement, so it sits in the same tier as any other data-driven hint
+        # and every user entry outranks it.
+        self.seed_resolved = None
+        self.seed_hint_sets = []
+        self.scale_hints = {}  # path -> init_scale in internal units
         self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
         self.symbolic_blacklist = set()
 
+        # Structured diagnostics collected by the relaxation engine (e.g.
+        # over-constrained contradictions).  Each entry is a dict
+        # {severity, message, param_paths}.  Consumed by the solve/validate
+        # API (solve_api.py) without parsing log text.  Populated only when
+        # the engine detects a contradiction; empty for a clean solve.
+        self.diagnostics = []
+
+        # Snapshots of the last relaxation solve (seed 0, which is solved
+        # last in finalize_user_params).  Exposed via export_solution() so a
+        # caller can report each parameter's solved value, scale, and
+        # provenance without rebuilding the PyMC model.
+        self._last_provenance = {}  # internal_path -> rank
+        self._last_scale_provenance = {}  # internal_path -> rank
+        self._last_resolved = {}  # internal_path -> internal value
+        self._last_solved_by = {}  # internal_path -> relation string
+
         components_dir = Path(__file__).parent / "components"
 
-        for py_file in components_dir.rglob("symbolic_physics.py"):
-            module_name = f"exozippy.components.{py_file.parent.name}.symbolic_physics"
+        # Sorted: rglob yields entries in filesystem directory order, which is
+        # stable on one machine but differs between machines (ext4's hashed
+        # btree vs xfs/NFS), so it survives PYTHONHASHSEED randomization and
+        # looks perfectly reproducible until you compare two boxes.  This order
+        # sets all_relations order, which sets the order the relaxation engine
+        # visits equations, which decides WHICH member of a symmetric pair it
+        # solves for -- e.g. mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2 and
+        # pi_rel = KAPPA*m*(pi_E_N**2 + pi_E_E**2) are both symmetric under
+        # swapping the pair, so nothing in the equation itself breaks the tie.
+        # Unsorted, an Ubuntu 26.04 box transposed (pm_ra, pm_dec),
+        # (mu_ra_rel, mu_dec_rel) and (pi_E_N, pi_E_E) relative to a RHEL8 box:
+        # t_E came out 11.54 d instead of 18.29 d and DC2018_128's logp at the
+        # pinned GOOD_RAW went -945.57 -> -113614.65.
+        for py_file in sorted(components_dir.rglob("symbolic_physics.py")):
+            module_name = (
+                f"exozippy.components.{py_file.parent.name}.symbolic_physics"
+            )
 
             spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec is None: continue
+            if spec is None:
+                continue
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
@@ -121,7 +441,10 @@ class ConfigManager:
 
             yaml_key = getattr(module, "comp_key", py_file.parent.name)
 
-            if hasattr(module, "get_symbol_map") and yaml_key in self.system_config:
+            if (
+                hasattr(module, "get_symbol_map")
+                and yaml_key in self.system_config
+            ):
                 comp_section = self.system_config[yaml_key]
 
                 if not isinstance(comp_section, list):
@@ -131,32 +454,53 @@ class ConfigManager:
                     if not isinstance(entry_cfg, dict):
                         continue
 
-                    raw_map = module.get_symbol_map(entry_cfg)
+                    # A component may return a single symbol map, or a list of
+                    # maps when one config entry instantiates the relations
+                    # multiple times (e.g. a lens with N sources instantiates
+                    # the per-source parameter chain once per source).
+                    raw_maps = module.get_symbol_map(entry_cfg)
+                    if not isinstance(raw_maps, list):
+                        raw_maps = [raw_maps]
 
-                    instance_map = {}
-                    for sym_name, path in raw_map.items():
-                        if "." in str(path):
-                            instance_map[sym_name] = path
-                        else:
-                            instance_map[sym_name] = f"{yaml_key}.{i}.{path}"
+                    for raw_map in raw_maps:
+                        instance_map = {}
+                        for sym_name, path in raw_map.items():
+                            if "." in str(path):
+                                instance_map[sym_name] = path
+                            else:
+                                instance_map[sym_name] = (
+                                    f"{yaml_key}.{i}.{path}"
+                                )
 
-                    for _, full_path in instance_map.items():
-                        self.master_symbol_map[full_path] = sp.Symbol(full_path)
+                        for _, full_path in instance_map.items():
+                            self.master_symbol_map[full_path] = sp.Symbol(
+                                full_path
+                            )
 
-                    # Extract the exact SymPy objects (with all their assumptions) from the equations
-                    module_symbols = set()
-                    for rel in getattr(module, "RELATIONS", []):
-                        module_symbols.update(rel.free_symbols)
+                        # Extract the exact SymPy objects (with all their assumptions) from the equations
+                        module_symbols = set()
+                        for rel in getattr(module, "RELATIONS", []):
+                            module_symbols.update(rel.free_symbols)
 
-                    subs = {}
-                    for sym in module_symbols:
-                        if sym.name in instance_map:
-                            subs[sym] = sp.Symbol(instance_map[sym.name])
+                        subs = {}
+                        for sym in module_symbols:
+                            if sym.name in instance_map:
+                                subs[sym] = sp.Symbol(instance_map[sym.name])
 
-                    for rel in getattr(module, "RELATIONS", []):
-                        self.all_relations.append(rel.subs(subs))
+                        for rel in getattr(module, "RELATIONS", []):
+                            rel_inst = rel.subs(subs)
+                            # Maps sharing symbols (e.g. per-source maps with a
+                            # common lens mass) produce identical instances of
+                            # the shared relations; keep one copy.
+                            if rel_inst not in self.all_relations:
+                                self.all_relations.append(rel_inst)
 
-        for defaults_file in components_dir.rglob("defaults.yaml"):
+        # Sorted for the same reason as the symbolic_physics walk above.  No
+        # root-level key is currently defined by two components (a test pins
+        # that), so today this is future-proofing rather than a live fix --
+        # _deep_merge is last-writer-wins, so the first such collision would
+        # otherwise resolve by walk order.
+        for defaults_file in sorted(components_dir.rglob("defaults.yaml")):
             with open(defaults_file, "r") as f:
                 comp_defaults = yaml.safe_load(f) or {}
                 self._deep_merge(self.base_defaults, comp_defaults)
@@ -165,8 +509,67 @@ class ConfigManager:
         for rel in self.all_relations:
             logger.debug(f"Relation: {rel}")
 
-    def register_custom_solver(self, target_str, solver_func):
+    def register_custom_solver(
+        self, target_str, solver_func, standalone=False
+    ):
+        """
+        Register a shortcut solver for 'comp.param' targets.
+
+        By default a custom solver only runs when the relaxation engine
+        attacks an equation containing the target (see _execute_solve).
+        standalone=True additionally runs it once per iteration on its own:
+        required when the target's defining relation always holds a second
+        derived unknown (e.g. orbit.m_total in the Kepler relation, whose
+        other side is the equally-unknown arsun), so the equation path can
+        never get down to one unknown by itself.
+        """
         self.custom_solvers[target_str] = solver_func
+        if standalone:
+            self.standalone_solvers.add(target_str)
+
+    # ----------------------------
+    # User-defined parameter links
+    # ----------------------------
+
+    def _link_internal_expr(self, plink):
+        """
+        Convert a ParamLink's user-unit expression to internal units.
+
+        The user writes f(deps) where each dep contributes its value in its
+        own user unit and the result is in the target's user unit.  The
+        relaxation engine works in internal units, so substitute
+        dep -> dep_internal / factor_dep and multiply by factor_target.
+        """
+        subs = {}
+        for dep in plink.dep_paths:
+            parts = dep.split(".")
+            f = self.get_conversion_factor(parts[0], parts[-1], full_path=dep)
+            if f != 1.0:
+                subs[sp.Symbol(dep)] = sp.Symbol(dep) / f
+        tparts = plink.target_path.split(".")
+        tf = self.get_conversion_factor(
+            tparts[0], tparts[-1], full_path=plink.target_path
+        )
+        expr = plink.expr.subs(subs) if subs else plink.expr
+        return tf * expr if tf != 1.0 else expr
+
+    def get_element_links(self, comp_type, param_name):
+        """
+        Return the user-defined links targeting elements of one parameter:
+        {field: {element_index: ParamLink}}.  Used by Component.add_parameter
+        to wire dynamic (runtime) links into the PyMC graph.
+        """
+        out = {}
+        for target, fields in self.links.items():
+            parts = target.split(".")
+            if (
+                len(parts) == 3
+                and parts[0] == comp_type
+                and parts[2] == param_name
+            ):
+                for fld, plink in fields.items():
+                    out.setdefault(fld, {})[int(parts[1])] = plink
+        return out
 
     def get_resolved_path(self, component_prefix, dep_str, resolved_maps):
         """
@@ -184,29 +587,37 @@ class ConfigManager:
         """Call this during Stage 1/Pre-flight when the System config is loaded."""
         self.system_config = config
         # Modernize the names to strict index format before running any staging logic
-        self.user_params = self.standardize_param_names(self.raw_user_params, config)
+        self.user_params = self.standardize_param_names(
+            self.raw_user_params, config
+        )
+        self.links = extract_links(self.user_params, config)
 
-    def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
-        """
-        API for components to register their data-driven guesses.
-        Converts human-readable paths to strict indices and scales to internal units.
-        """
+    def _translate_and_scale(self, path, value):
+        """Standardize a human-readable path to internal-index form and convert
+        its value to internal units.  Returns (translated_path, internal_value).
+        Shared by add_hint / add_scale_hint / add_seed_hints so they all agree
+        on nomenclature and unit handling."""
         translated_path = path
-        parts = path.split('.')
+        parts = path.split(".")
 
         # 1. Standardize the Nomenclature
         if len(parts) == 3:
             comp_type, name, param = parts
             try:
                 # Resolve human name (e.g., 'LENS') to internal index (e.g., '0')
-                idx = next(i for i, c in enumerate(self.system_config.get(comp_type, []))
-                           if str(c.get("name")) == str(name) or str(i) == str(name))
+                idx = next(
+                    i
+                    for i, c in enumerate(
+                        self.system_config.get(comp_type, [])
+                    )
+                    if str(c.get("name")) == str(name) or str(i) == str(name)
+                )
                 translated_path = f"{comp_type}.{idx}.{param}"
             except StopIteration:
                 pass
 
         # 2. Scale to Internal Units
-        final_parts = translated_path.split('.')
+        final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             # Use the original path to check if the user provided an explicit unit in yaml
@@ -215,31 +626,93 @@ class ConfigManager:
         else:
             internal_value = float(value)
 
-        # 3. Store the fully processed, ready-to-use hint
+        return translated_path, internal_value
+
+    def add_hint(self, path, value, rank=RANK_DERIVED_DATA):
+        """
+        API for components to register their data-driven guesses.
+        Converts human-readable paths to strict indices and scales to internal units.
+        """
+        translated_path, internal_value = self._translate_and_scale(
+            path, value
+        )
+
+        # Store the fully processed, ready-to-use hint
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
 
+    def add_seed_hints(self, seed_dicts):
+        """Register K per-seed observable sets for multi-seed sampling (P4).
+
+        `seed_dicts` is a list of length K; each entry maps a parameter path
+        (human-readable or index form) to a value in that parameter's user
+        unit.  These feed the relaxation engine as one complete start point per
+        seed (see finalize_user_params), at RANK_DERIVED_DATA -- the same tier
+        as ``add_hint``'s default, because the MMEXOFAST loader (the primary
+        caller) is a derivation from the data, not a user statement.  Every
+        user entry therefore outranks a seed.  Paths absent from a given seed
+        fall back to the base (defaults/hints/user) solution for that seed.
+        """
+        processed = []
+        for d in seed_dicts:
+            pd = {}
+            for path, value in d.items():
+                tpath, ival = self._translate_and_scale(path, value)
+                pd[tpath] = ival
+            processed.append(pd)
+        self.seed_hint_sets = processed
+
+    def seed_start_value(self, path, seed=0):
+        """Seed-hint start value for ``path`` in USER units, or None.
+
+        ``add_seed_hints`` stores values in index-form paths and INTERNAL
+        units (via ``_translate_and_scale``).  Stage-1 consumers that read
+        raw ``user_params`` entries -- which are still in user units before
+        ``finalize_user_params`` runs -- use this as the matching-unit
+        fallback (e.g. the mulens flux bootstrap needs alpha in degrees,
+        the MulensModel convention, not the internal radians).
+        """
+        sets = self.seed_hint_sets or []
+        if seed >= len(sets):
+            return None
+        tpath, _ = self._translate_and_scale(path, 0.0)
+        if tpath not in sets[seed]:
+            return None
+        parts = tpath.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        val = float(sets[seed][tpath])
+        return val / factor if factor else val
+
     def add_scale_hint(self, path, scale):
         """
-        Register a context-appropriate init_scale for a parameter.
+        Register a context-appropriate PRELIMINARY init_scale for a parameter.
 
-        Overrides the defaults.yaml init_scale but yields to an explicit
-        init_scale provided by the user in their params file.  Use this to
-        set physically meaningful sampling scales that differ from the generic
-        stellar defaults (e.g. bulge distances need ~500 pc, not 0.1 pc).
+        Overrides the defaults.yaml init_scale.  Use this to set physically
+        meaningful scales that differ from the generic stellar defaults (e.g.
+        bulge distances need ~500 pc, not 0.1 pc).  Sampled parameters get
+        their real scale from the whitening probe at startup regardless; the
+        hint seeds that probe and, via the forward Jacobian pass, sets the
+        soft-bound barrier steepness of derived parameters.
         """
         translated_path = path
-        parts = path.split('.')
+        parts = path.split(".")
         if len(parts) == 3:
             comp_type, name, param = parts
             try:
-                idx = next(i for i, c in enumerate(self.system_config.get(comp_type, []))
-                           if str(c.get("name")) == str(name) or str(i) == str(name))
+                idx = next(
+                    i
+                    for i, c in enumerate(
+                        self.system_config.get(comp_type, [])
+                    )
+                    if str(c.get("name")) == str(name) or str(i) == str(name)
+                )
                 translated_path = f"{comp_type}.{idx}.{param}"
             except StopIteration:
                 pass
 
-        final_parts = translated_path.split('.')
+        final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
             factor = self.get_conversion_factor(c_type, p_name, full_path=path)
@@ -256,7 +729,21 @@ class ConfigManager:
             else:
                 base[k] = v
 
-    def resolve(self, component_type, param_name, shape=(), internal_overrides=None, names=None):
+    def resolve(
+        self,
+        component_type,
+        param_name,
+        shape=(),
+        internal_overrides=None,
+        names=None,
+        element=None,
+    ):
+        # `element` targets a single specific instance when resolving with
+        # shape=(): the per-element user-param keys are built with that index
+        # instead of the local loop index.  Without it, resolving star.1.age
+        # one element at a time would read star.0.age's user entry and bleed
+        # element-0 overrides (e.g. sigma: 0) into its siblings.
+
         # 1. Grab an isolated copy of the global root default blueprint
         base = copy.deepcopy(self.base_defaults.get(param_name, {}))
 
@@ -279,12 +766,19 @@ class ConfigManager:
                 base["expressions"] = copy.deepcopy(root_cfg["expressions"])
 
         n_elements = int(np.prod(shape)) if shape != () else 1
+
+        def _eff_idx(i):
+            return element if (element is not None and n_elements == 1) else i
+
         base_unit_str = base.get("unit", "")
         new_unit_str = None
 
         keys_to_check_global = []
         for i in range(n_elements):
-            keys = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            keys = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
             keys_to_check_global.extend(keys)
@@ -316,18 +810,24 @@ class ConfigManager:
         }
 
         tuning_keys = ["initval", "init_scale"]
-        physics_keys = ["lower", "upper", "mu", "sigma"]
+        # bound_scale is a physics key: it sets soft-bound barrier steepness,
+        # a real posterior term (unlike init_scale, which is preliminary
+        # conditioning only and not user-facing).
+        physics_keys = ["lower", "upper", "mu", "sigma", "bound_scale"]
         all_numeric = tuning_keys + physics_keys
 
         for key in all_numeric:
             val = base.get(key)
             if val is not None:
-                resolved[key] = np.full(n_elements, float(val) * unit_scaling, dtype=float)
+                resolved[key] = np.full(
+                    n_elements, float(val) * unit_scaling, dtype=float
+                )
             else:
                 resolved[key] = None
 
         def apply_value(key, current_arr, idx, new_val):
-            if new_val is None: return current_arr
+            if new_val is None:
+                return current_arr
             if current_arr is None:
                 current_arr = np.full(n_elements, np.nan, dtype=float)
                 resolved[key] = current_arr
@@ -343,60 +843,105 @@ class ConfigManager:
             return current_arr
 
         resolved["auto_estimated"] = False
+        # Component-computed bounds that were actually applied, so a user bound
+        # they later clip can be reported instead of silently overridden (the
+        # clip itself is deliberate: these are validity limits, e.g.
+        # Instrument._register_noise's jitter-variance floor).
+        override_bounds = {}
         if internal_overrides:
-            resolved["auto_estimated"] = True
             for key in all_numeric:
                 if key in internal_overrides:
                     val = internal_overrides[key]
                     for i in range(n_elements):
-                        v = val[i] if isinstance(val, (list, np.ndarray)) else val
-                        v_scaled = float(v) * unit_scaling
-                        apply_value(key, resolved[key], i, v_scaled)
+                        v = (
+                            val[i]
+                            if isinstance(val, (list, np.ndarray))
+                            else val
+                        )
+                        if v is None:
+                            continue
+                        v = float(v)
+                        # NaN means "leave this element alone".  Component-supplied
+                        # overrides are frequently per-element and sparse (e.g.
+                        # Instrument._register_gp pins only the files that did not
+                        # opt into a GP term); NaN lets one array express that
+                        # without inventing a value for the others.  +/-inf is a
+                        # legitimate bound and is NOT skipped.
+                        if np.isnan(v):
+                            continue
+                        resolved["auto_estimated"] = True
+                        apply_value(key, resolved[key], i, v * unit_scaling)
+                        if key in ("lower", "upper"):
+                            override_bounds[(key, i)] = v * unit_scaling
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
         # before passing to Parameter, which will re-apply the same factor.
         # This is distinct from unit_scaling (base→user), which only applies to
         # default values read from defaults.yaml.
-        internal_factor = self.get_conversion_factor(component_type, param_name) or 1.0
+        internal_factor = (
+            self.get_conversion_factor(component_type, param_name) or 1.0
+        )
 
         # Apply Jacobian-propagated scales (lowest priority after defaults,
         # overridden by scale hints and user params below).
         if self.propagated_scales:
             for i in range(n_elements):
-                prop_keys = [f"{component_type}.{param_name}",
-                             f"{component_type}.{i}.{param_name}"]
+                prop_keys = [
+                    f"{component_type}.{param_name}",
+                    f"{component_type}.{_eff_idx(i)}.{param_name}",
+                ]
                 if names and i < len(names):
-                    prop_keys.append(f"{component_type}.{names[i]}.{param_name}")
+                    prop_keys.append(
+                        f"{component_type}.{names[i]}.{param_name}"
+                    )
                 for k in prop_keys:
                     if k in self.propagated_scales:
-                        apply_value("init_scale", resolved["init_scale"], i,
-                                    self.propagated_scales[k] / internal_factor)
+                        apply_value(
+                            "init_scale",
+                            resolved["init_scale"],
+                            i,
+                            self.propagated_scales[k] / internal_factor,
+                        )
                         break
 
         # Apply scale hints: context-appropriate init_scales from components
         # (e.g. bulge distances). They override defaults.yaml but yield to the
         # user's explicit init_scale below.
         for i in range(n_elements):
-            scale_keys = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            scale_keys = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
                 scale_keys.append(f"{component_type}.{names[i]}.{param_name}")
             for k in scale_keys:
                 if k in self.scale_hints:
-                    apply_value("init_scale", resolved["init_scale"], i,
-                                self.scale_hints[k] / internal_factor)
+                    apply_value(
+                        "init_scale",
+                        resolved["init_scale"],
+                        i,
+                        self.scale_hints[k] / internal_factor,
+                    )
                     break
 
         for i in range(n_elements):
-            keys_to_check = [f"{component_type}.{param_name}", f"{component_type}.{i}.{param_name}"]
+            keys_to_check = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
             if names and i < len(names):
-                keys_to_check.append(f"{component_type}.{names[i]}.{param_name}")
+                keys_to_check.append(
+                    f"{component_type}.{names[i]}.{param_name}"
+                )
 
             for k in keys_to_check:
                 if k in self.user_params:
                     ov = self.user_params[k]
-                    if ov is None: continue
-                    if not isinstance(ov, dict): ov = {"initval": ov}
+                    if ov is None:
+                        continue
+                    if not isinstance(ov, dict):
+                        ov = {"initval": ov}
 
                     resolved["user_modified"] = True
                     if any(pk in ov for pk in physics_keys):
@@ -404,13 +949,37 @@ class ConfigManager:
 
                     for key in all_numeric:
                         if key in ov:
-                            apply_value(key, resolved[key], i, ov[key])
+                            v_ov = ov[key]
+                            # List-valued initvals are per-seed start points
+                            # (P4 multi-seed sampling); bounds/scales and the
+                            # canonical single start derive from seed 0.
+                            if isinstance(v_ov, (list, tuple)):
+                                v_ov = v_ov[0]
+                            apply_value(key, resolved[key], i, v_ov)
+                            # apply_value keeps the TIGHTER of the two bounds.
+                            # When the winner is a component-computed one, say
+                            # so: these are validity limits (the likelihood is
+                            # NaN past them), but the user asked for something
+                            # else and deserves to hear that it did not apply.
+                            if (key, i) in override_bounds and not np.isclose(
+                                resolved[key][i], float(v_ov)
+                            ):
+                                logger.warning(
+                                    f"[{component_type}.{_eff_idx(i)}."
+                                    f"{param_name}] user {key}={float(v_ov):g}"
+                                    f" is outside the component-computed "
+                                    f"validity bound "
+                                    f"{override_bounds[(key, i)]:g}; using "
+                                    f"{resolved[key][i]:g}."
+                                )
 
                     for str_key in ["unit", "latex", "description"]:
                         if str_key in ov:
                             if n_elements > 1:
                                 if not isinstance(resolved[str_key], list):
-                                    resolved[str_key] = [resolved[str_key]] * n_elements
+                                    resolved[str_key] = [
+                                        resolved[str_key]
+                                    ] * n_elements
                                 resolved[str_key][i] = ov[str_key]
                             else:
                                 resolved[str_key] = ov[str_key]
@@ -419,21 +988,38 @@ class ConfigManager:
                         if bool_key in ov:
                             resolved[bool_key] = ov[bool_key]
 
-                    if "sigma" in ov and "init_scale" not in ov and resolved["sigma"] is not None:
-                        apply_value("init_scale", resolved.get("init_scale"), i, ov["sigma"])
+                    # A user-supplied Gaussian prior width doubles as the
+                    # best preliminary scale (user init_scale entries were
+                    # stripped at construction, so sigma is the only user
+                    # signal left).
+                    if "sigma" in ov and resolved["sigma"] is not None:
+                        apply_value(
+                            "init_scale",
+                            resolved.get("init_scale"),
+                            i,
+                            ov["sigma"],
+                        )
 
                     # If user gave mu but not initval, start the chain at mu rather
                     # than the defaults.yaml value — the user's prior center is always
                     # a better starting point than an arbitrary global default.
                     if "mu" in ov and "initval" not in ov:
-                        apply_value("initval", resolved["initval"], i, ov["mu"])
+                        apply_value(
+                            "initval", resolved["initval"], i, ov["mu"]
+                        )
 
         return resolved
 
-    def get_conversion_factor(self, component_type, param_name, full_path=None):
+    def get_conversion_factor(
+        self, component_type, param_name, full_path=None
+    ):
         u_str = None
         # 1. Check if the user explicitly provided a unit in their config
-        if full_path and full_path in self.user_params and isinstance(self.user_params[full_path], dict):
+        if (
+            full_path
+            and full_path in self.user_params
+            and isinstance(self.user_params[full_path], dict)
+        ):
             u_str = self.user_params[full_path].get("unit")
 
         # 2. Fallback to defaults
@@ -444,14 +1030,26 @@ class ConfigManager:
 
         i_str = param_cfg.get("internal_unit", "")
 
-        if not u_str or not i_str: return 1.0
+        if not u_str or not i_str:
+            return 1.0
 
         try:
-            if "dex" in u_str or "dex" in i_str: return 1.0
+            if "dex" in u_str or "dex" in i_str:
+                return 1.0
             # Returns the multiplier to convert FROM user TO internal
             return u.Unit(u_str).to(u.Unit(i_str))
         except Exception:
             return 1.0
+
+    def canonical_key(self, key):
+        """Index-form spelling of ``key`` under THIS manager's system config.
+
+        Thin instance wrapper around :func:`canonical_param_key`, for callers
+        that hold a ConfigManager and need to look a user-facing (possibly
+        name-form) path up in ``self.user_params``, which is stored in index
+        form.
+        """
+        return canonical_param_key(key, self.system_config)
 
     @staticmethod
     def standardize_param_names(user_params, config):
@@ -471,6 +1069,17 @@ class ConfigManager:
 
         After this function, self.user_params contains only indexed or flat-dict
         keys internally.  The 2-part form is purely a user convenience.
+
+        EVERY pass deepcopies the entry.  The returned dict must share no object
+        with the caller's, because downstream code writes through these entries
+        in place: extract_links deletes the link-expression fields, and
+        finalize_user_params' inject-back sets initval/derived.  Aliasing them
+        would (a) strip a caller's link strings out of their own dict, so a
+        second ConfigManager built from it sees no links and a hard link
+        silently degrades to a fixed parameter, and (b) feed the previous
+        solve's answer back in as RANK_USER input.  Pass 2 additionally needs
+        the copy per broadcast instance, so the last instance's write does not
+        clobber all the others (e.g. per-source radii solved from rho).
         """
         if not user_params:
             return {}
@@ -495,17 +1104,73 @@ class ConfigManager:
 
             comp_list = config[comp_type]
             if not isinstance(comp_list, list):
-                standardized[key] = val  # flat-dict component 3-part key: keep as-is
+                # flat-dict component 3-part key: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
-            try:
-                idx = next(
-                    i for i, c in enumerate(comp_list)
-                    if isinstance(c, dict) and c.get("name") == comp_name
+            # An UNKNOWN INSTANCE NAME is as fatal as an unknown component
+            # prefix, and for the same reason.  canonical_param_key returns
+            # such a key unchanged (deliberately -- it is also the lookup
+            # helper behind ConfigManager.canonical_key, which must stay
+            # total), so it used to be stored verbatim, registered as an inert
+            # leaf symbol by finalize_user_params, and never reach any
+            # parameter: `star.Aa.teff` silently dropped the user's value,
+            # bounds, mu and sigma.  A typo'd PRIOR that changes the posterior
+            # without a word is the worst version of this, so refuse to run.
+            #
+            # The accepted name set is every `name:` DECLARED ANYWHERE in the
+            # config, not just this component's own list, and that width is
+            # load-bearing -- a component's per-element names need not be its
+            # config entries' names:
+            #   * `lens.SourceA.t_0` (examples/ob161003) addresses element j
+            #     of the lens's per-source vectors by the SOURCE STAR's name;
+            #     the lens block itself has one entry, named "Lens".  The
+            #     per-parameter `names` list is a manifest option and is not
+            #     known until stage 2, long after this runs.
+            #   * `mann.B.ks_offset` names a mann block that has no `name:`
+            #     yet: this ConfigManager is built BEFORE the component loop
+            #     in System.__init__, and mann/torres derive their name from
+            #     their `star:` key inside their own __init__.
+            # Both are covered because the borrowed name is always some other
+            # component's instance name.  A genuine typo is a string that
+            # appears nowhere, which is what we reject.  Numeric index forms
+            # (`star.0.teff`) are pass-through by design.
+            if (
+                not comp_name.isdigit()
+                and canonical_param_key(key, config) == key
+                and comp_name not in _declared_instance_names(config)
+            ):
+                own = [
+                    e["name"]
+                    for e in comp_list
+                    if isinstance(e, dict) and e.get("name") is not None
+                ]
+                own_msg = (
+                    f"'{comp_type}' instances are: "
+                    f"{', '.join(repr(n) for n in own)}."
+                    if own
+                    else f"No '{comp_type}' entry declares a 'name:', so its "
+                    f"instances are addressable by index only."
                 )
-                standardized[f"{comp_type}.{idx}.{param_name}"] = val
-            except StopIteration:
-                standardized[key] = val  # numeric index or unknown name: keep as-is
+                raise ValueError(
+                    f"\n!!! STRICT NAMING ERROR !!!\n"
+                    f"Parameter '{key}' names the instance '{comp_name}', "
+                    f"which is not declared by any component in your system "
+                    f"configuration.\n"
+                    f"{own_msg} "
+                    f"Indices 0-{len(comp_list) - 1} also work "
+                    f"(e.g. '{comp_type}.0.{param_name}'), as does the "
+                    f"instance-less broadcast form "
+                    f"'{comp_type}.{param_name}'.\n"
+                    f"Fix the spelling, or delete the entry: it is otherwise "
+                    f"ignored outright, silently discarding its value, bounds "
+                    f"and prior."
+                )
+
+            # Numeric index or resolved name: canonical_param_key returns the
+            # index form.  deepcopy so broadcast instances never share one
+            # dict (see the aliasing fix in #76).
+            standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
         # Pass 2: expand 2-part keys for list components.
         # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
@@ -518,18 +1183,19 @@ class ConfigManager:
             comp_list = config.get(comp_type)
 
             if not isinstance(comp_list, list):
-                standardized[key] = val  # flat-dict or unknown component: keep as-is
+                # flat-dict or unknown component: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
             for i in range(len(comp_list)):
                 indexed_key = f"{comp_type}.{i}.{param_name}"
                 if indexed_key not in standardized:
-                    standardized[indexed_key] = val
+                    standardized[indexed_key] = copy.deepcopy(val)
 
         # Pass 3: 1-part and other unhandled keys (e.g. 'run').
         for key, val in user_params.items():
             if "." not in key and key not in standardized:
-                standardized[key] = val
+                standardized[key] = copy.deepcopy(val)
 
         return standardized
 
@@ -537,6 +1203,11 @@ class ConfigManager:
         """
         Called by the System object AFTER all components have registered their hints.
         """
+        # Reset structured diagnostics for this solve.  resolve_and_validate
+        # runs once per seed and appends contradictions here; _record_diagnostic
+        # dedupes so repeated seeds do not multiply identical entries.
+        self.diagnostics = []
+
         flat_params = {}
         name_to_index = {}
 
@@ -553,8 +1224,14 @@ class ConfigManager:
             if data is None:
                 continue
             val = data.get("initval") if isinstance(data, dict) else data
+            # A list-valued initval is a set of per-seed start points (P4
+            # multi-seed sampling).  The base flat_params below seeds the
+            # relaxation engine with seed 0; _build_seed_overrides re-injects
+            # each seed's element as a RANK_USER override in the K-solve loop.
+            if isinstance(val, (list, tuple)):
+                val = val[0]
             if val is not None:
-                parts = path.split('.')
+                parts = path.split(".")
                 translated_path = path
 
                 if len(parts) == 3:
@@ -565,15 +1242,33 @@ class ConfigManager:
 
                 sym = self.master_symbol_map.get(translated_path)
                 if sym:
-                    c_type = translated_path.split('.')[0]
-                    p_name = translated_path.split('.')[-1]
-                    factor = self.get_conversion_factor(c_type, p_name, full_path=path)
+                    c_type = translated_path.split(".")[0]
+                    p_name = translated_path.split(".")[-1]
+                    factor = self.get_conversion_factor(
+                        c_type, p_name, full_path=path
+                    )
                     internal_val = float(val) * factor
-                    logger.debug(f"Mapped: {path} -> {translated_path} -> {sym} = {internal_val} (internal)")
+                    logger.debug(
+                        f"Mapped: {path} -> {translated_path} -> {sym} = {internal_val} (internal)"
+                    )
                     flat_params[sym] = internal_val
                 else:
                     if "." in path:
-                        logger.debug(f"Unmapped: {path} (tried translated: {translated_path})")
+                        logger.debug(
+                            f"Unmapped: {path} (tried translated: {translated_path})"
+                        )
+
+        # --- REGISTER LINK TARGETS AND DEPENDENCIES AS SYMBOLS ---
+        # A link target/dep may not appear in any component's symbol map
+        # (e.g. star.age has no symbolic relations); registering it here lets
+        # the relaxation engine seed it from defaults.yaml and solve the
+        # directed link assignments.
+        for target, fields in self.links.items():
+            for plink in fields.values():
+                for path in [target] + list(plink.dep_paths):
+                    if path not in self.master_symbol_map:
+                        self.master_symbol_map[path] = sp.Symbol(path)
+                        logger.debug(f"Registered link symbol: {path}")
 
         # --- FALLBACK TO LEAFS ---
         for path in list(self.user_params.keys()):
@@ -584,20 +1279,59 @@ class ConfigManager:
                 # Push the user's value into the solver's initial state
                 data = self.user_params[path]
                 val = data.get("initval") if isinstance(data, dict) else data
+                if isinstance(val, (list, tuple)):
+                    val = val[0]  # seed 0; see per-seed handling below
                 if val is not None:
-                    c_type = path.split('.')[0]
-                    p_name = path.split('.')[-1]
-                    factor = self.get_conversion_factor(c_type, p_name, full_path=path)
-                    flat_params[self.master_symbol_map[path]] = float(val) * factor
+                    c_type = path.split(".")[0]
+                    p_name = path.split(".")[-1]
+                    factor = self.get_conversion_factor(
+                        c_type, p_name, full_path=path
+                    )
+                    flat_params[self.master_symbol_map[path]] = (
+                        float(val) * factor
+                    )
 
-        resolved_flat = self.resolve_and_validate_parameters({str(k): v for k, v in flat_params.items()})
+        base_flat = {str(k): v for k, v in flat_params.items()}
+
+        # --- MULTI-SEED SOLVE (P4) ---
+        # Build the K per-seed override sets in their two provenance channels
+        # (user initval lists at RANK_USER, component/MMEXOFAST seed hints at
+        # RANK_DERIVED_DATA; both fall back to the shared base_flat for any
+        # path they do not touch), then run the relaxation engine once per
+        # seed inside this single prepare() call so every seed shares one symbol
+        # environment (guards against the known cross-build nondeterminism).
+        # Bounds/scales are taken from seed 0 only -- seeds move the START, never
+        # the bounds -- so self.propagated_scales is restored to seed 0's after
+        # the loop.
+        K, user_overrides, seed_hint_overrides = self._build_seed_overrides(
+            name_to_index
+        )
+
+        # Solve seed 0 LAST so the final self.propagated_scales and any
+        # init_scale synced back into self.user_params by _execute_solve both
+        # reflect seed 0 -- the seed whose bounds/scales the model actually
+        # uses.  Only start positions vary between seeds; bounds/scales do not.
+        seed_resolved = [None] * K
+        for k in list(range(1, K)) + [0]:
+            flat_k = dict(base_flat)
+            flat_k.update(user_overrides[k])
+            seed_resolved[k] = self.resolve_and_validate_parameters(
+                flat_k, seed_hints=seed_hint_overrides[k]
+            )
+
+        # seed 0 remains the canonical single start injected back into
+        # user_params below; the full K-set is stored for get_raw_starts.
+        resolved_flat = seed_resolved[0]
+        self.seed_resolved = seed_resolved if K > 1 else None
+        if K > 1:
+            logger.info(f"Multi-seed sampling: solved {K} seed start points.")
 
         logger.debug("Solver finished.")
 
         # 4. INJECT BACK SAFELY
         for sym_node, val in resolved_flat.items():
             path = str(sym_node)
-            parts = path.split('.')
+            parts = path.split(".")
             final_path = path
 
             if len(parts) == 3:
@@ -606,7 +1340,13 @@ class ConfigManager:
                     if c_type == comp_type and str(i) == str(idx):
                         final_path = f"{comp_type}.{c_name}.{param}"
                         break
-                factor = self.get_conversion_factor(comp_type, param, full_path=final_path)
+                # `path` (index form), not `final_path` (name form): a user
+                # `unit:` override lives under the standardized index key, so
+                # looking it up by name silently falls back to the default
+                # unit and the injected start is off by that factor.
+                factor = self.get_conversion_factor(
+                    comp_type, param, full_path=path
+                )
                 user_val = val / factor
             else:
                 user_val = val
@@ -616,12 +1356,17 @@ class ConfigManager:
             # Check both so we don't create a spurious duplicate entry.
             existing_key = None
             for try_key in (final_path, path):
-                if try_key in self.user_params and isinstance(self.user_params[try_key], dict):
+                if try_key in self.user_params and isinstance(
+                    self.user_params[try_key], dict
+                ):
                     existing_key = try_key
                     break
 
             if existing_key is None:
-                self.user_params[final_path] = {"initval": user_val, "derived": True}
+                self.user_params[final_path] = {
+                    "initval": user_val,
+                    "derived": True,
+                }
             else:
                 existing = self.user_params[existing_key]
                 # Don't clobber a user-specified Gaussian prior: if the user gave
@@ -632,6 +1377,148 @@ class ConfigManager:
                 else:
                     existing["initval"] = user_val
                     existing["derived"] = True
+
+        # --- SNAPSHOT USER-LINK EXPRESSIONS FOR STATIC FIELDS ---
+        # sigma links are static by design; lower / upper links
+        # additionally need a numeric snapshot so the logit transform can be
+        # set up (the dynamic tensor bound replaces it at runtime).
+        for target, fields in self.links.items():
+            entry = self.user_params.get(target)
+            if not isinstance(entry, dict):
+                entry = {}
+                self.user_params[target] = entry
+            for fld, plink in fields.items():
+                if fld in ("initval", "mu"):
+                    continue  # handled by the directed relaxation pass
+                if not all(d in resolved_flat for d in plink.dep_paths):
+                    logger.warning(
+                        f"Link '{target}.{fld} = {plink.expr_str}' could not be "
+                        f"snapshot: unresolved dependencies "
+                        f"{[d for d in plink.dep_paths if d not in resolved_flat]}."
+                    )
+                    continue
+                try:
+                    val_int = float(
+                        self._link_internal_expr(plink).evalf(
+                            subs=resolved_flat
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Link '{target}.{fld} = {plink.expr_str}' snapshot "
+                        f"evaluation failed: {e}"
+                    )
+                    continue
+                tparts = target.split(".")
+                tf = self.get_conversion_factor(
+                    tparts[0], tparts[-1], full_path=target
+                )
+                entry[fld] = val_int / tf
+                logger.debug(
+                    f"Link snapshot: {target}.{fld} = {entry[fld]:.6g} (user units)"
+                )
+
+    def _build_seed_overrides(self, name_to_index):
+        """Assemble the per-seed override sets for multi-seed sampling.
+
+        Two sources feed the seeds, and they are kept in SEPARATE channels
+        because they carry different provenance:
+          1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
+             RANK_USER, merged into the engine's user_provided_params.
+          2. Component seed hints (config_manager.seed_hint_sets), e.g. the
+             MMEXOFAST loader -- RANK_DERIVED_DATA, passed to the engine as
+             `seed_hints` and layered in with the other data-driven hints.
+
+        Merging them into one RANK_USER dict (as this did until the 2.1.2
+        review fix) had two consequences: a seed silently clobbered a user's
+        *scalar* initval for the same path -- the scalar lives in base_flat,
+        which the merged override dict overwrote -- and a seed that disagreed
+        with a genuine user entry made every symbol of the connecting relation
+        RANK_USER, tripping the "over-constrained" contradiction clause.
+
+        Returns (K, user_overrides, seed_hint_overrides) where K is the seed
+        count and each override list has length K of {internal_path_str:
+        internal_value} dicts.  Every initval list must have length K or 1
+        (length-1 broadcasts to all seeds).  When no list initvals and no seed
+        hints exist, K == 1 and both lists are [{}], exactly reproducing the
+        legacy single-solve behavior.
+        """
+        # 1. User initval lists -> {sym_path: [internal values]}
+        user_lists = {}
+        for path, data in self.user_params.items():
+            if not isinstance(data, dict):
+                continue
+            iv = data.get("initval")
+            if not isinstance(iv, (list, tuple)):
+                continue
+            sym_path = self._to_symbol_path(path, name_to_index)
+            if sym_path is None:
+                logger.warning(
+                    f"List initval on '{path}' is not a known parameter path; "
+                    f"multi-seed override ignored."
+                )
+                continue
+            c_type, p_name = sym_path.split(".")[0], sym_path.split(".")[-1]
+            factor = self.get_conversion_factor(c_type, p_name, full_path=path)
+            user_lists[sym_path] = [float(x) * factor for x in iv]
+
+        mm_sets = self.seed_hint_sets or []
+
+        # 2. Determine K and validate list lengths.
+        Ku = max((len(v) for v in user_lists.values()), default=1)
+        Km = len(mm_sets)
+        K = max(Ku, Km, 1)
+
+        for p, v in user_lists.items():
+            if len(v) not in (1, Ku):
+                raise ValueError(
+                    f"Inconsistent seed count: initval list for '{p}' has "
+                    f"length {len(v)}, expected {Ku} or 1. All initval lists in "
+                    f"a params file must share one length K (or be length 1)."
+                )
+        if Ku > 1 and Km > 1 and Ku != Km:
+            raise ValueError(
+                f"Seed-count mismatch: {Ku} user initval seeds vs {Km} "
+                f"component seed hints. Provide matching counts (or length 1)."
+            )
+
+        # 3. Split per seed.  No merge: the two channels enter the engine at
+        #    different ranks, and a path in both is resolved by rank, not by
+        #    dict order (a user list is RANK_USER and wins).
+        user_overrides = []
+        seed_hint_overrides = []
+        for k in range(K):
+            if mm_sets:
+                src = mm_sets[k] if len(mm_sets) > 1 else mm_sets[0]
+                seed_hint_overrides.append(dict(src))
+            else:
+                seed_hint_overrides.append({})
+            user_overrides.append(
+                {
+                    p: (vals[k] if len(vals) > 1 else vals[0])
+                    for p, vals in user_lists.items()
+                }
+            )
+
+        return K, user_overrides, seed_hint_overrides
+
+    def _to_symbol_path(self, path, name_to_index):
+        """Translate a user_params key to the internal-index path string used by
+        the relaxation engine (e.g. 'lens.Lens.t_0' -> 'lens.0.t_0').  Returns
+        None if the path does not correspond to a registered symbol."""
+        translated = path
+        parts = path.split(".")
+        if len(parts) == 3:
+            comp_type, name, param = parts
+            if (comp_type, name) in name_to_index:
+                translated = (
+                    f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
+                )
+        if translated in self.master_symbol_map:
+            return translated
+        if path in self.master_symbol_map:
+            return path
+        return None
 
     def prune_dependency_cycles(self, cycle_nodes):
         """
@@ -645,98 +1532,381 @@ class ConfigManager:
                 self.dependencies[node] = []
                 logger.debug(f"[Pruning] Severed dependency cycle at: {node}")
 
-    def audit_scales(self):
-        """
-        Validates that all SAMPLED parameters have a valid init_scale.
-        Warns if the user explicitly provided an init_scale for a DERIVED, FIXED, or AUXILIARY parameter.
-        """
-        missing_scales = []
+    def _strip_user_init_scales(self):
+        """Warn about and drop any init_scale entries in the user's params.
 
-        # 1. Identify which paths the user explicitly provided an init_scale for
-        user_scale_paths = []
-        standardized_user_params = self.standardize_param_names(self.raw_user_params, self.system_config)
-        for k, v in standardized_user_params.items():
+        init_scale is obsolete as a user-facing knob: the whitening scale is
+        measured directly from the data at startup (see exozippy/whitening.py)
+        and any user value would be overwritten anyway.  Old params files keep
+        working -- the key is simply ignored with a warning.  Entries are
+        removed via a rebuilt per-parameter dict; the caller's original dict
+        (raw_user_params) is already insulated by standardize_param_names,
+        which deepcopies every entry, so this is belt and braces for the
+        no-config path that skips standardization.
+        """
+        stripped = []
+        for k, v in list(self.user_params.items()):
             if isinstance(v, dict) and "init_scale" in v:
-                user_scale_paths.append(k)
-
-        # 2. Audit all parameters in the symbol map
-        for path_str in self.master_symbol_map.keys():
-            parts = path_str.split('.')
-            comp_type = parts[0]
-            param_name = parts[-1]
-
-            cfg = self.resolve(comp_type, param_name)
-
-            # --- Replicate Parameter.is_sampled logic ---
-            # 1. is_config_present: Internal math variables (logradius, etc.) won't exist in defaults.yaml
-            # 2. is_fixed: Has a hardcoded 'value'
-            # 3. is_derived: Has 'expressions' to calculate it
-            is_config_present = bool(cfg)
-            is_fixed = cfg.get("value") is not None
-            is_derived = bool(cfg.get("expressions"))
-
-            is_sampled = is_config_present and not is_fixed and not is_derived
-
-            # Check for a valid scale
-            scale_val = cfg.get("init_scale")
-            has_scale = scale_val is not None and not np.any(np.isnan(np.atleast_1d(scale_val)))
-
-            # Issue targeted warnings based on exactly why the scale is being ignored
-            if path_str in user_scale_paths:
-                if is_derived:
-                    logger.debug(f"init_scale for '{path_str}' will be back-propagated to sampled parents.")
-                elif is_fixed:
-                    logger.warning(f"init_scale for '{path_str}' ignored — it is FIXED; the sampler will not step here.")
-                elif not is_config_present:
-                    logger.warning(f"init_scale for '{path_str}' ignored — it is an internal AUXILIARY variable.")
-
-            # We ONLY halt if it is a truly sampled parameter missing its scale
-            if is_sampled and not has_scale:
-                missing_scales.append(path_str)
-
-        if missing_scales:
-            raise ValueError(
-                f"\n!!! CRITICAL CONFIGURATION ERROR !!!\n"
-                f"The following SAMPLED parameters lack a valid 'init_scale'.\n"
-                f"Missing: {missing_scales}\n"
-                f"Check 'defaults.yaml' or provide an 'init_scale' in your config file."
+                self.user_params[k] = {
+                    kk: vv for kk, vv in v.items() if kk != "init_scale"
+                }
+                stripped.append(k)
+        if stripped:
+            logger.warning(
+                f"'init_scale' is obsolete and was ignored for: {stripped}. "
+                f"Whitening scales are now measured directly from the data at "
+                f"startup; remove init_scale from your params file."
             )
 
-    def resolve_and_validate_parameters(self, user_provided_params, tolerance=1e-3):
+    def _record_diagnostic(self, severity, message, param_paths):
+        """Append a structured diagnostic (deduped) for the solve/validate API.
+
+        severity is one of "error" | "warning" | "info"; param_paths is a list
+        of the parameter paths involved.  Duplicate entries (same severity,
+        message, and paths) -- e.g. the same contradiction seen once per seed
+        -- collapse to a single record.
+        """
+        entry = {
+            "severity": severity,
+            "message": message,
+            "param_paths": list(param_paths),
+        }
+        if entry not in self.diagnostics:
+            self.diagnostics.append(entry)
+
+    def _provenance_label(self, rank):
+        """Map a numeric provenance rank to a coarse source label."""
+        if rank is None:
+            return "default"
+        if rank >= RANK_USER:
+            return "user"
+        # Microlensing distance hint (rank 30) and data-derived estimates
+        # (RANK_DERIVED_DATA = 60) both come from the data channel.
+        if rank == RANK_DERIVED_DATA or rank == 30:
+            return "data"
+        if rank > RANK_DEFAULT:
+            return "solved"
+        return "default"
+
+    def export_solution(self, derived_params=None):
+        """Export the resolved parameter solution as JSON-friendly dicts.
+
+        `derived_params`, when given, is the set of `(component_prefix,
+        param_name)` pairs the built manifests actually derive
+        (`System.derived_params()`).  Pass it whenever a System is in scope:
+        the fallback -- "this parameter has an expressions: block in its
+        defaults.yaml" -- is only an approximation, since a component may
+        declare the same parameter free in one topology and derived in
+        another (see planet.mass's linear vs log_q coordinate).
+
+        Returns a dict with:
+          - "parameters": {user_path: {value, unit, internal_unit, lower,
+            upper, init_scale, sigma, mu, fixed, derived, provenance}} where
+            provenance is {rank, label, relation}.  All numeric fields are in
+            the parameter's user unit (as reported by resolve()).
+          - "seeds": a list of {user_path: value} start points, present only
+            when multi-seed sampling produced more than one seed.
+
+        Reads only in-memory state left behind by finalize_user_params; it does
+        NOT build the PyMC model.  Must be called after System.prepare().
+
+        Note: the relaxation engine has a known cross-build nondeterminism (two
+        identical prepares may pick different derived bounds), so the exported
+        bounds/values for solved quantities are one valid solution, not a
+        canonical one.  See the solve_api module docstring.
+        """
+
+        def _clean(x):
+            if x is None:
+                return None
+            try:
+                xf = float(x)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(xf):
+                return None
+            return xf
+
+        # Build an index -> name map per component for readable paths.
+        idx_to_name = {}
+        for comp_key, entries in (self.system_config or {}).items():
+            if isinstance(entries, list):
+                for i, c in enumerate(entries):
+                    if isinstance(c, dict) and "name" in c:
+                        idx_to_name[(comp_key, str(i))] = str(c["name"])
+
+        def _display_path(internal_path):
+            parts = internal_path.split(".")
+            if len(parts) == 3 and (parts[0], parts[1]) in idx_to_name:
+                return f"{parts[0]}.{idx_to_name[(parts[0], parts[1])]}.{parts[2]}"
+            return internal_path
+
+        parameters = {}
+        for internal_path in self.master_symbol_map:
+            parts = internal_path.split(".")
+            c_type = parts[0]
+            p_name = parts[-1]
+            # Skip instance-less (2-part) symbol entries for components that are
+            # instanced as a list. These are abstract relaxation-engine symbols
+            # (e.g. a bare "star.feh" that SED physics references) with no owning
+            # instance; the real parameters are the per-instance "star.A.feh".
+            # Exporting them surfaced orphaned "star" rows in the GUI tree that
+            # correspond to no actual star.
+            if len(parts) == 2 and isinstance(
+                (self.system_config or {}).get(c_type), list
+            ):
+                continue
+            el = (
+                int(parts[1])
+                if len(parts) == 3 and parts[1].isdigit()
+                else None
+            )
+            cfg = self.resolve(c_type, p_name, element=el)
+
+            def _first(key):
+                arr = cfg.get(key)
+                if arr is None:
+                    return None
+                try:
+                    return _clean(np.atleast_1d(arr)[0])
+                except (IndexError, TypeError):
+                    return _clean(arr)
+
+            sigma = _first("sigma")
+            # Prefer the engine's solved value (index-form paths that match the
+            # symbol map exactly, in internal units) over resolve()'s initval:
+            # finalize injects derived initvals under the name-form path, which
+            # a nameless resolve() call cannot see.
+            if internal_path in self._last_resolved:
+                factor = (
+                    self.get_conversion_factor(
+                        c_type, p_name, full_path=internal_path
+                    )
+                    or 1.0
+                )
+                value = _clean(self._last_resolved[internal_path] / factor)
+            else:
+                value = _first("initval")
+            if derived_params is None:
+                derived = bool(cfg.get("expressions"))
+            else:
+                derived = (c_type, p_name) in derived_params
+            # A parameter is fixed when it has a hardcoded value or sigma == 0.
+            fixed = (cfg.get("value") is not None) or (
+                sigma is not None and sigma == 0
+            )
+
+            rank = self._last_provenance.get(internal_path)
+            relation = self._last_solved_by.get(internal_path)
+            label = self._provenance_label(rank)
+
+            parameters[_display_path(internal_path)] = {
+                "value": value,
+                "unit": cfg.get("unit"),
+                "internal_unit": cfg.get("internal_unit"),
+                "lower": _first("lower"),
+                "upper": _first("upper"),
+                "init_scale": _first("init_scale"),
+                "sigma": sigma,
+                "mu": _first("mu"),
+                "fixed": bool(fixed),
+                "derived": derived,
+                "provenance": {
+                    "rank": rank,
+                    "label": label,
+                    "relation": relation if label == "solved" else None,
+                },
+            }
+
+        result = {"parameters": parameters}
+
+        # Multi-seed start points, converted to user units and readable paths.
+        if self.seed_resolved and len(self.seed_resolved) > 1:
+            seeds = []
+            for seed in self.seed_resolved:
+                seed_out = {}
+                for internal_path, internal_val in seed.items():
+                    parts = internal_path.split(".")
+                    c_type = parts[0]
+                    p_name = parts[-1]
+                    factor = (
+                        self.get_conversion_factor(
+                            c_type, p_name, full_path=internal_path
+                        )
+                        or 1.0
+                    )
+                    seed_out[_display_path(internal_path)] = _clean(
+                        internal_val / factor
+                    )
+                seeds.append(seed_out)
+            result["seeds"] = seeds
+
+        return result
+
+    def probe_derivable(self, paths, tolerance=1e-3):
+        """Which of `paths` the relaxation engine can pin down from what is
+        known now, as opposed to falling back on a bare defaults.yaml value.
+
+        Runs the engine on a snapshot and rolls every mutation back, so this
+        is a read-only question: `finalize_user_params` still does the real
+        solve later, from the same inputs plus whatever stages 1-2 add.
+
+        The test is on **provenance**, not on presence: the engine's "default
+        armor" step seeds every mapped path from defaults.yaml, so almost
+        everything comes back resolved.  A rank above RANK_DEFAULT means the
+        value traces back to a user entry or a component hint rather than to
+        a default -- i.e. someone actually told us, directly or through a
+        relation.
+
+        Called at stage 1a (before most hints exist), so a False here means
+        "not derivable *yet*"; callers that must decide early -- notably the
+        MMEXOFAST trigger -- get the conservative answer.
+        """
+        flat = {}
+        for upath, data in self.user_params.items():
+            sym = self.master_symbol_map.get(upath)
+            if sym is None:
+                continue
+            val = data.get("initval") if isinstance(data, dict) else data
+            if val is None and isinstance(data, dict):
+                val = data.get("mu")
+            if isinstance(val, (list, tuple)):
+                val = val[0] if len(val) else None
+            if val is None:
+                continue
+            c_type, p_name = upath.split(".")[0], upath.split(".")[-1]
+            factor = (
+                self.get_conversion_factor(c_type, p_name, full_path=upath)
+                or 1.0
+            )
+            flat[str(sym)] = float(val) * factor
+
+        # The engine writes back init_scale into user_params, appends
+        # diagnostics, and refreshes the export snapshots.  None of that may
+        # leak out of a probe.
+        saved = (
+            copy.deepcopy(self.user_params),
+            list(self.diagnostics),
+            dict(self.propagated_scales),
+            dict(self._last_provenance),
+            dict(self._last_scale_provenance),
+            dict(self._last_resolved),
+            dict(self._last_solved_by),
+        )
+        prev_level = logger.level
+        try:
+            logger.setLevel(logging.WARNING)
+            self.resolve_and_validate_parameters(flat, tolerance)
+            ranks = dict(self._last_provenance)
+        except Exception as e:
+            # A probe must never break a run that would otherwise work; the
+            # caller's fallback is simply "not derivable".
+            logger.debug(f"Derivability probe failed ({e}); assuming unknown.")
+            ranks = {}
+        finally:
+            logger.setLevel(prev_level)
+            (
+                self.user_params,
+                self.diagnostics,
+                self.propagated_scales,
+                self._last_provenance,
+                self._last_scale_provenance,
+                self._last_resolved,
+                self._last_solved_by,
+            ) = (
+                saved[0],
+                saved[1],
+                saved[2],
+                saved[3],
+                saved[4],
+                saved[5],
+                saved[6],
+            )
+
+        return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
+
+    def resolve_and_validate_parameters(
+        self, user_provided_params, tolerance=1e-3, seed_hints=None
+    ):
+        """Run the relaxation engine.
+
+        ``user_provided_params`` is {internal_path: internal_value} at
+        RANK_USER.  ``seed_hints`` is the optional per-seed hint set for this
+        seed (see ``_build_seed_overrides``), layered in at RANK_DERIVED_DATA
+        alongside ``self.hints``.
+        """
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
         provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
         resolved_scales = {}
         scale_provenance = {}
+        # Per-solve record of which relation last set each variable (seed 0's
+        # values win because it is solved last).  Reset each call.
+        self._last_solved_by = {}
 
         # 1. Initialize Default Armor (Rank 20)
         def to_scalar(val):
-            return val.item() if hasattr(val, 'item') else float(val)
+            return val.item() if hasattr(val, "item") else float(val)
 
         for path_str, sym in self.master_symbol_map.items():
-            parts = path_str.split('.')
+            parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
-            cfg = self.resolve(c_type, p_name)
+            el = (
+                int(parts[1])
+                if len(parts) == 3 and parts[1].isdigit()
+                else None
+            )
+            cfg = self.resolve(c_type, p_name, element=el)
 
             # Read rank directly from base_defaults (not from resolve() return dict)
-            param_rank = (self.base_defaults.get(c_type, {}).get(p_name, {}).get('rank')
-                          or self.base_defaults.get(p_name, {}).get('rank')
-                          or RANK_DEFAULT)
+            param_rank = (
+                self.base_defaults.get(c_type, {}).get(p_name, {}).get("rank")
+                or self.base_defaults.get(p_name, {}).get("rank")
+                or RANK_DEFAULT
+            )
 
-            if path_str not in resolved and cfg.get('initval') is not None:
-                factor = self.get_conversion_factor(c_type, p_name)
-                resolved[path_str] = to_scalar(cfg['initval']) * factor
+            if path_str not in resolved and cfg.get("initval") is not None:
+                # resolve() returns the initval in USER units, so the factor
+                # must honor a user `unit:` override -- pass full_path, the
+                # same way the init_scale conversion below does.
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved[path_str] = to_scalar(cfg["initval"]) * factor
                 provenance[path_str] = param_rank
 
-            if cfg.get('init_scale') is not None:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = to_scalar(cfg['init_scale']) * factor
+            if cfg.get("init_scale") is not None:
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved_scales[path_str] = (
+                    to_scalar(cfg["init_scale"]) * factor
+                )
                 scale_provenance[path_str] = param_rank
 
         # 1.5 LAYER IN COMPONENT HINTS
         for path_str, val in self.hints.items():
             if provenance.get(path_str, 0) < RANK_USER:
                 resolved[path_str] = val
-                provenance[path_str] = self.hint_ranks.get(path_str, RANK_DERIVED_DATA)
+                provenance[path_str] = self.hint_ranks.get(
+                    path_str, RANK_DERIVED_DATA
+                )
+
+        # 1.5b LAYER IN THIS SEED'S HINT SET (RANK_DERIVED_DATA)
+        # Same tier as the component hints above: an MMEXOFAST solution is a
+        # derivation from the data, not a user statement.  The guard is `<=`
+        # rather than `<` so a seed WINS a tie with an ordinary component
+        # hint -- a per-seed fit of the actual light curve is strictly more
+        # informative than the generic guess a component pushes for every
+        # seed alike.  (Today no real path is in both channels: the seeds
+        # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
+        # component hint that touches one of those, lens.0.alpha, is rank
+        # 20.  The rule is stated so a future overlap has a defined answer.)
+        # Anything above RANK_DERIVED_DATA -- every user entry, in particular
+        # a scalar initval, which lives in user_provided_params -- wins.
+        for path_str, val in (seed_hints or {}).items():
+            if provenance.get(path_str, 0) <= RANK_DERIVED_DATA:
+                resolved[path_str] = val
+                provenance[path_str] = RANK_DERIVED_DATA
 
         # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
         # The initialization loop above calls resolve() without an index, so a hint
@@ -747,43 +1917,89 @@ class ConfigManager:
                 resolved_scales[hint_path] = hint_scale
                 scale_provenance[hint_path] = RANK_DERIVED_DATA
 
-        # 1.7 LAYER IN USER-SPECIFIED SCALES (RANK_USER)
-        # When the user provides sigma or init_scale for a parameter, that scale
-        # must propagate via the Jacobian (e.g. mass sigma → logmass init_scale).
-        # The initialization loop records these with RANK_DEFAULT provenance because
-        # it uses the parameter's rank field, not the source of the scale value.
-        # Re-apply them here with RANK_USER so they win over hints and defaults
-        # and their Jacobian derivatives can correctly update dependent parameters.
+        # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (RANK_USER)
+        # A user-supplied Gaussian prior width is also the best available
+        # preliminary scale for that parameter, and the forward Jacobian pass
+        # below propagates it into derived-parameter scales (which set the
+        # soft-bound barrier steepness on derived parameters).  User
+        # init_scale entries no longer exist at this point -- they are
+        # stripped with a warning at construction (whitening scales are
+        # measured from the data instead; see exozippy/whitening.py).
         for path_str in self.master_symbol_map:
             up = self.user_params.get(path_str)
             if not isinstance(up, dict):
                 continue
-            parts = path_str.split('.')
+            parts = path_str.split(".")
             c_type, p_name = parts[0], parts[-1]
-            if 'init_scale' in up:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = float(up['init_scale']) * factor
-                scale_provenance[path_str] = RANK_USER
-            elif 'sigma' in up and up.get('sigma') is not None and float(up['sigma']) > 0:
-                factor = self.get_conversion_factor(c_type, p_name, full_path=path_str)
-                resolved_scales[path_str] = float(up['sigma']) * factor
+            if (
+                "sigma" in up
+                and up.get("sigma") is not None
+                and float(up["sigma"]) > 0
+            ):
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
+                resolved_scales[path_str] = float(up["sigma"]) * factor
                 scale_provenance[path_str] = RANK_USER
 
+        # 1.8 PREPARE USER-DEFINED LINK ASSIGNMENTS (directed, RANK_USER)
+        # initval/mu links are directed: the target is defined in terms of its
+        # dependencies, never the reverse.  They are re-asserted every
+        # iteration so downstream physics relations always see the linked
+        # value, and RANK_USER provenance protects it from being overridden.
+        directed_links = []
+        for link_target, link_fields in self.links.items():
+            for link_field, plink in link_fields.items():
+                if link_field in ("initval", "mu"):
+                    directed_links.append(
+                        (
+                            link_target,
+                            link_field,
+                            plink,
+                            self._link_internal_expr(plink),
+                        )
+                    )
+
         # 2. The Relaxation Engine
-        logger.info("Solving for starting values/scales of sampled parameters given user/data/default initialization....")
+        logger.info(
+            "Solving for starting values/scales of sampled parameters given user/data/default initialization...."
+        )
         iteration = 0
         max_iter = 100  # Failsafe
         _CYCLE_HIST = 6  # how many recent values to keep per variable
         value_history = {}  # {var_name: [recent rounded values]}
-        pinned_vars = set()  # variables locked out of further updates due to cycle
+        pinned_vars = (
+            set()
+        )  # variables locked out of further updates due to cycle
 
         while iteration < max_iter:
             iteration += 1
             resolved_snapshot = dict(resolved)
 
+            self._apply_directed_links(
+                directed_links,
+                resolved,
+                provenance,
+                resolved_scales,
+                scale_provenance,
+                tolerance,
+                pinned_vars,
+            )
+
+            self._run_standalone_solvers(
+                resolved, provenance, tolerance, pinned_vars
+            )
+
             for eq in self.all_relations:
-                self._relax_equation(eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
-                                     pinned_vars)
+                self._relax_equation(
+                    eq,
+                    resolved,
+                    provenance,
+                    resolved_scales,
+                    scale_provenance,
+                    tolerance,
+                    pinned_vars,
+                )
 
             # Convergence check: compare end-of-iteration state to start-of-iteration.
             # This correctly handles intra-iteration oscillation (two equations fighting
@@ -816,7 +2032,12 @@ class ConfigManager:
             for k, hist in value_history.items():
                 if k in pinned_vars:
                     continue
-                if len(hist) >= 4 and hist[-1] == hist[-3] and hist[-2] == hist[-4] and hist[-1] != hist[-2]:
+                if (
+                    len(hist) >= 4
+                    and hist[-1] == hist[-3]
+                    and hist[-2] == hist[-4]
+                    and hist[-1] != hist[-2]
+                ):
                     logger.warning(
                         f"Cycle: '{k}' oscillates between {hist[-2]:.6g} and {hist[-1]:.6g} — "
                         f"pinned to {hist[-1]:.6g} (conflicting equal-rank constraints)."
@@ -824,113 +2045,201 @@ class ConfigManager:
                     pinned_vars.add(k)
 
         if iteration == max_iter:
-            logger.warning("Relaxation engine reached max iterations — check for unstable circular dependencies.")
+            logger.warning(
+                "Relaxation engine reached max iterations — check for unstable circular dependencies."
+            )
 
         logger.info(f"Done solving after {iteration} iterations.")
 
-        # Forward scale pass: propagate scales using the same rank semantics as
-        # initvals — higher rank always wins, regardless of value.  A hint at
-        # rank 60 overrides a default at rank 20; a user override at rank 100
-        # overrides a hint at rank 60.  This fills in derived-parameter scales
-        # (e.g. mass from logmass) that the engine never solved for directly.
-        for eq in self.all_relations:
-            syms = [str(s) for s in eq.free_symbols]
-            if not all(s in resolved for s in syms):
-                continue
-            for target_str in syms:
-                if scale_provenance.get(target_str, 0) >= RANK_USER:
-                    continue
-                inputs = [s for s in syms if s != target_str]
-                if not all(s in resolved_scales for s in inputs):
-                    continue
-                try:
-                    sols = sp.solve(eq, sp.Symbol(target_str))
-                    if not sols:
-                        continue
-                    sol = sols[0]
-                    var = 0.0
-                    active_inputs = []
-                    for inp in inputs:
-                        inp_sym = sp.Symbol(inp)
-                        if not sol.has(inp_sym):
-                            continue
-                        d = float(sp.diff(sol, inp_sym).evalf(subs=resolved))
-                        if np.isfinite(d) and abs(d) < 1e15:
-                            var += (d * resolved_scales[inp]) ** 2
-                            active_inputs.append(inp)
-                    if var <= 0 or not active_inputs:
-                        continue
-                    new_scale = float(np.sqrt(var))
-                    new_rank = sum(scale_provenance.get(s, 0) for s in active_inputs) / len(active_inputs)
-                    if new_rank > scale_provenance.get(target_str, 0):
-                        resolved_scales[target_str] = new_scale
-                        scale_provenance[target_str] = new_rank
-                except Exception as e:
-                    pass
-
-        # Backward scale pass: if the user specified init_scale on a derived parameter,
-        # back-propagate it to sampled parents via the inverse Jacobian:
-        #   σ_parent ≈ σ_derived / |∂derived/∂parent|
-        # Rank and update semantics are identical to the initval relaxation engine:
-        # a back-propagated scale gets RANK_DERIVED_USER (one tier below the user's
-        # RANK_USER source), and only wins if its rank exceeds the parent's current rank.
-        for eq in self.all_relations:
-            syms = [str(s) for s in eq.free_symbols]
-            if not all(s in resolved for s in syms):
-                continue
-            for derived_str in syms:
-                if scale_provenance.get(derived_str, 0) < RANK_USER:
-                    continue
-                sigma_derived = resolved_scales.get(derived_str)
-                if sigma_derived is None:
-                    continue
-                new_rank = min(RANK_DERIVED_USER, scale_provenance[derived_str])
-                parents = [s for s in syms if s != derived_str]
-                # Skip the expensive sp.solve if no parent can benefit
-                if not any(
-                    scale_provenance.get(p, 0) < RANK_USER and new_rank > scale_provenance.get(p, 0)
-                    for p in parents
-                ):
-                    continue
-                try:
-                    sols = sp.solve(eq, sp.Symbol(derived_str))
-                    if not sols:
-                        continue
-                    sol = sols[0]
-                    for parent_str in parents:
-                        if scale_provenance.get(parent_str, 0) >= RANK_USER:
-                            continue
-                        if new_rank <= scale_provenance.get(parent_str, 0):
-                            continue
-                        parent_sym = sp.Symbol(parent_str)
-                        if not sol.has(parent_sym):
-                            continue
-                        d = float(sp.diff(sol, parent_sym).evalf(subs=resolved))
-                        if not np.isfinite(d) or abs(d) < 1e-15:
-                            continue
-                        implied = sigma_derived / abs(d)
-                        resolved_scales[parent_str] = implied
-                        scale_provenance[parent_str] = new_rank
-                        logger.debug(
-                            f"Scale for {parent_str} informed by {derived_str} "
-                            f"(σ={sigma_derived:.4g} → {implied:.4g})"
-                        )
-                except Exception:
-                    pass
+        # (The old sympy scale passes are gone.  Backward -- inverse-Jacobian
+        # propagation of a user scale on a derived parameter to its sampled
+        # parents -- because sampled scales are only PRELIMINARY now: the
+        # whitening probe measures the real ones from the data, prior sigmas
+        # included.  Forward -- filling derived-parameter scales for their
+        # soft-bound barrier steepness -- because those are now measured
+        # numerically from the whitened model's actual unit-step response
+        # (whitening.measure_barrier_scales), which is both cheaper and more
+        # reliable than per-relation sp.solve with timeouts.  What remains in
+        # resolved_scales: defaults, component hints, user sigmas, and the
+        # engine's own solved-value scale sync.)
 
         # Expose final scales for resolve() to use as a low-priority default
-        # (hints and user init_scale still win; see resolve()).
+        # (component scale hints still win; see resolve()).
         self.propagated_scales = dict(resolved_scales)
+
+        # Snapshot provenance/scales/values for export_solution().  In the
+        # multi-seed loop seed 0 is solved last, so these end up reflecting the
+        # canonical seed-0 solution whose bounds/scales the model uses.
+        self._last_provenance = dict(provenance)
+        self._last_scale_provenance = dict(scale_provenance)
+        self._last_resolved = dict(resolved)
 
         return resolved
 
-    def _relax_equation(self, eq, resolved, provenance, resolved_scales, scale_provenance, tolerance,
-                        pinned_vars=None):
+    def _run_standalone_solvers(
+        self, resolved, provenance, tolerance, pinned_vars=None
+    ):
+        """
+        Run standalone-registered custom solvers once per relaxation
+        iteration, for every instance path of their target in the symbol
+        map.  A solver that raises (missing dependencies) is retried next
+        iteration; results carry RANK_DERIVED_MIXED so user values and
+        data-derived hints always win, and re-fire as inputs refine.
+
+        "Always win" has to be enforced here, not just asserted: unlike the
+        equation path (``_attempt_solve``), which picks the LOWEST-ranked
+        symbol of a violated relation, a standalone solver writes its target
+        unconditionally.  ``_meaningful_change`` compares values, not ranks,
+        so before the guard below an explicit ``orbit.b.m_total`` in
+        params.yaml (RANK_USER) was overwritten every iteration by the body
+        mass sum and its provenance DOWNGRADED to RANK_DERIVED_MIXED --
+        exactly the inversion the ranking system exists to prevent.  A path
+        already held at a rank the solver cannot beat is therefore skipped;
+        one held at RANK_DERIVED_MIXED or below (including the solver's own
+        previous answer) still re-fires as its inputs refine.
+        """
+        for lookup_key in self.standalone_solvers:
+            solver_func = self.custom_solvers[lookup_key]
+            comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
+            for path in list(self.master_symbol_map):
+                parts = path.split(".")
+                if (
+                    len(parts) != 3
+                    or parts[0] != comp
+                    or parts[2] != param
+                    or not parts[1].isdigit()
+                ):
+                    continue
+                if pinned_vars and path in pinned_vars:
+                    continue
+                if provenance.get(path, 0) > RANK_DERIVED_MIXED:
+                    logger.debug(
+                        f"Standalone solver for {path} skipped: already held "
+                        f"at rank {provenance.get(path)} > "
+                        f"{RANK_DERIVED_MIXED}."
+                    )
+                    continue
+                try:
+                    val = float(
+                        solver_func(
+                            resolved, self.system_config, int(parts[1])
+                        )
+                    )
+                except Exception as e:
+                    logger.debug(f"Standalone solver for {path} deferred: {e}")
+                    continue
+                if not _meaningful_change(
+                    val,
+                    resolved.get(path),
+                    RANK_DERIVED_MIXED,
+                    provenance.get(path, 0),
+                    tolerance,
+                    resolved,
+                    provenance,
+                    path,
+                ):
+                    continue
+                resolved[path] = val
+                provenance[path] = RANK_DERIVED_MIXED
+                self._last_solved_by[path] = (
+                    f"{lookup_key} (standalone solver)"
+                )
+                logger.debug(f"Updated {path} = {val:.4g} (standalone solver)")
+
+    def _apply_directed_links(
+        self,
+        directed_links,
+        resolved,
+        provenance,
+        resolved_scales,
+        scale_provenance,
+        tolerance,
+        pinned_vars=None,
+    ):
+        """
+        Assert user-defined link assignments (target := f(deps), internal units).
+
+        An 'initval' link IS the user's value for the target, so it always
+        wins (RANK_USER).  A 'mu' link only seeds the starting point, so it
+        yields to an explicit numeric initval (which also carries RANK_USER).
+        Scales propagate through the link Jacobian at RANK_DERIVED_USER.
+        """
+        for target, fld, plink, expr_int in directed_links:
+            if pinned_vars and target in pinned_vars:
+                continue
+            if not all(d in resolved for d in plink.dep_paths):
+                continue
+            if fld == "mu" and provenance.get(target, 0) >= RANK_USER:
+                continue
+            try:
+                val = float(expr_int.evalf(subs=resolved))
+            except (TypeError, ValueError) as e:
+                logger.debug(
+                    f"Link '{target} := {plink.expr_str}' not evaluable yet: {e}"
+                )
+                continue
+
+            if _meaningful_change(
+                val,
+                resolved.get(target),
+                RANK_USER,
+                provenance.get(target, 0),
+                tolerance,
+                resolved,
+                provenance,
+                target,
+            ):
+                resolved[target] = val
+                provenance[target] = RANK_USER
+                logger.debug(
+                    f"Updated {target} = {val:.4g} (user link: {plink.expr_str})"
+                )
+
+            # Scale propagation through the link Jacobian
+            if scale_provenance.get(target, 0) >= RANK_USER:
+                continue
+            var = 0.0
+            any_input = False
+            for dep in plink.dep_paths:
+                dep_scale = resolved_scales.get(dep)
+                if dep_scale is None:
+                    continue
+                try:
+                    d = float(
+                        sp.diff(expr_int, sp.Symbol(dep)).evalf(subs=resolved)
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(d) and abs(d) < 1e15:
+                    var += (d * dep_scale) ** 2
+                    any_input = True
+            if (
+                any_input
+                and var > 0
+                and RANK_DERIVED_USER > scale_provenance.get(target, 0)
+            ):
+                resolved_scales[target] = float(np.sqrt(var))
+                scale_provenance[target] = RANK_DERIVED_USER
+
+    def _relax_equation(
+        self,
+        eq,
+        resolved,
+        provenance,
+        resolved_scales,
+        scale_provenance,
+        tolerance,
+        pinned_vars=None,
+    ):
 
         if not isinstance(eq, sp.Eq):
             return False
 
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+        # Sorted: free_symbols is a set of Symbols whose hashes include the
+        # PYTHONHASHSEED-randomized name string, so bare iteration order
+        # varies per process.  The July-2026 init_scale flakiness came from
+        # exactly this in the (since-deleted) scale passes.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         # 1. Gatekeeper: Skip if equation contains undefined variables
         if not all(s in self.master_symbol_map for s in symbols_in_eq):
@@ -983,7 +2292,9 @@ class ConfigManager:
         # Condition B floor is RANK_DEFAULT so conflict resolution never produces
         # armor weaker than an unseeded default.
         inputs = [s for s in symbols_in_eq if s != target]
-        min_input_rank = min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
+        min_input_rank = (
+            min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
+        )
         # Condition A floor: RANK_DEFAULT-1 so indirect derivations always yield
         #   to expression-path derivations or defaults in Condition B.
         # Condition B floor: 0 so low-rank inputs (e.g. pm defaults at rank 10)
@@ -1003,33 +2314,74 @@ class ConfigManager:
             logger.debug(
                 f"Over-constrained: all variables in '{eq}' have user rank "
                 f"but equation is violated (error={error:.4g}). "
-                f"Leaving all user values unchanged.")
+                f"Leaving all user values unchanged."
+            )
+            self._record_diagnostic(
+                "error",
+                f"Over-constrained relation '{eq.lhs} = {eq.rhs}' is violated "
+                f"(relative error {error:.4g}): every parameter it links was "
+                f"set explicitly, so no value can be adjusted to satisfy it.",
+                symbols_in_eq,
+            )
             return False
 
-        return self._execute_solve(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance,
-                                   inputs, pinned_vars=pinned_vars, tolerance=tolerance)
+        return self._execute_solve(
+            eq,
+            target,
+            resolved,
+            provenance,
+            new_rank,
+            resolved_scales,
+            scale_provenance,
+            inputs,
+            pinned_vars=pinned_vars,
+            tolerance=tolerance,
+        )
 
-    def _execute_solve(self, eq, target_str, resolved, provenance, new_rank, resolved_scales, scale_provenance, inputs,
-                       pinned_vars=None, tolerance=1e-3):
+    def _execute_solve(
+        self,
+        eq,
+        target_str,
+        resolved,
+        provenance,
+        new_rank,
+        resolved_scales,
+        scale_provenance,
+        inputs,
+        pinned_vars=None,
+        tolerance=1e-3,
+    ):
         if pinned_vars and target_str in pinned_vars:
             return False
 
         # 1. ALWAYS check custom solvers FIRST
-        parts = target_str.split('.')
+        parts = target_str.split(".")
         lookup_key = f"{parts[0]}.{parts[-1]}"
         idx = int(parts[1]) if len(parts) >= 3 else 0
 
         if lookup_key in self.custom_solvers:
             solver_func = self.custom_solvers[lookup_key]
             try:
-                valid_val = float(solver_func(resolved, self.system_config, idx))
-                if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
-                                          provenance.get(target_str, 0), tolerance,
-                                          resolved, provenance, target_str):
+                valid_val = float(
+                    solver_func(resolved, self.system_config, idx)
+                )
+                if not _meaningful_change(
+                    valid_val,
+                    resolved.get(target_str),
+                    new_rank,
+                    provenance.get(target_str, 0),
+                    tolerance,
+                    resolved,
+                    provenance,
+                    target_str,
+                ):
                     return False
                 resolved[target_str] = valid_val
                 provenance[target_str] = new_rank
-                logger.debug(f"Updated {target_str} = {valid_val:.4g} (custom solver)")
+                self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
+                logger.debug(
+                    f"Updated {target_str} = {valid_val:.4g} (custom solver)"
+                )
                 return True
             except Exception as e:
                 # A custom solver is a shortcut for one specific relation
@@ -1037,8 +2389,10 @@ class ConfigManager:
                 # dependencies), fall through to the generic symbolic solver
                 # so OTHER equations targeting this parameter (e.g.
                 # q * M_primary = M_companion) still get their chance.
-                logger.debug(f"Custom solver failed for {target_str}: {e}; "
-                             f"falling back to symbolic solve.")
+                logger.debug(
+                    f"Custom solver failed for {target_str}: {e}; "
+                    f"falling back to symbolic solve."
+                )
 
         # 2. Skip equations whose symbolic inversion has previously timed out
         if target_str in self.symbolic_blacklist:
@@ -1059,7 +2413,9 @@ class ConfigManager:
                     # Format to 5 sig figs (handles scientific notation automatically)
                     val_str = f"{float(resolved[s_str]):.5g}"
                     # Use regex with word boundaries to replace exact variable names
-                    eq_str = re.sub(rf'\b{re.escape(s_str)}\b', val_str, eq_str)
+                    eq_str = re.sub(
+                        rf"\b{re.escape(s_str)}\b", val_str, eq_str
+                    )
 
             logger.debug(f"  Substituted: {eq_str}")
         except Exception as e:
@@ -1070,49 +2426,69 @@ class ConfigManager:
         def handler(signum, frame):
             raise TimeoutError("Symbolic solver timed out!")
 
-        signal.signal(signal.SIGALRM, handler)
-        signal.alarm(2)  # 2-second hard limit
+        _arm_alarm(2, handler)  # 2-second hard limit (POSIX only)
 
         solutions = []
         used_nsolve = False
 
         try:
-            target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
-            solutions = sp.solve(eq, target_sym, dict=False)
+            target_sym = next(
+                s for s in eq.free_symbols if str(s) == target_str
+            )
+            # simplify=False + check=False: sp.solve's default post-simplify and
+            # its checksol() verification pass together dominate prepare()
+            # (sympy.simplify + sympy.checksol) and are redundant here -- every
+            # candidate solution is evaluated numerically, bounds-checked, and
+            # (for multiple roots) scored against the other relations below, so
+            # the code already does its own root validation. simplify only
+            # changes the expression's form (identical numeric value); check
+            # only pre-filters roots the numeric bounds/scoring pass re-filters.
+            solutions = sp.solve(
+                eq, target_sym, dict=False, simplify=False, check=False
+            )
             elapsed = time.time() - start_time
-            logger.debug(f"sp.solve finished in {elapsed:.4f}s for {target_str}")
+            logger.debug(
+                f"sp.solve finished in {elapsed:.4f}s for {target_str}"
+            )
         except TimeoutError:
-            logger.debug(f"sp.solve timed out for {target_str} — blacklisting.")
+            logger.debug(
+                f"sp.solve timed out for {target_str} — blacklisting."
+            )
             self.symbolic_blacklist.add(target_str)
-            signal.alarm(0)
+            _disarm_alarm()
             return False
         except Exception as e:
             logger.debug(f"sp.solve exception for {target_str}: {e}")
-            signal.alarm(0)
+            _disarm_alarm()
             return False
         finally:
-            signal.alarm(0)
+            _disarm_alarm()
 
         # 3. Fallback to nsolve if analytical failed
         if not solutions:
             try:
-                guess = float(resolved.get(target_str, 1.0))
-                sub_dict = {s: resolved[str(s)] for s in inputs}
-                expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
-                solutions = [sp.nsolve(expr, target_sym, guess)]
-                used_nsolve = True
+                with _sympy_time_limit(2):
+                    guess = float(resolved.get(target_str, 1.0))
+                    sub_dict = {s: resolved[str(s)] for s in inputs}
+                    expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
+                    solutions = [sp.nsolve(expr, target_sym, guess)]
+                    used_nsolve = True
             except Exception:
                 return False
 
         # 4. Validation — collect all in-bounds solutions
-        cfg = self.resolve(parts[0], parts[-1], shape=())
-        lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
-        upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
+        cfg = self.resolve(parts[0], parts[-1], shape=(), element=idx)
+        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
+        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
 
         valid_solutions = []
         for sol in solutions:
             try:
-                val = float(sol.evalf(subs=resolved)) if not used_nsolve else float(sol)
+                val = (
+                    float(sol.evalf(subs=resolved))
+                    if not used_nsolve
+                    else float(sol)
+                )
                 if lower <= val <= upper:
                     valid_solutions.append((val, sol))
             except (TypeError, ValueError):
@@ -1128,8 +2504,11 @@ class ConfigManager:
         if len(valid_solutions) == 1:
             valid_val, valid_sol = valid_solutions[0]
         else:
-            best_val, best_sol, best_score = None, None, float('inf')
-            for val, sol in valid_solutions:
+            # Sorted by value: sp.solve's root order is not contractual, and
+            # the strict < below means equal-score roots go to whichever came
+            # first -- break that tie by value, not arrival order.
+            best_val, best_sol, best_score = None, None, float("inf")
+            for val, sol in sorted(valid_solutions, key=lambda vs: vs[0]):
                 temp = {**resolved, target_str: val}
                 score = 0.0
                 for other_eq in self.all_relations:
@@ -1152,9 +2531,16 @@ class ConfigManager:
 
         # 5. Apply Value and Armor
         if valid_val is not None:
-            if not _meaningful_change(valid_val, resolved.get(target_str), new_rank,
-                                      provenance.get(target_str, 0), tolerance,
-                                      resolved, provenance, target_str):
+            if not _meaningful_change(
+                valid_val,
+                resolved.get(target_str),
+                new_rank,
+                provenance.get(target_str, 0),
+                tolerance,
+                resolved,
+                provenance,
+                target_str,
+            ):
                 return False
             # 5b. Jacobian-filtered rank refinement.
             # Replace raw min(input_ranks) with min(active_input_ranks), where
@@ -1163,30 +2549,47 @@ class ConfigManager:
             # mu_dec_rel = sqrt(mu_rel_mag² - mu_ra_rel²) equation) from dragging
             # down the trustworthiness of the result.
             jac_active_inputs = []
-            if not used_nsolve and hasattr(valid_sol, 'free_symbols') and inputs:
+            if (
+                not used_nsolve
+                and hasattr(valid_sol, "free_symbols")
+                and inputs
+            ):
                 for parent_str in inputs:
                     parent_sym = sp.Symbol(parent_str)
                     if not valid_sol.has(parent_sym):
                         continue
                     try:
-                        d = float(sp.diff(valid_sol, parent_sym).evalf(subs=resolved))
+                        d = float(
+                            sp.diff(valid_sol, parent_sym).evalf(subs=resolved)
+                        )
                         if np.isfinite(d) and abs(d) > 1e-6:
                             jac_active_inputs.append(parent_str)
                     except Exception:
-                        jac_active_inputs.append(parent_str)  # conservative: include on error
+                        jac_active_inputs.append(
+                            parent_str
+                        )  # conservative: include on error
 
             if jac_active_inputs:
-                min_jac_rank = min(provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs)
+                min_jac_rank = min(
+                    provenance.get(s, RANK_DEFAULT) for s in jac_active_inputs
+                )
                 # Refine upward only: never reduce a rank that was already determined
                 # by a valid floor (e.g. Condition A floor of RANK_DEFAULT-1).
                 new_rank = max(new_rank, min(RANK_DERIVED_USER, min_jac_rank))
 
             resolved[target_str] = valid_val
             provenance[target_str] = new_rank
-            logger.debug(f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})")
+            self._last_solved_by[target_str] = f"{eq.lhs} = {eq.rhs}"
+            logger.debug(
+                f"Updated {target_str} = {valid_val:.4g} (rank: {new_rank})"
+            )
 
             # 6. Independent Scale Propagation via Jacobian
-            if not used_nsolve and hasattr(valid_sol, 'free_symbols') and inputs:
+            if (
+                not used_nsolve
+                and hasattr(valid_sol, "free_symbols")
+                and inputs
+            ):
                 scale_variance = 0.0
                 valid_scale_inputs = []
 
@@ -1203,7 +2606,10 @@ class ConfigManager:
                         sensitivity = float(derivative.evalf(subs=resolved))
 
                         # Only update variance if the sensitivity is a sane number
-                        if np.isfinite(sensitivity) and abs(sensitivity) < 1e15:
+                        if (
+                            np.isfinite(sensitivity)
+                            and abs(sensitivity) < 1e15
+                        ):
                             scale_variance += (sensitivity * parent_scale) ** 2
 
                     except (OverflowError, FloatingPointError, TypeError):
@@ -1214,23 +2620,35 @@ class ConfigManager:
                         break
 
                 if valid_scale_inputs:
-                    new_scale_rank = sum(scale_provenance.get(s, 0) for s in valid_scale_inputs) / len(
-                        valid_scale_inputs)
+                    new_scale_rank = sum(
+                        scale_provenance.get(s, 0) for s in valid_scale_inputs
+                    ) / len(valid_scale_inputs)
                     new_scale = float(np.sqrt(scale_variance))
                     if new_scale_rank > scale_provenance.get(target_str, 0):
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_scale_rank
 
-                    if target_str in self.user_params and isinstance(self.user_params[target_str], dict):
-                        factor = self.get_conversion_factor(parts[0], parts[-1], full_path=target_str)
-                        self.user_params[target_str]["init_scale"] = resolved_scales[target_str] / factor
+                    if target_str in self.user_params and isinstance(
+                        self.user_params[target_str], dict
+                    ):
+                        factor = self.get_conversion_factor(
+                            parts[0], parts[-1], full_path=target_str
+                        )
+                        self.user_params[target_str]["init_scale"] = (
+                            resolved_scales[target_str] / factor
+                        )
 
             return True
 
         return False
 
-    def _attempt_rank_upgrade(self, eq, resolved, provenance, resolved_scales, scale_provenance):
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+    def _attempt_rank_upgrade(
+        self, eq, resolved, provenance, resolved_scales, scale_provenance
+    ):
+        # Sorted for the same reason as _execute_solve's walk: free_symbols is a
+        # set of Symbols whose hashes include the PYTHONHASHSEED-randomized name
+        # string, so bare iteration order varies per process.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         def get_rank(s):
             return provenance.get(s, RANK_DEFAULT)
@@ -1241,8 +2659,10 @@ class ConfigManager:
             return False
 
         # 2. Identify the target:
-        # Pick the symbol with the lowest provenance.
-        target = min(symbols_in_eq, key=get_rank)
+        # Pick the symbol with the lowest provenance, breaking rank ties
+        # alphabetically -- a bare min() returns the first minimum it meets, so
+        # on tied ranks the winner would follow iteration order.
+        target = min(symbols_in_eq, key=lambda s: (get_rank(s), s))
 
         # 3. Check dependencies: Are all inputs known?
         inputs = [s for s in symbols_in_eq if s != target]
@@ -1255,19 +2675,39 @@ class ConfigManager:
 
         # 5. Monotonic upgrade check
         if new_rank > get_rank(target):
-            logger.debug(f"Rank upgrade: {target} ({get_rank(target)} -> {new_rank}) via {eq}")
-            return self._solve_and_update(eq, target, resolved, provenance, new_rank, resolved_scales, scale_provenance)
+            logger.debug(
+                f"Rank upgrade: {target} ({get_rank(target)} -> {new_rank}) via {eq}"
+            )
+            return self._solve_and_update(
+                eq,
+                target,
+                resolved,
+                provenance,
+                new_rank,
+                resolved_scales,
+                scale_provenance,
+            )
 
         return False
 
-    def _solve_and_update(self, eq, target_str, resolved, provenance_map, new_rank, resolved_scales, scale_provenance):
+    def _solve_and_update(
+        self,
+        eq,
+        target_str,
+        resolved,
+        provenance_map,
+        new_rank,
+        resolved_scales,
+        scale_provenance,
+    ):
         target_sym = next(s for s in eq.free_symbols if str(s) == target_str)
 
         # 1. Setup bounds and solver lookups
-        parts = target_str.split('.')
-        cfg = self.resolve(parts[0], parts[-1], shape=())
-        lower = cfg['lower'][0] if cfg.get('lower') is not None else -np.inf
-        upper = cfg['upper'][0] if cfg.get('upper') is not None else np.inf
+        parts = target_str.split(".")
+        el = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+        cfg = self.resolve(parts[0], parts[-1], shape=(), element=el)
+        lower = cfg["lower"][0] if cfg.get("lower") is not None else -np.inf
+        upper = cfg["upper"][0] if cfg.get("upper") is not None else np.inf
 
         # 2. Logic to isolate target and solve
         solutions = []
@@ -1289,7 +2729,11 @@ class ConfigManager:
         if not solutions:
             try:
                 guess = float(resolved.get(target_str, 1.0))
-                sub_dict = {s: resolved[str(s)] for s in eq.free_symbols if str(s) != target_str}
+                sub_dict = {
+                    s: resolved[str(s)]
+                    for s in eq.free_symbols
+                    if str(s) != target_str
+                }
                 expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
                 solutions = [sp.nsolve(expr, target_sym, guess)]
             except Exception:
@@ -1313,7 +2757,7 @@ class ConfigManager:
             provenance_map[target_str] = new_rank
 
             # Propagate Scale (Calculus-based)
-            if hasattr(valid_sol, 'free_symbols'):
+            if hasattr(valid_sol, "free_symbols"):
                 scale_variance = 0.0
                 for parent_sym in valid_sol.free_symbols:
                     parent_str = str(parent_sym)
@@ -1326,13 +2770,21 @@ class ConfigManager:
 
                 # Apply scale update only if rank allows
                 if new_rank >= scale_provenance.get(target_str, 0):
-                    resolved_scales[target_str] = float(np.sqrt(scale_variance))
+                    resolved_scales[target_str] = float(
+                        np.sqrt(scale_variance)
+                    )
                     scale_provenance[target_str] = new_rank
 
                     # Sync scale back to user_params if necessary
-                    if target_str in self.user_params and isinstance(self.user_params[target_str], dict):
-                        factor = self.get_conversion_factor(parts[0], parts[-1], full_path=target_str)
-                        self.user_params[target_str]["init_scale"] = resolved_scales[target_str] / factor
+                    if target_str in self.user_params and isinstance(
+                        self.user_params[target_str], dict
+                    ):
+                        factor = self.get_conversion_factor(
+                            parts[0], parts[-1], full_path=target_str
+                        )
+                        self.user_params[target_str]["init_scale"] = (
+                            resolved_scales[target_str] / factor
+                        )
 
             return True
 
@@ -1343,8 +2795,9 @@ class ConfigManager:
             "!" * 60 + "\n"
             "WARNING: PHYSICAL CONTRADICTION DETECTED\n"
             f"Relation: {eq}\n"
-            f"Relative Error: {error:.2%}\n"
-            + "-" * 60 + "\n"
+            f"Relative Error: {error:.2%}\n" + "-" * 60 + "\n"
             "The parameters provided in your config do not satisfy this equation.\n"
             "Verify your starting values; a bad initialization will destroy NUTS efficiency.\n"
-            + "!" * 60)
+            + "!"
+            * 60
+        )

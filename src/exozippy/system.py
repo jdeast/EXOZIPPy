@@ -1,28 +1,67 @@
-#import ipdb
+# import ipdb
 import logging
-import yaml
-import numpy as np
 import os
+
+import numpy as np
+import yaml
 
 logger = logging.getLogger(__name__)
 
+import arviz as az
+import pymc as pm
 import pytensor
 import pytensor.tensor as pt
-import pymc as pm
-import arviz as az
 
-# local imports
 from exozippy.components.component import Component
-from exozippy.components.parameter import Parameter
-from exozippy.config import ConfigManager
 from exozippy.components.factory import discover_components
+from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
+from exozippy.config import ConfigManager
+from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
 
 """
 The System Class builds an entire system to model from its components.
-Critically, it contains no component-specific logic, so it 
+Critically, it contains no component-specific logic, so it
 can generally construct any model containing arbitrary components.
 """
+
+# Top-level config keys that are NOT component blocks. Every other top-level
+# key is looked up in the component registry and, failing that, warned about
+# as "will be ignored" -- so a key that some part of the codebase honors but
+# that is missing here produces a warning which is actively false, training
+# users to disbelieve the warning system. Each entry names its consumer:
+#
+#   run            -- documentation/bookkeeping block; deliberately inert.
+#                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it from
+#                     the structural hash, which is its only mention in code.
+#   name           -- System.name (below), read back by e.g.
+#                     astrometryinstrument's sky-plot title.
+#   parameter_file -- System.__init__, mkparam.mkprior, gui.document.
+#   prefix         -- run.py, cli_modes.py, mkparam.py, gui/status.py,
+#                     gui/runner.py, mulensinstrument's mmexofast cache path.
+#   logger_level   -- run.py, cli.py, cli_modes.py.
+#   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
+#   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
+#   mkprior        -- mkparam.mkprior: {n_seeds}.
+#   gui            -- gui.status.gui_enabled: {snapshot}.
+#
+# tests/test_known_keys.py cross-checks this set against the top-level-config
+# accesses in the source, in both directions, so it cannot silently drift.
+RESERVED_CONFIG_KEYS = frozenset(
+    {
+        "run",
+        "parameter_file",
+        "prefix",
+        "sampler",
+        "name",
+        "logger_level",
+        "modes",
+        "mkprior",
+        "gui",
+    }
+)
+
+
 class System(Component):
     def __init__(self, config, user_params=None):
         self.config = config
@@ -46,15 +85,17 @@ class System(Component):
                     f"run exozippy (currently: {os.getcwd()}). "
                     f"Check that the file exists and the path in your config YAML is correct."
                 )
-            with open(str(user_params_file), 'r') as f:
+            with open(str(user_params_file), "r") as f:
                 self.user_params = yaml.safe_load(f)
 
-        self.config_manager = ConfigManager(self.user_params, system_config=self.config)
+        self.config_manager = ConfigManager(
+            self.user_params, system_config=self.config
+        )
         self.registry = discover_components()
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = {"run", "parameter_file", "prefix", "sampler", "name", "logger_level"}
+        reserved_keys = RESERVED_CONFIG_KEYS
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]
@@ -62,7 +103,9 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
-                logger.warning(f"YAML key '{key}' does not match any registered component and will be ignored.")
+                logger.warning(
+                    f"YAML key '{key}' does not match any registered component and will be ignored."
+                )
 
         logger.info("Modeling the following components:")
         for key, comp in self.active_components.items():
@@ -76,23 +119,77 @@ class System(Component):
             for idx, name in enumerate(comp.names):
                 entity_directory[name] = (comp, idx)
 
+        # Structural fingerprint of the inputs, snapshotted HERE: after the
+        # components have normalized their own config blocks (Mann/Torres
+        # derive `name:` from their `star:` key in __init__), and before
+        # prepare() runs.  Both halves of that placement were measured, not
+        # assumed -- see the note on mkprior's own recomputation in
+        # mkparam.mkprior.  Taking it any earlier fingerprints a config
+        # spelling that exists only for the first few lines of __init__, so
+        # a fingerprint recomputed later would never match; taking it later
+        # would fold in whatever stages 1-6 might one day write.  The params
+        # half is safe at either point: ConfigManager deepcopies before it
+        # standardizes keys, strips links and injects solved initvals, so
+        # self.user_params stays exactly the file that was read.
+        self._structural_payload = structural_payload(
+            self.config, self.user_params
+        )
+        self._structural_hash = structural_hash(self.config, self.user_params)
+
+    def structural_fingerprint(self):
+        """``(hash, payload)`` of the config + params this System was built from.
+
+        The hash is ``evaluator.structural_hash``; the payload is the dict it
+        was taken over, kept so a mismatch can name what changed.  Both are
+        snapshotted at the END of ``__init__`` -- after the components have
+        normalized their own config blocks, before ``prepare()`` -- so that a
+        fingerprint recomputed from the same inputs later in the run
+        (mkparam.mkprior) reproduces it exactly.
+        """
+        return self._structural_hash, self._structural_payload
+
     def prepare(self):
         # ==========================================================
         # PRE-FLIGHT SEQUENCE
         # ==========================================================
         # Stage 1: DATA & LOGICAL MAPS
         for comp in self.active_components.values():
-            if hasattr(comp, 'load_data'): comp.load_data(self)
-            if hasattr(comp, 'build_maps'): comp.build_maps()
+            if hasattr(comp, "load_data"):
+                comp.load_data(self)
+            if hasattr(comp, "build_maps"):
+                comp.build_maps()
 
         # Stage 2: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
-            if hasattr(comp, 'register_parameters'): comp.register_parameters(self)
+            if hasattr(comp, "register_parameters"):
+                comp.register_parameters(self)
 
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
 
-        self.config_manager.audit_scales()
+    def derived_params(self):
+        """`(component_prefix, param_name)` pairs the manifests actually derive.
+
+        The static `expressions:` block in a defaults.yaml is not the answer:
+        a component may declare the same parameter free in one topology and
+        derived in another (planet.mass is sampled linearly when RV or
+        astrometry measures it, and derived from log_q otherwise). This
+        mirrors `Component.add_parameter`'s rule -- a manifest value that is a
+        string, or a dict carrying an "expr_key", names an expression; a bare
+        None is a free parameter.  Valid after stage 2.
+        """
+        out = set()
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                if isinstance(raw, str):
+                    derived = True
+                elif isinstance(raw, dict):
+                    derived = raw.get("expr_key") is not None
+                else:
+                    derived = False
+                if derived:
+                    out.add((comp.prefix, name))
+        return out
 
     def build_likelihood(self, model, system):
         pass
@@ -114,19 +211,37 @@ class System(Component):
 
             # Stage 4: Topological Sort for Parameter Building
             # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
-            pymc_build_order = determine_pymc_build_order(self.active_components, self.config_manager)
+            pymc_build_order = determine_pymc_build_order(
+                self.active_components, self.config_manager
+            )
 
             # Stage 5: Linearly materialize the nodes node-by-node
             for param_path in pymc_build_order:
-                comp_name, param_name = param_path.split('.', 1)
+                comp_name, param_name = param_path.split(".", 1)
                 if comp_name in self.active_components:
                     comp = self.active_components[comp_name]
-                    if param_name in getattr(comp, 'manifest', {}):
+                    if param_name in getattr(comp, "manifest", {}):
                         comp.add_parameter(model, param_name, self)
+
+            # Warn about user-defined parameter links whose target was never
+            # materialized (e.g. star.A.age linked in the params file, but the
+            # current model configuration does not build 'age').
+            for target in getattr(self.config_manager, "links", {}):
+                t_comp, t_param = target.split(".")[0], target.split(".")[-1]
+                comp = self.active_components.get(t_comp)
+                if comp is None or not isinstance(
+                    getattr(comp, t_param, None), Parameter
+                ):
+                    logger.warning(
+                        f"Parameter link on '{target}' had no effect: "
+                        f"'{t_comp}.{t_param}' is not built by the current model "
+                        f"configuration."
+                    )
 
             # Stage 6: LIKELIHOOD
             for comp in self.active_components.values():
-                if hasattr(comp, 'build_likelihood'): comp.build_likelihood(model, system=self)
+                if hasattr(comp, "build_likelihood"):
+                    comp.build_likelihood(model, system=self)
 
         self.compile_plotter_functions(model)
         return model
@@ -159,15 +274,260 @@ class System(Component):
         raw_start = model.initial_point()
         lookup = {p.label: p for p in self.get_all_parameters()}
         for key in raw_start:
-            name = key[:-len("_raw")] if key.endswith("_raw") else key
+            name = key[: -len("_raw")] if key.endswith("_raw") else key
             par = lookup.get(name)
-            raw_init = getattr(par, "raw_initval", None) if par is not None else None
-            if raw_init is not None and np.size(raw_init) == np.size(raw_start[key]):
+            raw_init = (
+                getattr(par, "raw_initval", None) if par is not None else None
+            )
+            if raw_init is not None and np.size(raw_init) == np.size(
+                raw_start[key]
+            ):
                 raw_start[key] = np.asarray(raw_init, dtype=float).reshape(
-                    np.shape(raw_start[key]))
+                    np.shape(raw_start[key])
+                )
             else:
                 raw_start[key] = np.zeros_like(raw_start[key])
         return raw_start
+
+    def jitter_raw_start(self, center, raw_scales, factor, rng):
+        """One over-dispersed start, drawn in PHYSICAL space, returned as raw.
+
+        Jittering directly in raw space -- center + factor*scale*N(0,1) -- looks
+        natural but saturates the logit transform.  A raw element reaches its
+        bound through `lower + span*sigmoid(lq)`, so what governs saturation is
+        the jitter's width in lq (= factor * scale * init_scale_logit), not its
+        width in raw.  Once that approaches ~3 the sigmoid folds both tails onto
+        the bounds instead of spreading across them: measured on a [0,1]
+        parameter, pileup within 1% of a bound goes 0.0000 -> 0.105 -> 0.276 as
+        sigma/span goes 0.1 -> 0.3 -> 1.0, and a parameter whose logp is flat out
+        to its bounds starts 31.5% of its chains within 1% of a bound where
+        uniform wants 2.0%.  The flat case cannot be fixed by correcting the
+        scale: its jitter width in lq is factor * 1.41 regardless of init_scale.
+
+        Drawing in physical space from a Gaussian TRUNCATED to [lower, upper]
+        reproduces what rejecting out-of-bounds draws would give, in closed form
+        and with no rejection loop, and self-adapts across the whole range:
+          - scale << span: truncation never bites -> plain factor-x
+            over-dispersed Gaussian, unchanged.
+          - scale ~ span:  truncated Gaussian, no pileup.
+          - flat:          a Gaussian far wider than the interval, truncated,
+                           IS uniform -- which is max entropy on a bounded
+                           range, so over-dispersion correctly runs out there
+                           rather than folding onto the bounds.
+        Pileup never exceeds uniform's at any scale (worst measured 0.0196 vs
+        uniform's 0.0200) because a truncated normal's density is monotone
+        toward each bound.
+
+        `raw_scales` holds the probe's per-element 0.5-nat step
+        (whitening.probe_scales) in raw units; it is converted to a physical
+        half-width through this parameter's own transform.  The probe scale
+        measures the ACTUAL local posterior width including the likelihood --
+        for a flat parameter it lands at 0.304*span independent of the
+        whitening scale, which is exactly what makes the flat case come out
+        uniform.  (After the startup whitening rescale these steps are ~1 by
+        construction, but PTDE re-probes rather than assuming it.)
+
+        Elements without a finite [lower, upper] pair are not logit-transformed
+        (their raw -> physical map is linear and unbounded), so they keep plain
+        Gaussian jitter; build_pymc's soft barriers handle any one-sided bound.
+        """
+        from scipy.stats import truncnorm
+
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        out = {}
+        for key, cval in center.items():
+            name = key[: -len("_raw")] if key.endswith("_raw") else key
+            par = lookup.get(name)
+            tf = (
+                getattr(par, "_raw_transform", None)
+                if par is not None
+                else None
+            )
+            shape = np.shape(cval)
+            c = np.asarray(cval, dtype=float).reshape(-1)
+            sc = np.asarray(raw_scales[key], dtype=float).reshape(-1)
+
+            if tf is None or len(tf["sampled_idx"]) != c.size:
+                # No frozen transform (or a shape we cannot line up): fall back
+                # to the historical raw-space jitter.
+                out[key] = np.asarray(cval, dtype=float) + (
+                    factor
+                    * np.asarray(raw_scales[key], dtype=float)
+                    * rng.standard_normal(shape)
+                )
+                continue
+
+            idx = tf["sampled_idx"]
+            # Physical center, and the physical half-width spanned by one probe
+            # scale either side of it -- measured through the real transform
+            # rather than linearized, since the point is that it is nonlinear.
+            p0 = par.phys_from_raw(c)
+            p_hi = par.phys_from_raw(c + sc)
+            p_lo = par.phys_from_raw(c - sc)
+
+            new_phys = np.array(p0, dtype=float, copy=True)
+            for j, i in enumerate(idx):
+                half = 0.5 * abs(p_hi[i] - p_lo[i])
+                s = factor * half
+                if not np.isfinite(s) or s <= 0:
+                    continue  # degenerate scale: start at the seed
+                if not tf["use_logit"][i]:
+                    new_phys[i] = p0[i] + s * rng.standard_normal()
+                    continue
+                lower, upper = tf["lowers"][i], tf["uppers"][i]
+                a, b = (lower - p0[i]) / s, (upper - p0[i]) / s
+                new_phys[i] = truncnorm.rvs(
+                    a, b, loc=p0[i], scale=s, random_state=rng
+                )
+
+            raw_vec = par.raw_from_initval(new_phys)
+            out[key] = np.asarray(raw_vec, dtype=float).reshape(shape)
+        return out
+
+    def get_raw_starts(self, model):
+        """Multi-seed variant of get_raw_start (P4).
+
+        Returns (starts, seed_indices): a list of raw-space start dicts (one per
+        usable seed) and the parallel list of the original seed indices they
+        came from.  seed 0 is always the canonical single start (identical to
+        get_raw_start); additional seeds are built from the relaxation engine's
+        per-seed solutions (config_manager.seed_resolved) by re-mapping each
+        parameter's solved physical initval through its frozen forward transform
+        (Parameter.raw_from_initval), so bounds/scale stay fixed at seed 0 and
+        only the start position moves.
+
+        A seed whose solved start violates a hard bound is logged and skipped
+        entirely (a clipped start would sit in no posterior basin).  Falls back
+        to a single-element list when no multi-seed solutions exist.
+        """
+        base = self.get_raw_start(model)
+        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+        if not seed_resolved or len(seed_resolved) <= 1:
+            return [base], [0]
+
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        starts, seed_indices = (
+            [base],
+            [0],
+        )  # seed 0 == the canonical base start
+
+        for k in range(1, len(seed_resolved)):
+            resolved = seed_resolved[k]
+            raw = {
+                key: np.array(v, dtype=float, copy=True)
+                for key, v in base.items()
+            }
+            violated = False
+            for key in base:
+                name = key[: -len("_raw")] if key.endswith("_raw") else key
+                par = lookup.get(name)
+                if par is None:
+                    continue
+                iv = self._seed_initvals_for(par, resolved)
+                if iv is None:
+                    continue  # not seeded: keep the seed-0 raw start
+                try:
+                    raw_vec = par.raw_from_initval(iv)
+                except SeedBoundViolation as e:
+                    logger.warning(
+                        f"Multi-seed: seed {k} start violates a bound ({e}); "
+                        f"skipping this seed (a clipped start is in no basin)."
+                    )
+                    violated = True
+                    break
+                if np.size(raw_vec) == np.size(base[key]):
+                    raw[key] = raw_vec.reshape(np.shape(base[key]))
+            if not violated:
+                starts.append(raw)
+                seed_indices.append(k)
+
+        logger.info(
+            f"Multi-seed starts: {len(starts)}/{len(seed_resolved)} seeds "
+            f"usable (seed indices {seed_indices})."
+        )
+        return starts, seed_indices
+
+    def apply_polished_starts(self, polished_raws, seed_indices):
+        """Adopt polished raw starts (polish.polish_raw_starts) as the
+        canonical starts.
+
+        Seed 0 is written into each Parameter's ``raw_initval`` -- which
+        get_raw_start, get_mcmc_init, and the sampler initvals all read --
+        and its physical values into ``Parameter.initval`` so the startup
+        table and diagnostics report the polished start.  set_whitening
+        keeps a nonzero raw_initval pinned to the same physical point
+        through later rescales.  Seeds k > 0 are written back into
+        config_manager.seed_resolved as physical (internal-unit) values, so
+        get_raw_starts re-derives them through the frozen transform in
+        whatever raw coordinates are current.
+        """
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+
+        for s, raw in enumerate(polished_raws):
+            for key, vec in raw.items():
+                name = key[: -len("_raw")] if key.endswith("_raw") else key
+                par = lookup.get(name)
+                tf = (
+                    getattr(par, "_raw_transform", None)
+                    if par is not None
+                    else None
+                )
+                if tf is None:
+                    continue
+                new_raw = np.asarray(vec, dtype=float).reshape(-1)
+                if new_raw.size != len(tf["sampled_idx"]):
+                    continue
+                phys = np.asarray(par.phys_from_raw(new_raw), dtype=float)
+
+                if s == 0:
+                    par.raw_initval = new_raw.copy()
+                    n_elements = (
+                        int(np.prod(par.shape))
+                        if par.shape not in ((), None)
+                        else 1
+                    )
+                    iv = np.asarray(
+                        to_vec(par.initval, n_elements, fill=np.nan),
+                        dtype=float,
+                    )
+                    for i in tf["sampled_idx"]:
+                        iv[i] = phys[i]
+                    par.initval = (
+                        float(iv[0]) if par.shape in ((), None) else iv
+                    )
+                else:
+                    k = seed_indices[s]
+                    if (
+                        not seed_resolved
+                        or k >= len(seed_resolved)
+                        or seed_resolved[k] is None
+                    ):
+                        continue
+                    comp_type = par.label.split(".")[0]
+                    param_name = par.label.split(".", 1)[1]
+                    for i in tf["sampled_idx"]:
+                        seed_resolved[k][f"{comp_type}.{i}.{param_name}"] = (
+                            float(phys[i])
+                        )
+
+    def _seed_initvals_for(self, par, resolved):
+        """Internal-unit initval vector for one Parameter under one seed's solved
+        state, or None if that seed does not touch any of its elements."""
+        comp_type = par.label.split(".")[0]
+        param_name = par.label.split(".", 1)[1]
+        n_elements = (
+            int(np.prod(par.shape)) if par.shape not in ((), None) else 1
+        )
+        base_iv = to_vec(par.initval, n_elements, fill=np.nan)
+        vals = np.array(base_iv, dtype=float).reshape(-1).copy()
+        found = False
+        for i in range(n_elements):
+            path = f"{comp_type}.{i}.{param_name}"
+            if path in resolved:
+                vals[i] = resolved[path]
+                found = True
+        return vals if found else None
 
     def get_internal_point(self, model, raw_point):
         """Evaluates graph deterministics for plotting/physics without user-unit conversion."""
@@ -176,7 +536,7 @@ class System(Component):
         eval_fn = pytensor.function(
             inputs=model.free_RVs,
             outputs=output_vars,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Pull the values in the exact order the function expects them
@@ -184,7 +544,9 @@ class System(Component):
 
         physical_values = eval_fn(*input_values)
 
-        return {var.name: val for var, val in zip(output_vars, physical_values)}
+        return {
+            var.name: val for var, val in zip(output_vars, physical_values)
+        }
 
     def get_physical_point(self, model, raw_point):
         output_vars = model.free_RVs + model.deterministics
@@ -192,7 +554,7 @@ class System(Component):
         eval_fn = pytensor.function(
             inputs=model.free_RVs,
             outputs=output_vars,
-            on_unused_input='ignore'
+            on_unused_input="ignore",
         )
 
         # Pull the values in the exact order the function expects them
@@ -213,8 +575,32 @@ class System(Component):
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""
-        posterior = az.extract(idata)
+        posterior = az.extract(idata, keep_dataset=True)
         param_lookup = self.get_parameter_lookup()
+
+        # Mode labels (outputs.modes.identify_modes) ride along in the
+        # posterior group; keep them sample-aligned with every Parameter's
+        # posterior so per-mode summaries can be computed downstream.
+        # Draws labeled -1 are invalid (runaway/stuck chains rejected by
+        # identify_modes) and must not contaminate any reported summary, so
+        # they are dropped from the distributed posterior entirely.
+        if "mode" in posterior:
+            labels = np.asarray(posterior["mode"].values, dtype=int)
+            if (labels < 0).any():
+                keep = labels >= 0
+                posterior = posterior.isel(sample=keep)
+                labels = labels[keep]
+                logger.info(
+                    f"distribute_posterior: dropped {int((~keep).sum())} "
+                    f"invalid/unassigned draws flagged by mode identification"
+                )
+            self.mode_labels = labels
+            self.n_modes = int(
+                posterior["mode"].attrs.get("n_modes", labels.max() + 1)
+            )
+        else:
+            self.mode_labels = None
+            self.n_modes = 1
 
         # Dynamically discover all components (Stars, Planets, Orbits, Instruments, etc.)
         for attr_name, comp in self.__dict__.items():
@@ -233,7 +619,9 @@ class System(Component):
                     # Case B: Not in the trace; evaluate the PyTensor expression.
                     # Pass param_lookup so generate_posterior converts user-unit
                     # inputs → internal → evaluates → back to user units.
-                    attr.posterior = attr.generate_posterior(posterior, param_lookup=param_lookup)
+                    attr.posterior = attr.generate_posterior(
+                        posterior, param_lookup=param_lookup
+                    )
 
             # Recurse to children (Stars, Planets, etc.)
             elif isinstance(attr, Component) and attr is not component:
@@ -279,7 +667,7 @@ class System(Component):
 
             # Use __dict__ to respect insertion order instead of dir() (alphabetical)
             for attr_name, attr in obj.__dict__.items():
-                if attr_name.startswith('_'):
+                if attr_name.startswith("_"):
                     continue
 
                 # 1. If it's a Component, yield it and its children
@@ -292,7 +680,10 @@ class System(Component):
                 # 2. If it's a list of components (future-proofing)
                 elif isinstance(attr, (list, tuple)):
                     for item in attr:
-                        if isinstance(item, Component) and id(item) not in seen_components:
+                        if (
+                            isinstance(item, Component)
+                            and id(item) not in seen_components
+                        ):
                             seen_components.add(id(item))
                             yield item
                             yield from crawl(item)
@@ -318,12 +709,15 @@ class System(Component):
             # The unity start is 0.0 for logit params, (initval-mu)/sigma for
             # Gaussian-path params (see get_raw_start).
             unity_start = raw_start.get(
-                value_var.name, np.zeros(rv.shape.eval(), dtype=float))
+                value_var.name, np.zeros(rv.shape.eval(), dtype=float)
+            )
             transform = model.rvs_to_transforms.get(rv)
 
             if transform is not None:
                 # Forward the 0.0 through the interval/log math
-                t_node = transform.forward(pt.as_tensor_variable(unity_start), *rv.owner.inputs)
+                t_node = transform.forward(
+                    pt.as_tensor_variable(unity_start), *rv.owner.inputs
+                )
                 transformed_inits[value_var.name] = t_node.eval()
             else:
                 # No transform, raw == value
@@ -343,7 +737,12 @@ class System(Component):
         total_dims = sum(np.size(val) for val in transformed_inits.values())
 
         # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
-        return np.ones(total_dims), ordered_scales, ordered_inits, transformed_inits
+        return (
+            np.ones(total_dims),
+            ordered_scales,
+            ordered_inits,
+            transformed_inits,
+        )
 
     def compile_plotter_functions(self, model):
         """

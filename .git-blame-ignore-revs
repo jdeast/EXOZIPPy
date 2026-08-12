@@ -1,0 +1,21 @@
+# Commits listed here are skipped by `git blame`, so a mechanical reformat
+# does not show up as the last author of every line in the repository.
+#
+# GitHub honours this file automatically in its blame view. Locally it needs
+# one opt-in, once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only ever add commits that are PURELY mechanical -- no logic changes mixed
+# in. A commit listed here becomes invisible to blame, so anything real hidden
+# inside it is effectively lost to archaeology.
+
+# Apply black and isort across the tree (176 files).
+536c2da893368f42094cdcf5e4ca940abdd5de89
+
+# Apply ruff format across the tree (49 files), after ruff replaced black and
+# isort. Verified AST-identical across all 192 Python files, and it touches
+# nothing but .py -- the config and docs changes that came with the switch are
+# separate commits, which is why this PR was merged with a merge commit rather
+# than squashed.
+e62f639b71937121772e2a1ae5287faf968b8665

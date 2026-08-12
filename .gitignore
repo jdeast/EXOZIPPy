@@ -14,13 +14,14 @@ __pycache__/
 *.pyc
 *settings.json
 runs/
+notes/
 examples/*/fitresults/
 .idea/
 /examples/ob140939/convert.py
 /examples/ob140939/n20100310.I.OGLE.OB140939.txt
 /examples/ob140939/n20140605.L.Spitzer.OB140939.txt
-src/exozippy/components/sed/models/NextGen/NextGen.spectra.csv
-src/exozippy/components/sed/models/NextGen/NextGen.wavelength.csv
+src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
 src/exozippy/components/evolutionarymodel/testing.ipynb
 src/exozippy/components/evolutionarymodel/massradius_mann.py
 src/exozippy/components/evolutionarymodel/massradius_mist.py

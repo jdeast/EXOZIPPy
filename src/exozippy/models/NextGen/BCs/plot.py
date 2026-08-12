@@ -7,12 +7,11 @@ from exozippy.components.sed.plot import Plot
 
 
 class NextGenPlot(Plot):
-
     ALPHA_GRID_PTS = np.array([0, 0.2, -0.2, 0.4, 0.6])
     axis_alias = {
-            'teff': 'star.teffsed',
-            'feh': 'star.feh',
-        }
+        "teff": "star.teffsed",
+        "feh": "star.feh",
+    }
 
     def __init__(self, system, draws):
 
@@ -27,84 +26,92 @@ class NextGenPlot(Plot):
         # calculate observed flux from observed mags
         self._calc_obs_flux_from_obs_mag()
 
-
     def _calc_compiled_func(self):
         """
-        Calculates the two compiled functions for use in plotting:
-        Logg and predicted magnitudes
+        Evaluates the compiled functions for use in plotting: loggsed,
+        per-star predicted magnitudes, and the per-row combined
+        (blended/differential) magnitudes.
+
+        The compiled functions take the FULL plot-parameter bundle
+        (vector parameters stay vectors), so one call per draw covers
+        all stars at once.
 
         Created Class Attributes
         -------
-            self.logg_vals_draws :  np.ndarray, shape (ndraws, nstars)
-            self.mag_pred_draws  :  np.ndarray, shape (ndraws, nstars, nfilters)
+            self.logg_vals_draws     :  np.ndarray, shape (ndraws, nstars)
+            self.mag_pred_draws      :  np.ndarray, shape (ndraws, nstars, nfilters)
+            self.combined_pred_draws :  np.ndarray, shape (ndraws, nfilters)
         """
         # grab compiled functions
-        mag_compiled = getattr(self.system.sed, "_compiled_mag_predictors", [None])
-        logg_compiled = getattr(self.system.sed, "_compiled_logg_calc", [None])
+        mag_compiled = getattr(
+            self.system.sed, "_compiled_mag_predictors", None
+        )
+        logg_compiled = getattr(self.system.sed, "_compiled_logg_calc", None)
+        combined_compiled = getattr(
+            self.system.sed, "_compiled_combined_mag", None
+        )
 
-        # collect parameters used as inputs to compiled functions
         logg_vals_draws = np.zeros((self.ndraws, self.nstars))
         mag_pred_draws = np.zeros((self.ndraws, self.nstars, self.nfilters))
+        combined_pred_draws = np.zeros((self.ndraws, self.nfilters))
+
         for d, draw in enumerate(self.draws):
-            logg_params = []
-            mag_params = []
-            for p in self.system.plot_params:
-                val = np.asarray(
-                draw.get(p.label, p.initval), dtype=np.float64
+            params = [
+                (
+                    float(np.squeeze(np.asarray(draw.get(p.label, p.initval))))
+                    if getattr(p.value, "ndim", 0) == 0
+                    else np.atleast_1d(draw.get(p.label, p.initval)).astype(
+                        np.float64
                     )
-                mag_params = np.append(mag_params, np.atleast_1d(val), axis=0)
-                if p.label in ['star.logmass', 'star.radiussed']:
-                    logg_params = np.append(logg_params, np.atleast_1d(val), axis=0)
-            # reshape arrays into shapes compatible with function inputs
-            logg_params = np.reshape(logg_params, (self.nstars, 2, 1)) 
-            mag_params = np.reshape(mag_params, (len(self.system.plot_params), self.nstars, 1)) 
-            
-            # calculate outputs for compiled functions
-            logg_vals = np.array([])
-            mag_vals_pred = np.array([])
-            for nstar in range(self.nstars):
-                if self.nstars == 1:
-                    l_params = logg_params[nstar]
-                else:
-                    l_params = logg_params[:, nstar]
-                m_params = mag_params[:, nstar]
-                logg_vals = np.append(logg_vals, np.atleast_1d(logg_compiled(*l_params)))
-                mag_vals_pred = np.append(mag_vals_pred, np.atleast_1d(mag_compiled(*m_params)))
-
-            mag_vals_pred = np.reshape(mag_vals_pred, (self.nstars, self.system.sed.nfilters))
-
-            logg_vals_draws[d, :] = logg_vals
-            mag_pred_draws[d, :] = mag_vals_pred
+                )
+                for p in self.system.plot_params
+            ]
+            mag_pred_draws[d] = mag_compiled(*params)
+            logg_vals_draws[d] = logg_compiled(*params)
+            if combined_compiled is not None:
+                combined_pred_draws[d] = combined_compiled(*params)
 
         self.logg_vals_draws = logg_vals_draws
         self.mag_pred_draws = mag_pred_draws
-
+        self.combined_pred_draws = combined_pred_draws
 
     def _interp_spectra(self):
         """
-        Linearly interpolates model spectra in n-dimensions 
+        Linearly interpolates model spectra in n-dimensions
         for star(s) parameters reported in draw
 
         Created Class Attribute
         -------
             self.model_spectrum_flux_draws  :  np.ndarray, shape (ndraws, nstars, len(self.df_wave))
                                          model flux is unextincted and represents flux at stellar surface
-        """        
-        model_spectrum_flux_draws = np.zeros((self.ndraws, self.nstars, len(self.df_wave)))
+        """
+        model_spectrum_flux_draws = np.zeros(
+            (self.ndraws, self.nstars, len(self.df_wave))
+        )
 
         for d, draw in enumerate(self.draws):
             pt_dict = {}
             for col in self.df_spec.columns:
                 if col in self.grid_axes:
-                    if col == 'logg':
+                    if col == "logg":
                         pt_dict[col] = self.logg_vals_draws[d]
                     else:
                         pt_dict[col] = draw[self.axis_alias[col]]
-            
+
             nearPts = self._findNearestGridPoints(pt_dict, self.df_spec)
-            
-            teff_near, logg_near, feh_near = [np.array(pts) for pts in nearPts]  # unpack the three parameter axes
-            flux_near = np.zeros(shape=(self.nstars, len(teff_near), len(logg_near), len(feh_near), len(self.df_wave)))
+
+            teff_near, logg_near, feh_near = [
+                np.array(pts) for pts in nearPts
+            ]  # unpack the three parameter axes
+            flux_near = np.zeros(
+                shape=(
+                    self.nstars,
+                    len(teff_near),
+                    len(logg_near),
+                    len(feh_near),
+                    len(self.df_wave),
+                )
+            )
 
             for nstar in range(self.nstars):
                 for i_t, teff_pt in enumerate(teff_near[:, nstar]):
@@ -113,13 +120,15 @@ class NextGenPlot(Plot):
                             matched = False
                             for alpha in self.ALPHA_GRID_PTS:
                                 flux_vals = self.df_spec.loc[
-                                    (self.df_spec['teff'] == teff_pt) &
-                                    (self.df_spec['logg'] == logg_pt) &
-                                    (self.df_spec['feh'] == feh_pt) &
-                                    (self.df_spec['alpha'] == alpha)
-                                ]['flux'].values
+                                    (self.df_spec["teff"] == teff_pt)
+                                    & (self.df_spec["logg"] == logg_pt)
+                                    & (self.df_spec["feh"] == feh_pt)
+                                    & (self.df_spec["alpha"] == alpha)
+                                ]["flux"].values
                                 if len(flux_vals) > 0:
-                                    flux_near[nstar, i_t, i_l, i_f, :] = flux_vals[0]
+                                    flux_near[nstar, i_t, i_l, i_f, :] = (
+                                        flux_vals[0]
+                                    )
                                     matched = True
                                     break
 
@@ -131,9 +140,15 @@ class NextGenPlot(Plot):
 
             interp_flux = np.zeros((self.nstars, len(self.df_wave)))
             for nstar in range(self.nstars):
-                points = (teff_near[:, nstar], logg_near[:, nstar], feh_near[:, nstar])
+                points = (
+                    teff_near[:, nstar],
+                    logg_near[:, nstar],
+                    feh_near[:, nstar],
+                )
                 eval_point = np.array([pt_dict[ax][nstar] for ax in pt_dict])
-                interp_flux[nstar, :] = interpn(points, flux_near[nstar], eval_point)
+                interp_flux[nstar, :] = interpn(
+                    points, flux_near[nstar], eval_point
+                )
 
             model_spectrum_flux_draws[d, :] = interp_flux
 
