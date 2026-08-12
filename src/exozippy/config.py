@@ -1743,6 +1743,22 @@ class ConfigManager:
 
         return result
 
+    # Every mutable ConfigManager attribute the relaxation engine writes to.
+    # probe_derivable deep-copies each one before running the engine and puts
+    # the copy back in a finally block, which is what makes a probe genuinely
+    # read-only.  If the engine ever starts writing somewhere new, it belongs
+    # in this tuple -- a mutation missing from it silently survives the probe.
+    _PROBE_SNAPSHOT_ATTRS = (
+        "user_params",  # _execute_solve syncs solved init_scale back
+        "diagnostics",  # _record_diagnostic appends contradictions
+        "propagated_scales",  # refreshed at the end of every solve
+        "symbolic_blacklist",  # a 2 s sp.solve timeout adds the target
+        "_last_provenance",
+        "_last_scale_provenance",
+        "_last_resolved",
+        "_last_solved_by",
+    )
+
     def probe_derivable(self, paths, tolerance=1e-3):
         """Which of `paths` the relaxation engine can pin down from what is
         known now, as opposed to falling back on a bare defaults.yaml value.
@@ -1782,17 +1798,17 @@ class ConfigManager:
             flat[str(sym)] = float(val) * factor
 
         # The engine writes back init_scale into user_params, appends
-        # diagnostics, and refreshes the export snapshots.  None of that may
-        # leak out of a probe.
-        saved = (
-            copy.deepcopy(self.user_params),
-            list(self.diagnostics),
-            dict(self.propagated_scales),
-            dict(self._last_provenance),
-            dict(self._last_scale_provenance),
-            dict(self._last_resolved),
-            dict(self._last_solved_by),
-        )
+        # diagnostics, blacklists any inversion whose sp.solve hits the 2 s
+        # alarm, and refreshes the export snapshots.  None of that may leak
+        # out of a probe -- least of all the blacklist, which is consulted
+        # for the rest of the process: one slow inversion during this
+        # throwaway stage-1a probe would otherwise disable that relation for
+        # the real stage-3 solve, which has different inputs and might well
+        # have solved it in time.
+        saved = {
+            attr: copy.deepcopy(getattr(self, attr))
+            for attr in self._PROBE_SNAPSHOT_ATTRS
+        }
         prev_level = logger.level
         try:
             logger.setLevel(logging.WARNING)
@@ -1805,23 +1821,8 @@ class ConfigManager:
             ranks = {}
         finally:
             logger.setLevel(prev_level)
-            (
-                self.user_params,
-                self.diagnostics,
-                self.propagated_scales,
-                self._last_provenance,
-                self._last_scale_provenance,
-                self._last_resolved,
-                self._last_solved_by,
-            ) = (
-                saved[0],
-                saved[1],
-                saved[2],
-                saved[3],
-                saved[4],
-                saved[5],
-                saved[6],
-            )
+            for attr, value in saved.items():
+                setattr(self, attr, value)
 
         return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
 
