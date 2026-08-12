@@ -22,20 +22,58 @@ Typical use:
 """
 
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import yaml
 
 from exozippy.gui import TERMINAL_PHASES
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_PREFIX = "fitresults/planet"
 _STATUS_SUFFIX = "_gui_status.json"
 _SNAPSHOT_SUFFIX = "_gui_snapshot"
+_CONSOLE_SUFFIX = "_gui_console.log"
+
+RUN_ID_ENV = "EXOZIPPY_GUI_RUN_ID"
+"""Env var carrying this launch's run id into the child (see start_run)."""
+
+MAX_CONSOLE_TAIL = 4000
+"""Bytes of the child's console kept as the `error` of a crashed run."""
+
+
+def _new_run_id():
+    """A launch identifier unique across runs, machines and pid reuse."""
+    return f"{os.getpid()}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+
+
+def _console_tail(path, limit=MAX_CONSOLE_TAIL):
+    """Last `limit` bytes of the child's captured console, or None.
+
+    Used only to explain a run that died: a crash BEFORE run_fit installs its
+    reporter (a bad config, an import error, a bad CLI argument) -- and any
+    crash the interpreter cannot catch at all (SIGKILL, OOM, segfault) --
+    leaves nothing in the status file, and this is the only surviving trace.
+    """
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > limit:
+                fh.seek(size - limit)
+            data = fh.read()
+    except OSError:
+        return None
+    text = data.decode("utf-8", "replace").strip()
+    return text or None
 
 
 def _parse_prefix(config_path):
@@ -67,12 +105,13 @@ def _pid_is_running(pid):
 class RunHandle:
     """A launched fit: its subprocess, output prefix, and working directory."""
 
-    def __init__(self, proc, prefix, cwd, config_path):
+    def __init__(self, proc, prefix, cwd, config_path, run_id=None):
         self.proc = proc
         self.pid = proc.pid
         self.prefix = prefix
         self.cwd = cwd
         self.config_path = config_path
+        self.run_id = run_id
 
     @property
     def status_path(self):
@@ -83,43 +122,97 @@ class RunHandle:
     def snapshot_dir(self):
         return os.path.join(self.cwd, self.prefix + _SNAPSHOT_SUFFIX)
 
+    @property
+    def console_path(self):
+        """Where start_run captured this child's stdout+stderr."""
+        return os.path.join(self.cwd, self.prefix + _CONSOLE_SUFFIX)
+
     def is_alive(self):
         return self.proc.poll() is None
 
-    def status(self):
-        """Parsed status.json augmented with a liveness check.
+    def _read_status_doc(self):
+        """(doc, stale) for this run's status file.
 
-        If the process is dead but the file never reached a terminal phase
-        (crash before the run_fit wrapper could write one, or no file at all),
-        the reported phase is forced to "error" with reason "died" so a
-        monitor never waits forever on a stale non-terminal phase.
+        `doc` is None unless the file exists, parses, AND belongs to THIS
+        launch; `stale` says a document was there but described a different
+        run. Runs at a given prefix overwrite each other's status file, so
+        without the run-id check a fit that crashed before writing anything
+        would report the PREVIOUS run's terminal phase -- the user reads
+        "done" about a run that died. The check is skipped only when this
+        handle has no run id (a hand-built handle in a test); a document
+        written before run ids existed never matches one.
         """
-        alive = self.is_alive()
-        doc = None
         try:
             with open(self.status_path, "r") as fh:
                 doc = json.load(fh)
         except (OSError, json.JSONDecodeError):
-            doc = None
+            return None, False
+        if not isinstance(doc, dict):
+            return None, False
+        if self.run_id is not None and doc.get("run_id") != self.run_id:
+            return None, True
+        return doc, False
+
+    def status(self):
+        """Parsed status.json augmented with a liveness check.
+
+        Four states are distinguishable, and a crashed run is never confused
+        with a finished one:
+
+        * alive, with a status document  -> the fit's own phase
+        * alive, no document for this run -> "starting"
+        * dead, terminal document        -> "done"/"stopped"/"error" as written
+        * dead, anything else            -> "error", with the child's console
+          tail (or "died") as `error` and the process return code
+
+        The last case covers both a crash before ``run_fit`` could record its
+        traceback and a stale document left by an EARLIER run at this prefix;
+        `stale_status` flags the latter so the caller can say "unknown"
+        rather than repeat someone else's answer.
+        """
+        alive = self.is_alive()
+        doc, stale = self._read_status_doc()
 
         if doc is None:
-            # No readable status yet. Alive -> still starting; dead -> it died
-            # before writing anything.
-            phase = "starting" if alive else "error"
-            result = {"phase": phase, "state": {}, "pid": self.pid}
+            # No status for THIS run. Alive -> still starting; dead -> it died
+            # before writing anything of its own.
+            result = {
+                "phase": "starting" if alive else "error",
+                "state": {},
+                "pid": self.pid,
+                "run_id": self.run_id,
+                "alive": alive,
+            }
+            if stale:
+                result["stale_status"] = True
             if not alive:
-                result["error"] = "died"
+                result["error"] = self._death_reason(stale)
                 result["returncode"] = self.proc.poll()
-            result["alive"] = alive
             return result
 
         phase = doc.get("phase")
         if not alive and phase not in TERMINAL_PHASES:
             doc["phase"] = "error"
-            doc["error"] = "died"
+            doc["error"] = self._death_reason(False)
             doc["returncode"] = self.proc.poll()
         doc["alive"] = alive
         return doc
+
+    def _death_reason(self, stale):
+        """Why this run is gone: the exit status, plus the console tail.
+
+        Both halves are labeled: the console tail of a fit killed mid-sampling
+        is ordinary output, not a traceback, and presenting it bare would read
+        as an error message it is not.
+        """
+        head = (
+            f"the fit process exited (code {self.proc.poll()}) without "
+            "recording a terminal status"
+        )
+        if stale:
+            head += "; the status file at this prefix is an earlier run's"
+        tail = _console_tail(self.console_path)
+        return f"{head}\nlast console output:\n{tail}" if tail else head
 
     def stop(self, force=False, graceful_timeout=30.0, kill_timeout=10.0):
         """Request a graceful stop (SIGINT); optionally escalate.
@@ -203,8 +296,15 @@ def start_run(config_path, cwd=None):
     )
     prefix = _parse_prefix(resolved_config)
 
+    # Every run at a given prefix writes the same status file, so the child
+    # stamps this id into it and RunHandle.status() refuses a document
+    # carrying any other -- otherwise a fit that dies before writing anything
+    # reports the PREVIOUS run's "done".
+    run_id = _new_run_id()
+
     env = dict(os.environ)
     env["EXOZIPPY_GUI_SNAPSHOT"] = "1"
+    env[RUN_ID_ENV] = run_id
 
     # A fresh interpreter via -m avoids any dependence on the console-script
     # entry point being on PATH and gives the child a clean PyTensor/pymc state.
@@ -215,13 +315,42 @@ def start_run(config_path, cwd=None):
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "exozippy.cli", config_path],
-        cwd=cwd,
-        env=env,
-        **popen_kwargs,
-    )
-    return RunHandle(proc, prefix, cwd, config_path)
+    # Capture the child's console to a file. A crash before run_fit installs
+    # its GuiReporter (an unreadable config, an import error, a bad argument)
+    # writes its traceback to stderr and NOTHING to the status file, and with
+    # the streams inherited that traceback lands wherever the GUI server was
+    # started -- invisible to the user, who only sees the run vanish. A file
+    # (not a PIPE: nobody is draining it, and a full pipe would wedge the fit)
+    # keeps it where status() can report it. Best-effort, exactly like the
+    # snapshot artifacts: if it cannot be opened the run still starts, with
+    # the streams inherited as before.
+    console = None
+    try:
+        console_path = os.path.join(cwd, prefix + _CONSOLE_SUFFIX)
+        os.makedirs(os.path.dirname(console_path) or ".", exist_ok=True)
+        console = open(console_path, "wb")
+    except OSError:
+        logger.exception(
+            "Could not open the run console log; the fit's output stays on "
+            "the parent's streams (non-fatal)."
+        )
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "exozippy.cli", config_path],
+            cwd=cwd,
+            env=env,
+            stdout=console if console is not None else None,
+            stderr=subprocess.STDOUT if console is not None else None,
+            **popen_kwargs,
+        )
+    finally:
+        # The child holds its own duplicate of the descriptor; keeping the
+        # parent's copy open would leak one per run.
+        if console is not None:
+            console.close()
+
+    return RunHandle(proc, prefix, cwd, config_path, run_id=run_id)
 
 
 def list_runs(directory):
@@ -257,6 +386,7 @@ def list_runs(directory):
                     "recorded_phase": doc.get("phase"),
                     "pid": pid,
                     "alive": alive,
+                    "run_id": doc.get("run_id"),
                     "state": doc.get("state", {}),
                     "started_at": doc.get("started_at"),
                     "updated_at": doc.get("updated_at"),
