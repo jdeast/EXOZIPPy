@@ -196,13 +196,11 @@ class MulensInstrument(Instrument):
         only event, so the event-0 source, t0_par, and magnification are used
         throughout.
         """
-        all_times, all_flux, all_errs, inst_indices = [], [], [], []
-        all_detrend = []
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
         self._raw_time_list = []
-        all_obspos = []
+        blocks = self._concat_blocks()
 
         self._n_sources = int(system.lens.n_sources)
 
@@ -285,7 +283,6 @@ class MulensInstrument(Instrument):
             self.inst_ref_pos.append(np.median(xyz_abs, axis=0))
 
             xyz_delta = self._abs_to_delta(t, xyz_abs)
-            all_obspos.append(xyz_delta)
 
             f_total, q_source, q_flux = self._estimate_flux_components(
                 t, f, xyz_delta, ra_rad, dec_rad, i
@@ -305,54 +302,38 @@ class MulensInstrument(Instrument):
                 data_format=self.config[i].get("data_format", "magnitude"),
             )
 
-            all_times.append(t)
-            all_flux.append(f)
-            all_errs.append(e)
-            inst_indices.append(np.full(len(t), i))
             self._raw_time_list.append(t)
 
             # Optional detrending against extra data columns (columns 4+ of
             # the file), exactly as rvinstrument/transit do: one coefficient
             # per column per instrument, kept from mixing across instruments
-            # by the block-diagonal design matrix built below.  A column is a
-            # magnitude-space trend (airmass, seeing, ...), i.e. it enters the
-            # flux model MULTIPLICATIVELY as 10**(-0.4 * X.c) -- algebraically
-            # identical to the additive magnitude detrending this component
-            # used before it moved to a flux likelihood, and the right form
-            # for a throughput/extinction trend either way.
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((len(t), 0)))
+            # by the block-diagonal design matrix the accumulator builds.  A
+            # column is a magnitude-space trend (airmass, seeing, ...), i.e.
+            # it enters the flux model MULTIPLICATIVELY as 10**(-0.4 * X.c) --
+            # algebraically identical to the additive magnitude detrending
+            # this component used before it moved to a flux likelihood, and
+            # the right form for a throughput/extinction trend either way.
+            #
+            # observer_pos rides along as a per-epoch side array, so the
+            # Skowron geocentric deviations (used by both magnification
+            # paths) stay row-aligned with the photometry by construction.
+            blocks.add(i, time=t, obs=f, err=e, df=df, observer_pos=xyz_delta)
 
         self.inst_ref_pos = np.array(
             self.inst_ref_pos
         )  # (n_inst, 3) absolute AU
-        self.time = np.concatenate(all_times).astype(float)
-        # The modeled observable, in the file's own flux system.  Magnitude
-        # files were converted above; flux files are untouched, negatives and
-        # all.  There is deliberately no `self.mag`: nothing downstream may
-        # reintroduce a magnitude-space likelihood.
-        self.flux = np.concatenate(all_flux).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.observer_pos = np.vstack(all_obspos).astype(
-            float
-        )  # Skowron geocentric deviations (both magnification paths)
-        self.n_total_obs = len(self.time)
 
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # Errors are already in the amplitude parameter's unit (flux, in each
-        # file's own flux system).
-        self._prepare_gp(self.time, self.err, self.inst_map)
-        self._prepare_robust(self.err, self.inst_map)
+        # Shared accumulator: concatenation (time/flux/err/observer_pos),
+        # inst_map, the per-file row ranges, the block-diagonal detrend
+        # matrix, and the optional GP / robust-likelihood hooks.  No
+        # user_factor: the errors are already in the amplitude parameters'
+        # unit (flux, in each file's own flux system).
+        #
+        # `flux` is the modeled observable, in the file's own flux system.
+        # Magnitude files were converted above; flux files are untouched,
+        # negatives and all.  There is deliberately no `self.mag`: nothing
+        # downstream may reintroduce a magnitude-space likelihood.
+        blocks.finalize("flux")
 
     def _resolve_t0_par_final(self, system, all_times):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
