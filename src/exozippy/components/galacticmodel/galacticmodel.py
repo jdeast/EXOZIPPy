@@ -6,6 +6,11 @@ import pytensor.tensor as pt
 from scipy.special import erf, erfc
 
 from exozippy.components.component import Component
+
+# One owner for "read a Parameter's hard support" -- star.py's volume prior
+# normalizes over star.distance's bounds exactly the way the IMF branches
+# below normalize over star.logmass's.
+from exozippy.components.parameter import sampled_bounds as _sampled_bounds
 from exozippy.constants import (
     BULGE_BAR_ANGLE,
     BULGE_CENTRAL_NUMBER_DENSITY,
@@ -66,30 +71,11 @@ logger = logging.getLogger(__name__)
 # mulensing/lens.py use exactly the code this likelihood uses.
 from .physics import (  # noqa: E402
     GALACTOCENTRIC_FRAME,
-    galactic_xyz as _galactic_xyz_np,
     line_of_sight_basis,
 )
-
-
-def _sampled_bounds(param):
-    """(lower, upper) of a Parameter's hard support as float arrays.
-
-    Returns None when the bounds are missing, non-finite, or symbolic, which
-    the IMF normalizers treat as "leave this prior unnormalized" -- a
-    constant offset never changes the sampling, so a bound the component
-    cannot read is not worth failing a fit over.
-    """
-    try:
-        # atleast_1d: a scalar bound must still broadcast against the
-        # (n_star,) logmass vector, and np.select wants real arrays.
-        lower = np.atleast_1d(np.asarray(param.lower, dtype=float))
-        upper = np.atleast_1d(np.asarray(param.upper, dtype=float))
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
-        return None
-    return lower, upper
+from .physics import (  # noqa: E402
+    galactic_xyz as _galactic_xyz_np,
+)
 
 
 def _unnormalized_warning():

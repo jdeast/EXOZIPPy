@@ -148,6 +148,25 @@ Planet-as-lens was **not** implemented, deliberately. A planet body has no `dist
 
 Tests: `tests/test_galactic_model.py`, `tests/test_ffp_mass_function.py`.
 
+### The stellar distance prior (`components/star/star.py`)
+
+`star.distance` carries finite `lower`/`upper` (1 mpc to 100 kpc) and no sigma, so `parameter.py`'s logit transform gave it a **uniform-in-distance** prior -- a default that fell out of the machinery, not a choice anyone made. `Star.build_likelihood` now adds the constant-space-density (volume) prior instead: `+2*log(d)`, normalized over the parameter's own hard support (`log Z = log((upper^3 - lower^3)/3)`), i.e. `p(d) ~ d^2`, `p(plx) ~ plx^-4`. Uniform-in-d is `p(plx) ~ plx^-2`; the two disagree by exactly `d^2`, negligible for a well-measured parallax and dominant below `plx/sigma ~ 10` (the Lutz-Kelker regime). One or the other always applies -- there is no config key, because there is a right answer.
+
+**Where a `galacticmodel` block exists the star component stands down entirely.** Its `kinematic_prior` already carries `volume_element = 2*log(d)`, and it applies to `system.star.distance.value` -- the **whole** vector, one `pt.sum`, no mask, lens and source and every other star alike -- so the two coverage sets are identical and a second copy would make the prior `d^4`. A galactic model is also strictly stronger than constant space density (real disk/bulge profiles along the actual sight line), so where one exists it wins outright. If galacticmodel's coverage ever narrows to a subset, star must cover the **complement** rather than stand down; `tests/test_distance_volume_prior.py` pins the coverage claim so that change cannot pass silently. Topology detection is `Star._galactic_imf` (component attr, then raw config), the same helper the Salpeter floor uses.
+
+Details worth not rediscovering:
+
+- **Normalized, deliberately**, even though the choice here is topology-driven rather than user-selected and so does not need PR #82/#86's "make two user-selectable IMFs comparable" argument. Three other reasons do: the prior it replaces *is* a normalized density (the logit reparameterization implies exactly `U(lower, upper)`), so dropping the constant would quietly demote `star.distance`'s prior to an unnormalized reweighting; the bounds are user-settable even though the prior is not, and today tightening `upper:` moves logp by exactly the `-log(span)` it is worth rather than by an arbitrary offset; and it is one closed-form constant with no gradient and no runtime cost. A **dynamic (linked)** `lower`/`upper` is normalized over the STATIC bounds and warns -- `build_pymc` re-maps that element's real support, so the constant does not normalize it.
+- The term covers **every** element, pinned and hard-linked ones included, exactly as the galacticmodel priors do. For a pinned element it is a constant and cannot move a posterior.
+- It applies **on top of** a user's Gaussian `sigma` on distance, and that is right: such an entry is a parallax *measurement*, and multiplying it by the volume prior is the standard treatment. The shift is `~2*(sigma/d)^2` in fractional distance -- 2e-4 for a 1% parallax, 18% for a 30% one, i.e. it only bites exactly where the volume prior is what you want.
+- **Nothing else carries a distance Jacobian or volume term.** SED (`calc_appmag`'s distance modulus), mann (`calc_absmag`), and astrometry (parallax scaling) use distance only in forward models; `lens.event_rate_prior`'s `log(mu_rel * theta_E)` is a rate *selection* factor, not a volume element, and it is applied whether or not a galacticmodel exists.
+- Reading a Parameter's hard support has one owner, `parameter.sampled_bounds` (galacticmodel's IMF normalizers call it too). Unreadable/non-finite bounds fall back to unnormalized with a warning rather than failing a fit.
+- Like `star.logmass` under the IMF, the LaTeX prior macro still reports `star.distance` as Uniform: a component-level `pm.Potential` is invisible to `Parameter`'s own prior description. Pre-existing behavior, not introduced here.
+
+Every pinned logp for a topology with a star and no galacticmodel moves by exactly `2*sum(log d) - n_star*log Z` (`log Z = 33.44017` at the defaults.yaml bounds, so `-28.835` nats per star at the 10 pc default start). `tests/test_runaway_logp_regression.py` has a galacticmodel and is therefore the unchanged control.
+
+Tests: `tests/test_distance_volume_prior.py`.
+
 ### Gaussian-process noise (`components/gp.py`)
 
 Optional, per data file, off by default. A file gets correlated noise by naming a celerite2 kernel on its config entry — `gp: rotation` (`RotationTerm`, spot modulation), `gp: sho` (`SHOTerm`, granulation/generic red noise), or `gp: [rotation, sho]` for their sum. Absent or `gp: none` keeps the independent-Gaussian likelihood, byte for byte.
