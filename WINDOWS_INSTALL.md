@@ -101,11 +101,41 @@ Keep a second Ubuntu window open for the `sudo` steps. [VERIFIED -- hit here]
 
 ## Prerequisites
 
-- Windows 11 (this was set up on Windows 11 Pro). [VERIFIED]
+- **Windows 10 version 2004 (build 19041) or newer, or Windows 11.** WSL2 does
+  not exist below that, and since WSL2 is the only supported way to run
+  EXOZIPPy on Windows, **neither does EXOZIPPy**. There is no workaround short
+  of upgrading Windows or installing Linux: native Windows cannot run the
+  samplers (no `fork` -- see "Why not native Windows?" above), and the older
+  WSL1 is a syscall translation layer, not a Linux kernel, so it does not give
+  you the platform this document assumes.
+
+  Worth stating plainly because observational astronomy runs on old hardware:
+  Windows 7, 8, 8.1, and any Windows 10 older than the May 2020 update are all
+  out. Windows 10 reached end of support in October 2025, so an unpatched
+  machine is a security question as well as a compatibility one. On hardware
+  that cannot take a supported Windows, installing Linux directly is the
+  better answer anyway -- it is the platform EXOZIPPy is developed and tested
+  on, and it will be faster on old silicon than a VM would be.
+
+  Check your version from PowerShell (`winver` in the Run box shows the same
+  thing):
+
+  ```powershell
+  [System.Environment]::OSVersion.Version    # want: Build 19041 or higher
+  ```
+
+- Windows 11 is what this runbook was verified on (Windows 11 Pro). [VERIFIED]
+  Windows 10 build 19041+ is expected to work but has not been reproduced
+  here. [EXPECTED]
 - CPU virtualization enabled in firmware. On this machine
   `Win32_Processor.VirtualizationFirmwareEnabled` was already `True`, so **no
   BIOS trip was needed**. [VERIFIED]
 - Admin access (for `wsl --install`) and one reboot.
+
+  Note the one-command `wsl --install` used in Step 1 needs Windows 10 build
+  19041+ or Windows 11. On older-but-still-supported builds you would be doing
+  the retired manual install (enable two optional features, download a kernel
+  update, `wsl --set-default-version 2`), which is not covered here.
 
 Check virtualization from PowerShell (non-elevated is fine):
 

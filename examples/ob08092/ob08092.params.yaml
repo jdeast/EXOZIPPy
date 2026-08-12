@@ -80,11 +80,3 @@ star.Source.teff:
 star.Source.feh:
     initval: 0
     sigma: 0.0
-
-# The band exists so the instrument's filter identity is declared and
-# readable.  This fit is point-source (lens.finite_source: False), so the
-# mulens likelihood never reads the limb darkening -- leaving q1/q2 free
-# would add two unconstrained dimensions sampling their priors.  Pin them.
-# Remove these two entries if finite_source is ever turned on.
-band.Cousins_I.q1: {sigma: 0}
-band.Cousins_I.q2: {sigma: 0}

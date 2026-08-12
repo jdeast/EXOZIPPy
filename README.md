@@ -60,6 +60,16 @@ genuine Ubuntu userspace, so it *is* the Linux platform in the table above,
 (Windows 11 -> Ubuntu 26.04 -> Python 3.14 -> Poetry), is
 [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
 
+**This needs Windows 10 version 2004 (build 19041) or newer, or Windows 11.**
+WSL2 does not exist below that, and WSL2 is the only supported route, so on an
+older Windows there is no way to run EXOZIPPy at all -- native Windows cannot
+run the samplers (below), and WSL1 is a syscall translation layer rather than
+a Linux kernel. Worth saying out loud because observational astronomy runs on
+old hardware: Windows 7/8/8.1 and pre-2004 Windows 10 are out. If the machine
+cannot take a supported Windows, install Linux on it directly -- that is the
+platform EXOZIPPy is developed and tested on, and on old silicon it will beat
+a VM anyway.
+
 **Why not natively?** Two independent reasons:
 
 1. **The PTDE sampler cannot work.** It builds worker pools with
