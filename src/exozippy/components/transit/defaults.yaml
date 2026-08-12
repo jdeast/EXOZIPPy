@@ -23,7 +23,7 @@ transit:
     description: "Photometric Jitter"
     expressions:
       default:
-        func_name: "calc_transit_jitter"
+        func_name: "calc_jitter"
         deps: [ "jitter_variance" ]
   # Limb darkening lives on the Band component (band: reference per
   # instrument); see components/band/defaults.yaml.

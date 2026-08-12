@@ -11,8 +11,6 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 
-from . import physics
-
 
 class RVInstrument(Instrument):
     def __init__(self, config, config_manager):

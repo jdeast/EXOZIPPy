@@ -2,17 +2,11 @@ import numpy as np
 import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
-from ...physics_registry import register_physics
-
 # Limb-darkening physics lives on the Band component
 # (calc_u1_from_kipping / calc_u2_from_kipping in band/physics.py).
-
-
-@register_physics
-def calc_transit_jitter(jitter_variance):
-    return pt.switch(
-        pt.lt(jitter_variance, 0.0), 0.0, pt.sqrt(jitter_variance)
-    )
+# The reported jitter (calc_jitter) belongs to the shared additive noise model
+# and lives on components/instrument.py, next to the jitter-variance floor
+# that makes its signed square root meaningful.
 
 
 def calc_planet_visible(b_p, Z_p, r_p):
