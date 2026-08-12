@@ -32,6 +32,32 @@ requires_fork = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_shared_download_cache(monkeypatch):
+    """Keep the machine-level Zenodo cache out of the test suite by default.
+
+    utilities/zenodo.py caches large downloads under ~/.cache/exozippy and
+    adopts an already-present destination into it. Both are exactly what we
+    want in a fit and exactly what we do not want in a test: the suite would
+    md5 (and possibly copy) the real 250 MB NextGen spectra, and tests using
+    fake payloads would leave entries in the developer's own cache.
+
+    Tests that exercise the cache opt back in by pointing EXOZIPPY_CACHE_DIR
+    at a tmp_path of their own; with it switched off here, everything else
+    behaves exactly as it did before the cache existed. The module-level
+    latches are reset too, so one test's unwritable-cache warning cannot
+    leak into the next.
+    """
+    from exozippy.utilities import zenodo
+
+    monkeypatch.setenv("EXOZIPPY_CACHE_DIR", "")
+    # raising=False so this fixture keeps working against a zenodo.py that
+    # predates the cache (bisects, and the pre-fix run that proves the cache
+    # tests really do fail without it).
+    monkeypatch.setattr(zenodo, "_cache_disabled_reason", None, raising=False)
+    monkeypatch.setattr(zenodo, "_adoption_attempted", set(), raising=False)
+
+
 class _DummyConfigManager:
     """Minimal ConfigManager stub for tests that only need a no-op hint interface."""
 
