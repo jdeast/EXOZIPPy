@@ -29,7 +29,12 @@ import pytensor.tensor as pt
 from astropy import units as u
 
 from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
-from exozippy.outputs.texutils import latex_escape
+from exozippy.outputs.texutils import (
+    DIGIT_WORDS,
+    idx_to_words,
+    latex_escape,
+    mode_suffix,
+)
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 logger = logging.getLogger(__name__)
@@ -118,44 +123,18 @@ def _latex_varname(label: str, prefix: str = "ez") -> str:
     """
     Create a LaTeX-safe macro name from a label:
     - remove underscores and periods
-    - replace digits with words
+    - replace digits with words (outputs.texutils.DIGIT_WORDS -- the same
+      table idx_to_words uses, because this builds the <varname> half of
+      the very name idx_to_words builds the <idx> half of)
     - prefix to avoid global collisions
+
+    The digit substitutions are safe in any order: no replacement word
+    contains a digit, so none of them can be re-processed by a later rule.
     """
-    old = [".", "_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-    new = [
-        "",
-        "",
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-    ]
-    var = label
-    for o, n in zip(old, new):
-        var = var.replace(o, n)
+    var = label.replace(".", "").replace("_", "")
+    for digit, word in DIGIT_WORDS.items():
+        var = var.replace(digit, word)
     return prefix + var
-
-
-def _idx_to_words(n):
-    words = {
-        "0": "zero",
-        "1": "one",
-        "2": "two",
-        "3": "three",
-        "4": "four",
-        "5": "five",
-        "6": "six",
-        "7": "seven",
-        "8": "eight",
-        "9": "nine",
-    }
-    return "".join(words[char] for char in str(n))
 
 
 def _as_flat_array(x: Any) -> np.ndarray:
@@ -1899,7 +1878,7 @@ class Parameter:
                 if len(inits) > 1:
                     lines = []
                     for i, val in enumerate(inits):
-                        idx_str = _idx_to_words(i)
+                        idx_str = idx_to_words(i)
                         lines.append(
                             rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{\equiv {val}}}}}"
                             + "\n"
@@ -1920,7 +1899,7 @@ class Parameter:
             lines = []
             for i, summ in enumerate(self.summary):
                 val = summ.latex_value(sigfigs=sigfigs)
-                idx_str = _idx_to_words(i)
+                idx_str = idx_to_words(i)
                 lines.append(
                     rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{{val}}}}}"
                     + "\n"
@@ -1945,12 +1924,12 @@ class Parameter:
             return ""
         lines = []
         for k, summary in enumerate(self.mode_summaries):
-            suffix = "mode" + _idx_to_words(k + 1)
+            suffix = mode_suffix(k)
             if isinstance(summary, list):
                 for i, summ in enumerate(summary):
                     val = summ.latex_value(sigfigs=sigfigs)
                     lines.append(
-                        rf"\providecommand{{\{self.latex_varname}{_idx_to_words(i)}{suffix}}}"
+                        rf"\providecommand{{\{self.latex_varname}{idx_to_words(i)}{suffix}}}"
                         rf"{{\ensuremath{{{val}}}}}" + "\n"
                     )
             else:
@@ -2224,7 +2203,7 @@ class Parameter:
         )
         lines = []
         for i in range(n_elements):
-            idx_str = _idx_to_words(i) if n_elements > 1 else ""
+            idx_str = idx_to_words(i) if n_elements > 1 else ""
             prior_str = self.get_prior_str(index=i, latex=True)
             lines.append(
                 rf"\providecommand{{\{self.latex_varname}{idx_str}prior}}"
@@ -2270,7 +2249,7 @@ class Parameter:
 
         lines = []
         for i in range(n_elements):
-            idx_str = _idx_to_words(i) if n_elements > 1 else ""
+            idx_str = idx_to_words(i) if n_elements > 1 else ""
 
             if n_elements > 1:
                 if self.names and i < len(self.names):
@@ -2329,7 +2308,7 @@ class Parameter:
             raise ValueError(f"{self.label}: description not set.")
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
-        idx_str = _idx_to_words(index) if n_elements > 1 else ""
+        idx_str = idx_to_words(index) if n_elements > 1 else ""
 
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"

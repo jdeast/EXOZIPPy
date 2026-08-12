@@ -1,5 +1,9 @@
 """Shared LaTeX plumbing for the report layer.
 
+Two things live here, both of which MUST have exactly one implementation:
+the escaping helper, and the pieces a generated macro NAME is assembled
+from (see "Macro name pieces" below).
+
 One escaping helper, used everywhere a string that is NOT meant to be LaTeX
 reaches a LaTeX file: the output prefix, target/system names, instrument and
 band (instance) names, component section labels, parameter descriptions.
@@ -49,3 +53,61 @@ def latex_escape(text):
     for old, new in _REPLACEMENTS:
         out = out.replace(old, new)
     return out.replace(_BACKSLASH_PLACEHOLDER, r"\textbackslash{}")
+
+
+# ----------------------------------------------------------------------
+# Macro name pieces
+# ----------------------------------------------------------------------
+#
+# A generated macro name is \<varname><idx><suffix>, and the three pieces
+# are assembled in TWO different modules: components/parameter.py EMITS the
+# \providecommand, outputs/latex.py REFERS to it from the table body (and
+# run.py reuses the mode suffix for the per-mode plot filenames).  Emitter
+# and referrer must spell the name identically or the document cites an
+# undefined macro -- a hard compile error at the very end of a long fit --
+# or, if the drift lands on a name that happens to exist, silently prints
+# another parameter's value.
+#
+# So there is exactly ONE implementation of each piece and it lives here,
+# in the leaf module both sides already import (components -> outputs is
+# an existing edge via latex_escape; outputs -> components would close a
+# cycle, so this is the only direction available).  A TeX control sequence
+# may not contain digits, which is why every index is spelled in words.
+
+DIGIT_WORDS = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
+}
+
+
+def idx_to_words(n):
+    """Spell ``n`` digit by digit: 0 -> 'zero', 12 -> 'onetwo'."""
+    return "".join(DIGIT_WORDS[char] for char in str(n))
+
+
+def mode_word(k):
+    """1-based word for the 0-based mode ``k``: 'one', 'two', ...
+
+    The 0-based-index/1-based-label conversion is here, once: modes are
+    stored 0-based and reported 1-based, and an off-by-one that reached
+    only one of the two sides would mislabel every column of the table.
+    """
+    return idx_to_words(k + 1)
+
+
+def mode_suffix(k):
+    """LaTeX-macro-safe suffix for mode ``k`` (0-based): 'modeone', ...
+
+    Also used verbatim for the per-mode output FILENAMES (run.py's
+    ``<prefix>_corner_modeone.png``), so the plots and the macros that
+    describe them cannot drift apart either.
+    """
+    return "mode" + mode_word(k)
