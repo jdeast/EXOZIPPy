@@ -208,6 +208,110 @@ class Band(Component):
     def build_maps(self):
         self.star_map = np.array(self.star_indices, dtype=int)
 
+    # Every place in the codebase that reads a Band's limb darkening, and the
+    # condition under which it does.  Keep this list in sync with the grep for
+    # `band.u1` / `band.u2` -- a new consumer that is not represented here
+    # would have its band's LD silently pinned.
+    #
+    #   transit/transit.py       band.u1/u2[obs_band_map]  -- unconditional
+    #   mulensing/mulensinstrument.py  band.u1[band_idx]   -- finite_source only
+    #   rm.py (via rvinstrument `rm:`)  band.u1/u2[band_idx]
+    #
+    # astrometryinstrument's optional `band:` is deliberately absent: it uses
+    # the band only for its filter identity (the SED photocenter fluxfrac),
+    # never its limb darkening.
+    def _ld_consumer_indices(self, system):
+        """Band indices whose limb darkening something in this topology reads.
+
+        Read from each consumer's raw ``config`` rather than from its parsed
+        band map: ``MulensInstrument.band_map`` is built in *stage 2*
+        (``register_parameters``), so whether it exists yet depends on
+        component ordering, while ``Component.config`` is set in ``__init__``
+        and is always available here.
+        """
+        name_to_idx = {name: i for i, name in enumerate(self.names)}
+        consumers = set()
+
+        def _mark(idx):
+            if idx is not None and 0 <= idx < self.n_elements:
+                consumers.add(idx)
+
+        def _cfg(comp_name):
+            comp = getattr(system, comp_name, None)
+            return list(getattr(comp, "config", None) or [])
+
+        # Transit: the occultation model cannot be computed without limb
+        # darkening, so any transit referencing a band reads it.
+        for c in _cfg("transit"):
+            _mark(name_to_idx.get(c.get("band")))
+
+        # Microlensing: the magnification only takes u1 when the source is
+        # resolved.  `any` over the lens elements, not `[0]`, because that is
+        # the conservative direction -- MulensInstrument.build_likelihood
+        # currently gates on finite_source[0].
+        finite_source = any(
+            bool(c.get("finite_source", False)) for c in _cfg("lens")
+        )
+        if finite_source:
+            # Every band a light curve references is marked, not just the
+            # lowest-indexed one build_likelihood actually passes down (it
+            # warns and uses the first).  Pinning on that tie-break would make
+            # the pin an artifact of an acknowledged limitation.
+            for c in _cfg("mulensinstrument"):
+                _mark(name_to_idx.get(c.get("band")))
+
+        # Rossiter-McLaughlin: rvinstrument `rm:` reads the `rm_band` band, or
+        # band 0 when unset (see rm.resolve_rm_indices).
+        for c in _cfg("rvinstrument"):
+            if not c.get("rm"):
+                continue
+            rm_band = c.get("rm_band")
+            _mark(0 if rm_band is None else name_to_idx.get(rm_band))
+
+        return consumers
+
+    def _pin_unread_limb_darkening(self, system, ld_params):
+        """Pin the LD parameters of every band nothing in the topology reads.
+
+        A `band:` block declares filter identity, which a point-source
+        microlensing fit needs and which says nothing about limb darkening.
+        Before this, adding one to such a fit also added two free RVs that no
+        likelihood term touched -- so `finite_source: true/false` was a
+        one-line config edit plus remembering to add or remove two pins.
+
+        The pin goes through the manifest "overrides" channel, which layers
+        UNDER the params file (`sigma` takes apply_value's last-writer-wins
+        `else` branch, and user params are applied after internal_overrides),
+        so an explicit `band.<name>.q1: {sigma: 0.1}` still frees it -- someone
+        may deliberately want a free LD to put a prior on.
+        """
+        consumers = self._ld_consumer_indices(system)
+        unread = [i for i in range(self.n_elements) if i not in consumers]
+        if not unread:
+            return
+
+        pin = np.full(self.n_elements, np.nan)
+        pin[unread] = 0.0
+        for param_name in ld_params:
+            entry = self.manifest.get(param_name)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            overrides = dict(entry.get("overrides", {}))
+            overrides["sigma"] = pin.tolist()
+            entry["overrides"] = overrides
+            self.manifest[param_name] = entry
+
+        joined = "/".join(ld_params)
+        for i in unread:
+            logger.info(
+                f"[{self.prefix}] pinning {self.prefix}.{self.names[i]}."
+                f"{joined} (sigma=0): nothing in this topology reads this "
+                f"band's limb darkening. Only a transit, a finite-source "
+                f"microlensing light curve, or an rvinstrument 'rm:' block "
+                f"does; astrometry's 'band:' uses the filter identity only. "
+                f"Give {self.prefix}.{self.names[i]}.{ld_params[0]} an entry "
+                f"in the params file to sample it anyway."
+            )
+
     def register_parameters(self, system):
         # Uniform by construction (_parse_ld_laws raises on a mix), so the
         # first element's law is the system's law.
@@ -215,6 +319,7 @@ class Band(Component):
             self.manifest = {
                 "u1": None,
             }
+            ld_params = ["u1"]
         else:
             self.manifest = {
                 "q1": None,
@@ -222,6 +327,11 @@ class Band(Component):
                 "u1": "default",
                 "u2": "default",
             }
+            # Pin the SAMPLED coordinates; u1/u2 are Kipping-derived from them
+            # and a sigma on a derived parameter is a silent no-op.
+            ld_params = ["q1", "q2"]
+
+        self._pin_unread_limb_darkening(system, ld_params)
 
         # thermal (secondary-eclipse depth, ppm) is opt-in per band via
         # fitthermal: true. Bands that don't opt in are pinned at sigma=0

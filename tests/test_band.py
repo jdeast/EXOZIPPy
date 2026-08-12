@@ -11,6 +11,21 @@ def _make_band(config):
     return Band(config, _DummyConfigManager())
 
 
+def _is_free(entry):
+    """True when a manifest entry declares a SAMPLED (non-derived) parameter.
+
+    The manifest's own rule (Component.add_parameter, System.derived_params):
+    a string names an expression, a dict names one only via "expr_key", and
+    anything else -- including a dict carrying just an "overrides" pin, which
+    is how Band pins limb darkening no consumer reads -- is free.
+    """
+    if isinstance(entry, str):
+        return False
+    if isinstance(entry, dict):
+        return entry.get("expr_key") is None
+    return entry is None
+
+
 def test_load_data_populates_lists_from_config():
     """
     Given a config with filter, star_ndx, and ld_law,
@@ -65,9 +80,11 @@ def test_register_parameters_quadratic_law_uses_kipping():
     assert "q2" in band.manifest
     assert "u1" in band.manifest
     assert "u2" in band.manifest
-    # q1/q2 are free; u1/u2 derive from them
-    assert band.manifest["q1"] is None
-    assert band.manifest["q2"] is None
+    # q1/q2 are free; u1/u2 derive from them.  These bands have no consumer in
+    # this (empty) topology, so the free pair also carries the auto-pin -- a
+    # manifest dict with no "expr_key" is still a free parameter.
+    assert _is_free(band.manifest["q1"])
+    assert _is_free(band.manifest["q2"])
     assert band.manifest["u1"] == "default"
     assert band.manifest["u2"] == "default"
 
@@ -82,7 +99,7 @@ def test_register_parameters_linear_law_samples_u1_directly():
     band.load_data(system=None)
     band.register_parameters(system=None)
     assert "u1" in band.manifest
-    assert band.manifest["u1"] is None
+    assert _is_free(band.manifest["u1"])
     assert "q1" not in band.manifest
     assert "q2" not in band.manifest
     assert "u2" not in band.manifest
@@ -163,7 +180,7 @@ def test_uniform_ld_law_across_several_bands_is_allowed():
     band.load_data(system=None)
     band.register_parameters(system=None)
     assert "u2" not in band.manifest
-    assert band.manifest["u1"] is None
+    assert _is_free(band.manifest["u1"])
 
 
 def test_build_likelihood_adds_no_potentials():
