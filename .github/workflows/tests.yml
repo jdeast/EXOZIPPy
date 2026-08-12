@@ -110,10 +110,27 @@ jobs:
       # the paths it was SAVED with. Repointing `path:` alone would still hit
       # the old entry and still unpack it at the old location; the key has to
       # change for a new entry to be written at the new one.
+      #
+      # The path names the two DOWNLOADED files, not their directory. Both
+      # land in models/NextGen/BCs/ next to 68 TRACKED BC tables, and a cache
+      # is restored after checkout and overwrites what it finds. Caching the
+      # directory would therefore let a stale entry silently revert a tracked
+      # table -- and the key, being the spectra md5, would not change when a
+      # table did, so it would never self-heal. That is not hypothetical: the
+      # "sed: fix Av bug in shipped 2MASS/WISE/GAIA BC tables" commit is
+      # exactly the change that would have been reverted under CI while
+      # passing locally.
+      #
+      # The other Zenodo asset, the 128 MB MIST EEP grid (models/MIST/eep_grid
+      # .py, same fetch_assets core), is deliberately not cached: the only
+      # test that touches it monkeypatches _EEP_GRID_ASSETS and EEP_GRID_DIR,
+      # so CI never downloads it. Add it here if that ever changes.
       - name: Cache the Zenodo model spectra
         uses: actions/cache@v6
         with:
-          path: src/exozippy/models/NextGen
+          path: |
+            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
           key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
 
       # The mulensing component sets astropy's solar-system ephemeris to
@@ -199,7 +216,9 @@ jobs:
       - name: Cache the Zenodo model spectra
         uses: actions/cache@v6
         with:
-          path: src/exozippy/models/NextGen
+          path: |
+            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
           key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
 
       # Same astropy ephemeris-kernel cache as the matrix job -- see the
