@@ -2629,8 +2629,23 @@ class ConfigManager:
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_scale_rank
 
-                    if target_str in self.user_params and isinstance(
-                        self.user_params[target_str], dict
+                    # Sync the solved scale back into user_params -- but only
+                    # when there IS one.  init_scale is optional at every
+                    # source (defaults.yaml, component hints, user sigmas), so
+                    # a target whose parents are ALL scale-less scores
+                    # new_scale_rank == 0, fails the guard above, and has no
+                    # entry from the default-armor pass either: reading
+                    # resolved_scales[target_str] here used to raise KeyError
+                    # straight out of prepare().  (Reproduced by naming
+                    # `orbit.<name>.arsun` in a params file -- it is solved
+                    # from m_total and period, and none of the three carries
+                    # an init_scale default.)  Skipping leaves the parameter
+                    # with no preliminary scale, which is the documented and
+                    # handled state: build_pymc falls back to a fraction of
+                    # the bound span, and the startup whitening probe measures
+                    # the real scale from the data regardless.
+                    if target_str in resolved_scales and isinstance(
+                        self.user_params.get(target_str), dict
                     ):
                         factor = self.get_conversion_factor(
                             parts[0], parts[-1], full_path=target_str
