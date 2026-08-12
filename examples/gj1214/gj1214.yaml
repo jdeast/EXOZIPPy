@@ -71,7 +71,10 @@ band:
     filter: "MIRILRS"
     fitthermal: true
   - name: "I"
-    filter: "I"
+    # MEarth's I band. Spelled out rather than left as a bare "I", which
+    # names two rows of the filter alias table (Bessell and Cousins); a
+    # bare "I"/"R" resolves to Cousins, but say it rather than rely on it.
+    filter: "Generic/Cousins.I"
   - name: "V"
     filter: "V"
 

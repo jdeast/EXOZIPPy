@@ -6,6 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.sed.bc_grid import (
+    AMBIGUOUS_FILTER_ALIASES,
     _load_alias_table,
     facility_from_svo_name,
     resolve_filter_name,
@@ -132,6 +133,26 @@ class Band(Component):
                     f"filter alias table (exozippy/filters/"
                     f"filternames.txt); assuming it is already a canonical "
                     f"BC-table/SVO name."
+                )
+            elif alias_df is not None and filt in AMBIGUOUS_FILTER_ALIASES:
+                # INFO, not a warning, and deliberately so.  The label names
+                # two rows of the alias table, so SOMETHING has to choose --
+                # but the choice is now a documented project convention
+                # (AMBIGUOUS_FILTER_ALIASES) rather than the row order it
+                # used to be, and "I" is how essentially every ground-based
+                # microlensing survey spells its band.  A warning on every
+                # such fit would be noise on a config that is doing nothing
+                # wrong, and the standing lesson from the FFP logmass bound
+                # is that warnings people cannot act on teach them to ignore
+                # warnings.  Stating the resolution once per band is enough
+                # for a user who meant the other one to notice.
+                logger.info(
+                    f"Band '{band_name}': filter '{filt}' names more than "
+                    f"one row of the filter alias table; resolving it to "
+                    f"'{self.filter_svo[-1]}' by the project convention "
+                    f"that a bare '{filt}' is the Cousins band. Write the "
+                    f"filter out (e.g. 'Generic/Bessell.{filt}' or "
+                    f"'Generic/Cousins.{filt}') to say so explicitly."
                 )
 
     def _parse_ld_laws(self):
