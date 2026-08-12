@@ -12,8 +12,9 @@ This file is the cheap guard against that recurring.  Deliberately narrow:
     its decorators -- which is exactly where that class of rot lives.  It does
     NOT run the script, so this stays side-effect free.  Every script in
     scripts/ therefore has to keep its work behind ``main()``; two did not
-    (make_test_fixtures.py wrote a fixture at import, validate_vbm_safedist.py
-    ran a multi-minute VBM scan), and they were wrapped when this went in.
+    (validate_vbm_safedist.py ran a multi-minute VBM scan, and the
+    since-deleted make_test_fixtures.py wrote a fixture), and they were
+    wrapped when this went in.
   * --help constructs the argparse parser and exits, which catches a flag
     referring to a parameter that no longer exists and a help string
     describing behaviour that changed.  It is driven in-process rather than
@@ -44,7 +45,6 @@ NO_CLI = {
     "diag_rotation.py",
     # One-shot generators, hard-coded scenario, no knobs.
     "make_exofast_tran_reference.py",  # also: shells out to IDL
-    "make_test_fixtures.py",
     "validate_vbm_safedist.py",
 }
 
@@ -160,9 +160,9 @@ def test_script_guards_its_main(name):
     Then it guards execution behind ``if __name__ == "__main__":``.
 
     The import test above is only side-effect free while this holds.  Two
-    scripts violated it: make_test_fixtures.py wrote into tests/fixtures/ at
-    import time and validate_vbm_safedist.py started a multi-minute
-    VBMicrolensing scan.
+    scripts violated it: the since-deleted make_test_fixtures.py wrote into
+    tests/fixtures/ at import time, and validate_vbm_safedist.py started a
+    multi-minute VBMicrolensing scan.
     """
     # Assert
     source = (SCRIPTS_DIR / name).read_text()
