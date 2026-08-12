@@ -433,8 +433,17 @@ def build_latex_output(
         value_heads = r"\colhead{Value}"
 
     with open(template_filename, "w") as f:
+        # aastex701 and nothing else.  A \usepackage{apjfonts} line used to
+        # follow, and it made the generated template uncompilable anywhere
+        # that file was missing: apjfonts is a legacy AASTeX v5 font package,
+        # it is NOT on CTAN and NOT in TeX Live, and its absence is fatal
+        # ("LaTeX Error: File `apjfonts.sty' not found. Emergency stop."),
+        # not degraded.  AASTeX 7 sets its own fonts -- AAS's own
+        # aastex701-sample.tex does not load apjfonts -- and the reference
+        # manuscript compiles identically with it and without it.  So it
+        # bought nothing and cost a hard failure to everyone whose TeX
+        # installation did not happen to carry a file from 2005.
         f.write(r"\documentclass{aastex701}" + "\n")
-        f.write(r"\usepackage{apjfonts}" + "\n")
         f.write(rf"\input{{{pathlib.Path(var_filename).stem}}}" + "\n")
         f.write(r"\begin{document}" + "\n")
         f.write(r"\startlongtable" + "\n")
