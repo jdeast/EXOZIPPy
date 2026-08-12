@@ -24,15 +24,16 @@ galacticmodel:
   - name: "OB08092"
     anchor_idx: 1
 
+band:
+  - name: "Cousins_I"
+    filter: "Cousins_I"
+
 mulensinstrument:
   - name: "OGLE4"
     file: "n20100309.I.OGLE4.ob08092.dat"
-    # Descriptive only: mulensinstrument takes a `band:` reference (to a
-    # band block), not a `filter:` string, and this fit declares no band
-    # block, so nothing reads this key. Spelled out anyway rather than left
-    # as a bare "I", which names two rows of the filter alias table
-    # (Bessell and Cousins); OGLE observes in Cousins I.
-    filter: "Generic/Cousins.I"
+    # OGLE observes in Cousins I.  A bare "I" would name two rows of the
+    # filter alias table (Bessell and Cousins), so the band spells it out.
+    band: "Cousins_I"
     zero_point: ""
 
 parameter_file: "ob08092.params.yaml"
