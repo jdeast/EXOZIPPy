@@ -202,3 +202,229 @@ def test_multi_seed_stratifies_across_modes(tmp_path):
     assert in_majority.any(), f"no majority-mode seeds: {t0_seeds}"
     # seed 0 is the global MAP, which lives in the better-lp minority basin
     assert t0_seeds[0] > 2004.0
+
+
+# ---------------------------------------------------------------------------
+# A trace whose draws are ALL numerically invalid must not seed the next fit.
+#
+# Sibling of the outputs.modes validity gate (review 3.17 / PR #130): there,
+# a 100%-invalid trace slipped past the reporting gate because identify_modes
+# raised instead of returning a report.  Here the same NoValidDrawsError was
+# swallowed by _sample_seed_draws' broad "never let mode analysis break seed
+# emission" catch -- and the single-seed path never even reached it, because
+# with an all-NaN lp np.argmax returns 0 and the "MAP" is silently draw 0 of
+# chain 0.  The values that lands in the restart file look perfectly
+# reasonable, which is exactly why it cannot pass quietly: the file IS the
+# next fit's start.
+# ---------------------------------------------------------------------------
+
+
+def _make_all_invalid_trace(
+    tmp_path, kind="nonfinite-lp", nchain=4, ndraw=400
+):
+    """A trace whose draws are all rejected by identify_modes' filter, over
+    perfectly ordinary-looking posterior values.
+
+    ``nonfinite-lp`` is PR #130's own fixture shape (all-NaN
+    ``sample_stats['lp']``).  ``nonfinite-raw`` keeps lp healthy and makes
+    the raw-space values non-finite instead -- the shape that actually
+    reached the swallowed catch, since find_burnin is happy with it.
+    """
+    rng = np.random.default_rng(0)
+    t0_raw = rng.standard_normal((nchain, ndraw))
+    post = {
+        "lens.t_0": 2000.0 + t0_raw,
+        "lens.t_0_raw": t0_raw,
+        "star.mass": 1.0 + 0.1 * rng.standard_normal((nchain, ndraw, 2)),
+        "star.mass_raw": rng.standard_normal((nchain, ndraw, 2)),
+    }
+    lp = -0.5 * t0_raw**2
+    if kind == "nonfinite-lp":
+        lp = np.full((nchain, ndraw), np.nan)
+    elif kind == "nonfinite-raw":
+        for name in list(post):
+            if name.endswith("_raw"):
+                post[name] = np.full_like(post[name], np.nan)
+    else:  # pragma: no cover - guard against a typo'd parametrization
+        raise ValueError(kind)
+    idata = az.from_dict({"posterior": post, "sample_stats": {"lp": lp}})
+    trace_path = tmp_path / f"{kind}_trace.nc"
+    idata.to_netcdf(str(trace_path))
+    return trace_path
+
+
+@pytest.mark.parametrize("kind", ["nonfinite-lp", "nonfinite-raw"])
+@pytest.mark.parametrize("n_seeds", [1, 4])
+def test_all_invalid_trace_refuses_to_write_a_restart_file(
+    tmp_path, kind, n_seeds
+):
+    """
+    Given a trace in which EVERY draw fails the numerical-validity filter,
+    When mkprior is asked for a restart file (single- or multi-seed),
+    Then it raises instead of writing one, and nothing is written.
+
+    Parametrized over both seed counts on purpose: the single-seed path is
+    the default and the one run.py fires post-fit, and it never calls
+    _sample_seed_draws at all -- so a gate that lived only there would leave
+    it wide open.
+    """
+    trace_path = _make_all_invalid_trace(tmp_path, kind)
+    out = tmp_path / "out.params.yaml"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        mkprior(
+            _config(),
+            base_dir=tmp_path,
+            trace_path=trace_path,
+            output_path=out,
+            n_seeds=n_seeds,
+        )
+
+    assert not out.exists(), "a restart file was written despite the refusal"
+    msg = str(excinfo.value)
+    assert "1600" in msg, f"counts not named: {msg}"
+    assert "100.00%" in msg, f"invalid fraction not named: {msg}"
+    assert str(trace_path) in msg, f"trace path not named: {msg}"
+    assert kind in msg, f"rejection reason not named: {msg}"
+    # What to do next, and the escape hatch -- which is deliberately the
+    # mkprior key, not the modes one.
+    assert "recompute_trace" in msg
+    assert "mkprior: {force: true}" in msg
+
+
+def test_all_invalid_refusal_is_not_enabled_by_the_modes_force_key(tmp_path):
+    """
+    Given an all-invalid trace and `modes: {force: true}` in the config,
+    When mkprior runs,
+    Then it STILL refuses.
+
+    `modes: {force: true}` authorizes forensic RE-PROCESSING -- emitting
+    tables so a broken run can be inspected -- and under it run.py sails
+    past build_mode_reports' identical gate and goes on to call mkprior at
+    the end of wrap-up.  If that key also unlocked seed emission, this check
+    would be a no-op on the one live path that reaches it, and asking for
+    forensic tables would silently authorize a corrupt restart file as a
+    side effect.
+    """
+    trace_path = _make_all_invalid_trace(tmp_path)
+    out = tmp_path / "out.params.yaml"
+    config = dict(_config(), modes={"force": True, "max_invalid_frac": 1.0})
+
+    with pytest.raises(RuntimeError, match="refusing to write a restart file"):
+        mkprior(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace_path,
+            output_path=out,
+            n_seeds=4,
+        )
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("n_seeds", [1, 4])
+def test_mkprior_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
+    """
+    Given an all-invalid trace and `mkprior: {force: true}`,
+    When mkprior runs,
+    Then it writes the restart file, and the FILE itself carries the
+      no-valid-draws warning.
+
+    The log line scrolls away; this file is the artifact that outlives it
+    and gets handed to the next fit, so the provenance has to travel with
+    it.  (The single-seed case also pins that the all-NaN lp no longer
+    aborts inside find_burnin's np.nanargmax with an opaque
+    "All-NaN slice encountered" naming nothing.)
+    """
+    trace_path = _make_all_invalid_trace(tmp_path)
+    out = tmp_path / "out.params.yaml"
+
+    mkprior(
+        dict(_config(), mkprior={"force": True}),
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        output_path=out,
+        n_seeds=n_seeds,
+    )
+
+    text = out.read_text()
+    assert "NO VALID DRAWS" in text
+    assert "All 1600 draws (100.00%)" in text
+    assert "mkprior: {force: true}" in text
+    params = yaml.safe_load(text)
+    assert "lens.L.t_0" in params  # seeds were in fact emitted
+
+
+def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
+    tmp_path, monkeypatch
+):
+    """
+    Given a HEALTHY trace and a mode pass that crashes for an unrelated
+      reason,
+    When mkprior runs,
+    Then it still emits seeds, byte-identically to the no-crash run.
+
+    The broad "never let mode analysis break seed emission" catch is right
+    and must keep working; only the all-draws-invalid case is carved out of
+    it.
+    """
+    import exozippy.outputs.modes as modes_mod
+
+    trace_path = _make_trace(tmp_path)
+    control = tmp_path / "control.params.yaml"
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        output_path=control,
+        n_seeds=4,
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic mode-pass crash")
+
+    monkeypatch.setattr(modes_mod, "identify_modes", boom)
+    crashed = tmp_path / "crashed.params.yaml"
+    mkprior(
+        _config(),
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        output_path=crashed,
+        n_seeds=4,
+    )
+
+    assert crashed.read_text() == control.read_text()
+
+
+def test_a_partially_invalid_trace_is_left_alone(tmp_path):
+    """
+    Given a trace with SOME invalid draws but not all,
+    When mkprior runs,
+    Then it emits the restart file as before.
+
+    This gate is binary by design: either identify_modes could build a
+    report or it rejected every single draw.  A partial invalid fraction is
+    the REPORTING gate's business (`modes: {max_invalid_frac}`), and mkprior
+    deliberately has no fraction knob of its own -- with only two reachable
+    settings it would just be an obscurer spelling of `force`.
+    """
+    rng = np.random.default_rng(0)
+    nchain, ndraw = 4, 400
+    t0_raw = rng.standard_normal((nchain, ndraw))
+    lp = -0.5 * t0_raw**2
+    lp[0, :50] = np.nan  # 3.1% invalid
+    post = {"lens.t_0": 2000.0 + t0_raw, "lens.t_0_raw": t0_raw}
+    trace_path = tmp_path / "partial_trace.nc"
+    az.from_dict({"posterior": post, "sample_stats": {"lp": lp}}).to_netcdf(
+        str(trace_path)
+    )
+
+    out = tmp_path / "out.params.yaml"
+    mkprior(
+        {"prefix": "run", "lens": [{"name": "L"}]},
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        output_path=out,
+        n_seeds=4,
+    )
+    params = yaml.safe_load(out.read_text())
+    assert len(params["lens.L.t_0"]["initval"]) == 4
