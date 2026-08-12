@@ -30,11 +30,13 @@ Policy:
     and the load proceeds.  Traces written before this check existed are
     legitimate and must keep working.
 
-Note the deliberate asymmetry with the neighboring reload in
-``whitening.load_whitening``, which detects a model mismatch of its own and
-merely falls back: whitening can honestly be re-measured from scratch at
-load time, so a mismatch there costs a probe.  A stale trace has no such
-repair -- the draws are already drawn.
+The neighboring reload in ``whitening`` splits along the same line, and for
+the same reason.  On a run that is about to sample, a whitening mismatch
+merely costs a probe (``load_whitening`` warns and re-measures): the
+coordinates are still a free choice.  On the REUSE path they are not -- the
+draws being decoded were sampled in the old coordinates -- so
+``whitening.restore_whitening_for_trace`` raises ``StaleWhiteningError``,
+exactly as this module raises here.  The draws are already drawn either way.
 
 The code that produced the trace is recorded alongside the fingerprint (the
 package version, and the git commit / describe / dirty flag of the source

@@ -33,6 +33,7 @@ is ~1.
 
 import json
 import logging
+import os
 
 import numpy as np
 
@@ -69,6 +70,16 @@ _GRAD_DOMINATED_NATS = 3.0
 _WHITEN_MAX_STEP = 1.0e9
 _WHITEN_MIN_STEP = 1.0e-14
 _WHITEN_MAX_BISECT = 90
+
+_BANNER = "!" * 70
+
+
+class StaleWhiteningError(RuntimeError):
+    """A saved trace's whitening file does not apply to this build.
+
+    Raised only on the REUSE path (``recompute_trace: false`` with an
+    existing trace).  See :func:`restore_whitening_for_trace`.
+    """
 
 
 def probe_step_1d(
@@ -765,6 +776,43 @@ def _validate_whitening_state(system, saved, lookup):
     return None
 
 
+def _apply_whitening_file(system, path):
+    """Read, validate and apply a persisted whitening state.
+
+    Returns ``None`` on success, or a human-readable reason the file does
+    not apply.  Nothing is written to any shared variable until the whole
+    file has been validated, so a rejected file leaves the build untouched
+    (never half-restored).
+
+    This is the shared body of :func:`load_whitening` (fresh path: warn and
+    re-measure) and :func:`restore_whitening_for_trace` (reuse path: raise).
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return f"{path} could not be read ({e})"
+    if data.get("version") != 1:
+        return f"{path} has an unknown version ({data.get('version')!r})"
+    saved = data.get("params", {})
+    lookup = {p.label: p for p in system.get_all_parameters()}
+
+    reason = _validate_whitening_state(system, saved, lookup)
+    if reason is not None:
+        return reason
+
+    for label, state in saved.items():
+        if not lookup[label].load_whitening(state):
+            # Unreachable: the validation above covers every shape
+            # load_whitening checks.  Loud rather than silent if it ever is.
+            return (
+                f"applying persisted state for '{label}' failed AFTER "
+                f"validation; the build may be partially restored"
+            )
+    logger.debug(f"Whitening: state restored from {path} (no probe needed).")
+    return None
+
+
 def load_whitening(system, path):
     """Apply a persisted whitening state.  Returns True on success.
 
@@ -775,39 +823,119 @@ def load_whitening(system, path):
     truncated file) leaves the build untouched and the caller falls back to
     a fresh probe.
 
-    A mismatch WARNS and re-measures rather than raising, matching what
-    ``measure_and_whiten`` does downstream: unlike foreign posterior draws,
-    whitening and barrier scales can be honestly recomputed from the model
-    at load time, so there is nothing to salvage by stopping the run.  What
-    must not happen is a PARTIAL apply, which is why nothing is written
-    until the whole file has been checked.
-    """
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:
-        logger.warning(f"Whitening: could not read {path} ({e}).")
-        return False
-    if data.get("version") != 1:
-        logger.warning(f"Whitening: {path} has an unknown version.")
-        return False
-    saved = data.get("params", {})
-    lookup = {p.label: p for p in system.get_all_parameters()}
+    A mismatch WARNS and re-measures rather than raising: when nothing has
+    been sampled yet the whitening is a free choice of coordinates, and
+    unlike foreign posterior draws it can be honestly recomputed from the
+    model at load time, so there is nothing to salvage by stopping the run.
 
-    reason = _validate_whitening_state(system, saved, lookup)
+    That reasoning holds ONLY while no existing draws depend on the answer.
+    A caller that is about to REUSE a saved trace must call
+    :func:`restore_whitening_for_trace` instead.
+    """
+    reason = _apply_whitening_file(system, path)
     if reason is not None:
         logger.warning(f"Whitening: {reason}; re-measuring.")
         return False
-
-    for label, state in saved.items():
-        if not lookup[label].load_whitening(state):
-            # Unreachable: the validation above covers every shape
-            # load_whitening checks.  Loud rather than silent if it ever is.
-            logger.warning(
-                f"Whitening: applying persisted state for '{label}' failed "
-                f"after validation; the build may be partially restored. "
-                f"Re-measuring."
-            )
-            return False
-    logger.debug(f"Whitening: state restored from {path} (no probe needed).")
     return True
+
+
+def restore_whitening_for_trace(system, path, trace_path):
+    """Restore the whitening a REUSED trace was sampled under.
+
+    Returns ``"restored"`` when the file applied, or ``"unverifiable"`` when
+    no whitening file exists (a warning is logged and the build keeps its
+    PRELIMINARY scales).  Raises :class:`StaleWhiteningError` when a file
+    exists but does not apply to this build.
+
+    Why this is not ``load_whitening``'s warn-and-re-measure: a trace's raw
+    draws are coordinates in the whitened space, so they only decode to the
+    physical values they were sampled at under the whitening that produced
+    them.  Re-measuring is a probe of the CURRENT start, which the draws
+    never saw; every posterior mode label, Laplace ledger width, recomputed
+    lp and model curve drawn at a stored draw would then be computed at a
+    different physical point than the sampler visited, with nothing
+    downstream able to notice.  This is exactly
+    :class:`~exozippy.trace_meta.StaleTraceError`'s situation, and the
+    asymmetry that module documents ("whitening can honestly be
+    re-measured") is an argument about a run that is about to sample, not
+    about one decoding draws that already exist.
+
+    Nothing is written to ``path`` on this path, ever: overwriting the
+    whitening a trace was sampled under destroys the only record of how to
+    read that trace, and a re-measured file would be indistinguishable from
+    a genuine one on the NEXT reload -- laundering a detected mismatch into
+    a silent one.
+    """
+    if not os.path.exists(path):
+        # Same policy as trace_meta's absent-fingerprint case: this is NOT a
+        # detected mismatch.  Traces sampled with 'measure_scales: false',
+        # or before whitening was persisted at all, legitimately have no
+        # file -- and for the former the preliminary scales in the fresh
+        # build ARE the ones it was sampled with.  Keep them: a probe of
+        # the current start is not more correct than they are, merely less
+        # reproducible, and it would move the soft-bound barriers (a real
+        # posterior term) away from the sampled model as well.
+        logger.warning(
+            f"{_BANNER}\n"
+            f"UNVERIFIABLE WHITENING: reusing the saved trace {trace_path}, "
+            f"but no whitening state was found at {path}, so the raw draws "
+            f"cannot be checked against -- or decoded under -- the "
+            f"coordinates they were sampled in. This is NOT a detected "
+            f"mismatch; the model keeps its PRELIMINARY scales and nothing "
+            f"is re-measured or written. If the trace was sampled with "
+            f"measured scales, its physical Deterministics are still "
+            f"correct, but anything recomputed from the raw draws (mode "
+            f"labels, the seed ledger, a recomputed lp) may not be. To be "
+            f"certain, re-sample with 'sampler: {{recompute_trace: true}}'."
+            f"\n{_BANNER}"
+        )
+        return "unverifiable"
+
+    reason = _apply_whitening_file(system, path)
+    if reason is None:
+        return "restored"
+
+    raise StaleWhiteningError(
+        f"{_BANNER}\n"
+        f"STALE WHITENING: {path} does not describe the model this config "
+        f"builds, and the saved trace {trace_path} is being REUSED "
+        f"('sampler: {{recompute_trace: false}}').\n"
+        f"  why it does not apply: {reason}\n"
+        f"A trace's raw draws are coordinates in the whitened space: they "
+        f"only decode to the physical values the sampler visited under the "
+        f"whitening they were sampled with. Re-measuring it here would "
+        f"probe the CURRENT start instead -- silently changing what every "
+        f"stored draw means -- and would overwrite the only record of how "
+        f"to read this trace. The draws cannot be repaired at load time.\n"
+        f"REMEDY: re-sample with 'sampler: {{recompute_trace: true}}' in the "
+        f"config, or restore the {path} that was written alongside "
+        f"{trace_path} (and revert the model edit that invalidated it).\n"
+        f"{_BANNER}"
+    )
+
+
+def prepare_whitening(
+    system, model, raw_start, path, trace_path, *, reusing_trace
+):
+    """Put the model into the whitened coordinates this run must use.
+
+    The two situations this serves look alike and are not:
+
+    * ``reusing_trace=False`` -- about to SAMPLE.  The whitening is a free
+      choice of coordinates, so it is measured from the data and persisted
+      to ``path``.  Whatever was there before is superseded, because the
+      draws it described are about to be superseded too.  Returns the probe
+      report (the caller must re-read its raw start: the rescale re-expressed
+      it in the new coordinates).
+    * ``reusing_trace=True`` -- about to DECODE draws that already exist.
+      The whitening is then a property of those draws, not a choice, so it
+      is restored and never re-measured or rewritten (see
+      :func:`restore_whitening_for_trace`; a mismatch raises).  Returns
+      ``None`` -- there is no probe and the raw start did not move.
+    """
+    if reusing_trace:
+        restore_whitening_for_trace(system, path, trace_path)
+        return None
+    report = measure_and_whiten(system, model, raw_start)
+    save_whitening(system, path, map_lp=report["map_lp"])
+    return report
