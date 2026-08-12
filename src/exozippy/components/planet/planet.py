@@ -6,7 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
-from exozippy.potentials import soft_lower_bound, soft_upper_bound
+from exozippy.potentials import soft_lower_bound
 
 from . import physics
 
@@ -401,14 +401,14 @@ class Planet(Component):
             return
 
         orbits = system.orbit
-        pm.Potential(
-            f"{self.prefix}.e_collision_bound",
-            soft_upper_bound(
-                orbits.ecc.value[self.orbit_map],
-                self.max_ecc.value,
-                scale=0.88,
-            ),
-        )
+        # The eccentricity barrier used to live here, on
+        # orbits.ecc.value[self.orbit_map] -- i.e. on the node calc_ecc
+        # clips at 0.9999, which gave it zero gradient over 21.5% of the
+        # sampled (secosw, sesinw) square, and gave a planet-free orbit no
+        # bound at all.  It now lives in Orbit._add_eccentricity_bound,
+        # which bounds the unclipped sum and folds self.max_ecc in as the
+        # per-orbit threshold.  Exactly one potential per orbit; do not add
+        # a second one here.
 
         if self.n_elements >= 2:
             self._add_crossing_potential(system, orbits)

@@ -606,6 +606,10 @@ class Lens(Component):
         if not isinstance(mmx_file, str) or mmx_file == "auto":
             return
 
+        # None means the file is ABSENT (warn and run unseeded, as before);
+        # a file that exists but cannot be parsed raises out of load_json.
+        # exozippy did not write a user-named file and so cannot regenerate
+        # it -- only run_or_load's own cache has that recovery.
         data = mmexofast_support.load_json(mmx_file)
         if data is None:
             logger.warning(f"No seeds loaded from '{mmx_file}'.")
@@ -898,7 +902,9 @@ class Lens(Component):
         blockers = [
             k
             for k in up
-            if k.endswith((".pi_E_N", ".pi_E_E")) or ".pm_ra" in k or ".pm_dec" in k
+            if k.endswith((".pi_E_N", ".pi_E_E"))
+            or ".pm_ra" in k
+            or ".pm_dec" in k
         ]
         if blockers:
             logger.info(
@@ -1240,6 +1246,59 @@ class Lens(Component):
             }
         return {}
 
+    def _frozen_op_coords_deg(self, system, source_ndx):
+        """(ra, dec) in degrees baked into the MulensModel / VBM Op, ONCE.
+
+        The Op takes the line of sight as a coordinate STRING, so it cannot
+        track a sampled ``star.ra``/``star.dec``: whatever is read here is
+        frozen for the whole fit.  That freeze is deliberate and numerically
+        free.  Microlensing parallax enters only through the PROJECTION of the
+        Earth's orbit onto the event's (N, E) axes, so a coordinate error of
+        eps radians perturbs the projection by ~eps relative: 1 arcsec is
+        5e-6, nothing against pi_E uncertainties of order 1%.  Making the
+        coordinates dynamic would rebuild the Op every likelihood call to buy
+        a correction six orders of magnitude below the measurement.
+
+        What is NOT free is doing it silently, so a topology that actually
+        samples the source's ra/dec (microlensing + gaia/abs astrometry) gets
+        one warning per source naming the frozen values.  Nothing is emitted
+        for the overwhelmingly common case where they are pinned -- a warning
+        on every microlensing fit is a warning nobody reads.
+
+        The value comes from ``initval``, not from ``.eval()`` of the value
+        node.  A sampled element's node IS a random variable, so ``.eval()``
+        draws from its prior: the old code did not freeze the start value, it
+        froze an arbitrary draw (measured 0.36 deg away on a mulens topology
+        with a sampled source position).
+        """
+        star = system.star
+        deg = 180.0 / np.pi
+        ra_deg = star.ra.element_start(source_ndx) * deg
+        dec_deg = star.dec.element_start(source_ndx) * deg
+
+        warned = getattr(self, "_frozen_coord_warned", None)
+        if warned is None:
+            warned = self._frozen_coord_warned = set()
+        moving = [
+            name
+            for name, param in (("ra", star.ra), ("dec", star.dec))
+            if param.element_is_sampled(source_ndx)
+        ]
+        if moving and source_ndx not in warned:
+            warned.add(source_ndx)
+            logger.warning(
+                f"[{self.prefix}] star.{'/'.join(moving)} of source body "
+                f"{source_ndx} is sampled, but the MulensModel/VBM "
+                f"magnification Op takes the line of sight as a fixed "
+                f"coordinate string: it is FROZEN at the start value "
+                f"(ra={ra_deg:.6f} deg, dec={dec_deg:.6f} deg) for the whole "
+                f"fit. This is safe -- the parallax projection is perturbed "
+                f"only ~1e-5 per arcsec of coordinate error, far below any "
+                f"pi_E uncertainty -- but the sampled ra/dec do NOT feed the "
+                f"microlensing model."
+            )
+        return ra_deg, dec_deg
+
     def get_magnification_op(
         self, times, obs_pos, system, index=0, u1=None, bandpass=None
     ):
@@ -1280,12 +1339,7 @@ class Lens(Component):
             return self.get_magnification(times, obs_pos, system, index)
 
         source_ndx = self.source_map[index]
-        ra_deg = float(system.star.ra.value[source_ndx].eval()) * (
-            180.0 / np.pi
-        )
-        dec_deg = float(system.star.dec.value[source_ndx].eval()) * (
-            180.0 / np.pi
-        )
+        ra_deg, dec_deg = self._frozen_op_coords_deg(system, source_ndx)
         coords = f"{ra_deg}d {dec_deg}d"
 
         use_rho = self.finite_source[0]

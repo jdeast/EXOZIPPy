@@ -15,7 +15,7 @@ astrometryinstrument:
     description: "Astrometric Jitter"
     expressions:
       default:
-        func_name: "calc_astrom_jitter"
+        func_name: "calc_jitter"
         deps: [ "jitter_variance" ]
   fluxfrac:
     # Fractional flux of the companion(s) in this instrument's band,

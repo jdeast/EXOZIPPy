@@ -395,6 +395,40 @@ class GalacticModel(Component):
                     latex="Galactic kinematic model",
                     supersedes_bounds=True,
                 )
+    def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
+        """Warn once if the anchor star's ra/dec are SAMPLED, since the
+        line-of-sight basis below is built from their start values and frozen.
+
+        Same policy as ``Lens._frozen_op_coords_deg``: keep the freeze, say so
+        -- but only when it could conceivably matter, i.e. when the sampler
+        actually moves the coordinates (galacticmodel + gaia/abs astrometry).
+
+        The freeze is safe here too, and separately measured rather than
+        assumed by analogy with the microlensing Op: shifting the sight line
+        by 1 arcsec moves the anchor's galactocentric velocity by 1.3e-3 km/s
+        (4e-5 of a 30 km/s thin-disk dispersion) and its galactic position by
+        5e-5 kpc, against kpc-scale density gradients.  It stays negligible
+        out to ~1 arcmin (0.08 km/s, 3 pc) and only reaches 0.16 sigma at a
+        full degree -- five orders of magnitude beyond the mas-scale posterior
+        width astrometry gives ra/dec.
+        """
+        moving = [
+            name
+            for name, param in (("ra", stars.ra), ("dec", stars.dec))
+            if param.element_is_sampled(self.anchor_idx)
+        ]
+        if not moving:
+            return
+        logger.warning(
+            f"[{self.prefix}] star.{'/'.join(moving)} of the anchor star "
+            f"{self.anchor_idx} is sampled, but the galactic model's line of "
+            f"sight is FROZEN at the start value (ra="
+            f"{np.degrees(ra_rad):.6f} deg, dec={np.degrees(dec_rad):.6f} "
+            f"deg) for the whole fit. This is safe -- 1 arcsec of coordinate "
+            f"error moves the galactocentric velocity by ~1e-3 km/s and the "
+            f"galactic position by ~0.05 pc -- but the sampled ra/dec do NOT "
+            f"feed the density or kinematic prior."
+        )
 
     def build_likelihood(self, model, system):
         stars = system.star
@@ -410,8 +444,9 @@ class GalacticModel(Component):
         # error whenever n_blocks and n_stars disagreed and neither was 1.
         # Keeping the matrix 2-D (and the direction cosines scalar) lets it
         # broadcast over any number of stars by construction.
-        ra_rad = float(np.atleast_1d(stars.ra.initval)[self.anchor_idx])
-        dec_rad = float(np.atleast_1d(stars.dec.initval)[self.anchor_idx])
+        ra_rad = stars.ra.element_start(self.anchor_idx)
+        dec_rad = stars.dec.element_start(self.anchor_idx)
+        self._warn_if_anchor_coords_sampled(stars, ra_rad, dec_rad)
 
         # Shared with the start-value hints (physics.line_of_sight_basis):
         # the affine (pm_ra_cosdec, pm_dec, rv) -> galactocentric velocity map,

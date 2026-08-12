@@ -36,8 +36,11 @@ def get_symbol_map(config):
 
 RELATIONS = [
     # Reparameterization bridge: user may provide 'jitter', sampler steps
-    # in 'jitter_variance'
-    sp.Eq(jitter_variance, jitter**2)
+    # in 'jitter_variance'.  Signed square, matching the signed square root
+    # the model reports (components/instrument.py:calc_jitter) over the
+    # negative variances Instrument._jitter_floor deliberately allows;
+    # jitter**2 would fold a negative seed onto a positive variance.
+    sp.Eq(jitter_variance, jitter * sp.Abs(jitter))
 ]
 
 

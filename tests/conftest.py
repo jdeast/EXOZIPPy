@@ -6,6 +6,8 @@ Pytest adds the tests/ directory to sys.path, so ``from conftest import ...`` wo
 
 import os
 
+import numpy as np
+import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.parameter import Parameter
@@ -60,6 +62,48 @@ class _DummySystem:
     """Empty system namespace for tests that attach attributes manually."""
 
     pass
+
+
+class _MockParam:
+    """Minimal Parameter stand-in: initval, a PyTensor value, hard bounds.
+
+    Shared rather than per-module because two suites (test_galactic_model and
+    test_ffp_mass_function) exercise the same GalacticModel.build_likelihood
+    and so need the same stand-in.  Keeping a copy in each was a live
+    landmine: every change to the part of Parameter's surface that
+    build_likelihood reads had to be mirrored by hand, and PR #117 shipped
+    with only one copy updated, reddening CI on a suite it had not touched.
+    """
+
+    def __init__(self, initval, lower=None, upper=None, is_sampled=None):
+        self.initval = np.atleast_1d(np.asarray(initval, dtype=np.float64))
+        self.value = pt.as_tensor_variable(self.initval)
+        self.lower = lower
+        self.upper = upper
+        # build_pymc's per-element sampled mask.  None = the model has not
+        # been built, which Parameter.element_is_sampled reads as "not
+        # sampled" -- the same conservative answer.
+        self.is_sampled = is_sampled
+        self.prior_contributions = []
+
+    def element_start(self, index=0):
+        arr = self.initval
+        return float(arr[index] if arr.size > index else arr[0])
+
+    def element_is_sampled(self, index=0):
+        if self.is_sampled is None:
+            return False
+        mask = np.atleast_1d(self.is_sampled)
+        return bool(mask[index] if mask.size > index else mask[0])
+
+    def add_prior_contribution(self, *args, **kwargs):
+        """Reporting-only hook (see parameter.PriorContribution).
+
+        build_likelihood declares what its potentials ARE so the reported
+        tables can describe them; the declaration changes no math.  Recorded
+        rather than dropped so a test can assert on it.
+        """
+        self.prior_contributions.append((args, kwargs))
 
 
 class MockSystem:

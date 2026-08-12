@@ -11,6 +11,7 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.component import Component
 from exozippy.components.parameter import Parameter
+from exozippy.potentials import soft_upper_bound
 
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
@@ -379,7 +380,9 @@ class Orbit(Component):
                 )
                 return E_c - ecc * np.sin(E_c)
 
-            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, 0.9999)
+            # Same ceiling calc_ecc applies, for the same reason: this is a
+            # forward-model evaluation (a Kepler solve), not a bound.
+            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
             w0 = np.arctan2(ss0, sc0)
             n_mm = 2.0 * np.pi / period
             tp = tc0 - _M_c(ecc0, w0) / n_mm
@@ -513,7 +516,74 @@ class Orbit(Component):
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def build_likelihood(self, model, system):
-        pass
+        self._add_eccentricity_bound(system)
+
+    def _add_eccentricity_bound(self, system):
+        """Soft upper bound on every orbit's eccentricity.
+
+        The barrier is applied to the UNCLIPPED sum secosw^2 + sesinw^2, not
+        to self.ecc: calc_ecc clips at MAX_ECC = 0.9999, so feeding the
+        clipped node here froze the penalty at a constant on the whole
+        e > 0.9999 region -- a flat plateau with exactly zero gradient, and
+        no restoring force for NUTS to follow back out.  That region is not
+        a corner case: secosw and sesinw are each uniform on [-1, 1], so the
+        clipped part of the sampled square has area 4 - pi * 0.9999, i.e.
+        21.5% of the prior volume.  This is the identical mistake documented
+        (and already fixed) for m_total in Planet.build_likelihood.
+
+        The bound lives here, not on the planet component, because
+        eccentricity is a property of the ORBIT: a stellar binary with no
+        planet at all used to get no eccentricity bound whatsoever.  Where a
+        planet does orbit, its collision limit (planet.max_ecc, the
+        eccentricity at which periastron reaches the stellar surface) is the
+        tighter constraint, so the per-orbit threshold is the minimum of
+        MAX_ECC and the max_ecc of every planet mapped to that orbit.  One
+        potential per orbit, planet or no planet.
+
+        scale = 0.88 with the default 1% softness gives the historical
+        steepness of 4.4 / 0.0088 = 500 nats per unit eccentricity, matching
+        the barrier this replaces (and Planet's mass barrier).
+        """
+        e_unclipped = self._unclipped_ecc()
+        if e_unclipped is None:
+            return
+
+        threshold = pt.as_tensor_variable(
+            np.full(self.n_elements, physics.MAX_ECC)
+        )
+        planets = system.active_components.get("planet")
+        if isinstance(getattr(planets, "max_ecc", None), Parameter):
+            for p, o in enumerate(np.atleast_1d(planets.orbit_map)):
+                o = int(o)
+                threshold = pt.set_subtensor(
+                    threshold[o],
+                    pt.minimum(threshold[o], planets.max_ecc.value[p]),
+                )
+
+        pm.Potential(
+            f"{self.prefix}.e_collision_bound",
+            soft_upper_bound(e_unclipped, threshold, scale=0.88),
+        )
+
+    def _unclipped_ecc(self):
+        """secosw^2 + sesinw^2, or None when that pair is not sampled.
+
+        Every current parameterization samples the pair (the vcve branch
+        raises NotImplementedError in register_parameters), so this is a
+        guard, not a code path: an eccentricity built some other way has no
+        unclipped node to bound and is left to its own parameter bounds.
+        """
+        secosw = getattr(self, "secosw", None)
+        sesinw = getattr(self, "sesinw", None)
+        if not (
+            isinstance(secosw, Parameter) and isinstance(sesinw, Parameter)
+        ):
+            logger.debug(
+                "[orbit] secosw/sesinw are not built; skipping the "
+                "eccentricity bound."
+            )
+            return None
+        return physics.ecc_from_sqrte(secosw.value, sesinw.value)
 
     def get_true_anomaly(self, t):
         """Returns the true anomaly f for all planets at all times."""

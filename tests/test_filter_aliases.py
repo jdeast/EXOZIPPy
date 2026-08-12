@@ -117,19 +117,21 @@ def test_alias_table_ambiguities_are_the_declared_ones(alias_df):
     Given every naming column of the alias table,
     When labels appearing on more than one row are collected,
     Then they are exactly the known set: 'I' and 'R' (Claret, Bessell vs
-    Cousins), which the disambiguation map resolves, plus 'iPS' (Keivan,
-    PS1.i vs PS1.w), which is left alone and recorded here.
+    Cousins), which the disambiguation map resolves.
 
     A new duplicate must fail this test rather than quietly resolve by file
     order, which is the bug this module exists to prevent.
     """
     # Arrange
     known_resolved = set(AMBIGUOUS_FILTER_ALIASES)
-    # Ambiguous, deliberately NOT in the map: 'iPS' is Keivan's label for
-    # PAN-STARRS i, and the second row it hits is PS1.w (the wide filter),
-    # whose own Keivan cell should probably read 'wPS'.  That is a table
-    # fix, not a resolution policy, and no shipped config uses either name.
-    known_unresolved = {"iPS"}
+    # Nothing is ambiguous-but-unresolved any more.  'iPS' was, until PR #115:
+    # it is Keivan's label for PAN-STARRS i, and the PS1.w row carried a copy
+    # of it, so PS1.w was unreachable by its own name and one row-order change
+    # away from answering a PS1.i request.  That was a TABLE bug rather than a
+    # resolution policy, and the fix was to give the w row its own 'wPS'.
+    # The set stays (rather than asserting against the map alone) so the next
+    # deliberate exception has an obvious home, with its reason beside it.
+    known_unresolved = set()
 
     # Act
     found = set()
