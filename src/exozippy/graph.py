@@ -31,13 +31,21 @@ def determine_pymc_build_order(active_components, config_manager):
             if isinstance(raw, str):
                 expr_key = raw  # e.g. "default"
             elif isinstance(raw, dict):
+                # A dict WITHOUT "expr_key" is a free parameter carrying only
+                # options -- an "overrides" pin, a shape, a table note.  Same
+                # rule Component.add_parameter (which needs a truthy expr_key
+                # to build an expression) and System.derived_params use.  This
+                # used to fall back to "default", which made graph.py the only
+                # place that read such an entry as derived: harmless while no
+                # pinned free parameter had an UNUSED `expressions:` block in
+                # its defaults.yaml, and a hard "Dependency Error" the moment
+                # one did (Band's linear-law u1, whose Kipping expression the
+                # manifest deliberately ignores).  The fallback could only ever
+                # add edges add_parameter does not use; it could never supply
+                # a needed one, since a parameter it applied to is free.
                 expr_key = raw.get("expr_key")  # explicit key or None
             else:
                 expr_key = None  # None → free parameter, no expression
-            # Fall back to "default" only when the manifest explicitly requested it
-            # via the "default" string shorthand.  A bare None means free parameter.
-            if expr_key is None:
-                expr_key = "default" if raw is not None else None
             expressions_dict = cfg.get("expressions", {})
 
             if expr_key is not None and expr_key in expressions_dict:
