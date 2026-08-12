@@ -23,7 +23,7 @@ These tests pin the three load outcomes and the save-side stamping:
     and a mismatch quotes them plus the git lines that get back to that
     code -- while a version/commit difference on its own NEVER raises, since
     only the structural hash decides staleness;
-  * mkprior refuses a structurally stale trace (its output seeds the next
+  * mkparam refuses a structurally stale trace (its output seeds the next
     fit) but proceeds on an unstamped one.
 
 They follow AAA with Given/When/Then docstrings.
@@ -393,19 +393,19 @@ def test_provenance_report_flags_a_dirty_source_tree():
 
 
 # ---------------------------------------------------------------------------
-# mkprior: its output seeds the NEXT fit, so a stale trace there corrupts a
+# mkparam: its output seeds the NEXT fit, so a stale trace there corrupts a
 # run that has not happened yet.
 # ---------------------------------------------------------------------------
 
-_MKPRIOR_CONFIG = {
+_MKPARAM_CONFIG = {
     "prefix": "fitresults/model",
     "parameter_file": None,
     "star": [{"name": "Host"}],
 }
 
 
-def _mkprior_trace(tmp_path, stamp_source=None):
-    """A one-draw trace mkprior can consume, optionally stamped."""
+def _mkparam_trace(tmp_path, stamp_source=None):
+    """A one-draw trace mkparam can consume, optionally stamped."""
     import xarray as xr
 
     posterior = xr.Dataset(
@@ -429,22 +429,22 @@ def _mkprior_trace(tmp_path, stamp_source=None):
     return path
 
 
-def test_mkprior_refuses_a_structurally_stale_trace(tmp_path):
+def test_mkparam_refuses_a_structurally_stale_trace(tmp_path):
     """
     Given a trace stamped under a different config,
-    When mkprior is asked to seed a restart file from it,
+    When mkparam is asked to seed a restart file from it,
     Then it raises StaleTraceError instead of writing start values drawn
     from a foreign posterior.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    other = dict(_MKPRIOR_CONFIG)
+    other = dict(_MKPARAM_CONFIG)
     other["star"] = [{"name": "Host"}, {"name": "Companion"}]
-    trace = _mkprior_trace(tmp_path, stamp_source=_FakeSystem(other, {}))
+    trace = _mkparam_trace(tmp_path, stamp_source=_FakeSystem(other, {}))
 
     with pytest.raises(StaleTraceError):
-        mkprior(
-            dict(_MKPRIOR_CONFIG),
+        write_param_file(
+            dict(_MKPARAM_CONFIG),
             base_dir=tmp_path,
             trace_path=trace,
             output_path=tmp_path / "out.yaml",
@@ -453,20 +453,20 @@ def test_mkprior_refuses_a_structurally_stale_trace(tmp_path):
     assert not (tmp_path / "out.yaml").exists()
 
 
-def test_mkprior_accepts_a_matching_fingerprint(tmp_path):
+def test_mkparam_accepts_a_matching_fingerprint(tmp_path):
     """
-    Given a trace stamped with the fingerprint mkprior computes for itself,
-    When mkprior runs,
+    Given a trace stamped with the fingerprint mkparam computes for itself,
+    When mkparam runs,
     Then it writes the restart file as before.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    trace = _mkprior_trace(
-        tmp_path, stamp_source=_FakeSystem(_MKPRIOR_CONFIG, {})
+    trace = _mkparam_trace(
+        tmp_path, stamp_source=_FakeSystem(_MKPARAM_CONFIG, {})
     )
 
-    out = mkprior(
-        dict(_MKPRIOR_CONFIG),
+    out = write_param_file(
+        dict(_MKPARAM_CONFIG),
         base_dir=tmp_path,
         trace_path=trace,
         output_path=tmp_path / "out.yaml",
@@ -475,19 +475,19 @@ def test_mkprior_accepts_a_matching_fingerprint(tmp_path):
     assert out.exists()
 
 
-def test_mkprior_proceeds_on_an_unstamped_trace(tmp_path, caplog):
+def test_mkparam_proceeds_on_an_unstamped_trace(tmp_path, caplog):
     """
     Given a trace written before this metadata existed,
-    When mkprior runs,
+    When mkparam runs,
     Then it warns that the trace is unverifiable and still writes the file.
     """
-    from exozippy.mkparam import mkprior
+    from exozippy.mkparam import write_param_file
 
-    trace = _mkprior_trace(tmp_path)
+    trace = _mkparam_trace(tmp_path)
 
     with caplog.at_level(logging.WARNING, logger="exozippy.trace_meta"):
-        out = mkprior(
-            dict(_MKPRIOR_CONFIG),
+        out = write_param_file(
+            dict(_MKPARAM_CONFIG),
             base_dir=tmp_path,
             trace_path=trace,
             output_path=tmp_path / "out.yaml",
@@ -513,7 +513,7 @@ def test_fingerprint_survives_component_config_normalization():
     Given a config whose components rewrite their own blocks while the
       System is being constructed (Mann/Torres derive `name:` from `star:`),
     When the fingerprint is recomputed from that config dict afterwards, the
-      way mkprior does,
+      way mkparam does,
     Then it reproduces the System's snapshot exactly.
 
     Measured regression, not a hypothetical: the snapshot was originally

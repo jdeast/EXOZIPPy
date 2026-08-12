@@ -3,7 +3,7 @@ restart file built from those params, not from whatever file happens to sit at
 ``config['parameter_file']``.
 
 ``run_fit(config, user_params=<dict>)`` is a documented entry point (no YAML
-files needed), but mkprior used to re-read the parameter_file from disk to get
+files needed), but mkparam used to re-read the parameter_file from disk to get
 the constraints it merges the trace MAP into.  A dict-driven run therefore
 emitted a restart file carrying priors and bounds that were never part of the
 fit -- and silently, because the two inputs here differ only in the magnitudes
@@ -38,8 +38,8 @@ STALE_TEFF = {"initval": 6207.0, "mu": 4000.0, "sigma": 900.0}
 def in_memory_result(tmp_path_factory):
     """Run the kelt4 RV-only example once through run_fit with an in-memory
     user_params dict, leaving a decoy params file on disk."""
-    work_dir = tmp_path_factory.mktemp("mkprior_mem_work") / "kelt4"
-    out_dir = tmp_path_factory.mktemp("mkprior_mem_out")
+    work_dir = tmp_path_factory.mktemp("mkparam_mem_work") / "kelt4"
+    out_dir = tmp_path_factory.mktemp("mkparam_mem_out")
 
     shutil.copytree(
         EXAMPLE_DIR,
@@ -85,11 +85,11 @@ def test_restart_file_is_written_for_an_in_memory_run(in_memory_result):
     """
     Given run_fit called with an in-memory user_params dict,
     When the run completes,
-    Then mkprior still writes the next versioned restart file.
+    Then mkparam still writes the next versioned restart file.
     """
     _, work_dir = in_memory_result
     assert (work_dir / "kelt4.params.2.yaml").exists(), (
-        "mkprior wrote nothing; yaml files present: "
+        "mkparam wrote nothing; yaml files present: "
         f"{[f.name for f in work_dir.glob('*.yaml')]}"
     )
 
@@ -98,7 +98,7 @@ def test_restart_file_carries_the_in_memory_priors(in_memory_result):
     """
     Given a decoy params file on disk whose priors differ from the in-memory
     dict the fit ran with,
-    When run_fit completes and mkprior writes the restart file,
+    When run_fit completes and mkparam writes the restart file,
     Then the restart file carries the FITTED prior, not the decoy's.
     """
     _, work_dir = in_memory_result

@@ -194,7 +194,7 @@ RELATIONS = [
     # bounding to [-1,1] would break isotropy and bias angles near ±45°.
     # The relaxation engine uses these only forward (alpha → xalpha, yalpha):
     # given alpha, set xalpha=cos(alpha), yalpha=sin(alpha) as unit-circle seeds.
-    # mkprior converts the sampled xalpha/yalpha back to alpha via arctan2.
+    # mkparam converts the sampled xalpha/yalpha back to alpha via arctan2.
     # alpha itself is not in the symbol map for PSPL events (no xalpha/yalpha
     # registered), so both relations are automatically inert for point-source fits.
     sp.Eq(xalpha, sp.cos(alpha)),

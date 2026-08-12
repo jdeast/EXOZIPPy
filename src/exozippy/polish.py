@@ -62,7 +62,7 @@ Seed-provenance gate (resolve_polish_steps): 'auto' polishes SOLUTION
 ESTIMATES -- the single canonical start (user/literature initvals, the
 relaxation engine's solution) and MMEXOFAST seed sets -- but never a
 multi-seed set WITHOUT seed hints, which is a posterior-draw restart
-(mkprior stratified draws): those are already at equilibrium, and polishing
+(mkparam stratified draws): those are already at equilibrium, and polishing
 K draws per basin would collapse them onto K copies of the basin optimum,
 destroying the restart's overdispersion.
 """

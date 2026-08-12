@@ -11,7 +11,7 @@ EXOZIPPy warns about unrecognized keys in exactly two places:
 Both warnings say the key "will be ignored". When the declared set falls
 behind the set the code actually consumes, that statement becomes false --
 worse than silence, because it teaches users to disbelieve the warnings.
-That is exactly what happened to ``modes``/``mkprior``/``gui`` (honored by
+That is exactly what happened to ``modes``/``mkparam``/``gui`` (honored by
 run.py, mkparam.py and gui/status.py) and to ``jitter`` (the key
 ``sample_jax_nuts``'s own comment tells users to opt back in with).
 
@@ -150,7 +150,7 @@ def _example_config_files():
 def test_honored_global_blocks_are_not_warned_about(caplog):
     """
     Given a config using the global blocks run.py/mkparam.py/gui honor
-      (`modes:`, `mkprior:`, `gui:`),
+      (`modes:`, `mkparam:`, `gui:`),
     When a System is constructed from it,
     Then no "will be ignored" warning is emitted for them.
 
@@ -162,7 +162,7 @@ def test_honored_global_blocks_are_not_warned_about(caplog):
     config = {
         "star": [{"name": "A"}],
         "modes": {"weights": "evidence", "ledger": False},
-        "mkprior": {"n_seeds": 4},
+        "mkparam": {"n_seeds": 4},
         "gui": {"snapshot": True},
     }
 
@@ -175,6 +175,36 @@ def test_honored_global_blocks_are_not_warned_about(caplog):
         r.getMessage() for r in caplog.records if "ignored" in r.getMessage()
     ]
     assert ignored == [], f"honored keys reported as ignored: {ignored}"
+
+
+def test_an_unreserved_top_level_key_is_still_reported(caplog):
+    """
+    Given a config with a top-level key that is neither a component nor
+      reserved (here a plausible typo of `mkparam:`),
+    When a System is constructed from it,
+    Then it is warned about by name as "will be ignored", and nothing on the
+      System answers to it.
+
+    The mirror of the test above, and the top-level counterpart of
+    test_a_genuine_typo_is_still_reported: widening RESERVED_CONFIG_KEYS to
+    silence the false warnings must not silence the true ones. Both halves
+    matter -- the warning is only worth reading if the key really is inert,
+    which is asserted here too.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}], "mkparm": {"n_seeds": 4}}
+
+    # ACT
+    with caplog.at_level("WARNING", logger="exozippy.system"):
+        system = System(config, user_params={})
+
+    # ASSERT
+    assert any(
+        "mkparm" in r.getMessage() and "will be ignored" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+    assert "mkparm" not in system.active_components
+    assert not hasattr(system, "mkparm")
 
 
 def test_jitter_is_a_recognized_sampler_key(caplog):
