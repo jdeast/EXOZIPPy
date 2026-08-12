@@ -14,6 +14,7 @@ import arviz as az
 import matplotlib.pyplot as plt
 import pytest
 
+import exozippy.run as run_mod
 from exozippy.run import _render_trace_page, save_multipage_trace
 
 
@@ -263,3 +264,231 @@ def test_dist_column_is_density_not_ecdf(many_chain_idata):
         assert not all(np.all(np.diff(y) >= -1e-12) for y in ys)
     finally:
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Degenerate (density-less) variables
+#
+# arviz_stats' KDE builds a fixed 512-interval grid spanning exactly the
+# [min, max] of the finite draws, so np.histogram raises
+#   ValueError: Too many bins for data range. Cannot create 512 finite-sized
+#   bins.
+# whenever that range spans fewer than ~512 float64 steps.  That took down the
+# whole PDF -- and, since save_multipage_trace runs inside _run_fit's wrap-up,
+# every other output of a gracefully stopped fit with it.
+# ---------------------------------------------------------------------------
+
+
+def _idata_with(a_values, other=None, n_chain=2, n_draw=60):
+    """Posterior with variable 'a' set to a_values and a healthy 'b'."""
+    rng = np.random.default_rng(3)
+    post = {
+        "a": np.asarray(a_values, dtype=float),
+        "b": rng.normal(size=(n_chain, n_draw)) if other is None else other,
+    }
+    return az.from_dict({"posterior": post})
+
+
+def _constant_but_one_ulp(value=1.0, shape=(2, 60)):
+    """Finite, not constant, but spanning a single float64 step.
+
+    This is the shape a stopped, unmixed run leaves behind: a chain that never
+    really moved, but whose last bits differ -- the exact condition that
+    crashed CI (n_draws=137, max_rhat=6.42).
+    """
+    arr = np.full(shape, value)
+    arr[0, 0] = np.nextafter(value, value + 1.0)
+    return arr
+
+
+@pytest.mark.parametrize(
+    "label, values",
+    [
+        ("one float64 step", _constant_but_one_ulp()),
+        ("exactly constant", np.full((2, 60), 3.5)),
+        ("no finite draws", np.full((2, 60), np.nan)),
+        ("all infinite", np.full((2, 60), np.inf)),
+        (
+            "hundred float64 steps",
+            1.0
+            + np.random.default_rng(1).integers(0, 100, size=(2, 60))
+            * np.spacing(1.0),
+        ),
+    ],
+)
+def test_degenerate_variable_does_not_kill_the_pdf(label, values, tmp_path):
+    """
+    Given a posterior in which one variable admits no density (it is
+      constant, non-finite, or spans fewer float64 steps than the KDE grid
+      has points),
+    When save_multipage_trace runs,
+    Then a complete PDF is still written -- the whole of wrap-up used to die
+      with numpy's "Too many bins for data range".
+    """
+    # ARRANGE
+    idata = _idata_with(values)
+    out = tmp_path / "trace.pdf"
+
+    # ACT
+    save_multipage_trace(idata, ["a", "b"], str(out))
+
+    # ASSERT
+    assert out.exists(), label
+    assert out.stat().st_size > 5000, label
+
+
+def test_degenerate_variable_is_reported_not_swallowed(caplog, tmp_path):
+    """
+    Given a variable with no density,
+    When save_multipage_trace runs,
+    Then it says so per variable, naming the variable and the reason -- a
+      missing panel must never be silent.
+    """
+    # ARRANGE
+    idata = _idata_with(np.full((2, 60), 3.5))
+
+    # ACT
+    with caplog.at_level("WARNING", logger="exozippy.run"):
+        save_multipage_trace(idata, ["a", "b"], str(tmp_path / "t.pdf"))
+
+    # ASSERT
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("a" in m and "constant at 3.5" in m for m in messages), messages
+    assert not any("b" in m and "constant" in m for m in messages), messages
+
+
+def test_degenerate_variable_keeps_its_trace_panel(tmp_path):
+    """
+    Given a flat variable,
+    When its page is rendered,
+    Then the trace panel still carries one line per chain (a flat chain is
+      exactly what the reader needs to see) and the density panel carries the
+      reason and value instead of a density.
+    """
+    # ARRANGE
+    idata = _idata_with(np.full((3, 40), 3.5), other=None, n_chain=3)
+    rng = np.random.default_rng(4)
+    idata.posterior["b"] = (("chain", "draw"), rng.normal(size=(3, 40)))
+    rows = run_mod._split_degenerate_vars(idata, ["a"])[1]
+
+    # ACT
+    fig = run_mod._render_degenerate_page(idata, rows, title="t")
+
+    try:
+        # ASSERT
+        assert len(fig.axes) == 2
+        ax_dist, ax_trace = fig.axes
+        assert len(ax_trace.lines) == 3
+        texts = " ".join(t.get_text() for t in ax_dist.texts)
+        assert "no density" in texts
+        assert "constant at 3.5" in texts
+    finally:
+        plt.close(fig)
+
+
+def test_partially_pinned_vector_keeps_its_sampled_densities(tmp_path):
+    """
+    Given a vector variable with some elements pinned constant and some
+      sampled (GP and robust-likelihood hyperparameters are full-length
+      vectors with the non-opted-in files pinned via sigma: 0, and such a
+      vector IS tracked as a Deterministic),
+    When the pages are split,
+    Then only the pinned elements lose their density; the sampled ones stay
+      on an ArviZ page via a coords selection.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(5)
+    vec = rng.normal(size=(2, 60, 4))
+    vec[:, :, 1] = 0.5
+    vec[:, :, 3] = -2.0
+    idata = az.from_dict(
+        {"posterior": {"gp_sigma": vec, "b": rng.normal(size=(2, 60))}}
+    )
+
+    # ACT
+    specs, degenerate = run_mod._split_degenerate_vars(
+        idata, ["gp_sigma", "b"]
+    )
+
+    # ASSERT
+    gp_spec = [s for s in specs if s[0] == "gp_sigma"]
+    assert len(gp_spec) == 1
+    _name, coords, n_rows = gp_spec[0]
+    assert n_rows == 2
+    assert list(coords.values())[0] == [0, 2]
+    assert sorted(r.label for r in degenerate) == [
+        "gp_sigma[1]",
+        "gp_sigma[3]",
+    ]
+    # b is healthy and must not be touched
+    assert ("b", None, 1) in specs
+
+
+def test_degenerate_lp_does_not_kill_the_pdf(tmp_path):
+    """
+    Given a stopped fit whose log-posterior never moved (its own page comes
+      from sample_stats, not posterior),
+    When save_multipage_trace runs,
+    Then the PDF is still written.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(6)
+    idata = az.from_dict(
+        {
+            "posterior": {"a": rng.normal(size=(2, 60))},
+            "sample_stats": {"lp": np.full((2, 60), -123.5)},
+        }
+    )
+    out = tmp_path / "t.pdf"
+
+    # ACT
+    save_multipage_trace(idata, ["a"], str(out))
+
+    # ASSERT
+    assert out.exists()
+    assert out.stat().st_size > 5000
+
+
+def test_healthy_posterior_takes_the_unchanged_path(small_idata):
+    """
+    Given a posterior with no degenerate element,
+    When the split runs,
+    Then it is the identity: every variable keeps coords=None, so the ArviZ
+      call is exactly the one made before degeneracy handling existed.
+    """
+    # ACT
+    specs, degenerate = run_mod._split_degenerate_vars(small_idata, ["a", "b"])
+
+    # ASSERT
+    assert specs == [("a", None, 1), ("b", None, 1)]
+    assert degenerate == []
+
+
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        (np.array([[1.0, 2.0], [3.0, 4.0]]), None),
+        (np.full((2, 2), 7.0), "constant at 7"),
+        (np.full((2, 2), np.nan), "no finite draws"),
+        (np.array([[np.nan, np.inf], [-np.inf, np.nan]]), "no finite draws"),
+        (_constant_but_one_ulp(), "float64 steps"),
+        # non-finite values are filtered before the test, exactly as
+        # arviz_stats filters them, so a lone NaN must not change the verdict
+        (np.array([[1.0, 2.0], [3.0, np.nan]]), None),
+    ],
+)
+def test_dist_degeneracy_verdicts(values, expected):
+    """
+    Given each degenerate shape,
+    When _dist_degeneracy inspects it,
+    Then it returns None only when a 512-interval KDE grid can actually be
+      built, and otherwise a reason naming what is wrong.
+    """
+    # ACT
+    reason = run_mod._dist_degeneracy(values)
+
+    # ASSERT
+    if expected is None:
+        assert reason is None
+    else:
+        assert reason is not None and expected in reason
