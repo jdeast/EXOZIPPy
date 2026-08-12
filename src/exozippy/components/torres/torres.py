@@ -1,17 +1,19 @@
-import logging
-
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.relations import (
+    StellarRelation,
+    as_float_vector,
+    constrain_schema_entry,
+    star_schema_entry,
+)
 
 from . import physics
 
-logger = logging.getLogger(__name__)
 
-
-class Torres(Component):
+class Torres(StellarRelation, Component):
     """Constrain a star's mass and/or radius with the Torres+2010 relations.
 
     One instance per constrained star::
@@ -30,8 +32,9 @@ class Torres(Component):
     Ks latent, so the manifest is empty and the component contributes only
     potentials.
 
-    Two things differ structurally from mann, which is why the two are
-    separate components rather than sharing a base:
+    Two things differ statistically from mann, which is why the two are
+    separate components sharing only the ``StellarRelation`` scaffolding
+    rather than a common base class that owns the likelihood:
 
     * The relations predict logarithms, and their scatter is quoted in dex,
       not as a fraction.  The mass penalty therefore acts directly on
@@ -39,18 +42,11 @@ class Torres(Component):
       exponentiation round trip.
     * That scatter is a constant, so (unlike mann's prediction-proportional
       sigma) the -log(sigma) normalization is constant and is dropped, which
-      is exactly EXOFASTv2's chi2.
+      is exactly EXOFASTv2's chi2.  That is the ``normalize=False`` in
+      build_likelihood below; mann passes ``normalize=True``.
     """
 
     yaml_key = "torres"
-
-    def __init__(self, component_config, config_manager):
-        # Name each instance after the star it constrains, so the base
-        # class's duplicate-name check also enforces one Torres per star.
-        for c in component_config:
-            if c.get("name") is None and c.get("star") is not None:
-                c["name"] = str(c["star"]).split(".")[-1]
-        super().__init__(component_config, config_manager)
 
     @property
     def prefix(self):
@@ -59,72 +55,24 @@ class Torres(Component):
     @classmethod
     def config_schema(cls):
         return [
-            {
-                "key": "star",
-                "kind": "ref",
-                "accepts": ["star"],
-                "required": True,
-                "doc": (
-                    "Name (or index) of the star this Torres relation "
-                    "constrains. One Torres instance per star."
-                ),
-            },
-            {
-                "key": "constrain",
-                "kind": "option",
-                "accepts": ["mass", "radius"],
-                "required": False,
-                "doc": (
-                    "Which stellar quantities to constrain from "
-                    "teff/logg/feh (a list; default both mass and radius)."
-                ),
-            },
+            star_schema_entry("Torres"),
+            constrain_schema_entry("teff/logg/feh"),
         ]
 
     def load_data(self, system):
         """Stage 1a: resolve the target stars and parse the per-instance config."""
-        star_names = list(system.star.names)
-        name_to_idx = {n: i for i, n in enumerate(star_names)}
-
         self.star_indices = []
         self.constrain = []
         self.logm_floor = []
         self.logr_floor = []
 
         for c, nm in zip(self.config, self.names):
-            raw_star = c.get("star")
-            if raw_star is None:
-                raise ValueError(
-                    f"torres '{nm}': a 'star:' key is required naming the star "
-                    f"to constrain. Available stars: {star_names}."
-                )
-            key = str(raw_star).split(".")[-1]
-            if key in name_to_idx:
-                self.star_indices.append(name_to_idx[key])
-            elif key.isdigit() and int(key) < len(star_names):
-                self.star_indices.append(int(key))
-            else:
-                raise ValueError(
-                    f"torres '{nm}': unknown star '{raw_star}'. "
-                    f"Available stars: {star_names}."
-                )
-
-            con = c.get("constrain", ["mass", "radius"])
-            if isinstance(con, str):
-                con = [con]
-            con = set(con)
-            bad = con - {"mass", "radius"}
-            if bad:
-                raise ValueError(
-                    f"torres '{nm}': unknown 'constrain:' entries {sorted(bad)}; "
-                    f"valid entries are 'mass' and 'radius'."
-                )
-            if not con:
-                raise ValueError(
-                    f"torres '{nm}': 'constrain:' is empty, so this block would "
-                    f"do nothing. Remove it or list 'mass' and/or 'radius'."
-                )
-            self.constrain.append(con)
+            self.star_indices.append(
+                self._resolve_star(system, nm, c.get("star"))
+            )
+            self.constrain.append(
+                self._parse_constrain(nm, c.get("constrain"))
+            )
 
             # Scatter overrides, in dex (mann's floors are fractional -- hence
             # the different names).
@@ -139,10 +87,6 @@ class Torres(Component):
                     f"torres '{nm}': 'logm_floor:'/'logr_floor:' must be > 0 dex."
                 )
 
-    def build_maps(self):
-        """Stage 1b: index array linking each instance to its star."""
-        self.star_map = np.array(self.star_indices, dtype=int)
-
     def register_parameters(self, system):
         """Stage 2: nothing to declare -- Torres adds only potentials.
 
@@ -155,25 +99,22 @@ class Torres(Component):
         """Warn when a star starts below the relations' calibrated mass range.
 
         EXOFASTv2 warns on every likelihood call; this is a startup warning
-        only, and nothing here bounds the posterior.
+        only, and nothing here bounds the posterior (see
+        ``StellarRelation._warn_outside_range``).
         """
-        for i, nm in enumerate(self.names):
-            si = self.star_indices[i]
-            v = getattr(system.star.mass, "initval", None)
-            if v is None:
-                continue
-            arr = np.atleast_1d(np.asarray(v, dtype=float))
-            mass = float(arr[0] if arr.size == 1 else arr[si])
-            if np.isnan(mass):
-                continue
-            if mass < physics.MSTAR_MIN:
-                logger.warning(
-                    f"torres '{nm}': star '{system.star.names[si]}' starts at "
-                    f"{mass:.3f} solMass, below the Torres+2010 calibration "
-                    f"floor of {physics.MSTAR_MIN} solMass. If it stays there, "
-                    f"prefer the Mann+ relations (components/mann), MIST or "
-                    f"PARSEC."
-                )
+        self._warn_outside_range(
+            system,
+            system.star.mass,
+            physics.MSTAR_MIN,
+            np.inf,
+            message=(
+                "star '{star}' starts at "
+                "{value:.3f} solMass, below the Torres+2010 calibration "
+                f"floor of {physics.MSTAR_MIN} solMass. If it stays there, "
+                "prefer the Mann+ relations (components/mann), MIST or "
+                "PARSEC."
+            ),
+        )
 
     def build_likelihood(self, model, system):
         star = system.star
@@ -197,37 +138,23 @@ class Torres(Component):
         pm.Deterministic(f"{self.prefix}.radius_pred", 10.0**logr_pred)
 
         # star.logmass IS log10(M/Msun), so the mass penalty needs no
-        # conversion. star.radius is linear, so take its log.
+        # conversion. star.radius is linear, so take its log.  sigma is a
+        # CONSTANT scatter in dex, so its -log(sigma) is an additive constant:
+        # normalize=False drops it, which is exactly EXOFASTv2's
+        # (alog10(mstar/mstar_prior)/umstar)^2 chi2 term.  (components/mann
+        # passes normalize=True, and is right to: its sigma is a fraction of
+        # a sampled prediction.)
         self._add_penalty(
-            "mass", star.logmass.value[smap], logm_pred, self.logm_floor
+            "mass",
+            star.logmass.value[smap],
+            logm_pred,
+            as_float_vector(self.logm_floor),
+            normalize=False,
         )
         self._add_penalty(
             "radius",
             pt.log10(star.radius.value[smap]),
             logr_pred,
-            self.logr_floor,
+            as_float_vector(self.logr_floor),
+            normalize=False,
         )
-
-    def _add_penalty(self, which, observed_log, predicted_log, floors):
-        """Gaussian potential in log space tying a star parameter to Torres.
-
-        Only instances that asked for this parameter in `constrain:`
-        contribute. sigma is a constant in dex, so its -log(sigma)
-        normalization is constant and dropped -- this is exactly EXOFASTv2's
-        (alog10(mstar/mstar_prior)/umstar)^2 chi2 term.
-        """
-        mask = np.array([which in c for c in self.constrain], dtype=bool)
-        if not mask.any():
-            return
-        sigma = pt.as_tensor_variable(np.asarray(floors, dtype=float))
-        logp = -0.5 * pt.sqr((observed_log - predicted_log) / sigma)
-        pm.Potential(
-            f"{self.prefix}.{which}_prior",
-            pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),
-        )
-
-    def compile_plotters(self, model, system):
-        pass
-
-    def plot(self, system, points, filename_prefix="debug"):
-        pass
