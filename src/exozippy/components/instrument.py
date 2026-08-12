@@ -56,6 +56,7 @@ import numpy as np
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
+import sympy as sp
 
 from ..physics_registry import register_physics
 from . import gp as gp_support
@@ -115,13 +116,77 @@ def calc_jitter(jitter_variance):
     fit starts on the cusp: the pre-fix ``pt.switch`` reported
     ``d jitter / d jitter_variance = inf`` there.
 
+    DELIBERATE DEPARTURE FROM EXOFASTv2, which floors the jitter at zero.
+    This is an upgrade, not a port bug -- do not "restore" the floor.  The
+    argument is the one ``planet.mass`` in ``linear`` mode already makes (see
+    the mass-parametrization section of CLAUDE.md): a positive-definite
+    coordinate biases a marginal detection upward, because the half of the
+    posterior that would have balanced it is folded onto the boundary.  Here
+    the floor would also throw information away -- a negative jitter is the
+    fit telling you the quoted error bars are too large, which is a result
+    worth reporting.  And it would buy nothing in exchange: ``total_sigma``
+    uses ``jitter_variance`` directly and NOTHING in any physics path consumes
+    this function's output, so ``jitter`` is purely the reported form and a
+    floor could only ever hide a negative variance the sampler had already
+    visited.  The one cost of the sign is that a reader must know what it
+    means, which the defaults.yaml ``description`` says and the ``latex``
+    label carries: ``J``, not a ``sigma``, which would promise positivity.
+
     One function, three components (rv/transit/astrometry): it is pure
     algebra on the shared noise model this module owns, so it lives here
     rather than as three byte-identical copies under three registry names.
+    Its sympy counterpart lives just below, for the same reason.
     """
     return pt.sign(jitter_variance) * pt.sqrt(
         pt.maximum(pt.abs(jitter_variance), _JITTER_EPS)
     )
+
+
+# ---------------------------------------------------------------------------
+# The symbolic counterpart of calc_jitter
+# ---------------------------------------------------------------------------
+# The relaxation engine needs the same relation in sympy so a user may seed
+# EITHER side -- ``jitter`` in the data's own units (what anyone actually has a
+# number for) or the sampled ``jitter_variance`` -- and get the other derived.
+# It is the SIGNED square, the exact inverse of calc_jitter's signed square
+# root, because ``jitter_variance`` is deliberately allowed to go negative down
+# to ``Instrument._jitter_floor``.  Written as ``jitter**2`` it would fold a
+# negative seed onto a POSITIVE variance: a silent sign flip on the one
+# direction of this relation that matters.
+#
+# WHY THE DEFINITION LIVES HERE BUT THE REGISTRATION DOES NOT.  ConfigManager
+# discovers relations by walking ``components/*/symbolic_physics.py`` and keys
+# each file on its directory name (or its ``comp_key``), which must match a
+# single YAML block; the symbol map it then applies is per component INSTANCE
+# (``transit.0.jitter``, ...).  So there is no file this parent class could own
+# that would register one relation against three different YAML blocks -- and
+# it should not want to: ``mulensinstrument`` is an ``Instrument`` too, with
+# ``noise_model = "err_scale"`` and no jitter at all, so the set of children
+# that get this relation is a per-child fact.  Each additive-noise child
+# therefore imports these two objects into its own ``symbolic_physics.py`` and
+# registers them; the definition, like ``calc_jitter`` above, exists once.
+JITTER_SYMBOLS = {
+    "jitter": sp.Symbol("jitter", real=True),
+    "jitter_variance": sp.Symbol("jitter_variance", real=True),
+}
+
+# Keys must equal the sympy symbol NAMES above: ConfigManager substitutes
+# relation symbols by ``sym.name``, so a map key that does not match leaves the
+# symbol unbound and the relation silently inert.  Sharing one dict across the
+# three children is what makes that failure mode unreachable -- transit's copy
+# named its symbol "jittervar" against a "jitter_variance" key and was inert
+# from the day it was written until 2026-08.
+JITTER_SYMBOL_MAP = {
+    "jitter": "jitter",
+    "jitter_variance": "jitter_variance",
+}
+
+JITTER_RELATIONS = [
+    sp.Eq(
+        JITTER_SYMBOLS["jitter_variance"],
+        JITTER_SYMBOLS["jitter"] * sp.Abs(JITTER_SYMBOLS["jitter"]),
+    )
+]
 
 
 class Instrument(Component):

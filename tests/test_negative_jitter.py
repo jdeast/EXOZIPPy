@@ -145,6 +145,220 @@ def test_every_additive_noise_component_wires_the_shared_relation():
         assert block["deps"] == ["jitter_variance"]
 
 
+def test_the_labels_and_descriptions_do_not_promise_a_positive_jitter():
+    """
+    Given a reader meeting a negative jitter in an output table for the first
+    time,
+    When they look at the symbol and the description,
+    Then neither claims positivity: the label is not a sigma (and the
+    variance's is not a square), and the description says the value is signed
+    and what a negative one means.
+
+    EXOFASTv2 floors the jitter at zero; this code deliberately does not (see
+    calc_jitter), so the table is the only place that difference is explained.
+    """
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager({}, {})
+    for comp in ("rvinstrument", "transit", "astrometryinstrument"):
+        for name in ("jitter", "jitter_variance"):
+            block = cm.base_defaults[comp][name]
+            where = f"{comp}.{name}"
+
+            assert "sigma" not in block["latex"], where
+            assert "^2" not in block["latex"], where
+            assert "signed" in block["description"].lower(), where
+
+            # Descriptions reach LaTeX *text* mode through latex_escape,
+            # which covers ^ but not these -- they would silently render as
+            # something else.
+            assert not set("<>|") & set(block["description"]), where
+
+        described = cm.base_defaults[comp]["jitter"]["description"].lower()
+        assert "quadrature" in described, comp
+        assert "overestimated" in described, comp
+
+
+# ---------------------------------------------------------------------------
+# The symbolic bridge: one definition, live in every child
+#
+# calc_jitter's sympy counterpart used to be copied into each child's
+# symbolic_physics.py, and transit's copy named its symbol "jittervar" against
+# a get_symbol_map key of "jitter_variance".  ConfigManager substitutes
+# relation symbols by sym.name, so the symbol never bound: transit's bridge was
+# inert from the day it was written, and (worse, invisibly) every transit
+# instance's relation referred to the SAME unbound global symbol.
+#
+# The definition now lives once on the Instrument parent, next to calc_jitter.
+# Registration necessarily stays per-child -- ConfigManager discovers relations
+# by walking components/*/symbolic_physics.py and keys each file on one YAML
+# block, and mulensinstrument is an Instrument with no jitter at all -- so
+# these pin that all three children register it and that no name can drift.
+# ---------------------------------------------------------------------------
+_BRIDGE_CONFIG = {
+    "rvinstrument": [{"name": "R1"}, {"name": "R2"}],
+    "transit": [{"name": "T1"}, {"name": "T2"}],
+    "astrometryinstrument": [{"name": "A1"}, {"name": "A2"}],
+}
+
+# Each child's own unit for a jitter seed: m/s, relative flux, mas.
+_BRIDGE_SEEDS = {
+    "rvinstrument": (-2.0, 7.0),
+    "transit": (-0.002, 0.004),
+    "astrometryinstrument": (-0.5, 1.5),
+}
+
+
+def _solve(user_params, config=None):
+    """Run the relaxation engine alone and return its solved paths."""
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager(user_params, config or _BRIDGE_CONFIG)
+    cm.finalize_user_params()
+    return cm
+
+
+def _solved(cm, comp, index, param):
+    """The engine's solved value, whichever name form it wrote it under."""
+    name = _BRIDGE_CONFIG[comp][index]["name"]
+    for path in (f"{comp}.{index}.{param}", f"{comp}.{name}.{param}"):
+        entry = cm.user_params.get(path)
+        if entry is not None:
+            return entry["initval"] if isinstance(entry, dict) else entry
+    raise KeyError(f"{comp}.{index}.{param} not in the solved parameters")
+
+
+def test_the_symbolic_bridge_is_defined_once_on_the_instrument_parent():
+    """
+    Given the jitter <-> jitter_variance bridge is pure algebra on the additive
+    noise model Instrument owns,
+    When each additive-noise child's symbolic_physics module is imported,
+    Then all three expose the parent's relation object itself, and the symbol
+    map they publish uses exactly the parent's symbol names -- so the
+    name/key mismatch that silenced transit cannot recur in one child only.
+    """
+    import importlib
+
+    from exozippy.components.instrument import (
+        JITTER_RELATIONS,
+        JITTER_SYMBOL_MAP,
+        JITTER_SYMBOLS,
+    )
+
+    # The map keys ARE the sympy symbol names: this is the invariant whose
+    # violation made transit's relation inert.
+    assert set(JITTER_SYMBOL_MAP) == {
+        sym.name for sym in JITTER_SYMBOLS.values()
+    }
+
+    for comp in ("rvinstrument", "transit", "astrometryinstrument"):
+        module = importlib.import_module(
+            f"exozippy.components.{comp}.symbolic_physics"
+        )
+        assert JITTER_RELATIONS[0] in module.RELATIONS, comp
+        for key, path in JITTER_SYMBOL_MAP.items():
+            assert module.get_symbol_map({})[key] == path, comp
+
+
+def test_every_child_registers_a_fully_bound_jitter_relation():
+    """
+    Given a config with two instruments of each additive-noise component,
+    When ConfigManager collects the symbolic relations,
+    Then each instrument owns one bridge relation whose symbols are ALL its own
+    indexed paths.
+
+    Pre-fix, transit's two instances produced Eq(jittervar, transit.i.jitter):
+    an unbound symbol, shared between the two instruments.
+    """
+    from exozippy.config import ConfigManager
+
+    manager = ConfigManager({}, _BRIDGE_CONFIG)
+
+    for comp in ("rvinstrument", "transit", "astrometryinstrument"):
+        for i in (0, 1):
+            jitter = f"{comp}.{i}.jitter"
+            variance = f"{comp}.{i}.jitter_variance"
+            matches = [
+                rel
+                for rel in manager.all_relations
+                if {str(s) for s in rel.free_symbols} == {jitter, variance}
+            ]
+            assert len(matches) == 1, f"{comp}.{i}: {matches}"
+            # No stray unbound symbol anywhere in the collected relations.
+            assert not [
+                rel
+                for rel in manager.all_relations
+                if any(
+                    "." not in str(s) and "jitter" in str(s)
+                    for s in rel.free_symbols
+                )
+            ]
+
+
+@pytest.mark.parametrize(
+    "comp", ["rvinstrument", "transit", "astrometryinstrument"]
+)
+def test_seeding_jitter_derives_the_sampled_variance_in_every_child(comp):
+    """
+    Given a user who seeds an instrument's 'jitter' (the quantity anyone
+    actually has a number for) rather than the sampled 'jitter_variance',
+    When the relaxation engine runs,
+    Then the variance is derived as the SIGNED square in that child's own
+    units -- the same answer in all three, including transit, whose relation
+    was inert.
+    """
+    negative, positive = _BRIDGE_SEEDS[comp]
+    cm = _solve(
+        {
+            f"{comp}.0.jitter": {"initval": negative},
+            f"{comp}.1.jitter": {"initval": positive},
+        }
+    )
+
+    assert _solved(cm, comp, 0, "jitter_variance") == pytest.approx(
+        -(negative**2), rel=1e-9
+    )
+    assert _solved(cm, comp, 1, "jitter_variance") == pytest.approx(
+        positive**2, rel=1e-9
+    )
+
+
+@pytest.mark.parametrize(
+    "comp", ["rvinstrument", "transit", "astrometryinstrument"]
+)
+def test_the_sign_survives_the_relation_in_every_child(comp):
+    """
+    Given a negative jitter seed, which is legal down to Instrument's
+    jitter-variance floor,
+    When the engine derives the sampled variance,
+    Then it is negative.
+
+    The bridge is jitter*|jitter|, not jitter**2: as a plain square, seeding
+    jitter = -2 asked for a variance of +4, silently reversing the one
+    statement the user made.
+    """
+    cm = _solve({f"{comp}.0.jitter": {"initval": -2.0}})
+
+    assert _solved(cm, comp, 0, "jitter_variance") == pytest.approx(-4.0)
+
+
+def test_one_instruments_jitter_seed_does_not_leak_into_another():
+    """
+    Given two transit light curves, only one of which seeds a jitter,
+    When the engine runs,
+    Then the other keeps its own default variance.
+
+    Pre-fix every transit instance's relation named the same unbound global
+    'jittervar' symbol, so the instances were not independent even in
+    principle -- it only went unnoticed because the symbol was never bound to
+    anything and the relation therefore never fired at all.
+    """
+    cm = _solve({"transit.0.jitter": {"initval": 0.003}})
+
+    assert _solved(cm, "transit", 0, "jitter_variance") == pytest.approx(9e-06)
+    assert _solved(cm, "transit", 1, "jitter_variance") == pytest.approx(0.0)
+
+
 # ---------------------------------------------------------------------------
 # End to end through a model
 # ---------------------------------------------------------------------------
