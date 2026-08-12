@@ -307,7 +307,7 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared file reading: columns, mask, time system, sort
     # ------------------------------------------------------------------
-    def _read_data(self, i, roles, detrend=False):
+    def _read_data(self, i, roles, detrend=False, shared_roles=()):
         """Read data file ``i`` into canonical column order, ready to use.
 
         One call replaces the read/mask/sort triplet every child used to
@@ -328,6 +328,10 @@ class Instrument(Component):
         ``roles[j]``, columns ``len(roles):`` are the detrend columns.
         With none of the optional keys set this is byte-for-byte the old
         read (all columns, as-is on disk, sorted by column 0).
+
+        ``shared_roles`` names groups of roles this component allows to
+        read the SAME file column (see ``_check_no_duplicate_columns``);
+        every other collision is an error.
         """
         if roles[0] != "time":
             raise ValueError(
@@ -337,7 +341,7 @@ class Instrument(Component):
         df = pd.read_csv(
             self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
         )
-        df = self._select_columns(df, i, roles, detrend)
+        df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
         t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
         df[df.columns[0]] = t
@@ -392,7 +396,7 @@ class Instrument(Component):
                 out[k] = _col(v)
         return out
 
-    def _select_columns(self, df, i, roles, detrend):
+    def _select_columns(self, df, i, roles, detrend, shared_roles=()):
         """Apply file ``i``'s ``columns:`` spec, returning the canonical layout.
 
         Without a spec the file is returned untouched (the on-disk order IS
@@ -432,9 +436,68 @@ class Instrument(Component):
                 f"[{label}] columns indices are 0-based and the data file "
                 f"has {df.shape[1]} columns; got {sorted(set(too_big))}."
             )
+        self._check_no_duplicate_columns(label, roles, idx, det, shared_roles)
         out = df.iloc[:, idx + det].copy()
         out.columns = range(out.shape[1])
         return out
+
+    @staticmethod
+    def _check_no_duplicate_columns(label, roles, idx, det, shared_roles=()):
+        """Reject a ``columns:`` spec that points two roles at one column.
+
+        A PARTIAL spec is the trap this closes: ``columns: {time: 1}``
+        names only the time column, every other role keeps its canonical
+        position, and ``rv`` is canonically column 1 -- so the RVs are
+        silently the times, and the fit runs on a dataset nobody wrote.
+        Nothing downstream can notice: ``df.iloc`` is happy to select a
+        column twice.
+
+        Two reuses are legitimate and survive:
+
+        * The TIME column may ALSO be a detrend column.  Detrending
+          against a linear trend in time is a real use case, and there is
+          no other way to spell it (the detrend list may not name a
+          column that is not in the file).
+        * Roles the component declares interchangeable through
+          ``shared_roles``, a sequence of role-name groups.  Astrometry's
+          ``abs`` mode passes ``("err_e", "err_n")`` so one symmetric
+          per-epoch uncertainty column can serve both sky axes -- a
+          common catalog layout.
+
+        Everything else is an error, including a ``detrend`` list that
+        repeats a column (two identical basis vectors are an exactly
+        degenerate pair of coefficients) and two roles in different units
+        (astrometry ``rel``'s ``err_sep`` in mas vs ``err_pa`` in deg).
+        """
+        names = list(roles) + [f"detrend[{k}]" for k in range(len(det))]
+        by_column = {}
+        for name, col in zip(names, list(idx) + list(det)):
+            by_column.setdefault(col, []).append(name)
+
+        groups = [set(g) for g in shared_roles]
+        for col, hits in sorted(by_column.items()):
+            if len(hits) == 1:
+                continue
+            # time, reused as exactly one detrend column
+            if (
+                len(hits) == 2
+                and "time" in hits
+                and any(h.startswith("detrend[") for h in hits)
+            ):
+                continue
+            if any(set(hits) <= g for g in groups):
+                continue
+            allowed = "".join(
+                f"; '{sorted(g)}' may share one" for g in shared_roles
+            )
+            raise ValueError(
+                f"[{label}] columns maps {hits} to the same file column "
+                f"{col}. Each role needs its own column -- note that roles "
+                f"the spec does not name keep their canonical position, so "
+                f"a partial spec can collide with a default. (The only "
+                f"reuse allowed is the time column doubling as a detrend "
+                f"column{allowed}.)"
+            )
 
     @staticmethod
     def _columns_config_schema(roles, detrend=True, note=""):
@@ -455,7 +518,10 @@ class Instrument(Component):
                 f"Optional column layout: a mapping from role name to "
                 f"0-based column index in the data file. Roles: "
                 f"{', '.join(roles)}{extra}. Unnamed roles keep their "
-                f"default position. Default: the documented column order."
+                f"default position -- so two roles must not end up on the "
+                f"same column, which a partial spec can cause (that is an "
+                f"error; the time column may also be a detrend column). "
+                f"Default: the documented column order."
                 + (f" {note}" if note else "")
             ),
         }
