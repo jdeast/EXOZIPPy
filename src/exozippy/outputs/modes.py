@@ -97,37 +97,208 @@ def _idx_to_words(n):
     return "".join(words[char] for char in str(n))
 
 
+# Outcome vocabulary for one mode-identification attempt, following the
+# status-dict pattern of outputs/ledger.py's hot-chain search (HOT_*) and
+# outputs/evidence.py's per-mode bridge estimates (EV_*).
+#
+# The distinction that matters is between the last two.  Both end with
+# ``mode_report = None`` at the call site, and until 2026-08-12 that was the
+# ONLY thing the caller could see -- so the numerical-validity gate below,
+# which returns immediately on a None report, was bypassed in exactly the
+# worst case: EVERY draw rejected.  A trace with 1.1% invalid draws refused
+# to emit tables while a trace with 100% invalid draws emitted a full set
+# that read as clean (review item 3.17).  MODE_NO_VALID_DRAWS is the signal
+# that separates "the draws are unusable" from "we could not tell you
+# anything, for some other reason"; it can only be set from
+# NoValidDrawsError, which identify_modes raises from one place.
+MODE_OK = "ok"
+MODE_NO_VALID_DRAWS = "no-valid-draws"
+MODE_FAILED = "failed"
+
+
+class NoValidDrawsError(ValueError):
+    """Every draw in the trace failed identify_modes' validity filter.
+
+    A ValueError subclass, so any pre-existing ``except ValueError`` around
+    identify_modes keeps behaving as before.
+
+    It carries the counts because it is the only channel through which the
+    all-invalid case can reach ``check_invalid_frac``: there is nothing to
+    cluster, so no ModeReport exists to read ``n_invalid``/``invalid_frac``
+    off, and a bare exception would leave the gate with nothing to gate on.
+    """
+
+    def __init__(self, n_invalid, n_draws, reason_counts=None, per_chain=None):
+        self.n_invalid = int(n_invalid)
+        self.n_draws = int(n_draws)
+        self.invalid_frac = (
+            self.n_invalid / self.n_draws if self.n_draws else 0.0
+        )
+        self.reason_counts = dict(reason_counts or {})
+        self.per_chain_invalid = (
+            list(per_chain) if per_chain is not None else []
+        )
+        # The leading clause is load-bearing: callers and tests match on
+        # "no valid draws".
+        super().__init__(
+            f"identify_modes: no valid draws in trace -- all "
+            f"{self.n_invalid} draws ({self.invalid_frac:.2%}) failed the "
+            f"numerical-validity filter (reasons={self.reason_counts}, "
+            f"per-chain invalid counts={self.per_chain_invalid})"
+        )
+
+
+def _invalid_reason_hint(reason_counts):
+    """One actionable sentence about the dominant rejection reason."""
+    if not reason_counts:
+        return ""
+    dominant = max(reason_counts, key=lambda r: reason_counts[r])
+    if dominant == "nonfinite-raw":
+        return (
+            " The sampled parameter values themselves are non-finite, so "
+            "the sampler never produced a usable point: check the model's "
+            "logp at the start point and the sampler's step-size adaptation."
+        )
+    if dominant in ("nonfinite-lp", "lp-ceiling"):
+        return (
+            " The stored log-posterior is non-finite (or beyond "
+            f"|lp| = {DEFAULT_LP_ABS_MAX:g}) for every draw. The parameter "
+            "values may still look perfectly reasonable in the tables, "
+            "which is exactly why this cannot be allowed to pass quietly: "
+            "check the model's logp for NaN/inf-producing terms."
+        )
+    return ""
+
+
 def check_invalid_frac(
     mode_report,
     max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
     force=False,
     trace_path=None,
     modes_path=None,
+    status=None,
 ):
-    """Raise if ``mode_report``'s invalid-draw fraction exceeds the threshold.
+    """Raise if the trace's invalid-draw fraction exceeds the threshold.
 
     A trace this numerically broken must not silently emit final tables.
     Call this only after the trace and mode report have already been
     written to disk, so the raise preserves that evidence for forensics.
     ``force=True`` (config ``modes: {force: true}``) or a higher
     ``max_invalid_frac`` re-enables processing of a known-bad trace.
+
+    ``mode_report`` may be None, which is ambiguous on its own and so is
+    disambiguated by ``status`` (the dict build_mode_reports fills in):
+
+    * ``state == MODE_NO_VALID_DRAWS`` -- identify_modes rejected EVERY
+      draw and could not build a report.  That is a 100% invalid fraction,
+      the most extreme form of exactly what this gate exists to catch, and
+      it is gated on the same comparison and honours the same overrides as
+      a partially-invalid report.  Passing it silently is review item 3.17.
+    * anything else (including no status at all) -- mode identification
+      produced no report for a reason that says nothing about the draws'
+      numerical validity (an unclustered trace, a crash in the mode pass).
+      There is nothing to gate on and this returns, unchanged.
     """
-    if force or mode_report is None or not mode_report.n_invalid:
+    if mode_report is not None:
+        n_invalid = int(mode_report.n_invalid)
+        frac = mode_report.invalid_frac
+        reason_counts = dict(mode_report.invalid_reason_counts or {})
+        per_chain = None
+        all_invalid = False
+    elif status and status.get("state") == MODE_NO_VALID_DRAWS:
+        n_invalid = int(status.get("n_invalid", 0))
+        frac = float(status.get("invalid_frac", 0.0))
+        reason_counts = dict(status.get("reasons") or {})
+        per_chain = status.get("per_chain_invalid")
+        all_invalid = True
+    else:
         return
-    if mode_report.invalid_frac <= max_invalid_frac:
+
+    if not n_invalid or frac <= max_invalid_frac:
         return
+    if force:
+        logger.warning(
+            "modes: %d draws (%.2f%%) are numerically invalid, above "
+            "max_invalid_frac=%.2f%%, but `modes: {force: true}` was set -- "
+            "emitting tables from a trace known to be broken. reasons=%s",
+            n_invalid,
+            100 * frac,
+            100 * max_invalid_frac,
+            reason_counts,
+        )
+        return
+
     where = ""
     if trace_path or modes_path:
         where = f" The trace ({trace_path}) and mode report ({modes_path}) have already been written."
+    override = (
+        " Override with config `modes: {force: true}` (or raise "
+        "`modes.max_invalid_frac`) to re-process forensically."
+    )
+    if all_invalid:
+        raise RuntimeError(
+            f"identify_modes: ALL {n_invalid} draws ({frac:.2%}) were "
+            "rejected as numerically invalid, so no posterior mode could be "
+            "identified and NO summary of this trace is meaningful -- the "
+            "tables would describe draws that were all rejected. "
+            f"reasons={reason_counts}, per-chain invalid counts={per_chain}."
+            + _invalid_reason_hint(reason_counts)
+            + where
+            + " Re-run `exozippy-modes <config>` to inspect the trace "
+            "without raising." + override
+        )
     raise RuntimeError(
-        f"identify_modes: {mode_report.n_invalid} draws "
-        f"({mode_report.invalid_frac:.2%}) rejected as numerically invalid, "
+        f"identify_modes: {n_invalid} draws "
+        f"({frac:.2%}) rejected as numerically invalid, "
         f"exceeding max_invalid_frac={max_invalid_frac:.2%}. This indicates "
         "a model or sampler bug -- investigate before trusting any output."
         + where
-        + " Override with config `modes: {force: true}` (or raise "
-        "`modes.max_invalid_frac`) to re-process forensically."
+        + override
     )
+
+
+def mode_status_to_text(status):
+    """Render a MODE_NO_VALID_DRAWS outcome for ``<prefix>_modes.txt``.
+
+    Mirrors ``ledger.hot_status_to_text``: returns "" for anything it has
+    nothing to say about, so callers can pass a status dict unconditionally.
+
+    Only the all-invalid state renders.  MODE_OK writes a real report (that
+    is ModeReport.to_text's job) and MODE_FAILED is deliberately left
+    byte-identical to its pre-3.17 behaviour -- a crash in the mode pass is
+    not evidence about the draws, and the file it would write here would be
+    the only place claiming otherwise.
+    """
+    if not status or status.get("state") != MODE_NO_VALID_DRAWS:
+        return ""
+    n_invalid = int(status.get("n_invalid", 0))
+    frac = float(status.get("invalid_frac", 0.0))
+    lines = [
+        "Posterior mode report",
+        "=====================",
+        "",
+        "*** NO VALID DRAWS ***",
+        "",
+        f"All {n_invalid} draws ({frac:.2%}) in this trace were rejected as",
+        "numerically invalid, so no mode could be identified and no mode",
+        "report exists. Any table or plot generated from this trace",
+        "describes draws that the validity filter rejected in full.",
+        "",
+        f"reasons: {status.get('reasons') or {}}",
+        f"per-chain invalid counts: {status.get('per_chain_invalid')}",
+    ]
+    hint = _invalid_reason_hint(status.get("reasons") or {})
+    if hint:
+        lines += ["", hint.strip()]
+    lines += [
+        "",
+        "This is a model or sampler bug, not a reporting problem. A live",
+        "fit refuses to write final tables in this state; this file was",
+        "written by a forensic re-processing run (exozippy-modes) or by a",
+        "run with `modes: {force: true}` set.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _fmt_pm(value, err, fmt="{:.4f}"):
@@ -833,7 +1004,15 @@ def identify_modes(
             invalid_per_chain.tolist(),
         )
     if not valid.any():
-        raise ValueError("identify_modes: no valid draws in trace")
+        # Carries the counts so the caller's validity gate has something to
+        # gate on: no ModeReport can exist here, and a bare exception is
+        # indistinguishable from any other mode-pass failure (review 3.17).
+        raise NoValidDrawsError(
+            n_invalid,
+            n_samples,
+            reason_counts=invalid_reason_counts,
+            per_chain=invalid_per_chain.tolist(),
+        )
 
     # ---- standardize + cluster ------------------------------------------
     Xv = X[valid]
