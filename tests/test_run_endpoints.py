@@ -232,6 +232,90 @@ def test_run_snapshots_config_into_output_dir(client, monkeypatch, tmp_path):
     assert (tmp_path / "out" / "cfg.used.yaml").is_file()
 
 
+def test_run_snapshots_the_params_file_the_fit_will_read(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a config naming a parameter_file,
+    When POST /api/run runs with no explicit params argument,
+    Then that params file is snapshotted into the output dir too.
+
+    Reproduces review 2.11.2: every caller omitted the argument, so the params
+    branch of _snapshot_run_inputs never ran and the promised '.used' copy of
+    the file that actually sets the start values was never written.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text(
+        "prefix: out/RUN\nparameter_file: cfg.params.yaml\n"
+    )
+    (tmp_path / "cfg.params.yaml").write_text("star.A.teff: {initval: 5800}\n")
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
+
+    used = tmp_path / "out" / "cfg.params.used.yaml"
+    assert used.is_file()
+    assert used.read_text() == (tmp_path / "cfg.params.yaml").read_text()
+
+
+def test_run_snapshot_prefers_an_explicit_params_argument(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a request that names its own params file,
+    When POST /api/run runs,
+    Then that file is snapshotted instead of the config's parameter_file.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text(
+        "prefix: out/RUN\nparameter_file: cfg.params.yaml\n"
+    )
+    (tmp_path / "cfg.params.yaml").write_text("star.A.teff: {initval: 5800}\n")
+    (tmp_path / "other.params.yaml").write_text(
+        "star.A.teff: {initval: 6100}\n"
+    )
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    client.post(
+        "/api/run",
+        json={
+            "config": "cfg.yaml",
+            "params": "other.params.yaml",
+            "project_dir": str(tmp_path),
+        },
+    )
+
+    assert (tmp_path / "out" / "other.params.used.yaml").is_file()
+    assert not (tmp_path / "out" / "cfg.params.used.yaml").exists()
+
+
+def test_run_snapshot_survives_a_config_without_a_params_file(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a config with no parameter_file key (or an unreadable one),
+    When POST /api/run runs,
+    Then the config snapshot still happens and nothing raises.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text("prefix: out/RUN\n")
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    resp = client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
+    assert resp.status_code == 200
+    assert (tmp_path / "out" / "cfg.used.yaml").is_file()
+
+
 def test_run_image_rejects_outside_tree(client, monkeypatch, tmp_path):
     """
     Given an active run,

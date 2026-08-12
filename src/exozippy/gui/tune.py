@@ -30,12 +30,17 @@ import gc
 import logging
 import multiprocessing
 import os
+import queue
 import signal
 import sys
 import threading
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# How long the parent waits on the response queue before re-checking that the
+# worker process is still alive (see EvaluatorWorker._next_message).
+_AWAIT_POLL_S = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +271,31 @@ class EvaluatorWorker:
         self._req_q.put({"op": "eval", "path": path, "value": value})
         return self._await(None)
 
+    def _next_message(self):
+        """Next queue message, raising if the worker died without answering.
+
+        Polls rather than blocking forever on ``get()``: a worker that dies --
+        or is closed out from under an in-flight solve, which is what opening a
+        different project does -- never answers, and an unbounded get() would
+        wedge the caller. The server's tune pool has a single slot, so one such
+        stuck thread would block every later solve.
+        """
+        while True:
+            try:
+                return self._resp_q.get(timeout=_AWAIT_POLL_S)
+            except queue.Empty:
+                if self.is_alive():
+                    continue
+                try:
+                    # Last drain: the child may have answered as it exited,
+                    # with the payload still in flight through the pipe.
+                    return self._resp_q.get(timeout=_AWAIT_POLL_S)
+                except queue.Empty:
+                    raise RuntimeError("evaluator worker exited") from None
+
     def _await(self, on_progress):
         while True:
-            msg = self._resp_q.get()
+            msg = self._next_message()
             if "progress" in msg:
                 if on_progress:
                     # The full message: phase string plus any payload riding

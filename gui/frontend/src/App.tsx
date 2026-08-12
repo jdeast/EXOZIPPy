@@ -37,7 +37,18 @@ const TABS: Tab[] = [
     label: "Config",
     render: (ctx) => <ConfigTab configPath={ctx.configPath} active={ctx.active} />,
   },
-  { id: "tune", label: "Tune", render: (ctx) => <TuneTab configPath={ctx.configPath} /> },
+  {
+    id: "tune",
+    label: "Tune",
+    // Keyed by the config it is tuning: switching project (or config) must
+    // REMOUNT the tab, not reuse it. The Tune state -- solved parameters,
+    // plots, selected row, slider value -- describes one specific model, and
+    // carrying it into another project showed the old project's numbers under
+    // the new project's name until a re-Solve finished (review 2.11.1).
+    render: (ctx) => (
+      <TuneTab key={ctx.configPath ?? "none"} configPath={ctx.configPath} />
+    ),
+  },
   {
     id: "tools",
     label: "Tools",
