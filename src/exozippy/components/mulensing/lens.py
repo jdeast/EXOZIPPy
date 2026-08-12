@@ -16,9 +16,20 @@ from exozippy.potentials import soft_lower_bound
 from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
-from .physics import MU_REL_FLOOR, THETA_E_FLOOR
+from .physics import (
+    _Q_NAN_ADVICE,
+    MU_REL_FLOOR,
+    Q_MAX,
+    Q_MIN,
+    THETA_E_FLOOR,
+    clip_q,
+)
 
 logger = logging.getLogger(__name__)
+
+# alpha is stored in radians (lens.alpha's internal_unit) and consumed in
+# degrees by both magnification backends.
+_RAD_TO_DEG = 180.0 / np.pi
 
 
 def _parse_body_ref(ref):
@@ -396,10 +407,6 @@ class Lens(Component):
     def _primary_source(self, event_idx):
         """Return (comp_type, star_ndx) for the primary source of event i."""
         return self.source_bodies[event_idx][0]
-
-    def _body_mass(self, system, comp_type, ndx):
-        """Return the PyTensor mass node for a given body."""
-        return getattr(system, comp_type).mass.value[ndx]
 
     def _mass_initval(self, comp_type, ndx):
         """Best-effort mass initval (solMass) for a body at stage 2, from
@@ -783,7 +790,7 @@ class Lens(Component):
         if isinstance(sa, (list, tuple)):
             sa = sa[0] if sa else None
         if ca is not None and sa is not None:
-            alpha_deg = float(np.arctan2(float(sa), float(ca)) * 180.0 / np.pi)
+            alpha_deg = float(np.arctan2(float(sa), float(ca)) * _RAD_TO_DEG)
             self.config_manager.add_hint(f"lens.0.alpha", alpha_deg, rank=20)
 
         # Expected proper motions from the galactic model, for the seeds below.
@@ -1061,8 +1068,48 @@ class Lens(Component):
         )
         return float(v @ e_hat), float(v @ n_hat)
 
+    def _validate_q_start(self):
+        """Stage 6: check the START value of the mass ratio, loudly and once.
+
+        The magnification path clips q into [Q_MIN, Q_MAX] (physics.clip_q) --
+        a statement about where the backends are defined, not a licence to
+        invent a mass ratio.  The clip used to be preceded by
+        ``pt.nan_to_num(q, nan=Q_MIN)``, which silently turned a failed
+        computation into a healthy-looking likelihood.  That scrub is gone; a
+        NaN now reaches logp and the proposal is rejected.  What the scrub also
+        hid, though, was the *start*, and a bad start is the case that is worth
+        a message rather than a rejection -- so it is checked here, once, on
+        the inputs, where a raise costs nothing and can say what to do.
+
+        NaN is fatal: the fit cannot start.  Out of range (the infinities
+        included -- they at least carry a sign, the same split clip_q_value
+        makes) is a warning: the fit will silently begin at the clipped q
+        rather than at the seeded one, which is exactly the sort of "the number
+        I typed is not the number being fitted" that goes unnoticed for months.
+        """
+        if self.n_companions < 1 or self.q.initval is None:
+            return
+        q0 = np.atleast_1d(np.asarray(self.q.initval, dtype=float)).ravel()
+        if np.any(np.isnan(q0)):
+            raise ValueError(
+                f"{self.prefix}.q starts at {q0.tolist()}, which is not a "
+                f"number.  {_Q_NAN_ADVICE}"
+            )
+        out = (q0 < Q_MIN) | (q0 > Q_MAX)
+        if np.any(out):
+            logger.warning(
+                f"{self.prefix}.q starts at {q0[out].tolist()}, outside the "
+                f"[{Q_MIN:g}, {Q_MAX:g}] range the binary-lens magnification "
+                "backends are defined on, so the fit will actually START at "
+                "the clipped value.  Move the start inside the range (set "
+                f"{self.prefix}.q, or the companion/primary masses it is "
+                "derived from) rather than relying on the clip."
+            )
+
     def build_likelihood(self, model, system):
         """Stage 6: Observational penalties on the lensing geometry."""
+        self._validate_q_start()
+
         # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
         # in the frame the event is observed in (rp.py used the geocentric
         # value at t0_par; Batista+2011's rate is in the frame of the
@@ -1111,6 +1158,20 @@ class Lens(Component):
     # Magnification
     # ------------------------------------------------------------------
 
+    def _alpha_deg(self, j=0):
+        """Trajectory angle of companion ``j`` in DEGREES -- the unit both
+        magnification backends take, while lens.alpha's internal unit is
+        radians.
+
+        Reads the alpha Parameter rather than re-deriving ``arctan2(yalpha,
+        xalpha)`` at each call site (it was open-coded twice; review item 4.5).
+        alpha's expression IS that arctan2 (physics.calc_alpha), so this is
+        bit-identical, and going through the Parameter means the angle handed
+        to the backend is by construction the same one the reports, priors and
+        plots see.
+        """
+        return self.alpha.value[j] * _RAD_TO_DEG
+
     def _get_safe_mm_params(self, index=0):
         """Sanitized single-source params.  ``index`` is the SOURCE slot: the
         per-source vector parameters (t_0, u_0, t_E, pi_E_*) hold one element
@@ -1139,7 +1200,7 @@ class Lens(Component):
             "pi_E": pt.switch(is_physical, pi_E_scrubbed, 0.0),
         }
 
-    def _get_binary_mm_params(self, system, index=0):
+    def _get_binary_mm_params(self, index=0):
         """Params for a binary lens.  ``index`` is the SOURCE slot; the lens
         bodies are shared by all sources (single event ⇒ event index 0).
 
@@ -1147,26 +1208,21 @@ class Lens(Component):
         the TOTAL lens mass via mlens_total, so the safe single-source params
         pass straight through — only the companion geometry (s, q, alpha) is
         added here.
+
+        It no longer takes ``system``: q used to be recomputed here from the
+        two body mass nodes, which is what needed it.  It now reads the q
+        Parameter, which is that same ratio (physics.calc_q) and is what every
+        other consumer already uses.
         """
         s = self._get_safe_mm_params(index)
 
-        l2_type, l2_idx = self.lens_bodies[0][1]
-        m1 = self._body_mass(system, *self.lens_bodies[0][0])
-        m2 = self._body_mass(system, l2_type, l2_idx)
-        q = m2 / pt.maximum(m1, 1e-10)
-        q_safe = pt.clip(pt.nan_to_num(q, nan=1e-9), 1e-9, 100.0)
-
-        # s/xalpha/yalpha are indexed by companion (binary = companion 0),
-        # not by event or source.
-        alpha_deg = pt.arctan2(self.yalpha.value[0], self.xalpha.value[0]) * (
-            180.0 / np.pi
-        )
-
+        # s/q/alpha are indexed by companion (binary = companion 0), not by
+        # event or source.
         return {
             **s,
             "s": self.s.value[0],
-            "q": q_safe,
-            "alpha": alpha_deg,
+            "q": clip_q(self.q.value[0]),
+            "alpha": self._alpha_deg(0),
         }
 
     def get_magnification(self, times, obs_pos, system, index=0):
@@ -1357,13 +1413,13 @@ class Lens(Component):
             if use_rho:
                 param_list.append(self.rho.value[index])
             for j in range(self.n_companions):
-                q_j = pt.clip(
-                    pt.nan_to_num(self.q.value[j], nan=1e-9), 1e-9, 100.0
+                param_list.extend(
+                    [
+                        self.s.value[j],
+                        clip_q(self.q.value[j]),
+                        self._alpha_deg(j),
+                    ]
                 )
-                alpha_deg_j = pt.arctan2(
-                    self.yalpha.value[j], self.xalpha.value[j]
-                ) * (180.0 / np.pi)
-                param_list.extend([self.s.value[j], q_j, alpha_deg_j])
             if effective_bandpass is not None:
                 param_list.append(u1)
             mag_op = VBMDirectMagOp(
@@ -1373,7 +1429,7 @@ class Lens(Component):
                 bandpass=effective_bandpass,
             )
         elif n_lenses == 2:
-            bp = self._get_binary_mm_params(system, index)
+            bp = self._get_binary_mm_params(index)
             param_list = [bp["t0"], bp["u0"], bp["tE"], bp["pi_N"], bp["pi_E"]]
             if use_rho:
                 param_list.append(self.rho.value[index])

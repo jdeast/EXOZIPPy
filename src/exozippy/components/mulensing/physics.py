@@ -124,6 +124,91 @@ def calc_q(*masses):
     return pt.concatenate([pt.atleast_1d(c) for c in companions]) / primary
 
 
+# --- Mass-ratio sanitization ------------------------------------------------
+# Validity range of the binary/multiple-lens magnification backends.  Both
+# MulensModel and VBMicrolensing require a strictly positive, finite q, and the
+# caustic solvers stop converging well before these limits.  Q_MIN sits a decade
+# below lens.q's own defaults.yaml `lower: 1e-8` soft barrier, so on a fit that
+# is behaving the clip is never active: the barrier turns the sampler around
+# first.  Q_MAX is exactly lens.q's `upper` (q > 1 is legal -- it is the same
+# geometry with the two bodies relabelled).
+#
+# This is a RANGE decision and ONLY a range decision.  It must never be paired
+# with a NaN substitution -- see clip_q.
+Q_MIN = 1e-9
+Q_MAX = 100.0
+
+_Q_NAN_ADVICE = (
+    "q = M_companion / M_primary, so a non-finite q means one of the lens "
+    "body masses is already non-finite.  Check the initval (and any "
+    "'sigma: 0' link expression) on star.<primary lens>.logmass and on the "
+    "companion's mass -- planet.<name>.log_q in log_q mode, "
+    "planet.<name>.mass in linear mode, star.<name>.logmass for a stellar "
+    "companion."
+)
+
+
+def clip_q(q):
+    """Clip a symbolic mass ratio into the magnification model's valid range.
+
+    Deliberately NOT paired with ``pt.nan_to_num``, which is what this used to
+    be -- ``pt.clip(pt.nan_to_num(q, nan=Q_MIN), Q_MIN, Q_MAX)``, copied to
+    five sites (review item 4.5).  Dropping the scrub is safe *and* strictly
+    better:
+
+    * It was unreachable.  ``q`` is ``m_companion / m_primary``; every mass in
+      the chain descends from a logit-bounded sampled coordinate (star.logmass
+      in [-9, 2.5] dex, planet.log_q, or a linear planet.mass with finite hard
+      bounds -- and user bounds may only be tightened), so both operands are
+      finite and the denominator, a stellar mass, has a hard floor of 1e-9
+      solMass.  Measured on examples/DC2018_128 and examples/ob161003: q stays
+      finite over the entire raw support out to raw = +/-1e12, and 2400 random
+      raw points per event produced no NaN and no inf.  A 300-tune/300-draw
+      PTDE fit of DC2018_128 (2 rungs x 36 chains, plus the whitening probe,
+      the DE polish and the seed polish) never once entered the branch.
+    * If it *were* reached it could only do harm.  q is NaN only when an input
+      is already NaN, i.e. the raw vector itself carries a NaN -- and that raw
+      variable's own N(0, 1) prior term already makes the total logp NaN, so
+      the proposal is rejected whatever q does (verified: setting
+      ``star.logmass_raw`` or ``planet.log_q_raw`` to NaN gives logp = nan).
+      Substituting Q_MIN could therefore never rescue a sample; it only
+      invented a mass ratio -- with a *zero* gradient, since nan_to_num is a
+      switch -- in place of the one quantity that would have named the
+      failure.
+
+    So a NaN now propagates to logp, which is the sampler's own reject signal,
+    and no gradient is poisoned.  A finite-but-out-of-range q is a different
+    thing entirely and is still clipped, because that is a genuine modelling
+    decision about where the backends are defined.
+    """
+    return pt.clip(q, Q_MIN, Q_MAX)
+
+
+def clip_q_value(q, label="lens.q"):
+    """Numeric counterpart of :func:`clip_q` for the backend Op and bootstrap
+    paths, which see concrete floats rather than tensors.
+
+    Raises ``ValueError`` on a NaN ``q`` instead of handing it to
+    MulensModel/VBMicrolensing.  Every caller already has an error path that
+    turns this into the right thing: the magnification Ops catch it and return
+    NaN magnifications (logp = -inf, proposal rejected) after warning once with
+    this message, and the flux bootstrap catches it, warns, and falls back to
+    the PSPL columns.  The point is that the message names the parameter --
+    ``np.clip(nan, ...)`` returned nan and let MulensModel report the generic
+    "Wrong number of solutions to the lens equation" three frames away.
+
+    The infinities are NOT an error: they carry a sign, so they are ordinary
+    out-of-range values and are clipped to the bound exactly as np.clip -- and
+    as the symbolic clip_q -- does.  NaN is the case with no value at all.
+    """
+    q = float(q)
+    if np.isnan(q):
+        raise ValueError(
+            f"{label} is nan: a mass ratio must be a number.  {_Q_NAN_ADVICE}"
+        )
+    return float(np.clip(q, Q_MIN, Q_MAX))
+
+
 @register_physics
 def calc_mlens_total(*masses):
     # Total lens mass: sum over all lens bodies.  theta_E, t_E, rho, and pi_E

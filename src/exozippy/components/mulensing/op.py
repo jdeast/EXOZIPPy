@@ -9,6 +9,8 @@ from astropy.coordinates import SkyCoord
 from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
+from .physics import clip_q_value
+
 
 def _clear_mm_satellite_cache():
     """Drop MulensModel's class-level satellite-delta cache before each call.
@@ -113,7 +115,7 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
     mm_params["s"] = float(max(float(p[idx]), 1e-6))
-    mm_params["q"] = float(np.clip(float(p[idx + 1]), 1e-9, 100.0))
+    mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
     mm_params["alpha"] = float(p[idx + 2])
 
     model = mm.Model(parameters=mm_params, coords=coords)
@@ -463,6 +465,15 @@ class VBMDirectMagOp(Op):
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
     def _compute(self, p, times_np, obs_pos_np):
+        # Non-finite check FIRST: it is the explicit handler for a NaN
+        # parameter vector (return NaN magnifications -> logp = -inf ->
+        # proposal rejected), and running it before the unpacking below means
+        # clip_q_value never has to be the one to notice.  It used to sit
+        # after the unpacking, which only worked because np.clip passed NaN
+        # through silently.
+        if not np.all(np.isfinite(p)):
+            return np.full(len(times_np), np.nan)
+
         base = _base_mm_params(p)
         idx = 5
         rho = 0.0
@@ -470,19 +481,16 @@ class VBMDirectMagOp(Op):
             rho = _safe_rho(p[idx])
             idx += 1
         companions = []
-        for _ in range(self.n_companions):
+        for j in range(self.n_companions):
             companions.append(
                 (
                     float(max(float(p[idx]), 1e-6)),
-                    float(np.clip(float(p[idx + 1]), 1e-9, 100.0)),
+                    clip_q_value(p[idx + 1], f"lens.q[{j}]"),
                     float(np.radians(float(p[idx + 2]))),
                 )
             )
             idx += 3
         u1 = float(p[-1]) if self.bandpass is not None else None
-
-        if not np.all(np.isfinite(p)):
-            return np.full(len(times_np), np.nan)
 
         dN, dE = self._deltas(obs_pos_np)
         tau = (

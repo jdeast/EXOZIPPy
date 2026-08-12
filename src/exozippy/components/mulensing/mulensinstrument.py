@@ -16,6 +16,7 @@ from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 
 from . import mmexofast_support
+from .physics import clip_q_value
 
 
 def _raw_initval(data, default=None):
@@ -682,7 +683,7 @@ class MulensInstrument(Instrument):
                     "u_0": float(np.sign(u0) * max(abs(u0), 1e-9)),
                     "t_E": max(float(tE), 1e-4),
                     "s": max(float(s_val), 1e-6),
-                    "q": float(np.clip(q_val, 1e-9, 100.0)),
+                    "q": clip_q_value(q_val, "lens.0.q (flux bootstrap)"),
                     "alpha": float(alpha),
                 }
                 rho = _get(f"lens.{j}.rho")
