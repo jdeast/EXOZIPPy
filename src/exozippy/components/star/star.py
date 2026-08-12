@@ -136,7 +136,7 @@ class Star(Component):
                 "doc": (
                     "Constrain this star with the MIST evolutionary model "
                     "(default true).  Only consulted when an "
-                    "evolutionary_model block exists."
+                    "evolutionarymodel block exists."
                 ),
             },
             {
@@ -147,7 +147,7 @@ class Star(Component):
                 "doc": (
                     "Constrain this star with the PARSEC evolutionary model "
                     "(default false).  Only consulted when an "
-                    "evolutionary_model block exists."
+                    "evolutionarymodel block exists."
                 ),
             },
             {
@@ -551,7 +551,7 @@ class Star(Component):
                 }
             )
 
-        if in_system("evolutionary_model"):
+        if in_system("evolutionarymodel"):
             mask = [m or p for m, p in zip(self.mist, self.parsec)]
             self.manifest.update(
                 {"age": {"mask": mask}, "initfeh": {"mask": mask}}

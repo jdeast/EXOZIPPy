@@ -33,34 +33,26 @@ percent-level absolute calibration is needed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
 
+from ...filters.filter import Filter
+from ...utilities.zenodo import fetch_assets
 from .bc_grid import (
-    DEFAULT_BC_ROOT,
+    DEFAULT_MODEL_ROOT,
     _load_alias_table,
     _read_single_bc_file,
     facility_from_svo_name,
     peek_grid_axes,
     resolve_filter_name,
 )
-from .filters.filter import Filter
 
 logger = logging.getLogger(__name__)
-
-try:
-    current_dir = Path(__file__).parent
-except NameError:
-    current_dir = Path.cwd()
 
 SIGMA_SB = 5.670374419e-5  # erg s^-1 cm^-2 K^-4
 L0 = 3.0128e35  # IAU 2015 resolution B2, erg/s
@@ -69,7 +61,7 @@ F0_10PC = L0 / (4.0 * np.pi * (10.0 * PC_CM) ** 2)  # erg s^-1 cm^-2
 V_BAND_MICRON = 0.55
 
 # Alpha-abundance fallback order when a grid point has no alpha=0
-# spectrum (mirrors models/NextGen/plot.py ALPHA_GRID_PTS).
+# spectrum (mirrors models/NextGen/BCs/plot.py ALPHA_GRID_PTS).
 ALPHA_FALLBACK = (0.0, 0.2, -0.2, 0.4, 0.6)
 
 # size and md5 come from the Zenodo record's own API
@@ -106,131 +98,41 @@ _DOWNSAMPLING_WARNING = (
 
 _warned_models: set[str] = set()
 
-# Zenodo is a free academic host and 5xx-es under load. Four attempts with
-# doubling backoff spans ~35s, which covers the transient gateway errors seen
-# in CI without making a genuinely dead URL take minutes to report.
-_DOWNLOAD_ATTEMPTS = 4
-_RETRY_BACKOFF = 5  # seconds; doubles each attempt
 
-
-def _md5(path: Path, chunk: int = 1 << 20) -> str:
-    """Streaming md5 of a file (the spectra grid is ~250 MB)."""
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(chunk), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
-def ensure_model_data(model: str, bc_root: Path | str = DEFAULT_BC_ROOT):
+def ensure_model_data(model: str, model_root: Path | str = DEFAULT_MODEL_ROOT):
     """Download large model data files from Zenodo if not present locally.
 
     These are the raw model spectra used to synthesize bolometric corrections
     for filters with no precomputed BC table. They are far too large to ship
     in the package (~300 MB) and are git-ignored, so they are fetched on first
-    use and cached in place. See _DOWNSAMPLING_WARNING for their accuracy.
+    use and cached alongside the model's BC tables. See _DOWNSAMPLING_WARNING
+    for their accuracy.
 
-    Integrity is enforced, because the failure mode without it is silent and
-    lasting: urlretrieve happily writes a truncated body to the destination,
-    and every later run then reads that half-file. It surfaced as
-    `pandas.errors.ParserError: EOF inside string starting at row 11248`, in a
-    test that has nothing to do with downloading. So:
-
-    * a cached file is size-checked on every call (cheap, and truncation --
-      the observed failure -- always changes the size);
-    * a download lands on a .part file, is checked for size AND md5, and only
-      then atomically renamed into place, so an interrupted fetch can never be
-      mistaken for a cached one;
-    * a corrupt cached file is re-fetched rather than raising, since the
-      recovery is unambiguous.
+    This is the NextGen-specific half of the fetch: it owns the _MODEL_DATA
+    URL table and the downsampling warning. The mechanics -- retries, the
+    .part-then-rename, the size/md5 checks -- live in
+    utilities.zenodo.fetch_assets, which the MIST EEP grid also calls.
     """
-    files = _MODEL_DATA.get(model, {})
-    model_dir = Path(bc_root) / model
-    for filename, meta in files.items():
-        dest = model_dir / filename
-        if dest.exists():
-            actual = dest.stat().st_size
-            if actual == meta["size"]:
-                continue
-            logger.warning(
-                "Cached %s is %d bytes, expected %d -- it is truncated or "
-                "stale. Re-downloading.",
-                dest,
-                actual,
-                meta["size"],
-            )
-            dest.unlink()
 
+    def _warn_once(_filename: str) -> None:
+        # The warning is about THESE spectra, not about downloading in
+        # general, so it belongs here rather than in the shared core. Once
+        # per model per process, and only when something is really fetched.
         if model not in _warned_models:
             _warned_models.add(model)
             logger.warning(_DOWNSAMPLING_WARNING, model, model)
 
-        logger.info(f"Downloading {filename} from Zenodo...")
-        model_dir.mkdir(parents=True, exist_ok=True)
-        part = dest.with_name(dest.name + ".part")
-
-        # Retried with backoff. Zenodo is a free academic host serving a 250 MB
-        # file, and it returns 5xx under load -- observed as
-        # `HTTPError: HTTP Error 504: Gateway Time-out` failing CI on pull
-        # requests that had touched nothing related. A transient gateway error
-        # should cost a few seconds, not a whole run.
-        #
-        # Only transport and integrity errors are retried. A 404 means the URL
-        # or record is wrong, and retrying that just delays a real failure by
-        # _RETRY_BACKOFF seconds, so it is re-raised at once.
-        last_error = None
-        for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
-            try:
-                urllib.request.urlretrieve(meta["url"], part)
-                size = part.stat().st_size
-                if size != meta["size"]:
-                    raise RuntimeError(
-                        f"{filename} downloaded {size} bytes, expected "
-                        f"{meta['size']}. The download was truncated; retry."
-                    )
-                digest = _md5(part)
-                if digest != meta["md5"]:
-                    raise RuntimeError(
-                        f"{filename} has md5 {digest}, expected "
-                        f"{meta['md5']}. The file on Zenodo may have been "
-                        f"replaced, or the download was corrupted."
-                    )
-                part.replace(dest)  # atomic within the same directory
-                last_error = None
-                break
-            except urllib.error.HTTPError as e:
-                if e.code < 500:
-                    raise
-                last_error = e
-            except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
-                last_error = e
-            finally:
-                part.unlink(missing_ok=True)
-
-            if attempt < _DOWNLOAD_ATTEMPTS:
-                delay = _RETRY_BACKOFF * 2 ** (attempt - 1)
-                logger.warning(
-                    "Download of %s failed (attempt %d/%d): %s. "
-                    "Retrying in %ds.",
-                    filename,
-                    attempt,
-                    _DOWNLOAD_ATTEMPTS,
-                    last_error,
-                    delay,
-                )
-                time.sleep(delay)
-
-        if last_error is not None:
-            raise RuntimeError(
-                f"Could not download {filename} from Zenodo after "
-                f"{_DOWNLOAD_ATTEMPTS} attempts: {last_error}"
-            ) from last_error
-
-        logger.info(f"Saved {filename} to {dest}")
+    # The spectra sit next to the model's BC tables ({model}/BCs/), which is
+    # where plot.py and _load_spectra both look for them.
+    fetch_assets(
+        _MODEL_DATA.get(model, {}),
+        Path(model_root) / model / "BCs",
+        on_fetch=_warn_once,
+    )
 
 
 def _load_spectra(
-    model: str, bc_root: Path
+    model: str, model_root: Path
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """
     Load the model spectra table and its wavelength grid (Angstrom).
@@ -238,7 +140,7 @@ def _load_spectra(
     only the rows actually used (a large fraction of the file may be
     alternate-alpha rows that are never touched).
     """
-    model_dir = Path(bc_root) / model
+    model_dir = Path(model_root) / model / "BCs"
     df_spec = pd.read_csv(model_dir / f"{model}.spectra.csv")
     df_wave = pd.read_csv(model_dir / f"{model}.wavelength.csv")
     return df_spec, df_wave["wavelength_angstrom"].values.astype(float)
@@ -247,7 +149,7 @@ def _load_spectra(
 def _unit_optical_depth(wave_ang: np.ndarray) -> np.ndarray:
     """Optical depth per magnitude of Av on the spectra wavelength grid."""
     ext = pd.read_csv(
-        current_dir / "models" / "extinction_law.ascii",
+        DEFAULT_MODEL_ROOT / "extinction_law.ascii",
         names=["wavelength", "extinction"],
         delimiter=" ",
         index_col=False,
@@ -294,25 +196,25 @@ def _vega_zeropoint(filt: Filter) -> float:
 def make_bc_tables(
     svo_filter_ids: Sequence[str],
     model: str = "NextGen",
-    bc_root: Path | str = DEFAULT_BC_ROOT,
+    model_root: Path | str = DEFAULT_MODEL_ROOT,
 ) -> List[Path]:
     """
     Generate BC tables for the given SVO filter IDs (grouped per facility)
     on exactly the (teff, logg, feh, Av) axes of the shipped tables, and
-    write them under {bc_root}/{model}/BCs/{FACILITY}/feh*_afe+0.0.{FACILITY}.
+    write them under {model_root}/{model}/BCs/{FACILITY}/feh*_afe+0.0.{FACILITY}.
 
     Returns the list of files written.
     """
-    bc_root = Path(bc_root)
-    ensure_model_data(model, bc_root)
+    model_root = Path(model_root)
+    ensure_model_data(model, model_root)
 
-    axes = peek_grid_axes(model=model, bc_root=bc_root)
+    axes = peek_grid_axes(model=model, model_root=model_root)
     teff_pts = axes["teff_pts"]
     logg_pts = axes["logg_pts"]
     feh_pts = axes["feh_pts"]
     av_pts = axes["av_pts"]
 
-    df_spec, wave_ang = _load_spectra(model, bc_root)
+    df_spec, wave_ang = _load_spectra(model, model_root)
     tau_unit = _unit_optical_depth(wave_ang)
     # (n_av, n_wave) attenuation factors
     atten = np.exp(-np.outer(av_pts, tau_unit))
@@ -343,7 +245,7 @@ def make_bc_tables(
         # photon-weighted band normalization: int(S lambda dlam)
         S_norm = np.trapezoid(S * wave_ang, wave_ang, axis=1)
 
-        out_dir = bc_root / model / "BCs" / fac
+        out_dir = model_root / model / "BCs" / fac
         out_dir.mkdir(parents=True, exist_ok=True)
 
         new_cols = [c for _, c in items]
@@ -433,7 +335,7 @@ def generate_missing_facility(
     facility: str,
     svo_names: Sequence[str],
     model: str,
-    bc_root: Path | str,
+    model_root: Path | str,
 ) -> bool:
     """
     Auto-generation hook used by bc_grid.build_bc_grid when a facility's
@@ -448,7 +350,7 @@ def generate_missing_facility(
         f"now from the {model} spectra for {wanted} (one-time cost)."
     )
     try:
-        make_bc_tables(wanted, model=model, bc_root=bc_root)
+        make_bc_tables(wanted, model=model, model_root=model_root)
         return True
     except Exception as e:
         logger.error(f"BC auto-generation for '{facility}' failed: {e}")

@@ -14,17 +14,17 @@ from scipy import interpolate
 
 # from exozippy.constants import *
 from ...constants import *
+from ...filters import filter as VOID
 from .bc_grid import _load_alias_table, resolve_filter_name
-from .filters import filter as VOID
-
-# import exozippy.components.sed.filters.filter as VOID
-# from exozippy.components.sed.bc_grid import _load_alias_table, resolve_filter_name
-
 
 try:
     current_dir = Path(__file__).parent
 except NameError:
     current_dir = Path.cwd()
+
+source_code_dir = current_dir.parent.parent  # source code two directories up
+DEFAULT_FILTER_ROOT = source_code_dir / "filters"
+DEFAULT_MODEL_ROOT = source_code_dir / "models"
 
 
 class Plot:
@@ -48,7 +48,7 @@ class Plot:
     markers = ["o", "D", "v", "s", "^", "P", "X", "*"]
 
     # read in extinction values
-    extinction_dir = current_dir / "models" / "extinction_law.ascii"
+    extinction_dir = DEFAULT_MODEL_ROOT / "extinction_law.ascii"
     extinction_df = pd.read_csv(
         extinction_dir,
         names=["wavelength", "extinction"],
@@ -58,7 +58,7 @@ class Plot:
     )
 
     # read in filter magnitude systems
-    filtersys_dir = current_dir / "filters" / "filter_magsys.txt"
+    filtersys_dir = DEFAULT_FILTER_ROOT / "filter_magsys.txt"
     filtersys_df = pd.read_csv(
         filtersys_dir, sep="\t", comment="#", skipinitialspace=True
     )
@@ -184,15 +184,15 @@ class Plot:
 
         try:
             df_spec = pd.read_csv(
-                current_dir
-                / "models"
+                DEFAULT_MODEL_ROOT
                 / f"{self.sedmodel}"
+                / "BCs"
                 / f"{self.sedmodel}.spectra.csv"
             )
             df_wave = pd.read_csv(
-                current_dir
-                / "models"
+                DEFAULT_MODEL_ROOT
                 / f"{self.sedmodel}"
+                / "BCs"
                 / f"{self.sedmodel}.wavelength.csv"
             )
         except:
@@ -201,10 +201,13 @@ class Plot:
                 "Defaulting to using ``NextGen`` spectra for plotting."
             )
             df_spec = pd.read_csv(
-                current_dir / "models" / "NextGen" / "NextGen.spectra.csv"
+                DEFAULT_MODEL_ROOT / "NextGen" / "BCs" / "NextGen.spectra.csv"
             )
             df_wave = pd.read_csv(
-                current_dir / "models" / "NextGen" / "NextGen.wavelength.csv"
+                DEFAULT_MODEL_ROOT
+                / "NextGen"
+                / "BCs"
+                / "NextGen.wavelength.csv"
             )
 
         df_spec["flux"] = df_spec["flux"].apply(json.loads).apply(np.array)
@@ -225,9 +228,9 @@ class Plot:
                                         'grid' axes that the model will be interpolated on
         """
         with open(
-            current_dir
-            / "models"
+            DEFAULT_MODEL_ROOT
             / f"{self.sedmodel}"
+            / "BCs"
             / f"{self.sedmodel}.grid.yaml",
             "r",
         ) as f:
