@@ -147,21 +147,55 @@ class Orbit(Component):
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
 
+    def _resolve_initval(self, name, shape):
+        """This orbit's stage-2 initval for ``name``, NaN where unseeded.
+
+        Stage 2 runs BEFORE the relaxation engine, so this sees only what
+        the user wrote (plus component hints and defaults.yaml) -- nothing
+        the engine will later derive.  Values are in the parameter's own
+        user unit; the caller converts.
+        """
+        n_el = int(np.prod(shape))
+        val = self.config_manager.resolve(
+            self.prefix, name, shape=shape, names=self.names
+        )["initval"]
+        if val is None:
+            return np.full(n_el, np.nan)
+        return np.atleast_1d(val).astype(float).copy()
+
+    def _seeded_period(self, shape):
+        """The per-orbit period in days implied by the stage-2 seeds.
+
+        BOTH spellings are legal in a params file, and the relaxation
+        engine (stage 3) is what normally reconciles them -- but it has not
+        run yet, so a user-supplied ``period:`` has NOT been propagated
+        into ``logP``.  Reading ``logP`` alone therefore returns its
+        defaults.yaml initval (1.0 -> 10 d) for every fit that seeds
+        ``period:``.  Prefer the directly seeded ``period`` and fall back
+        to ``10**logP``.
+
+        Still not covered, because only the engine can get there: a period
+        implied by ``arsun`` plus the member masses.  Seed ``logP`` (or
+        ``period``) directly when that is how the orbit is specified.
+        """
+        period_user = self._resolve_initval("period", shape)
+        logP = self._resolve_initval("logP", shape)
+        return np.where(np.isnan(period_user), 10.0**logP, period_user)
+
     def register_parameters(self, system):
         """Stage 2: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
-        logP_cfg = self.config_manager.resolve(
-            self.prefix, "logP", shape=shape, names=self.names
-        )
         tc_cfg = self.config_manager.resolve(
             self.prefix, "tc", shape=shape, names=self.names
         )
 
-        logP_init = np.atleast_1d(logP_cfg["initval"])
         tc_init = np.atleast_1d(tc_cfg["initval"])
-        half_period = (10**logP_init) / 2.0
+        # tc is periodic (tc and tc + P are the same solution), so one full
+        # period is the right hard window -- but it must be the period the
+        # user actually seeded, in either spelling.  See _seeded_period.
+        half_period = self._seeded_period(shape) / 2.0
 
         self.manifest = {
             "logP": None,
@@ -301,15 +335,9 @@ class Orbit(Component):
         # bigomega initval; the manifest initvals set below override the
         # relaxation-engine seeds at build time.
         cm = self.config_manager
-        n_el = int(np.prod(shape))
 
         def rslv(name):
-            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)[
-                "initval"
-            ]
-            if val is None:
-                return np.full(n_el, np.nan)
-            return np.atleast_1d(val).astype(float).copy()
+            return self._resolve_initval(name, shape)
 
         factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
         bo = rslv("bigomega") * factor_bo  # rad; NaN where unseeded
@@ -342,12 +370,7 @@ class Orbit(Component):
             ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
 
             tc0 = rslv("tc")
-            # The relaxation engine has not run yet, so a user-supplied
-            # 'period' has not been propagated to logP; prefer it directly.
-            period_user = rslv("period")
-            period = np.where(
-                ~np.isnan(period_user), period_user, 10.0 ** rslv("logP")
-            )
+            period = self._seeded_period(shape)
 
             def _M_c(ecc, w):
                 E_c = 2.0 * np.arctan2(
