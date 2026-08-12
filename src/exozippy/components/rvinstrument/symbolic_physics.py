@@ -1,5 +1,7 @@
 import sympy as sp
 
+from ..instrument import JITTER_RELATIONS, JITTER_SYMBOL_MAP
+
 # ---------------------------------------------------------
 # 1. Define Symbols
 # ---------------------------------------------------------
@@ -8,10 +10,10 @@ import sympy as sp
 # Positivity bounds (e.g., jitter > 0) are enforced downstream by defaults.yaml
 # NOTE: symbol names must match the get_symbol_map keys exactly; the
 # ConfigManager substitutes relation symbols by sym.name, so a mismatched
-# name (e.g. 'jittervar') leaves the symbol unbound in the relations.
+# name (e.g. 'jittervar') leaves the symbol unbound in the relations.  The
+# jitter pair is therefore not declared here: it comes from
+# components/instrument.py, the parent that owns the additive noise model.
 gamma = sp.symbols("gamma", real=True)
-jitter = sp.symbols("jitter", real=True)
-jitter_variance = sp.symbols("jitter_variance", real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
@@ -22,8 +24,7 @@ jitter_variance = sp.symbols("jitter_variance", real=True)
 def get_symbol_map(config):
     return {
         "gamma": "gamma",
-        "jitter": "jitter",
-        "jitter_variance": "jitter_variance",
+        **JITTER_SYMBOL_MAP,
     }
 
 
@@ -33,18 +34,11 @@ def get_symbol_map(config):
 # Units:
 # gamma and jitter are typically in m/s (or whatever your global RV unit is).
 
-RELATIONS = [
-    # Reparameterization bridge: the user may provide 'jitter' while the
-    # sampler steps in 'jitter_variance'.  It is the SIGNED square, because
-    # the runtime relation is the signed square root
-    # (components/instrument.py:calc_jitter) and jitter_variance is
-    # deliberately allowed to go negative down to Instrument._jitter_floor.
-    # Written as jitter**2 it would fold a negative 'jitter' seed onto a
-    # POSITIVE variance -- a silent sign flip on the one direction of this
-    # relation that matters (the user seeds jitter, the engine derives the
-    # sampled variance).
-    sp.Eq(jitter_variance, jitter * sp.Abs(jitter))
-]
+# Reparameterization bridge: the user may provide 'jitter' while the sampler
+# steps in 'jitter_variance'.  It is the SIGNED square, defined once on the
+# shared Instrument parent (see the note there for why registration stays
+# per-child, and why jitter**2 would be wrong).
+RELATIONS = list(JITTER_RELATIONS)
 
 
 def get_solver_paths():
