@@ -55,7 +55,7 @@ from exozippy.system import System
 from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
-from .mkparam import mkprior
+from .mkparam import write_param_file
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
@@ -765,18 +765,21 @@ def _run_fit(config, gui, user_params=None):
             )
 
     try:
-        # mkprior re-derives the structural fingerprint from this config and
+        # mkparam re-derives the structural fingerprint from this config and
         # the params, not from the live System; measured to reproduce the
-        # System snapshot exactly (see the note at mkparam.mkprior's check).
-        # The params half has to be handed over when run_fit was called with
-        # an in-memory dict: the file at config['parameter_file'] is then not
-        # what was fitted (it may be stale, or absent), and mkprior would
-        # merge ITS priors and bounds into the restart file.  Left None for a
-        # file-driven run, so that path still reads the file itself and its
-        # error messages still name it.
-        mkprior(config, trace_path=trace_path, user_params=user_params)
+        # System snapshot exactly (see the note at the check inside
+        # mkparam.write_param_file).  The params half has to be handed over
+        # when run_fit was called with an in-memory dict: the file at
+        # config['parameter_file'] is then not what was fitted (it may be
+        # stale, or absent), and write_param_file would merge ITS priors and
+        # bounds into the restart file.  Left None for a file-driven run, so
+        # that path still reads the file itself and its error messages still
+        # name it.
+        write_param_file(
+            config, trace_path=trace_path, user_params=user_params
+        )
     except Exception:
-        logger.exception("mkprior failed (non-fatal)")
+        logger.exception("mkparam failed (non-fatal)")
 
 
 def _element_conversion_factor(par, index):

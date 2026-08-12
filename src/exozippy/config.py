@@ -201,10 +201,11 @@ def validate_sigma_has_center(user_params, links=None, source=None):
     ``mu`` nor ``initval`` is given, Parameter.build_pymc centers that prior on
     whatever start value the system resolved (``prior_mus = np.where(~isnan(mus),
     mus, inits)``) -- and that start is frequently DERIVED FROM THE DATA: a
-    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or an
-    mkprior MAP.  A prior centered on the data's own best fit double-counts the
-    data, so there is no configuration in which it is what the user meant.  We
-    refuse to run rather than silently produce it.
+    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or a
+    start value mkparam seeded from a previous fit's MAP.  A prior centered on
+    the data's own best fit double-counts the data, so there is no
+    configuration in which it is what the user meant.  We refuse to run rather
+    than silently produce it.
 
     Legitimate, and NOT flagged:
       - ``sigma: 0`` (any all-zero form) -- a fixed pin, not a prior.  It means
@@ -251,7 +252,8 @@ def validate_sigma_has_center(user_params, links=None, source=None):
             f"neither 'mu' nor 'initval' given the prior is centered on "
             f"whatever start value the system resolves -- and that start is "
             f"frequently derived FROM THE DATA (a component's data hint, a "
-            f"relaxation-engine solution, or an mkprior MAP). A prior "
+            f"relaxation-engine solution, or a start value mkparam seeded "
+            f"from a previous fit's MAP). A prior "
             f"centered on the data's own best fit double-counts that data, "
             f"so it can never be justified. "
             f"Fix: give an explicit 'mu' (the independent prior center you "

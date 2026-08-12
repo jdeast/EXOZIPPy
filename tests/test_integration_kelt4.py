@@ -2,7 +2,7 @@
 
 Exercises the full pipeline:
   config parsing → system build → model construction → NUTS sampling
-  → unit conversion → trace save → mkprior output
+  -> unit conversion -> trace save -> mkparam output
 
 All file I/O is redirected to a temp directory so nothing is written into the
 source tree. run_fit is called once (module scope) and all tests share the result.
@@ -34,7 +34,7 @@ def kelt4_result(tmp_path_factory):
     return (out_dir, work_dir) for all tests to share.
 
     work_dir — copy of the example directory (data files, params yaml)
-    out_dir  — where trace, plots, and mkprior output are written
+    out_dir  -- where trace, plots, and mkparam output are written
     """
     work_dir = tmp_path_factory.mktemp("kelt4_work") / "kelt4"
     out_dir = tmp_path_factory.mktemp("kelt4_out")
@@ -158,16 +158,16 @@ def test_run_fit_kelt4_posterior_in_user_units(kelt4_result):
     )
 
 
-def test_run_fit_kelt4_mkprior_written(kelt4_result):
+def test_run_fit_kelt4_mkparam_written(kelt4_result):
     """
     Given the kelt4rvonly example with parameter_file: kelt4.params.yaml,
     When run_fit completes,
-    Then mkprior writes the next versioned params file in the work directory.
+    Then mkparam writes the next versioned params file in the work directory.
     """
     _, work_dir = kelt4_result
     # kelt4.params.yaml → next version is kelt4.params.2.yaml
     expected = work_dir / "kelt4.params.2.yaml"
     assert expected.exists(), (
-        f"mkprior did not write {expected.name}; "
+        f"mkparam did not write {expected.name}; "
         f"yaml files present: {[f.name for f in work_dir.glob('*.yaml')]}"
     )

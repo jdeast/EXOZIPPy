@@ -91,7 +91,7 @@ def _attrs(idata) -> Dict[str, Any]:
 def _fingerprint_of(source) -> tuple:
     """Accept a System (anything with structural_fingerprint()) or a ready
     ``(hash, payload)`` pair.  The pair form lets a caller that already has a
-    built System -- run.py handing its fingerprint to mkprior -- pass it
+    built System -- run.py handing its fingerprint to mkparam -- pass it
     straight through instead of recomputing it from a config dict that stage
     1-2 may since have written into."""
     if hasattr(source, "structural_fingerprint"):

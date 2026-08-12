@@ -1,6 +1,6 @@
-"""Tests for mkprior's multi-seed emission (notes/todo.txt #3).
+"""Tests for mkparam's multi-seed emission (notes/todo.txt #3).
 
-With n_seeds > 1, mkprior writes list-valued initvals -- K mutually-consistent
+With n_seeds > 1, mkparam writes list-valued initvals -- K mutually-consistent
 JOINT posterior draws -- that the next run consumes as P4 multi-seed starts, so
 walkers begin spread across the posterior covariance instead of clustered at a
 single point. seed 0 stays the MAP; bounds stay scalar (seed 0).
@@ -14,7 +14,7 @@ import yaml
 
 az = pytest.importorskip("arviz")
 
-from exozippy.mkparam import mkprior
+from exozippy.mkparam import write_param_file
 
 
 def _make_trace(tmp_path, nchain=4, ndraw=400, seed=0):
@@ -55,8 +55,8 @@ def test_single_seed_emits_scalars(tmp_path):
     # Given a trace and n_seeds=1 (the default)
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
-    # When mkprior runs
-    mkprior(
+    # When mkparam runs
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace,
@@ -73,8 +73,8 @@ def test_multi_seed_emits_length_k_lists(tmp_path):
     # Given a trace and n_seeds=3
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
-    # When mkprior runs
-    mkprior(
+    # When mkparam runs
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace,
@@ -95,8 +95,8 @@ def test_multi_seed_lists_share_one_length(tmp_path):
     # initval lists in a file to share one length K, or be length 1)
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
-    # When mkprior runs with n_seeds=3
-    mkprior(
+    # When mkparam runs with n_seeds=3
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace,
@@ -113,12 +113,64 @@ def test_multi_seed_lists_share_one_length(tmp_path):
     assert lengths == {3}
 
 
+def test_n_seeds_is_read_from_the_mkparam_config_block(tmp_path):
+    """
+    Given a config whose `mkparam:` block asks for 3 seeds,
+    When write_param_file runs with no explicit n_seeds argument,
+    Then it emits 3.
+
+    Pins the config-block SPELLING, not just the keyword argument. Every
+    other test in this file passes n_seeds= directly, so a renamed or
+    mistyped block would leave all of them green while every real run
+    silently fell back to a single seed.
+    """
+    # ARRANGE
+    trace = _make_trace(tmp_path)
+    out = tmp_path / "out.params.yaml"
+    config = dict(_config(), mkparam={"n_seeds": 3})
+
+    # ACT
+    write_param_file(
+        config, base_dir=tmp_path, trace_path=trace, output_path=out
+    )
+
+    # ASSERT
+    params = yaml.safe_load(out.read_text())
+    assert len(params["lens.L.t_0"]["initval"]) == 3
+
+
+def test_an_unrecognized_config_block_does_not_set_n_seeds(tmp_path):
+    """
+    Given the same request under a misspelled block (`mkparm:`),
+    When write_param_file runs,
+    Then it falls back to one seed -- the unrecognized key is truly inert.
+
+    The other half of System.__init__'s "does not match any registered
+    component and will be ignored" warning: the warning is only honest if
+    nothing downstream quietly honors the key anyway.
+    """
+    # ARRANGE
+    trace = _make_trace(tmp_path)
+    out = tmp_path / "out.params.yaml"
+    config = dict(_config(), mkparm={"n_seeds": 3})
+
+    # ACT
+    write_param_file(
+        config, base_dir=tmp_path, trace_path=trace, output_path=out
+    )
+
+    # ASSERT
+    assert isinstance(
+        yaml.safe_load(out.read_text())["lens.L.t_0"]["initval"], float
+    )
+
+
 def test_multi_seed_converts_direction_pair_to_angle_list(tmp_path):
     # Given xalpha/yalpha in the trace
     trace = _make_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
-    # When mkprior runs with n_seeds=3
-    mkprior(
+    # When mkparam runs with n_seeds=3
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace,
@@ -141,8 +193,8 @@ def test_multi_seed_seed0_is_map(tmp_path):
     mc, md = np.unravel_index(np.argmax(lp), lp.shape)
     map_t0 = float(idata.posterior["lens.t_0"].values[mc, md])
     out = tmp_path / "out.params.yaml"
-    # When mkprior emits multiple seeds
-    mkprior(
+    # When mkparam emits multiple seeds
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace,
@@ -181,12 +233,12 @@ def test_multi_seed_stratifies_across_modes(tmp_path):
     """
     Given a bimodal trace (5 chains in one basin, 1 chain in a displaced,
       better-lp basin),
-    When mkprior emits 8 seeds,
+    When mkparam emits 8 seeds,
     Then the initval list contains draws from BOTH basins -- a restart can
       never launder a multimodal posterior into a single-basin seed set.
     """
     trace_path = _make_bimodal_trace(tmp_path)
-    out = mkprior(
+    out = write_param_file(
         {"prefix": "run", "lens": [{"name": "L"}]},
         base_dir=tmp_path,
         trace_path=trace_path,
@@ -260,7 +312,7 @@ def test_all_invalid_trace_refuses_to_write_a_restart_file(
 ):
     """
     Given a trace in which EVERY draw fails the numerical-validity filter,
-    When mkprior is asked for a restart file (single- or multi-seed),
+    When mkparam is asked for a restart file (single- or multi-seed),
     Then it raises instead of writing one, and nothing is written.
 
     Parametrized over both seed counts on purpose: the single-seed path is
@@ -272,7 +324,7 @@ def test_all_invalid_trace_refuses_to_write_a_restart_file(
     out = tmp_path / "out.params.yaml"
 
     with pytest.raises(RuntimeError) as excinfo:
-        mkprior(
+        write_param_file(
             _config(),
             base_dir=tmp_path,
             trace_path=trace_path,
@@ -287,20 +339,20 @@ def test_all_invalid_trace_refuses_to_write_a_restart_file(
     assert str(trace_path) in msg, f"trace path not named: {msg}"
     assert kind in msg, f"rejection reason not named: {msg}"
     # What to do next, and the escape hatch -- which is deliberately the
-    # mkprior key, not the modes one.
+    # mkparam key, not the modes one.
     assert "recompute_trace" in msg
-    assert "mkprior: {force: true}" in msg
+    assert "mkparam: {force: true}" in msg
 
 
 def test_all_invalid_refusal_is_not_enabled_by_the_modes_force_key(tmp_path):
     """
     Given an all-invalid trace and `modes: {force: true}` in the config,
-    When mkprior runs,
+    When mkparam runs,
     Then it STILL refuses.
 
     `modes: {force: true}` authorizes forensic RE-PROCESSING -- emitting
     tables so a broken run can be inspected -- and under it run.py sails
-    past build_mode_reports' identical gate and goes on to call mkprior at
+    past build_mode_reports' identical gate and goes on to call mkparam at
     the end of wrap-up.  If that key also unlocked seed emission, this check
     would be a no-op on the one live path that reaches it, and asking for
     forensic tables would silently authorize a corrupt restart file as a
@@ -311,7 +363,7 @@ def test_all_invalid_refusal_is_not_enabled_by_the_modes_force_key(tmp_path):
     config = dict(_config(), modes={"force": True, "max_invalid_frac": 1.0})
 
     with pytest.raises(RuntimeError, match="refusing to write a restart file"):
-        mkprior(
+        write_param_file(
             config,
             base_dir=tmp_path,
             trace_path=trace_path,
@@ -322,10 +374,10 @@ def test_all_invalid_refusal_is_not_enabled_by_the_modes_force_key(tmp_path):
 
 
 @pytest.mark.parametrize("n_seeds", [1, 4])
-def test_mkprior_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
+def test_mkparam_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
     """
-    Given an all-invalid trace and `mkprior: {force: true}`,
-    When mkprior runs,
+    Given an all-invalid trace and `mkparam: {force: true}`,
+    When mkparam runs,
     Then it writes the restart file, and the FILE itself carries the
       no-valid-draws warning.
 
@@ -338,8 +390,8 @@ def test_mkprior_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
     trace_path = _make_all_invalid_trace(tmp_path)
     out = tmp_path / "out.params.yaml"
 
-    mkprior(
-        dict(_config(), mkprior={"force": True}),
+    write_param_file(
+        dict(_config(), mkparam={"force": True}),
         base_dir=tmp_path,
         trace_path=trace_path,
         output_path=out,
@@ -349,7 +401,7 @@ def test_mkprior_force_emits_seeds_and_stamps_the_file(tmp_path, n_seeds):
     text = out.read_text()
     assert "NO VALID DRAWS" in text
     assert "All 1600 draws (100.00%)" in text
-    assert "mkprior: {force: true}" in text
+    assert "mkparam: {force: true}" in text
     params = yaml.safe_load(text)
     assert "lens.L.t_0" in params  # seeds were in fact emitted
 
@@ -360,7 +412,7 @@ def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
     """
     Given a HEALTHY trace and a mode pass that crashes for an unrelated
       reason,
-    When mkprior runs,
+    When mkparam runs,
     Then it still emits seeds, byte-identically to the no-crash run.
 
     The broad "never let mode analysis break seed emission" catch is right
@@ -371,7 +423,7 @@ def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
 
     trace_path = _make_trace(tmp_path)
     control = tmp_path / "control.params.yaml"
-    mkprior(
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace_path,
@@ -384,7 +436,7 @@ def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
 
     monkeypatch.setattr(modes_mod, "identify_modes", boom)
     crashed = tmp_path / "crashed.params.yaml"
-    mkprior(
+    write_param_file(
         _config(),
         base_dir=tmp_path,
         trace_path=trace_path,
@@ -398,12 +450,12 @@ def test_an_ordinary_mode_pass_failure_still_falls_back_unchanged(
 def test_a_partially_invalid_trace_is_left_alone(tmp_path):
     """
     Given a trace with SOME invalid draws but not all,
-    When mkprior runs,
+    When mkparam runs,
     Then it emits the restart file as before.
 
     This gate is binary by design: either identify_modes could build a
     report or it rejected every single draw.  A partial invalid fraction is
-    the REPORTING gate's business (`modes: {max_invalid_frac}`), and mkprior
+    the REPORTING gate's business (`modes: {max_invalid_frac}`), and mkparam
     deliberately has no fraction knob of its own -- with only two reachable
     settings it would just be an obscurer spelling of `force`.
     """
@@ -419,7 +471,7 @@ def test_a_partially_invalid_trace_is_left_alone(tmp_path):
     )
 
     out = tmp_path / "out.params.yaml"
-    mkprior(
+    write_param_file(
         {"prefix": "run", "lens": [{"name": "L"}]},
         base_dir=tmp_path,
         trace_path=trace_path,

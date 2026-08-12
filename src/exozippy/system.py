@@ -36,14 +36,14 @@ can generally construct any model containing arbitrary components.
 #                     the structural hash, which is its only mention in code.
 #   name           -- System.name (below), read back by e.g.
 #                     astrometryinstrument's sky-plot title.
-#   parameter_file -- System.__init__, mkparam.mkprior, gui.document.
+#   parameter_file -- System.__init__, mkparam.write_param_file, gui.document.
 #   prefix         -- run.py, cli_modes.py, mkparam.py, gui/status.py,
 #                     gui/runner.py, mulensinstrument's mmexofast cache path.
 #   logger_level   -- run.py, cli.py, cli_modes.py.
 #   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
 #   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
-#   mkprior        -- mkparam.mkprior: {n_seeds, force}.  `force` is
-#                     deliberately NOT `modes: {force: true}`: that one
+#   mkparam        -- mkparam.write_param_file: {n_seeds, force}.  `force`
+#                     is deliberately NOT `modes: {force: true}`: that one
 #                     authorizes forensic REPORTING off a known-bad
 #                     trace, this one authorizes seeding the NEXT fit
 #                     from one.  See mkparam._refuse_invalid_seed_draws.
@@ -60,7 +60,7 @@ RESERVED_CONFIG_KEYS = frozenset(
         "name",
         "logger_level",
         "modes",
-        "mkprior",
+        "mkparam",
         "gui",
     }
 )
@@ -142,14 +142,15 @@ class System(Component):
         # components have normalized their own config blocks (Mann/Torres
         # derive `name:` from their `star:` key in __init__), and before
         # prepare() runs.  Both halves of that placement were measured, not
-        # assumed -- see the note on mkprior's own recomputation in
-        # mkparam.mkprior.  Taking it any earlier fingerprints a config
-        # spelling that exists only for the first few lines of __init__, so
-        # a fingerprint recomputed later would never match; taking it later
-        # would fold in whatever stages 1-6 might one day write.  The params
-        # half is safe at either point: ConfigManager deepcopies before it
-        # standardizes keys, strips links and injects solved initvals, so
-        # self.user_params stays exactly the file that was read.
+        # assumed -- see the note on the recomputation in
+        # mkparam.write_param_file.  Taking it any earlier fingerprints a
+        # config spelling that exists only for the first few lines of
+        # __init__, so a fingerprint recomputed later would never match;
+        # taking it later would fold in whatever stages 1-6 might one day
+        # write.  The params half is safe at either point: ConfigManager
+        # deepcopies before it standardizes keys, strips links and injects
+        # solved initvals, so self.user_params stays exactly the file that
+        # was read.
         self._structural_payload = structural_payload(
             self.config, self.user_params
         )
@@ -163,7 +164,7 @@ class System(Component):
         snapshotted at the END of ``__init__`` -- after the components have
         normalized their own config blocks, before ``prepare()`` -- so that a
         fingerprint recomputed from the same inputs later in the run
-        (mkparam.mkprior) reproduces it exactly.
+        (mkparam.write_param_file) reproduces it exactly.
         """
         return self._structural_hash, self._structural_payload
 

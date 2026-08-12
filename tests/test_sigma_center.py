@@ -3,9 +3,9 @@
 A user 'sigma' > 0 asks for a Gaussian prior.  With neither 'mu' nor 'initval'
 given, Parameter.build_pymc centers that prior on whatever start value the
 system resolved -- frequently one derived FROM THE DATA (a component data hint,
-a relaxation-engine solution, an mkprior MAP).  Centering a prior on the data's
-own best fit double-counts the data, so the config is rejected outright rather
-than silently sampled.
+a relaxation-engine solution, a start value mkparam seeded from a previous
+fit's MAP).  Centering a prior on the data's own best fit double-counts the
+data, so the config is rejected outright rather than silently sampled.
 """
 
 import pytest

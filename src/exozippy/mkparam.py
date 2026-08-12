@@ -1,4 +1,19 @@
-"""mkparam - Seed a params.yaml from the MAP of a previous trace."""
+"""mkparam - Seed a params.yaml from the MAP of a previous trace.
+
+This is EXOFASTv2's restart-file writer in spirit, and deliberately not in
+name.  What it writes is overwhelmingly START VALUES: an ``initval`` says
+where the next fit's chains begin and cannot move that fit's posterior.  A
+prior is a term in the logp, and only ``mu``/``sigma`` are that.  Conflating
+the two costs something real -- re-reading a start value that came from a
+previous fit's MAP as though it were an independent constraint double-counts
+the data (``config.validate_sigma_has_center`` refuses one spelling of
+exactly that mistake) -- so nothing here calls a start value a prior.
+
+Priors ARE written, when the previous params file carried them: an existing
+entry's ``mu``/``sigma``/``lower``/``upper`` are copied across verbatim and
+never allowed to drift toward the new MAP.  Those are genuine priors and
+bounds, and are named as such.
+"""
 
 import copy
 import logging
@@ -48,24 +63,29 @@ def _find_existing(existing_params, comp_key, idx, name, param):
 def _apply_existing_constraints(entry, existing_entry):
     """Layer an existing params entry's constraint fields onto a fresh entry.
 
-    ``entry`` already carries the new ``initval`` (the trace MAP, or the
-    length-K seed list). The existing entry's mu/sigma/bounds are copied over
-    unchanged -- mu is the prior center, not the starting point, so it must
-    never drift toward the MAP.
+    ``entry`` already carries the new ``initval`` -- the trace MAP, or the
+    length-K seed list -- which is a START VALUE and nothing more.  The
+    existing entry's mu/sigma (a real Gaussian prior) and lower/upper (real
+    bounds) are copied over unchanged: mu is the prior CENTER, not a starting
+    point, so it must never drift toward the MAP.  That asymmetry is the
+    whole job of this function.
 
     If the original carried a Gaussian prior (sigma > 0) but no explicit mu,
     its initval WAS the prior center (``Parameter.build_pymc`` centers the
     potential on initval whenever mu is absent, for sampled and derived
     parameters alike), so promote it to mu. Without the promotion the prior
-    would silently follow the MAP on every successive mkprior run.
+    would silently follow the MAP on every successive mkparam run.
 
     Returns ``entry`` (mutated in place) for convenience.
     """
     if not isinstance(existing_entry, dict):
         return entry
-    for prior_key in ("mu", "sigma", "lower", "upper"):
-        if prior_key in existing_entry:
-            entry[prior_key] = existing_entry[prior_key]
+    # Not "prior" keys: mu/sigma are a prior, lower/upper are hard bounds.
+    # Both are constraints the user stated and neither is a start value,
+    # which is the only property that matters here.
+    for constraint_key in ("mu", "sigma", "lower", "upper"):
+        if constraint_key in existing_entry:
+            entry[constraint_key] = existing_entry[constraint_key]
     existing_sigma = existing_entry.get("sigma")
     if (
         existing_sigma is not None
@@ -153,7 +173,7 @@ def _identify_modes(idata, mode_status):
     distinction the status carries is the whole point here:
 
     * ``MODE_NO_VALID_DRAWS`` -- EVERY draw failed the numerical-validity
-      filter.  That is a statement about the DRAWS, and mkprior's output
+      filter.  That is a statement about the DRAWS, and mkparam's output
       seeds the NEXT fit, so it must not be turned into seed values.
     * ``MODE_FAILED`` -- the mode pass could not tell us anything, for a
       reason that says nothing about the draws (an unclusterable trace, a
@@ -173,7 +193,7 @@ def _identify_modes(idata, mode_status):
     except NoValidDrawsError as exc:
         # The ONE mode-pass failure that is a statement about the DRAWS.
         # Catching it in the broad clause below is what let a 100%-invalid
-        # trace emit a clean-looking restart file (this is the mkprior-side
+        # trace emit a clean-looking restart file (this is the mkparam-side
         # sibling of report_pipeline's review-3.17 fix).
         mode_status.update(
             state=MODE_NO_VALID_DRAWS,
@@ -188,7 +208,7 @@ def _identify_modes(idata, mode_status):
     except Exception as exc:  # never let mode analysis break seed emission
         mode_status.update(state=MODE_FAILED, detail=repr(exc))
         logger.warning(
-            f"mkprior: mode identification failed ({exc}); falling back to "
+            f"mkparam: mode identification failed ({exc}); falling back to "
             f"unstratified seed draws."
         )
         return None
@@ -213,7 +233,7 @@ def _all_draws_invalid(mode_status):
 def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     """Refuse to emit restart seeds from a trace with NO valid draws.
 
-    mkprior's output IS the next fit's start, so this is the same argument
+    mkparam's output IS the next fit's start, so this is the same argument
     that makes a structurally stale trace a hard ``StaleTraceError`` a few
     lines below -- and sharper.  Seeds taken from draws the numerical-
     validity filter rejected in FULL are not a degraded starting point;
@@ -223,14 +243,14 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     reasonable: an all-NaN ``sample_stats['lp']`` over ordinary posterior
     draws emits a restart file whose every value looks healthy.
 
-    Escape hatch: ``mkprior: {force: true}``, and deliberately NOT
+    Escape hatch: ``mkparam: {force: true}``, and deliberately NOT
     ``modes: {force: true}``.  The two are different decisions.  The modes
     key is documented as forensic RE-PROCESSING -- "emit the tables anyway
     so I can look at them" -- which reads the trace; writing a restart file
     writes into a fit that has not happened yet.  Honouring the modes key
     here would also make this whole check a no-op on the one live path that
     reaches it: under ``modes: {force: true}`` run.py sails past
-    build_mode_reports' identical gate and calls mkprior at the end of
+    build_mode_reports' identical gate and calls mkparam at the end of
     wrap-up, so the same key that asks for forensic tables would silently
     authorize a corrupt restart file as a side effect.
 
@@ -252,14 +272,14 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     )
     if force:
         logger.warning(
-            "mkprior: %s, but `mkprior: {force: true}` was set -- writing a "
+            "mkparam: %s, but `mkparam: {force: true}` was set -- writing a "
             "restart file whose seeds come from draws that were ALL "
             "rejected. The next fit will start from them.",
             detail,
         )
         return
     raise RuntimeError(
-        f"mkprior: refusing to write a restart file. {detail}. "
+        f"mkparam: refusing to write a restart file. {detail}. "
         "This file IS the next fit's start, so seeds taken from draws that "
         "were all rejected would be spread across that fit's chains as its "
         "starting basins while reading as a converged posterior -- the "
@@ -267,7 +287,7 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
         "that produced the invalid draws and re-sample "
         "(`sampler: {recompute_trace: true}`), or hand-write the restart "
         "file. To emit it anyway from this known-bad trace, set "
-        "`mkprior: {force: true}` in the config (`modes: {force: true}` "
+        "`mkparam: {force: true}` in the config (`modes: {force: true}` "
         "deliberately does NOT enable this: it authorizes forensic "
         "REPORTING, not seeding the next fit)."
     )
@@ -298,7 +318,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     exactly the same post-burn-in good draws.
 
     ``mode_report`` lets the caller hand in an already-computed report so
-    the mode pass runs once per mkprior call rather than twice; left unset,
+    the mode pass runs once per mkparam call rather than twice; left unset,
     this runs it itself (and swallows any failure, as it always has).
 
     NOTE this pool is NOT validity-filtered: ``find_burnin``'s good-chain
@@ -318,13 +338,13 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
         if not np.isfinite(lp).any():
             # An all-non-finite lp is a degenerate input, not a ranking:
             # good_chain_mask's np.nanargmax raises "All-NaN slice
-            # encountered" on it, which used to abort mkprior with an
+            # encountered" on it, which used to abort mkparam with an
             # opaque numpy error naming nothing.  Only reachable under
-            # `mkprior: {force: true}` (the validity gate refuses first);
+            # `mkparam: {force: true}` (the validity gate refuses first);
             # treat it as "no lp", which is the same degenerate-input
             # answer find_burnin gives for a single chain.
             logger.warning(
-                "mkprior: every lp in the trace is non-finite; treating it "
+                "mkparam: every lp in the trace is non-finite; treating it "
                 "as absent for the burn-in/good-chain diagnostics."
             )
             lp = None
@@ -351,7 +371,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     if labels is not None:
         quotas = _mode_seed_quotas(weights, n)
         logger.info(
-            "mkprior: multimodal trace -- stratifying %d seeds across %d "
+            "mkparam: multimodal trace -- stratifying %d seeds across %d "
             "modes (quotas %s, weights %s)",
             n,
             len(quotas),
@@ -389,7 +409,7 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     return pairs, good_mask, burnin
 
 
-def mkprior(
+def write_param_file(
     config,
     base_dir=None,
     trace_path=None,
@@ -399,6 +419,13 @@ def mkprior(
 ):
     """
     Write a params.yaml seeded from a previous trace.
+
+    What lands in that file is a START VALUE per sampled parameter (see the
+    module docstring): the ``initval`` moves where the next fit begins, not
+    what it converges to.  Any ``mu``/``sigma``/``lower``/``upper`` in the
+    output was carried over verbatim from the previous params file -- those
+    are the real priors and bounds, and nothing here recenters them on the
+    MAP.
 
     With ``n_seeds == 1`` (default) every sampled parameter gets a scalar
     ``initval`` at the trace MAP. With ``n_seeds > 1`` the ``initval`` becomes
@@ -412,7 +439,7 @@ def mkprior(
 
     Raises ``RuntimeError`` if EVERY draw in the trace fails the numerical-
     validity filter -- see ``_refuse_invalid_seed_draws`` for why that is a
-    refusal rather than a warning, and for the ``mkprior: {force: true}``
+    refusal rather than a warning, and for the ``mkparam: {force: true}``
     escape hatch.  This check covers the DEFAULT single-seed path too, and
     has to: seed 0 is the MAP draw, and with an all-NaN lp ``np.argmax``
     returns index 0, so the emitted "MAP" is silently the first draw of
@@ -428,10 +455,15 @@ def mkprior(
     trace_path : str or Path, optional
         Trace file; defaults to ``<prefix>_trace.nc``.
     output_path : str or Path, optional
-        Output file; defaults to ``<prefix>_mkprior.params.yaml``.
+        Output file.  Defaults to the next version of the config's
+        ``parameter_file`` (``foo.params.yaml`` -> ``foo.params.2.yaml``,
+        ``foo.params.2.yaml`` -> ``foo.params.3.yaml``), or to
+        ``<runname>.params.2.yaml`` when the config names no parameter_file.
+        The input file is never written over, which is why there is no
+        backup step.
     n_seeds : int, optional
         Number of multi-seed start points to emit. When None, read from
-        ``config['mkprior']['n_seeds']`` (default 1 = legacy scalar behavior).
+        ``config['mkparam']['n_seeds']`` (default 1 = legacy scalar behavior).
     user_params : dict, optional
         The parameter overrides the fit actually ran with, for the in-memory
         entry point ``run_fit(config, user_params=<dict>)``. When omitted,
@@ -454,11 +486,11 @@ def mkprior(
     else:
         base_dir = Path(base_dir or ".")
 
-    mkprior_cfg = config.get("mkprior") or {}
+    mkparam_cfg = config.get("mkparam") or {}
     if n_seeds is None:
-        n_seeds = mkprior_cfg.get("n_seeds", 1)
+        n_seeds = mkparam_cfg.get("n_seeds", 1)
     n_seeds = max(1, int(n_seeds))
-    force_invalid = bool(mkprior_cfg.get("force", False))
+    force_invalid = bool(mkparam_cfg.get("force", False))
 
     prefix = config.get("prefix", "fitresults/model")
     run_name = Path(prefix).stem  # e.g. "KELT-4A" from "fitresults/KELT-4A"
@@ -485,8 +517,8 @@ def mkprior(
         param_path = base_dir / param_file
         if param_path.exists():
             existing_params = _load_yaml(str(param_path))
-            # mkprior reads the params file directly, bypassing ConfigManager,
-            # so the same check has to run here.  Every entry mkprior
+            # mkparam reads the params file directly, bypassing ConfigManager,
+            # so the same check has to run here.  Every entry mkparam
             # synthesizes carries an initval, but the pass-through loop below
             # copies constraint-bearing entries verbatim -- a legacy
             # '{sigma: 0.5}' would be re-emitted into the restart file.  Fail
@@ -559,14 +591,14 @@ def mkprior(
         map_draw = map_idx % n_draws
         map_lp = float(flat_lp[map_idx])
         logger.info(
-            f"mkprior: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
+            f"mkparam: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
         )
     else:
         # No lp → use last draw of chain 0 as a self-consistent fallback.
         # Per-parameter medians would be inconsistent (the joint point may not
         # exist in the posterior); any real draw is always self-consistent.
         logger.warning(
-            "mkprior: lp not in trace — using last draw of chain 0 as fallback"
+            "mkparam: lp not in trace -- using last draw of chain 0 as fallback"
         )
         map_chain, map_draw, map_lp = (
             0,
@@ -597,14 +629,14 @@ def mkprior(
         seed_pairs += extra
         if len(seed_pairs) < n_seeds:
             logger.warning(
-                "mkprior: requested %d seeds but only %d distinct draws were "
+                "mkparam: requested %d seeds but only %d distinct draws were "
                 "available; emitting %d.",
                 n_seeds,
                 len(seed_pairs),
                 len(seed_pairs),
             )
     K = len(seed_pairs)
-    logger.info("mkprior: emitting %d seed(s) per parameter", K)
+    logger.info("mkparam: emitting %d seed(s) per parameter", K)
 
     output = {}
     consumed_existing = set()
@@ -742,7 +774,7 @@ def mkprior(
     output_path = Path(output_path)
     with open(output_path, "w") as f:
         f.write(
-            f"# Generated by mkprior from {Path(str(trace_path)).name}"
+            f"# Generated by mkparam from {Path(str(trace_path)).name}"
             f"  (MAP lp={map_lp:.4f})\n"
         )
         if K > 1:
@@ -751,7 +783,7 @@ def mkprior(
                 f"# draws (seed 0 = MAP; 1..{K - 1} = random post-burn-in draws\n"
                 f"# from the good chains). Bounds are scalar (seed 0).\n"
             )
-        # Only reachable under `mkprior: {force: true}` -- otherwise the gate
+        # Only reachable under `mkparam: {force: true}` -- otherwise the gate
         # above already refused.  The warning it logged scrolls away; this
         # file is the artifact that outlives it and gets fed to the next fit,
         # so the provenance has to travel with it.
@@ -764,12 +796,12 @@ def mkprior(
                 f"trace were rejected as\n"
                 f"# numerically invalid "
                 f"(reasons={mode_status.get('reasons') or {}}). These seeds\n"
-                f"# were emitted only because `mkprior: {{force: true}}` was "
+                f"# were emitted only because `mkparam: {{force: true}}` was "
                 f"set. They do NOT\n"
                 f"# describe a posterior -- do not start a production fit "
                 f"from this file.\n"
             )
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 
-    logger.info(f"mkprior: written {output_path}")
+    logger.info(f"mkparam: written {output_path}")
     return output_path
