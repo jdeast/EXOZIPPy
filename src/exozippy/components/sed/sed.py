@@ -600,11 +600,42 @@ class SED(Component):
     # the same (nstars, nfilters) apparent-magnitude graph; build it
     # once and cache the node.
     # ------------------------------------------------------------------
+    # Star Parameters the BC forward model below reads directly.  They are
+    # not declared as manifest deps of anything on this component, so a
+    # cross-component caller that runs at stage 5 (mulensinstrument's derived
+    # zeropoint) can reach here before the topological order has built them.
+    _STAR_NODE_DEPS = (
+        "teffsed",
+        "radiussed",
+        "logmass",
+        "feh",
+        "av",
+        "distance",
+    )
+
+    def _ensure_star_nodes(self, system):
+        """Materialize the star Parameters ``_predicted_appmag_node`` reads.
+
+        This is the same lazy build ``Component.add_parameter`` performs for
+        a declared cross-component dep ("star.mass[lens_map]"); these are
+        read through the predict_* API instead of being declared, so the
+        build has to happen here.  A no-op at stage 6, where every manifest
+        parameter already exists.
+        """
+        star = getattr(system, "star", None)
+        if star is None:
+            return
+        model = pm.modelcontext(None)
+        for name in self._STAR_NODE_DEPS:
+            if not isinstance(getattr(star, name, None), Parameter):
+                star.add_parameter(model, name, system)
+
     def _predicted_appmag_node(self, system):
         """Per-star predicted apparent mags, shape (nstars, n_all_filters)."""
         if getattr(self, "_m_pred_matrix", None) is not None:
             return self._m_pred_matrix
 
+        self._ensure_star_nodes(system)
         star = system.star
         teffsed = star.teffsed.value  # K,        (nstars,)
         radiussed = star.radiussed.value  # R_sun,    (nstars,)

@@ -407,22 +407,36 @@ mulensinstrument:
     latex: "k"
     description: >-
       Multiplicative scale on the reported FLUX errors (dimensionless)
-  # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
-  # with this Gaussian prior as a potential (see
-  # mulensinstrument._build_sed_flux_constraint). Override per light curve
-  # in params.yaml; sigma must be nonzero.
+  # DERIVED, not sampled: zp = m_SED + 2.5*log10(f_source) is determined by
+  # f_source and the SED, so it adds no sampled dimension -- exactly the
+  # analytic substitution it has always been.  It IS an ordinary Parameter
+  # now, though (manifest entry registered by
+  # MulensInstrument.register_parameters when a sed: block exists), so the
+  # Gaussian below is applied by Parameter.build_pymc's derived-with-sigma
+  # branch rather than by a hand-built pm.Potential, and every generic
+  # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
+  # on it.  Override per light curve in params.yaml; sigma must be nonzero
+  # (an exact zeropoint would make f_source deterministic given the SED).
   zeropoint:
-    # Purely defensive, and equal to mu so it can never move anything.  Today
-    # zeropoint never becomes a Parameter at all: _build_sed_flux_constraint
-    # resolves this block itself, reads only mu/sigma, and builds a
-    # pm.Deterministic -- so nothing reads this initval.  It is here so that
-    # "every sampled parameter carries an initval" stays an invariant if that
-    # ever changes (see the pinned-with-no-value check in
-    # Parameter.build_pymc).
-    initval: 0.0
+    # No `initval:` key, like every other DERIVED parameter in this file
+    # (f_source, f_blend, s, ...): the expression IS the value.  It carried a
+    # purely defensive `initval: 0.0` only to satisfy "every sampled
+    # parameter carries an initval", and that check (pinned-with-no-value, in
+    # Parameter.build_pymc) exempts derived elements outright -- so the
+    # reason for it is gone, and a second number duplicating mu is one more
+    # thing to keep in sync.  `mu` is the start, through resolve()'s ordinary
+    # "user gave mu but no initval" rule, exactly as for every other
+    # Gaussian-prior parameter.
     mu: 0.0
     sigma: 0.2
     unit: "mag"
     internal_unit: "mag"
     latex: "ZP"
     description: "Photometric zeropoint of the light curve's magnitude system (m_cal = -2.5 log10(f) + ZP)"
+    expressions:
+      default:
+        # m_source_pred / zp_center / sed_constrained are context nodes
+        # injected by MulensInstrument.add_parameter (see
+        # context_dep_names); only f_source is a manifest dependency.
+        func_name: "calc_zeropoint"
+        deps: ["m_source_pred", "zp_center", "sed_constrained", "f_source"]

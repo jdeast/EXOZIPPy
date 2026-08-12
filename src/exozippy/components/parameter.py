@@ -847,10 +847,9 @@ class Parameter:
         # This runs at stage 5, which is deliberate: it is the earliest point
         # that sees EVERY channel a value can arrive through.  The manifest
         # "overrides" channel that pins whole vectors (GP, robust likelihood,
-        # band LD) and the plain manifest options that carry data-derived
-        # starts (transit's per-file median `baseline`) are both applied
-        # inside this stage; a check at ConfigManager construction or at
-        # stage 3 would have to guess about them and would fire falsely.
+        # band LD) and the plain manifest options are both applied inside
+        # this stage; a check at ConfigManager construction or at stage 3
+        # would have to guess about them and would fire falsely.
         #
         # Two exemptions, both because the value comes from somewhere other
         # than initval:
