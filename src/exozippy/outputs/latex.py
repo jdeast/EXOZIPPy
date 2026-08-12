@@ -4,8 +4,7 @@ import pathlib
 import numpy as np
 
 from ..components import Parameter
-from ..components.parameter import _idx_to_words
-from .texutils import latex_escape
+from .texutils import latex_escape, mode_suffix, mode_word
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -227,8 +226,10 @@ def build_latex_output(
     document; the unsuffixed macros keep their combined-posterior meaning.
     """
     multimodal = _multimodal(mode_report)
+    # THE cross-reference: these are the names Parameter.to_latex_mode_defs
+    # emits \providecommand for, so both sides call texutils.mode_suffix.
     mode_suffixes = (
-        [f"mode{_idx_to_words(k + 1)}" for k in range(mode_report.n_modes)]
+        [mode_suffix(k) for k in range(mode_report.n_modes)]
         if multimodal
         else None
     )
@@ -348,8 +349,12 @@ def build_latex_output(
         # set by the number of independent mode transitions (NOT by the draw
         # count), and for evidence weighting it is the propagated lnZ error.
         # A weight printed bare invites reading 0.7 +/- 0.3 as 0.7 +/- 0.02.
+        # The weight macros carry the bare mode WORD (\ezmodeweightone), not
+        # the \...modeone suffix the value macros carry -- \ezmodeweight is
+        # already a mode-specific stem.  Same 0-based -> 1-based conversion
+        # either way, so both go through texutils.
         for k, m in enumerate(mode_report.modes):
-            suffix = _idx_to_words(k + 1)
+            suffix = mode_word(k)
             all_defs.append(
                 rf"\providecommand{{\ezmodeweight{suffix}}}"
                 rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n"
@@ -363,12 +368,12 @@ def build_latex_output(
         # wrap the pair (nested \ensuremath is a no-op inside math mode).
         weight_cells = " & ".join(
             (
-                rf"\ensuremath{{\ezmodeweight{_idx_to_words(k + 1)} \pm "
-                rf"\ezmodeweighterr{_idx_to_words(k + 1)}}}\dotfill"
+                rf"\ensuremath{{\ezmodeweight{mode_word(k)} \pm "
+                rf"\ezmodeweighterr{mode_word(k)}}}\dotfill"
                 if np.isfinite(
                     getattr(mode_report.modes[k], "weight_err", np.nan)
                 )
-                else rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
+                else rf"\ezmodeweight{mode_word(k)}\dotfill"
             )
             for k in range(mode_report.n_modes)
         )

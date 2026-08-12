@@ -39,6 +39,14 @@ import numpy as np
 
 from .autocorr import iact
 
+# Re-exported, not defined here: mode_suffix names both the per-mode LaTeX
+# macros (emitted in components/parameter.py, referenced in outputs/latex.py)
+# and the per-mode plot files (run.py), so it has to be spelled in a module
+# components/ can import -- see the "Macro name pieces" note in texutils.py.
+# Kept importable from here because `mode_suffix` reads as a modes concept
+# at every call site.
+from .texutils import mode_suffix  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # Draws whose |lp| exceeds this are numerically broken, not a mode.  A real
@@ -81,22 +89,6 @@ _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
 DEFAULT_MIN_WEIGHT_ESS = 30.0
 
 
-def _idx_to_words(n):
-    words = {
-        "0": "zero",
-        "1": "one",
-        "2": "two",
-        "3": "three",
-        "4": "four",
-        "5": "five",
-        "6": "six",
-        "7": "seven",
-        "8": "eight",
-        "9": "nine",
-    }
-    return "".join(words[char] for char in str(n))
-
-
 def check_invalid_frac(
     mode_report,
     max_invalid_frac=DEFAULT_MAX_INVALID_FRAC,
@@ -136,11 +128,6 @@ def _fmt_pm(value, err, fmt="{:.4f}"):
     if err is not None and np.isfinite(err):
         text += " +/- " + fmt.format(err)
     return text
-
-
-def mode_suffix(k):
-    """LaTeX-macro-safe suffix for mode ``k`` (0-based): 'modeone', ..."""
-    return "mode" + _idx_to_words(k + 1)
 
 
 @dataclass
