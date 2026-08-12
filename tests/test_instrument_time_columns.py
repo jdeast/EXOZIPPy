@@ -384,6 +384,136 @@ def test_malformed_columns_specs_raise_at_construction(tmp_path):
         _construct({"time": True})
 
 
+# ----------------------------------------------------------------------
+# columns: duplicate-index detection (review 3.5)
+# ----------------------------------------------------------------------
+def test_partial_columns_spec_colliding_with_a_default_raises(tmp_path):
+    """
+    Given a partial columns spec that puts time on column 1, which is
+      also rv's unnamed canonical position,
+    When the data are loaded,
+    Then a ValueError names both roles and the shared column -- pre-fix
+      the rv array was silently a second copy of the times.
+    """
+    # Arrange: file is (rv, time, err); only `time` is named.
+    rows = [(10.0, 1.0, 0.1), (20.0, 2.0, 0.2)]
+
+    # Act / Assert
+    with pytest.raises(ValueError, match=r"same file column 1"):
+        _load(tmp_path, {"columns": {"time": 1}}, rows=rows)
+
+
+def test_two_explicitly_named_roles_on_one_column_raises(tmp_path):
+    """
+    Given a columns spec that names two roles on the same column,
+    When the data are loaded,
+    Then a ValueError is raised -- an explicit collision is a typo, not
+      an opt-in.
+    """
+    rows = [(1.0, 10.0, 0.1), (2.0, 20.0, 0.2)]
+    with pytest.raises(ValueError, match=r"same file column 2"):
+        _load(tmp_path, {"columns": {"rv": 2, "err": 2}}, rows=rows)
+
+
+def test_time_may_also_be_a_detrend_column(tmp_path):
+    """
+    Given a columns spec that lists the time column in `detrend` as well,
+    When the data are loaded,
+    Then the load succeeds and the detrend column IS the time vector --
+      detrending against a linear time trend is the one legitimate reuse.
+    """
+    # Arrange
+    rows = [(1.0, 5.0, 0.1), (2.0, 6.0, 0.2)]
+
+    # Act
+    inst = _load(
+        tmp_path,
+        {"columns": {"time": 0, "rv": 1, "err": 2, "detrend": [0]}},
+        rows=rows,
+    )
+
+    # Assert
+    np.testing.assert_allclose(inst.time, [1.0, 2.0])
+    assert inst.total_detrend_cols == 1
+    np.testing.assert_allclose(inst.detrend_matrix[:, 0], [1.0, 2.0])
+
+
+def test_repeated_detrend_column_raises(tmp_path):
+    """
+    Given a detrend list that names the same column twice,
+    When the data are loaded,
+    Then a ValueError is raised -- two identical basis vectors are an
+      exactly degenerate pair of coefficients, so the time exemption
+      covers time-as-detrend, not any repeat.
+    """
+    rows = [(1.0, 5.0, 0.1, 7.0), (2.0, 6.0, 0.2, 8.0)]
+    with pytest.raises(ValueError, match=r"same file column 3"):
+        _load(tmp_path, {"columns": {"detrend": [3, 3]}}, rows=rows)
+
+
+def test_non_time_role_reused_as_detrend_column_raises(tmp_path):
+    """
+    Given a detrend list that names the rv (observable) column,
+    When the data are loaded,
+    Then a ValueError is raised -- only `time` is exempt, and detrending
+      the observable against itself is degenerate.
+    """
+    rows = [(1.0, 5.0, 0.1), (2.0, 6.0, 0.2)]
+    with pytest.raises(ValueError, match=r"same file column 1"):
+        _load(
+            tmp_path,
+            {"columns": {"time": 0, "rv": 1, "err": 2, "detrend": [1]}},
+            rows=rows,
+        )
+
+
+def test_full_columns_spec_without_collisions_still_loads(tmp_path):
+    """
+    Given a fully specified, collision-free columns spec,
+    When the data are loaded,
+    Then it loads unchanged -- the new check must not reject valid specs.
+    """
+    rows = [(0.5, 10.0, 2.0), (0.25, 20.0, 1.0)]
+    inst = _load(
+        tmp_path, {"columns": {"time": 2, "rv": 1, "err": 0}}, rows=rows
+    )
+    np.testing.assert_allclose(inst.time, [1.0, 2.0])
+    np.testing.assert_allclose(inst.rv / RV_FACTOR, [20.0, 10.0])
+
+
+def test_component_declared_shareable_roles_are_exempt():
+    """
+    Given an abs-mode astrometry layout whose single uncertainty column
+      serves both sky axes (`err_e` and `err_n` on column 3),
+    When the duplicate check runs,
+    Then it is accepted -- the component declares that pair shareable --
+      while rel mode, which declares none, rejects the same layout.
+    """
+    # Arrange
+    from exozippy.components.instrument import Instrument
+
+    check = Instrument._check_no_duplicate_columns
+
+    # Act / Assert: abs mode, err_e and err_n both on column 3.
+    check(
+        "astrometryinstrument[A]",
+        ("time", "ra", "dec", "err_e", "err_n"),
+        [0, 1, 2, 3, 3],
+        [],
+        (("err_e", "err_n"),),
+    )
+
+    # rel mode declares no shareable pair (mas vs deg) -> raises.
+    with pytest.raises(ValueError, match=r"same file column 3"):
+        check(
+            "astrometryinstrument[A]",
+            ("time", "sep", "err_sep", "pa", "err_pa"),
+            [0, 1, 3, 2, 3],
+            [],
+            (),
+        )
+
+
 def test_columns_compose_with_mask_and_offset(tmp_path):
     """
     Given a shuffled file with a row mask, a columns spec and a
