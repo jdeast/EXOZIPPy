@@ -3,15 +3,15 @@ transit:
     lower: -1000000.0
     upper: 1000000.0
     # Unity relative flux: the out-of-transit level of a normalized light
-    # curve.  Inert in any real fit -- Transit.register_parameters puts the
-    # per-file median flux in the manifest as a plain option, which
-    # add_parameter layers OVER the resolved config (`{**cfg, **options}`),
-    # and its own fallback for a file it never read is this same 1.0.  It is
-    # here so that every sampled parameter carries an initval from somewhere,
-    # which is what makes the "pinned with no value" check in
-    # Parameter.build_pymc an invariant rather than a rule with exceptions.
-    # `baseline` appears in no RELATION, so this cannot change any other
-    # parameter's provenance either.
+    # curve.  This is the RANK_DEFAULT (20) floor of the provenance stack --
+    # Transit._hint_baseline pushes each file's median flux over it at
+    # RANK_DERIVED_DATA (60), and a user's own `transit.<name>.baseline`
+    # outranks both at RANK_USER (100).  It is what a fit resolves to when
+    # there is no data to measure a median from (the same 1.0 load_data seeds
+    # baseline_init with), and it is also what makes the "pinned with no
+    # value" check in Parameter.build_pymc an invariant rather than a rule
+    # with exceptions.  `baseline` appears in no RELATION, so it cannot
+    # change any other parameter's provenance either.
     initval: 1.0
     init_scale: 0.01
     unit: ""

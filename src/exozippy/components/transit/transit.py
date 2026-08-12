@@ -239,7 +239,8 @@ class Transit(Instrument):
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
-        self.manifest = {"baseline": {"initval": self.baseline_init}}
+        self._hint_baseline()
+        self.manifest = {"baseline": None}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
@@ -273,6 +274,43 @@ class Transit(Instrument):
             [name_to_idx[n] for n in self.band_names], dtype=int
         )
         self.obs_band_map = self.band_map[self.inst_map]
+
+    def _hint_baseline(self):
+        """Push each light curve's median flux as a RANK_DERIVED_DATA hint.
+
+        The median is measured in ``load_data`` (stage 1a), so it is ready
+        by the time this runs at stage 2 -- which is what lets it go through
+        the provenance pipeline at all.
+
+        It used to be a plain manifest option (``{"baseline": {"initval":
+        ...}}``), and options are merged as ``{**cfg, **options}`` AFTER
+        ``resolve()``: they beat the user's params file outright and never
+        acquire a rank.  For a data-derived START value that is backwards --
+        an explicit ``transit.<name>.baseline`` in a params file (a restart
+        file, say) was silently discarded.  As a hint it sits at
+        RANK_DERIVED_DATA (60), the tier this channel exists for: above the
+        defaults.yaml 1.0 (20) and below the user (100), exactly like
+        ``rvinstrument``'s gamma (median RV) and ``mulensinstrument``'s
+        f_source/log_f_total.
+
+        A non-finite median (a file with no usable flux) is skipped rather
+        than hinted: the defaults.yaml 1.0 is then what the engine resolves,
+        which is also the no-data fallback ``load_data`` seeds
+        ``baseline_init`` with, so the two agree by construction.
+        """
+        baseline_init = getattr(self, "baseline_init", None)
+        if baseline_init is None:
+            return  # register_parameters without load_data (bare harness)
+        arr = np.atleast_1d(baseline_init)
+        for i in range(self.n_elements):
+            val = float(arr[i])
+            if not np.isfinite(val):
+                logger.warning(
+                    f"transit {self.names[i]}: median flux is not finite; "
+                    f"leaving baseline at its defaults.yaml start value."
+                )
+                continue
+            self.config_manager.add_hint(f"{self.prefix}.{i}.baseline", val)
 
     def _build_dilution(self, system):
         """
