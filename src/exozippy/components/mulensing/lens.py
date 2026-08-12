@@ -606,6 +606,10 @@ class Lens(Component):
         if not isinstance(mmx_file, str) or mmx_file == "auto":
             return
 
+        # None means the file is ABSENT (warn and run unseeded, as before);
+        # a file that exists but cannot be parsed raises out of load_json.
+        # exozippy did not write a user-named file and so cannot regenerate
+        # it -- only run_or_load's own cache has that recovery.
         data = mmexofast_support.load_json(mmx_file)
         if data is None:
             logger.warning(f"No seeds loaded from '{mmx_file}'.")
@@ -898,7 +902,9 @@ class Lens(Component):
         blockers = [
             k
             for k in up
-            if k.endswith((".pi_E_N", ".pi_E_E")) or ".pm_ra" in k or ".pm_dec" in k
+            if k.endswith((".pi_E_N", ".pi_E_E"))
+            or ".pm_ra" in k
+            or ".pm_dec" in k
         ]
         if blockers:
             logger.info(
