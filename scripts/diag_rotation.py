@@ -31,7 +31,6 @@ MMEXOFAST's chi2, and chi2/N > 1 here is not evidence of a bug on its own.
 import importlib.util
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -51,7 +50,7 @@ from exozippy.system import System  # noqa: E402
 # just one lets the engine re-derive the other and |mu_rel| drifts (measured:
 # 11.411 vs 11.616, a 1.8% contamination of the comparison).
 DEFAULT = -3.0
-OFFSET = -11.4113305      # == the engine's -14.4113305 hint minus DEFAULT
+OFFSET = -11.4113305  # == the engine's -14.4113305 hint minus DEFAULT
 
 
 def _pin(mu_ra, mu_dec):
@@ -63,10 +62,16 @@ def _pin(mu_ra, mu_dec):
         "star.1.pm_dec": {"initval": DEFAULT},
     }
 
+
 REPORT = (
-    "lens.mu_ra_rel", "lens.mu_dec_rel", "lens.mu_rel_mag",
-    "lens.mu_rel_geo_mag", "lens.t_E", "lens.theta_E",
-    "lens.pi_E_N", "lens.pi_E_E",
+    "lens.mu_ra_rel",
+    "lens.mu_dec_rel",
+    "lens.mu_rel_mag",
+    "lens.mu_rel_geo_mag",
+    "lens.t_E",
+    "lens.theta_E",
+    "lens.pi_E_N",
+    "lens.pi_E_E",
 )
 
 
@@ -82,7 +87,8 @@ def _good_raw():
 def build_and_measure(label, overrides, good_raw):
     work = Path(tempfile.mkdtemp()) / "DC2018_128"
     shutil.copytree(
-        EXAMPLE_DIR, work,
+        EXAMPLE_DIR,
+        work,
         ignore=shutil.ignore_patterns("fitresults", ".#*", "#*#"),
     )
     cwd = os.getcwd()
@@ -147,7 +153,6 @@ def build_and_measure(label, overrides, good_raw):
         print(f"    total logp = {total:.4f}")
         return mag, chi2
 
-
     finally:
         os.chdir(cwd)
 
@@ -166,12 +171,16 @@ def main():
     print("\n=== VERDICT ===")
     print(f"  |mu_rel|:  A={a_mag:.6f}   B={b_mag:.6f}")
     if abs(a_mag - b_mag) > 1e-6 * max(a_mag, b_mag):
-        print("  -> ABORT: the two builds are not the same family, so the chi2")
+        print(
+            "  -> ABORT: the two builds are not the same family, so the chi2"
+        )
         print("     comparison below would be contaminated.  Fix the pinning.")
         return
     print("     (equal, so both builds sit in the same family)")
-    print(f"  chi2    :  A={a_chi2:.2f}   B={b_chi2:.2f}   "
-          f"delta={abs(a_chi2 - b_chi2):.2f}")
+    print(
+        f"  chi2    :  A={a_chi2:.2f}   B={b_chi2:.2f}   "
+        f"delta={abs(a_chi2 - b_chi2):.2f}"
+    )
     if abs(a_chi2 - b_chi2) > 1.0:
         print("  -> the light curve DISTINGUISHES members of the family;")
         print("     an arbitrary choice is not safe.")

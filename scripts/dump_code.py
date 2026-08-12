@@ -1,6 +1,16 @@
+"""Collate the repo into one copy/pasteable file for AI review.
+
+    poetry run python scripts/dump_code.py                 # src/exozippy
+    poetry run python scripts/dump_code.py -p all          # + examples, tests
+    poetry run python scripts/dump_code.py -t traceback.txt
+
+See CONTRIBUTING.md for how the output is meant to be used.
+"""
+
 import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
 # Pre-defined presets
@@ -128,13 +138,20 @@ def dump_code(output_file, target_files, project_root):
                         if line.strip():
                             out.write(f"{i:4d} | {line}")
             except Exception as e:
+                # Also on stderr: a note buried mid-way through a 2 MB dump
+                # is not a report. A file that silently arrives empty is
+                # exactly the kind of hole an AI review cannot see.
+                print(
+                    f"WARNING: could not read {rel_path}: {e}",
+                    file=sys.stderr,
+                )
                 out.write(f"Error reading file: {e}\n")
             out.write("\n")
 
     print("Done!")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Dump code for LLM context.")
     parser.add_argument("-o", "--output", default="repo_dump.txt")
     parser.add_argument(
@@ -155,11 +172,14 @@ if __name__ == "__main__":
         print(f"Smart Mode: Filtering by traceback in {args.traceback}")
         tb_file = Path(args.traceback)
         if not tb_file.exists():
-            print(f"Error: Traceback file {tb_file} not found.")
-            exit(1)
+            sys.exit(f"Error: Traceback file {tb_file} not found.")
         target_files = get_smart_files(tb_file, project_root)
     else:
         print(f"Preset Mode: {args.preset}")
         target_files = get_preset_files(PRESETS[args.preset], project_root)
 
     dump_code(args.output, target_files, project_root)
+
+
+if __name__ == "__main__":
+    main()
