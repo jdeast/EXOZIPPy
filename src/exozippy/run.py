@@ -266,10 +266,15 @@ def _run_fit(config, gui, user_params=None):
         if "reason" in reqs:
             _reasons.append(reqs["reason"])
 
+    # sorted(), not next(iter(...)): _recommended is a set, so with two
+    # components recommending different samplers the choice would be a
+    # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
+    # component recommends anything today (mulensing's Lens), so this is
+    # inert; it stops being inert silently.
     if method is None:
-        method = next(iter(_recommended)) if _recommended else "nuts"
+        method = sorted(_recommended)[0] if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = next(iter(_recommended)) if _recommended else "ptde_async"
+        rec_str = sorted(_recommended)[0] if _recommended else "ptde_async"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )

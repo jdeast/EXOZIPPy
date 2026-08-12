@@ -710,7 +710,10 @@ def write_param_file(
             for k in list(output)
             if k.endswith(f".{y_name}")
         }
-        for prefix in set(_x_keys) & set(_y_keys):
+        # Sorted: the body deletes the x/y entries and inserts the angle in
+        # their place, so a hash-ordered set intersection would shuffle the
+        # written params file's key order from run to run.
+        for prefix in sorted(set(_x_keys) & set(_y_keys)):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             # initval may be a scalar (single-seed) or a length-K list

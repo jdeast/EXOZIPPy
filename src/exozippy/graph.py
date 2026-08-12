@@ -100,7 +100,20 @@ def determine_pymc_build_order(active_components, config_manager):
                 )
 
     # 4. Sort agnostically
-    sorter = graphlib.TopologicalSorter(forward_graph)
+    #
+    # Hand graphlib SORTED predecessor lists, not the raw sets.  The order
+    # returned here is the order the PyMC nodes -- and so the terms of the
+    # summed logp -- get created in, so a hash-ordered tie-break would move
+    # the last bits of every fit's logp from process to process.  Step 1
+    # above happens to make today's output independent of these sets (every
+    # node is already a key of forward_graph before the sorter sees it, so
+    # graphlib registers nodes in the dict's order, not the sets'), which is
+    # why sorting changes nothing right now -- but that is a property of
+    # step 1, not of graphlib, and it should not be the only thing standing
+    # between us and a PYTHONHASHSEED-dependent model.
+    sorter = graphlib.TopologicalSorter(
+        {node: sorted(deps) for node, deps in forward_graph.items()}
+    )
     try:
         return list(sorter.static_order())
     except graphlib.CycleError as e:

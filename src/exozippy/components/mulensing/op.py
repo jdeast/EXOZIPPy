@@ -9,7 +9,16 @@ from astropy.coordinates import SkyCoord
 from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
+from exozippy.compat import patch_mulensmodel_method_order
+
 from .physics import clip_q_value
+
+# MulensModel dispatches magnification methods in PYTHONHASHSEED order, and
+# the VBMicrolensing backends are not order-independent, so identical inputs
+# give different answers in different processes.  This is the exozippy module
+# that owns the MulensModel import, so patch it here, before any Op can build
+# an mm.Model.  See exozippy/compat/mulensmodel_method_order.py.
+patch_mulensmodel_method_order()
 
 
 def _clear_mm_satellite_cache():
