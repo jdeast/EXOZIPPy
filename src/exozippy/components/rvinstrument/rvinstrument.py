@@ -10,9 +10,13 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
+from exozippy.outputs.prose import get_collector
+from exozippy.outputs.texutils import latex_escape
 
 
 class RVInstrument(Instrument):
+    prose_noun = "radial velocity"
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
@@ -335,7 +339,22 @@ class RVInstrument(Instrument):
         sigma = self.total_sigma(err)
 
         self.add_observation_likelihood(
-            f"{self.prefix}.model", mu=rv_model, sigma=sigma, observed=rv
+            f"{self.prefix}.model",
+            mu=rv_model,
+            sigma=sigma,
+            observed=rv,
+            system=system,
+        )
+
+        # Modeling-draft prose for the RV model itself (the shared
+        # data/noise sentences came from the dispatcher above).
+        get_collector(system).add(
+            "Radial velocities were modeled as a sum of Keplerian orbits "
+            "(every orbit containing the observed star), plus a "
+            "per-instrument velocity offset.",
+            section="orbits",
+            key=f"{self.prefix}.rv_model",
+            rank=20,
         )
 
     def compile_plotters(self, model, system):
@@ -637,6 +656,11 @@ class RVInstrument(Instrument):
                     "file_tag": "RV_unphased",
                     "figsize": (12, 6),
                     "dynamic_data": True,
+                    "caption": (
+                        "Radial velocities with the best-fit model "
+                        "(red); posterior draws are overplotted with "
+                        "low opacity."
+                    ),
                 },
             )
         )
@@ -706,6 +730,13 @@ class RVInstrument(Instrument):
                             "tc": tc_ref,
                             "file_tag": f"RV_phased_{oname}",
                             "figsize": (10, 6),
+                            "caption": (
+                                "Radial velocities phase-folded on "
+                                "orbit "
+                                + latex_escape(oname)
+                                + ", with the other orbits' "
+                                "contributions removed."
+                            ),
                             "hline_y": 0.0,
                             "dynamic_data": True,
                         },

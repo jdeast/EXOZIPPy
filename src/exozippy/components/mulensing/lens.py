@@ -11,6 +11,7 @@ from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,
 )
+from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_lower_bound
 
 from ..galacticmodel.physics import expected_proper_motion
@@ -1130,6 +1131,14 @@ class Lens(Component):
                 pt.log(pt.maximum(mu_rel_geo, MU_REL_FLOOR))
                 + pt.log(pt.maximum(theta_E, THETA_E_FLOOR))
             ),
+        )
+        get_collector(system).add(
+            r"We weighted the lens prior by the microlensing event rate, "
+            r"$\Gamma \propto \mu_{\rm rel}\,\theta_{\rm E}$ "
+            r"\citep[e.g.][]{Batista:2011}.",
+            section="priors",
+            key=f"{self.prefix}.event_rate",
+            rank=30,
         )
 
         # Shared log-sigmoid barriers (see exozippy.potentials): smooth and

@@ -10,11 +10,15 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
+from exozippy.outputs.prose import get_collector
+from exozippy.outputs.texutils import latex_escape
 
 from . import physics
 
 
 class Transit(Instrument):
+    prose_noun = "transit photometry"
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
@@ -566,8 +570,34 @@ class Transit(Instrument):
         # likelihood around this same transit model.
         sigma = self.total_sigma(err)
         self.add_observation_likelihood(
-            "transit_likelihood", mu=lc_model, sigma=sigma, observed=flux
+            "transit_likelihood",
+            mu=lc_model,
+            sigma=sigma,
+            observed=flux,
+            system=system,
         )
+
+        # Modeling-draft prose for the transit model itself (the shared
+        # data/noise sentences came from the dispatcher above).
+        get_collector(system).add(
+            r"We modeled each transit with the analytic quadratic "
+            r"limb-darkening light curve of \citet{Agol:2020}, as "
+            r"implemented in exoplanet-core \citep{ForemanMackey:2021}.",
+            section="planetary",
+            key=f"{self.prefix}.lc_model",
+            rank=20,
+        )
+        get_collector(system).add_software("exoplanet-core")
+        if getattr(system, "band", None) is not None and (
+            system.band.ld_laws and system.band.ld_laws[0] == "quadratic"
+        ):
+            get_collector(system).add(
+                r"Limb-darkening coefficients were sampled in the "
+                r"$(q_1, q_2)$ parameterization of \citet{Kipping:2013}.",
+                section="planetary",
+                key=f"{self.prefix}.ld_param",
+                rank=21,
+            )
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions for generating plotting lightcurves."""
@@ -910,6 +940,11 @@ class Transit(Instrument):
                         "instrument": self.names[i],
                         "file_tag": f"LC_unphased_{self.names[i]}",
                         "figsize": (12, 5),
+                        "caption": (
+                            "Transit photometry from "
+                            + latex_escape(self.names[i])
+                            + " with the best-fit model (red)."
+                        ),
                     },
                 )
             )
@@ -961,6 +996,13 @@ class Transit(Instrument):
                         "file_tag": (f"LC_phased_{self.names[i]}_{pname}"),
                         "figsize": (10, 6),
                         "hline_y": 0.0,
+                        "caption": (
+                            "Phase-folded transit of planet "
+                            + latex_escape(pname)
+                            + " in "
+                            + latex_escape(self.names[i])
+                            + ", baseline and other planets removed."
+                        ),
                         # The phased DATA re-folds with tc/P and its cleaning
                         # subtracts the baseline, other planets and any GP --
                         # all point-dependent, so live evals must re-ship it.

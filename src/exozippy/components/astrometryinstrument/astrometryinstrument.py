@@ -126,6 +126,7 @@ def wrap_ra_diff_pt(delta_rad):
 
 
 class AstrometryInstrument(Instrument):
+    prose_noun = "astrometry"
     # No per-file Gaussian process here.  Unlike the other instruments, an
     # astrometric dataset carries two observables per epoch -- (dE, dN) in
     # 'abs' mode, (sep, PA) in 'rel' mode -- with different units, so a single
@@ -729,6 +730,12 @@ class AstrometryInstrument(Instrument):
             raise ValueError(
                 f"[{self.prefix}] astrometry requires a star component."
             )
+        # Astrometry never calls the shared add_observation_likelihood
+        # dispatcher (two observables per epoch), so it declares the shared
+        # data/noise prose itself.  gp_terms/likelihood_kinds are absent
+        # here by construction (supports_gp = False), which the helper
+        # tolerates.
+        self._add_observation_prose(system)
         if any(m == "rel" for m in self.modes) and not hasattr(
             system, "orbit"
         ):

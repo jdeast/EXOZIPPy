@@ -7,7 +7,7 @@ parameter_file YAML used for the original fit (needed for Parameter units,
 expressions, and derived-parameter posteriors -- see CLAUDE.md's six-stage
 lifecycle), loads the saved trace, runs outputs.modes.identify_modes and
 System.distribute_posterior, and rewrites <prefix>_modes.txt,
-<prefix>_definitions.tex, <prefix>_template.tex, and <prefix>_results.csv.
+<prefix>_definitions.tex, <prefix>_table.tex, and <prefix>_results.csv.
 
 It shares the exact identify_modes -> distribute_posterior -> LaTeX/CSV
 pipeline with run.run_fit() via outputs.report_pipeline.build_mode_reports,
@@ -98,7 +98,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
 
     CONFIG_FILE is the same system YAML passed to `exozippy`; its `prefix:`
     key locates the previously saved trace (<prefix>_trace.nc). Rewrites
-    <prefix>_modes.txt, <prefix>_definitions.tex, <prefix>_template.tex,
+    <prefix>_modes.txt, <prefix>_definitions.tex, <prefix>_table.tex,
     <prefix>_results.csv, and the trace file itself (with
     idata.posterior['mode'] attached) -- without re-running the sampler.
 
@@ -159,6 +159,20 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
         raise_on_invalid=False,
         mode_status=mode_status,
     )
+
+    # Regenerate the modeling-draft scaffold against the rewritten table
+    # fragments.  The components' prose exists (stages 1-6 ran above); the
+    # run-level convergence paragraph does not (no live diagnostics here),
+    # which the regenerated file simply omits.  Never fatal, like every
+    # other output this forensic tool writes.
+    try:
+        from .outputs.modeling import build_modeling_output
+
+        build_modeling_output(system, prefix)
+    except Exception:
+        logger.warning(
+            "modeling-draft regeneration failed (non-fatal)", exc_info=True
+        )
 
     if mode_status.get("state") == MODE_NO_VALID_DRAWS:
         # A live fit refuses outright here (check_invalid_frac); this tool

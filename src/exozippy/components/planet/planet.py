@@ -6,6 +6,8 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.outputs.prose import get_collector, join_names
+from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
 from . import physics
@@ -396,6 +398,20 @@ class Planet(Component):
 
         self._add_chen_potential()
         self._annotate_chen_table_notes(system)
+        # Modeling-draft prose, declared next to the potential it describes
+        # (outputs/prose.py's declare-at-site rule).
+        enabled = [nm for nm, on in zip(self.names, self.chen) if on]
+        if enabled:
+            noun = "planet" if len(enabled) == 1 else "planets"
+            get_collector(system).add(
+                r"We imposed the \citet{Chen:2017} probabilistic "
+                rf"mass--radius relation on {noun} "
+                + join_names(latex_escape(n) for n in enabled)
+                + ", constraining whichever of the mass and radius the "
+                "data do not.",
+                section="planetary",
+                key=f"{self.prefix}.chen",
+            )
 
         if "orbit" not in system.active_components:
             return

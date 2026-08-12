@@ -1,10 +1,14 @@
 import csv
-import pathlib
 
 import numpy as np
 
 from ..components import Parameter
-from .texutils import latex_escape, mode_suffix, mode_word
+from .texutils import (
+    latex_escape,
+    latex_escape_prose,
+    mode_suffix,
+    mode_word,
+)
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -211,12 +215,21 @@ def build_csv_output(
 def build_latex_output(
     system,
     var_filename="variables.tex",
-    template_filename="table_template.tex",
+    table_filename="table.tex",
     caption=None,
     tablecomments=None,
     mode_report=None,
 ):
-    """Write the LaTeX variable definitions and deluxetable template.
+    """Write the LaTeX variable definitions and the deluxetable FRAGMENT.
+
+    Both outputs are fragments, meant to be ``\\input`` by a wrapper
+    document: ``var_filename`` gets the ``\\providecommand`` set,
+    ``table_filename`` the ``deluxetable*`` body.  The one standalone
+    wrapper is ``<prefix>_modeling.tex`` (``outputs/modeling.py``), which
+    supplies the ``aastex701`` preamble, inputs both files, and carries the
+    bibliography -- the table file itself used to be that wrapper, minus
+    the prose and with a ``\\bibliography{References}`` line pointing at a
+    file that never existed.
 
     With a multimodal ``mode_report`` (from outputs.modes.identify_modes,
     after system.distribute_posterior picked up the mode labels), the table
@@ -386,9 +399,13 @@ def build_latex_output(
         )
         all_table_lines.insert(0, weight_row)
 
+        # The provenance is composed as PLAIN TEXT (modes.txt is its first
+        # consumer) and really does carry N_eff and >= -- unescaped, the
+        # underscore is a hard "Missing $ inserted" in \tablecomments, found
+        # the first time the modeling draft auto-compiled a multimodal table.
         provenance_note = (
             "Mode weights: "
-            + mode_report.provenance
+            + latex_escape_prose(mode_report.provenance)
             + ". "
             + _mixing_sentence(mode_report)
             + "Combined "
@@ -432,20 +449,11 @@ def build_latex_output(
     else:
         value_heads = r"\colhead{Value}"
 
-    with open(template_filename, "w") as f:
-        # aastex701 and nothing else.  A \usepackage{apjfonts} line used to
-        # follow, and it made the generated template uncompilable anywhere
-        # that file was missing: apjfonts is a legacy AASTeX v5 font package,
-        # it is NOT on CTAN and NOT in TeX Live, and its absence is fatal
-        # ("LaTeX Error: File `apjfonts.sty' not found. Emergency stop."),
-        # not degraded.  AASTeX 7 sets its own fonts -- AAS's own
-        # aastex701-sample.tex does not load apjfonts -- and the reference
-        # manuscript compiles identically with it and without it.  So it
-        # bought nothing and cost a hard failure to everyone whose TeX
-        # installation did not happen to carry a file from 2005.
-        f.write(r"\documentclass{aastex701}" + "\n")
-        f.write(rf"\input{{{pathlib.Path(var_filename).stem}}}" + "\n")
-        f.write(r"\begin{document}" + "\n")
+    with open(table_filename, "w") as f:
+        # A pure fragment: no \documentclass, no \begin{document}, no
+        # bibliography lines -- outputs/modeling.py owns the one wrapper
+        # (and the historical \usepackage{apjfonts} trap is documented
+        # there, where the preamble now lives).
         f.write(r"\startlongtable" + "\n")
         f.write(rf"\begin{{deluxetable*}}{{{colspec}}}" + "\n")
         if caption is not None:
@@ -467,6 +475,3 @@ def build_latex_output(
         if tablecomments:
             f.write(rf"\tablecomments{{{tablecomments}}}" + "\n")
         f.write(r"\end{deluxetable*}" + "\n")
-        f.write(r"\bibliographystyle{aasjournalv7}" + "\n")
-        f.write(r"\bibliography{References}" + "\n")
-        f.write(r"\end{document}" + "\n")

@@ -514,7 +514,7 @@ def test_multimode_latex_suppresses_combined_defs(tmp_path):
     build_latex_output(
         sys_obj,
         var_filename=str(var_path),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
         mode_report=mode_report,
     )
 
@@ -541,7 +541,7 @@ def test_single_mode_latex_output_unchanged(tmp_path):
 
     var1, tmpl1 = tmp_path / "v1.tex", tmp_path / "t1.tex"
     build_latex_output(
-        _sys_with_param(), var_filename=str(var1), template_filename=str(tmpl1)
+        _sys_with_param(), var_filename=str(var1), table_filename=str(tmpl1)
     )
 
     unimodal_report = ModeReport(
@@ -570,7 +570,7 @@ def test_single_mode_latex_output_unchanged(tmp_path):
     build_latex_output(
         _sys_with_param(),
         var_filename=str(var2),
-        template_filename=str(tmpl2),
+        table_filename=str(tmpl2),
         mode_report=unimodal_report,
     )
 
@@ -615,7 +615,7 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
     build_latex_output(
         sys_obj,
         var_filename=str(tmp_path / "v.tex"),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
         mode_report=mode_report,
     )
 
@@ -673,7 +673,7 @@ def test_instance_names_and_descriptions_are_escaped(tmp_path):
     build_latex_output(
         _fake_system(comp),
         var_filename=str(tmp_path / "v.tex"),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
     )
 
     # ASSERT
@@ -936,7 +936,7 @@ def test_transition_diagnostics_reach_latex_and_csv(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         mode_report=rep,
     )
     build_csv_output(_StubSystem(), str(csv_file), mode_report=rep)
@@ -1176,7 +1176,7 @@ def test_pipeline_refuses_to_write_tables_when_every_draw_is_invalid(
     assert status["invalid_frac"] == 1.0
     assert not (tmp_path / "broken_results.csv").exists()
     assert not (tmp_path / "broken_definitions.tex").exists()
-    assert not (tmp_path / "broken_template.tex").exists()
+    assert not (tmp_path / "broken_table.tex").exists()
     assert "NO VALID DRAWS" in (tmp_path / "broken_modes.txt").read_text()
 
 
@@ -1210,7 +1210,7 @@ def test_pipeline_reports_all_invalid_without_raising_for_forensics(
     # latex.py's own invalid-draw note reads off the mode report, which does
     # not exist here, so the pipeline supplies it: the table it does write
     # must not read as a clean result.
-    template = (tmp_path / "forensic_template.tex").read_text()
+    template = (tmp_path / "forensic_table.tex").read_text()
     assert "rejected as numerically invalid" in template
     assert r"100.00\%" in template
 
