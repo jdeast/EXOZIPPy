@@ -1,4 +1,11 @@
-"""Per-mode local evidence estimation via warp bridge sampling.
+"""Per-mode local evidence estimation by bridge sampling.
+
+The estimator is the plain Meng & Wong (1996) optimal bridge against a
+Gaussian proposal fitted to the mode's own raw draws.  It is NOT warp bridge
+sampling: no warp transformation of the target is applied anywhere in this
+module (see the note under step 4 for the one place a warp would earn its
+keep).  The module was titled "warp bridge sampling" until 2026-08-11, which
+described an implementation that never existed.
 
 This is the *fallback* multimodal-weighting path in EXOZIPPy.  The primary
 paths (declared-degeneracy jump proposals / folded likelihoods) weight known
@@ -14,10 +21,12 @@ outputs.modes already clusters on):
   1. Membership.  Draws are assigned to modes by the integer ``mode`` label
      that identify_modes attaches to idata.posterior (or by ModeReport.labels).
 
-  2. Proposal.  A normalized multivariate Gaussian (default) or Student-t is
-     fit to the mode's raw draws over the *full* free-RV vector.  Raw space is
-     the non-centered N(0, 1) space, so a Gaussian is a natural, bound-free
-     reference with an analytic normalizing constant.
+  2. Proposal.  A normalized multivariate Gaussian -- the only proposal family
+     implemented -- is fit to the mode's raw draws over the *full* free-RV
+     vector (``_fit_gaussian``, shrunk toward its diagonal and eigenvalue-
+     floored so the density is always proper).  Raw space is the non-centered
+     N(0, 1) space, so a Gaussian is a natural, bound-free reference with an
+     analytic normalizing constant.
 
   3. Bridge estimator (Meng & Wong 1996, optimal bridge).  Using the mode's
      posterior draws and fresh draws from the proposal, the iterative optimal
@@ -31,6 +40,13 @@ outputs.modes already clusters on):
      refused: no number is reported, the reason is logged, and the caller
      falls back to occupancy for the whole report (softmax evidence weights
      need every mode's lnZ, so a single refusal invalidates the set).
+
+     That bound-pileup case is exactly what a warp would fix, and is the
+     obvious next step if refusals prove common: Warp-III (Meng & Schilling
+     2002) symmetrizes the target about its mode by mixing x with 2*mu - x,
+     turning the one-sided tail the Gaussian proposal cannot cover into a
+     symmetric one it can.  Not implemented -- recorded here so the option is
+     not rediscovered from scratch.
 
   5. Weights.  Accepted lnZ_k -> softmax weights w_k; lnZ error bars propagate
      to softmax weight uncertainties dw_k by linearization.
@@ -445,7 +461,10 @@ def estimate_mode_evidences(
     re2_max=DEFAULT_RE2_MAX,
     seed=20260712,
 ):
-    """Estimate each mode's local evidence by warp bridge sampling.
+    """Estimate each mode's local evidence by bridge sampling.
+
+    Meng & Wong (1996) optimal bridge against a Gaussian proposal fitted to
+    each mode's own raw draws; no warp is applied (see the module docstring).
 
     Parameters
     ----------

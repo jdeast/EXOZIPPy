@@ -105,3 +105,54 @@ def test_user_sigma_still_seeds_the_scale():
     assert cm.propagated_scales.get("star.0.logmass") == pytest.approx(
         0.02, rel=0.01
     )
+
+
+# ---------------------------------------------------------------------------
+# The scale sync back into user_params when there is no scale to sync
+# ---------------------------------------------------------------------------
+
+# star + planet + orbit is the smallest topology carrying Kepler's third law,
+# arsun**3 = C * m_total * period**2.  None of arsun, m_total or period has an
+# init_scale in defaults.yaml -- init_scale is optional -- so the forward
+# Jacobian pass scores the solved arsun scale at rank 0, which loses to arsun's
+# own (absent) rank-0 scale and is therefore never stored.  Naming arsun in a
+# params file then used to send the sync step reading a key that was never
+# written: KeyError straight out of prepare().
+_ORBIT_CONFIG = {
+    "star": [{"name": "A"}],
+    "planet": [{"name": "b"}],
+    "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+}
+
+
+def test_scaleless_solved_target_does_not_crash_the_engine():
+    """
+    Given a params entry on a derived parameter (orbit arsun) whose relation
+    parents carry no init_scale from any source,
+    When the relaxation engine solves it (stage 3 of prepare),
+    Then the solve completes and the entry simply gets no init_scale.
+
+    The user period entry is load-bearing: an initval with no sigma pins the
+    VALUE at RANK_USER while leaving period scale-less, which is what drives
+    the propagated scale rank to zero.
+    """
+    # Arrange
+    cm = ConfigManager(
+        {
+            "orbit.b.period": {"initval": 2.9895933},
+            "orbit.b.arsun": {"lower": 0.0, "upper": 1000.0},
+        },
+        system_config=_ORBIT_CONFIG,
+    )
+
+    # Act
+    cm.finalize_user_params()
+
+    # Assert: the solve ran and arsun got a start value ...
+    entry = cm.user_params["orbit.0.arsun"]
+    assert entry["initval"] is not None
+    # ... but no preliminary scale, which is the handled state: build_pymc
+    # falls back to a fraction of the bound span and the whitening probe
+    # measures the real scale from the data.
+    assert "init_scale" not in entry
+    assert cm.propagated_scales.get("orbit.0.arsun") is None
