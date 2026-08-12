@@ -10,6 +10,12 @@ import numpy as np
 import yaml
 
 from exozippy.config import validate_sigma_has_center
+from exozippy.outputs.modes import (
+    MODE_FAILED,
+    MODE_NO_VALID_DRAWS,
+    MODE_OK,
+    NoValidDrawsError,
+)
 from exozippy.samplers import convergence
 from exozippy.trace_meta import check_trace_freshness
 
@@ -129,7 +135,145 @@ def _mode_seed_quotas(weights, n):
     return quotas
 
 
-def _sample_seed_draws(idata, n, exclude, rng_seed=0):
+# Sentinel for "run the mode pass yourself" -- distinct from a genuine
+# ``None`` report, which means "the mode pass ran and produced nothing".
+_UNSET = object()
+
+
+def _identify_modes(idata, mode_status):
+    """Run the mode pass ONCE, recording its outcome in ``mode_status``.
+
+    Returns the ``outputs.modes.ModeReport``, or None when there is none.
+
+    ``mode_status`` is an in/out dict filled with a ``state`` from the
+    outputs.modes MODE_* vocabulary plus the invalid-draw bookkeeping,
+    exactly as ``report_pipeline.build_mode_reports`` fills it (which in
+    turn follows ``outputs/ledger.py``'s HOT_* and ``outputs/evidence.py``'s
+    EV_* status dicts).  A returned None is ambiguous on its own, and the
+    distinction the status carries is the whole point here:
+
+    * ``MODE_NO_VALID_DRAWS`` -- EVERY draw failed the numerical-validity
+      filter.  That is a statement about the DRAWS, and mkprior's output
+      seeds the NEXT fit, so it must not be turned into seed values.
+    * ``MODE_FAILED`` -- the mode pass could not tell us anything, for a
+      reason that says nothing about the draws (an unclusterable trace, a
+      crash, an ImportError).  Seed emission carries on unstratified, as it
+      always has: a broken mode pass must never break seed emission.
+
+    ``identify_modes`` itself is looked up per call rather than bound at
+    import time (the MODE_* vocabulary and the exception class are imported
+    at module level, so this cannot fail): it keeps the function
+    monkeypatchable in tests, which is how the "an ordinary mode-pass
+    failure still falls back" guarantee is pinned.
+    """
+    from exozippy.outputs.modes import identify_modes
+
+    try:
+        report = identify_modes(idata, attach=False)
+    except NoValidDrawsError as exc:
+        # The ONE mode-pass failure that is a statement about the DRAWS.
+        # Catching it in the broad clause below is what let a 100%-invalid
+        # trace emit a clean-looking restart file (this is the mkprior-side
+        # sibling of report_pipeline's review-3.17 fix).
+        mode_status.update(
+            state=MODE_NO_VALID_DRAWS,
+            n_draws=exc.n_draws,
+            n_invalid=exc.n_invalid,
+            invalid_frac=exc.invalid_frac,
+            reasons=exc.reason_counts,
+            per_chain_invalid=exc.per_chain_invalid,
+            detail=str(exc),
+        )
+        return None
+    except Exception as exc:  # never let mode analysis break seed emission
+        mode_status.update(state=MODE_FAILED, detail=repr(exc))
+        logger.warning(
+            f"mkprior: mode identification failed ({exc}); falling back to "
+            f"unstratified seed draws."
+        )
+        return None
+
+    mode_status.update(
+        state=MODE_OK,
+        n_draws=int(report.labels.size),
+        n_invalid=int(report.n_invalid),
+        invalid_frac=float(report.invalid_frac),
+        reasons=dict(report.invalid_reason_counts or {}),
+    )
+    return report
+
+
+def _all_draws_invalid(mode_status):
+    """True when the mode pass rejected EVERY draw (MODE_NO_VALID_DRAWS)."""
+    return bool(mode_status) and (
+        mode_status.get("state") == MODE_NO_VALID_DRAWS
+    )
+
+
+def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
+    """Refuse to emit restart seeds from a trace with NO valid draws.
+
+    mkprior's output IS the next fit's start, so this is the same argument
+    that makes a structurally stale trace a hard ``StaleTraceError`` a few
+    lines below -- and sharper.  Seeds taken from draws the numerical-
+    validity filter rejected in FULL are not a degraded starting point;
+    they are arbitrary numbers wearing the costume of a converged
+    posterior, and multi-seed emission then spreads them across the next
+    fit's chains as its starting basins.  They read as perfectly
+    reasonable: an all-NaN ``sample_stats['lp']`` over ordinary posterior
+    draws emits a restart file whose every value looks healthy.
+
+    Escape hatch: ``mkprior: {force: true}``, and deliberately NOT
+    ``modes: {force: true}``.  The two are different decisions.  The modes
+    key is documented as forensic RE-PROCESSING -- "emit the tables anyway
+    so I can look at them" -- which reads the trace; writing a restart file
+    writes into a fit that has not happened yet.  Honouring the modes key
+    here would also make this whole check a no-op on the one live path that
+    reaches it: under ``modes: {force: true}`` run.py sails past
+    build_mode_reports' identical gate and calls mkprior at the end of
+    wrap-up, so the same key that asks for forensic tables would silently
+    authorize a corrupt restart file as a side effect.
+
+    There is no ``max_invalid_frac`` counterpart, on purpose.  This gate is
+    binary -- either the mode pass could build a report or every single draw
+    was rejected -- so a fraction knob would have exactly two reachable
+    settings and be a second, obscurer spelling of ``force``.  A PARTIALLY
+    invalid trace is left alone here and is the reporting gate's business.
+    """
+    if not _all_draws_invalid(mode_status):
+        return
+
+    n_invalid = int(mode_status.get("n_invalid", 0))
+    frac = float(mode_status.get("invalid_frac", 0.0))
+    detail = (
+        f"ALL {n_invalid} draws ({frac:.2%}) in {trace_path} were rejected "
+        f"as numerically invalid (reasons={mode_status.get('reasons') or {}}, "
+        f"per-chain invalid counts={mode_status.get('per_chain_invalid')})"
+    )
+    if force:
+        logger.warning(
+            "mkprior: %s, but `mkprior: {force: true}` was set -- writing a "
+            "restart file whose seeds come from draws that were ALL "
+            "rejected. The next fit will start from them.",
+            detail,
+        )
+        return
+    raise RuntimeError(
+        f"mkprior: refusing to write a restart file. {detail}. "
+        "This file IS the next fit's start, so seeds taken from draws that "
+        "were all rejected would be spread across that fit's chains as its "
+        "starting basins while reading as a converged posterior -- the "
+        "values look perfectly reasonable. Fix the model or sampler bug "
+        "that produced the invalid draws and re-sample "
+        "(`sampler: {recompute_trace: true}`), or hand-write the restart "
+        "file. To emit it anyway from this known-bad trace, set "
+        "`mkprior: {force: true}` in the config (`modes: {force: true}` "
+        "deliberately does NOT enable this: it authorizes forensic "
+        "REPORTING, not seeding the next fit)."
+    )
+
+
+def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
 
     When the trace is multimodal (outputs.modes.identify_modes finds more
@@ -152,6 +296,17 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     Returns (pairs, good_mask, burnin) where ``good_mask`` and ``burnin``
     also describe the pool used, so a caller can compute statistics over
     exactly the same post-burn-in good draws.
+
+    ``mode_report`` lets the caller hand in an already-computed report so
+    the mode pass runs once per mkprior call rather than twice; left unset,
+    this runs it itself (and swallows any failure, as it always has).
+
+    NOTE this pool is NOT validity-filtered: ``find_burnin``'s good-chain
+    mask is a stuck-chain detector and its burn-in is an ESS knee, neither
+    of which is the numerical-validity filter.  Draws are taken blindly
+    from ``post``.  That is fine for a healthy trace and is precisely why
+    the all-invalid case has to be refused by the caller before we get
+    here: this path would otherwise emit rejected draws as seeds.
     """
     post = idata["posterior"]
     var_names = convergence.default_var_names(post)
@@ -160,6 +315,19 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     ss = idata.get("sample_stats") if hasattr(idata, "get") else None
     if ss is not None and "lp" in ss.data_vars:
         lp = ss["lp"].values
+        if not np.isfinite(lp).any():
+            # An all-non-finite lp is a degenerate input, not a ranking:
+            # good_chain_mask's np.nanargmax raises "All-NaN slice
+            # encountered" on it, which used to abort mkprior with an
+            # opaque numpy error naming nothing.  Only reachable under
+            # `mkprior: {force: true}` (the validity gate refuses first);
+            # treat it as "no lp", which is the same degenerate-input
+            # answer find_burnin gives for a single chain.
+            logger.warning(
+                "mkprior: every lp in the trace is non-finite; treating it "
+                "as absent for the burn-in/good-chain diagnostics."
+            )
+            lp = None
 
     diag = convergence.find_burnin(arrays, lp=lp, var_names=var_names)
     burnin, good_mask = diag["burnin"], diag["good_mask"]
@@ -169,19 +337,16 @@ def _sample_seed_draws(idata, n, exclude, rng_seed=0):
     draw_lo = min(burnin, max(0, n_draws - 1))
 
     # ---- mode-stratified path -------------------------------------------
+    # A mode-pass failure must never break seed emission (_identify_modes
+    # keeps the broad catch that guarantees it); the ONE outcome that is not
+    # a mode-pass failure but a broken trace -- every draw invalid -- is
+    # refused by the caller before this function is reached.
+    if mode_report is _UNSET:
+        mode_report = _identify_modes(idata, {})
     labels = None
-    try:
-        from exozippy.outputs.modes import identify_modes
-
-        report = identify_modes(idata, attach=False)
-        if report.n_modes > 1:
-            labels = report.labels  # (chain, draw); -1 = invalid/unassigned
-            weights = [m.weight for m in report.modes]
-    except Exception as e:  # never let mode analysis break seed emission
-        logger.warning(
-            f"mkprior: mode identification failed ({e}); falling back to "
-            f"unstratified seed draws."
-        )
+    if mode_report is not None and mode_report.n_modes > 1:
+        labels = mode_report.labels  # (chain, draw); -1 = invalid/unassigned
+        weights = [m.weight for m in mode_report.modes]
 
     if labels is not None:
         quotas = _mode_seed_quotas(weights, n)
@@ -245,6 +410,14 @@ def mkprior(
     ``init_scale`` is written: whitening scales are measured from the data at
     startup and the key would be warn-ignored.
 
+    Raises ``RuntimeError`` if EVERY draw in the trace fails the numerical-
+    validity filter -- see ``_refuse_invalid_seed_draws`` for why that is a
+    refusal rather than a warning, and for the ``mkprior: {force: true}``
+    escape hatch.  This check covers the DEFAULT single-seed path too, and
+    has to: seed 0 is the MAP draw, and with an all-NaN lp ``np.argmax``
+    returns index 0, so the emitted "MAP" is silently the first draw of
+    chain 0.
+
     Parameters
     ----------
     config : dict or str or Path
@@ -281,9 +454,11 @@ def mkprior(
     else:
         base_dir = Path(base_dir or ".")
 
+    mkprior_cfg = config.get("mkprior") or {}
     if n_seeds is None:
-        n_seeds = (config.get("mkprior") or {}).get("n_seeds", 1)
+        n_seeds = mkprior_cfg.get("n_seeds", 1)
     n_seeds = max(1, int(n_seeds))
+    force_invalid = bool(mkprior_cfg.get("force", False))
 
     prefix = config.get("prefix", "fitresults/model")
     run_name = Path(prefix).stem  # e.g. "KELT-4A" from "fitresults/KELT-4A"
@@ -352,6 +527,24 @@ def mkprior(
         trace_path,
     )
 
+    # Same argument as the freshness check above, one step further in: a
+    # trace whose draws are ALL numerically invalid cannot seed the next fit
+    # either.  Run the mode pass ONCE here, before the MAP is chosen, and
+    # hand the report down to _sample_seed_draws so multi-seed runs pay for
+    # it exactly once.  It has to run before the MAP selection because the
+    # MAP is seed 0 on EVERY path including the default single-seed one --
+    # gating only inside _sample_seed_draws would leave the default
+    # untouched -- and because an all-non-finite lp otherwise reaches
+    # find_burnin's np.nanargmax and aborts with an opaque numpy error.
+    #
+    # Recomputed here rather than accepted from run.py's live mode pass, for
+    # the same reason the structural fingerprint above is recomputed: what
+    # this function is handed is what its output is built from, and the
+    # standalone entry points have no live System to be handed anything by.
+    mode_status = {}
+    mode_report = _identify_modes(idata, mode_status)
+    _refuse_invalid_seed_draws(mode_status, trace_path, force=force_invalid)
+
     # Find the MAP draw. lp is present for NUTS and for Metropolis traces saved
     # after the fix that persists it right after pm.sample(). Fall back to the
     # posterior median for old Metropolis trace files without lp.
@@ -396,7 +589,10 @@ def mkprior(
     seed_pairs = [(map_chain, map_draw)]
     if n_seeds > 1:
         extra, _pool_mask, _pool_burnin = _sample_seed_draws(
-            idata, n_seeds - 1, exclude=(map_chain, map_draw)
+            idata,
+            n_seeds - 1,
+            exclude=(map_chain, map_draw),
+            mode_report=mode_report,
         )
         seed_pairs += extra
         if len(seed_pairs) < n_seeds:
@@ -554,6 +750,24 @@ def mkprior(
                 f"# Multi-seed: initval is a length-{K} list of joint posterior\n"
                 f"# draws (seed 0 = MAP; 1..{K - 1} = random post-burn-in draws\n"
                 f"# from the good chains). Bounds are scalar (seed 0).\n"
+            )
+        # Only reachable under `mkprior: {force: true}` -- otherwise the gate
+        # above already refused.  The warning it logged scrolls away; this
+        # file is the artifact that outlives it and gets fed to the next fit,
+        # so the provenance has to travel with it.
+        if _all_draws_invalid(mode_status):
+            f.write(
+                "#\n"
+                "# *** WARNING: NO VALID DRAWS ***\n"
+                f"# All {mode_status.get('n_invalid', 0)} draws "
+                f"({100 * mode_status.get('invalid_frac', 0.0):.2f}%) in this "
+                f"trace were rejected as\n"
+                f"# numerically invalid "
+                f"(reasons={mode_status.get('reasons') or {}}). These seeds\n"
+                f"# were emitted only because `mkprior: {{force: true}}` was "
+                f"set. They do NOT\n"
+                f"# describe a posterior -- do not start a production fit "
+                f"from this file.\n"
             )
         yaml.dump(output, f, default_flow_style=False, sort_keys=True)
 

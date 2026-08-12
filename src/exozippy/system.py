@@ -42,7 +42,11 @@ can generally construct any model containing arbitrary components.
 #   logger_level   -- run.py, cli.py, cli_modes.py.
 #   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
 #   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
-#   mkprior        -- mkparam.mkprior: {n_seeds}.
+#   mkprior        -- mkparam.mkprior: {n_seeds, force}.  `force` is
+#                     deliberately NOT `modes: {force: true}`: that one
+#                     authorizes forensic REPORTING off a known-bad
+#                     trace, this one authorizes seeding the NEXT fit
+#                     from one.  See mkparam._refuse_invalid_seed_draws.
 #   gui            -- gui.status.gui_enabled: {snapshot}.
 #
 # tests/test_known_keys.py cross-checks this set against the top-level-config
