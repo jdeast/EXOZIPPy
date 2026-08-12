@@ -142,8 +142,20 @@ def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
             factors = np.asarray(
                 par._get_conversion_factors(), dtype=float
             ).reshape(-1)
-            if factors.size != p0.size:
-                factors = np.ones(p0.size)
+            # A SCALAR `unit:` normalizes to a one-element list in
+            # Parameter.__post_init__, so factors.size is 1 for every
+            # multi-element parameter -- and 1 broadcasts correctly.  The old
+            # `if factors.size != p0.size: factors = np.ones(...)` therefore
+            # fired for EVERY vector parameter and reported internal units
+            # under the user-unit label: radians labelled deg for orbit.omega
+            # / inc / bigomega / lam and star.ra / dec, off by 57.3x, in the
+            # rejected-modes table and the results CSV, as soon as a system
+            # had two orbits or two stars.
+            if factors.size not in (1, p0.size):
+                raise ValueError(
+                    f"[{name}] {factors.size} unit conversion factors for "
+                    f"{p0.size} elements -- cannot report physical units."
+                )
             phys[name] = p0 / factors
             phys_sigma[name] = 0.5 * np.abs(p_hi - p_lo) / factors
             sampled_idx[name] = list(tf["sampled_idx"])

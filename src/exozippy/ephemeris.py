@@ -237,10 +237,26 @@ def interpolate_ephemeris(time, ephemeris_file):
 
     # Check if we are extrapolating (which is dangerous)
     t_min, t_max = np.min(t_grid), np.max(t_grid)
-    if np.any(time < t_min) or np.any(time > t_max):
-        warnings.warn(
-            f"Extrapolating outside ephemeris range! "
-            f"Grid: {t_min:.2f}-{t_max:.2f}, Requested: {np.min(time):.2f}"
+    below = np.asarray(time) < t_min
+    above = np.asarray(time) > t_max
+    if np.any(below) or np.any(above):
+        # The old message printed `Requested: {np.min(time)}` whichever end
+        # was out of range, so an over-range epoch was reported with an
+        # in-range number.  It also went through warnings.warn, which is
+        # deduplicated and (nothing calls logging.captureWarnings) never
+        # reaches <prefix>.log -- the file users actually keep.  A cubic
+        # not-a-knot spline diverges fast outside its grid and this feeds
+        # microlensing pi_E and astrometric parallax factors, so the epochs
+        # and the overshoot both have to be nameable.
+        n_bad = int(np.count_nonzero(below) + np.count_nonzero(above))
+        logger.warning(
+            f"Extrapolating outside the ephemeris range in "
+            f"{ephemeris_file}: grid covers {t_min:.4f}-{t_max:.4f}, but "
+            f"{n_bad} epoch(s) fall outside it "
+            f"(min requested {np.min(time):.4f}, max {np.max(time):.4f}). "
+            f"The cubic spline is being extrapolated; regenerate the "
+            f"ephemeris to cover these epochs (see "
+            f"ephemerides/get_ephemeris.py)."
         )
 
     # Create the spline object

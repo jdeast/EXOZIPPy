@@ -274,6 +274,23 @@ class Component(ABC):
                     if hasattr(self, map_attr):
                         map_tensor = getattr(self, map_attr)
                         dep_nodes.append(ext_param.value[map_tensor])
+                    elif custom_slice:
+                        # A dep that NAMES its map ("star.mass[lens_map]")
+                        # asked for specific elements.  Falling back to the
+                        # unsliced vector does not mean "no slice" -- where
+                        # the lengths happen to match it broadcasts silently
+                        # and pairs the wrong bodies (a different star's mass
+                        # into a lens's theta_E).  The unnamed
+                        # "{comp}_map_tensor" convenience path keeps its
+                        # fallback.
+                        raise AttributeError(
+                            f"[{self.prefix}.{param_name}] dependency '{d}' "
+                            f"names the index map '{custom_slice}', but "
+                            f"{self.prefix} has no '{map_attr}'.  Build it in "
+                            f"build_maps() (build_tensor_maps converts "
+                            f"'{custom_slice}' automatically) or drop the "
+                            f"[...] from the dep."
+                        )
                     else:
                         dep_nodes.append(ext_param.value)
                 else:

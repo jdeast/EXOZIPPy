@@ -102,6 +102,52 @@ def timing_enabled():
     return _PTDE_COLLECT_TIMING
 
 
+# Exception types _eval_logp has already reported, so a failing region does
+# not emit one log line per proposal.  Per worker process, by construction.
+_LOGP_EXC_SEEN = set()
+
+
+def _report_logp_exception(exc, proposal):
+    """Log the first occurrence of each logp exception type in this worker.
+
+    The -inf below is kept -- a failed evaluation has to return SOMETHING and
+    the samplers are built around it -- but -inf is not "absent": both
+    Metropolis tests read it as ZERO POSTERIOR DENSITY, so a region that
+    merely raises is excluded from the posterior exactly as if the model had
+    ruled it out.  If it borders the mode, the posterior is truncated there
+    and the failures are absorbed into the acceptance rate as ordinary
+    rejections.  It used to be a bare `except Exception: return -np.inf`
+    with no counter, no warning and no sample_stats entry -- and it also
+    swallowed the exception before ptde_async's error_callback could fire,
+    making that logger.error dead code.  Note the SAME logp called on the
+    parent side during initialization is not wrapped at all, so an identical
+    failure is fatal at startup and was invisible during sampling.
+    """
+    key = type(exc).__name__
+    if key in _LOGP_EXC_SEEN:
+        return
+    _LOGP_EXC_SEEN.add(key)
+    try:
+        # RAW-space values: the worker has no raw_to_phys map (that lives on
+        # the parent, which is what describe_proposal needs), and a
+        # diagnostic that cannot be produced is worth less than one in the
+        # wrong coordinates.
+        where = ", ".join(
+            f"{k}={np.asarray(v).ravel()[:4]}"
+            for k, v in sorted(proposal.items())
+        )
+    except Exception:  # pragma: no cover - diagnostics must not raise
+        where = "<unprintable proposal>"
+    logger.error(
+        f"logp evaluation raised {key}: {exc}.  The proposal is being "
+        f"REJECTED (logp = -inf), i.e. treated as zero posterior density, "
+        f"so this region is excluded from the posterior rather than "
+        f"explored.  First occurrence in this worker; further {key} will "
+        f"not be logged.  Proposal: {where}",
+        exc_info=True,
+    )
+
+
 def _eval_logp(proposal):
     """Worker: evaluate logp for one raw-space proposal dict.
 
@@ -113,12 +159,14 @@ def _eval_logp(proposal):
         t0 = time.perf_counter()
         try:
             lp = float(_PTDE_LOGP_FN(proposal))
-        except Exception:
+        except Exception as exc:
+            _report_logp_exception(exc, proposal)
             lp = -np.inf
         return lp, time.perf_counter() - t0
     try:
         return float(_PTDE_LOGP_FN(proposal))
-    except Exception:
+    except Exception as exc:
+        _report_logp_exception(exc, proposal)
         return -np.inf
 
 
