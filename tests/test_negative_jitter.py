@@ -145,6 +145,40 @@ def test_every_additive_noise_component_wires_the_shared_relation():
         assert block["deps"] == ["jitter_variance"]
 
 
+def test_the_labels_and_descriptions_do_not_promise_a_positive_jitter():
+    """
+    Given a reader meeting a negative jitter in an output table for the first
+    time,
+    When they look at the symbol and the description,
+    Then neither claims positivity: the label is not a sigma (and the
+    variance's is not a square), and the description says the value is signed
+    and what a negative one means.
+
+    EXOFASTv2 floors the jitter at zero; this code deliberately does not (see
+    calc_jitter), so the table is the only place that difference is explained.
+    """
+    from exozippy.config import ConfigManager
+
+    cm = ConfigManager({}, {})
+    for comp in ("rvinstrument", "transit", "astrometryinstrument"):
+        for name in ("jitter", "jitter_variance"):
+            block = cm.base_defaults[comp][name]
+            where = f"{comp}.{name}"
+
+            assert "sigma" not in block["latex"], where
+            assert "^2" not in block["latex"], where
+            assert "signed" in block["description"].lower(), where
+
+            # Descriptions reach LaTeX *text* mode through latex_escape,
+            # which covers ^ but not these -- they would silently render as
+            # something else.
+            assert not set("<>|") & set(block["description"]), where
+
+        described = cm.base_defaults[comp]["jitter"]["description"].lower()
+        assert "quadrature" in described, comp
+        assert "overestimated" in described, comp
+
+
 # ---------------------------------------------------------------------------
 # The symbolic bridge: one definition, live in every child
 #

@@ -116,9 +116,26 @@ def calc_jitter(jitter_variance):
     fit starts on the cusp: the pre-fix ``pt.switch`` reported
     ``d jitter / d jitter_variance = inf`` there.
 
+    DELIBERATE DEPARTURE FROM EXOFASTv2, which floors the jitter at zero.
+    This is an upgrade, not a port bug -- do not "restore" the floor.  The
+    argument is the one ``planet.mass`` in ``linear`` mode already makes (see
+    the mass-parametrization section of CLAUDE.md): a positive-definite
+    coordinate biases a marginal detection upward, because the half of the
+    posterior that would have balanced it is folded onto the boundary.  Here
+    the floor would also throw information away -- a negative jitter is the
+    fit telling you the quoted error bars are too large, which is a result
+    worth reporting.  And it would buy nothing in exchange: ``total_sigma``
+    uses ``jitter_variance`` directly and NOTHING in any physics path consumes
+    this function's output, so ``jitter`` is purely the reported form and a
+    floor could only ever hide a negative variance the sampler had already
+    visited.  The one cost of the sign is that a reader must know what it
+    means, which the defaults.yaml ``description`` says and the ``latex``
+    label carries: ``J``, not a ``sigma``, which would promise positivity.
+
     One function, three components (rv/transit/astrometry): it is pure
     algebra on the shared noise model this module owns, so it lives here
     rather than as three byte-identical copies under three registry names.
+    Its sympy counterpart lives just below, for the same reason.
     """
     return pt.sign(jitter_variance) * pt.sqrt(
         pt.maximum(pt.abs(jitter_variance), _JITTER_EPS)
