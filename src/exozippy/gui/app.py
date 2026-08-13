@@ -21,9 +21,9 @@ Endpoints (Phase 2, G7):
 
 Data file manager (G9):
     GET  /api/files?dir=...       -- browse the project tree for data files
+    GET  /api/browse?dir=...      -- unconfined browse for the project picker
     POST /api/files/eligible      -- schema-driven association menu for a file
     GET  /api/files/associations  -- current file -> instance associations
-    POST /api/preview             -- data-only PlotSpecs (worker subprocess)
 
 Run controls (G11):
     POST /api/run             -- launch a fit as a subprocess (one per project)
@@ -68,9 +68,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 # YAML files that look like parameter-override files rather than system configs.
 _PARAMS_SUFFIXES = (".params.yaml", ".params.yml")
 
-# Data-file extensions worth surfacing in the project listing (preview/assoc.
-# in later prompts). Kept generic -- the datafile schema (G1) is the real
-# authority; this is only a listing convenience.
+# Data-file extensions worth surfacing in the project listing. Kept generic --
+# the datafile schema (G1) is the real authority; this is only a listing
+# convenience.
 _DATA_EXTS = (
     ".sed",
     ".rv",
@@ -482,10 +482,6 @@ def create_app(project_dir=None, initial_config=None):
     # app instance so each create_app() -- including per-test apps -- is isolated.
     run_state = {"handle": None}
 
-    # Data-tab preview cache, keyed by (comp_type, data-file mtimes) so a
-    # re-preview of an unchanged file is instant (G9).
-    preview_cache = {}
-
     # One Tune-tab solve/evaluator session per project (G10). Held on the app
     # instance so the dedicated worker process survives across requests.
     tune_state = {"session": None}
@@ -523,10 +519,6 @@ def create_app(project_dir=None, initial_config=None):
 
     class EligibleRequest(BaseModel):
         filename: str
-
-    class PreviewRequest(BaseModel):
-        comp_type: str
-        name: Optional[str] = None
 
     class TuneSolveRequest(BaseModel):
         # All optional: when omitted, the currently-open document supplies the
@@ -604,11 +596,8 @@ def create_app(project_dir=None, initial_config=None):
         # Every piece of per-project state below outlived the switch, so
         # project B showed A's solved parameters and A's plots under B's name
         # until a re-Solve -- and an edit made against those stale values was
-        # committed into B's params file (review 2.11.1). Order matters: the
-        # heavy tune session goes first so its worker starts winding down while
-        # the rest is cleared.
+        # committed into B's params file (review 2.11.1).
         _reset_tune_session()
-        preview_cache.clear()
 
         doc = state["doc"]
         if doc is not None and not _is_inside(listing["dir"], doc.config_path):
@@ -768,10 +757,9 @@ def create_app(project_dir=None, initial_config=None):
 
     # --- data file manager (G9) ---------------------------------------------
     #
-    # A schema-driven file browser + association + raw-data preview. Nothing
-    # here names a component: eligibility and associations flow entirely from
-    # the datafile globs declared in the config schema, and preview reuses each
-    # component's own plot_data(point=None).
+    # A schema-driven file browser + association menu. Nothing here names a
+    # component: eligibility and associations flow entirely from the datafile
+    # globs declared in the config schema.
 
     @app.get("/api/files")
     def files_list(dir: Optional[str] = None):
@@ -835,68 +823,6 @@ def create_app(project_dir=None, initial_config=None):
             state["doc"].config, full_schema()
         )
         return JSONResponse({"associations": assoc})
-
-    def _preview_cache_key(doc, comp_type):
-        """Cache key = comp_type plus the mtimes of that component's data files.
-
-        Component-agnostic: it discovers the data-file values via the schema's
-        datafile keys, so the cache invalidates whenever any associated file on
-        the component changes on disk (spec: cache per file mtime + instance).
-        """
-        from ..introspect import full_schema
-        from . import datafiles
-
-        workdir = (
-            str(doc.config_path.parent) if doc.config_path else os.getcwd()
-        )
-        assoc = datafiles.current_associations(doc.config, full_schema())
-        mtimes = []
-        for _base, refs in assoc.items():
-            for ref in refs:
-                if ref["comp_type"] != comp_type:
-                    continue
-                path = ref["path"]
-                if not os.path.isabs(path):
-                    path = os.path.join(workdir, path)
-                try:
-                    mtimes.append((ref["path"], os.path.getmtime(path)))
-                except OSError:
-                    mtimes.append((ref["path"], None))
-        return (comp_type, tuple(sorted(mtimes)))
-
-    @app.post("/api/preview")
-    def preview(req: PreviewRequest):
-        """Build data-only PlotSpecs for a component in a worker subprocess.
-
-        Runs a lightweight prepare() off-process with a timeout, so a bad data
-        file surfaces as a readable error instead of hanging the server.
-        """
-        from .document import _jsonable
-        from .preview import run_preview
-
-        doc = state["doc"]
-        if doc is None:
-            return JSONResponse(
-                {"error": "no document is open; POST /api/doc/open first"},
-                status_code=400,
-            )
-
-        key = _preview_cache_key(doc, req.comp_type)
-        if key in preview_cache:
-            return JSONResponse(preview_cache[key])
-
-        config = _jsonable(doc.config)
-        params = _jsonable(doc.params)
-        workdir = (
-            str(doc.config_path.parent) if doc.config_path else os.getcwd()
-        )
-        result = run_preview(config, params, workdir, req.comp_type)
-
-        # Only cache successful builds; an error should be re-attempted after a
-        # fix, and errors are cheap to reproduce anyway.
-        if "specs" in result:
-            preview_cache[key] = result
-        return JSONResponse(result)
 
     # --- run controls (G11) -------------------------------------------------
     #
@@ -1038,17 +964,6 @@ def create_app(project_dir=None, initial_config=None):
         session.error = None
         tune_pool.submit(session.solve, config, params, workdir)
         return JSONResponse(session.status())
-
-    @app.post("/api/tune/prewarm")
-    def tune_prewarm():
-        """Start the evaluator worker (heavy imports) ahead of the first Solve.
-
-        Fire-and-forget: the Tune tab calls this on open so the ~10s import cost
-        is paid while the user reads the tab, not on the Solve click.
-        """
-        session = _tune_session()
-        tune_pool.submit(session.prewarm)
-        return JSONResponse({"ok": True})
 
     @app.get("/api/tune/status")
     def tune_status():

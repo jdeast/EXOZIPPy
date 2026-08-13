@@ -1,7 +1,8 @@
 """Component-agnostic data-file association helpers for the GUI (G9).
 
-The Data tab lets a user browse project files, associate them with component
-instances, and preview their raw contents. Which instances a given file may be
+These back the project file browser and the schema-driven association menu
+(the Config form's Browse button; the Tools tab's "associate produced file"
+affordance is still unwired -- see gui.md). Which instances a given file may be
 associated with is decided SOLELY by the declarative schema
 (:func:`exozippy.introspect.full_schema`): every component config key with
 ``kind == "datafile"`` carries a glob pattern in its ``accepts`` field, and a

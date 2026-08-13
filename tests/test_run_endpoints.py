@@ -3,9 +3,10 @@
 Two layers:
 
 * Fast endpoint tests drive POST /api/run, GET /api/run/status,
-  POST /api/run/stop, GET /api/run/image and POST /api/utilities/run with a
-  *fake* RunHandle (no subprocess), so the HTTP wiring, guard rails, status
-  payload, and path safety are covered in milliseconds.
+  POST /api/run/stop, GET /api/run/plots, GET /api/run/image and
+  POST /api/utilities/run with a *fake* RunHandle (no subprocess), so the HTTP
+  wiring, guard rails, status payload, and path safety are covered in
+  milliseconds.
 * One slow end-to-end test launches a real, tiny PTDE fit through the endpoints
   (reusing the kelt4 RV-only example the way tests/test_runner.py does) and
   confirms the start -> running -> stop -> clean-exit round trip.
@@ -314,6 +315,55 @@ def test_run_snapshot_survives_a_config_without_a_params_file(
     )
     assert resp.status_code == 200
     assert (tmp_path / "out" / "cfg.used.yaml").is_file()
+
+
+def test_run_plots_lists_raster_images_but_not_pdfs(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given an active run with start/mcmc plot files beside its prefix,
+    When GET /api/run/plots is polled,
+    Then raster images are listed under the phase their filename names, while
+    PDFs and non-image files are not.
+
+    This endpoint has no frontend caller today -- it is a kept seam (the
+    run-plot gallery; see gui.md), so its contract is pinned here. The PDF
+    exclusion is the CURRENT behavior, and it is also the reason a restored
+    gallery would show nothing: ``plotrender`` writes ``{prefix}_{tag}.pdf``,
+    so a real fit produces no file this endpoint will list. Fixing that (a
+    raster copy, or serving PDFs and rendering them as links/embeds) is part
+    of restoring the gallery, and this test is where the change shows up.
+    """
+    from exozippy.gui import runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "RUN_start_rv.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (out / "RUN_mcmc_rv.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (out / "RUN_mcmc_transit.pdf").write_bytes(b"%PDF-1.4")
+    (out / "RUN_start_notes.txt").write_text("not an image")
+    fake = _FakeHandle(tmp_path)
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
+
+    body = client.get("/api/run/plots").json()
+
+    assert [Path(p).name for p in body["start"]] == ["RUN_start_rv.png"]
+    assert [Path(p).name for p in body["progress"]] == ["RUN_mcmc_rv.png"]
+
+
+def test_run_plots_without_active_run_is_empty(client):
+    """
+    Given no active run,
+    When GET /api/run/plots is polled,
+    Then both lists are empty rather than an error (the poll is best-effort).
+    """
+    assert client.get("/api/run/plots").json() == {
+        "start": [],
+        "progress": [],
+    }
 
 
 def test_run_image_rejects_outside_tree(client, monkeypatch, tmp_path):

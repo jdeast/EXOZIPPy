@@ -2,8 +2,7 @@
 
 Covers the SCHEMA-DRIVEN association eligibility helper/endpoint (with a fake
 component to prove no component names are hardcoded), the current-association
-mapping, the directory-listing helper, and the preview endpoint returning
-PlotSpec JSON for a real kelt4 RV instance.
+mapping, and the directory-listing helper.
 
 Follows AAA with Given/When/Then docstrings.
 """
@@ -224,35 +223,3 @@ def test_files_and_associations_endpoints(client, rvonly_project):
     assoc = client.get("/api/files/associations").json()["associations"]
     assert assoc["KELT-4b.HIRES.rv"][0]["comp_type"] == "rvinstrument"
     assert assoc["KELT-4b.HIRES.rv"][0]["name"] == "HIRES"
-
-
-@pytest.mark.slow
-def test_preview_endpoint_returns_plotspec_json(client, rvonly_project):
-    """
-    Given the opened RV-only kelt4 project,
-    When POST /api/preview requests the rvinstrument data-only preview,
-    Then it returns >= 1 PlotSpec with observed RV data traces.
-    """
-    config_path = str(rvonly_project / "kelt4_rvonly.yaml")
-    client.post("/api/doc/open", json={"config_path": config_path})
-
-    resp = client.post("/api/preview", json={"comp_type": "rvinstrument"})
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "specs" in body, body
-    specs = body["specs"]
-    assert len(specs) >= 1
-    # data-only: every trace is observational, no model curves
-    roles = {t["role"] for s in specs for t in s["traces"]}
-    assert roles == {"data"}
-    # and the payload is real JSON with numeric arrays
-    first = specs[0]
-    assert first["traces"][0]["x"] and first["traces"][0]["y"]
-
-
-def test_preview_endpoint_without_doc_is_400(client):
-    """Given no open document, When POST /api/preview, Then it returns 400."""
-    resp = client.post("/api/preview", json={"comp_type": "rvinstrument"})
-    assert resp.status_code == 400
-    assert "error" in resp.json()

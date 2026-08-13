@@ -84,12 +84,14 @@ push it into one of these contracts instead.
 - `datafiles.py` (G9) -- pure, component-agnostic helpers: `list_directory`
   (project-rooted browser that cannot escape the root), `eligible_associations`
   (which instance/key a filename may attach to, by matching the schema's
-  `kind: "datafile"` globs), `current_associations` (chip data).
-- `preview.py` + `preview_worker.py` (G9) -- data-file preview. `run_preview`
-  drives `python -m exozippy.gui.preview_worker` as a **subprocess with a hard
-  timeout**, which runs a lightweight `prepare()` + `plot_data(point=None)` and
-  emits data-only PlotSpec JSON (or a readable load error -- surfacing bad-file
-  errors IS the feature). A pathological file can never hang the server.
+  `kind: "datafile"` globs), `current_associations` (chip data). The latter two
+  are the unwired association seam -- see "Known unwired seams".
+  (There is no `preview.py`/`preview_worker.py` any more: a per-component
+  data-file preview subprocess served the removed Welcome/Data tabs, and the
+  Tune landing's `/api/tune/plots/data` -- the same `plot_data(point=None)`
+  specs, built in the tune worker process -- superseded it. Deleted 2026-08-12
+  with its `/api/preview` endpoint and mtime cache; recover from git history if
+  a per-component preview is ever wanted without a full solve.)
 - `tune.py` (G10) -- `TuneSession` (server-side phase tracking:
   solving -> compiling -> live -> error) driving an `EvaluatorWorker`, a
   dedicated **worker process** (spawn context, request/response over
@@ -148,8 +150,10 @@ returns the dirty in-memory document unchanged (tabs call open on mount, and
 a naive reload-from-disk silently reverted unsaved edits on tab switches); a
 clean same-path doc IS reloaded so external file edits are picked up.
 
-Data manager (G9): `GET /api/files`, `POST /api/files/eligible`,
-`GET /api/files/associations`, `POST /api/preview`.
+Data manager (G9): `GET /api/files` (project-rooted browser),
+`GET /api/browse` (unconfined, for the sidebar project picker),
+`POST /api/files/eligible`, `GET /api/files/associations` (both unwired --
+see "Known unwired seams").
 
 Run controls (G11): `POST /api/run` (one active run per project; copies the
 exact config/params into the output dir as `.used.*` for reproducibility -- the
@@ -162,9 +166,13 @@ plus `run_id`, `stale_status`, `returncode`, `error` and `console_path`, so
 `RunControl` can offer Run again and show WHY a run stopped instead of leaving
 a Stop button on a dead process), `POST /api/run/stop`, `GET /api/run/plots`,
 `GET /api/run/image?path=` (path-restricted to the run tree via
-realpath+commonpath), `POST /api/utilities/run`.
+realpath+commonpath -- the last two are unwired, see "Known unwired seams"),
+`POST /api/utilities/run`.
 
-Tune (G10): `POST /api/tune/solve`, `GET /api/tune/status`,
+Tune (G10): `POST /api/tune/solve` (the tune worker process is spawned by the
+solve itself; there is no separate prewarm call -- the Tune tab is the landing
+page and auto-Solves on mount, so a prewarm had nothing left to overlap with),
+`GET /api/tune/status`,
 `GET /api/tune/result`, `POST /api/tune/eval`, `GET /api/tune/hash`,
 `GET /api/tune/plots/data` (data-only PlotSpecs, available from the
 "compiling" phase on -- the worker builds them right after `prepare()` via
@@ -201,7 +209,19 @@ dependency. See `gui/frontend/README.md` for the dev/build loop.
   `active` flag tells a tab it is the visible one (ConfigTab resyncs from
   `GET /api/doc` on reveal so edits from other tabs show up).
 - `src/api.ts` -- the single typed client for every endpoint, plus
-  `openLogSocket(file)` and `runImageUrl(path)`.
+  `openLogSocket(file)` and `runImageUrl(path)`. Client methods with no caller
+  are the unwired seams listed at the bottom of this file and say so in a
+  comment; anything else without a caller is dead and should be deleted with
+  its endpoint.
+- `src/components/PathPicker.tsx` -- the ONE server-side path browser, used
+  twice: the sidebar picks a project **directory** (`select="dir"`, unconfined
+  `api.browse`, confirmed with a button) and the Config form picks a data
+  **file** (`select="file"`, project-rooted `api.files`, `relativeToRoot` so
+  the stored path is relative to the config dir, picked by clicking the row).
+  It browses through the server rather than a native OS dialog so it behaves
+  identically in the pywebview window and in a plain browser tab. Both call
+  sites had their own near-identical copy until 2026-08-12 (review 4.13); add
+  a prop rather than a third copy.
 - `src/plotspec.ts` -- TypeScript mirror of `plotspec.py`'s PlotSpec.
 - `src/plotly-adapter.ts` -- the ONE place PlotSpec trace roles map to plotly
   encodings (data = markers+error bars, model = line unless kind "scatter").
@@ -268,13 +288,17 @@ so tuned values can be written to disk without leaving the tab.
 3. **Round-trip YAML.** All config writes go through `ProjectDocument`
    (ruamel) so the user's comments and ordering survive.
 4. **Process isolation for heavy/blocking work.** Fits run as subprocesses
-   (never threads -- GIL + pytensor compile locks). The tune evaluator and the
-   file preview run in their own worker process/subprocess. Never block the
-   event loop.
+   (never threads -- GIL + pytensor compile locks). The tune evaluator runs in
+   its own worker process. Never block the event loop.
 5. **Local only.** The server binds 127.0.0.1. File-serving endpoints must stay
    path-restricted to their intended tree.
 
 ## Testing
+
+A **kept** seam still has to be tested end to end on the server side, or it
+rots into something that only looks alive: `/api/files/eligible`,
+`/api/files/associations`, `/api/run/plots` and `/api/run/image` are all
+exercised by the files below even though no frontend calls them today.
 
 Fast GUI tests (fastapi TestClient, no real compile): `tests/test_gui_app.py`,
 `tests/test_gui_document.py`, `tests/test_gui_data.py`, `tests/test_gui_tune.py`,
@@ -302,9 +326,49 @@ running the targeted GUI tests.
 Implemented: Phase 1 backend contracts (G1-G6) and Phase 2 core GUI (G7 shell,
 G8 config editor, G9 data manager, G10 tune panel, G11 run controls).
 
-Known unwired seams (polish backlog): the Tools tab's "associate produced
-file" affordance (a G9 stub). (The old Run-button doc-dirty gating seam is
-gone: RunControl saves the document before every launch.)
+Known unwired seams (polish backlog). Each is a **live, tested backend
+contract with a typed client method and no caller** -- kept deliberately, not
+overlooked. Anything not on this list and not called is dead; delete it with
+its endpoint rather than growing the list.
+
+1. **Associate a produced file** (G9 stub). The Tools tab renders a disabled
+   "Associate" button next to each file a utility produced
+   (`ToolsTab.tsx`, `TODO(G9)`). Wiring it up is `api.filesEligible(filename)`
+   for the instance/key menu, then the existing undoable `associate_datafile`
+   command; `api.filesAssociations()` is the same contract's other half (which
+   instances already reference a file -- the chip data the removed Data tab
+   drew). Server: `POST /api/files/eligible`, `GET /api/files/associations`,
+   over the pure helpers in `datafiles.py`.
+2. **The run-plot gallery** (`api.runPlots` + `runImageUrl`, served by
+   `GET /api/run/plots` and `GET /api/run/image`). This one is a **dropped
+   feature, not a backlog item**: the removed Run tab polled `/api/run/plots`
+   on the same tick as the status poll and rendered the run's
+   `<prefix>_start*` and `<prefix>_mcmc*` images as a thumbnail grid, each
+   thumbnail linking to the full-size file (the CSS, `.plot-gallery` /
+   `.gallery-grid`, is still in `styles.css`). It went with RunTab in commit
+   `75bf1ba` (2026-08-03) and nothing replaced it, so a running fit's plots
+   are reachable only through the filesystem.
+   **It never actually displayed an EXOZIPPy plot**, though, and that is the
+   real work in restoring it: `plotrender` writes `{prefix}_{tag}.pdf`, while
+   `app.py`'s `_IMAGE_EXTS` has listed only raster formats + svg since G11, so
+   `/api/run/plots` returns empty lists for every real run (`_corner.png` is
+   the one raster the fit writes, and it matches neither glob). The gallery
+   therefore rendered for its fixtures and stayed blank in practice.
+   Restoring it means deciding how PDFs reach a browser -- serve them and
+   render an `<embed>`/link grid rather than `<img>`, or have the fit emit
+   raster thumbnails alongside -- and then the UI is small: the two
+   `<section className="plot-gallery">` blocks from
+   `git show 75bf1ba^:gui/frontend/src/components/RunTab.tsx`, plus an
+   `api.runPlots()` call on RunControl's existing poll. The endpoints, the
+   `RunPlots` type, the client methods and the CSS are all kept so that
+   remains the whole job; the format decision is why this is recorded rather
+   than patched over. Where it should live -- expanded out of RunControl, or
+   as the G13 results browser -- is the other open question.
+   `tests/test_run_endpoints.py::test_run_plots_lists_raster_images_but_not_pdfs`
+   pins the current behavior and is where the format fix would show up.
+
+(The old Run-button doc-dirty gating seam is gone: RunControl saves the
+document before every launch.)
 
 Not yet built (Phase 3): G12 node canvas (React Flow view over the G8
 document), G13 results browser, G14 run queue + settings + packaging.
