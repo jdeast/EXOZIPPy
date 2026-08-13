@@ -8,6 +8,11 @@ import numpy as np
 G = const.G.to(u.R_sun**3 / (u.M_sun * u.day**2)).value
 
 RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
+# Speed of light in EXOZIPPy's native internal unit system (R_sun, M_sun,
+# day) -- NOT AU/day like exoplanet's own c_light, and NOT AU/s like
+# EXOFASTv2 -- so light-travel-time delays (components/ltt.py) combine
+# directly with orbit.arsun (already in R_sun) with no AU round-trip.
+C_LIGHT_RSUN_PER_DAY = const.c.to(u.R_sun / u.day).value
 KEPLER_CONST = (G / (4.0 * np.pi**2)) ** (1.0 / 3.0)
 LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (
