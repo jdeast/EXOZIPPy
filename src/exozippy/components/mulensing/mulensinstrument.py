@@ -1154,7 +1154,7 @@ class MulensInstrument(Instrument):
             else:
                 mag_cite = (
                     r"computed with VBMicrolensing "
-                    r"\citep{Bozza:2010, Bozza:2018}"
+                    r"\citep{Bozza:2010, Bozza:2018, Bozza:2025}"
                 )
                 get_collector(system).add_software("VBMicrolensing")
         else:
@@ -1164,6 +1164,16 @@ class MulensInstrument(Instrument):
             section="microlensing",
             key=f"{self.prefix}.magnification",
             rank=10,
+        )
+        get_collector(system).add(
+            r"The microlens parallax is parameterized in the geocentric "
+            r"frame of \citet{Gould:2004}, with observer positions "
+            r"expressed as geocentric deviations following "
+            r"\citet{Skowron:2011}; all sign conventions match "
+            r"MulensModel \citep{Poleski:2019}.",
+            section="microlensing",
+            key=f"{self.prefix}.parallax_convention",
+            rank=15,
         )
         get_collector(system).add(
             "The microlensing likelihood is Gaussian in flux (never in "

@@ -285,7 +285,7 @@ def _run_fit(config, gui, user_params=None):
     # the user keeps it even if the fit dies hours in.  Regenerated (not
     # appended) at wrap-up with the results/convergence/figures/table
     # sections. Never fatal: the draft is a bonus deliverable.
-    _add_sampler_prose(system, method)
+    _add_sampler_prose(system, method, swap_schedule=swap_schedule)
     try:
         build_modeling_output(system, prefix)
     except Exception:
@@ -1226,7 +1226,7 @@ def inspect_start(
         )
 
 
-def _add_sampler_prose(system, method):
+def _add_sampler_prose(system, method, swap_schedule="deo"):
     """Declare the run-level modeling prose (intro + sampler paragraph).
 
     Config facts only, per the prose contract (outputs/prose.py): the
@@ -1244,12 +1244,19 @@ def _add_sampler_prose(system, method):
         rank=5,
     )
     if method in ("ptde", "ptde_async"):
+        swap_cite = (
+            r" and the non-reversible deterministic even--odd (DEO) swap "
+            r"schedule \citep{Syed:2022}"
+            if str(swap_schedule).lower() == "deo"
+            else ""
+        )
         prose.add(
             r"We sampled the posterior with a parallel-tempered "
             r"differential-evolution MCMC "
             r"\citep{terBraak:2006, terBraak:2008} with adaptive "
-            r"temperature-ladder placement \citep{Vousden:2016}, as "
-            r"implemented in EXOZIPPy.",
+            r"temperature-ladder placement \citep{Vousden:2016}"
+            + swap_cite
+            + ", as implemented in EXOZIPPy.",
             section="sampling",
             key="run.sampler",
             rank=10,
