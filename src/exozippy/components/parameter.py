@@ -99,6 +99,12 @@ _LOGIT_SATURATION_PENALTY_K = 0.5
 # measured rescale (Parameter.set_whitening) replaces it before sampling.
 _PRELIM_SCALE_SPAN_FRACTION = 0.1
 
+# The labels ConfigManager.initval_source may return.  Both start-value
+# errors key an advice table on one of these, so an unrecognized label is
+# normalized to "default" rather than KeyError-ing while rendering the very
+# message it is decorating.
+_INITVAL_SOURCES = frozenset({"user", "data", "solved", "default"})
+
 
 # ----------------------------
 # Helper functions
@@ -826,7 +832,10 @@ class Parameter:
         Returns "user", "data", "solved" or "default" (see
         ConfigManager.initval_source).  Pure metadata for an error message,
         so a fault in the lookup must never replace the diagnosis it is
-        decorating: anything that goes wrong degrades to "default".
+        decorating: anything that goes wrong degrades to "default".  That
+        includes an unrecognized label -- both callers key an advice table on
+        the result, and a KeyError raised while rendering an error message
+        would replace the diagnosis with a traceback about the decoration.
         """
         if not callable(self.initval_source):
             return "default"
@@ -837,9 +846,10 @@ class Parameter:
             else None
         )
         try:
-            return self.initval_source(comp, pname, element=int(i), name=name)
+            src = self.initval_source(comp, pname, element=int(i), name=name)
         except Exception:  # noqa: BLE001 -- metadata only, never fatal
             return "default"
+        return src if src in _INITVAL_SOURCES else "default"
 
     def _unit_suffix(self):
         """The user unit as a message suffix (e.g. ' solMass'), or ''."""
@@ -899,16 +909,58 @@ class Parameter:
             f"nobody chose; it now refuses.\n" + advice
         )
 
-    def _no_start_value_message(self, offenders, lowers, uppers):
-        """Render the fatal 'sampled element with a non-finite start' error.
+    # What to do about a SAMPLED element with no start value, keyed on the
+    # provenance ConfigManager recorded for it.  For the overwhelmingly common
+    # case nothing recorded anything and the label is "default"; the other
+    # three mean some channel is on record as the source while no number
+    # actually landed, which is worth saying out loud because it points at the
+    # channel rather than at the user.
+    _NO_START_ADVICE = {
+        "default": (
+            "Nothing supplied a start value: not your params file, not the "
+            "component's defaults.yaml, not a component hint or manifest "
+            "'overrides' entry, and the relaxation engine derived none. "
+            "Fix: add an 'initval' for this element to your params file -- or, "
+            "if every fit of this topology needs one, add an 'initval' to the "
+            "parameter's entry in the component's defaults.yaml."
+        ),
+        "user": (
+            "Your params file names this parameter, but the entry supplies no "
+            "usable 'initval' -- a 'lower'/'upper', a 'sigma', or a link on "
+            "some other field is not a start value. Fix: add 'initval:' to "
+            "that same entry."
+        ),
+        "solved": (
+            "The relaxation engine is on record as this element's source, but "
+            "it left the element itself unsolved, so no number reached the "
+            "model. Fix: seed it directly with an 'initval' (a user value "
+            "outranks a derivation), or supply the inputs the derivation "
+            "needs."
+        ),
+        "data": (
+            "A data-derived hint from the component that loaded your data is "
+            "on record as this element's source, but no number reached the "
+            "model -- most likely the hint covered other elements of the same "
+            "vector and not this one. Fix: seed this element directly with an "
+            "'initval'."
+        ),
+    }
 
-        Same family as the out-of-bounds error and caught in the same place,
-        but a genuinely different mistake, so it says so.  NaN satisfies no
-        bound and is no start: the old code sent it through ``np.clip``,
-        which returns NaN, warned that it had "nudged" it, and then wrote
-        ``log(NaN/(1-NaN))`` into the transform -- so the model was built
-        with a NaN start and died later inside PyMC's initial-point check,
+    def _no_start_value_message(self, offenders, lowers, uppers):
+        """Render the fatal 'sampled element with no start value' error.
+
+        Same family as the out-of-bounds error, but a genuinely different
+        mistake, so it says so.  A sampled element's start is ``initval`` and
+        there is no second channel for it: ``to_vec``'s ``fill=0.0`` used to
+        turn "nobody said" into the number 0.0 in whatever internal unit the
+        parameter happens to carry -- a start nobody chose, indistinguishable
+        downstream from a deliberate one -- and where the missing value was
+        spelled ``NaN`` instead it went on to build ``log(NaN/(1-NaN))`` into
+        the transform, so the fit died later inside PyMC's initial-point check
         naming a raw variable rather than the parameter the user has to fix.
+
+        Bounds are quoted (in the user unit) only where they are finite; an
+        unbounded sampled element reaches this too.
         """
         factors = np.atleast_1d(
             np.asarray(self._get_conversion_factors(), dtype=float)
@@ -919,24 +971,36 @@ class Parameter:
             return val * f
 
         unit = self._unit_suffix()
-        lines = [
-            f"  {self.get_display_label(int(i))}: no usable start value "
-            f"(bounds [{user_units(lowers[i], i):.10g}, "
-            f"{user_units(uppers[i], i):.10g}]{unit})"
-            for i in offenders
-        ]
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
+                bounds = (
+                    f" (bounds [{user_units(lowers[i], i):.10g}, "
+                    f"{user_units(uppers[i], i):.10g}]{unit};"
+                )
+            else:
+                bounds = " (unbounded;"
+            lines.append(
+                f"  {self.get_display_label(int(i))}: no start value"
+                f"{bounds} provenance: {src})"
+            )
+
         where = (
             f" (params file: {self.source_file})" if self.source_file else ""
         )
+        advice = "\n".join(self._NO_START_ADVICE[s] for s in sorted(sources))
         return (
-            f"Sampled parameter with a non-finite start value{where}:\n"
+            f"Sampled parameter with no start value{where}:\n"
             + "\n".join(lines)
             + "\n"
-            + f"Nothing supplied a start for the element(s) above -- not the "
-            f"params file, not {self.label.split('.')[0]}/defaults.yaml, and "
-            f"nothing derived one -- so the logit transform would be built "
-            f"around NaN and every logp evaluated from it would be NaN. "
-            f"Fix: give the element an 'initval' inside its bounds."
+            + "A sampled element has to start SOMEWHERE, and 'initval' is the "
+            "only thing that says where. EXOZIPPy used to fill a missing one "
+            "with 0.0 in internal units and carry on, which produced a "
+            "plausible-looking fit from a point nobody chose; it now "
+            "refuses.\n" + advice
         )
 
     def build_pymc(self, ndx=0, expression=None):
@@ -1019,10 +1083,12 @@ class Parameter:
         #     there is a no-op, already warned about below -- a different
         #     mistake with a different fix, so it keeps its own message.
         #   - HARD-LINKED elements: the link expression IS the value.
+        has_value = self._initval_present(n_elements)
+        hard_linked = set((self.element_links or {}).get("hard", {}))
         pinned_no_value = [
             i
-            for i in np.where(is_fixed & ~self._initval_present(n_elements))[0]
-            if i not in set((self.element_links or {}).get("hard", {}))
+            for i in np.where(is_fixed & ~has_value)[0]
+            if i not in hard_linked
         ]
         if pinned_no_value:
             where = (
@@ -1043,6 +1109,45 @@ class Parameter:
                 f"Fix: add an explicit 'initval' (the value you mean to fix "
                 f"it at) to the same params-file entry as the 'sigma: 0', or "
                 f"drop the 'sigma: 0' and let it be fitted."
+            )
+
+        # A SAMPLED ELEMENT MUST SAY WHERE IT STARTS.  The sibling of the pin
+        # check above, and for the same reason: `initval` is the ONLY channel
+        # for a start value, and `to_vec`'s `fill=0.0` turns "nobody said" into
+        # the number 0.0 in whatever internal unit the parameter carries.  For
+        # a pinned element that is the whole answer; for a sampled one it is
+        # the chain's starting point, the point the whitening probe measures
+        # around and the point every multi-seed start is derived from -- and
+        # 0.0 is a perfectly ordinary-looking value, so nothing downstream can
+        # tell it apart from a start the user chose.  Where the missing value
+        # arrives spelled NaN instead (ConfigManager.resolve writes NaN into a
+        # vector for "this element was never set"), the logit branch built
+        # log(NaN/(1-NaN)) and the fit died much later inside PyMC's
+        # initial-point check, naming a raw variable instead of the parameter.
+        #
+        # Stage 5 for the same reason the pin check is: it is the earliest
+        # point that sees EVERY channel a value can arrive through --
+        # defaults.yaml, the params file, a component hint, the manifest
+        # "overrides" and "options" channels, and the relaxation engine's
+        # solution have all landed in `initval` by now, so a check here cannot
+        # fire falsely on a value that was simply going to arrive later.
+        #
+        # No exemption list is needed here, unlike the pin check.  A DERIVED
+        # element is excluded already (`is_sampled` is false for it), and so
+        # is a HARD-LINKED one: Component._wire_user_links only classifies an
+        # initval link as "hard" when that element's sigma is 0, so a hard
+        # link implies a pin and the pin check above owns it.  A SOFT link
+        # (an initval link with sigma > 0, or a `mu` link) does reach here,
+        # and should: it adds a Gaussian potential tying the element to an
+        # expression, but the element is still sampled and still has to start
+        # somewhere.  A symbolic initval counts as present and is deliberately
+        # not evaluated.
+        sampled_no_value = [
+            int(i) for i in np.where(is_sampled & ~has_value)[0]
+        ]
+        if sampled_no_value:
+            raise ValueError(
+                self._no_start_value_message(sampled_no_value, lowers, uppers)
             )
 
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
@@ -1105,19 +1210,13 @@ class Parameter:
         #     barrier ever reads their bounds.  Nothing is clipped there.
         # Every offending element of a vector is reported, not just the first.
         #
-        # A NON-FINITE start is split out into its own message: NaN satisfies
-        # no bound either, but "you asked to start outside the bounds" is the
-        # wrong diagnosis for "nothing gave this element a start at all", and
-        # the fixes differ.
+        # A NON-FINITE start never reaches here: NaN satisfies no bound either,
+        # but "you asked to start outside the bounds" is the wrong diagnosis
+        # for "nothing gave this element a start at all", and the fixes differ.
+        # The no-start-value check above catches every spelling of that
+        # (missing, NaN, or short of the vector's length) before this one runs.
         two_finite = np.isfinite(lowers) & np.isfinite(uppers)
         checkable = is_sampled & two_finite & (uppers > lowers)
-        no_start = [
-            int(i) for i in np.where(checkable)[0] if not np.isfinite(inits[i])
-        ]
-        if no_start:
-            raise ValueError(
-                self._no_start_value_message(no_start, lowers, uppers)
-            )
         bound_violations = [
             int(i)
             for i in np.where(checkable)[0]

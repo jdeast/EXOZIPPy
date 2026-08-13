@@ -406,6 +406,409 @@ def test_manifest_overrides_pins_are_unaffected():
 
 
 # ---------------------------------------------------------------------------
+# A SAMPLED ELEMENT MUST SAY WHERE IT STARTS (Parameter.build_pymc).
+#
+# The pin check's sibling, and the same argument: `initval` is the ONLY
+# channel for a start value, and to_vec's `fill=0.0` turns "nobody said" into
+# the number 0.0 in whatever internal unit the parameter carries.  For a
+# sampled element that 0.0 is where the chains begin, where the whitening
+# probe measures, and what every multi-seed start is derived from -- and it
+# looks exactly like a start somebody chose.
+#
+# The first group pins that it fires; the second pins that it does NOT fire
+# for any of the several channels a value legitimately arrives through, since
+# stage 5 is where they have all landed.
+# ---------------------------------------------------------------------------
+
+
+def test_sampled_parameter_with_no_start_value_raises():
+    """
+    Given a sampled parameter with bounds but no initval from any source,
+    When it is materialized in the PyMC graph,
+    Then a ValueError naming the parameter is raised rather than silently
+    starting the chains at 0.0 in internal units.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        lower=1000.0,
+        upper=10000.0,
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            p.build_pymc()
+    msg = str(exc.value)
+    assert "star.teff" in msg
+    assert "initval" in msg
+    # Not the pin error and not the out-of-bounds one: three neighbouring
+    # checks, three different mistakes, three different fixes.
+    assert "Pinned parameter with no value" not in msg
+    assert "outside its hard bounds" not in msg
+
+
+def test_no_start_error_names_the_params_file_when_one_is_known():
+    """
+    Given a start-less sampled parameter whose values came from a params FILE,
+    When the error is raised,
+    Then the message quotes that file so the user knows what to edit.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        lower=1000.0,
+        upper=10000.0,
+        unit="",
+        internal_unit="",
+        source_file="myfit.params.yaml",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            p.build_pymc()
+    assert "myfit.params.yaml" in str(exc.value)
+
+
+def test_no_start_error_is_per_element_and_spares_the_valued_elements():
+    """
+    Given a vector whose element 0 has no start and whose element 1 does,
+    When the model is built,
+    Then only element 0 is reported -- the check is per element, like the
+    "overrides" channel it has to coexist with.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="gp.amp",
+        initval=[np.nan, 2.0],
+        lower=[0.0, 0.0],
+        upper=[10.0, 10.0],
+        shape=(2,),
+        names=["fileA", "fileB"],
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            p.build_pymc()
+    msg = str(exc.value)
+    assert "gp.fileA.amp" in msg
+    assert "gp.fileB.amp" not in msg
+
+
+def test_unbounded_sampled_element_with_no_start_raises_too():
+    """
+    Given a sampled element with no bounds and an explicit Gaussian sigma,
+    When the model is built,
+    Then it still raises: the Gaussian branch reads its start from initval
+    too (raw = (initval - mu)/sigma), so a missing one starts the chain at
+    0.0 rather than at the prior centre. The message says "unbounded" rather
+    than quoting bounds it does not have.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        mu=5778.0,
+        sigma=100.0,
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            p.build_pymc()
+    assert "unbounded" in str(exc.value)
+
+
+def test_no_start_with_no_value_anywhere_raises_through_component_path():
+    """
+    Given a manifest that declares star.mass a FREE parameter (it carries no
+    defaults.yaml initval -- it is normally derived from logmass) and nothing
+    seeding it,
+    When the parameter is built through the real component path,
+    Then the error fires and names the parameter as the user spelled it.
+    """
+    # ARRANGE
+    config_manager = ConfigManager({})
+    star = Star([{"name": "A"}], config_manager)
+
+    # ACT & ASSERT
+    with pm.Model(name="valueless_sampled"):
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            star.add_parameter(model=None, param_name="mass", system=None)
+    assert "star.A.mass" in str(exc.value)
+
+
+def test_no_start_error_tailors_its_advice_to_the_provenance():
+    """
+    Given a start-less element whose recorded provenance is the relaxation
+    engine (some channel is on record while no number landed),
+    When the error is raised,
+    Then the advice names that channel rather than blaming a params-file line
+    the user never wrote -- the same tailoring the out-of-bounds error does.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="lens.t_E",
+        lower=1.0,
+        upper=500.0,
+        unit="",
+        internal_unit="",
+        initval_source=lambda *a, **k: "solved",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(ValueError) as exc:
+            p.build_pymc()
+    msg = str(exc.value)
+    assert "provenance: solved" in msg
+    assert "relaxation engine" in msg
+    assert "not your params file" not in msg  # the "default" advice
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("provenance lookup exploded")
+
+
+@pytest.mark.parametrize(
+    "source", [_boom, lambda *a, **k: "somethingelse"], ids=["raises", "bogus"]
+)
+def test_no_start_error_survives_a_broken_provenance_lookup(source):
+    """
+    Given an initval_source callable that raises, or one that returns a label
+    the advice table does not know,
+    When the no-start error is rendered,
+    Then the diagnosis still gets out (degraded to "default") -- a fault in
+    the decoration must never replace the error it decorates, and a KeyError
+    while rendering the message would do exactly that.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        lower=1000.0,
+        upper=10000.0,
+        unit="",
+        internal_unit="",
+        initval_source=source,
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
+            p.build_pymc()
+    assert "provenance: default" in str(exc.value)
+
+
+# --- the channels a value legitimately arrives through: none may fire -------
+
+
+def test_derived_element_needs_no_start_value():
+    """
+    Given a DERIVED parameter with no initval at all,
+    When the model is built,
+    Then nothing is raised: its value is the expression, and it is not
+    sampled.
+    """
+    # ARRANGE
+    expr_val = pt.as_tensor_variable(np.float64(3.0))
+    p = Parameter(
+        label="lens.t_E",
+        expression=lambda: expr_val,
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model(name="derived_no_start"):
+        p.build_pymc()  # must not raise
+
+
+def test_pinned_element_with_no_start_still_gets_the_pin_error():
+    """
+    Given an element pinned with sigma=0 and no value,
+    When the model is built,
+    Then it is the PIN error that fires, not this one -- the two checks sit
+    side by side and a pin has its own message and its own fix.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        sigma=0,
+        lower=1000.0,
+        upper=10000.0,
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model():
+        with pytest.raises(ValueError, match="Pinned parameter with no value"):
+            p.build_pymc()
+
+
+def test_symbolic_initval_counts_as_a_start_value():
+    """
+    Given a sampled element whose initval is a symbolic node (what a linked
+    initval resolves to),
+    When the model is built,
+    Then nothing is raised and the node is not evaluated to find out.
+    """
+    # ARRANGE
+    p = Parameter(
+        label="star.teff",
+        initval=pt.as_tensor_variable(np.float64(5778.0)),
+        lower=1000.0,
+        upper=10000.0,
+        unit="",
+        internal_unit="",
+    )
+
+    # ACT & ASSERT
+    with pm.Model(name="symbolic_start"):
+        p.build_pymc()  # must not raise
+
+
+def test_defaults_yaml_initval_satisfies_the_check():
+    """
+    Given a parameter whose only start value is the one in its component's
+    defaults.yaml (star.radius: 1.0),
+    When it is built through the real component path with empty user params,
+    Then it builds and starts there.
+    """
+    # ARRANGE
+    config_manager = ConfigManager({})
+    star = Star([{"name": "A"}], config_manager)
+
+    # ACT
+    with pm.Model(name="defaults_start"):
+        star.manifest = {"radius": {}}
+        star.add_parameter(model=None, param_name="radius", system=None)
+
+    # ASSERT
+    assert star.radius.is_sampled.tolist() == [True]
+    assert np.isclose(star.radius.initval[0], 1.0)
+
+
+def test_component_hint_satisfies_the_check():
+    """
+    Given a component hint as the ONLY source of a start value (the channel
+    load_data uses for a data-derived guess, layered in by the stage-3 solve),
+    When the parameter is built,
+    Then it builds and starts at the hinted value.
+    """
+    # ARRANGE
+    config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})
+    config_manager.add_hint("star.A.mass", 1.3)
+    config_manager.finalize_user_params()
+    star = Star([{"name": "A"}], config_manager)
+
+    # ACT
+    with pm.Model(name="hint_start"):
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
+        star.add_parameter(model=None, param_name="mass", system=None)
+
+    # ASSERT
+    assert star.mass.is_sampled.tolist() == [True]
+    assert np.isclose(star.mass.initval[0], 1.3)
+
+
+def test_manifest_overrides_initval_satisfies_the_check():
+    """
+    Given the manifest "overrides" channel supplying the start value (what
+    MulensInstrument._scale_flux_amplitudes and the GP amplitudes do),
+    When the parameter is built,
+    Then it builds -- the check has to see a channel applied inside its own
+    stage, which is why it lives at stage 5.
+    """
+    # ARRANGE
+    config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})
+    star = Star([{"name": "A"}], config_manager)
+
+    # ACT
+    with pm.Model(name="overrides_start"):
+        star.manifest = {
+            "mass": {
+                "lower": 0.1,
+                "upper": 250.0,
+                "overrides": {"initval": 1.4},
+            }
+        }
+        star.add_parameter(model=None, param_name="mass", system=None)
+
+    # ASSERT
+    assert np.isclose(star.mass.initval[0], 1.4)
+
+
+def test_manifest_options_initval_satisfies_the_check():
+    """
+    Given a plain manifest option supplying the start value (what transit's
+    per-file median baseline does),
+    When the parameter is built,
+    Then it builds.
+    """
+    # ARRANGE
+    config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})
+    star = Star([{"name": "A"}], config_manager)
+
+    # ACT
+    with pm.Model(name="options_start"):
+        star.manifest = {
+            "mass": {"lower": 0.1, "upper": 250.0, "initval": 1.7}
+        }
+        star.add_parameter(model=None, param_name="mass", system=None)
+
+    # ASSERT
+    assert np.isclose(star.mass.initval[0], 1.7)
+
+
+def test_relaxation_engine_solution_satisfies_the_check():
+    """
+    Given a start value that exists ONLY as the relaxation engine's solution
+    (star.mass has no defaults.yaml initval; seeding logmass derives it
+    through Eq(mass, 10**logmass)),
+    When the parameter is built,
+    Then it builds and starts at the derived value -- the engine's solution
+    is a start value even though nothing spells it out anywhere.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}]}
+    config_manager = ConfigManager(
+        {"star.A.logmass": {"initval": 0.3}}, system_config=config
+    )
+    config_manager.finalize_user_params()
+    star = Star(config["star"], config_manager)
+
+    # ACT
+    with pm.Model(name="engine_start"):
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
+        star.add_parameter(model=None, param_name="mass", system=None)
+
+    # ASSERT
+    assert star.mass.is_sampled.tolist() == [True]
+    assert np.isclose(star.mass.initval[0], 10**0.3)
+
+
+# ---------------------------------------------------------------------------
 # A START VALUE OUTSIDE ITS HARD BOUNDS IS FATAL (Parameter.build_pymc).
 #
 # Two finite bounds put the element on the logit transform, whose support IS
@@ -559,12 +962,16 @@ def test_nan_start_raises_its_own_no_start_value_error():
     """
     Given a NaN start value on a bounded sampled element,
     When the model is built,
-    Then it raises -- but with the "non-finite start value" message, not the
+    Then it raises -- but with the "no start value" message, not the
     out-of-bounds one. NaN satisfies no bound either, yet "you asked to start
     outside the bounds" is the wrong diagnosis for "nothing gave this element
     a start at all", and the fixes differ. Previously np.clip returned the
     NaN unchanged, the code warned that it had "nudged" it, and the model was
     built around log(NaN/(1-NaN)).
+
+    NaN is only ConfigManager.resolve's SPELLING of "this element was never
+    set", so this is one case of the general rule pinned in the section
+    below: a sampled element must be given a start value.
     """
     # ARRANGE
     p = Parameter(
@@ -578,7 +985,9 @@ def test_nan_start_raises_its_own_no_start_value_error():
 
     # ACT & ASSERT
     with pm.Model():
-        with pytest.raises(ValueError, match="non-finite start value") as exc:
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
             p.build_pymc()
     msg = str(exc.value)
     assert "star.teff" in msg
@@ -606,7 +1015,9 @@ def test_nan_element_of_a_vector_is_reported_per_element():
 
     # ACT & ASSERT
     with pm.Model():
-        with pytest.raises(ValueError, match="non-finite start value") as exc:
+        with pytest.raises(
+            ValueError, match="Sampled parameter with no start value"
+        ) as exc:
             p.build_pymc()
     msg = str(exc.value)
     assert "star.A.teff" in msg
