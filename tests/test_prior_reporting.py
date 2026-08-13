@@ -132,10 +132,11 @@ def test_volume_prior_keeps_the_support_it_normalizes_over():
     with model:
         star.build_likelihood(model, system)
 
-    # Assert -- the term AND the interval it is a density over
+    # Assert -- the term AND the interval it is a density over (out-of-range
+    # magnitudes render as powers of ten: '1e5' in text, '10^{5}' in LaTeX)
     text, latex = _both(star.distance)
-    assert "d^2" in text and "0.001" in text and "1.00e+05" in text
-    assert "d^{2}" in latex and "0.001" in latex and "1.00e+05" in latex
+    assert "d^2" in text and "0.001" in text and "1e5" in text
+    assert "d^{2}" in latex and "0.001" in latex and "10^{5}" in latex
 
 
 def test_distance_reports_both_a_user_gaussian_and_the_volume_prior():

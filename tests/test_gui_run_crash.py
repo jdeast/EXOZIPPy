@@ -65,9 +65,7 @@ def test_crashed_run_does_not_inherit_the_previous_runs_done(tmp_path):
     When a new run dies before writing any status of its own,
     Then it reports "error", not the previous run's "done".
     """
-    _write_status(
-        tmp_path, phase="done", run_id="RUN-OLD", pid=111, state={}
-    )
+    _write_status(tmp_path, phase="done", run_id="RUN-OLD", pid=111, state={})
     handle = _handle(tmp_path, returncode=1)
 
     status = handle.status()
@@ -103,9 +101,7 @@ def test_this_runs_own_terminal_status_is_reported_verbatim(tmp_path):
     Then "done" is reported unchanged -- the run-id check must not turn a
       genuine success into a failure.
     """
-    _write_status(
-        tmp_path, phase="done", run_id="RUN-NEW", pid=222, state={}
-    )
+    _write_status(tmp_path, phase="done", run_id="RUN-NEW", pid=222, state={})
     handle = _handle(tmp_path, returncode=0)
 
     status = handle.status()
@@ -195,7 +191,7 @@ def test_console_tail_is_reported_as_the_error(tmp_path):
     console.parent.mkdir(parents=True, exist_ok=True)
     console.write_text(
         "Traceback (most recent call last):\n"
-        "  File \"cli.py\", line 1\n"
+        '  File "cli.py", line 1\n'
         "ValueError: bad config\n"
     )
     handle = _handle(tmp_path, returncode=1)
@@ -229,7 +225,9 @@ def test_console_tail_is_bounded(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_reporter_stamps_the_run_id_from_the_environment(tmp_path, monkeypatch):
+def test_reporter_stamps_the_run_id_from_the_environment(
+    tmp_path, monkeypatch
+):
     """
     Given a fit launched by the runner (which exports the run id),
     When the reporter writes a status file,

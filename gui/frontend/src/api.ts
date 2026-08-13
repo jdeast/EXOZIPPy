@@ -103,6 +103,9 @@ export interface RunStatus {
   snapshot?: SnapshotMeta | null;
 }
 
+// Start/progress plot images written next to the run's trace. UNWIRED: the
+// gallery that rendered these was part of the removed Run tab -- see the
+// "known unwired seams" note in gui.md.
 export interface RunPlots {
   start: string[];
   progress: string[];
@@ -168,12 +171,6 @@ export interface AssociationRef {
 
 // Map of file basename -> the instances that reference it.
 export type AssociationMap = Record<string, AssociationRef[]>;
-
-// The preview endpoint returns PlotSpec JSON, or a readable error message.
-export interface PreviewResult {
-  specs?: import("./plotspec").PlotSpec[];
-  error?: string;
-}
 
 // --- Tune tab: solve + live evaluator (G10) ---------------------------------
 
@@ -279,6 +276,7 @@ export const api = {
     postJson<RunStatus>("/api/run", { config, project_dir, params: params ?? null }),
   runStatus: () => getJson<RunStatus>("/api/run/status"),
   stopRun: (force: boolean) => postJson<RunStatus>("/api/run/stop", { force }),
+  // UNWIRED seam (with runImageUrl below): the run-plot gallery. See gui.md.
   runPlots: () => getJson<RunPlots>("/api/run/plots"),
   runUtility: (name: string, args: Record<string, unknown>, cwd: string) =>
     postJson<UtilityResult>("/api/utilities/run", { name, args, cwd }),
@@ -290,15 +288,15 @@ export const api = {
   // freely, unlike files() which is sandboxed to the open project).
   browse: (dir?: string | null) =>
     getJson<DirListing>(`/api/browse${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
+  // UNWIRED seam (both): the schema-driven association menu and its chips.
+  // The Tools tab's disabled "Associate" button is what wires them up. See
+  // gui.md's "known unwired seams".
   filesEligible: (filename: string) =>
     postJson<{ eligible: EligiblePair[] }>("/api/files/eligible", { filename }),
   filesAssociations: () =>
     getJson<{ associations: AssociationMap }>("/api/files/associations"),
-  preview: (comp_type: string, name?: string | null) =>
-    postJson<PreviewResult>("/api/preview", { comp_type, name: name ?? null }),
 
   // --- Tune tab (G10) ---
-  tunePrewarm: () => postJson<{ ok: boolean }>("/api/tune/prewarm", {}),
   tuneSolve: () => postJson<TuneStatus>("/api/tune/solve", {}),
   tuneStatus: () => getJson<TuneStatus>("/api/tune/status"),
   tuneResult: () => getJson<TuneResult>("/api/tune/result"),
@@ -309,7 +307,11 @@ export const api = {
   tuneHash: () => getJson<TuneHash>("/api/tune/hash"),
 };
 
-/** URL that serves a plot image from the active run's output directory. */
+/**
+ * URL that serves a plot image from the active run's output directory.
+ *
+ * UNWIRED seam, with `api.runPlots`: see gui.md's "known unwired seams".
+ */
 export function runImageUrl(path: string): string {
   return `/api/run/image?path=${encodeURIComponent(path)}`;
 }

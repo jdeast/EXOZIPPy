@@ -40,6 +40,12 @@ PlotSpec ``meta`` presentation keys (all optional):
 * ``x_log`` / ``y_log``         -- logarithmic axes.
 * ``x_inverted`` / ``y_inverted`` -- reversed axes (magnitudes, RA).
 * ``aspect_equal`` -- equal-aspect axes (sky-plane plots).
+* ``caption``    -- LaTeX figure caption for the generated paper draft
+  (``outputs/modeling.py``, the third consumer of these specs).  Neither
+  renderer draws it; without one the draft falls back to a generic
+  caption built from the spec title.  It is emitted verbatim into
+  ``\\caption{...}``, so escape any non-LaTeX pieces (instrument names!)
+  with ``latex_escape`` when composing it.
 """
 
 from __future__ import annotations

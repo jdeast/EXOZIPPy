@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, type ProjectListing, type FileEntry, type DirListing } from "../api";
+import { api, type ProjectListing, type FileEntry } from "../api";
+import PathPicker from "./PathPicker";
 
 // Left sidebar: open a project directory and show its files grouped by kind.
 // Selecting a data/log file bubbles up so the log terminal can tail it (any
@@ -10,80 +11,6 @@ interface Props {
   onOpen: (path: string) => void;
   onSelectFile: (entry: FileEntry) => void;
   error: string | null;
-}
-
-// A server-side directory browser. Uses the same /api/files endpoint the Data
-// tab uses, so it works identically whether the GUI runs in the native window
-// or a plain browser tab (a native OS dialog would only work in the former).
-function FolderPicker({
-  start,
-  onPick,
-  onClose,
-}: {
-  start: string | null;
-  onPick: (dir: string) => void;
-  onClose: () => void;
-}) {
-  const [dir, setDir] = useState<DirListing | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = (path?: string | null) => {
-    api
-      .browse(path)
-      .then((d) => {
-        setDir(d);
-        setError(null);
-      })
-      .catch((e) => setError(String(e instanceof Error ? e.message : e)));
-  };
-
-  useEffect(() => {
-    load(start);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return (
-    <div className="folderpicker-backdrop" onClick={onClose}>
-      <div className="folderpicker" onClick={(e) => e.stopPropagation()}>
-        <div className="folderpicker-head">
-          <span className="folderpicker-path" title={dir?.dir}>
-            {dir?.dir ?? "..."}
-          </span>
-          <button className="folderpicker-close" onClick={onClose}>
-            x
-          </button>
-        </div>
-        {error && <div className="sidebar-error">{error}</div>}
-        <ul className="folderpicker-list">
-          {dir?.parent && (
-            <li>
-              <button className="folderpicker-row" onClick={() => load(dir.parent)}>
-                <span className="kind-dot kind-dir" /> ..
-              </button>
-            </li>
-          )}
-          {dir?.entries
-            .filter((e) => e.is_dir)
-            .map((e) => (
-              <li key={e.path}>
-                <button className="folderpicker-row" onClick={() => load(e.path)}>
-                  <span className="kind-dot kind-dir" /> {e.name}
-                </button>
-              </li>
-            ))}
-        </ul>
-        <div className="folderpicker-actions">
-          <button
-            className="folderpicker-open"
-            disabled={!dir}
-            onClick={() => dir && onPick(dir.dir)}
-          >
-            Open this folder
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function FileGroup({
@@ -148,8 +75,11 @@ export default function Sidebar({ listing, onOpen, onSelectFile, error }: Props)
         </button>
       </div>
       {picking && (
-        <FolderPicker
+        <PathPicker
+          list={api.browse}
           start={listing?.dir ?? null}
+          select="dir"
+          confirmLabel="Open this folder"
           onClose={() => setPicking(false)}
           onPick={(d) => {
             setPicking(false);

@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pytensor.tensor as pt
 
+from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import Parameter
 
@@ -182,10 +183,13 @@ class Component(ABC):
                 f"[{self.prefix}] System requested '{param_name}', but it is not in the manifest."
             )
 
-        options = self.manifest[param_name] or {}
-        if isinstance(options, str):
-            options = {"expr_key": options}
-        options = dict(options)  # don't mutate the manifest via the pops below
+        # manifest.py is the single interpreter of the manifest vocabulary --
+        # the same one graph.determine_pymc_build_order (stage 4) and
+        # System.derived_params read, so the build order can never disagree
+        # with what gets built.  `entry.options` is already a copy, so the
+        # pops below cannot mutate the live manifest.
+        entry = interpret_manifest_entry(self.manifest[param_name])
+        options = dict(entry.options)
 
         # Manifest entries may override the shape for parameters that are not
         # one-per-element (e.g. one (s, alpha) per lens companion), and the
@@ -213,14 +217,13 @@ class Component(ABC):
             internal_overrides=overrides,
         )
 
-        expr_key = options.pop("expr_key", None)
         expressions_dict = cfg.pop("expressions", {})
+        expr_cfg = entry.expression_config(expressions_dict)
         expression = None
 
         # --- AGNOSTIC CONDITIONAL WIRE-UP ---
         # Only parse dependencies if an expression block actively exists for this parameter role
-        if expr_key and expr_key in expressions_dict:
-            expr_cfg = expressions_dict[expr_key]
+        if expr_cfg is not None:
             func_name = expr_cfg.get("func_name")
 
             if func_name not in PHYSICS_REGISTRY:
@@ -229,12 +232,8 @@ class Component(ABC):
                 )
 
             func = PHYSICS_REGISTRY[func_name]
-            manifest_deps = options.pop("deps", None)
-            dep_names = (
-                manifest_deps
-                if manifest_deps is not None
-                else expr_cfg.get("deps", [])
-            )
+            options.pop("deps", None)
+            dep_names = entry.dep_names(expr_cfg)
             dep_nodes = []
 
             for d in dep_names:
@@ -564,22 +563,3 @@ class Component(ABC):
         incompatible with gradient-based samplers.
         """
         return {}
-
-    def _is_sampling_param(self, attr):
-        """Helper to identify parameters that need to be passed to the compiled function."""
-        return isinstance(attr, Parameter) and attr.expression is None
-
-    def get_parameters(self, sampling_only=False):
-        """
-        Returns all Parameter objects belonging to this component.
-        If sampling_only=True, filters for Free (sampled) parameters.
-        """
-        params = []
-        for attr in self.__dict__.values():
-            if isinstance(attr, Parameter):
-                if sampling_only:
-                    if attr.expression is None:
-                        params.append(attr)
-                else:
-                    params.append(attr)
-        return params

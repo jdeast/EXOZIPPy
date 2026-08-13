@@ -388,6 +388,11 @@ class Instrument(Component):
     # (rv/transit/astrometry).
     noise_model = "jitter_variance"
 
+    # Human noun for the modeling-draft prose ("radial velocity", "transit
+    # photometry", ...).  Children override; the class-name fallback is only
+    # legible to developers.
+    prose_noun = None
+
     # Whether this child has wired up the GP hooks below.  Children that model
     # more than one observable per data file (astrometry: E/N or sep/PA, which
     # differ in units and so cannot share one amplitude) leave this False and
@@ -1302,6 +1307,28 @@ class Instrument(Component):
                 manifest[param] = dict(entry)
         return manifest
 
+    def _build_log10_deterministics(self, log_params):
+        """Expose the linear value of every log10-sampled parameter.
+
+        ``log_params`` is a ``{log_name: linear_name}`` table -- today
+        ``gp.GP_LOG_PARAMS`` and ``likelihood.LIKELIHOOD_LOG_PARAMS``, which
+        is why this is one function over two tables rather than two copies of
+        it.  Both features sample a positive quantity in log10 (see the
+        ``gp_*_log_q*`` convention) and both owe the posterior tables the
+        linear quantity the model actually uses; a parameter the topology
+        never built is skipped.  Returns the ``{linear_name: tensor}`` cache
+        the feature's own code reads back.
+        """
+        linear = {}
+        for log_name, lin_name in log_params.items():
+            param = getattr(self, log_name, None)
+            if param is None or param.value is None:
+                continue
+            linear[lin_name] = pm.Deterministic(
+                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
+            )
+        return linear
+
     def _build_gp_deterministics(self):
         """Record the linear value of every log-sampled hyperparameter.
 
@@ -1310,14 +1337,9 @@ class Instrument(Component):
         posterior tables and plots report the quantity the kernel actually
         uses, and caches the tensors for ``_gp_kernel``.
         """
-        self._gp_linear = {}
-        for log_name, lin_name in gp_support.GP_LOG_PARAMS.items():
-            param = getattr(self, log_name, None)
-            if param is None or param.value is None:
-                continue
-            self._gp_linear[lin_name] = pm.Deterministic(
-                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
-            )
+        self._gp_linear = self._build_log10_deterministics(
+            gp_support.GP_LOG_PARAMS
+        )
 
     def _gp_kernel(self, i):
         """The summed celerite2 kernel for element ``i``."""
@@ -1339,7 +1361,119 @@ class Instrument(Component):
                 }
         return gp_support.build_kernel(self.gp_terms[i], params_by_kind)
 
-    def add_observation_likelihood(self, name, mu, sigma, observed):
+    # Kernel nouns for the modeling-draft prose; keys are components/gp.py's
+    # GP_TERMS vocabulary.
+    _GP_TERM_PROSE = {
+        "rotation": "rotation kernel (two stochastically driven, damped "
+        "harmonic oscillators at the period and its first harmonic)",
+        "sho": "stochastically driven, damped simple-harmonic-oscillator "
+        "kernel",
+    }
+
+    def _add_observation_prose(self, system):
+        """Declare the modeling-draft sentences for this component's data.
+
+        Called from ``add_observation_likelihood`` (with ``system``), so the
+        prose describes exactly the likelihood being built: the data-set
+        inventory, any time-system conversion, the noise parameterization,
+        and the per-file GP kernels and robust likelihood families.
+        Idempotent through the collector's keys, like every prose site.
+        """
+        from ..outputs.prose import get_collector, join_names, plural
+        from ..outputs.texutils import latex_escape
+
+        prose = get_collector(system)
+        noun = self.prose_noun or self.__class__.__name__.lower()
+        names = [latex_escape(str(n)) for n in self.names]
+
+        prose.add(
+            f"We fit {plural(len(names), f'{noun} dataset')} "
+            f"({join_names(names)}; "
+            f"{self.n_total_obs} observations in total).",
+            section="data",
+            key=f"{self.prefix}.data",
+        )
+
+        converted = [
+            names[i]
+            for i, s in enumerate(self.time_specs)
+            if s["needs_conversion"]
+        ]
+        if converted:
+            prose.add(
+                "Times for " + join_names(converted) + " were converted "
+                r"to $\rm BJD_{TDB}$ following \citet{Eastman:2010}.",
+                section="data",
+                key=f"{self.prefix}.time_conversion",
+                rank=60,
+            )
+
+        if self.noise_model == "err_scale":
+            prose.add(
+                f"For each {noun} dataset we fit a multiplicative "
+                "rescaling of its reported uncertainties.",
+                section="noise",
+                key=f"{self.prefix}.noise_model",
+                rank=10,
+            )
+        else:
+            prose.add(
+                f"For each {noun} dataset we fit an additive noise "
+                "(``jitter'') variance, added in quadrature to the reported "
+                "uncertainties; a negative value indicates the reported "
+                "uncertainties are overestimated.",
+                section="noise",
+                key=f"{self.prefix}.noise_model",
+                rank=10,
+            )
+
+        by_kernel = {}
+        for i, terms in enumerate(getattr(self, "gp_terms", []) or []):
+            if terms:
+                by_kernel.setdefault(tuple(terms), []).append(names[i])
+        for terms, insts in by_kernel.items():
+            desc = join_names(
+                [f"a {self._GP_TERM_PROSE.get(k, k)}" for k in terms]
+            )
+            if len(terms) > 1:
+                desc = "the sum of " + desc
+            prose.add(
+                "We modeled correlated noise in "
+                + join_names(insts)
+                + f" with a Gaussian process ({desc}), computed with "
+                r"celerite2 \citep{ForemanMackey:2017, ForemanMackey:2018}.",
+                section="noise",
+                key=f"{self.prefix}.gp.{'_'.join(terms)}",
+                rank=30,
+            )
+            prose.add_software("celerite2")
+
+        robust = {"hogg": [], "studentt": []}
+        for i, kind in enumerate(getattr(self, "likelihood_kinds", []) or []):
+            if kind:
+                robust[kind].append(names[i])
+        if robust["hogg"]:
+            prose.add(
+                "For " + join_names(robust["hogg"]) + " we adopted a "
+                "marginalized inlier/outlier Gaussian-mixture likelihood "
+                r"\citep{Hogg:2010} in place of hard outlier rejection.",
+                section="noise",
+                key=f"{self.prefix}.robust.hogg",
+                rank=40,
+            )
+        if robust["studentt"]:
+            prose.add(
+                "For " + join_names(robust["studentt"]) + " we adopted a "
+                "Student's $t$ likelihood, the analytic marginalization "
+                "of a per-point error inflation.",
+                section="noise",
+                key=f"{self.prefix}.robust.studentt",
+                rank=40,
+            )
+
+    def add_observation_likelihood(
+        self, name, mu, sigma, observed, system=None
+    ):
         """Stage 6: the observational likelihood, with or without GPs and
         robust families.
 
@@ -1355,7 +1489,14 @@ class Instrument(Component):
         ``mu``, ``sigma`` and ``observed`` are (n_total_obs,) tensors in the
         concatenated order the child built; the per-file sort recorded by
         ``_prepare_gp`` is applied here.
+
+        ``system``, when given, lets this one dispatcher declare the
+        modeling-draft prose for exactly the likelihood it is building
+        (data set inventory, noise model, GP kernels, robust families) --
+        the declare-at-site rule with a single site per child.
         """
+        if system is not None:
+            self._add_observation_prose(system)
         if not (self.has_gp or self.has_robust_likelihood):
             return pm.Normal(name, mu=mu, sigma=sigma, observed=observed)
 
@@ -1626,14 +1767,9 @@ class Instrument(Component):
         exposes ``t_nu`` as a Deterministic so posterior tables report the
         degrees of freedom the likelihood actually uses.
         """
-        self._robust_linear = {}
-        for log_name, lin_name in robust_support.LIKELIHOOD_LOG_PARAMS.items():
-            param = getattr(self, log_name, None)
-            if param is None or param.value is None:
-                continue
-            self._robust_linear[lin_name] = pm.Deterministic(
-                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
-            )
+        self._robust_linear = self._build_log10_deterministics(
+            robust_support.LIKELIHOOD_LOG_PARAMS
+        )
 
     def _add_robust_likelihoods(self, name, mu, sigma, observed):
         """Add each robust file's likelihood term (from the dispatcher)."""

@@ -6,6 +6,8 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.outputs.prose import get_collector, join_names
+from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
 from . import physics
@@ -17,6 +19,13 @@ class Planet(Component):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
+        # BEER (PR 1.b): Doppler beaming amplitude. Per-planet, not
+        # per-band (EXOFASTv2 declares it ss.planet[i].beam, unlike
+        # thermal/reflect/ellipsoidal which are ss.band[i].*).
+        self.beam_free = [bool(c.get("beam_free", False)) for c in self.config]
+        self.beam_constrains_mass = [
+            bool(c.get("beam_constrains_mass", False)) for c in self.config
+        ]
 
     @property
     def prefix(self):
@@ -25,6 +34,33 @@ class Planet(Component):
     @classmethod
     def config_schema(cls):
         return [
+            {
+                "key": "beam_free",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a Doppler beaming amplitude (ppm) for this planet "
+                    "directly from the photometry, independent of the RV "
+                    "semi-amplitude K -- does not constrain planet mass. "
+                    "Default False, which pins beam at 0. If "
+                    "beam_constrains_mass is also set, beam_constrains_mass "
+                    "wins and beam is derived from K instead of fit freely."
+                ),
+            },
+            {
+                "key": "beam_constrains_mass",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Compute this planet's Doppler beaming amplitude from "
+                    "the RV semi-amplitude K (Faigler & Mazeh 2011 eq. 1, "
+                    "bolometric approximation) instead of fitting it "
+                    "freely -- ties the photometric beaming signal to the "
+                    "same mass/K driving the RV model. Default False."
+                ),
+            },
             {
                 "key": "chen",
                 "kind": "option",
@@ -102,13 +138,63 @@ class Planet(Component):
             self.manifest.update(
                 {
                     "p": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "ar": "default",
                     "b": "default",
                     "K": "default",
                     "max_ecc": "default",
                 }
             )
+
+        # BEER (PR 1.b): beam is either (a) derived from K for every planet
+        # (beam_constrains_mass), (b) free-fit for every planet (beam_free),
+        # or (c) pinned at 0 everywhere (neither set -- transit model
+        # unchanged). The two flags are not mutually exclusive: per
+        # EXOFASTv2's step2pars.pro (~line 256), beam is computed whenever
+        # either is set, and beam_constrains_mass takes priority -- when
+        # both are set, beam is still derived from K, not fit freely.
+        # Unlike thermal/reflect/ellipsoidal's per-band opt-in, this is a
+        # single mode for the whole component: Component.add_parameter
+        # resolves one manifest entry as either a whole-component expression
+        # ("default") or a whole-component free/fixed tensor (via per-element
+        # sigma), never a mix of the two within one parameter -- so a
+        # per-planet mix of derived/free/off beam isn't supported yet.
+        any_beam_constrains_mass = any(self.beam_constrains_mass)
+        any_beam_free = any(self.beam_free)
+        if any_beam_constrains_mass and not has_orbit:
+            raise ValueError(
+                f"[{self.prefix}] beam_constrains_mass requires an orbit "
+                f"component (beam is derived from K, which requires the "
+                f"orbital elements)."
+            )
+        if (
+            len(set(self.beam_free)) > 1
+            or len(set(self.beam_constrains_mass)) > 1
+        ):
+            logger.warning(
+                f"[{self.prefix}] beam_free/beam_constrains_mass differ "
+                f"across planets (beam_free={self.beam_free}, "
+                f"beam_constrains_mass={self.beam_constrains_mass}); beam "
+                f"is a whole-component mode, not per-planet (see the "
+                f"comment above), so the resolved mode applies to every "
+                f"planet -- derived-from-K if any planet set "
+                f"beam_constrains_mass, else free-fit if any set "
+                f"beam_free, else pinned at 0."
+            )
+        if any_beam_constrains_mass:
+            self.manifest["beam"] = "default"
+        elif any_beam_free:
+            off = [i for i in range(self.n_elements) if not self.beam_free[i]]
+            entry = {}
+            if off:
+                pin = np.full(self.n_elements, np.nan)
+                pin[off] = 0.0
+                entry["overrides"] = {"sigma": pin.tolist()}
+            self.manifest["beam"] = entry
+        # Neither flag set anywhere: beam does not enter the manifest at
+        # all (no parameter, no table row), matching Band's opt-in gating
+        # for thermal/reflect/ellipsoidal.  Consumers guard on
+        # `"beam" in planets.manifest`.
 
         # Data-driven estimate: Initialize 'K' directly from the RV data variance
         rv_comps = [
@@ -396,6 +482,20 @@ class Planet(Component):
 
         self._add_chen_potential()
         self._annotate_chen_table_notes(system)
+        # Modeling-draft prose, declared next to the potential it describes
+        # (outputs/prose.py's declare-at-site rule).
+        enabled = [nm for nm, on in zip(self.names, self.chen) if on]
+        if enabled:
+            noun = "planet" if len(enabled) == 1 else "planets"
+            get_collector(system).add(
+                r"We imposed the \citet{Chen:2017} probabilistic "
+                rf"mass--radius relation on {noun} "
+                + join_names(latex_escape(n) for n in enabled)
+                + ", constraining whichever of the mass and radius the "
+                "data do not.",
+                section="planetary",
+                key=f"{self.prefix}.chen",
+            )
 
         if "orbit" not in system.active_components:
             return
@@ -416,7 +516,7 @@ class Planet(Component):
     def _initial_semimajor_axes(self, system, orbits):
         """Per-planet starting semi-major axis, solRad.
 
-        ``planet.arsun`` is a derived Parameter and carries no ``initval``
+        ``planet.a`` is a derived Parameter and carries no ``initval``
         of its own, so the start is recomputed here from the same relation
         (``physics.calc_arsun``) using the start values the relaxation
         engine did resolve.  Returns NaN wherever an input is missing; the
@@ -457,7 +557,7 @@ class Planet(Component):
           ``.orbit.a_val`` attributes, none of which have existed since the
           vectorized refactor -- so ANY system with two or more planets
           raised AttributeError here.  A planet's semi-major axis is
-          ``planet.arsun`` (solRad, derived from m_total and the orbit's
+          ``planet.a`` (internally solRad, derived from m_total and the orbit's
           period) and its eccentricity is its orbit's, via ``orbit_map``.
         - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
           gives NUTS no gradient to follow out of the forbidden region (and
@@ -477,7 +577,7 @@ class Planet(Component):
         first-order condition but not a stability criterion.
         """
         # Semi-major axis (solRad) and eccentricity, per planet.
-        a = self.arsun.value
+        a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
 
         a_init = self._initial_semimajor_axes(system, orbits)

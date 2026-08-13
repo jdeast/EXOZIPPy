@@ -28,7 +28,3 @@ def get_symbol_map(config):
 # while the sampler steps in 'jitter_variance'.  Defined once on the shared
 # Instrument parent; see the note there for why registration stays per-child.
 RELATIONS = list(JITTER_RELATIONS)
-
-
-def get_solver_paths():
-    return RELATIONS

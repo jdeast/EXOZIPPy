@@ -215,20 +215,32 @@ def test_ledger_unit_factor_guard_allows_scalar_broadcast():
     np.ones(...)`, which fired for EVERY vector parameter -- reporting
     radians under a 'deg' label (57.3x) for orbit.omega / inc / bigomega /
     lam and star.ra / dec as soon as a system had two orbits or two stars.
+
+    The conversion now has one owner (Parameter.from_internal, which the
+    ledger calls), so this exercises the broadcast rather than matching the
+    guard's source text.  The DIRECTION of that call has its own regression
+    in tests/test_unit_conversion.py: the ledger used to DIVIDE by the
+    internal->user factor and so was wrong by factor**2.
     """
-    # ARRANGE
-    import inspect
+    # ARRANGE: a scalar `unit:` on a three-element vector -- exactly the
+    # shape the ledger passes in.
+    from exozippy.components.parameter import Parameter
 
-    from exozippy.outputs import ledger
-
-    src = inspect.getsource(ledger)
-
-    # ASSERT
-    assert "factors = np.ones(p0.size)" not in src, (
-        "the identity-substitution fallback is back; a size-1 factor "
-        "broadcasts correctly and must not be replaced by ones"
+    p = Parameter(
+        label="orbit.omega",
+        unit="deg",
+        internal_unit="rad",
+        initval=[90.0, 180.0, 270.0],
     )
-    assert "factors.size not in (1, p0.size)" in src
+    internal = np.asarray(p.initval, dtype=float)
+
+    # ACT
+    user = np.asarray(p.from_internal(internal), dtype=float)
+
+    # ASSERT: ONE factor, applied to all three -- not replaced by ones.
+    assert np.size(p._get_conversion_factors()) == 1
+    np.testing.assert_allclose(internal, np.deg2rad([90.0, 180.0, 270.0]))
+    np.testing.assert_allclose(user, [90.0, 180.0, 270.0], rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

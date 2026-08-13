@@ -68,7 +68,7 @@ orbit:
       default:
         func_name: "calc_m_total"
         deps: ["m_primary", "m_companion"]
-  arsun:
+  a:
     unit: "AU"
     internal_unit: "solRad"
     latex: "a"
@@ -81,11 +81,11 @@ orbit:
     unit: "m/s"
     internal_unit: "solRad/d"
     latex: "K"
-    description: "RV Semi-amplitude (primary reflex)"
+    description: "RV Semi-amplitude"
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["m_companion", "m_total", "ecc", "arsun", "sini", "period"]
+        deps: ["m_companion", "m_total", "ecc", "a", "sini", "period"]
 
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
   secosw:
@@ -104,6 +104,11 @@ orbit:
     unit: ""
     internal_unit: ""
     latex: "e^{1/2}\\sin{\\omega_*}"
+  # WIP (review 5.11): no orbit manifest declares vcve, so this block is
+  # inert.  It is selected by `fitvcve: true`, which raises
+  # NotImplementedError in Orbit._reject_wip_parameterizations -- as does a
+  # params-file entry naming orbit.<name>.vcve.  See the from_vcve
+  # expressions below.
   vcve:
     lower: -10.0  # Adjust based on expected Vc/Ve scaling
     upper: 10.0
@@ -123,6 +128,8 @@ orbit:
       default:
         func_name: "calc_ecc"
         deps: ["secosw", "sesinw"]
+      # WIP (review 5.11): calc_ecc_from_vcve is UNDEFINED -- nothing
+      # registers it, so selecting this expr_key cannot build a node.
       from_vcve:
         func_name: "calc_ecc_from_vcve"
         deps: ["vcve", "omega"]
@@ -135,6 +142,8 @@ orbit:
       default:
         func_name: "calc_omega"
         deps: ["secosw", "sesinw"]
+      # WIP (review 5.11): calc_omega_from_vcve is UNDEFINED -- nothing
+      # registers it, so selecting this expr_key cannot build a node.
       from_vcve:
         func_name: "calc_omega_from_vcve"
         deps: ["cosw", "sinw"]
@@ -179,9 +188,18 @@ orbit:
     latex: "\\cos{i}"
     description: "Cosine of Inclination"
     expressions:
+      # WIP (review 5.11): calc_cosi_from_b is UNDEFINED, and the deps name
+      # an "ar" the orbit does not have (its semi-major axis is "a", in AU;
+      # the scaled a/R* is planet.ar).  No manifest selects this expr_key.
       from_b:
         func_name: "calc_cosi_from_b"
         deps: ["b", "ar", "ecc", "omega"]
+  # WIP (review 5.11): a dead duplicate of the LIVE planet.b -- the deps
+  # name a nonexistent "orbit.ar" (see cosi.from_b above), and no orbit
+  # manifest declares b, so this block is inert.  A params-file entry naming
+  # orbit.<name>.b raises NotImplementedError in
+  # Orbit._reject_wip_parameterizations rather than being dropped; use
+  # planet.<name>.b.
   b:
     initval: 0.5
     init_scale: 0.1

@@ -69,10 +69,3 @@ RELATIONS = [
     # Astrometric Bridge
     sp.Eq(parallax, 1000.0 / distance),
 ]
-
-
-def get_solver_paths():
-    """
-    Returns the equations defining the physical state of a Star.
-    """
-    return RELATIONS

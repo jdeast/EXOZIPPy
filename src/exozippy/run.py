@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import importlib
 import itertools
@@ -13,42 +14,10 @@ import arviz as az
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
-import yaml
-from matplotlib.backends.backend_pdf import PdfPages
-from pymc.initial_point import make_initial_point_fn
-
-# import pytensor
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-
-
-# PyMC 5.25.1 bug fix: stats_dtypes_shapes declares scaling/lambda as scalar []
-# but np.atleast_1d always produces a 1-D array, crashing the NDArray backend.
-# Not currently used (PTDE replaced DEMetropolis), kept for future experiments.
-def _fix_de_stats(astep_fn):
-    def wrapper(self, q0):
-        result, stats = astep_fn(self, q0)
-        for s in stats:
-            for key in ("scaling", "lambda"):
-                if key in s and np.ndim(s[key]) > 0:
-                    s[key] = float(np.ravel(s[key])[0])
-        return result, stats
-
-    return wrapper
-
-
-class DEMetropolisZ(pm.DEMetropolisZ):
-    astep = _fix_de_stats(pm.DEMetropolisZ.astep)
-
-
-class DEMetropolis(pm.DEMetropolis):
-    astep = _fix_de_stats(pm.DEMetropolis.astep)
-
-
 import pytensor
+from matplotlib.backends.backend_pdf import PdfPages
 
-from exozippy.samplers import convergence
+from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
@@ -57,6 +26,7 @@ from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
 from .mkparam import write_param_file
+from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
@@ -65,7 +35,10 @@ from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
-# debugging imports
+# debugging knobs
+# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
+# pytensor.config.allow_gc = True
+# pytensor.config.linker = "py"
 # import ipdb
 
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
@@ -105,6 +78,24 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "store_hot_chains",
 }
+
+
+@contextlib.contextmanager
+def sigterm_as_interrupt():
+    """Map SIGTERM to Python's default SIGINT handler while sampling.
+
+    A batch scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`) can
+    then interrupt sampling the same way a terminal Ctrl+C already does,
+    instead of Python's default SIGTERM action (immediate termination with no
+    partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
+    raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
+    work. Used by every branch that calls ``pm.sample`` directly.
+    """
+    old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def warn_unknown_sampler_keys(sampler_cfg):
@@ -284,6 +275,20 @@ def _run_fit(config, gui, user_params=None):
         )
     method = method.lower()
 
+    # First modeling-draft checkpoint: the components declared their prose
+    # during stages 1-6 and the sampler is now resolved, so the citation
+    # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
+    # the user keeps it even if the fit dies hours in.  Regenerated (not
+    # appended) at wrap-up with the results/convergence/figures/table
+    # sections. Never fatal: the draft is a bonus deliverable.
+    _add_sampler_prose(system, method, swap_schedule=swap_schedule)
+    try:
+        build_modeling_output(system, prefix)
+    except Exception:
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
+
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
     with model:
@@ -372,15 +377,11 @@ def _run_fit(config, gui, user_params=None):
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
-        nuts_scales, phys_scales, phys_inits, transformed_inits = (
-            system.get_mcmc_init(model)
-        )
+        transformed_inits = system.get_mcmc_init(model)
         inspect_start(
             model,
             system,
             transformed_inits,
-            phys_inits,
-            phys_scales,
             whiten_report=whiten_report,
         )
 
@@ -570,6 +571,35 @@ def _run_fit(config, gui, user_params=None):
                     cores=cores,
                     return_inferencedata=True,
                 )
+            elif method in de_metropolis.STEP_CLASSES:
+                # Gradient-free differential-evolution MCMC (ter Braak 2006 /
+                # ter Braak & Vrugt 2008) on PyMC's own step methods, started
+                # from the same over-dispersed population PTDE's T=1 rung
+                # uses -- see samplers/de_metropolis.py, which also documents
+                # the (now dormant) PyMC stats-shape patch.  `chains` is read
+                # off the raw config rather than the resolved default so an
+                # unset key can mean "size the DE population from the
+                # parameter count" (2 x n_params) instead of silently
+                # accepting the generic 4.
+                with sigterm_as_interrupt():
+                    idata = de_metropolis.de_metropolis_sample(
+                        model,
+                        system,
+                        draws,
+                        tune,
+                        variant=method,
+                        chains=sampler_cfg.get("chains", None),
+                        cores=cores,
+                        raw_starts=raw_starts,
+                        seed_indices=seed_indices,
+                        raw_scales=(
+                            whiten_report["raw_scales"]
+                            if whiten_report
+                            else None
+                        ),
+                        maxtime=maxtime,
+                        plot_prefix=str(prefix),
+                    )
             else:
                 nuts_callback = None
                 if maxtime is not None:
@@ -583,17 +613,7 @@ def _run_fit(config, gui, user_params=None):
                             raise KeyboardInterrupt
 
                 step = pm.NUTS(target_accept=target_accept)
-                # Map SIGTERM to Python's default SIGINT handler so a batch
-                # scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`)
-                # can interrupt sampling the same way a terminal Ctrl+C
-                # already does, instead of Python's default SIGTERM action
-                # (immediate termination with no partial trace saved). pm.sample
-                # already handles a KeyboardInterrupt raised mid-sampling
-                # gracefully -- that's exactly how the maxtime cutoff above works.
-                old_sigterm = signal.signal(
-                    signal.SIGTERM, signal.default_int_handler
-                )
-                try:
+                with sigterm_as_interrupt():
                     idata = pm.sample(
                         draws=draws,
                         tune=tune,
@@ -604,8 +624,6 @@ def _run_fit(config, gui, user_params=None):
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
-                finally:
-                    signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
             # Record the storage thinning on the trace.  Consecutive stored
@@ -770,6 +788,32 @@ def _run_fit(config, gui, user_params=None):
                 exc_info=True,
             )
 
+    # Final modeling-draft checkpoint: the table fragments and posterior
+    # plots now exist on disk and the convergence/mode facts are known, so
+    # regenerate <prefix>_paper.tex with its Results sections and
+    # (config `modeling: {compile: false}` to opt out) compile the draft
+    # PDF.  Compile failure or missing TeX never fails the fit.
+    modeling_cfg = config.get("modeling", {}) or {}
+    for _key in modeling_cfg:
+        if _key != "compile":
+            logger.warning(
+                f"Unrecognized key '{_key}' in the modeling block will be "
+                f"ignored (known: compile)."
+            )
+    try:
+        _add_wrapup_prose(system, burn_diag, mode_report)
+        # One posterior draw unlocks the model-bearing plot specs (phased
+        # panels), whose figures otherwise never enter the draft.
+        tex_path = build_modeling_output(
+            system, prefix, point=draws[0] if draws else None
+        )
+        if modeling_cfg.get("compile", True):
+            compile_modeling_pdf(tex_path)
+    except Exception:
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
+
     try:
         # mkparam re-derives the structural fingerprint from this config and
         # the params, not from the live System; measured to reproduce the
@@ -786,16 +830,6 @@ def _run_fit(config, gui, user_params=None):
         )
     except Exception:
         logger.exception("mkparam failed (non-fatal)")
-
-
-def _element_conversion_factor(par, index):
-    """Internal -> user conversion factor for element ``index`` of ``par``."""
-    f = par._get_conversion_factors()
-    if np.size(f) > 1:
-        return float(np.ravel(f)[index])
-    if np.size(f) == 1:
-        return float(np.ravel(f)[0])
-    return float(f)
 
 
 def _user_initval(config_manager, par, index):
@@ -839,7 +873,7 @@ def _user_initval(config_manager, par, index):
     if val is None:
         return None
     try:
-        return float(val) / _element_conversion_factor(par, index)
+        return float(par.to_internal(float(val), index=index))
     except (TypeError, ValueError, ZeroDivisionError):
         return None
 
@@ -858,10 +892,11 @@ def inspect_start(
     model,
     system,
     transformed_inits,
-    phys_inits,
-    phys_scales,
     whiten_report=None,
 ):
+    # No physical inits/scales arguments: this reads p.initval / p.init_scale
+    # off the Parameters below, so the two dicts get_mcmc_init used to build
+    # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
     unused_yaml = auditor.check_unused_yaml()
@@ -1024,27 +1059,14 @@ def inspect_start(
                 except (TypeError, ValueError):
                     return np.nan
 
-            raw_val = safe_float(v_phys[i])
-            # Pass through component conversion
-            internal_res = p.from_internal(raw_val)
-            # FORCE extraction to a standard Python float
-            val_out = (
-                float(internal_res.item())
-                if hasattr(internal_res, "item")
-                else float(internal_res)
-            )
-
-            # Do the same for scale
-            raw_scale = safe_float(s_phys[i])
-            internal_scale = p.from_internal(raw_scale)
-            scale_out = (
-                float(internal_scale.item())
-                if hasattr(internal_scale, "item")
-                else float(internal_scale)
-            )
-
-            # val_out = float(p.from_internal(safe_float(v_phys[i])))
-            # scale_out = float(p.from_internal(safe_float(s_phys[i])))
+            # Internal -> user for THIS element.  index=i matters as soon as
+            # a parameter carries per-element units (a `unit:` override on
+            # one instance of a vector): the whole-vector call returned an
+            # n-element array for a scalar input, and the .item() below then
+            # raised "can only convert an array of size 1", killing the fit
+            # in its startup table.
+            val_out = float(p.from_internal(safe_float(v_phys[i]), index=i))
+            scale_out = float(p.from_internal(safe_float(s_phys[i]), index=i))
 
             # Float/Scientific formatting logic ---
             def smart_format(val, width):
@@ -1188,6 +1210,146 @@ def inspect_start(
             f"The following parameters in the parameter.yaml file did not match any model parameter "
             f"and were not applied: {unused_yaml}\n"
             "This can be safely ignored if intentional, but check for typos."
+        )
+
+
+def _add_sampler_prose(system, method, swap_schedule="deo"):
+    """Declare the run-level modeling prose (intro + sampler paragraph).
+
+    Config facts only, per the prose contract (outputs/prose.py): the
+    sampler's identity and citations.  The actual draw/burn-in counts are
+    measured facts and belong to ``_add_wrapup_prose``.
+    """
+    prose = system.prose
+    prose.add(
+        r"This analysis used the EXOZIPPy modeling suite (Eastman et al., "
+        r"in preparation), a successor to EXOFAST \citep{Eastman:2013} and "
+        r"EXOFASTv2 \citep{Eastman:2019} built on PyMC "
+        r"\citep{AbrilPla:2023}.",
+        section="intro",
+        key="run.exozippy",
+        rank=5,
+    )
+    if method in ("ptde", "ptde_async"):
+        swap_cite = (
+            r" and the non-reversible deterministic even--odd (DEO) swap "
+            r"schedule \citep{Syed:2022}"
+            if str(swap_schedule).lower() == "deo"
+            else ""
+        )
+        prose.add(
+            r"We sampled the posterior with a parallel-tempered "
+            r"differential-evolution MCMC "
+            r"\citep{terBraak:2006, terBraak:2008} with adaptive "
+            r"temperature-ladder placement \citep{Vousden:2016}"
+            + swap_cite
+            + ", as implemented in EXOZIPPy.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demc":
+        prose.add(
+            r"We sampled the posterior with differential-evolution MCMC "
+            r"\citep{terBraak:2006} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demcz":
+        prose.add(
+            r"We sampled the posterior with the DE-MC$_Z$ variant of "
+            r"differential-evolution MCMC, which draws its proposal vectors "
+            r"from each chain's own past states \citep{terBraak:2008}, as "
+            r"implemented in PyMC \citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    else:
+        # nuts / numpyro / blackjax are all NUTS implementations.
+        prose.add(
+            r"We sampled the posterior with the No-U-Turn Sampler "
+            r"\citep{Hoffman:2014} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+
+
+def _add_wrapup_prose(system, diag, mode_report):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+
+    These are diagnostics of the run (the convergence criteria the user
+    asked the draft to record), not fitted values -- posterior numbers stay
+    in the table, whose macros are the mechanism for citing them in prose.
+    """
+    prose = system.prose
+    prose.add(
+        r"The median values and 68\% confidence intervals of the "
+        r"posterior are listed in Table~\ref{tab:"
+        + str(getattr(system, "name", "system"))
+        + r"}.",
+        section="results",
+        key="run.table_ref",
+        rank=10,
+    )
+    if diag:
+        prose.add(
+            f"We discarded the first {diag.get('burnin', 0)} draws "
+            f"({100 * diag.get('burnin_frac', 0.0):.0f}\\% of "
+            f"{diag.get('n_draws', 0)}) of each chain as burn-in, keeping "
+            f"{diag.get('n_chains_used')} chains.",
+            section="convergence",
+            key="run.burnin",
+            rank=10,
+        )
+        criteria = []
+        if diag.get("max_rhat_threshold") is not None:
+            criteria.append(rf"$\hat{{R}} \le {diag['max_rhat_threshold']}$")
+        if diag.get("min_ess_threshold") is not None:
+            criteria.append(rf"ESS $\ge {diag['min_ess_threshold']}$")
+        verdict = "met" if diag.get("converged", False) else "NOT met"
+        measured = []
+        if diag.get("max_rhat") is not None:
+            measured.append(rf"maximum $\hat{{R}} = {diag['max_rhat']:.3f}$")
+        if diag.get("min_ess") is not None:
+            measured.append(f"minimum ESS $= {diag['min_ess']:.0f}$")
+        prose.add(
+            r"Convergence was assessed with the rank-normalized "
+            r"Gelman--Rubin statistic and the effective sample size "
+            r"\citep{Gelman:1992, Vehtari:2021} as implemented in ArviZ "
+            r"\citep{Kumar:2019}"
+            + (
+                ", requiring "
+                + " and ".join(criteria)
+                + " for every sampled parameter"
+                if criteria
+                else ""
+            )
+            + f"; these criteria were {verdict}"
+            + (" (" + ", ".join(measured) + ")." if measured else "."),
+            section="convergence",
+            key="run.convergence",
+            rank=20,
+        )
+    if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
+        # The provenance is plain text (N_eff, >=): escape it for LaTeX
+        # text mode, exactly as latex.py does for \tablecomments.
+        from .outputs.texutils import latex_escape_prose
+
+        provenance = latex_escape_prose(
+            getattr(mode_report, "provenance", "see the table notes")
+        )
+        prose.add(
+            f"The posterior is multimodal: {mode_report.n_modes} distinct "
+            "modes were identified and are reported separately in the "
+            f"parameter table. Mode weights: {provenance}.",
+            section="modes",
+            key="run.modes",
+            rank=10,
         )
 
 
@@ -1822,6 +1984,14 @@ def _convert_posterior_to_user_units(idata, param_lookup):
     unit conversion is multiplied by the internal→user factor.  This is called
     once after sampling so that the saved trace, trace plots, ArviZ summary,
     and mkparam output are all in user-facing units (e.g. jupiterMass, m/s).
+
+    This and ``get_draws`` below are the deliberate exceptions to "convert
+    through Parameter.to_internal / from_internal": the operand is a
+    (chain, draw, element) DataArray, so the factor has to broadcast against
+    the TRAILING axis and the owner's element-count check -- which sees the
+    total size -- would reject it.  The direction is the only thing that
+    matters here, and it is stated: internal -> user multiplies, and
+    get_draws (user trace -> internal for the physics) divides.
     """
     for var_name in list(idata.posterior.data_vars):
         if var_name.endswith("_raw") or var_name not in param_lookup:

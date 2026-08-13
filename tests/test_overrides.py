@@ -88,7 +88,7 @@ def test_unrecognized_yaml_subkey_triggers_auditor_warning(mock_logp, caplog):
     from exozippy.run import inspect_start
 
     with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     assert "sigm" in caplog.text
@@ -134,7 +134,7 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
     import logging
 
     with caplog.at_level(logging.WARNING):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     assert "star.A.radiuss" in caplog.text

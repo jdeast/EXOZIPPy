@@ -24,7 +24,7 @@ class Orbit(Component):
     Two-body Keplerian orbit between a primary and a companion body group
     (see bodies.py for the group syntax).  Alongside the timing/geometry
     elements, each orbit derives its own physical scale -- m_primary,
-    m_companion, m_total, arsun, K -- from the masses of its member bodies,
+    m_companion, m_total, a, K -- from the masses of its member bodies,
     so hierarchical systems (e.g. B orbits C, B+C orbits A, planet b orbits
     A) stay mass-consistent automatically: every orbit touching a body
     reads the same star.mass/planet.mass nodes.  Each group is treated as a
@@ -42,6 +42,122 @@ class Orbit(Component):
         )
         self.i180 = [c.get("i180", False) for c in self.config]
         self.fitvcve = [c.get("fitvcve", False) for c in self.config]
+
+        self._reject_wip_parameterizations()
+
+    # ------------------------------------------------------------------
+    # WIP parameterizations (review 5.11)
+    # ------------------------------------------------------------------
+    # Physics functions the WIP defaults.yaml expression keys name and which
+    # nothing defines -- neither orbit/physics.py nor anywhere else, so
+    # PHYSICS_REGISTRY has no entry to look up and selecting one of these
+    # expression keys cannot build a node at all.
+    WIP_PHYSICS = {
+        "ecc.from_vcve": "calc_ecc_from_vcve",
+        "omega.from_vcve": "calc_omega_from_vcve",
+        "cosi.from_b": "calc_cosi_from_b",
+    }
+
+    # Orbit parameters that exist in defaults.yaml and in nothing else, as
+    # {param: (the WIP_PHYSICS keys that consume it, why it is inert)}.
+    WIP_PARAMS = {
+        "vcve": (
+            ("ecc.from_vcve", "omega.from_vcve"),
+            "It is the sampled coordinate of the V_c/V_e eccentricity "
+            "parameterization, selected by the orbit block's 'fitvcve:' key "
+            "-- which raises for the same reason.  No orbit manifest "
+            "declares vcve, so the entry would be silently ignored.",
+        ),
+        "b": (
+            ("cosi.from_b",),
+            "The orbit-level impact parameter is a dead duplicate of the "
+            "live planet.b: its defaults.yaml expression depends on "
+            "'orbit.ar', and the orbit has no 'ar' -- its semi-major axis "
+            "is 'a' (AU), while the SCALED semi-major axis a/R* lives on "
+            "the planet.  No orbit manifest declares it, so the entry would "
+            "be silently ignored.  Use 'planet.<name>.b'.",
+        ),
+    }
+
+    @classmethod
+    def _missing_physics(cls, expr_keys):
+        """Name the undefined physics functions the given expr_keys call."""
+        return ", ".join(
+            f"{cls.WIP_PHYSICS[k]}() (defaults.yaml {k})"
+            for k in sorted(expr_keys)
+        )
+
+    def _reject_wip_parameterizations(self):
+        """Raise on `fitvcve: true` and on user params naming a WIP parameter.
+
+        Both halves of the V_c/V_e branch are unbuilt.  The runtime half is
+        `orbit/defaults.yaml`'s `from_vcve` expressions, which name
+        `calc_ecc_from_vcve` / `calc_omega_from_vcve`: no definition exists
+        anywhere, so `PHYSICS_REGISTRY` has no entry and the lookup in
+        `Component.add_parameter` would fail.  The structural half is the
+        manifest `mask` field -- `fitvcve` is per orbit, but
+        `Parameter.build_pymc` derives `is_derived` for a WHOLE vector, so
+        one orbit cannot sample `vcve` while another samples
+        `secosw`/`sesinw`; `mask` is declared for exactly that and is not
+        consumed yet.  That, not the missing physics, is the real blocker
+        (the same one that keeps `ld_law` and `mass_parameterization`
+        one-mode-per-component).
+
+        `cosi`'s `from_b` expression and the orbit-level `b` entry are the
+        same kind of stub: `calc_cosi_from_b` does not exist, and `b`'s deps
+        name an `orbit.ar` that does not exist either.
+
+        A user reaches these three ways, and all three now raise here rather
+        than being accepted and dropped: `fitvcve: true` on the orbit block,
+        or a params-file entry on `orbit.<name>.vcve` or `orbit.<name>.b`
+        (an unknown parameter path is otherwise silently ignored, the
+        failure mode `config._reject_renamed_arsun` exists to prevent).
+        """
+        wip = []
+
+        # Read the parsed attribute, not the raw config: register_parameters
+        # builds hk_mask from self.fitvcve, so that is the value that has to
+        # be false for the manifest below it to be the one we ship.
+        flags = np.atleast_1d(getattr(self, "fitvcve", False)).astype(bool)
+        for i, flag in enumerate(flags):
+            if not flag:
+                continue
+            missing = self._missing_physics(self.WIP_PARAMS["vcve"][0])
+            name = self.names[i] if i < len(self.names) else i
+            wip.append(
+                f"{self.prefix}.{name}: 'fitvcve: true' is not "
+                f"implemented.  The V_c/V_e parameterization would derive "
+                f"ecc and omega from a sampled 'vcve' through the "
+                f"'from_vcve' expressions in orbit/defaults.yaml, whose "
+                f"physics functions are undefined: {missing}.  Nothing "
+                f"registers them, so no node could be built.  It is also "
+                f"blocked on the manifest 'mask' field: fitvcve is a per-"
+                f"orbit switch, but Parameter.build_pymc derives a whole "
+                f"vector at once, so 'mask' is declared and not consumed and "
+                f"one orbit cannot use vcve while another uses "
+                f"secosw/sesinw.  Drop the key (or write 'fitvcve: false') "
+                f"to sample the sqrt(e)cos(omega)/sqrt(e)sin(omega) pair.  "
+                f"V_c/V_e support is planned."
+            )
+
+        user_params = getattr(self.config_manager, "user_params", None) or {}
+        for key in user_params:
+            parts = str(key).split(".")
+            if len(parts) < 2 or parts[0] != self.prefix:
+                continue
+            param = parts[-1]
+            if param in self.WIP_PARAMS:
+                expr_keys, why = self.WIP_PARAMS[param]
+                wip.append(
+                    f"'{key}': orbit parameter '{param}' is not implemented.  "
+                    f"{why}  The defaults.yaml expressions that would consume "
+                    f"it call undefined physics functions: "
+                    f"{self._missing_physics(expr_keys)}.  Remove the entry; "
+                    f"support is planned."
+                )
+
+        if wip:
+            raise NotImplementedError("\n".join(wip))
 
     @property
     def prefix(self):
@@ -87,11 +203,14 @@ class Orbit(Component):
             {
                 "key": "fitvcve",
                 "kind": "option",
-                "accepts": [True, False],
+                "accepts": [False],
                 "required": False,
                 "doc": (
-                    "Parametrize eccentricity via V_c/V_e instead of "
-                    "sqrt(e)cos(omega)/sqrt(e)sin(omega). Default false."
+                    "WIP -- 'fitvcve: true' RAISES NotImplementedError.  It "
+                    "would parametrize eccentricity via V_c/V_e instead of "
+                    "sqrt(e)cos(omega)/sqrt(e)sin(omega), but the from_vcve "
+                    "physics functions are undefined and the per-orbit "
+                    "switch needs the unconsumed manifest 'mask' field."
                 ),
             },
         ]
@@ -138,9 +257,8 @@ class Orbit(Component):
             # component's `mass` -- so an unsorted walk decides whether
             # star.mass or planet.mass becomes a PyMC RV first.
             # model.free_RVs order is the compiled input signature
-            # (system.py), the gradient-vector layout (polish.py) and the
-            # on-disk mass matrix (outputs/save_mass_matrix.py), none of
-            # which may depend on PYTHONHASHSEED.  Inert while one side
+            # (system.py) and the gradient-vector layout (polish.py),
+            # neither of which may depend on PYTHONHASHSEED.  Inert while one side
             # references a single body type; live for a hierarchical group
             # that mixes stars and planets.
             for ctype in sorted(types):
@@ -186,7 +304,7 @@ class Orbit(Component):
         to ``10**logP``.
 
         Still not covered, because only the engine can get there: a period
-        implied by ``arsun`` plus the member masses.  Seed ``logP`` (or
+        implied by ``a`` plus the member masses.  Seed ``logP`` (or
         ``period``) directly when that is how the orbit is specified.
         """
         period_user = self._resolve_initval("period", shape)
@@ -224,27 +342,28 @@ class Orbit(Component):
         )
         hk_mask = ~fitvcve_mask
 
-        if any(self.fitvcve):
-            raise NotImplementedError(
-                "VCVE parameterization not yet migrated to manifest."
-            )
-        else:
-            self.manifest.update(
-                {
-                    "secosw": {"mask": hk_mask},
-                    "sesinw": {"mask": hk_mask},
-                    "cosi": {"mask": hk_mask},
-                    "ecc": "default",
-                    "omega": "default",
-                    "inc": "default",
-                    "sini": "default",
-                    "sinw": "default",
-                    "cosw": "default",
-                    "esinw": "default",
-                    "ecosw": "default",
-                    "tp": "default",
-                }
-            )
+        # __init__ already refused fitvcve: true (see
+        # _reject_wip_parameterizations), so hk_mask is all-True here.  The
+        # call is repeated because self.fitvcve is a plain attribute anyone
+        # could set between construction and stage 2, and a silently masked-
+        # out secosw/sesinw/cosi is exactly what the guard exists to prevent.
+        self._reject_wip_parameterizations()
+        self.manifest.update(
+            {
+                "secosw": {"mask": hk_mask},
+                "sesinw": {"mask": hk_mask},
+                "cosi": {"mask": hk_mask},
+                "ecc": "default",
+                "omega": "default",
+                "inc": "default",
+                "sini": "default",
+                "sinw": "default",
+                "cosw": "default",
+                "esinw": "default",
+                "ecosw": "default",
+                "tp": "default",
+            }
+        )
 
         # Physical scale of every orbit, from the member bodies' masses
         # (see class docstring).  Group-mass deps name the mass vectors of
@@ -266,7 +385,7 @@ class Orbit(Component):
                     "m_primary": {"expr_key": "default", "deps": group_deps},
                     "m_companion": {"expr_key": "default", "deps": group_deps},
                     "m_total": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "K": "default",
                 }
             )
@@ -462,7 +581,7 @@ class Orbit(Component):
                     logger.info(
                         f"[{self.prefix}.{self.names[i]}] implicit body "
                         f"'{ctype}.{idx}' is not in the system; orbit "
-                        f"mass/scale parameters (m_total, arsun, K) are "
+                        f"mass/scale parameters (m_total, a, K) are "
                         f"disabled."
                     )
                     return False

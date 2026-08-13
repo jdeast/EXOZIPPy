@@ -153,7 +153,7 @@ def _generate(tmp_path, mode_report):
     build_latex_output(
         _build_system_with_params(),
         var_filename=str(var_path),
-        template_filename=str(tmpl_path),
+        table_filename=str(tmpl_path),
         mode_report=mode_report,
     )
     return var_path.read_text(), tmpl_path.read_text()
@@ -326,7 +326,13 @@ def test_generated_macros_actually_compile(tmp_path):
     assert (tmp_path / "doc.pdf").exists()
 
 
-AASTEX_CLS = Path(__file__).parent / "fixtures" / "tex" / "aastex701.cls"
+# The ONE vendored aastex copy: the package data outputs/modeling.py ships
+# next to every generated document (see src/exozippy/latex/README.md).  The
+# test fixture copy this file used to carry was byte-identical and could
+# only drift.
+AASTEX_CLS = (
+    Path(__file__).parents[1] / "src" / "exozippy" / "latex" / "aastex701.cls"
+)
 
 
 @pytest.mark.skipif(
@@ -335,10 +341,12 @@ AASTEX_CLS = Path(__file__).parent / "fixtures" / "tex" / "aastex701.cls"
 @pytest.mark.skipif(
     not AASTEX_CLS.exists(), reason="vendored aastex701.cls is missing"
 )
-def test_generated_template_compiles_as_a_real_aastex_document(tmp_path):
+def test_generated_table_compiles_as_a_real_aastex_document(tmp_path):
     """
-    Given the generated deluxetable template and its variable file,
-    When they are compiled as an actual aastex701 document,
+    Given the generated deluxetable FRAGMENT and its variable file,
+    When they are compiled inside the real wrapper document
+      (outputs/modeling.py's render_document, the one standalone LaTeX
+      wrapper this project emits),
     Then pdflatex produces a PDF with no errors.
 
     This is the check the previous test cannot make. That one typesets the
@@ -348,32 +356,47 @@ def test_generated_template_compiles_as_a_real_aastex_document(tmp_path):
     \\tablecomments{} that swallows the rest of its line all compile
     perfectly well as a list of \\noindent macros and fail here.
 
-    That is not hypothetical. The template shipped a `\\usepackage{apjfonts}`
-    line for years; apjfonts is a legacy AASTeX v5 package that is on
-    neither CTAN nor TeX Live, so its absence is a fatal "Emergency stop"
-    and the generated template could not compile at all except on a machine
-    that happened to carry the file. Removing that line is what makes this
-    test possible, and this test is what stops it coming back.
+    That is not hypothetical. The old standalone table template shipped a
+    `\\usepackage{apjfonts}` line for years; apjfonts is a legacy AASTeX v5
+    package that is on neither CTAN nor TeX Live, so its absence is a fatal
+    "Emergency stop" and the generated template could not compile at all
+    except on a machine that happened to carry the file. Compiling the real
+    wrapper here is what stops it coming back.
 
-    aastex701.cls is vendored under tests/fixtures/tex/ (LPPL 1.3c, ~375 kB)
+    aastex701.cls is the copy shipped as package data (LPPL 1.3c, ~375 kB)
     so this runs out of the box rather than asking every developer to
-    install AASTeX. TEXINPUTS points there; nothing is installed.
+    install AASTeX; nothing is installed into a TeX tree.
     """
-    _, tmpl_text = _generate(tmp_path, _mode_report())
-    shutil.copy(AASTEX_CLS, tmp_path / AASTEX_CLS.name)
-    # _generate writes tmpl.tex next to vars.tex, and the template \inputs
-    # the variable file by stem -- so both must be compiled in place.
+    from exozippy.outputs.modeling import render_document
+    from exozippy.outputs.prose import ProseCollector
 
-    assert r"\documentclass{aastex701}" in tmpl_text
+    _, tmpl_text = _generate(tmp_path, _mode_report())
+
+    # The table file is now a pure fragment; the wrapper owns the preamble.
+    assert r"\documentclass" not in tmpl_text
     assert "apjfonts" not in tmpl_text, (
-        "the template loads apjfonts again -- it is not on CTAN or in TeX "
-        "Live, so this makes the generated file uncompilable for anyone "
-        "who does not already have that file (see build_latex_output)"
+        "the table fragment loads apjfonts again -- it is not on CTAN or "
+        "in TeX Live, so this makes the generated file uncompilable for "
+        "anyone who does not already have that file (see outputs/modeling)"
     )
+
+    system = _fake_system(_FakeComp())
+    system.prose = ProseCollector()
+    system.prose.add("A minimal modeling sentence.", section="intro")
+    system.active_components = {}
+    doc = render_document(
+        system, "doc.tex", var_stem="vars", table_stem="tmpl"
+    )
+    (tmp_path / "doc.tex").write_text(doc)
+    shutil.copy(AASTEX_CLS, tmp_path / AASTEX_CLS.name)
+    # _generate writes tmpl.tex next to vars.tex, and the wrapper \inputs
+    # both by stem -- so everything compiles in place.  No bibtex pass:
+    # unresolved \citations are warnings, not errors, and this test is
+    # about the table body.
 
     env = dict(os.environ, TEXINPUTS=f".:{tmp_path}:")
     result = subprocess.run(
-        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "tmpl"],
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "doc"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -386,4 +409,4 @@ def test_generated_template_compiles_as_a_real_aastex_document(tmp_path):
         if line.startswith("!") or "Undefined control sequence" in line
     ]
     assert result.returncode == 0, "pdflatex failed:\n" + "\n".join(errors)
-    assert (tmp_path / "tmpl.pdf").exists()
+    assert (tmp_path / "doc.pdf").exists()

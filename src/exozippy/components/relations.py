@@ -240,6 +240,47 @@ class StellarRelation:
             pt.sum(pt.where(pt.as_tensor_variable(mask), logp, 0.0)),
         )
 
+    def _add_relation_prose(self, system, cite_by_quantity, input_desc):
+        """Declare the modeling-draft sentence for this relation component.
+
+        Called from ``build_likelihood`` next to the penalties it describes
+        (outputs/prose.py's declare-at-site rule).  ``cite_by_quantity``
+        maps each constrained quantity to its ``\\citet{...}`` string --
+        per quantity because mann's mass and radius come from different
+        papers -- and ``input_desc`` says what the relation's input is
+        ("its absolute $K_s$ magnitude", "its effective temperature,
+        surface gravity, and metallicity").
+        """
+        from ..outputs.prose import get_collector, join_names
+        from ..outputs.texutils import latex_escape
+
+        prose = get_collector(system)
+
+        by_star = {}
+        for i, nm in enumerate(self.names):
+            quantities = tuple(
+                q for q in ("mass", "radius") if q in self.constrain[i]
+            )
+            by_star.setdefault(quantities, []).append(
+                system.star.names[self.star_indices[i]]
+            )
+        for quantities, stars in by_star.items():
+            # dict.fromkeys dedupes while keeping order: torres cites one
+            # paper for both quantities, mann one per quantity.
+            cites = join_names(
+                dict.fromkeys(cite_by_quantity[q] for q in quantities)
+            )
+            noun = "star" if len(stars) == 1 else "stars"
+            prose.add(
+                f"We constrained the {' and '.join(quantities)} of {noun} "
+                + join_names(latex_escape(s) for s in stars)
+                + f" from {input_desc} with the empirical relations of "
+                + cites
+                + ".",
+                section="stellar",
+                key=f"{self.prefix}.relation.{'_'.join(quantities)}",
+            )
+
     # ------------------------------------------------------------------
     # Plotting: these components have no data of their own to draw.
     # ------------------------------------------------------------------

@@ -53,7 +53,7 @@ band:
     filter: "TESS"
 
 sampler:
-  method: numpyro         # nuts, numpyro, nutpie, blackjax, ptde
+  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 500
   draws: 1000
   chains: 4

@@ -17,6 +17,8 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.manifest import interpret_manifest_entry
+from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
 
 """
@@ -48,6 +50,11 @@ can generally construct any model containing arbitrary components.
 #                     trace, this one authorizes seeding the NEXT fit
 #                     from one.  See mkparam._refuse_invalid_seed_draws.
 #   gui            -- gui.status.gui_enabled: {snapshot}.
+#   modeling       -- run.py: {compile} for the generated paper-draft
+#                     scaffold (<prefix>_paper.tex).  Output-only, so
+#                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it
+#                     from the structural hash: adding the block or
+#                     flipping `compile` must not stale a finished trace.
 #
 # tests/test_known_keys.py cross-checks this set against the top-level-config
 # accesses in the source, in both directions, so it cannot silently drift.
@@ -62,6 +69,7 @@ RESERVED_CONFIG_KEYS = frozenset(
         "modes",
         "mkparam",
         "gui",
+        "modeling",
     }
 )
 
@@ -94,6 +102,13 @@ class System(Component):
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
+        # The modeling-prose collector (outputs/prose.py): components add
+        # sentences at the code sites that implement each feature (stages
+        # 1-6), run.py adds the sampling/results sentences, and
+        # outputs/modeling.py regenerates <prefix>_paper.tex from it at
+        # each checkpoint.  add() is idempotent, so a second build_model()
+        # on one System (the GUI) cannot accumulate copies.
+        self.prose = ProseCollector()
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
         # happens to name but System never opened.
@@ -133,14 +148,6 @@ class System(Component):
         logger.info("Modeling the following components:")
         for key, comp in self.active_components.items():
             logger.info(f"  {key} ({comp.n_elements})")
-
-        # ==========================================================
-        # THE WIRING PASS (Universal Topology)
-        # ==========================================================
-        entity_directory = {}
-        for comp_name, comp in self.active_components.items():
-            for idx, name in enumerate(comp.names):
-                entity_directory[name] = (comp, idx)
 
         # Structural fingerprint of the inputs, snapshotted HERE: after the
         # components have normalized their own config blocks (Mann/Torres
@@ -197,21 +204,20 @@ class System(Component):
         The static `expressions:` block in a defaults.yaml is not the answer:
         a component may declare the same parameter free in one topology and
         derived in another (planet.mass is sampled linearly when RV or
-        astrometry measures it, and derived from log_q otherwise). This
-        mirrors `Component.add_parameter`'s rule -- a manifest value that is a
-        string, or a dict carrying an "expr_key", names an expression; a bare
-        None is a free parameter.  Valid after stage 2.
+        astrometry measures it, and derived from log_q otherwise). The rule
+        is `manifest.interpret_manifest_entry`'s, shared with
+        `Component.add_parameter` (stage 5) and
+        `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
+        is a string, or a dict carrying an "expr_key", names an expression; a
+        bare None is a free parameter.  This is the structural question only:
+        it does not check that the named block exists in the component's
+        defaults.yaml (there is no resolved config here).  Valid after
+        stage 2.
         """
         out = set()
         for comp in self.active_components.values():
             for name, raw in getattr(comp, "manifest", {}).items():
-                if isinstance(raw, str):
-                    derived = True
-                elif isinstance(raw, dict):
-                    derived = raw.get("expr_key") is not None
-                else:
-                    derived = False
-                if derived:
+                if interpret_manifest_entry(raw).names_expression:
                     out.add((comp.prefix, name))
         return out
 
@@ -715,9 +721,20 @@ class System(Component):
         yield from crawl(self)
 
     def get_mcmc_init(self, model):
-        """
-        Generalized initialization for the whitened parameters.
-        Uses the agnostic parameter list to build metadata dictionaries.
+        """The sampler's start point, keyed by PyMC value-variable name.
+
+        The whitened start is 0.0 for every logit element and
+        ``(initval - mu)/sigma`` for a Gaussian-path one (see
+        ``get_raw_start``); this forwards it through each RV's transform so
+        PyMC can take it as an ``initvals`` dict.
+
+        Returns only that dict.  It used to return three more things -- a
+        vector of 1.0s sized by the total transformed dimension (for a NUTS
+        ``scaling`` argument nothing has passed since PTDE replaced
+        DEMetropolis), plus ``{label: initval}`` and ``{label: init_scale}``
+        maps -- and the two physical maps were dead by construction: the one
+        caller handed them straight to ``inspect_start``, which reads
+        ``p.initval`` / ``p.init_scale`` off the Parameters itself.
         """
         transformed_inits = {}
 
@@ -747,26 +764,7 @@ class System(Component):
                 # No transform, raw == value
                 transformed_inits[value_var.name] = unity_start
 
-        # 2. Extract Physical Metadata using the Master Parameter List
-        # This now uses the simplified get_all_parameters() which relies on the generator
-        all_params = self.get_all_parameters()
-
-        # Filter for only the 'Free' parameters (those being sampled, no expression)
-        sampling_params = [p for p in all_params if p.expression is None]
-
-        ordered_inits = {p.label: p.initval for p in sampling_params}
-        ordered_scales = {p.label: p.init_scale for p in sampling_params}
-
-        # Calculate total dimensions for the NUTS step scaling
-        total_dims = sum(np.size(val) for val in transformed_inits.values())
-
-        # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
-        return (
-            np.ones(total_dims),
-            ordered_scales,
-            ordered_inits,
-            transformed_inits,
-        )
+        return transformed_inits
 
     def compile_plotter_functions(self, model):
         """

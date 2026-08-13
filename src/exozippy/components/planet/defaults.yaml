@@ -21,7 +21,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "\\log{q}"
-    description: "log10 of the planet/host star mass ratio"
+    description: "$\\log_{10}{M_P/M_\\star}$"
     # rank 5 (below mass's 10) is load-bearing: the relaxation engine's
     # Condition B rewrites the LOWEST-rank symbol of a violated relation, so
     # log_q always absorbs Eq(mass, 10**log_q * star_mass).  That both gives
@@ -103,11 +103,12 @@ planet:
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["mass", "m_total", "orbit.ecc", "arsun", "orbit.sini", "orbit.period"]
-  arsun:
-    unit: "solRad"
+        deps: ["mass", "m_total", "orbit.ecc", "a", "orbit.sini", "orbit.period"]
+  a:
+    unit: "AU"
     internal_unit: "solRad"
     latex: "a"
+    description: "Semi-major Axis"
     expressions:
       default:
         func_name: "calc_arsun"
@@ -119,7 +120,7 @@ planet:
     expressions:
       default:
         func_name: "calc_arstar"
-        deps: ["arsun", "star.radius"]
+        deps: ["a", "star.radius"]
   b:
     unit: ""
     internal_unit: ""
@@ -146,3 +147,26 @@ planet:
       default:
         func_name: "calc_max_ecc"
         deps: ["ar", "p"]
+
+  # PR 1.b (BEER): Doppler beaming amplitude, in ppm (EXOFASTv2's
+  # ss.planet[i].beam). Off by default (pinned to 0 unless beam_free or
+  # beam_constrains_mass is set; see Planet.register_parameters), like
+  # thermal/reflect/ellipsoidal on Band. Unlike those three, beam is an odd
+  # (sine) function of orbital phase -- it tracks the star's directional
+  # line-of-sight velocity, not a magnitude -- so unlike their lower: 0.0,
+  # beam is allowed either sign; only beam_constrains_mass's K-derived
+  # expression (always >= 0, since K itself is a non-negative amplitude)
+  # picks a definite sign in practice.
+  beam:
+    lower: -1.0e6
+    upper: 1.0e6
+    initval: 0.0
+    init_scale: 100.0
+    unit: ""
+    internal_unit: ""
+    latex: "A_B"
+    description: "Doppler beaming amplitude (ppm)"
+    expressions:
+      default:
+        func_name: "calc_beam_from_K"
+        deps: ["K"]

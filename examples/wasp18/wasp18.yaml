@@ -25,6 +25,7 @@ torres:
 
 planet:
   - name: "b"
+    beam_free: true
 
 orbit:
   - name: "b"
@@ -50,6 +51,8 @@ band:
   - name: "TESS"
     filter: "TESS"
     fitthermal: true
+    fitreflect: true
+    fitellip: true
 
 rvinstrument:
   - name: "CORALIE"
@@ -58,7 +61,7 @@ rvinstrument:
 parameter_file: "wasp18.params.yaml"
 
 sampler:
-  method: nuts      # nuts, numpyro, blackjax, nutpie, ptde
+  method: nuts   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 2000
   draws: 4000
   init: adapt_diag

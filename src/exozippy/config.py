@@ -194,6 +194,38 @@ def _sigma_is_zero(value):
         return False
 
 
+def _reject_renamed_arsun(user_params):
+    """Raise, with the fix, on the pre-rename ``arsun`` parameter spelling.
+
+    The semi-major axis was renamed ``arsun`` -> ``a`` (2026-08: the name
+    dated from EXOFASTv2's fixed internal units; with unit handling the
+    user-facing value is AU and the name lied).  An unknown parameter path
+    in a params file is otherwise SILENTLY ignored, so without this check
+    an old file's ``orbit.b.arsun`` seed would simply stop doing anything
+    -- a silent behavior change, the exact failure mode pointed errors on
+    renames exist to prevent (compare planet.log_q's stale-restart-file
+    raise).  Checked on the raw params (before standardization, so the
+    message shows the user's own spelling) and inside link expressions.
+    """
+    for key, spec in (user_params or {}).items():
+        if str(key) == "arsun" or str(key).endswith(".arsun"):
+            raise ValueError(
+                f"'{key}': the semi-major axis parameter was renamed "
+                f"'arsun' -> 'a' (reported in AU; internally solRad). "
+                f"Rename the entry to "
+                f"'{str(key)[: -len('arsun')]}a'."
+            )
+        if isinstance(spec, dict):
+            for field, value in spec.items():
+                if isinstance(value, str) and "arsun" in value:
+                    raise ValueError(
+                        f"'{key}.{field}' links to '{value}': the "
+                        f"semi-major axis parameter was renamed 'arsun' "
+                        f"-> 'a' (reported in AU; internally solRad). "
+                        f"Update the expression."
+                    )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -266,11 +298,13 @@ def canonical_param_key(key, system_config):
     """Canonical (index-form) spelling of a user-facing parameter key.
 
     ``star.A.mass`` -> ``star.0.mass`` when the config's ``star`` list has an
-    entry named ``A``.  This is the ONE place the name -> index translation
-    lives: ``standardize_param_names`` uses it to store ``user_params``, and
-    anything looking a key up in ``user_params`` must go through it too --
-    otherwise the lookup silently depends on whether the user named their
-    instances.
+    entry named ``A``.  This is the ONE place the config-scanning name ->
+    index translation lives: ``standardize_param_names`` uses it to store
+    ``user_params``, ``ConfigManager._translate_and_scale`` uses it for every
+    component hint, and anything looking a key up in ``user_params`` must go
+    through it too -- otherwise the lookup silently depends on whether the
+    user named their instances.  (``_index_path`` is the same translation
+    against a prebuilt map, for the relaxation engine's inner loops.)
 
     Keys that are not 3-part, that name a flat-dict (non-list) component, or
     that name an instance the config does not define are returned unchanged,
@@ -289,6 +323,30 @@ def canonical_param_key(key, system_config):
         if isinstance(entry, dict) and entry.get("name") == comp_name:
             return f"{comp_type}.{idx}.{param_name}"
     return key
+
+
+def _index_path(path, name_to_index):
+    """Index-form spelling of ``path`` under a prebuilt name -> index map.
+
+    The relaxation engine builds ``{(comp_key, name): index}`` once per solve
+    from the raw config (see ``resolve_and_validate_parameters``) and then
+    translates many paths against it, so it uses this rather than
+    ``canonical_param_key``, which rescans the config list on every call.
+    Same answer, different cost model -- and this is the ONE implementation of
+    the map-driven form, shared by the flat_params pass and
+    ``_to_symbol_path``.
+
+    Paths that are not 3-part, or whose (component, name) pair is not in the
+    map -- including index-form paths, which need no translation -- come back
+    unchanged.
+    """
+    parts = path.split(".")
+    if len(parts) != 3:
+        return path
+    comp_type, name, param = parts
+    if (comp_type, name) not in name_to_index:
+        return path
+    return f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
 
 
 def _declared_instance_names(system_config):
@@ -367,7 +425,6 @@ def _meaningful_change(
     new_rank,
     old_rank,
     tolerance,
-    resolved,
     provenance,
     target_str,
 ):
@@ -392,9 +449,10 @@ def _meaningful_change(
 
 class ConfigManager:
     def __init__(self, user_params, system_config=None):
-        self.raw_user_params = user_params
         self.custom_solvers = {}
         self.standalone_solvers = set()
+
+        _reject_renamed_arsun(user_params)
 
         # Path of the params FILE these entries were read from, set by System
         # only when it actually read one -- it stays None when the caller
@@ -455,7 +513,6 @@ class ConfigManager:
         self.seed_hint_sets = []
         self.scale_hints = {}  # path -> init_scale in internal units
         self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
-        self.dependencies = {}
         self.symbolic_blacklist = set()
 
         # Structured diagnostics collected by the relaxation engine (e.g.
@@ -589,7 +646,7 @@ class ConfigManager:
         standalone=True additionally runs it once per iteration on its own:
         required when the target's defining relation always holds a second
         derived unknown (e.g. orbit.m_total in the Kepler relation, whose
-        other side is the equally-unknown arsun), so the equation path can
+        other side is the equally-unknown semi-major axis), so the equation path can
         never get down to one unknown by itself.
         """
         self.custom_solvers[target_str] = solver_func
@@ -640,56 +697,26 @@ class ConfigManager:
                     out.setdefault(fld, {})[int(parts[1])] = plink
         return out
 
-    def get_resolved_path(self, component_prefix, dep_str, resolved_maps):
-        """
-        Handles 'star.mass[star_map]' -> 'star.1.mass'
-        """
-        if "[" in dep_str and "]" in dep_str:
-            param, map_name = dep_str.replace("]", "").split("[")
-            # resolved_maps is a dict of the component's maps (e.g., {'star_map': 1})
-            map_idx = resolved_maps.get(map_name)
-            base_name, p_name = param.split(".")
-            return f"{base_name}.{map_idx}.{p_name}"
-        return f"{component_prefix}.{dep_str}"
-
-    def attach_config(self, config):
-        """Call this during Stage 1/Pre-flight when the System config is loaded."""
-        self.system_config = config
-        # Modernize the names to strict index format before running any staging logic
-        self.user_params = self.standardize_param_names(
-            self.raw_user_params, config
-        )
-        self.links = extract_links(self.user_params, config)
-
     def _translate_and_scale(self, path, value):
         """Standardize a human-readable path to internal-index form and convert
         its value to internal units.  Returns (translated_path, internal_value).
-        Shared by add_hint / add_scale_hint / add_seed_hints so they all agree
-        on nomenclature and unit handling."""
-        translated_path = path
-        parts = path.split(".")
 
-        # 1. Standardize the Nomenclature
-        if len(parts) == 3:
-            comp_type, name, param = parts
-            try:
-                # Resolve human name (e.g., 'LENS') to internal index (e.g., '0')
-                idx = next(
-                    i
-                    for i, c in enumerate(
-                        self.system_config.get(comp_type, [])
-                    )
-                    if str(c.get("name")) == str(name) or str(i) == str(name)
-                )
-                translated_path = f"{comp_type}.{idx}.{param}"
-            except StopIteration:
-                pass
+        The ONE implementation shared by add_hint / add_scale_hint /
+        add_seed_hints / seed_start_value, so they cannot drift apart on
+        nomenclature or unit handling.  ``add_scale_hint`` used to carry a
+        line-for-line copy of this body despite the docstring claiming the
+        sharing; a divergence there would have silently sent a component's
+        scale hint to a path ``resolve()`` never looks up.
+        """
+        translated_path = self.canonical_key(path)
 
-        # 2. Scale to Internal Units
+        # Scale to Internal Units.  The ORIGINAL path is what carries a user
+        # `unit:` override in user_params, so that is what get_conversion_factor
+        # is asked about; the translated path only supplies the defaults.yaml
+        # lookup pair (component type, parameter name).
         final_parts = translated_path.split(".")
         if len(final_parts) >= 2:
             c_type, p_name = final_parts[0], final_parts[-1]
-            # Use the original path to check if the user provided an explicit unit in yaml
             factor = self.get_conversion_factor(c_type, p_name, full_path=path)
             internal_value = float(value) * factor
         else:
@@ -802,30 +829,9 @@ class ConfigManager:
         hint seeds that probe and, via the forward Jacobian pass, sets the
         soft-bound barrier steepness of derived parameters.
         """
-        translated_path = path
-        parts = path.split(".")
-        if len(parts) == 3:
-            comp_type, name, param = parts
-            try:
-                idx = next(
-                    i
-                    for i, c in enumerate(
-                        self.system_config.get(comp_type, [])
-                    )
-                    if str(c.get("name")) == str(name) or str(i) == str(name)
-                )
-                translated_path = f"{comp_type}.{idx}.{param}"
-            except StopIteration:
-                pass
-
-        final_parts = translated_path.split(".")
-        if len(final_parts) >= 2:
-            c_type, p_name = final_parts[0], final_parts[-1]
-            factor = self.get_conversion_factor(c_type, p_name, full_path=path)
-            internal_scale = float(scale) * factor
-        else:
-            internal_scale = float(scale)
-
+        translated_path, internal_scale = self._translate_and_scale(
+            path, scale
+        )
         self.scale_hints[translated_path] = internal_scale
 
     def _deep_merge(self, base, overrides):
@@ -876,6 +882,32 @@ class ConfigManager:
         def _eff_idx(i):
             return element if (element is not None and n_elements == 1) else i
 
+        def _element_keys(i):
+            """The user-facing spellings of element ``i`` of this parameter.
+
+            The three forms ``resolve()`` accepts, in the order every lookup
+            below scans them: the 2-part broadcast form, the index form, and
+            (only when the caller supplied per-element ``names``) the name
+            form -- least specific first.  One list, five call sites, because
+            the ORDER is the precedence rule and five copies of it is five
+            chances to disagree about which spelling of a parameter wins.
+
+            Note the two scan styles resolve that order oppositely, and this
+            predates the shared helper: the ``break``-on-first-hit lookups
+            (``unit:``, propagated scales, scale hints) take the BROADCAST
+            entry when both exist, while the loops that apply every match in
+            turn (component overrides, user params) let the most specific one
+            land last and win.  Preserved verbatim; if that asymmetry is ever
+            reconciled, this is the one place the order lives.
+            """
+            keys = [
+                f"{component_type}.{param_name}",
+                f"{component_type}.{_eff_idx(i)}.{param_name}",
+            ]
+            if names and i < len(names):
+                keys.append(f"{component_type}.{names[i]}.{param_name}")
+            return keys
+
         base_unit_str = base.get("unit", "")
 
         # The `unit:` override is resolved PER ELEMENT.  It used to be a
@@ -889,16 +921,9 @@ class ConfigManager:
         elem_units = []
         elem_scaling = np.ones(n_elements, dtype=float)
         for i in range(n_elements):
-            keys = [
-                f"{component_type}.{param_name}",
-                f"{component_type}.{_eff_idx(i)}.{param_name}",
-            ]
-            if names and i < len(names):
-                keys.append(f"{component_type}.{names[i]}.{param_name}")
-
             u_str = None
             u_src = None
-            for k in keys:
+            for k in _element_keys(i):
                 entry = self.user_params.get(k)
                 if isinstance(entry, dict) and "unit" in entry:
                     u_str = entry["unit"]
@@ -1011,13 +1036,7 @@ class ConfigManager:
         # the user still wins (bounds combine, per apply_value).
         if self.param_overrides:
             for i in range(n_elements):
-                keys = [
-                    f"{component_type}.{param_name}",
-                    f"{component_type}.{_eff_idx(i)}.{param_name}",
-                ]
-                if names and i < len(names):
-                    keys.append(f"{component_type}.{names[i]}.{param_name}")
-                for k in keys:
+                for k in _element_keys(i):
                     od = self.param_overrides.get(k)
                     if od:
                         apply_overrides(od, [i])
@@ -1035,15 +1054,7 @@ class ConfigManager:
         # overridden by scale hints and user params below).
         if self.propagated_scales:
             for i in range(n_elements):
-                prop_keys = [
-                    f"{component_type}.{param_name}",
-                    f"{component_type}.{_eff_idx(i)}.{param_name}",
-                ]
-                if names and i < len(names):
-                    prop_keys.append(
-                        f"{component_type}.{names[i]}.{param_name}"
-                    )
-                for k in prop_keys:
+                for k in _element_keys(i):
                     if k in self.propagated_scales:
                         apply_value(
                             "init_scale",
@@ -1057,13 +1068,7 @@ class ConfigManager:
         # (e.g. bulge distances). They override defaults.yaml but yield to the
         # user's explicit init_scale below.
         for i in range(n_elements):
-            scale_keys = [
-                f"{component_type}.{param_name}",
-                f"{component_type}.{_eff_idx(i)}.{param_name}",
-            ]
-            if names and i < len(names):
-                scale_keys.append(f"{component_type}.{names[i]}.{param_name}")
-            for k in scale_keys:
+            for k in _element_keys(i):
                 if k in self.scale_hints:
                     apply_value(
                         "init_scale",
@@ -1074,16 +1079,7 @@ class ConfigManager:
                     break
 
         for i in range(n_elements):
-            keys_to_check = [
-                f"{component_type}.{param_name}",
-                f"{component_type}.{_eff_idx(i)}.{param_name}",
-            ]
-            if names and i < len(names):
-                keys_to_check.append(
-                    f"{component_type}.{names[i]}.{param_name}"
-                )
-
-            for k in keys_to_check:
+            for k in _element_keys(i):
                 if k in self.user_params:
                     ov = self.user_params[k]
                     if ov is None:
@@ -1391,14 +1387,7 @@ class ConfigManager:
             if isinstance(val, (list, tuple)):
                 val = val[0]
             if val is not None:
-                parts = path.split(".")
-                translated_path = path
-
-                if len(parts) == 3:
-                    comp_type, name, param = parts
-                    if (comp_type, name) in name_to_index:
-                        idx = name_to_index[(comp_type, name)]
-                        translated_path = f"{comp_type}.{idx}.{param}"
+                translated_path = _index_path(path, name_to_index)
 
                 sym = self.master_symbol_map.get(translated_path)
                 if sym:
@@ -1692,31 +1681,12 @@ class ConfigManager:
         """Translate a user_params key to the internal-index path string used by
         the relaxation engine (e.g. 'lens.Lens.t_0' -> 'lens.0.t_0').  Returns
         None if the path does not correspond to a registered symbol."""
-        translated = path
-        parts = path.split(".")
-        if len(parts) == 3:
-            comp_type, name, param = parts
-            if (comp_type, name) in name_to_index:
-                translated = (
-                    f"{comp_type}.{name_to_index[(comp_type, name)]}.{param}"
-                )
+        translated = _index_path(path, name_to_index)
         if translated in self.master_symbol_map:
             return translated
         if path in self.master_symbol_map:
             return path
         return None
-
-    def prune_dependency_cycles(self, cycle_nodes):
-        """
-        Forcefully removes nodes from the dependency graph that are known
-        to cause cyclic build-order crashes.
-        """
-        for node in cycle_nodes:
-            if node in self.dependencies:
-                # Keep the node, but remove the parents that create the cycle
-                # This treats the node as a 'Leaf' from the perspective of the graph builder
-                self.dependencies[node] = []
-                logger.debug(f"[Pruning] Severed dependency cycle at: {node}")
 
     def _strip_user_init_scales(self):
         """Warn about and drop any init_scale entries in the user's params.
@@ -1725,10 +1695,10 @@ class ConfigManager:
         measured directly from the data at startup (see exozippy/whitening.py)
         and any user value would be overwritten anyway.  Old params files keep
         working -- the key is simply ignored with a warning.  Entries are
-        removed via a rebuilt per-parameter dict; the caller's original dict
-        (raw_user_params) is already insulated by standardize_param_names,
-        which deepcopies every entry, so this is belt and braces for the
-        no-config path that skips standardization.
+        removed via a rebuilt per-parameter dict; the caller's original dict is
+        already insulated by standardize_param_names, which deepcopies every
+        entry, so this is belt and braces for the no-config path that skips
+        standardization.
         """
         stripped = []
         for k, v in list(self.user_params.items()):
@@ -2376,7 +2346,6 @@ class ConfigManager:
                     RANK_DERIVED_MIXED,
                     provenance.get(path, 0),
                     tolerance,
-                    resolved,
                     provenance,
                     path,
                 ):
@@ -2427,7 +2396,6 @@ class ConfigManager:
                 RANK_USER,
                 provenance.get(target, 0),
                 tolerance,
-                resolved,
                 provenance,
                 target,
             ):
@@ -2613,7 +2581,6 @@ class ConfigManager:
                     new_rank,
                     provenance.get(target_str, 0),
                     tolerance,
-                    resolved,
                     provenance,
                     target_str,
                 ):
@@ -2786,7 +2753,6 @@ class ConfigManager:
                 new_rank,
                 provenance.get(target_str, 0),
                 tolerance,
-                resolved,
                 provenance,
                 target_str,
             ):
@@ -2885,7 +2851,7 @@ class ConfigManager:
                     # entry from the default-armor pass either: reading
                     # resolved_scales[target_str] here used to raise KeyError
                     # straight out of prepare().  (Reproduced by naming
-                    # `orbit.<name>.arsun` in a params file -- it is solved
+                    # `orbit.<name>.a` in a params file -- it is solved
                     # from m_total and period, and none of the three carries
                     # an init_scale default.)  Skipping leaves the parameter
                     # with no preliminary scale, which is the documented and

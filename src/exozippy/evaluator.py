@@ -74,7 +74,9 @@ class NeedsResolve(Exception):
 # ---------------------------------------------------------------------------
 
 # Config keys that carry no structural meaning for the compiled graph.
-_NON_STRUCTURAL_CONFIG_KEYS = {"run"}
+# "modeling" is output-only (the generated paper-draft scaffold): adding
+# the block or flipping its `compile` key must not stale a finished trace.
+_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling"}
 
 
 def _canon(value: Any) -> Any:
@@ -415,11 +417,9 @@ class Evaluator:
             )
 
         # user -> internal units
-        factors = np.atleast_1d(
-            np.asarray(par._get_conversion_factors(), dtype=float)
+        val_internal = float(
+            par.to_internal(float(value_in_user_units), index=elem)
         )
-        factor = factors[elem] if elem < factors.size else factors[0]
-        val_internal = float(value_in_user_units) / factor
 
         raw_key = f"{par.label}_raw"
         if raw_key not in raw_point:

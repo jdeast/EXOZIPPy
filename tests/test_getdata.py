@@ -325,3 +325,208 @@ def test_matching_tic_id_still_selects_its_light_curves(patched, tmp_path):
     # Assert
     depth = written_depth(tmp_path, "*.SPOC.dat")
     assert depth == pytest.approx(TRUE_DEPTH, rel=1e-9)
+
+
+# ---------------------------------------------------------------- 4.12
+#
+# The two priority tables and the author -> mission table, pinned. The
+# expected orders are spelled out here rather than read back from getdata:
+# a test that consults the table it is testing pins nothing.
+
+EXPECTED_EXPTIME_ORDER = [120, 200, 20, 300, 600, 1800]
+EXPECTED_AUTHOR_ORDER = [
+    "TESS",
+    "SPOC",
+    "TESS-SPOC",
+    "QLP",
+    "Kepler",
+    "K2SFF",
+    "EVEREST",
+    "K2",
+    "CDIPS",
+    "TASOC",
+]
+
+
+def test_the_exptime_chain_prefers_short_cadence_in_order():
+    """
+    Given every recognized exposure time on offer,
+    When the priority chain picks one,
+    Then it walks 120, 200, 20, 300, 600, 1800 s -- short cadence first, and
+      each successive suffix of the table selects its own head.
+    """
+    # Arrange / Act / Assert
+    for k, want in enumerate(EXPECTED_EXPTIME_ORDER):
+        offered = np.array(EXPECTED_EXPTIME_ORDER[k:], dtype=float)
+        picked = getdata._highest_priority(offered, getdata.EXPTIME_PRIORITY)
+        assert offered[picked].tolist() == [float(want)]
+
+
+def test_the_author_chain_prefers_pipelines_in_order():
+    """
+    Given every recognized author on offer,
+    When the priority chain picks one,
+    Then it walks the documented pipeline order, and each successive suffix
+      of the table selects its own head.
+    """
+    # Arrange / Act / Assert
+    for k, want in enumerate(EXPECTED_AUTHOR_ORDER):
+        offered = np.array(EXPECTED_AUTHOR_ORDER[k:])
+        picked = getdata._highest_priority(offered, getdata.AUTHOR_PRIORITY)
+        assert offered[picked].tolist() == [want]
+
+
+def test_an_unranked_value_selects_nothing():
+    """
+    Given only values the priority table does not rank,
+    When the priority chain is asked,
+    Then it returns nothing, so the caller warns and skips the sector rather
+      than silently downloading an arbitrary product.
+    """
+    # Arrange
+    offered = np.array([900.0, 1200.0])
+
+    # Act
+    picked = getdata._highest_priority(offered, getdata.EXPTIME_PRIORITY)
+
+    # Assert
+    assert len(picked) == 0
+
+
+def test_a_tie_at_the_winning_rank_returns_every_holder():
+    """
+    Given two products sharing the best-ranked author,
+    When the priority chain is asked,
+    Then both indices come back -- the caller cannot break the tie and must
+      say so rather than pick one.
+    """
+    # Arrange
+    offered = np.array(["SPOC", "QLP", "SPOC"])
+
+    # Act
+    picked = getdata._highest_priority(offered, getdata.AUTHOR_PRIORITY)
+
+    # Assert
+    assert picked.tolist() == [0, 2]
+
+
+@pytest.mark.parametrize(
+    "author,mission_string,sector,filter_,telescope,offset,undeblend",
+    [
+        (
+            "Kepler",
+            "Kepler Quarter 07",
+            "Q07",
+            "Kepler",
+            "Kepler",
+            2454833.0,
+            False,
+        ),
+        ("K2", "K2 Campaign 13", "C13", "Kepler", "Kepler", 2454833.0, False),
+        (
+            "EVEREST",
+            "K2 Campaign 04",
+            "C04",
+            "Kepler",
+            "Kepler",
+            2454833.0,
+            False,
+        ),
+        (
+            "K2SFF",
+            "K2 Campaign 04",
+            "C04",
+            "Kepler",
+            "Kepler",
+            2454833.0,
+            False,
+        ),
+        (
+            "K2VARCAT",
+            "K2 Campaign 04",
+            "C04",
+            "Kepler",
+            "Kepler",
+            2454833.0,
+            False,
+        ),
+        ("SPOC", "TESS Sector 5", "S05", "TESS", "TESS", 2457000.0, True),
+        (
+            "TESS-SPOC",
+            "TESS Sector 42",
+            "S42",
+            "TESS",
+            "TESS",
+            2457000.0,
+            True,
+        ),
+        ("QLP", "TESS Sector 7", "S07", "TESS", "TESS", 2457000.0, True),
+    ],
+)
+def test_each_author_maps_to_its_missions_epoch_band_and_sector_label(
+    author, mission_string, sector, filter_, telescope, offset, undeblend
+):
+    """
+    Given a product's author and lightkurve mission string,
+    When the mission table is consulted,
+    Then it supplies that mission's BJD offset, bandpass, telescope, sector
+      label and whether -u (undeblending) is supported there.
+    """
+    # Arrange
+    mission = getdata.MISSIONS[getdata.AUTHOR_MISSION[author]]
+
+    # Act
+    label = mission.sector(mission_string)
+
+    # Assert
+    assert label == sector
+    assert mission.filter == filter_
+    assert mission.telescope == telescope
+    assert mission.bjd_offset == offset
+    assert mission.undeblend is undeblend
+
+
+def test_only_tess_products_support_undeblending():
+    """
+    Given the mission table,
+    When asked which missions support -u,
+    Then only TESS does: CROWDSAP, the quantity the correction inverts, is a
+      SPOC/TESS header keyword.
+    """
+    # Arrange / Act
+    supported = {n for n, m in getdata.MISSIONS.items() if m.undeblend}
+
+    # Assert
+    assert supported == {"TESS"}
+
+
+def test_cdips_and_tasoc_are_recognized_but_unreadable():
+    """
+    Given the two authors whose products put flux and errors elsewhere,
+    When the author tables are consulted,
+    Then they are listed as unsupported and have no mission, so run() skips
+      them with a message instead of reading the wrong column.
+    """
+    # Arrange / Act / Assert
+    assert set(getdata.UNSUPPORTED_AUTHORS) == {"CDIPS", "TASOC"}
+    for author in getdata.UNSUPPORTED_AUTHORS:
+        assert author not in getdata.AUTHOR_MISSION
+
+
+def test_the_author_named_tess_is_ranked_but_has_no_reader():
+    """
+    Given the author priority table,
+    When it is compared against the authors run() can actually read,
+    Then "TESS" is the one entry with no mission and no unsupported-listing:
+      it sorts first, yet a sector offering only "TESS" products is skipped
+      with the unrecognized-author warning. Pre-existing behavior, pinned
+      here so a future mapping for it is a deliberate change.
+    """
+    # Arrange
+    readable = set(getdata.AUTHOR_MISSION) | set(getdata.UNSUPPORTED_AUTHORS)
+
+    # Act
+    unreadable = set(getdata.AUTHOR_PRIORITY) - readable
+
+    # Assert
+    assert unreadable == {"TESS"}

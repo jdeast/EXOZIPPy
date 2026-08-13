@@ -14,16 +14,14 @@ RSUN_TO_AU = (1.0 * u.R_sun).to(u.au).value
 # directly with orbit.arsun (already in R_sun) with no AU round-trip.
 C_LIGHT_RSUN_PER_DAY = const.c.to(u.R_sun / u.day).value
 KEPLER_CONST = (G / (4.0 * np.pi**2)) ** (1.0 / 3.0)
+C_MPS = const.c.to(u.m / u.s).value
+SOLRAD_PER_DAY_TO_MPS = (1.0 * u.R_sun / u.day).to(u.m / u.s).value
 LOGG_CONST = np.log10(const.GM_sun.cgs.value / const.R_sun.cgs.value**2)  # cgs
 LUM_CONST = 1.0 / (
     (const.L_sun / const.sigma_sb / const.R_sun**2).cgs.value / (4.0 * np.pi)
 )  # K^-4
 FBOL_CONST = 1.0 / (4.0 * np.pi * (const.pc / const.R_sun) ** 2.0)
 DENSITY_CONST = 3.0 / (4.0 * np.pi)
-FROM_PM_D_TO_V = u.au.to(u.km) / u.yr.to(u.s)  # = 4.74, for unit conversion:
-# multiply it by proper motion [mas/yr] and distance [kpc] to get velocity [km/s]
-FROM_V_D_TO_PM = 1.0 / FROM_PM_D_TO_V  # = 0.211 - opposite unit conversion:
-# multiply it by velocity [km/s] and divide by distance [kpc] to get proper motion [mas/yr]
 
 PC_TO_RSUN_CONST = u.pc.to(u.R_sun)
 ANG_TO_MICRON_CONST = u.Angstrom.to(u.micron)
@@ -143,9 +141,6 @@ SUN_Z_OFFSET = 0.025  # in kpc, Sun's height above the plane (genulens zsun)
 # Solar velocity in the galactocentric frame, genulens convention
 # (vxsun toward the GC, vysun in the rotation direction, vzsun up):
 SUN_GALCEN_V = (10.0, 243.0, 7.0)  # in km/s
-SUN_VELOCITY_X = -12.7  # in km/s (legacy, rp.py convention)
-SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s (legacy)
-SUN_VELOCITY_Z = 7.25  # in km/s (legacy)
 
 # --- 8. GALACTIC POPULATION NUMBER DENSITIES (stars/pc^3, MS+BD) ---
 # Branch weights for the disk/thick/bulge mixture in

@@ -155,7 +155,11 @@ class PlotSpec:
         model traces.  A GUI highlights the affected charts when a
         slider moves.  Empty for data-only specs.
     meta : dict
-        Free-form metadata (e.g. ``{"phase_folded": True}``).
+        Free-form metadata (e.g. ``{"phase_folded": True}``).  The
+        presentation keys both renderers honor are documented in
+        ``plotrender.py``'s module docstring; ``meta["caption"]`` is the
+        LaTeX figure caption the generated paper draft
+        (``outputs/modeling.py``) pairs with this spec's saved PDF.
     """
 
     id: str

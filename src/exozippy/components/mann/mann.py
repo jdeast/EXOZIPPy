@@ -271,3 +271,15 @@ class Mann(StellarRelation, Component):
             radius_pred * as_float_vector(self.rstar_floor),
             normalize=True,
         )
+
+        # Modeling-draft prose, next to the penalties it describes.  The
+        # radius relation is Mann+2015 (as corrected by the 2016 erratum,
+        # Mann:2016 in references.bib), the mass relation Mann+2019.
+        self._add_relation_prose(
+            system,
+            cite_by_quantity={
+                "mass": r"\citet{Mann:2019}",
+                "radius": r"\citet{Mann:2015}",
+            },
+            input_desc=r"its absolute $K_s$ magnitude",
+        )

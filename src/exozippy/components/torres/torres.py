@@ -158,3 +158,14 @@ class Torres(StellarRelation, Component):
             as_float_vector(self.logr_floor),
             normalize=False,
         )
+
+        # Modeling-draft prose, next to the penalties it describes.
+        self._add_relation_prose(
+            system,
+            cite_by_quantity={
+                "mass": r"\citet{Torres:2010}",
+                "radius": r"\citet{Torres:2010}",
+            },
+            input_desc="its effective temperature, surface gravity, and "
+            "metallicity",
+        )

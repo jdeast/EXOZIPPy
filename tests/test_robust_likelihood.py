@@ -305,6 +305,91 @@ def test_hogg_outlier_logodds_separates_outliers_from_inliers():
     assert np.all(prob[[0, 1, 2, 4]] < 0.15)
 
 
+@pytest.mark.parametrize(
+    "out_frac,out_scale",
+    [
+        (0.05, 4.0),
+        (1e-6, 1e-3),
+        (0.5, 1e3),
+        (0.4999999, 250.0),
+    ],
+)
+def test_hogg_logp_and_logodds_describe_the_same_two_branches(
+    out_frac, out_scale
+):
+    """
+    Given the mixture logp and the posterior outlier log-odds of the same
+    points,
+    When the two branch densities are RECOVERED from that pair alone and
+    compared with the closed-form weighted Gaussians,
+    Then both match -- so the probability the likelihood integrates and the
+    probability the audit reports are the same mixture.  This is the test
+    that fails if the two consumers ever drift apart again (they share
+    hogg_branch_logps; before that they each rebuilt the four terms).  The
+    algebra is exact: with a = log(1-f) + log N(r|0,s) and b = log(f) +
+    log N(r|0,sqrt(s^2+S^2)), logp = logaddexp(a, b) and logodds = b - a, so
+    a = logp - softplus(logodds) and b = logp - softplus(-logodds).  (The
+    residuals stay within a few tens of sigma: recovering a branch from the
+    pair is exact algebra but ill-conditioned once one branch underflows the
+    other by 1e7 nats, which says nothing about either implementation.  The
+    catastrophic-outlier case is pinned by the finite-gradient test below.)
+    """
+    rng = np.random.default_rng(19)
+    resid = np.concatenate([rng.normal(0, 1, 6), [0.0, 5.0, -5.0, 1e-12]])
+    sigma = np.concatenate([rng.uniform(0.1, 2.0, 6), [1.0, 0.2, 0.2, 1e-3]])
+
+    logp = robust_support.hogg_logp(
+        pt.as_tensor_variable(resid),
+        pt.as_tensor_variable(sigma),
+        out_frac,
+        out_scale,
+    ).eval()
+    logodds = robust_support.hogg_outlier_logodds(
+        pt.as_tensor_variable(resid),
+        pt.as_tensor_variable(sigma),
+        out_frac,
+        out_scale,
+    ).eval()
+
+    softplus = np.logaddexp(0.0, logodds)
+    inlier = logp - softplus
+    outlier = logp - np.logaddexp(0.0, -logodds)
+
+    expected_in = np.log1p(-out_frac) + stats.norm.logpdf(
+        resid, loc=0.0, scale=sigma
+    )
+    expected_out = np.log(out_frac) + stats.norm.logpdf(
+        resid, loc=0.0, scale=np.sqrt(sigma**2 + out_scale**2)
+    )
+    np.testing.assert_allclose(inlier, expected_in, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(outlier, expected_out, rtol=0, atol=1e-9)
+
+
+def test_both_hogg_consumers_are_built_from_the_shared_branches():
+    """
+    Given the shared hogg_branch_logps helper,
+    When its two outputs are combined the way each consumer combines them,
+    Then the results are bit-identical to the consumers' own output -- the
+    single definition really is the one both use, and the mixture is still
+    assembled with logaddexp (never a where over branch logps, which would
+    poison the JAX gradient).
+    """
+    resid = pt.as_tensor_variable(np.array([0.3, -2.0, 40.0]))
+    sigma = pt.as_tensor_variable(np.array([0.2, 0.5, 1.0]))
+    inlier, outlier = robust_support.hogg_branch_logps(resid, sigma, 0.1, 3.0)
+
+    logp = robust_support.hogg_logp(resid, sigma, 0.1, 3.0).eval()
+    logodds = robust_support.hogg_outlier_logodds(
+        resid, sigma, 0.1, 3.0
+    ).eval()
+
+    expected_logp = (
+        pt.logaddexp(inlier, outlier) - 0.5 * np.log(2.0 * np.pi)
+    ).eval()
+    assert np.array_equal(logp, expected_logp)
+    assert np.array_equal(logodds, (outlier - inlier).eval())
+
+
 # ---------------------------------------------------------------------------
 # 2. Instrument lifecycle hooks
 # ---------------------------------------------------------------------------
@@ -448,6 +533,50 @@ def test_register_robust_omits_the_pin_when_every_file_opted_in():
     t_pin = manifest["t_log_nu"]["overrides"]["sigma"]
     assert np.isnan(hogg_pin[0]) and hogg_pin[1] == 0.0
     assert t_pin[0] == 0.0 and np.isnan(t_pin[1])
+
+
+def test_one_helper_exposes_the_linear_value_of_both_log_tables():
+    """
+    Given the GP and robust features, which each sample some parameters in
+    log10 and owe the tables the linear value,
+    When the shared _build_log10_deterministics runs over each feature's
+    table,
+    Then it returns 10**value for every parameter the topology built, skips
+    the ones it did not, and names the Deterministic <prefix>.<linear name>
+    -- one function over two tables, so the two features cannot disagree
+    about what a log-sampled parameter reports.
+    """
+    from exozippy.components import gp as gp_support
+
+    inst = _make(
+        [
+            {"file": "a.rv", "likelihood": "studentt"},
+            {"file": "b.rv", "gp": "sho"},
+        ],
+        _RecordingConfigManager(),
+    )
+
+    with pm.Model() as model:
+        inst.t_log_nu = _FakeParam(np.array([0.7, 0.0]))
+        inst.gp_sho_log_q = _FakeParam(np.array([0.0, -0.5]))
+        # gp_rot_log_q0 / gp_rot_log_dq were never built (no rotation term).
+        inst._build_robust_deterministics()
+        inst._build_gp_deterministics()
+
+    assert set(inst._robust_linear) == {"t_nu"}
+    assert set(inst._gp_linear) == {"gp_sho_q"}
+    assert set(gp_support.GP_LOG_PARAMS) > {"gp_sho_log_q"}
+
+    np.testing.assert_allclose(
+        inst._robust_linear["t_nu"].eval(), 10.0 ** np.array([0.7, 0.0])
+    )
+    np.testing.assert_allclose(
+        inst._gp_linear["gp_sho_q"].eval(), 10.0 ** np.array([0.0, -0.5])
+    )
+    assert {v.name for v in model.deterministics} == {
+        "dummy.t_nu",
+        "dummy.gp_sho_q",
+    }
 
 
 def test_prepare_robust_hints_ten_times_the_white_noise_level():
