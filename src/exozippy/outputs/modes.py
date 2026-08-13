@@ -1054,11 +1054,10 @@ def identify_modes(
         # DEFAULT_LP_EXEMPT_MARGIN).  Skipped when lp is unavailable.
         if has_lp and (valid & z_ok).any():
             lp_bulk_med = np.median(lp[valid & z_ok])
-            exempt = (
-                valid
-                & ~z_ok
-                & np.nan_to_num(lp >= lp_bulk_med - lp_exempt_margin)
-            )
+            # No NaN guard on the comparison: `valid` already requires
+            # np.isfinite(lp), and a NaN lp compares False here anyway, so a
+            # nonfinite-lp draw cannot be exempted either way.
+            exempt = valid & ~z_ok & (lp >= lp_bulk_med - lp_exempt_margin)
             n_exempt = int(exempt.sum())
             if n_exempt:
                 notes.append(
@@ -1191,7 +1190,6 @@ def identify_modes(
     n_modes = order.size
     w_assigned = np.bincount(labels_full[labels_full >= 0], minlength=n_modes)
     w_assigned = w_assigned / w_assigned.sum()
-    lp_2d = lp.reshape(n_chain, n_draw)
 
     lp_maxes = []
     modes = []

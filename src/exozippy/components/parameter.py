@@ -2905,7 +2905,14 @@ class Parameter:
             return summary
         return get_stat(arr)
 
-    def compute_summary(self, nsigma: float = 1.0) -> Any:
+    def compute_summary(self) -> Any:
+        """Median and 68% interval over the trace, in user units.
+
+        The interval width is not a knob: ``_summarize_array`` reports the
+        1-sigma quantiles every consumer (LaTeX tables, CSV, mode report)
+        assumes.  This used to take an ``nsigma`` argument that nothing read,
+        so ``compute_summary(nsigma=2)`` silently returned 1 sigma.
+        """
         # arr from az.extract places the 'sample' dimension LAST.
         # Posterior is stored in user units (from the user-unit trace Deterministic).
         arr = np.asarray(

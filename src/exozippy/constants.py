@@ -140,9 +140,6 @@ SUN_Z_OFFSET = 0.025  # in kpc, Sun's height above the plane (genulens zsun)
 # Solar velocity in the galactocentric frame, genulens convention
 # (vxsun toward the GC, vysun in the rotation direction, vzsun up):
 SUN_GALCEN_V = (10.0, 243.0, 7.0)  # in km/s
-SUN_VELOCITY_X = -12.7  # in km/s (legacy, rp.py convention)
-SUN_VELOCITY_Y = 24.0 + DISK_ROTATION_VELOCITY  # in km/s (legacy)
-SUN_VELOCITY_Z = 7.25  # in km/s (legacy)
 
 # --- 8. GALACTIC POPULATION NUMBER DENSITIES (stars/pc^3, MS+BD) ---
 # Branch weights for the disk/thick/bulge mixture in
