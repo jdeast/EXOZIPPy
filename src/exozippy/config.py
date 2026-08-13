@@ -436,6 +436,12 @@ class ConfigManager:
         self.hints = {}
         self.hint_ranks = {}
 
+        # Cross-component parameter overrides (see add_override).  Same
+        # channel as a manifest entry's "overrides" dict -- layered UNDER the
+        # user's params.yaml -- for a component that must constrain a
+        # parameter another component owns.  path -> {field: value}.
+        self.param_overrides = {}
+
         # Multi-seed sampling (P4).  seed_resolved holds K fully-solved start
         # points (list of {internal_path: internal_value} dicts) after
         # finalize_user_params runs the relaxation engine once per seed; it
@@ -704,6 +710,43 @@ class ConfigManager:
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
 
+    def add_override(self, path, **fields):
+        """Register a component-computed override on a parameter it does NOT own.
+
+        This is the cross-component spelling of a manifest entry's
+        ``"overrides"`` dict, and it behaves identically: the fields are
+        applied inside ``resolve()`` through ``apply_value`` *before* the
+        user's params.yaml, so the user still wins -- with the one deliberate
+        exception ``apply_value`` builds in, that competing bounds combine as
+        ``max(lower)`` / ``min(upper)`` order-independently.  That is what
+        makes this the right channel for a **validity limit** (a range past
+        which the likelihood is NaN or meaningless, e.g. the coverage of an
+        interpolation grid) and the wrong one for a preference: a user bound
+        it clips is applied and logged, not silently dropped.
+
+        It exists because ``add_hint`` cannot express any of this.  A hint is
+        a ranked *start value*: one scalar, feeding ``initval`` only, competing
+        in the relaxation engine's provenance ledger.  A bound or a structural
+        pin is neither a start value nor ranked -- ``lower``/``upper``/``sigma``
+        never enter the ledger at all.
+
+        Writing into ``user_params`` instead (what the SED did until this was
+        added) is what this replaces: those entries are indistinguishable from
+        the user's own, so the ledger, ``export_solution``, ``initval_source``
+        and the GUI all report a value the user never wrote, and
+        ``finalize_user_params`` additionally registers the path as a leaf
+        symbol in the relaxation engine.
+
+        ``path`` may be any of the three spellings ``resolve()`` accepts --
+        ``comp.param`` (broadcast to every element), ``comp.<i>.param`` or
+        ``comp.<name>.param``.  Values are in the parameter's **defaults.yaml
+        unit**, like every other override (a user ``unit:`` rescales them, the
+        same way it rescales the defaults).  Per-element lists are accepted
+        with the same conventions as a manifest override: ``NaN`` means "leave
+        this element alone", ``+/-inf`` is a real bound.
+        """
+        self.param_overrides.setdefault(path, {}).update(fields)
+
     def add_seed_hints(self, seed_dicts):
         """Register K per-seed observable sets for multi-seed sampling (P4).
 
@@ -930,31 +973,54 @@ class ConfigManager:
         # clip itself is deliberate: these are validity limits, e.g.
         # Instrument._register_noise's jitter-variance floor).
         override_bounds = {}
-        if internal_overrides:
+
+        def apply_overrides(od, indices):
+            """Layer one component override dict onto elements `indices`."""
             for key in all_numeric:
-                if key in internal_overrides:
-                    val = internal_overrides[key]
-                    for i in range(n_elements):
-                        v = (
-                            val[i]
-                            if isinstance(val, (list, np.ndarray))
-                            else val
-                        )
-                        if v is None:
-                            continue
-                        v = float(v)
-                        # NaN means "leave this element alone".  Component-supplied
-                        # overrides are frequently per-element and sparse (e.g.
-                        # Instrument._register_gp pins only the files that did not
-                        # opt into a GP term); NaN lets one array express that
-                        # without inventing a value for the others.  +/-inf is a
-                        # legitimate bound and is NOT skipped.
-                        if np.isnan(v):
-                            continue
-                        resolved["auto_estimated"] = True
-                        apply_value(key, resolved[key], i, v * elem_scaling[i])
-                        if key in ("lower", "upper"):
-                            override_bounds[(key, i)] = v * elem_scaling[i]
+                if key not in od:
+                    continue
+                val = od[key]
+                for i in indices:
+                    v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                    if v is None:
+                        continue
+                    v = float(v)
+                    # NaN means "leave this element alone".  Component-supplied
+                    # overrides are frequently per-element and sparse (e.g.
+                    # Instrument._register_gp pins only the files that did not
+                    # opt into a GP term); NaN lets one array express that
+                    # without inventing a value for the others.  +/-inf is a
+                    # legitimate bound and is NOT skipped.
+                    if np.isnan(v):
+                        continue
+                    resolved["auto_estimated"] = True
+                    apply_value(key, resolved[key], i, v * elem_scaling[i])
+                    if key in ("lower", "upper"):
+                        override_bounds[(key, i)] = v * elem_scaling[i]
+
+        if internal_overrides:
+            apply_overrides(internal_overrides, range(n_elements))
+
+        # Cross-component overrides (ConfigManager.add_override): the same
+        # channel, for a component constraining a parameter it does not own --
+        # today the SED, whose model grid bounds star.teffsed/feh/av.  Keyed by
+        # path rather than reached through the owner's manifest, and read here
+        # under the same three spellings resolve() accepts everywhere else, so
+        # a broadcast `star.av` covers every element and a per-element
+        # `star.0.av` refines it.  Applied BEFORE the user's params below, so
+        # the user still wins (bounds combine, per apply_value).
+        if self.param_overrides:
+            for i in range(n_elements):
+                keys = [
+                    f"{component_type}.{param_name}",
+                    f"{component_type}.{_eff_idx(i)}.{param_name}",
+                ]
+                if names and i < len(names):
+                    keys.append(f"{component_type}.{names[i]}.{param_name}")
+                for k in keys:
+                    od = self.param_overrides.get(k)
+                    if od:
+                        apply_overrides(od, [i])
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
