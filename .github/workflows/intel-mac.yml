@@ -139,6 +139,42 @@ jobs:
           echo "--- intel-mac-requirements.txt ---"
           cat intel-mac-requirements.txt
 
+      # celerite2 has to be built BEFORE the bulk install, and outside pip's
+      # build isolation, or nothing else here matters.
+      #
+      # It ships no macOS x86_64 wheel, so pip source-builds it -- and
+      # 0.3.3's [build-system] requires names `jax==0.8.0`, which build
+      # isolation resolves in a fresh environment our pins cannot reach.
+      # jaxlib 0.8.0 has no Intel wheel, so the whole install dies before
+      # any C++ is compiled.
+      #
+      # That build dependency is not structural. celerite2's own
+      # CMakeLists declares BUILD_JAX an option and prints "Skipping JAX
+      # extension" when `from jax import ffi` fails; the pymc and numpy
+      # backends do not use it. So: install the real build requirements
+      # ourselves, turn the JAX extension off explicitly rather than
+      # relying on the graceful-skip path, and build with
+      # --no-build-isolation. The bulk install below then sees celerite2
+      # already satisfied and leaves it alone.
+      #
+      # Upstream fix that would delete this step: drop `jax==0.8.0` from
+      # celerite2's build requires, since CMake already treats it as
+      # optional.
+      # numpy is pinned to the SAME range the bulk install uses, not left
+      # free. Without that, pip resolves the newest numpy here, celerite2's
+      # extension compiles against those headers, and the bulk install then
+      # downgrades numpy under it -- a compiled module running against an
+      # older numpy than it was built for, which fails at import in a way
+      # that looks nothing like its cause.
+      - name: Pre-build celerite2 without its jax build dependency
+        run: |
+          set -euo pipefail
+          pip install scikit-build-core "numpy>=2.0,<2.4" pybind11 cmake ninja
+          pip install --no-build-isolation \
+            --config-settings=cmake.define.BUILD_JAX=OFF \
+            "celerite2>=0.3.3,<0.4.0"
+          python -c "import celerite2; print('celerite2', celerite2.__version__)"
+
       - name: Install dependencies
         run: pip install -r intel-mac-requirements.txt
 
@@ -164,10 +200,14 @@ jobs:
       - name: Record the resolved versions
         run: pip freeze | tee resolved-intel-mac.txt
 
+      # The celerite2 check lives here rather than next to its build,
+      # because celerite2.pymc imports pytensor and pymc -- which the build
+      # step runs before. This is the first point where it can be asked.
       - name: Import smoke test
         run: |
           python -c "import exozippy; print('exozippy', exozippy.__file__)"
           python -c "import exozippy.run, exozippy.system, exozippy.config"
+          python -c "from celerite2.pymc import terms; print('celerite2.pymc OK')"
 
       # THE POINT OF THIS WORKFLOW. Everything above is setup.
       #
