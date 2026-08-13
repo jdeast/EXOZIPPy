@@ -370,26 +370,14 @@ class TuneSession:
             self._worker = worker
         return worker
 
-    def prewarm(self):
-        """Start the worker subprocess (heavy imports) before the first Solve.
-
-        Called when the Tune tab opens so the import cost overlaps with the user
-        reading the tab instead of landing entirely on the first Solve click.
-        """
-        with self._lock:
-            try:
-                self._ensure_worker()
-            except Exception:  # noqa: BLE001 - best effort, non-fatal
-                logger.exception("tune prewarm failed")
-
     def solve(self, config, params, workdir):
         """Blocking solve (call from a background thread). Sets phase/result."""
         self.phase = "solving"
         self.error = None
         self.data_plots = None
         try:
-            # Brief lock only around (re)spawn, not the seconds-long solve, so a
-            # concurrent prewarm can't double-spawn but eval is never blocked.
+            # Brief lock only around (re)spawn, not the seconds-long solve, so
+            # concurrent callers can't double-spawn but eval is never blocked.
             with self._lock:
                 worker = self._ensure_worker()
 

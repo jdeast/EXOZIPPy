@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
-  type DirListing,
   type DocCommand,
   type DocState,
   type Diagnostic,
 } from "../api";
+import PathPicker from "./PathPicker";
 
 // Config tab: a form editor over the two user YAML files. Left = tree of
 // component instances (grouped by type) + global keys; right = an
@@ -381,78 +381,6 @@ function GlobalForm({
   );
 }
 
-// Project-rooted file picker for datafile config keys (the old Data tab's
-// association flow, folded into the form). Lists /api/files (sandboxed to
-// the open project); picking a file stores its project-relative path via
-// the undoable associate_datafile command.
-function FilePickerModal({
-  onPick,
-  onClose,
-}: {
-  onPick: (relPath: string) => void;
-  onClose: () => void;
-}) {
-  const [root, setRoot] = useState<string | null>(null);
-  const [dir, setDir] = useState<DirListing | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = (path?: string | null) => {
-    api
-      .files(path)
-      .then((d) => {
-        setDir(d);
-        setRoot((r) => r ?? d.dir);
-        setError(null);
-      })
-      .catch((e) => setError(String(e instanceof Error ? e.message : e)));
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Config datafile paths are relative to the project (= config) directory.
-  const relOf = (abs: string) =>
-    root && abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs;
-
-  return (
-    <div className="folderpicker-backdrop" onClick={onClose}>
-      <div className="folderpicker" onClick={(e) => e.stopPropagation()}>
-        <div className="folderpicker-head">
-          <span className="folderpicker-path" title={dir?.dir}>
-            {dir?.dir ?? "..."}
-          </span>
-          <button className="folderpicker-close" onClick={onClose}>
-            x
-          </button>
-        </div>
-        {error && <div className="sidebar-error">{error}</div>}
-        <ul className="folderpicker-list">
-          {dir?.parent && (
-            <li>
-              <button className="folderpicker-row" onClick={() => load(dir.parent)}>
-                <span className="kind-dot kind-dir" /> ..
-              </button>
-            </li>
-          )}
-          {dir?.entries.map((e) => (
-            <li key={e.path}>
-              <button
-                className="folderpicker-row"
-                onClick={() => (e.is_dir ? load(e.path) : onPick(relOf(e.path)))}
-              >
-                <span className={`kind-dot ${e.is_dir ? "kind-dir" : "kind-data"}`} />
-                {e.name}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
 function InstanceForm({
   schema,
   doc,
@@ -532,8 +460,15 @@ function InstanceForm({
         </section>
       )}
 
+      {/* The old Data tab's association flow, folded into the form: browse
+          /api/files (sandboxed to the open project) and store the picked
+          file's project-relative path via the undoable associate_datafile
+          command. */}
       {pickingKey && (
-        <FilePickerModal
+        <PathPicker
+          list={api.files}
+          select="file"
+          relativeToRoot
           onClose={() => setPickingKey(null)}
           onPick={(rel) => {
             run({
