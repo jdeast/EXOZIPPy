@@ -27,6 +27,7 @@ import argparse
 import math
 import sys
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -291,6 +292,278 @@ def _write_sed_yaml(path, sed_entries, model="NextGen", nstars=1, notes=None):
                 f.write("\n")
 
 
+# --- the catalog table --------------------------------------------------------
+#
+# Every photometric catalog is queried, cross-matched, floored and appended by
+# the same three functions below (_query_catalog, _add_band, _add_catalog_bands).
+# Everything that differs between catalogs lives in CATALOGS, so the table is
+# the documentation: read a row to know that catalog's match radius, its error
+# floors, which sentinel values it uses for "not measured", and which CLI flag
+# gates its rows.
+#
+# Two catalogs contribute photometry that is not a column -- Stromgren uvby
+# (converted from the b-y/m1/c1 indices) and Mermilliod UBV (converted from the
+# B-V/U-B colors) -- so they carry no `bands` and call _add_band directly with
+# the magnitudes they compute. They are still in the table for their query and
+# cross-match settings.
+
+_INF = float("inf")
+_NAN = float("nan")
+
+
+@dataclass(frozen=True)
+class Band:
+    """One photometric row a catalog can contribute to the SED.
+
+    ``floor`` is the error floor in magnitudes: the SED gets
+    ``max(floor, err)``, never the catalog's raw error alone.  ``dedup`` names
+    a reference magnitude (see ``_add_catalog_bands``) that this measurement
+    must differ from, so the same photometry cannot enter the SED twice from
+    two catalogs.
+    """
+
+    svo: str  # SVO Filter Profile Service name written to the .sed
+    mag_col: str  # Vizier column holding the magnitude
+    err_col: str  # Vizier column holding its uncertainty
+    floor: float  # error floor, mag
+    dedup: str = ""  # reference magnitude this must be distinct from
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """How to query one catalog, find the target in it, and floor its errors.
+
+    ``max_sep`` is the positional-fallback cutoff in arcsec, used only when the
+    cross-match ID misses: ``inf`` accepts the nearest row whatever the
+    separation (catalogs with no ID to match on), and ``None`` declines a
+    positional fallback entirely (Gaia DR2, where an ID mismatch means the TIC
+    is pointing at a different star).
+    """
+
+    vizier: str  # Vizier catalog identifier
+    label: str  # what the progress line calls it
+    bands: tuple = ()  # rows this catalog contributes, in SED order
+    flag: str = ""  # mkticsed kwarg gating these rows ("" = always live)
+    id_col: str = ""  # cross-match column, matched against a TIC ID
+    ra_col: str = "RAJ2000"  # coordinate columns for the positional fallback
+    dec_col: str = "DEJ2000"
+    max_sep: float = _INF  # positional-fallback cutoff, arcsec (see above)
+    max_err: float = _INF  # reject a band whose error is >= this, mag
+    err_scale: float = 1.0  # catalog error units -> magnitudes
+    no_data_err: float = _NAN  # raw error value meaning "not measured"
+    min_mag: float = -_INF  # magnitudes <= this are "not measured" sentinels
+    require_col: str = ""  # skip the catalog outright without this column
+
+
+CATALOGS = {
+    # Gaia DR3 photometry is written against the DR2 filter curves: the
+    # NextGen BC grid ships only those, and they agree to <1 mmag.
+    "gaia3": Catalog(
+        vizier="I/355/gaiadr3",
+        label="Gaia DR3",
+        id_col="Source",  # TICv8.2 carries the DR2 source ID, reused in DR3
+        ra_col="RA_ICRS",
+        dec_col="DE_ICRS",
+        max_sep=1.0,
+        max_err=1.0,
+        min_mag=-9.0,  # Gaia writes -99 for an absent band
+        bands=(
+            Band("GAIA/GAIA2r.G", "Gmag", "e_Gmag", 0.02),
+            Band("GAIA/GAIA2r.Gbp", "BPmag", "e_BPmag", 0.02),
+            Band("GAIA/GAIA2r.Grp", "RPmag", "e_RPmag", 0.02),
+        ),
+    ),
+    # Parallax only -- the DR3 photometry above supersedes DR2's.
+    "gaia2": Catalog(
+        vizier="I/345/gaia2",
+        label="Gaia DR2",
+        id_col="Source",
+        max_sep=None,
+    ),
+    "2mass": Catalog(
+        vizier="II/246/out",
+        label="2MASS",
+        id_col="_2MASS",
+        max_sep=2.0,
+        max_err=1.0,
+        bands=(
+            Band("2MASS/2MASS.J", "Jmag", "e_Jmag", 0.02),
+            Band("2MASS/2MASS.H", "Hmag", "e_Hmag", 0.02),
+            Band("2MASS/2MASS.Ks", "Kmag", "e_Kmag", 0.02),
+        ),
+    ),
+    "wise": Catalog(
+        vizier="II/328/allwise",
+        label="AllWISE",
+        id_col="AllWISE",
+        max_sep=15.0,  # WISE's beam is wide; so is its acceptable match
+        max_err=1.0,
+        bands=(
+            Band("WISE/WISE.W1", "W1mag", "e_W1mag", 0.03),
+            Band("WISE/WISE.W2", "W2mag", "e_W2mag", 0.03),
+            Band("WISE/WISE.W3", "W3mag", "e_W3mag", 0.03),
+            # W4 is the least trustworthy band, hence its own floor.
+            Band("WISE/WISE.W4", "W4mag", "e_W4mag", 0.10),
+        ),
+    ),
+    "tycho": Catalog(
+        vizier="I/259/TYC2",
+        label="Tycho-2",
+        flag="tycho",
+        ra_col="RAmdeg",
+        dec_col="DEmdeg",
+        bands=(
+            Band("TYCHO/TYCHO.B", "BTmag", "e_BTmag", 0.02),
+            Band("TYCHO/TYCHO.V", "VTmag", "e_VTmag", 0.02),
+        ),
+    ),
+    # UCAC4 republishes APASS, storing its errors as hundredths of a magnitude
+    # with 99 as the "no data" sentinel -- which must be rejected on every
+    # band, or it survives as a fabricated max(0.02, 99 * 0.01) = 0.99 mag
+    # error on a magnitude that was never measured.  B and V are deduplicated
+    # against the Tycho photometry the SED may already carry.
+    "ucac": Catalog(
+        vizier="UCAC4",
+        label="UCAC4/APASS DR6",
+        flag="ucac",
+        err_scale=0.01,
+        no_data_err=99.0,
+        bands=(
+            Band("Generic/Bessell.B", "Bmag", "e_Bmag", 0.02, dedup="BT"),
+            Band("Generic/Bessell.V", "Vmag", "e_Vmag", 0.02, dedup="VT"),
+            Band("SLOAN/SDSS.g", "gmag", "e_gmag", 0.02),
+            Band("SLOAN/SDSS.r", "rmag", "e_rmag", 0.02),
+            Band("SLOAN/SDSS.i", "imag", "e_imag", 0.02),
+        ),
+    ),
+    # uvby, converted from the catalog's b-y/m1/c1 indices by strom_conv.
+    "stromgren": Catalog(
+        vizier="J/A+A/580/A23/catalog",
+        label="Stromgren photometry (Paunzen+2015)",
+        flag="stromgren",
+    ),
+    # UBV, reconstructed from V and the B-V/U-B colors.
+    "mermilliod": Catalog(
+        vizier="II/168/ubvmeans",
+        label="Mermilliod+1994 UBV",
+        flag="merm",
+    ),
+    "galex": Catalog(
+        vizier="II/312/ais",
+        label="GALEX DR5",
+        flag="galex",
+        require_col="FUV",
+        bands=(
+            Band("GALEX/GALEX.FUV", "FUV", "e_FUV", 0.10),
+            Band("GALEX/GALEX.NUV", "NUV", "e_NUV", 0.10),
+        ),
+    ),
+}
+
+# Floors used by the two converted-photometry catalogs, which have no Band
+# rows of their own.  0.02 mag, the same floor every optical catalog above
+# carries.
+_STROMGREN_FLOOR = 0.02
+_MERMILLIOD_FLOOR = 0.02
+
+
+def _match_row(table, ra, dec, cat, id_value=""):
+    """Locate the target's row in a cone-search result.
+
+    The catalog's own cross-match ID wins; failing that the nearest row is
+    taken if it lies within ``cat.max_sep`` arcsec.  Returns
+    ``(index, separation_arcsec)`` -- index -1 when nothing matched, and a NaN
+    separation when the ID matched (no positional comparison was made).
+    """
+    if cat.id_col and id_value and cat.id_col in table.colnames:
+        for i, val in enumerate(table[cat.id_col]):
+            if str(val).strip() == id_value:
+                return i, _NAN
+    if cat.max_sep is None:
+        return -1, _INF
+    idx, sep = _nearest(table, ra, dec, cat.ra_col, cat.dec_col)
+    if not math.isinf(cat.max_sep) and not sep < cat.max_sep:
+        return -1, sep
+    return idx, sep
+
+
+def _query_catalog(cat, ra, dec, radius_arcsec, id_value=""):
+    """Cone-search one catalog and find the target in it.
+
+    Returns ``(table, row, sep)``; ``row`` is -1 when the catalog has nothing
+    usable for this star (no result, no rows, a missing ``require_col``, or no
+    acceptable match).
+    """
+    print(f"Querying {cat.label} ...", flush=True)
+    table = query_region(cat.vizier, ra, dec, radius_arcsec / 60.0)
+    if table is None or len(table) == 0:
+        return None, -1, _INF
+    if cat.require_col and cat.require_col not in table.colnames:
+        return table, -1, _INF
+    row, sep = _match_row(table, ra, dec, cat, id_value)
+    return table, row, sep
+
+
+def _add_band(
+    entries,
+    svo,
+    mag,
+    err,
+    floor,
+    enabled=True,
+    max_err=_INF,
+    min_mag=-_INF,
+):
+    """Append one SED row, applying its rejection gates and error floor.
+
+    Returns the ``(mag, used_err)`` written, or None when the measurement was
+    rejected: a non-finite or sentinel magnitude (``mag <= min_mag``), or a
+    non-finite or implausibly large error (``err >= max_err``).  A finite
+    uncertainty is a precondition for inclusion everywhere -- substituting a
+    plausible-looking one for an absent one over-weights the row in the SED
+    likelihood and biases Teff, radius and Av.
+    """
+    if not (np.isfinite(mag) and mag > min_mag):
+        return None
+    if not (np.isfinite(err) and err < max_err):
+        return None
+    used_err = max(floor, err)
+    entries.append(_sed_entry(svo, mag, used_err, enabled=enabled))
+    return mag, used_err
+
+
+def _add_catalog_bands(entries, cat, table, row, enabled=True, refs=None):
+    """Append every band ``cat`` contributes for its matched row.
+
+    ``refs`` maps a Band's ``dedup`` key to a reference magnitude that the
+    measurement must differ from (see ``_is_distinct``).  Returns
+    ``{svo_name: (mag, used_err)}`` for the rows actually written, so a caller
+    can reuse a magnitude it also needs as a prior.
+    """
+    written = {}
+    refs = refs or {}
+    for band in cat.bands:
+        raw_err = _get(table, band.err_col, row)
+        if raw_err == cat.no_data_err:
+            continue
+        mag = _get(table, band.mag_col, row)
+        if band.dedup and not _is_distinct(mag, refs.get(band.dedup, _NAN)):
+            continue
+        got = _add_band(
+            entries,
+            band.svo,
+            mag,
+            raw_err * cat.err_scale,
+            band.floor,
+            enabled=enabled,
+            max_err=cat.max_err,
+            min_mag=cat.min_mag,
+        )
+        if got is not None:
+            written[band.svo] = got
+    return written
+
+
 # --- main function ------------------------------------------------------------
 
 
@@ -348,6 +621,20 @@ def mkticsed(
 
     def key(param):
         return f"star.{star_name}.{param}"
+
+    # Which CLI flag un-comments each catalog's rows (Catalog.flag); a catalog
+    # with no flag is always live.
+    enabled_by_flag = {
+        "galex": galex,
+        "tycho": tycho,
+        "stromgren": stromgren,
+        "ucac": ucac,
+        "merm": merm,
+    }
+
+    def is_live(cat):
+        """True when this catalog's rows go into the SED uncommented."""
+        return enabled_by_flag.get(cat.flag, True)
 
     # --- 1. TICv8.2 -----------------------------------------------------------
     print(f"Querying TICv8.2 for TIC {ticid} ...", flush=True)
@@ -420,176 +707,138 @@ def mkticsed(
         }
 
     # --- 3. Gaia DR3 parallax + photometry ------------------------------------
-    print("Querying Gaia DR2 ...", flush=True)
     dr2_fallback_plx = float("nan")
     dr2_fallback_uplx = float("nan")
 
-    qgaia2 = query_region("I/345/gaia2", tic_ra, tic_dec, dist / 60.0)
-    if qgaia2 is not None and len(qgaia2) > 0 and gaia_id:
-        dr2_row = -1
-        if "Source" in qgaia2.colnames:
-            for i, src in enumerate(qgaia2["Source"]):
-                if str(src).strip() == gaia_id:
-                    dr2_row = i
-                    break
-        if dr2_row >= 0:
-            dr2_plx = _get(qgaia2, "Plx", dr2_row)
-            dr2_eplx = _get(qgaia2, "e_Plx", dr2_row)
-            dr2_gmag = _get(qgaia2, "Gmag", dr2_row)
-            if np.isfinite(dr2_plx) and np.isfinite(dr2_eplx) and dr2_plx > 0:
-                k = 1.08
-                sigma_s = (
-                    0.021
-                    if np.isfinite(dr2_gmag) and dr2_gmag <= 13
-                    else 0.043
-                )
-                c_plx = dr2_plx + 0.030  # Lindegren+2018 offset
-                if c_plx > 0:
-                    dr2_fallback_plx = c_plx
-                    dr2_fallback_uplx = math.sqrt(
-                        (k * dr2_eplx) ** 2 + sigma_s**2
-                    )
+    qgaia2, dr2_row, _ = _query_catalog(
+        CATALOGS["gaia2"], tic_ra, tic_dec, dist, gaia_id
+    )
+    if dr2_row >= 0:
+        dr2_plx = _get(qgaia2, "Plx", dr2_row)
+        dr2_eplx = _get(qgaia2, "e_Plx", dr2_row)
+        dr2_gmag = _get(qgaia2, "Gmag", dr2_row)
+        if np.isfinite(dr2_plx) and np.isfinite(dr2_eplx) and dr2_plx > 0:
+            k = 1.08
+            sigma_s = (
+                0.021 if np.isfinite(dr2_gmag) and dr2_gmag <= 13 else 0.043
+            )
+            c_plx = dr2_plx + 0.030  # Lindegren+2018 offset
+            if c_plx > 0:
+                dr2_fallback_plx = c_plx
+                dr2_fallback_uplx = math.sqrt((k * dr2_eplx) ** 2 + sigma_s**2)
 
-    print("Querying Gaia DR3 ...", flush=True)
-    qgaia3 = query_region("I/355/gaiadr3", tic_ra, tic_dec, dist / 60.0)
+    # Matched by Gaia DR2 source ID (TICv8.2 carries it and DR3 reuses it),
+    # falling back to the nearest star within 1".
+    qgaia3, g3row, g3sep = _query_catalog(
+        CATALOGS["gaia3"], tic_ra, tic_dec, dist, gaia_id
+    )
     target_ra = tic_ra
     target_dec = tic_dec
     target_pmra = float("nan")
     target_pmdec = float("nan")
     gaia_dr3_done = False
 
-    if qgaia3 is not None and len(qgaia3) > 0:
-        # Match by Gaia DR2 source ID (same ID is used in TICv8.2), fall back to position
-        g3row = -1
-        if gaia_id and "Source" in qgaia3.colnames:
-            for i, src in enumerate(qgaia3["Source"]):
-                if str(src).strip() == gaia_id:
-                    g3row = i
-                    break
-        if g3row == -1:
-            idx, sep = _nearest(qgaia3, tic_ra, tic_dec, "RA_ICRS", "DE_ICRS")
-            if sep < 1.0:
-                g3row = idx
-                notes.append(
-                    f"TICv8.2 Gaia ID didn't match DR3 Source; using star at {sep:.2f}\""
-                )
-
-        if g3row >= 0:
-            g3_plx = _get(qgaia3, "Plx", g3row)
-            g3_eplx = _get(qgaia3, "e_Plx", g3row)
-            g3_gmag = _get(qgaia3, "Gmag", g3row)
-            g3_egmag = _get(qgaia3, "e_Gmag", g3row)
-            g3_bpmag = _get(qgaia3, "BPmag", g3row)
-            g3_ebpm = _get(qgaia3, "e_BPmag", g3row)
-            g3_rpmag = _get(qgaia3, "RPmag", g3row)
-            g3_erpm = _get(qgaia3, "e_RPmag", g3row)
-            g3_ruwe = _get(qgaia3, "RUWE", g3row)
-            g3_nueff = _get(qgaia3, "nueff", g3row)
-            g3_pscol = _get(qgaia3, "pscol", g3row)
-            g3_elat = _get(qgaia3, "ELAT", g3row)
-            g3_solv = _get(qgaia3, "Solved", g3row)
-
-            if np.isfinite(g3_ruwe):
-                sed_notes.append(f"Gaia DR3 RUWE = {g3_ruwe:.4f}")
-                sed_notes.append(
-                    "RUWE > 1.4 is a strong indicator of stellar multiplicity"
-                )
-
-            # No positivity gate: the prior is written in PARALLAX space, so
-            # a negative measured parallax is representable (see below).
-            if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
-                uplx = math.sqrt(
-                    g3_eplx**2 + 0.01**2
-                )  # 0.01 mas systematic floor
-                zp = 0.0
-                zp_msg = "raw (gaiadr3-zeropoint not installed)"
-                if HAS_GAIADR3_ZPT:
-                    in5 = (
-                        np.isfinite(g3_solv)
-                        and int(g3_solv) == 31
-                        and np.isfinite(g3_nueff)
-                        and 1.1 <= g3_nueff <= 1.9
-                    )
-                    in6 = (
-                        np.isfinite(g3_solv)
-                        and int(g3_solv) == 95
-                        and np.isfinite(g3_pscol)
-                        and 1.24 <= g3_pscol <= 1.72
-                    )
-                    if (
-                        (in5 or in6)
-                        and np.isfinite(g3_gmag)
-                        and 6 <= g3_gmag <= 21
-                    ):
-                        try:
-                            # numpy scalars, not Python floats: under NEP 50
-                            # (numpy >= 2, our floor) zpt's internal
-                            # np.can_cast(inp, float) raises TypeError on a
-                            # Python float.  That was the second reason the
-                            # correction never once applied.
-                            zp = float(
-                                _gaia_zpt.get_zpt(
-                                    np.float64(g3_gmag),
-                                    np.float64(g3_nueff),
-                                    np.float64(g3_pscol),
-                                    np.float64(g3_elat),
-                                    np.int64(int(g3_solv)),
-                                )
-                            )
-                            zp_msg = (
-                                f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
-                            )
-                        except Exception as exc:
-                            # Do NOT fall through with zp = 0.  The result
-                            # here is not a missing number, it is a distance
-                            # PRIOR biased by the whole zero point (~0.02-0.05
-                            # mas, i.e. several sigma at 1 kpc) with nothing
-                            # but a note string to say so.  The out-of-range
-                            # case is handled by the else branch below and is
-                            # a legitimate "no published correction".
-                            raise RuntimeError(
-                                f"Gaia DR3 parallax zero-point correction "
-                                f"failed for this target "
-                                f"({type(exc).__name__}: {exc}).  Refusing to "
-                                f"write a distance prior from the uncorrected "
-                                f"parallax."
-                            ) from exc
-                    else:
-                        zp_msg = "out of Lindegren+2021 range; using raw"
-
-                corrected_plx = g3_plx - zp
-                notes.append(
-                    f"Gaia DR3 parallax {g3_plx:.5f} mas, {zp_msg}; "
-                    f"uncertainty {g3_eplx:.5f} + 0.01 mas systematic = {uplx:.5f}"
-                )
-
-                _write_parallax_prior(
-                    yaml_data, notes, key, corrected_plx, uplx
-                )
-                gaia_dr3_done = True
-
-                target_ra = _get(qgaia3, "RA_ICRS", g3row)
-                target_dec = _get(qgaia3, "DE_ICRS", g3row)
-                target_pmra = _get(qgaia3, "pmRA", g3row)
-                target_pmdec = _get(qgaia3, "pmDE", g3row)
-
-            # Gaia DR3 photometry with DR2 filter curves (nearest available BC grid)
-            sed_notes.append(
-                "Gaia DR3 photometry used with GAIA/GAIA2r filter curves (DR2); "
-                "differences are <1 mmag for typical stars"
+    if g3row >= 0:
+        if np.isfinite(g3sep):
+            notes.append(
+                f"TICv8.2 Gaia ID didn't match DR3 Source; "
+                f'using star at {g3sep:.2f}"'
             )
-            if g3_gmag > -9 and np.isfinite(g3_egmag) and g3_egmag < 1:
-                sed_entries.append(
-                    _sed_entry("GAIA/GAIA2r.G", g3_gmag, max(0.02, g3_egmag))
+        g3_plx = _get(qgaia3, "Plx", g3row)
+        g3_eplx = _get(qgaia3, "e_Plx", g3row)
+        g3_gmag = _get(qgaia3, "Gmag", g3row)
+        g3_ruwe = _get(qgaia3, "RUWE", g3row)
+        g3_nueff = _get(qgaia3, "nueff", g3row)
+        g3_pscol = _get(qgaia3, "pscol", g3row)
+        g3_elat = _get(qgaia3, "ELAT", g3row)
+        g3_solv = _get(qgaia3, "Solved", g3row)
+
+        if np.isfinite(g3_ruwe):
+            sed_notes.append(f"Gaia DR3 RUWE = {g3_ruwe:.4f}")
+            sed_notes.append(
+                "RUWE > 1.4 is a strong indicator of stellar multiplicity"
+            )
+
+        # No positivity gate: the prior is written in PARALLAX space, so
+        # a negative measured parallax is representable (see below).
+        if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
+            uplx = math.sqrt(g3_eplx**2 + 0.01**2)  # 0.01 mas systematic floor
+            zp = 0.0
+            zp_msg = "raw (gaiadr3-zeropoint not installed)"
+            if HAS_GAIADR3_ZPT:
+                in5 = (
+                    np.isfinite(g3_solv)
+                    and int(g3_solv) == 31
+                    and np.isfinite(g3_nueff)
+                    and 1.1 <= g3_nueff <= 1.9
                 )
-            if g3_bpmag > -9 and np.isfinite(g3_ebpm) and g3_ebpm < 1:
-                sed_entries.append(
-                    _sed_entry("GAIA/GAIA2r.Gbp", g3_bpmag, max(0.02, g3_ebpm))
+                in6 = (
+                    np.isfinite(g3_solv)
+                    and int(g3_solv) == 95
+                    and np.isfinite(g3_pscol)
+                    and 1.24 <= g3_pscol <= 1.72
                 )
-            if g3_rpmag > -9 and np.isfinite(g3_erpm) and g3_erpm < 1:
-                sed_entries.append(
-                    _sed_entry("GAIA/GAIA2r.Grp", g3_rpmag, max(0.02, g3_erpm))
-                )
+                if (
+                    (in5 or in6)
+                    and np.isfinite(g3_gmag)
+                    and 6 <= g3_gmag <= 21
+                ):
+                    try:
+                        # numpy scalars, not Python floats: under NEP 50
+                        # (numpy >= 2, our floor) zpt's internal
+                        # np.can_cast(inp, float) raises TypeError on a
+                        # Python float.  That was the second reason the
+                        # correction never once applied.
+                        zp = float(
+                            _gaia_zpt.get_zpt(
+                                np.float64(g3_gmag),
+                                np.float64(g3_nueff),
+                                np.float64(g3_pscol),
+                                np.float64(g3_elat),
+                                np.int64(int(g3_solv)),
+                            )
+                        )
+                        zp_msg = (
+                            f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
+                        )
+                    except Exception as exc:
+                        # Do NOT fall through with zp = 0.  The result
+                        # here is not a missing number, it is a distance
+                        # PRIOR biased by the whole zero point (~0.02-0.05
+                        # mas, i.e. several sigma at 1 kpc) with nothing
+                        # but a note string to say so.  The out-of-range
+                        # case is handled by the else branch below and is
+                        # a legitimate "no published correction".
+                        raise RuntimeError(
+                            f"Gaia DR3 parallax zero-point correction "
+                            f"failed for this target "
+                            f"({type(exc).__name__}: {exc}).  Refusing to "
+                            f"write a distance prior from the uncorrected "
+                            f"parallax."
+                        ) from exc
+                else:
+                    zp_msg = "out of Lindegren+2021 range; using raw"
+
+            corrected_plx = g3_plx - zp
+            notes.append(
+                f"Gaia DR3 parallax {g3_plx:.5f} mas, {zp_msg}; "
+                f"uncertainty {g3_eplx:.5f} + 0.01 mas systematic = {uplx:.5f}"
+            )
+
+            _write_parallax_prior(yaml_data, notes, key, corrected_plx, uplx)
+            gaia_dr3_done = True
+
+            target_ra = _get(qgaia3, "RA_ICRS", g3row)
+            target_dec = _get(qgaia3, "DE_ICRS", g3row)
+            target_pmra = _get(qgaia3, "pmRA", g3row)
+            target_pmdec = _get(qgaia3, "pmDE", g3row)
+
+        # Gaia DR3 photometry with DR2 filter curves (nearest available BC grid)
+        sed_notes.append(
+            "Gaia DR3 photometry used with GAIA/GAIA2r filter curves (DR2); "
+            "differences are <1 mmag for typical stars"
+        )
+        _add_catalog_bands(sed_entries, CATALOGS["gaia3"], qgaia3, g3row)
 
     if not gaia_dr3_done and np.isfinite(dr2_fallback_plx):
         notes.append(
@@ -600,83 +849,29 @@ def mkticsed(
         )
 
     # --- 4. 2MASS photometry --------------------------------------------------
-    print("Querying 2MASS ...", flush=True)
-    q2m = query_region("II/246/out", tic_ra, tic_dec, dist / 60.0)
-    if q2m is not None and len(q2m) > 0:
-        m_row = -1
-        if mass2id and "_2MASS" in q2m.colnames:
-            for i, tid in enumerate(q2m["_2MASS"]):
-                if str(tid).strip() == mass2id:
-                    m_row = i
-                    break
-        if m_row == -1:
-            idx, sep = _nearest(q2m, tic_ra, tic_dec)
-            if sep < 2.0:
-                m_row = idx
-        if m_row >= 0:
-            jmag = _get(q2m, "Jmag", m_row)
-            ejmag = _get(q2m, "e_Jmag", m_row)
-            hmag = _get(q2m, "Hmag", m_row)
-            ehmag = _get(q2m, "e_Hmag", m_row)
-            kmag = _get(q2m, "Kmag", m_row)
-            ekmag = _get(q2m, "e_Kmag", m_row)
-            if np.isfinite(jmag) and np.isfinite(ejmag) and ejmag < 1:
-                sed_entries.append(
-                    _sed_entry("2MASS/2MASS.J", jmag, max(0.02, ejmag))
-                )
-            if np.isfinite(hmag) and np.isfinite(ehmag) and ehmag < 1:
-                sed_entries.append(
-                    _sed_entry("2MASS/2MASS.H", hmag, max(0.02, ehmag))
-                )
-            if np.isfinite(kmag) and np.isfinite(ekmag) and ekmag < 1:
-                sed_entries.append(
-                    _sed_entry("2MASS/2MASS.Ks", kmag, max(0.02, ekmag))
-                )
-                yaml_data[key("appks")] = {
-                    "initval": round(kmag, 6),
-                    "mu": round(kmag, 6),
-                    "sigma": round(max(0.02, ekmag), 6),
-                }
+    q2m, m_row, _ = _query_catalog(
+        CATALOGS["2mass"], tic_ra, tic_dec, dist, mass2id
+    )
+    if m_row >= 0:
+        written = _add_catalog_bands(
+            sed_entries, CATALOGS["2mass"], q2m, m_row
+        )
+        # Ks doubles as the input to the Mann+2015/2019 relations, so it is
+        # written as a prior too -- with the same floored error the SED got.
+        if "2MASS/2MASS.Ks" in written:
+            kmag, ekmag = written["2MASS/2MASS.Ks"]
+            yaml_data[key("appks")] = {
+                "initval": round(kmag, 6),
+                "mu": round(kmag, 6),
+                "sigma": round(ekmag, 6),
+            }
 
     # --- 5. WISE photometry ---------------------------------------------------
-    print("Querying AllWISE ...", flush=True)
-    qw = query_region("II/328/allwise", tic_ra, tic_dec, dist / 60.0)
-    if qw is not None and len(qw) > 0:
-        w_row = -1
-        if wise_id and "AllWISE" in qw.colnames:
-            for i, wid in enumerate(qw["AllWISE"]):
-                if str(wid).strip() == wise_id:
-                    w_row = i
-                    break
-        if w_row == -1:
-            idx, sep = _nearest(qw, tic_ra, tic_dec)
-            if sep < 15.0:
-                w_row = idx
-        if w_row >= 0:
-            w1 = _get(qw, "W1mag", w_row)
-            ew1 = _get(qw, "e_W1mag", w_row)
-            w2 = _get(qw, "W2mag", w_row)
-            ew2 = _get(qw, "e_W2mag", w_row)
-            w3 = _get(qw, "W3mag", w_row)
-            ew3 = _get(qw, "e_W3mag", w_row)
-            w4 = _get(qw, "W4mag", w_row)
-            ew4 = _get(qw, "e_W4mag", w_row)
-            if np.isfinite(w1) and np.isfinite(ew1) and ew1 < 1:
-                sed_entries.append(
-                    _sed_entry("WISE/WISE.W1", w1, max(0.03, ew1))
-                )
-            if np.isfinite(w2) and np.isfinite(ew2) and ew2 < 1:
-                sed_entries.append(
-                    _sed_entry("WISE/WISE.W2", w2, max(0.03, ew2))
-                )
-            if np.isfinite(w3) and np.isfinite(ew3) and ew3 < 1:
-                sed_entries.append(
-                    _sed_entry("WISE/WISE.W3", w3, max(0.03, ew3))
-                )
-            if np.isfinite(w4) and np.isfinite(ew4) and ew4 < 1:
-                sed_entries.append(
-                    _sed_entry("WISE/WISE.W4", w4, max(0.10, ew4))
-                )
+    qw, w_row, _ = _query_catalog(
+        CATALOGS["wise"], tic_ra, tic_dec, dist, wise_id
+    )
+    if w_row >= 0:
+        _add_catalog_bands(sed_entries, CATALOGS["wise"], qw, w_row)
 
     # --- 6. Extinction upper limit from Schlegel+1998 dust map ----------------
     print("Querying Schlegel dust map ...", flush=True)
@@ -703,7 +898,7 @@ def mkticsed(
     if not np.isfinite(feh_tic) and key("feh") not in yaml_data:
         print("Querying Paunzen+2015 Stromgren for [Fe/H] ...", flush=True)
         qpz = query_region(
-            "J/A+A/580/A23/catalog", tic_ra, tic_dec, dist / 60.0
+            CATALOGS["stromgren"].vizier, tic_ra, tic_dec, dist / 60.0
         )
         if qpz is not None and len(qpz) > 0:
             p_row = -1
@@ -803,105 +998,41 @@ def mkticsed(
     # BT/VT of the *matched* Tycho star, carried into section 9 as the APASS
     # dedup reference. Reading row 0 instead would compare the target's APASS
     # photometry against an unrelated star whenever the cone holds more than
-    # one Tycho source.
-    bt_ref = float("nan")
-    vt_ref = float("nan")
-    qtyc2 = query_region("I/259/TYC2", tic_ra, tic_dec, dist / 60.0)
-    if qtyc2 is not None and len(qtyc2) > 0:
-        t_row = 0
-        if len(qtyc2) > 1:
-            t_row, _ = _nearest(qtyc2, tic_ra, tic_dec, "RAmdeg", "DEmdeg")
-        bt = _get(qtyc2, "BTmag", t_row)
-        ebt = _get(qtyc2, "e_BTmag", t_row)
-        vt = _get(qtyc2, "VTmag", t_row)
-        evt = _get(qtyc2, "e_VTmag", t_row)
-        bt_ref = bt
-        vt_ref = vt
-        if np.isfinite(bt) and np.isfinite(ebt):
-            sed_entries.append(
-                _sed_entry("TYCHO/TYCHO.B", bt, max(0.02, ebt), enabled=tycho)
-            )
-        if np.isfinite(vt) and np.isfinite(evt):
-            sed_entries.append(
-                _sed_entry("TYCHO/TYCHO.V", vt, max(0.02, evt), enabled=tycho)
-            )
+    # one Tycho source. The references are the matched star's catalog values
+    # whether or not the rows made it into the SED.
+    dedup_refs = {"BT": float("nan"), "VT": float("nan")}
+    qtyc2, t_row, _ = _query_catalog(CATALOGS["tycho"], tic_ra, tic_dec, dist)
+    if t_row >= 0:
+        dedup_refs["BT"] = _get(qtyc2, "BTmag", t_row)
+        dedup_refs["VT"] = _get(qtyc2, "VTmag", t_row)
+        _add_catalog_bands(
+            sed_entries,
+            CATALOGS["tycho"],
+            qtyc2,
+            t_row,
+            enabled=is_live(CATALOGS["tycho"]),
+        )
 
     # --- 9. Optional: UCAC4 / APASS DR6 (disabled by default) -----------------
-    qucac = query_region("UCAC4", tic_ra, tic_dec, dist / 60.0)
-    if qucac is not None and len(qucac) > 0:
-        u_row = 0
-        if len(qucac) > 1:
-            u_row, _ = _nearest(qucac, tic_ra, tic_dec)
-        B_mag = _get(qucac, "Bmag", u_row)
-        eB = _get(qucac, "e_Bmag", u_row)
-        V_mag = _get(qucac, "Vmag", u_row)
-        eV = _get(qucac, "e_Vmag", u_row)
-        g_mag = _get(qucac, "gmag", u_row)
-        eg = _get(qucac, "e_gmag", u_row)
-        r_mag = _get(qucac, "rmag", u_row)
-        er = _get(qucac, "e_rmag", u_row)
-        i_mag = _get(qucac, "imag", u_row)
-        ei = _get(qucac, "e_imag", u_row)
-        # UCAC4 stores APASS errors as 0.01 mag integers, with 99 as the
-        # catalog's "no data" sentinel -- it must be rejected on every band,
-        # or it survives as a fabricated max(0.02, 99 * 0.01) = 0.99 mag error
-        # on a magnitude that was never measured. Also avoid duplicating the
-        # Tycho photometry the SED already carries.
-        if (
-            np.isfinite(B_mag)
-            and np.isfinite(eB)
-            and eB != 99
-            and _is_distinct(B_mag, bt_ref)
-        ):
-            sed_entries.append(
-                _sed_entry(
-                    "Generic/Bessell.B",
-                    B_mag,
-                    max(0.02, eB * 0.01),
-                    enabled=ucac,
-                )
-            )
-        if (
-            np.isfinite(V_mag)
-            and np.isfinite(eV)
-            and eV != 99
-            and _is_distinct(V_mag, vt_ref)
-        ):
-            sed_entries.append(
-                _sed_entry(
-                    "Generic/Bessell.V",
-                    V_mag,
-                    max(0.02, eV * 0.01),
-                    enabled=ucac,
-                )
-            )
-        if np.isfinite(g_mag) and np.isfinite(eg) and eg != 99:
-            sed_entries.append(
-                _sed_entry(
-                    "SLOAN/SDSS.g", g_mag, max(0.02, eg * 0.01), enabled=ucac
-                )
-            )
-        if np.isfinite(r_mag) and np.isfinite(er) and er != 99:
-            sed_entries.append(
-                _sed_entry(
-                    "SLOAN/SDSS.r", r_mag, max(0.02, er * 0.01), enabled=ucac
-                )
-            )
-        if np.isfinite(i_mag) and np.isfinite(ei) and ei != 99:
-            sed_entries.append(
-                _sed_entry(
-                    "SLOAN/SDSS.i", i_mag, max(0.02, ei * 0.01), enabled=ucac
-                )
-            )
+    qucac, u_row, _ = _query_catalog(CATALOGS["ucac"], tic_ra, tic_dec, dist)
+    if u_row >= 0:
+        _add_catalog_bands(
+            sed_entries,
+            CATALOGS["ucac"],
+            qucac,
+            u_row,
+            enabled=is_live(CATALOGS["ucac"]),
+            refs=dedup_refs,
+        )
 
     # --- 10. Optional: Paunzen+2015 Stromgren photometry for SED --------------
-    qpz_full = query_region(
-        "J/A+A/580/A23/catalog", tic_ra, tic_dec, dist / 60.0
+    # A second query of the section-7 catalog: that one prefers the Tycho ID
+    # cross-match (it is after a [Fe/H] for this star), while the photometry
+    # here takes the nearest source in the cone.
+    qpz_full, pz_row, _ = _query_catalog(
+        CATALOGS["stromgren"], tic_ra, tic_dec, dist
     )
-    if qpz_full is not None and len(qpz_full) > 0:
-        pz_row = 0
-        if len(qpz_full) > 1:
-            pz_row, _ = _nearest(qpz_full, tic_ra, tic_dec)
+    if pz_row >= 0:
         vmag = _get(qpz_full, "Vmag", pz_row)
         evmag = _get(qpz_full, "e_Vmag", pz_row)
         by = _get(qpz_full, "b-y", pz_row)
@@ -937,49 +1068,26 @@ def mkticsed(
                 c1,
                 max(0.02, ec1),
             )
-            if np.isfinite(u_m):
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Stromgren.u",
-                        u_m,
-                        max(0.02, su),
-                        enabled=stromgren,
-                    )
-                )
-            if np.isfinite(v_m):
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Stromgren.v",
-                        v_m,
-                        max(0.02, sv),
-                        enabled=stromgren,
-                    )
-                )
-            if np.isfinite(b_m):
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Stromgren.b",
-                        b_m,
-                        max(0.02, sb),
-                        enabled=stromgren,
-                    )
-                )
-            if np.isfinite(y_m):
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Stromgren.y",
-                        y_m,
-                        max(0.02, sy),
-                        enabled=stromgren,
-                    )
+            for svo, mag, err in (
+                ("Generic/Stromgren.u", u_m, su),
+                ("Generic/Stromgren.v", v_m, sv),
+                ("Generic/Stromgren.b", b_m, sb),
+                ("Generic/Stromgren.y", y_m, sy),
+            ):
+                _add_band(
+                    sed_entries,
+                    svo,
+                    mag,
+                    err,
+                    _STROMGREN_FLOOR,
+                    enabled=is_live(CATALOGS["stromgren"]),
                 )
 
     # --- 11. Optional: Mermilliod+1994 UBV (disabled by default) --------------
-    qmerm = query_region("II/168/ubvmeans", tic_ra, tic_dec, dist / 60.0)
-    if qmerm is not None and len(qmerm) > 0:
-        me_row = 0
-        if len(qmerm) > 1:
-            me_row, _ = _nearest(qmerm, tic_ra, tic_dec)
+    qmerm, me_row, _ = _query_catalog(
+        CATALOGS["mermilliod"], tic_ra, tic_dec, dist
+    )
+    if me_row >= 0:
         V_m = _get(qmerm, "Vmag", me_row)
         eV_m = _get(qmerm, "e_Vmag", me_row)
         BV_m = _get(qmerm, "B-V", me_row)
@@ -999,47 +1107,34 @@ def mkticsed(
                 if (np.isfinite(eUB) and np.isfinite(eB_v))
                 else float("nan")
             )
-            if np.isfinite(U_v) and np.isfinite(eU_v) and eU_v < 1:
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Bessell.U", U_v, max(0.02, eU_v), enabled=merm
-                    )
+            for svo, mag, err in (
+                ("Generic/Bessell.U", U_v, eU_v),
+                ("Generic/Bessell.B", B_v, eB_v),
+                ("Generic/Bessell.V", V_m, eV_m),
+            ):
+                _add_band(
+                    sed_entries,
+                    svo,
+                    mag,
+                    err,
+                    _MERMILLIOD_FLOOR,
+                    enabled=is_live(CATALOGS["mermilliod"]),
+                    max_err=1.0,
                 )
-            if np.isfinite(B_v) and np.isfinite(eB_v) and eB_v < 1:
-                sed_entries.append(
-                    _sed_entry(
-                        "Generic/Bessell.B", B_v, max(0.02, eB_v), enabled=merm
-                    )
-                )
-            sed_entries.append(
-                _sed_entry(
-                    "Generic/Bessell.V", V_m, max(0.02, eV_m), enabled=merm
-                )
-            )
 
     # --- 12. Optional: GALEX DR5 (disabled by default; UV models unreliable) --
-    qgalex = query_region("II/312/ais", tic_ra, tic_dec, dist / 60.0)
-    if qgalex is not None and len(qgalex) > 0 and "FUV" in qgalex.colnames:
-        ga_row = 0
-        if len(qgalex) > 1:
-            ga_row, _ = _nearest(qgalex, tic_ra, tic_dec)
-        fuv = _get(qgalex, "FUV", ga_row)
-        efuv = _get(qgalex, "e_FUV", ga_row)
-        nuv = _get(qgalex, "NUV", ga_row)
-        enuv = _get(qgalex, "e_NUV", ga_row)
+    qgalex, ga_row, _ = _query_catalog(
+        CATALOGS["galex"], tic_ra, tic_dec, dist
+    )
+    if ga_row >= 0:
         sed_notes.append("GALEX: atmospheric models are unreliable in the UV")
-        if np.isfinite(fuv) and np.isfinite(efuv):
-            sed_entries.append(
-                _sed_entry(
-                    "GALEX/GALEX.FUV", fuv, max(0.1, efuv), enabled=galex
-                )
-            )
-        if np.isfinite(nuv) and np.isfinite(enuv):
-            sed_entries.append(
-                _sed_entry(
-                    "GALEX/GALEX.NUV", nuv, max(0.1, enuv), enabled=galex
-                )
-            )
+        _add_catalog_bands(
+            sed_entries,
+            CATALOGS["galex"],
+            qgalex,
+            ga_row,
+            enabled=is_live(CATALOGS["galex"]),
+        )
 
     # --- 13. Write output files -----------------------------------------------
     outpath.mkdir(parents=True, exist_ok=True)

@@ -18,8 +18,111 @@ import datetime
 import glob
 import os
 import sys
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
+
+# --- product selection tables -------------------------------------------------
+#
+# When one sector offers several products, exactly one is kept: the first
+# exposure time present in EXPTIME_PRIORITY, and among those the first author
+# present in AUTHOR_PRIORITY. Both are ordered best-first and both are read by
+# the same _highest_priority() helper, so the tables are the documentation.
+
+# Short cadence first (120, 200, 20 s), then the long-cadence FFI products.
+EXPTIME_PRIORITY = (120, 200, 20, 300, 600, 1800)
+
+AUTHOR_PRIORITY = (
+    "TESS",
+    "SPOC",
+    "TESS-SPOC",
+    "QLP",
+    "Kepler",
+    "K2SFF",
+    "EVEREST",
+    "K2",
+    "CDIPS",
+    "TASOC",
+)
+
+
+@dataclass(frozen=True)
+class Mission:
+    """How to read one mission's products: epoch, bandpass and sector label.
+
+    ``bjd_offset`` is added to the light curve's times to recover BJD_TDB.
+    ``sector`` turns the lightkurve mission string ("TESS Sector 14",
+    "Kepler Quarter 07", "K2 Campaign 13") into the tag that goes in the
+    filename. ``undeblend`` says whether -u is supported: only the TESS
+    products carry the CROWDSAP the correction inverts.
+    """
+
+    bjd_offset: float
+    filter: str
+    telescope: str
+    sector: Callable[[str], str]
+    undeblend: bool
+
+
+# Kepler and K2 share an epoch and a bandpass and differ only in how their
+# observing unit is labelled; both take the last two characters of the mission
+# string, while TESS parses its trailing sector number and zero-pads it.
+MISSIONS = {
+    "Kepler": Mission(
+        bjd_offset=2454833.0,
+        filter="Kepler",
+        telescope="Kepler",
+        sector=lambda mission: "Q" + mission[-2:],
+        undeblend=False,
+    ),
+    "K2": Mission(
+        bjd_offset=2454833.0,
+        filter="Kepler",
+        telescope="Kepler",
+        sector=lambda mission: "C" + mission[-2:],
+        undeblend=False,
+    ),
+    "TESS": Mission(
+        bjd_offset=2457000.0,
+        filter="TESS",
+        telescope="TESS",
+        sector=lambda mission: "S" + str(int(mission.split()[-1])).zfill(2),
+        undeblend=True,
+    ),
+}
+
+# Which mission each pipeline's products belong to. An author that is absent
+# is not supported: CDIPS and TASOC put their flux (and errors) somewhere else,
+# and anything else is unrecognized.
+AUTHOR_MISSION = {
+    "Kepler": "Kepler",
+    "K2": "K2",
+    "EVEREST": "K2",
+    "K2SFF": "K2",
+    "K2VARCAT": "K2",
+    "TESS-SPOC": "TESS",
+    "QLP": "TESS",
+    "SPOC": "TESS",
+}
+
+# Recognized, but their products are not in a format this tool can read.
+UNSUPPORTED_AUTHORS = ("CDIPS", "TASOC")
+
+
+def _highest_priority(values, priority):
+    """Return the indices of the best-ranked value present in ``values``.
+
+    ``priority`` is ordered best-first; the first of its entries that appears
+    in ``values`` wins, and every index holding it is returned (the caller
+    breaks a remaining tie with the next table, or gives up). An empty result
+    means ``values`` holds nothing the table ranks at all.
+    """
+    for want in priority:
+        match = np.where(values == want)[0]
+        if len(match) > 0:
+            return match
+    return np.array([], dtype=int)
 
 
 def build_parser():
@@ -319,73 +422,15 @@ def run(args):
             if len(match) == 1:
                 to_download.append(match[0])
             if len(match) > 1:
-                # prioritize by exptime: 120, 200, 20, (short cadence) 300, 600, then 1800 (long cadence)
-                match2 = np.where(search_results[match].exptime.value == 120)[
-                    0
-                ]
-                if len(match2) == 0:
-                    match2 = np.where(
-                        search_results[match].exptime.value == 200
-                    )[0]
-                if len(match2) == 0:
-                    match2 = np.where(
-                        search_results[match].exptime.value == 20
-                    )[0]
-                if len(match2) == 0:
-                    match2 = np.where(
-                        search_results[match].exptime.value == 300
-                    )[0]
-                if len(match2) == 0:
-                    match2 = np.where(
-                        search_results[match].exptime.value == 600
-                    )[0]
-                if len(match2) == 0:
-                    match2 = np.where(
-                        search_results[match].exptime.value == 1800
-                    )[0]
+                match2 = _highest_priority(
+                    search_results[match].exptime.value, EXPTIME_PRIORITY
+                )
                 if len(match2) == 1:
                     to_download.append(match[match2[0]])
                 if len(match2) > 1:
-                    # prioritize by author: TESS, SPOC, TESS-SPOC, QLP, Kepler, K2SFF, EVEREST, K2, CDIPS, then TASOC
-                    match3 = np.where(
-                        search_results[match[match2]].author == "TESS"
-                    )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "SPOC"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "TESS-SPOC"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "QLP"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "Kepler"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "K2SFF"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "EVEREST"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "K2"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "CDIPS"
-                        )[0]
-                    if len(match3) == 0:
-                        match3 = np.where(
-                            search_results[match[match2]].author == "TASOC"
-                        )[0]
+                    match3 = _highest_priority(
+                        search_results[match[match2]].author, AUTHOR_PRIORITY
+                    )
                     if len(match3) == 1:
                         to_download.append(match[match2[match3[0]]])
                     else:
@@ -412,56 +457,32 @@ def run(args):
         exptime = str(int(search_result.exptime[0].value)).zfill(4)
         ticid = "TIC" + search_result.target_name[0]
 
-        if author == "Kepler":
-            # Quarters of Kepler (prime) data
-            bjd_offset = 2454833.0
-            sector = "Q" + search_result.mission[0][-2:]
-            filter = "Kepler"
-            telescope = "Kepler"
-            if args.undeblend:
-                contratio = None
-                file_ext = ".dat"
-                print(
-                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
-                )
-        elif (
-            author == "K2"
-            or author == "EVEREST"
-            or author == "K2SFF"
-            or author == "K2VARCAT"
-        ):
-            # Campaigns of K2 data
-            bjd_offset = 2454833.0
-            sector = "C" + search_result.mission[0][-2:]
-            filter = "Kepler"
-            telescope = "Kepler"
-            if args.undeblend:
-                contratio = None
-                file_ext = ".dat"
-                print(
-                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
-                )
-        elif author == "TESS-SPOC" or author == "QLP" or author == "SPOC":
-            # TESS sectors
-            bjd_offset = 2457000.0
-            sector = "S" + str(
-                int(str(search_result.mission[0]).split()[-1])
-            ).zfill(2)
-            filter = "TESS"
-            telescope = "TESS"
-            if args.undeblend:
-                contratio = og_contratio
-                file_ext = ".undeblended.dat"
-        elif author == "CDIPS" or author == "TASOC":
+        if author in UNSUPPORTED_AUTHORS:
             # they don't have flux in the same place. Or errors.
             print("WARNING: CDIPS and TASOC LCs are not supported (yet?)")
             continue
-        else:
+        if author not in AUTHOR_MISSION:
             print(
                 "WARNING: Skipping lightcurve with unrecognized author: "
                 + author
             )
             continue
+
+        mission = MISSIONS[AUTHOR_MISSION[author]]
+        bjd_offset = mission.bjd_offset
+        sector = mission.sector(str(search_result.mission[0]))
+        filter = mission.filter
+        telescope = mission.telescope
+        if args.undeblend:
+            if mission.undeblend:
+                contratio = og_contratio
+                file_ext = ".undeblended.dat"
+            else:
+                contratio = None
+                file_ext = ".dat"
+                print(
+                    "WARNING: undeblending not supported for Kepler -- ignoring -u option"
+                )
         file_suffix = (
             "."
             + filter
