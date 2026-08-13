@@ -127,8 +127,8 @@ class SED(Component):
         # are kept on the component so build_likelihood can consult
         # the (logg_min, logg_max) range when adding a soft potential
         # on the inline loggsed expression (loggsed isn't a named
-        # star Parameter, so it can't be bounded via user_params the
-        # way teffsed/feh/av are).
+        # star Parameter, so it can't be bounded through the override
+        # channel the way teffsed/feh/av are).
         self.grid_axes = [None]
         self._inject_grid_bounds()
 
@@ -139,30 +139,39 @@ class SED(Component):
     # grid in ex: (teff, logg, feh, av). Letting the sampler wander
     # outside those ranges produces NaNs or garbage. Rather than push
     # that responsibility onto the user's YAML, we read the grid axes
-    # here and inject them as overrides into config_manager.user_params
-    # BEFORE any component's build_parameters() runs.
+    # here and register them on config_manager's cross-component
+    # override channel BEFORE any component's build_parameters() runs.
     #
     # Why this works timing-wise:
     #   System.__init__ instantiates every Component in one loop, then
     #   System.build_model() calls build_parameters() for every
-    #   component in a second loop. So any mutation of
-    #   config_manager.user_params from SED.__init__ is visible by the
-    #   time star.build_parameters() calls config_manager.resolve().
+    #   component in a second loop. So any add_override call from
+    #   SED.__init__ is visible by the time star.build_parameters()
+    #   calls config_manager.resolve().
+    #
+    # Why add_override and not user_params:
+    #   These bounds are a VALIDITY LIMIT of this component's model grid,
+    #   not a start value and not a user statement.  Writing them into
+    #   config_manager.user_params (what this did until 2026-08) made the
+    #   provenance ledger, export_solution, initval_source and the GUI all
+    #   report that the user had bounded star.teffsed/feh/av themselves, and
+    #   left finalize_user_params registering `star.av` & co. as leaf symbols
+    #   in the relaxation engine (which is where export_solution's "orphaned
+    #   2-part star rows" came from).  add_override is the same "overrides"
+    #   channel a component uses for its OWN parameters -- layered under the
+    #   user, so the user still wins -- reachable by path.
     #
     # Why the bound-tightening semantics are safe:
     #   ConfigManager.resolve() applies `max` to competing lower bounds
     #   and `min` to competing upper bounds. So:
-    #     * user silent  + grid bound  -> grid bound wins  ✓
-    #     * user tighter + grid bound  -> user wins        ✓
-    #     * user looser  + grid bound  -> grid wins        ✓ (safe,
-    #       sampler is kept inside the physically valid region)
-    #
-    # Future refinement (see README): the cleaner long-term design is
-    # a `contribute_param_overrides(config_manager)` hook on Component
-    # called explicitly before build_parameters in System.build_model.
-    # That requires touching component.py/system.py/config.py, which
-    # is deliberately out of scope for this scaffold — the __init__
-    # channel is functionally equivalent and zero-patch.
+    #     * user silent  + grid bound  -> grid bound wins
+    #     * user tighter + grid bound  -> user wins
+    #     * user looser  + grid bound  -> grid wins, with a warning naming
+    #       the parameter (safe: the sampler is kept inside the region the
+    #       interpolator can actually evaluate)
+    #   The third line is what the old `setdefault` could never do -- it saw
+    #   the user's key, left it alone, and never applied the grid bound at
+    #   all -- so this comment was wrong from the day it was written.
     # ------------------------------------------------------------------
     def _inject_grid_bounds(self):
 
@@ -194,31 +203,15 @@ class SED(Component):
         av_hi = float(axes["av_pts"].max())
 
         overrides = {
-            f"star.teffsed": {"lower": teff_lo, "upper": teff_hi},
-            f"star.feh": {"lower": feh_lo, "upper": feh_hi},
-            f"star.av": {"lower": av_lo, "upper": av_hi},
+            "star.teffsed": {"lower": teff_lo, "upper": teff_hi},
+            "star.feh": {"lower": feh_lo, "upper": feh_hi},
+            "star.av": {"lower": av_lo, "upper": av_hi},
         }
 
+        # 2-part (broadcast) paths: every star is interpolated on the same
+        # grid, so every star gets the same validity limits.
         for key, bounds in overrides.items():
-            existing = self.config_manager.user_params.get(key)
-            if existing is None:
-                self.config_manager.user_params[key] = dict(bounds)
-            elif isinstance(existing, dict):
-                # Don't clobber — only fill in bounds the user
-                # hasn't already specified. ConfigManager.resolve
-                # will tighten correctly when both are present,
-                # but we still want the grid bound to appear on
-                # the other side (lower *or* upper) when the user
-                # only set one of them.
-                for bk, bv in bounds.items():
-                    existing.setdefault(bk, bv)
-            else:
-                # User supplied a scalar initval shorthand; promote
-                # to dict and tack on the grid bounds.
-                self.config_manager.user_params[key] = {
-                    "initval": existing,
-                    **bounds,
-                }
+            self.config_manager.add_override(key, **bounds)
 
     @property
     def prefix(self):
@@ -536,9 +529,9 @@ class SED(Component):
                 self.filter_columns.setdefault(key, col)
 
         # Build the BC interpolator now, using config_manager.resolve() for
-        # the star parameter bounds. _inject_grid_bounds() already wrote the
-        # grid-axis limits into config_manager.user_params during __init__,
-        # so resolve() returns the correct tightened bounds here.
+        # the star parameter bounds. _inject_grid_bounds() already registered
+        # the grid-axis limits on config_manager's override channel during
+        # __init__, so resolve() returns the correct tightened bounds here.
         teff_cfg = self.config_manager.resolve("star", "teffsed")
         feh_cfg = self.config_manager.resolve("star", "feh")
         av_cfg = self.config_manager.resolve("star", "av")

@@ -853,28 +853,41 @@ def _make_sed(minimal_sed_file):
     return SED(config, cm), cm
 
 
-def test_sed_init_injects_grid_bounds_into_config_manager(minimal_sed_file):
+def test_sed_init_registers_grid_bounds_on_the_override_channel(
+    minimal_sed_file,
+):
     """
     Given a SED component initialised with a valid .sed file pointing at
     the NextGen BC tree,
     When __init__ runs,
-    Then config_manager.user_params should contain 'star.teffsed',
+    Then config_manager.param_overrides should contain 'star.teffsed',
     'star.feh', and 'star.av' entries whose 'lower' and 'upper' keys
-    bracket the BC grid's physical range.
+    bracket the BC grid's physical range -- and the user's own params should
+    be untouched.
+
+    The channel changed in 2026-08: these bounds used to be written straight
+    into config_manager.user_params, where nothing downstream could tell them
+    apart from something the user wrote.  The substance asserted here is
+    unchanged (the grid's validity limits are registered, and they are
+    physically sane); tests/test_component_override_channel.py covers the
+    provenance consequences.
     """
     # ARRANGE / ACT
     sed, cm = _make_sed(minimal_sed_file)
 
-    # ASSERT — keys injected
+    # ASSERT — bounds registered on the component override channel
     for key in ("star.teffsed", "star.feh", "star.av"):
-        assert key in cm.user_params, f"config_manager missing key: {key}"
-        entry = cm.user_params[key]
+        assert key in cm.param_overrides, f"config_manager missing key: {key}"
+        entry = cm.param_overrides[key]
         assert "lower" in entry and "upper" in entry, (
             f"{key} entry is missing 'lower' / 'upper': {entry}"
         )
+        # ...and NOT written into the user's params.
+        user_entry = cm.user_params.get(key) or {}
+        assert "lower" not in user_entry and "upper" not in user_entry
 
     # ASSERT — teff bounds are physically sane
-    teff_entry = cm.user_params["star.teffsed"]
+    teff_entry = cm.param_overrides["star.teffsed"]
     assert teff_entry["lower"] > 100
     assert teff_entry["upper"] < 200_000
 
