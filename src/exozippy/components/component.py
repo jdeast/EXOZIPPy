@@ -563,22 +563,3 @@ class Component(ABC):
         incompatible with gradient-based samplers.
         """
         return {}
-
-    def _is_sampling_param(self, attr):
-        """Helper to identify parameters that need to be passed to the compiled function."""
-        return isinstance(attr, Parameter) and attr.expression is None
-
-    def get_parameters(self, sampling_only=False):
-        """
-        Returns all Parameter objects belonging to this component.
-        If sampling_only=True, filters for Free (sampled) parameters.
-        """
-        params = []
-        for attr in self.__dict__.values():
-            if isinstance(attr, Parameter):
-                if sampling_only:
-                    if attr.expression is None:
-                        params.append(attr)
-                else:
-                    params.append(attr)
-        return params

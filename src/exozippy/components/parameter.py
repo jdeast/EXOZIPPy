@@ -285,11 +285,6 @@ class UnitTranslator:
             )
 
 
-# Example Usage:
-# unit = u.solMass
-# print(UnitTranslator.to_latex(unit)) -> "M_\odot"
-
-
 # ----------------------------
 # Data containers
 # ----------------------------
@@ -689,31 +684,6 @@ class Parameter:
         self.mu = convert(self.mu)
         self.sigma = convert(self.sigma)
 
-    def get_value(self, point):
-        """
-        Smart lookup: returns the value from the 'point' dict if it exists,
-        otherwise 'wakes up' the expression and calculates it.
-        """
-        # 1. Direct hit (it was a named node)
-        if self.label in point:
-            return float(point[self.label])
-
-        # 2. It's an anonymous parameter
-        if self.expression is not None:
-            # We use the existing generate_posterior logic,
-            # but treat the 'point' as a bundle with 1 draw.
-            # Convert point values to 0-d arrays for pytensor.function
-            bundle = {k: np.array(v) for k, v in point.items()}
-            return float(self.generate_posterior(bundle))
-
-        # 3. Fallback to initval if everything else fails
-        if self.initval is not None:
-            return float(self.initval)
-
-        raise KeyError(
-            f"Parameter {self.label} not found in point and has no expression."
-        )
-
     def element_is_sampled(self, index=0):
         """True if element ``index`` is a FREE sampled element of this vector.
 
@@ -888,13 +858,9 @@ class Parameter:
         so the numbers match what the user typed, and every offending element
         is listed.
         """
-        factors = np.atleast_1d(
-            np.asarray(self._get_conversion_factors(), dtype=float)
-        )
 
         def user_units(val, i):
-            f = factors[i] if i < factors.size else factors[0]
-            return val * f
+            return self.from_internal(val, index=i)
 
         unit = self._unit_suffix()
         sources = set()
@@ -981,13 +947,9 @@ class Parameter:
         Bounds are quoted (in the user unit) only where they are finite; an
         unbounded sampled element reaches this too.
         """
-        factors = np.atleast_1d(
-            np.asarray(self._get_conversion_factors(), dtype=float)
-        )
 
         def user_units(val, i):
-            f = factors[i] if i < factors.size else factors[0]
-            return val * f
+            return self.from_internal(val, index=i)
 
         unit = self._unit_suffix()
         sources = set()
@@ -1968,29 +1930,6 @@ class Parameter:
 
         return _process_single(self.unit)
 
-    def _get_conversion_factors_old(self):
-        """
-        Calculates the numerical conversion factor from internal -> user units.
-        Safely handles self.unit as a single Unit, a scalar Quantity, or a list/array.
-        """
-        # A list/tuple is safe. An ndarray/Quantity is only safe if it has dimensions.
-        is_sequence = isinstance(self.unit, (list, tuple)) or (
-            isinstance(self.unit, np.ndarray)
-            and getattr(self.unit, "ndim", 0) > 0
-        )
-
-        if is_sequence:
-            factors = []
-            for u_user in self.unit:
-                # getattr extracts the base Unit if u_user is accidentally a Quantity
-                target = getattr(u_user, "unit", u_user)
-                factors.append(self.internal_unit.to(target))
-            return np.array(factors, dtype=np.float64)
-
-        # Scalar fallback
-        target = getattr(self.unit, "unit", self.unit)
-        return float(self.internal_unit.to(target))
-
     def set_whitening(self, raw_scale):
         """Rescale the whitening in place from a measured raw-space scale.
 
@@ -2306,22 +2245,72 @@ class Parameter:
                 )
         return out
 
-    # converts user units to internal units
-    def to_internal(self, val=None):
-        target = val if val is not None else self.value
-        return target / self._get_conversion_factors()
+    # ------------------------------------------------------------------
+    # Unit conversion.  These three are the ONLY way anything outside this
+    # class converts a number between the user unit and the internal one.
+    #
+    # DIRECTION, because there are two reciprocal factor functions in the
+    # codebase and confusing them is silent: `_get_conversion_factors`
+    # (here) is the INTERNAL -> USER multiplier, while
+    # `ConfigManager.get_conversion_factor` is the USER -> INTERNAL one.
+    # So `* factor` means opposite things in parameter.py and config.py --
+    # which is exactly how `outputs/ledger.py` came to divide where it had
+    # to multiply and report every converted parameter wrong by factor**2
+    # (planet.mass in examples/hd80606: 1.45e-06 Mjup for a start of 1.596).
+    # Call these methods and the direction is in the name.
+    # ------------------------------------------------------------------
 
-    # converts internal units to user units
-    def from_internal(self, val=None):
+    def element_factor(self, index=0):
+        """Internal -> user multiplier for element ``index``, as a float.
+
+        The one owner of the "element ``index``, or element 0 when the
+        factor vector is shorter" rule.  A scalar ``unit:`` normalizes to a
+        one-element list in ``__post_init__``, so the fallback is the
+        ordinary case for every vector parameter; a genuinely per-element
+        ``unit:`` (config.py's ``elem_units``) is what makes the index
+        meaningful.
+        """
+        f = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+        return float(f[index] if index < f.size else f[0])
+
+    def _directional_factor(self, val, index):
+        """Factor for :meth:`to_internal` / :meth:`from_internal` to apply."""
+        if index is not None:
+            return self.element_factor(index)
+        f = np.asarray(self._get_conversion_factors(), dtype=float)
+        n_val = np.size(val)
+        # Both sides genuinely vectors and disagreeing is a bug, not a
+        # broadcast: it silently mixed elements before ledger.py grew a
+        # local guard against it.  Size 1 on either side broadcasts.
+        if f.size > 1 and n_val > 1 and f.size != n_val:
+            raise ValueError(
+                f"[{self.label}] {f.size} unit conversion factors for "
+                f"{n_val} values -- cannot convert."
+            )
+        return f
+
+    def to_internal(self, val=None, index=None):
+        """USER units -> INTERNAL units.
+
+        ``index`` converts a single element with that element's own factor;
+        ``None`` converts a whole vector (or a scalar) at once.
+        """
+        target = val if val is not None else self.value
+        return target / self._directional_factor(target, index)
+
+    def from_internal(self, val=None, index=None):
+        """INTERNAL units -> USER units.
+
+        ``index`` converts a single element with that element's own factor;
+        ``None`` converts a whole vector (or a scalar) at once.
+        """
         target = val if val is not None else self.value
         # Safety check for unitless parameters
         if self.unit is None or self.internal_unit is None:
             return target
-        return target * self._get_conversion_factors()
-
-    # converts internal units to arbitrary units
-    def to_unit(self, target_unit: Any) -> Any:
-        return self.value * self.internal_unit.to(target_unit).value
+        return target * self._directional_factor(target, index)
 
     # ---------
     # LaTeX helpers
@@ -2488,7 +2477,12 @@ class Parameter:
         ]
 
     def _prior_scalar(self, val, index):
-        """One element of a numeric prior field, in USER units (or None)."""
+        """One element of a numeric prior field, in USER units (or None).
+
+        The one reader of a numeric field for the Prior column: both
+        ``_support_str`` and ``_own_prior_str`` go through it, where each
+        used to carry its own byte-identical copy.
+        """
         if val is None:
             return None
         arr = np.atleast_1d(val)
@@ -2504,10 +2498,7 @@ class Parameter:
             return None
         if np.isnan(f_val):
             return None
-        if self.unit is None or self.internal_unit is None:
-            return f_val
-        f = np.atleast_1d(self._get_conversion_factors())
-        return f_val * float(f[index] if index < len(f) else f[0])
+        return float(self.from_internal(f_val, index=index))
 
     def _support_str(self, index, latex):
         """``[lower, upper]`` for this element, or '' when not both finite.
@@ -2569,23 +2560,12 @@ class Parameter:
         component has declared a contribution.
         """
 
+        # One reader for every Prior-column number, shared with
+        # _support_str: this was a byte-identical private copy of
+        # _prior_scalar apart from letting a non-float raise instead of
+        # reporting no number.
         def _scalar(val):
-            if val is None:
-                return None
-            arr = np.atleast_1d(val)
-            raw = arr[index] if index < len(arr) else arr[0]
-            if hasattr(raw, "eval"):
-                try:
-                    raw = raw.eval()
-                except:
-                    return None
-            f_val = float(raw)
-            if np.isnan(f_val):
-                return None
-            if self.unit is None or self.internal_unit is None:
-                return f_val
-            f = np.atleast_1d(self._get_conversion_factors())
-            return f_val * float(f[index] if index < len(f) else f[0])
+            return self._prior_scalar(val, index)
 
         # One formatter for every Prior-column number (shared with
         # _support_str) -- a second private copy is how '-1.00e+05' would

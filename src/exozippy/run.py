@@ -823,16 +823,6 @@ def _run_fit(config, gui, user_params=None):
         logger.exception("mkparam failed (non-fatal)")
 
 
-def _element_conversion_factor(par, index):
-    """Internal -> user conversion factor for element ``index`` of ``par``."""
-    f = par._get_conversion_factors()
-    if np.size(f) > 1:
-        return float(np.ravel(f)[index])
-    if np.size(f) == 1:
-        return float(np.ravel(f)[0])
-    return float(f)
-
-
 def _user_initval(config_manager, par, index):
     """Start value (INTERNAL units) for element ``index`` of ``par`` as spelled
     in the user/solved parameter table, or None if the table does not set one.
@@ -874,7 +864,7 @@ def _user_initval(config_manager, par, index):
     if val is None:
         return None
     try:
-        return float(val) / _element_conversion_factor(par, index)
+        return float(par.to_internal(float(val), index=index))
     except (TypeError, ValueError, ZeroDivisionError):
         return None
 
@@ -1060,27 +1050,14 @@ def inspect_start(
                 except (TypeError, ValueError):
                     return np.nan
 
-            raw_val = safe_float(v_phys[i])
-            # Pass through component conversion
-            internal_res = p.from_internal(raw_val)
-            # FORCE extraction to a standard Python float
-            val_out = (
-                float(internal_res.item())
-                if hasattr(internal_res, "item")
-                else float(internal_res)
-            )
-
-            # Do the same for scale
-            raw_scale = safe_float(s_phys[i])
-            internal_scale = p.from_internal(raw_scale)
-            scale_out = (
-                float(internal_scale.item())
-                if hasattr(internal_scale, "item")
-                else float(internal_scale)
-            )
-
-            # val_out = float(p.from_internal(safe_float(v_phys[i])))
-            # scale_out = float(p.from_internal(safe_float(s_phys[i])))
+            # Internal -> user for THIS element.  index=i matters as soon as
+            # a parameter carries per-element units (a `unit:` override on
+            # one instance of a vector): the whole-vector call returned an
+            # n-element array for a scalar input, and the .item() below then
+            # raised "can only convert an array of size 1", killing the fit
+            # in its startup table.
+            val_out = float(p.from_internal(safe_float(v_phys[i]), index=i))
+            scale_out = float(p.from_internal(safe_float(s_phys[i]), index=i))
 
             # Float/Scientific formatting logic ---
             def smart_format(val, width):
@@ -1979,6 +1956,14 @@ def _convert_posterior_to_user_units(idata, param_lookup):
     unit conversion is multiplied by the internal→user factor.  This is called
     once after sampling so that the saved trace, trace plots, ArviZ summary,
     and mkparam output are all in user-facing units (e.g. jupiterMass, m/s).
+
+    This and ``get_draws`` below are the deliberate exceptions to "convert
+    through Parameter.to_internal / from_internal": the operand is a
+    (chain, draw, element) DataArray, so the factor has to broadcast against
+    the TRAILING axis and the owner's element-count check -- which sees the
+    total size -- would reject it.  The direction is the only thing that
+    matters here, and it is stated: internal -> user multiplies, and
+    get_draws (user trace -> internal for the physics) divides.
     """
     for var_name in list(idata.posterior.data_vars):
         if var_name.endswith("_raw") or var_name not in param_lookup:
