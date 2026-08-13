@@ -171,16 +171,26 @@ def likelihood_config_schema_entry():
     }
 
 
-def hogg_logp(resid, sigma, out_frac, out_scale):
-    """Per-point log-probability of the marginalized Hogg mixture.
+def hogg_branch_logps(resid, sigma, out_frac, out_scale):
+    """The two weighted branch log-densities of the Hogg mixture.
 
     ``resid`` and ``sigma`` are (n,) tensors (data minus model, and the
     inlier sigma including the instrument's jitter/err_scale term);
-    ``out_frac`` and ``out_scale`` are scalars for one file.  Returns the
-    (n,) per-point logp INCLUDING the -log(sqrt(2 pi)) normalization: unlike
-    a fixed-sigma Gaussian, the mixture weights and widths are sampled, so
-    every term that depends on them must be kept (the same reasoning as the
-    mann component's -log(sigma) note).
+    ``out_frac`` and ``out_scale`` are scalars for one file.  Returns
+    ``(inlier, outlier)``, each an (n,) tensor holding ``log(weight) +
+    log N(resid | 0, that branch's sigma)`` *without* the shared
+    ``-0.5*log(2 pi)``, which cancels in the log-odds and is added back once
+    in ``hogg_logp``.
+
+    This is the single definition of the mixture's two components.  Both
+    consumers -- the likelihood (``hogg_logp``) and the per-point posterior
+    outlier log-odds (``hogg_outlier_logodds``) -- are built from it, so the
+    probability the fit uses and the probability the audit reports cannot
+    drift apart.  Each combines the branches its own way, which is the
+    reason this returns them separately rather than returning either
+    answer: the mixture must be assembled with ``pt.logaddexp`` and never a
+    ``where`` over branch logps (see the numerical note above), while the
+    log-odds is a plain difference.
 
     The ``maximum`` guards keep the logs finite if a user pins out_frac to
     an endpoint (0 or 0.5 exactly); sampled values live strictly inside the
@@ -191,7 +201,20 @@ def hogg_logp(resid, sigma, out_frac, out_scale):
     wide = -0.5 * pt.sqr(resid / wide_sigma) - pt.log(wide_sigma)
     log_in = pt.log(pt.maximum(1.0 - out_frac, 1e-300))
     log_out = pt.log(pt.maximum(out_frac, 1e-300))
-    return pt.logaddexp(log_in + core, log_out + wide) - 0.5 * _LOG_2PI
+    return log_in + core, log_out + wide
+
+
+def hogg_logp(resid, sigma, out_frac, out_scale):
+    """Per-point log-probability of the marginalized Hogg mixture.
+
+    Arguments as in ``hogg_branch_logps``.  Returns the (n,) per-point logp
+    INCLUDING the -log(sqrt(2 pi)) normalization: unlike a fixed-sigma
+    Gaussian, the mixture weights and widths are sampled, so every term that
+    depends on them must be kept (the same reasoning as the mann component's
+    -log(sigma) note).
+    """
+    inlier, outlier = hogg_branch_logps(resid, sigma, out_frac, out_scale)
+    return pt.logaddexp(inlier, outlier) - 0.5 * _LOG_2PI
 
 
 def hogg_outlier_logodds(resid, sigma, out_frac, out_scale):
@@ -199,11 +222,9 @@ def hogg_outlier_logodds(resid, sigma, out_frac, out_scale):
 
     ``sigmoid`` of this is the posterior probability the point came from the
     background component, given the mixture parameters -- the auditable
-    replacement for a hard bad-data mask.  Same arguments as ``hogg_logp``.
+    replacement for a hard bad-data mask.  Same arguments as ``hogg_logp``,
+    and the same two branch densities: the ``-0.5*log(2 pi)`` that
+    ``hogg_logp`` adds is common to both branches and cancels here.
     """
-    core = -0.5 * pt.sqr(resid / sigma) - pt.log(sigma)
-    wide_sigma = pt.sqrt(pt.sqr(sigma) + pt.sqr(out_scale))
-    wide = -0.5 * pt.sqr(resid / wide_sigma) - pt.log(wide_sigma)
-    log_in = pt.log(pt.maximum(1.0 - out_frac, 1e-300))
-    log_out = pt.log(pt.maximum(out_frac, 1e-300))
-    return (log_out + wide) - (log_in + core)
+    inlier, outlier = hogg_branch_logps(resid, sigma, out_frac, out_scale)
+    return outlier - inlier
