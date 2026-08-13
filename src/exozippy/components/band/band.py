@@ -92,7 +92,34 @@ class Band(Component):
                     "depth (ppm) for this band. Default False, which pins "
                     "thermal at 0 (transit-only model, unchanged). "
                     "Phase-curve variation (BEER) is not modeled by this "
-                    "flag; see PR 1.b."
+                    "flag; see fitreflect/fitellip (PR 1.b)."
+                ),
+            },
+            {
+                "key": "fitreflect",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit a reflected-light phase-curve amplitude (ppm) for "
+                    "this band, peaking at secondary eclipse and zero at "
+                    "primary transit. Default False, which pins reflect at "
+                    "0. Set alongside fitthermal only with real full-orbit "
+                    "phase coverage -- with eclipse-only data the two are "
+                    "degenerate and only their sum is measurable."
+                ),
+            },
+            {
+                "key": "fitellip",
+                "kind": "option",
+                "accepts": None,
+                "required": False,
+                "doc": (
+                    "Fit an ellipsoidal-variation amplitude (ppm) for this "
+                    "band: a half-orbital-period brightness modulation from "
+                    "the star's tidal distortion, dimmest at both "
+                    "conjunctions and brightest at both quadratures. "
+                    "Default False, which pins ellipsoidal at 0."
                 ),
             },
         ]
@@ -104,6 +131,10 @@ class Band(Component):
         self.fitthermal = [
             bool(c.get("fitthermal", False)) for c in self.config
         ]
+        self.fitreflect = [
+            bool(c.get("fitreflect", False)) for c in self.config
+        ]
+        self.fitellip = [bool(c.get("fitellip", False)) for c in self.config]
 
         # Canonical filter identities via the SED alias table. An
         # unknown name passes through unchanged (the user may already be
@@ -356,43 +387,58 @@ class Band(Component):
                 f"rvinstrument 'rm:' block does)."
             )
 
-        # thermal (secondary-eclipse depth, ppm) enters the manifest only
-        # when SOME band opts in via fitthermal: true; bands that did not
-        # are pinned at sigma=0 (the "overrides" pattern
-        # Instrument._register_gp uses), so their thermal.value is exactly
-        # 0 and the transit model is unchanged.  With no fitthermal
-        # anywhere the parameter does not exist at all -- no table row,
-        # and thermal_may_be_nonzero() is False by construction.  A
-        # params-file entry on band.<name>.thermal therefore requires
-        # fitthermal: true on that band (the entry alone used to free it).
-        if any(self.fitthermal):
-            off = [i for i in range(self.n_elements) if not self.fitthermal[i]]
-            thermal_entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                thermal_entry["overrides"] = {"sigma": pin.tolist()}
-            self.manifest["thermal"] = thermal_entry
+        # thermal/reflect/ellipsoidal (all ppm, opt-in per band via
+        # fitthermal/fitreflect/fitellip) enter the manifest ONLY when some
+        # band opts in; in a mixed set the opted-out bands are pinned at
+        # sigma=0 (the "overrides" pattern Instrument._register_gp uses),
+        # so their value is exactly 0 and the transit model is unchanged.
+        # With no opt-in anywhere the parameter does not exist at all --
+        # no table row, and <x>_may_be_nonzero() is False by construction.
+        # A params-file entry on band.<name>.<x> therefore requires the
+        # fit<x> flag on that band (the entry alone used to free it).
+        for name, flags in (
+            ("thermal", self.fitthermal),
+            ("reflect", self.fitreflect),
+            ("ellipsoidal", self.fitellip),
+        ):
+            if any(flags):
+                self.manifest[name] = self._pinned_manifest_entry(flags)
 
-    def thermal_may_be_nonzero(self):
-        """True unless every band's thermal is pinned (sigma == 0) at
-        exactly 0 -- the RESOLVED parameter state, after user params.
-
-        Consumers (transit) use this to skip building the thermal graph
-        entirely (a second quad_solution_vector per planet, as expensive
-        as the transit itself) when it can only ever evaluate to zero.
-        With no fitthermal anywhere the parameter is not even in the
-        manifest (register_parameters) and this is False outright; with a
-        mixed set it is deliberately not `any(self.fitthermal)`: the
-        manifest "overrides" pin is layered UNDER user params, so
-        params.yaml can free a non-fitthermal band's element (sigma > 0)
-        or fix it at a nonzero value, and the gate must stay open for
-        those. Anything non-numeric (a linked expression, no sigma at all
-        -> uniform prior) counts as active.
+    def _pinned_manifest_entry(self, opt_in_flags):
+        """A manifest entry that's free where opt_in_flags is True, and
+        pinned to sigma=0 (fixed at its default initval, 0) elsewhere.
+        Shared by thermal/reflect/ellipsoidal's identical opt-in gating
+        (only reached when some flag is True -- an all-False parameter is
+        omitted from the manifest entirely).
         """
-        if "thermal" not in self.manifest:
+        off = [i for i in range(self.n_elements) if not opt_in_flags[i]]
+        entry = {}
+        if off:
+            pin = np.full(self.n_elements, np.nan)
+            pin[off] = 0.0
+            entry["overrides"] = {"sigma": pin.tolist()}
+        return entry
+
+    def _may_be_nonzero(self, name):
+        """True unless every element of parameter ``name`` is pinned
+        (sigma == 0) at exactly 0 -- the RESOLVED state, after user params.
+
+        Consumers (transit) use this to skip building an expensive graph
+        (thermal: a second quad_solution_vector per planet; reflect: a
+        planetvisible evaluation -- both as expensive as the transit
+        itself) entirely when it can only ever evaluate to zero.
+        With no fit<x> anywhere the parameter is not even in the manifest
+        (register_parameters) and this is False outright; with a mixed set
+        it is deliberately not `any(self.fit<x>)`: the manifest
+        "overrides" pin is layered UNDER user params, so params.yaml can
+        free an opted-out band's element (sigma > 0) or fix it at a
+        nonzero value, and the gate must stay open for those. Anything
+        non-numeric (a linked expression, no sigma at all -> uniform
+        prior) counts as active.
+        """
+        if name not in self.manifest:
             return False
-        param = self.thermal
+        param = getattr(self, name)
 
         def _vec(value, fill):
             arr = np.atleast_1d(value if value is not None else fill)
@@ -411,6 +457,21 @@ class Band(Component):
             return True
         pinned_at_zero = (sigmas == 0.0) & (inits == 0.0)
         return not bool(np.all(pinned_at_zero))
+
+    def thermal_may_be_nonzero(self):
+        """True unless every band's thermal is pinned at exactly 0 -- see
+        _may_be_nonzero."""
+        return self._may_be_nonzero("thermal")
+
+    def reflect_may_be_nonzero(self):
+        """True unless every band's reflect is pinned at exactly 0 -- see
+        _may_be_nonzero."""
+        return self._may_be_nonzero("reflect")
+
+    def ellipsoidal_may_be_nonzero(self):
+        """True unless every band's ellipsoidal is pinned at exactly 0 --
+        see _may_be_nonzero."""
+        return self._may_be_nonzero("ellipsoidal")
 
     def build_likelihood(self, model, system):
         pass

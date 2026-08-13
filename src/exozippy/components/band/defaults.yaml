@@ -63,3 +63,26 @@ band:
     internal_unit: ""
     latex: "A_T"
     description: "Planet thermal emission"
+  # PR 1.b (BEER): phase-dependent reflection and ellipsoidal variation.
+  # Same opt-in/omitted-unless-flagged pattern as thermal (see fitreflect/
+  # fitellip in Band.register_parameters). Beaming (the "B" in BEER) lives
+  # on the Planet component instead -- see planet/defaults.yaml -- since
+  # EXOFASTv2 declares it per-planet (ss.planet[i].beam), not per-band.
+  reflect:
+    lower: 0.0
+    upper: 1.0e6
+    initval: 0.0
+    init_scale: 100.0
+    unit: ""
+    internal_unit: ""
+    latex: "A_R"
+    description: "Planet reflected light"
+  ellipsoidal:
+    lower: 0.0
+    upper: 1.0e6
+    initval: 0.0
+    init_scale: 100.0
+    unit: ""
+    internal_unit: ""
+    latex: "A_E"
+    description: "Ellipsoidal variation"
