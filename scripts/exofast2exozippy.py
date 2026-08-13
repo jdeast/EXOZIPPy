@@ -399,11 +399,13 @@ def _rv_meta(path):
 
 
 def _fmt(v):
+    # repr() is right for every float, so there is no int(v) round trip here.
+    # There used to be one, guarding two identical branches, and it raised
+    # OverflowError on inf and ValueError on nan -- both reachable, since a
+    # priorfile may spell a one-sided bound as +/-inf.
     if isinstance(v, bool):
         return "True" if v else "False"
     if isinstance(v, float):
-        if v == int(v) and abs(v) < 1e15:
-            return repr(v)
         return repr(v)
     if isinstance(v, (int,)):
         return str(v)
@@ -435,7 +437,7 @@ SAMPLER_BLOCK = """\
 # (maxsteps/nthin/ntemps are DE-MCMC knobs); this block follows EXOZIPPy's
 # HMC best practices instead.
 sampler:
-  method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde
+  method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
   tune: 2000
   draws: 4000
   init: adapt_diag

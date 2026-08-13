@@ -430,6 +430,14 @@ class ConfigManager:
 
         _reject_renamed_arsun(user_params)
 
+        # Path of the params FILE these entries were read from, set by System
+        # only when it actually read one -- it stays None when the caller
+        # passed user_params in memory, even if the config happens to name a
+        # parameter_file it did not use.  Metadata only: error messages that
+        # ask the user to edit an entry quote it so they know which file to
+        # open.
+        self.param_file = None
+
         # User-defined parameter links (expression strings in numeric fields).
         # Populated by extract_links, which also strips the strings from
         # user_params so downstream numeric code never sees them.
@@ -461,6 +469,12 @@ class ConfigManager:
         # Storage for hints passed by components during Registration Sweep
         self.hints = {}
         self.hint_ranks = {}
+
+        # Cross-component parameter overrides (see add_override).  Same
+        # channel as a manifest entry's "overrides" dict -- layered UNDER the
+        # user's params.yaml -- for a component that must constrain a
+        # parameter another component owns.  path -> {field: value}.
+        self.param_overrides = {}
 
         # Multi-seed sampling (P4).  seed_resolved holds K fully-solved start
         # points (list of {internal_path: internal_value} dicts) after
@@ -566,8 +580,13 @@ class ConfigManager:
                         for rel in getattr(module, "RELATIONS", []):
                             module_symbols.update(rel.free_symbols)
 
+                        # Sorted: module_symbols is a set, so its walk order
+                        # is PYTHONHASHSEED-dependent, and `subs` below is
+                        # applied as an unordered mapping.  The renaming is
+                        # order-independent today (disjoint symbols), but the
+                        # cost of stating the order is zero.
                         subs = {}
-                        for sym in module_symbols:
+                        for sym in sorted(module_symbols, key=str):
                             if sym.name in instance_map:
                                 subs[sym] = sp.Symbol(instance_map[sym.name])
 
@@ -724,6 +743,43 @@ class ConfigManager:
         # Store the fully processed, ready-to-use hint
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
+
+    def add_override(self, path, **fields):
+        """Register a component-computed override on a parameter it does NOT own.
+
+        This is the cross-component spelling of a manifest entry's
+        ``"overrides"`` dict, and it behaves identically: the fields are
+        applied inside ``resolve()`` through ``apply_value`` *before* the
+        user's params.yaml, so the user still wins -- with the one deliberate
+        exception ``apply_value`` builds in, that competing bounds combine as
+        ``max(lower)`` / ``min(upper)`` order-independently.  That is what
+        makes this the right channel for a **validity limit** (a range past
+        which the likelihood is NaN or meaningless, e.g. the coverage of an
+        interpolation grid) and the wrong one for a preference: a user bound
+        it clips is applied and logged, not silently dropped.
+
+        It exists because ``add_hint`` cannot express any of this.  A hint is
+        a ranked *start value*: one scalar, feeding ``initval`` only, competing
+        in the relaxation engine's provenance ledger.  A bound or a structural
+        pin is neither a start value nor ranked -- ``lower``/``upper``/``sigma``
+        never enter the ledger at all.
+
+        Writing into ``user_params`` instead (what the SED did until this was
+        added) is what this replaces: those entries are indistinguishable from
+        the user's own, so the ledger, ``export_solution``, ``initval_source``
+        and the GUI all report a value the user never wrote, and
+        ``finalize_user_params`` additionally registers the path as a leaf
+        symbol in the relaxation engine.
+
+        ``path`` may be any of the three spellings ``resolve()`` accepts --
+        ``comp.param`` (broadcast to every element), ``comp.<i>.param`` or
+        ``comp.<name>.param``.  Values are in the parameter's **defaults.yaml
+        unit**, like every other override (a user ``unit:`` rescales them, the
+        same way it rescales the defaults).  Per-element lists are accepted
+        with the same conventions as a manifest override: ``NaN`` means "leave
+        this element alone", ``+/-inf`` is a real bound.
+        """
+        self.param_overrides.setdefault(path, {}).update(fields)
 
     def add_seed_hints(self, seed_dicts):
         """Register K per-seed observable sets for multi-seed sampling (P4).
@@ -951,31 +1007,54 @@ class ConfigManager:
         # clip itself is deliberate: these are validity limits, e.g.
         # Instrument._register_noise's jitter-variance floor).
         override_bounds = {}
-        if internal_overrides:
+
+        def apply_overrides(od, indices):
+            """Layer one component override dict onto elements `indices`."""
             for key in all_numeric:
-                if key in internal_overrides:
-                    val = internal_overrides[key]
-                    for i in range(n_elements):
-                        v = (
-                            val[i]
-                            if isinstance(val, (list, np.ndarray))
-                            else val
-                        )
-                        if v is None:
-                            continue
-                        v = float(v)
-                        # NaN means "leave this element alone".  Component-supplied
-                        # overrides are frequently per-element and sparse (e.g.
-                        # Instrument._register_gp pins only the files that did not
-                        # opt into a GP term); NaN lets one array express that
-                        # without inventing a value for the others.  +/-inf is a
-                        # legitimate bound and is NOT skipped.
-                        if np.isnan(v):
-                            continue
-                        resolved["auto_estimated"] = True
-                        apply_value(key, resolved[key], i, v * elem_scaling[i])
-                        if key in ("lower", "upper"):
-                            override_bounds[(key, i)] = v * elem_scaling[i]
+                if key not in od:
+                    continue
+                val = od[key]
+                for i in indices:
+                    v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                    if v is None:
+                        continue
+                    v = float(v)
+                    # NaN means "leave this element alone".  Component-supplied
+                    # overrides are frequently per-element and sparse (e.g.
+                    # Instrument._register_gp pins only the files that did not
+                    # opt into a GP term); NaN lets one array express that
+                    # without inventing a value for the others.  +/-inf is a
+                    # legitimate bound and is NOT skipped.
+                    if np.isnan(v):
+                        continue
+                    resolved["auto_estimated"] = True
+                    apply_value(key, resolved[key], i, v * elem_scaling[i])
+                    if key in ("lower", "upper"):
+                        override_bounds[(key, i)] = v * elem_scaling[i]
+
+        if internal_overrides:
+            apply_overrides(internal_overrides, range(n_elements))
+
+        # Cross-component overrides (ConfigManager.add_override): the same
+        # channel, for a component constraining a parameter it does not own --
+        # today the SED, whose model grid bounds star.teffsed/feh/av.  Keyed by
+        # path rather than reached through the owner's manifest, and read here
+        # under the same three spellings resolve() accepts everywhere else, so
+        # a broadcast `star.av` covers every element and a per-element
+        # `star.0.av` refines it.  Applied BEFORE the user's params below, so
+        # the user still wins (bounds combine, per apply_value).
+        if self.param_overrides:
+            for i in range(n_elements):
+                keys = [
+                    f"{component_type}.{param_name}",
+                    f"{component_type}.{_eff_idx(i)}.{param_name}",
+                ]
+                if names and i < len(names):
+                    keys.append(f"{component_type}.{names[i]}.{param_name}")
+                for k in keys:
+                    od = self.param_overrides.get(k)
+                    if od:
+                        apply_overrides(od, [i])
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
@@ -1478,7 +1557,33 @@ class ConfigManager:
                     break
 
             if existing_key is None:
-                self.user_params[final_path] = {
+                # A NEW entry is written in the INDEX form (`path`), never the
+                # config-instance-name form (`final_path`).  resolve() looks a
+                # per-element entry up under three keys -- `comp.param`,
+                # `comp.<i>.param` and `comp.<names[i]>.param` -- and only the
+                # index one is guaranteed to address element i: `names` is a
+                # manifest option, so a component may label its elements with
+                # something other than its own config instances' names.
+                #
+                # `lens` does exactly that (examples/ob161003): its per-source
+                # vectors are named for the SOURCE STARS ("SourceA",
+                # "SourceB"), while the lens block has a single entry named
+                # "Lens" at index 0.  So the engine's answer for source slot 0
+                # -- `lens.0.theta_E` -- used to be filed as
+                # `lens.Lens.theta_E`, which matches none of element 0's three
+                # keys, and the solved value was silently dropped.  With no
+                # `initval` in mulensing/defaults.yaml (theta_E is derived) and
+                # element 1 filed readably as `lens.1.theta_E`, apply_value
+                # allocated a NaN-filled vector and wrote only element 1:
+                # `lens.theta_E.initval == [nan, 0.839]`.  Element 0 was the
+                # only one affected because index 0 is the only index a lens
+                # instance name collides with.
+                #
+                # The index form is also the documented internal spelling (see
+                # standardize_param_names) and is what get_conversion_factor,
+                # propagated_scales, scale_hints and the engine's own symbol
+                # paths already use.
+                self.user_params[path] = {
                     "initval": user_val,
                     "derived": True,
                 }
@@ -1701,6 +1806,56 @@ class ConfigManager:
             return "data"
         if rank > RANK_DEFAULT:
             return "solved"
+        return "default"
+
+    def initval_source(self, component, param, element=None, name=None):
+        """Where did this element's START VALUE come from?
+
+        Returns one of the ``_provenance_label`` strings -- "user" (written in
+        the params file), "data" (a component's data-derived hint), "solved"
+        (the relaxation engine derived it from other inputs) or "default"
+        (defaults.yaml) -- for the parameter ``component.param`` at element
+        index ``element``.
+
+        This exists so an error about a start value can say WHOSE start value
+        it is: blaming a user's params file for a number the engine derived is
+        worse than saying nothing.  Parameter.build_pymc is the only caller
+        (Component.add_parameter hands it this bound method).
+
+        Two known limits, both of which only soften the wording of a message
+        and never change a decision:
+          - it reports the provenance of the engine's LAST solve, so a
+            parameter the engine rewrote after reading a user value reports
+            the rewrite ("solved"), not "user";
+          - a parameter with no symbol in the master symbol map has no rank at
+            all, so it falls back to looking for the user's own numeric
+            ``initval`` in the params file (safe there: the inject-back only
+            writes into mapped paths).
+        """
+        # Index form first (what _last_provenance and a standardized
+        # user_params are keyed on), then the instance-name form (which
+        # survives when no system_config was attached, e.g. a unit test or a
+        # component driven directly), then the 2-part broadcast form.
+        paths = []
+        if element is not None:
+            paths.append(f"{component}.{element}.{param}")
+        if name is not None:
+            paths.append(f"{component}.{name}.{param}")
+        paths.append(f"{component}.{param}")
+
+        for path in paths:
+            rank = (self._last_provenance or {}).get(path)
+            if rank is not None:
+                return self._provenance_label(rank)
+
+        for path in paths:
+            entry = (self.user_params or {}).get(path)
+            if isinstance(entry, dict) and entry.get("initval") is not None:
+                return "user"
+            if path in (self.links or {}) and (
+                "initval" in self.links[path] or "mu" in self.links[path]
+            ):
+                return "user"
         return "default"
 
     def export_solution(self, derived_params=None):
@@ -2214,7 +2369,12 @@ class ConfigManager:
         one held at RANK_DERIVED_MIXED or below (including the solver's own
         previous answer) still re-fires as its inputs refine.
         """
-        for lookup_key in self.standalone_solvers:
+        # Sorted: standalone_solvers is a set, and each solver both reads and
+        # writes `resolved`, so with two of them registered the walk order
+        # decides whether one sees the other's answer from this iteration or
+        # the last -- feeding _meaningful_change, the provenance ranks and
+        # the cycle history.  Only orbit.m_total is registered today.
+        for lookup_key in sorted(self.standalone_solvers):
             solver_func = self.custom_solvers[lookup_key]
             comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
             for path in list(self.master_symbol_map):
@@ -2522,8 +2682,15 @@ class ConfigManager:
             # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
             eq_str = f"{eq.lhs} = {eq.rhs}"
 
-            # Replace only the known symbols so the math structure is preserved
-            for s in eq.free_symbols:
+            # Replace only the known symbols so the math structure is
+            # preserved.  Sorted for the same reason as _execute_solve's walk
+            # (free_symbols is a set of Symbols whose hashes include the
+            # string hash): successive re.sub calls are not commutative when
+            # one symbol's name is a substring of another's, so an unsorted
+            # walk could render this line differently in two processes.  It
+            # is only a debug string today -- but a diagnostic that varies
+            # run to run is the one thing a diagnostic must not do.
+            for s in sorted(eq.free_symbols, key=str):
                 s_str = str(s)
                 if s_str in resolved:
                     # Format to 5 sig figs (handles scientific notation automatically)
@@ -2860,9 +3027,13 @@ class ConfigManager:
         if not solutions:
             try:
                 guess = float(resolved.get(target_str, 1.0))
+                # Sorted: sympy applies an unordered subs mapping in its own
+                # canonical order, but the dict's own insertion order comes
+                # straight off a hash-randomized set -- do not rely on a
+                # third party to launder that for us.
                 sub_dict = {
                     s: resolved[str(s)]
-                    for s in eq.free_symbols
+                    for s in sorted(eq.free_symbols, key=str)
                     if str(s) != target_str
                 }
                 expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
@@ -2890,7 +3061,15 @@ class ConfigManager:
             # Propagate Scale (Calculus-based)
             if hasattr(valid_sol, "free_symbols"):
                 scale_variance = 0.0
-                for parent_sym in valid_sol.free_symbols:
+                # Sorted for the same reason as _execute_solve's walk (whose
+                # `inputs` list is already derived from a sorted
+                # symbols_in_eq): free_symbols is a set of Symbols whose
+                # hashes include the PYTHONHASHSEED-randomized name string.
+                # Here the order is doubly load-bearing -- it is the
+                # SUMMATION order of the float accumulation below, so an
+                # unsorted walk makes init_scale differ in its last bits
+                # between two processes running identical code.
+                for parent_sym in sorted(valid_sol.free_symbols, key=str):
                     parent_str = str(parent_sym)
                     # Fallback to a small epsilon if parent scale is missing
                     parent_scale = resolved_scales.get(parent_str, 1e-9)

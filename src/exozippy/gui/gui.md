@@ -72,7 +72,15 @@ push it into one of these contracts instead.
   `star_ndx`/`orbit:` keys, and `linking.py` expressions) purely from the
   schema -- no hardcoded component names. Undo uses TEXT snapshots, not
   `deepcopy` (ruamel drops comments on deepcopy). `command_from_json` dispatches
-  the API command payloads.
+  the API command payloads. Both files are screened on the read from disk by
+  the shared `exozippy.yamlio.check_yaml_booleans`, which refuses YAML-1.1-only
+  boolean spellings (`yes/no/on/off`): ruamel is YAML **1.2** and reads those as
+  strings while the fit's PyYAML is YAML **1.1** and reads them as booleans, so
+  `finite_source: no` was `False` to the fit and the truthy string `"no"` here
+  -- the editor showed, and could save, the opposite of what the fit does. The
+  fit's own loaders call the same guard, so neither side can accept a spelling
+  the other reads differently; `true/True/TRUE/false/False/FALSE` are the
+  agreement set, and quoting is the escape hatch when a string was meant.
 - `datafiles.py` (G9) -- pure, component-agnostic helpers: `list_directory`
   (project-rooted browser that cannot escape the root), `eligible_associations`
   (which instance/key a filename may attach to, by matching the schema's
@@ -92,6 +100,21 @@ push it into one of these contracts instead.
   `EXOZIPPY_GUI_SNAPSHOT=1`), `RunHandle.status()/stop(force=)`,
   `list_runs(dir)`; `GuiReporter` writes the atomic `_gui_status.json` +
   `_gui_snapshot/` artifacts the samplers emit at each convergence check.
+  **A crashed run must never render as the previous run's success.** Every run
+  at a prefix writes the same status file, so `start_run` mints a run id per
+  launch, passes it in `EXOZIPPY_GUI_RUN_ID`, `GuiReporter` stamps it into the
+  document, and `RunHandle.status()` refuses a document carrying any other id
+  -- a fit that dies before writing anything then reports "unknown" (alive:
+  "starting", dead: "error"), never someone else's "done". `start_run` also
+  captures the child's stdout+stderr to `<prefix>_gui_console.log`: a crash
+  before `run_fit` installs its reporter (an unreadable config, an import
+  error) -- and any crash the interpreter cannot catch (SIGKILL, OOM) -- has
+  no other trace, and with the streams inherited its traceback landed in
+  whatever terminal started the GUI. `status()` reports the exit status plus
+  that tail as the run's `error`; the capture is best-effort and a failure to
+  open it only logs. In-process crashes still record their traceback through
+  `GuiReporter.terminal(error=...)` (the PR #46 mechanism, called from
+  `run.run_fit`) -- this is the path for everything that never reaches it.
 - `__init__.py` -- intentionally light (no eager fastapi/numpy imports) so
   `import exozippy.gui` stays cheap; exports `TERMINAL_PHASES`.
 
@@ -134,7 +157,10 @@ params file is the config's own `parameter_file`, the one the fit subprocess
 reads, unless the request names another; this is content, complementary to the
 structural fingerprint `trace_meta.py` stamps into the trace, which is a hash
 and is deliberately blind to initval/mu values),
-`GET /api/run/status`, `POST /api/run/stop`, `GET /api/run/plots`,
+`GET /api/run/status` (adds `terminal` -- the run is over, however it ended --
+plus `run_id`, `stale_status`, `returncode`, `error` and `console_path`, so
+`RunControl` can offer Run again and show WHY a run stopped instead of leaving
+a Stop button on a dead process), `POST /api/run/stop`, `GET /api/run/plots`,
 `GET /api/run/image?path=` (path-restricted to the run tree via
 realpath+commonpath), `POST /api/utilities/run`.
 

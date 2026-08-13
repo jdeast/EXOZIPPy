@@ -1,5 +1,6 @@
 import gc
 import importlib
+import itertools
 import logging
 import multiprocessing as mp
 import os
@@ -266,10 +267,15 @@ def _run_fit(config, gui, user_params=None):
         if "reason" in reqs:
             _reasons.append(reqs["reason"])
 
+    # sorted(), not next(iter(...)): _recommended is a set, so with two
+    # components recommending different samplers the choice would be a
+    # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
+    # component recommends anything today (mulensing's Lens), so this is
+    # inert; it stops being inert silently.
     if method is None:
-        method = next(iter(_recommended)) if _recommended else "nuts"
+        method = sorted(_recommended)[0] if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = next(iter(_recommended)) if _recommended else "ptde_async"
+        rec_str = sorted(_recommended)[0] if _recommended else "ptde_async"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )
@@ -1498,29 +1504,244 @@ def _compute_lp_from_model(model, idata):
         return None
 
 
-def _n_trace_rows(idata, var_names, group="posterior"):
-    """Total rows az.plot_trace needs: 1 row per element (shape product) per var."""
-    rows = 0
-    dataset = idata[group]
-    for v in var_names:
-        shape = dataset[v].shape[2:]  # drop (chain, draw) dims
-        rows += int(np.prod(shape)) if shape else 1
-    return rows
+def _chunk_by_rows(specs, rows_per_page):
+    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows.
 
-
-def _chunk_by_rows(idata, var_names, rows_per_page):
-    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows."""
+    ``specs`` is a list of (var_name, coords, n_rows) triples as produced by
+    _split_degenerate_vars.  A spec carrying a non-None ``coords`` element
+    selection gets a page to itself: ArviZ takes ONE coords mapping for the
+    whole call, so two variables sharing a dimension name but needing
+    different element subsets would silently cross-contaminate.
+    """
     chunk, chunk_rows = [], 0
-    for v in var_names:
-        r = _n_trace_rows(idata, [v])
-        if chunk_rows + r > rows_per_page and chunk:
+    for name, coords, r in specs:
+        solo = coords is not None
+        if chunk and (solo or chunk_rows + r > rows_per_page):
             yield chunk, chunk_rows
-            chunk, chunk_rows = [v], r
-        else:
-            chunk.append(v)
-            chunk_rows += r
+            chunk, chunk_rows = [], 0
+        chunk.append((name, coords))
+        chunk_rows += r
+        if solo:
+            yield chunk, chunk_rows
+            chunk, chunk_rows = [], 0
     if chunk:
         yield chunk, chunk_rows
+
+
+# arviz_stats builds its KDE on a fixed 512-interval grid spanning exactly
+# [min, max] of the finite draws (bound_correction=True, so the grid is NOT
+# widened by a bandwidth).  np.histogram then raises
+#   ValueError: Too many bins for data range. Cannot create 512 finite-sized bins.
+# whenever np.linspace(min, max, 513) cannot produce 513 strictly increasing
+# float64 edges -- i.e. whenever the entire range spans fewer than ~512 ULPs.
+# That kills the whole page, and with it the rest of the PDF and all of
+# wrap-up, for one variable that did not move.
+_KDE_GRID_LEN = 512
+
+
+def _dist_degeneracy(values):
+    """Why no density can be drawn for ``values``, or None if one can.
+
+    Returns a short human-readable reason string.  Three shapes qualify, and
+    all three are things a real fit produces:
+
+    * no finite draws at all (a Deterministic whose physics went NaN);
+    * exactly constant (an element pinned with ``sigma: 0`` inside an
+      otherwise-sampled vector -- GP and robust-likelihood hyperparameters
+      are full-length vectors with the non-opted-in files pinned, and such a
+      vector IS tracked as a Deterministic, so its pinned elements reach the
+      plot as constants);
+    * finite but spanning fewer than _KDE_GRID_LEN float64 steps -- a chain
+      that never moved except in the last few bits, which is what a
+      gracefully stopped, unmixed run produces and what actually crashed CI.
+
+    The third test is the exact condition numpy itself raises on, so it
+    tracks the failure rather than approximating it.
+    """
+    x = np.asarray(values, dtype=float).ravel()
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return "no finite draws"
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return f"constant at {lo:.10g}"
+    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+        return (
+            f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
+            f"{_KDE_GRID_LEN} float64 steps"
+        )
+    return None
+
+
+class _DegenerateRow:
+    """One (variable, element) row whose density cannot be drawn."""
+
+    __slots__ = ("label", "reason", "values")
+
+    def __init__(self, label, reason, values):
+        self.label = label
+        self.reason = reason
+        self.values = values
+
+
+def _element_rows(dataset, var):
+    """Yield (selection, label, values) for every plotted row of ``var``.
+
+    One row per element, matching _render_trace_page's compact=False layout
+    (the row count that used to come from a separate _n_trace_rows helper is
+    just len(list(_element_rows(...))) now).  ``selection`` is the label
+    mapping that isolates the element -- ``{}`` for a scalar variable, and
+    None when a dimension carries no coordinates and so cannot be
+    label-selected at all; ``values`` is the element's (chain, draw) array.
+    """
+    da = dataset[var]
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if not extra:
+        yield {}, var, np.asarray(da.values)
+        return
+    labelled = all(d in da.coords for d in extra)
+    for combo in itertools.product(*(range(da.sizes[d]) for d in extra)):
+        pos = dict(zip(extra, combo))
+        # .isel, not .sel: a dimension without coordinates cannot be
+        # label-selected, and only a label-selectable one can be handed back
+        # to ArviZ as a ``coords`` mapping (see _split_degenerate_vars).
+        vals = np.asarray(da.isel(pos).values)
+        if labelled:
+            sel = {
+                d: np.asarray(da.coords[d].values)[i] for d, i in pos.items()
+            }
+        else:
+            sel = None
+        shown = sel if sel is not None else pos
+        label = f"{var}[{', '.join(str(shown[d]) for d in extra)}]"
+        yield sel, label, vals
+
+
+def _split_degenerate_vars(idata, var_names, group="posterior"):
+    """Split plot rows into ArviZ-renderable ones and density-less ones.
+
+    Returns ``(specs, degenerate)``:
+
+    * ``specs`` -- list of (var_name, coords, n_rows) for _chunk_by_rows.
+      ``coords`` is None when the whole variable renders normally (so a fit
+      with no degenerate element takes byte-identical code to before), and a
+      {dim: [kept values]} mapping when only some elements of a vector do.
+    * ``degenerate`` -- list of _DegenerateRow, rendered on their own pages.
+
+    Each degenerate row is logged as a warning naming the variable element
+    and the reason: a missing density is reported, never swallowed.
+    """
+    dataset = idata[group]
+    specs, degenerate = [], []
+    for v in var_names:
+        if v not in dataset.data_vars:
+            # Unknown name: pass it straight through so ArviZ raises the same
+            # error it always did rather than having it silently disappear.
+            specs.append((v, None, 1))
+            continue
+        rows = list(_element_rows(dataset, v))
+        bad = [
+            i
+            for i, (_, _, vals) in enumerate(rows)
+            if _dist_degeneracy(vals) is not None
+        ]
+        if not bad:
+            specs.append((v, None, len(rows)))
+            continue
+        for i in bad:
+            _, label, vals = rows[i]
+            reason = _dist_degeneracy(vals)
+            logger.warning(
+                f"trace plot: no density for {label} ({reason}); its trace "
+                "panel is still drawn"
+            )
+            degenerate.append(_DegenerateRow(label, reason, vals))
+        good = [i for i in range(len(rows)) if i not in set(bad)]
+        if not good:
+            continue
+        extra = [d for d in dataset[v].dims if d not in ("chain", "draw")]
+        if len(extra) == 1 and rows[good[0]][0] is not None:
+            dim = extra[0]
+            kept = [rows[i][0][dim] for i in good]
+            specs.append((v, {dim: kept}, len(kept)))
+        else:
+            # >= 2 element dimensions (a coords mapping would select the
+            # CROSS PRODUCT of the per-dimension survivors, which can readmit
+            # a degenerate element) or an unlabelled dimension ArviZ cannot be
+            # given a coords mapping for.  No EXOZIPPy Parameter is shaped
+            # either way (Parameter vectors are 1-D and ArviZ always names
+            # their dimension), so rather than risk a re-crash the surviving
+            # elements go on the annotated pages too, saying so.
+            for i in good:
+                _, label, vals = rows[i]
+                degenerate.append(
+                    _DegenerateRow(
+                        label,
+                        f"density omitted: other elements of {v} are "
+                        "degenerate and this variable's element layout "
+                        "cannot be split",
+                        vals,
+                    )
+                )
+    return specs, degenerate
+
+
+def _render_degenerate_page(idata, rows, title, group="posterior"):
+    """One page of rows whose density cannot be drawn.
+
+    Same two-column geometry as _render_trace_page (dist column then trace
+    column, one row per element), so the page reads continuously with the
+    ArviZ ones and _shade_trace_axes_by_mode's even/odd axis convention still
+    holds.  The trace panel is drawn for real -- a flat chain is exactly what
+    the reader needs to see -- and the dist panel carries the reason and the
+    value instead of a density.
+
+    Annotating beats the alternatives: a skipped panel looks like a plotting
+    bug, and a single-bin histogram looks like a real (if uninformative)
+    density while conveying neither the value nor why it is the only bin.
+    """
+    dataset = idata[group]
+    draw_coord = np.asarray(dataset["draw"].values)
+    n = len(rows)
+    fig, axes = plt.subplots(n, 2, figsize=(12, 3 * n), squeeze=False)
+    for r, row in enumerate(rows):
+        ax_dist, ax_trace = axes[r]
+        ax_dist.set_title(row.label)
+        ax_dist.text(
+            0.5,
+            0.5,
+            f"no density\n{row.reason}",
+            ha="center",
+            va="center",
+            transform=ax_dist.transAxes,
+            fontsize=9,
+            color="0.25",
+        )
+        ax_dist.set_xticks([])
+        ax_dist.set_yticks([])
+
+        vals = np.atleast_2d(np.asarray(row.values, dtype=float))
+        finite = np.isfinite(vals)
+        if finite.any():
+            for c in range(vals.shape[0]):
+                ax_trace.plot(draw_coord, vals[c], lw=0.8)
+        else:
+            ax_trace.text(
+                0.5,
+                0.5,
+                "no finite draws",
+                ha="center",
+                va="center",
+                transform=ax_trace.transAxes,
+                fontsize=9,
+                color="0.25",
+            )
+        ax_trace.set_xlabel("Draw")
+        ax_trace.set_ylabel(row.label)
+    fig.suptitle(title, fontsize=14)
+    _shade_trace_axes_by_mode(fig, idata)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    return fig
 
 
 def save_multipage_trace(
@@ -1593,29 +1814,67 @@ def save_multipage_trace(
         # into its own floating figure, leaving our fig blank.  Let ArviZ
         # own the figure and retrieve it from the returned axes instead.
         if lp_var and lp_idata is not None:
-            fig_lp = _render_trace_page(
+            for fig in _trace_page_figures(
                 lp_idata,
                 [lp_var],
-                n_rows=1,
-                title="Trace Plots: log-posterior (lp)",
+                rows_per_page=1,
                 group="sample_stats",
-            )
-            pdf.savefig(fig_lp)
-            plt.close(fig_lp)
-            gc.collect()
+                title_fn=lambda _i: "Trace Plots: log-posterior (lp)",
+            ):
+                pdf.savefig(fig)
+                plt.close(fig)
+                gc.collect()
 
-        for page_num, (chunk, n_rows) in enumerate(
-            _chunk_by_rows(idata, var_names, rows_per_page), start=1
+        for fig in _trace_page_figures(
+            idata,
+            var_names,
+            rows_per_page=rows_per_page,
+            group="posterior",
+            title_fn=lambda i: f"Trace Plots: Page {i}",
         ):
-            fig = _render_trace_page(
-                idata, chunk, n_rows, title=f"Trace Plots: Page {page_num}"
-            )
             pdf.savefig(fig)
             plt.close(fig)
             gc.collect()
 
 
-def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
+def _trace_page_figures(idata, var_names, rows_per_page, group, title_fn):
+    """Yield one figure per page, ArviZ pages first then annotated ones.
+
+    Variables (or single vector elements) whose draws admit no density are
+    routed to _render_degenerate_page instead of being handed to ArviZ, whose
+    KDE grid is what raises on them.  With no such element the split is the
+    identity and the ArviZ call is exactly the one made before this existed.
+    """
+    specs, degenerate = _split_degenerate_vars(idata, var_names, group=group)
+
+    page_num = 0
+    for chunk, n_rows in _chunk_by_rows(specs, rows_per_page):
+        page_num += 1
+        names = [name for name, _ in chunk]
+        coords = next((c for _, c in chunk if c is not None), None)
+        yield _render_trace_page(
+            idata,
+            names,
+            n_rows,
+            title=title_fn(page_num),
+            group=group,
+            coords=coords,
+        )
+
+    for start in range(0, len(degenerate), max(1, rows_per_page)):
+        page_num += 1
+        rows = degenerate[start : start + max(1, rows_per_page)]
+        yield _render_degenerate_page(
+            idata,
+            rows,
+            title=f"{title_fn(page_num)} (no density)",
+            group=group,
+        )
+
+
+def _render_trace_page(
+    idata, var_names, n_rows, title, group="posterior", coords=None
+):
     """One trace-plot page: dist column + trace column, one row per element.
 
     plot_trace_dist (not plot_trace) is the ArviZ 1.0 equivalent of the old
@@ -1628,11 +1887,16 @@ def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
     whenever a chain carries fewer than 100 draws -- the dist column then plots
     a cumulative curve that plateaus at 1.0, which reads as a posterior clipped
     at its maximum.  A density is always what this column is meant to show.
+
+    ``coords`` restricts which elements of a vector variable are drawn; it is
+    set only when some of that vector's elements have no density (see
+    _split_degenerate_vars) and is None for every ordinary page.
     """
     pc = az.plot_trace_dist(
         idata,
         var_names=var_names,
         group=group,
+        coords=coords,
         compact=False,
         kind="kde",
         figure_kwargs={"figsize": (12, 3 * n_rows)},

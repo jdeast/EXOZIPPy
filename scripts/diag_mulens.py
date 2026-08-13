@@ -13,6 +13,14 @@ Run on both machines from anywhere and diff the two outputs:
 Prints, in order: environment and versions, every resolved initval and
 init_scale, every parameter's physical value at ``GOOD_RAW``, and the mulens
 residual summary (chi2, per-time-bin z, worst points).
+
+``GOOD_RAW`` is a coordinate in the WHITENED space, so the test's whitening
+fixture has to be restored onto the build before it decodes to the state it
+came from -- exactly as ``tests/test_runaway_logp_regression.py`` does.  This
+script refuses to print anything if that restore fails, because the numbers
+would otherwise look ordinary and be wrong: without it, measured on
+DC2018_128, the total logp reads -4.77e5 instead of 3401.59 and the mulens
+chi2/N reads 1088 instead of 1.002.
 """
 
 import importlib.metadata as md
@@ -33,21 +41,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = REPO_ROOT / "examples" / "DC2018_128"
 TEST_FILE = REPO_ROOT / "tests" / "test_runaway_logp_regression.py"
 
+from exozippy import whitening  # noqa: E402
 from exozippy.system import System  # noqa: E402
 
 
 def _load_pinned_point():
-    """Import GOOD_RAW / GOOD_EXPECTED_LP from the test that pins them.
+    """Import the pinned point from the test that owns it.
 
-    Loaded by path rather than by adding tests/ to sys.path, so this script
-    works from any cwd and does not shadow anything named like a test module.
+    Returns (GOOD_RAW, GOOD_EXPECTED_LP, WHITENING_FIXTURE).  Loaded by path
+    rather than by adding tests/ to sys.path, so this script works from any
+    cwd and does not shadow anything named like a test module.  All three
+    come from the same module on purpose: the raw point, the lp it is
+    expected to produce and the whitening it was sampled under are one
+    inseparable set, and reading two of the three is how this script started
+    printing an unrelated state.
     """
     spec = importlib.util.spec_from_file_location(
         "_runaway_logp_regression", TEST_FILE
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.GOOD_RAW, module.GOOD_EXPECTED_LP
+    return (
+        module.GOOD_RAW,
+        module.GOOD_EXPECTED_LP,
+        module.WHITENING_FIXTURE,
+    )
 
 
 def _fmt(a, prec=8):
@@ -56,7 +74,7 @@ def _fmt(a, prec=8):
 
 
 def main():
-    good_raw, expected_lp = _load_pinned_point()
+    good_raw, expected_lp, whitening_fixture = _load_pinned_point()
 
     print("=" * 78)
     print("ENVIRONMENT")
@@ -66,8 +84,16 @@ def main():
     print(f"  platform      {platform.platform()}")
     print(f"  glibc         {platform.libc_ver()}")
     for pkg in (
-        "numpy", "scipy", "pytensor", "pymc", "vbmicrolensing", "astropy",
-        "sympy", "exoplanet-core", "celerite2", "numba",
+        "numpy",
+        "scipy",
+        "pytensor",
+        "pymc",
+        "vbmicrolensing",
+        "astropy",
+        "sympy",
+        "exoplanet-core",
+        "celerite2",
+        "numba",
     ):
         try:
             print(f"  {pkg:<13} {md.version(pkg)}")
@@ -98,6 +124,19 @@ def main():
         system = System(config, user_params)
         system.prepare()
         model = system.build_model()
+        # build_model leaves the PRELIMINARY whitening scales in place;
+        # run.py measures the real ones at startup.  GOOD_RAW came from a
+        # run, so restore that run's whitening or it decodes elsewhere.
+        if not whitening.load_whitening(system, whitening_fixture):
+            raise SystemExit(
+                f"ERROR: could not restore the whitening fixture "
+                f"{whitening_fixture}.  GOOD_RAW only means anything under "
+                f"the whitening it was sampled with, so every number this "
+                f"script would print describes a different physical state "
+                f"-- and looks perfectly ordinary while doing so.  Refusing "
+                f"to emit a cross-machine comparison that cannot be "
+                f"compared."
+            )
         point = {k: np.asarray(v, dtype=float) for k, v in good_raw.items()}
 
         total = float(np.asarray(model.compile_logp()(point)))
@@ -127,7 +166,9 @@ def main():
                 labels.append(p.label)
                 nodes.append(v)
         exprs = model.replace_rvs_by_values(nodes)
-        fn = pytensor.function(model.value_vars, exprs, on_unused_input="ignore")
+        fn = pytensor.function(
+            model.value_vars, exprs, on_unused_input="ignore"
+        )
         vals = fn(*[point[vv.name] for vv in model.value_vars])
         for lab, val in zip(labels, vals):
             print(f"  {lab:<38s} {_fmt(val)}")
@@ -147,30 +188,45 @@ def main():
             for a in f2(*[point[vv.name] for vv in model.value_vars])
         ]
         inst = next(
-            c for c in system.get_all_components()
+            c
+            for c in system.get_all_components()
             if c.prefix == "mulensinstrument"
         )
         t = np.asarray(inst.time, dtype=float).ravel()
         r = data - mu_v
         z = r / sig_v
-        print(f"  N={data.size}  chi2={np.sum(z**2):.2f}  "
-              f"chi2/N={np.sum(z**2) / data.size:.3f}")
-        print(f"  data  min={data.min():.6f} max={data.max():.6f} "
-              f"mean={data.mean():.6f}")
-        print(f"  model min={mu_v.min():.6f} max={mu_v.max():.6f} "
-              f"mean={mu_v.mean():.6f}")
-        print(f"  sigma min={sig_v.min():.6f} med={np.median(sig_v):.6f} "
-              f"max={sig_v.max():.6f}")
-        print(f"  resid mean={r.mean():+.6f} std={r.std():.6f}  "
-              f"z mean={z.mean():+.4f} std={z.std():.4f}")
+        print(
+            f"  N={data.size}  chi2={np.sum(z**2):.2f}  "
+            f"chi2/N={np.sum(z**2) / data.size:.3f}"
+        )
+        print(
+            f"  data  min={data.min():.6f} max={data.max():.6f} "
+            f"mean={data.mean():.6f}"
+        )
+        print(
+            f"  model min={mu_v.min():.6f} max={mu_v.max():.6f} "
+            f"mean={mu_v.mean():.6f}"
+        )
+        print(
+            f"  sigma min={sig_v.min():.6f} med={np.median(sig_v):.6f} "
+            f"max={sig_v.max():.6f}"
+        )
+        print(
+            f"  resid mean={r.mean():+.6f} std={r.std():.6f}  "
+            f"z mean={z.mean():+.4f} std={z.std():.4f}"
+        )
         print("  per-bin (sorted by time, 8 equal bins):")
         for b in np.array_split(np.argsort(t), 8):
-            print(f"    t=[{t[b].min():.2f},{t[b].max():.2f}] n={b.size:4d} "
-                  f"mean_z={z[b].mean():+9.3f} max|z|={np.abs(z[b]).max():9.2f}")
+            print(
+                f"    t=[{t[b].min():.2f},{t[b].max():.2f}] n={b.size:4d} "
+                f"mean_z={z[b].mean():+9.3f} max|z|={np.abs(z[b]).max():9.2f}"
+            )
         print("  worst 8 points:")
         for i in np.argsort(-np.abs(z))[:8]:
-            print(f"    t={t[i]:.5f} data={data[i]:+.6f} model={mu_v[i]:+.6f} "
-                  f"sig={sig_v[i]:.6f} z={z[i]:+.2f}")
+            print(
+                f"    t={t[i]:.5f} data={data[i]:+.6f} model={mu_v[i]:+.6f} "
+                f"sig={sig_v[i]:.6f} z={z[i]:+.2f}"
+            )
     finally:
         os.chdir(orig)
 

@@ -300,6 +300,16 @@ def _log_path(handle):
     return _prefix_path(handle) + ".log"
 
 
+def _console_path(handle):
+    """The captured stdout+stderr of the fit subprocess, when there is one.
+
+    This is where a crash that never reached the fit's own logger (an
+    unreadable config, an import error) leaves its traceback. Optional: a
+    hand-built handle (tests, a run adopted from elsewhere) has none.
+    """
+    return getattr(handle, "console_path", None)
+
+
 def _read_snapshot_meta(handle):
     """Latest partial.json snapshot metadata for the run, or None if absent."""
     path = os.path.join(handle.snapshot_dir, "partial.json")
@@ -317,20 +327,31 @@ def run_status_payload(handle):
     to auto-attach the terminal to, the results directory to link, and the
     latest downsampled-snapshot metadata (n_draws/max_rhat/min_ess/updated_at)
     for the progress strip and rhat sparkline.
+
+    `terminal` says the run is over (done/stopped/error, from RunHandle's own
+    liveness-checked phase) so the frontend can stop offering Stop and show
+    `error` -- a crashed run and a finished one must not look alike.
     """
+    from ..gui import TERMINAL_PHASES
+
     status = handle.status()
+    phase = status.get("phase")
     return {
         "active": True,
-        "phase": status.get("phase"),
+        "phase": phase,
+        "terminal": phase in TERMINAL_PHASES,
         "state": status.get("state", {}),
         "alive": status.get("alive"),
         "pid": status.get("pid"),
+        "run_id": status.get("run_id"),
+        "stale_status": bool(status.get("stale_status")),
         "returncode": status.get("returncode"),
         "error": status.get("error"),
         "prefix": handle.prefix,
         "config_path": handle.config_path,
         "cwd": handle.cwd,
         "log_path": _log_path(handle),
+        "console_path": _console_path(handle),
         "results_dir": _results_dir(handle),
         "snapshot": _read_snapshot_meta(handle),
     }

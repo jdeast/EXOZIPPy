@@ -484,9 +484,27 @@ class AstrometryInstrument(Instrument):
 
         # SED-derived fluxfrac: instruments with band + companion_star_ndx
         # in a system with a sed: block get their photocenter flux
-        # fraction from the SED (see _sed_beta_node). Fix the sampled
-        # fluxfrac element (it is unused) unless the user already
-        # configured it.
+        # fraction from the SED (see _sed_beta_node). Pin the sampled
+        # fluxfrac element for those files -- nothing reads it -- unless the
+        # user configured it themselves.
+        #
+        # This is a STRUCTURAL pin, not a start value, so it goes through the
+        # manifest "overrides" channel (exactly as Instrument._register_gp
+        # pins the files that did not opt into a GP term), NOT through
+        # config_manager.user_params.  A user_params write is indistinguishable
+        # from the user's own entry: it reported this component's own decision
+        # back to the user as something they had written, in the provenance
+        # ledger, export_solution, initval_source and the GUI alike.  The
+        # override sits below RANK_USER and is applied before the user's params
+        # in resolve(), so `sigma: 0` still yields to a user's own sigma --
+        # the setdefault semantics this replaces.
+        #
+        # Note the pin is belt-and-braces: defaults.yaml already gives fluxfrac
+        # `sigma: 0.0` (beta = 0 is the dark-companion default), so the old
+        # injection never changed a value at all -- its ONLY effect was to make
+        # the ledger say the user had pinned it.  Keeping the override states
+        # the intent where a future default change would otherwise silently
+        # free an element nothing reads.
         self._sed_fluxfrac = [False] * self.n_elements
         if "sed" in (self.config_manager.system_config or {}):
             for i, c in enumerate(self.config):
@@ -496,12 +514,12 @@ class AstrometryInstrument(Instrument):
                 ):
                     continue
                 self._sed_fluxfrac[i] = True
-                key = f"{self.prefix}.{i}.fluxfrac"
-                existing = self.config_manager.user_params.get(key)
-                if existing is None:
-                    self.config_manager.user_params[key] = {"sigma": 0}
-                elif isinstance(existing, dict):
-                    existing.setdefault("sigma", 0)
+
+        if any(self._sed_fluxfrac):
+            # NaN leaves the other elements alone (see resolve()).
+            pin = np.full(self.n_elements, np.nan)
+            pin[np.asarray(self._sed_fluxfrac, dtype=bool)] = 0.0
+            self.manifest["fluxfrac"] = {"overrides": {"sigma": pin.tolist()}}
 
     # ------------------------------------------------------------------
     # Model pieces (PyTensor)

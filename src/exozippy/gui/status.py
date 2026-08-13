@@ -8,8 +8,10 @@ never sees a half-written file):
   <prefix>_gui_status.json
       A single small JSON document: the current phase
       ("preparing" | "compiling" | "tuning" | "sampling" | "writing" | "done"
-      | "stopped" | "error"), the latest progress state dict, the pid, and
-      started/updated timestamps.
+      | "stopped" | "error"), the latest progress state dict, the pid,
+      started/updated timestamps, and -- for a fit launched by gui.runner --
+      that launch's run id, which is how a reader tells this run's file from
+      the one an earlier run left at the same prefix.
 
   <prefix>_gui_snapshot/partial.npz (+ partial.json)
       A downsampled copy of the T=1 raw draws collected so far (thinned to
@@ -54,6 +56,19 @@ MAX_SNAPSHOT_DRAWS = 200
 
 SNAPSHOT_BUDGET_S = 5.0
 """If a single snapshot write exceeds this, warn once and skip future ones."""
+
+
+def run_id_from_env():
+    """This launch's run id, or None outside a runner-launched fit.
+
+    ``gui.runner.start_run`` mints an id per launch and passes it in the
+    environment; stamping it into the status document is what lets a monitor
+    tell THIS run's file from the one an earlier run left at the same prefix
+    (every run at a prefix writes the same path). A fit started any other way
+    has no id, and the reader then falls back to reporting the document as it
+    finds it.
+    """
+    return os.environ.get("EXOZIPPY_GUI_RUN_ID") or None
 
 
 def gui_enabled(config):
@@ -105,11 +120,12 @@ class GuiReporter:
     fit -- a monitoring artifact must not be able to crash the science run.
     """
 
-    def __init__(self, prefix, enabled=True):
+    def __init__(self, prefix, enabled=True, run_id=None):
         self.prefix = str(prefix)
         self.enabled = bool(enabled)
         self.status_path = self.prefix + "_gui_status.json"
         self.snapshot_dir = self.prefix + "_gui_snapshot"
+        self.run_id = run_id if run_id is not None else run_id_from_env()
         self._t_start = time.time()
         self._last_state = {}
         self._snapshot_over_budget = False
@@ -130,6 +146,8 @@ class GuiReporter:
             "started_at": self._t_start,
             "updated_at": time.time(),
         }
+        if self.run_id is not None:
+            doc["run_id"] = self.run_id
         if error is not None:
             doc["error"] = str(error)
         _atomic_write_text(

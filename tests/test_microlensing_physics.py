@@ -145,12 +145,15 @@ def test_microlensing_sympy_pytensor_equivalence():
     cm = ConfigManager(user_params, system_config=system_config)
     cm.finalize_user_params()
 
-    # Verify the solver completed the chain
-    assert "lens.Lens.t_E" in cm.user_params
+    # Verify the solver completed the chain.  Derived values are injected
+    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # ConfigManager.resolve reads for every element.  See the inject-back
+    # comment in finalize_user_params and tests/test_nsnl.py.
+    assert "lens.0.t_E" in cm.user_params
 
-    te_sympy = cm.user_params["lens.Lens.t_E"]["initval"]
-    thetaE_sympy = cm.user_params["lens.Lens.theta_E"]["initval"]
-    pirel_sympy = cm.user_params["lens.Lens.pi_rel"]["initval"]
+    te_sympy = cm.user_params["lens.0.t_E"]["initval"]
+    thetaE_sympy = cm.user_params["lens.0.theta_E"]["initval"]
+    pirel_sympy = cm.user_params["lens.0.pi_rel"]["initval"]
 
     # 3. Feed the SAME raw inputs into the PyTensor graph
     # (Using .eval() to pull the numeric result out of the graph)

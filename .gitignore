@@ -40,3 +40,6 @@ src/exozippy/models/MIST/MISTv2.5/EEPs/afe_p0_vvcrit0.0.grid.parquet
 # that ran the SED tests.  Unignored, a `git add -A` in any worktree tries to
 # commit a 247 MB file and GitHub rejects the push.
 src/exozippy/components/sed/models/
+
+# scripts/dump_code.py default output (a 2+ MB collated copy of the repo).
+repo_dump.txt

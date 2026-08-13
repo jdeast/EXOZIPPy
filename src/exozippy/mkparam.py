@@ -33,13 +33,13 @@ from exozippy.outputs.modes import (
 )
 from exozippy.samplers import convergence
 from exozippy.trace_meta import check_trace_freshness
+from exozippy.yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
 
 
 def _load_yaml(path):
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
+    return load_yaml(path) or {}
 
 
 def _get_instance_names(config, comp_key):
@@ -710,7 +710,10 @@ def write_param_file(
             for k in list(output)
             if k.endswith(f".{y_name}")
         }
-        for prefix in set(_x_keys) & set(_y_keys):
+        # Sorted: the body deletes the x/y entries and inserts the angle in
+        # their place, so a hash-ordered set intersection would shuffle the
+        # written params file's key order from run to run.
+        for prefix in sorted(set(_x_keys) & set(_y_keys)):
             x_key, y_key = _x_keys[prefix], _y_keys[prefix]
             xv, yv = output[x_key]["initval"], output[y_key]["initval"]
             # initval may be a scalar (single-seed) or a length-K list

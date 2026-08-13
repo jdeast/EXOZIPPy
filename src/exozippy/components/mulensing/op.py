@@ -9,7 +9,24 @@ from astropy.coordinates import SkyCoord
 from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
-from .physics import clip_q_value
+from exozippy.compat import patch_mulensmodel_method_order
+
+from .physics import (
+    _MM_NAN_ADVICE,
+    RHO_FLOOR,
+    S_FLOOR,
+    T_E_FLOOR,
+    clip_q_value,
+    floor_u_0_value,
+    require_mm_number,
+)
+
+# MulensModel dispatches magnification methods in PYTHONHASHSEED order, and
+# the VBMicrolensing backends are not order-independent, so identical inputs
+# give different answers in different processes.  This is the exozippy module
+# that owns the MulensModel import, so patch it here, before any Op can build
+# an mm.Model.  See exozippy/compat/mulensmodel_method_order.py.
+patch_mulensmodel_method_order()
 
 
 def _clear_mm_satellite_cache():
@@ -50,20 +67,51 @@ def _dev_skycoord(obs_pos_np, cache):
     return cache[key]
 
 
+_BASE_LABELS = (
+    "lens.t_0",
+    "lens.u_0",
+    "lens.t_E",
+    "lens.pi_E_N",
+    "lens.pi_E_E",
+)
+
+
 def _base_mm_params(p):
-    """Sanitized parameters shared by all models: [t_0, u_0, t_E, pi_E_N, pi_E_E]."""
+    """Range-limited parameters shared by all models:
+    [t_0, u_0, t_E, pi_E_N, pi_E_E].
+
+    ``require_mm_number`` raises on a NaN instead of handing it to
+    MulensModel, which used to report whatever generic failure the NaN
+    happened to cause several frames away.  The caller's
+    ``except (ValueError, RuntimeError)`` turns it into the same all-NaN
+    answer as before, now under a message that names the parameter.  Finite
+    values, in range or out, are untouched.
+    """
+    t_0, u_0, t_E, pi_E_N, pi_E_E = (
+        require_mm_number(p[i], _BASE_LABELS[i]) for i in range(5)
+    )
     return {
-        "t_0": float(p[0]),
-        "u_0": float(np.sign(float(p[1])) * max(abs(float(p[1])), 1e-9)),
-        "t_E": float(max(float(p[2]), 1e-4)),
-        "pi_E_N": float(p[3]),
-        "pi_E_E": float(p[4]),
+        "t_0": t_0,
+        # Same floor, same expression as the symbolic path
+        # (Lens._get_safe_mm_params): both go through physics, so the two
+        # backends cannot disagree about where the model is defined.  This
+        # used to be a hard-coded 1e-9 against physics.U_0_FLOOR = 1e-6, so a
+        # fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer depending
+        # on which backend it was on.
+        "u_0": floor_u_0_value(u_0),
+        "t_E": float(max(t_E, T_E_FLOOR)),
+        "pi_E_N": pi_E_N,
+        "pi_E_E": pi_E_E,
     }
 
 
 def _safe_rho(value):
-    """rho <= 0 is unphysical and breaks finite-source methods; floor it."""
-    return float(max(float(value), 1e-9))
+    """Floor the source radius at physics.RHO_FLOOR.
+
+    One number, shared with the flux bootstrap's own copy of this clip, for
+    the same reason U_0_FLOOR is: two literals drift.
+    """
+    return float(max(float(value), RHO_FLOOR))
 
 
 def _build_pspl_model(p, coords, mag_method, use_rho=False):
@@ -114,7 +162,7 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     if use_rho:
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
-    mm_params["s"] = float(max(float(p[idx]), 1e-6))
+    mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
     mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
     mm_params["alpha"] = float(p[idx + 2])
 
@@ -341,6 +389,9 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
+        # Warn-once flag for the non-finite guard in _compute, mirroring
+        # _MagOpBase._warned.
+        self._warned = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
@@ -464,6 +515,19 @@ class VBMDirectMagOp(Op):
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
+    def _param_labels(self):
+        """Names of the entries of this Op's param vector, in order -- so the
+        non-finite guard below can say WHICH parameter failed rather than
+        just that something did."""
+        labels = list(_BASE_LABELS)
+        if self.use_rho:
+            labels.append("lens.rho")
+        for j in range(self.n_companions):
+            labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
+        if self.bandpass is not None:
+            labels.append("band.u1")
+        return labels
+
     def _compute(self, p, times_np, obs_pos_np):
         # Non-finite check FIRST: it is the explicit handler for a NaN
         # parameter vector (return NaN magnifications -> logp = -inf ->
@@ -471,7 +535,30 @@ class VBMDirectMagOp(Op):
         # clip_q_value never has to be the one to notice.  It used to sit
         # after the unpacking, which only worked because np.clip passed NaN
         # through silently.
-        if not np.all(np.isfinite(p)):
+        #
+        # Warn once, naming the entries, for the same reason _MagOpBase warns
+        # once: a *misconfigured* model is non-finite on every proposal, which
+        # is indistinguishable from ordinary rejection unless the first one is
+        # reported.  This branch used to return NaN in complete silence.
+        bad = ~np.isfinite(np.asarray(p, dtype=float))
+        if np.any(bad):
+            if not self._warned:
+                self._warned = True
+                labels = self._param_labels()
+                named = ", ".join(
+                    f"{labels[i] if i < len(labels) else f'p[{i}]'}"
+                    f" = {float(p[i])!r}"
+                    for i in np.flatnonzero(bad)
+                )
+                warnings.warn(
+                    f"{type(self).__name__}: non-finite magnification "
+                    f"parameter(s) {named} -- returning NaN magnifications "
+                    "(logp = -inf) for this proposal.  If this repeats for "
+                    "every proposal the model is misconfigured, not merely "
+                    f"exploring bad parameters.  {_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             return np.full(len(times_np), np.nan)
 
         base = _base_mm_params(p)
@@ -484,7 +571,7 @@ class VBMDirectMagOp(Op):
         for j in range(self.n_companions):
             companions.append(
                 (
-                    float(max(float(p[idx]), 1e-6)),
+                    float(max(float(p[idx]), S_FLOOR)),
                     clip_q_value(p[idx + 1], f"lens.q[{j}]"),
                     float(np.radians(float(p[idx + 2]))),
                 )

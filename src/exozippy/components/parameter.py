@@ -99,6 +99,12 @@ _LOGIT_SATURATION_PENALTY_K = 0.5
 # measured rescale (Parameter.set_whitening) replaces it before sampling.
 _PRELIM_SCALE_SPAN_FRACTION = 0.1
 
+# The labels ConfigManager.initval_source may return.  Both start-value
+# errors key an advice table on one of these, so an unrecognized label is
+# normalized to "default" rather than KeyError-ing while rendering the very
+# message it is decorating.
+_INITVAL_SOURCES = frozenset({"user", "data", "solved", "default"})
+
 
 # ----------------------------
 # Helper functions
@@ -558,6 +564,16 @@ class Parameter:
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
+    # Params file these values came from, if any (Component.add_parameter
+    # forwards ConfigManager.param_file).  Metadata only -- it is quoted in
+    # the "pinned with no value" error so the user is told which file to edit.
+    source_file: Optional[str] = None
+    # Optional callable (component, param, element=i) -> "user" | "data" |
+    # "solved" | "default": ConfigManager.initval_source, forwarded by
+    # Component.add_parameter.  Metadata only -- it is quoted in the
+    # "start value outside its hard bounds" error so the message can say
+    # whether the offending number was written by the user or derived.
+    initval_source: Any = None
 
     # LaTeX/table metadata
     latex: Optional[str] = ""
@@ -739,6 +755,44 @@ class Parameter:
                 return float(arr[index] if arr.size > index else arr[0])
         return float(np.atleast_1d(self.value[index].eval())[0])
 
+    def _initval_present(self, n_elements):
+        """Per-element mask: does this parameter actually carry a start value?
+
+        ``build_pymc`` reads ``initval`` through ``to_vec(..., fill=0.0)``, so
+        by the time it has a vector, "no value" and "the value 0.0" look
+        identical.  This answers the question *before* that fill, mirroring
+        ``to_vec``'s own broadcasting rules so the mask lines up element for
+        element with the vector ``to_vec`` returns:
+
+        - ``None``          -> nothing anywhere; every element absent.
+        - a symbolic node   -> a value (a linked/derived start); every element
+                               present.  It is deliberately not evaluated.
+        - a length-1 array  -> broadcast, so every element takes its value.
+        - a longer array    -> element-wise; elements past its end are absent
+                               (``to_vec`` fills them), and ``NaN`` means
+                               absent (``ConfigManager.resolve`` writes NaN
+                               into an array for "this element was never set").
+        """
+        init = self.initval
+        if init is None:
+            return np.zeros(n_elements, dtype=bool)
+        raw = getattr(init, "value", init)
+        if hasattr(raw, "owner") or "TensorVariable" in str(type(raw)):
+            return np.ones(n_elements, dtype=bool)
+        try:
+            arr = np.atleast_1d(np.asarray(raw, dtype=float))
+        except (TypeError, ValueError):
+            # Not numeric and not obviously symbolic: assume it is a value.
+            return np.ones(n_elements, dtype=bool)
+        if arr.size == 0:
+            return np.zeros(n_elements, dtype=bool)
+        if arr.size == 1:
+            return np.full(n_elements, not bool(np.isnan(arr[0])))
+        present = np.zeros(n_elements, dtype=bool)
+        n_copy = min(n_elements, arr.size)
+        present[:n_copy] = ~np.isnan(arr[:n_copy])
+        return present
+
     def get_display_label(self, index=0):
         parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
@@ -755,6 +809,220 @@ class Parameter:
             return f"{prefix}.{index}.{attr}"
 
         return self.label
+
+    # What to do about an out-of-bounds start, keyed on where the number came
+    # from (ConfigManager.initval_source).  The user wrote one of these
+    # numbers; they did not write the other three, and telling them to "fix
+    # the initval in your params file" for a value the relaxation engine
+    # derived sends them looking for a line that is not there.
+    _OUT_OF_BOUNDS_ADVICE = {
+        "user": (
+            "This start value is the 'initval' in your params file. Change it "
+            "to a value inside the bounds, or -- if the value is right -- "
+            "widen the bound. Note bounds may only be TIGHTENED by a params "
+            "file, so a value outside the range in the component's "
+            "defaults.yaml cannot be reached by editing bounds alone."
+        ),
+        "solved": (
+            "This start value was DERIVED by the relaxation engine from your "
+            "other inputs -- it is not written anywhere, so there is no line "
+            "to edit. Landing outside the bound means the inputs it was "
+            "solved from are inconsistent with that bound. Either seed this "
+            "parameter directly with an in-bounds 'initval' (that outranks "
+            "the derivation), or revisit the values it was derived from."
+        ),
+        "data": (
+            "This start value was estimated from your DATA by the component "
+            "that loaded it, not written in your params file. Either seed "
+            "this parameter directly with an in-bounds 'initval' (a user "
+            "value outranks a data-derived hint), or widen the bound if the "
+            "estimate is right."
+        ),
+        "default": (
+            "This start value is the default from the component's "
+            "defaults.yaml, and the bound excluding it was tightened "
+            "elsewhere (most likely a 'lower'/'upper' in your params file). "
+            "Add an explicit 'initval' inside the new bound, or relax the "
+            "bound."
+        ),
+    }
+
+    def _element_initval_source(self, i):
+        """Classify where element ``i``'s start came from.
+
+        Returns "user", "data", "solved" or "default" (see
+        ConfigManager.initval_source).  Pure metadata for an error message,
+        so a fault in the lookup must never replace the diagnosis it is
+        decorating: anything that goes wrong degrades to "default".  That
+        includes an unrecognized label -- both callers key an advice table on
+        the result, and a KeyError raised while rendering an error message
+        would replace the diagnosis with a traceback about the decoration.
+        """
+        if not callable(self.initval_source):
+            return "default"
+        comp, _, pname = self.label.rpartition(".")
+        name = (
+            self.names[i]
+            if self.names is not None and i < len(self.names)
+            else None
+        )
+        try:
+            src = self.initval_source(comp, pname, element=int(i), name=name)
+        except Exception:  # noqa: BLE001 -- metadata only, never fatal
+            return "default"
+        return src if src in _INITVAL_SOURCES else "default"
+
+    def _unit_suffix(self):
+        """The user unit as a message suffix (e.g. ' solMass'), or ''."""
+        try:
+            unit_str = str(self.unit[0]) if self.unit else ""
+        except (TypeError, IndexError):
+            return ""
+        if not unit_str or unit_str == "dimensionless":
+            return ""
+        return f" {unit_str}"
+
+    def _out_of_bounds_message(self, offenders, inits, lowers, uppers):
+        """Render the fatal 'start value outside its hard bounds' error.
+
+        ``offenders`` is the list of element indices; the three arrays are the
+        build's internal-unit vectors.  Values are reported in the USER unit
+        so the numbers match what the user typed, and every offending element
+        is listed.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            lines.append(
+                f"  {self.get_display_label(int(i))}: start "
+                f"{user_units(inits[i], i):.10g}{unit} is outside its bounds "
+                f"[{user_units(lowers[i], i):.10g}, "
+                f"{user_units(uppers[i], i):.10g}]{unit} (start value from: "
+                f"{src})"
+            )
+
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        advice = "\n".join(
+            self._OUT_OF_BOUNDS_ADVICE[s] for s in sorted(sources)
+        )
+        return (
+            f"Start value outside its hard bounds{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + f"These bounds are the parameter's SUPPORT, not a preference: "
+            f"'{self.label}' is sampled through a logit transform onto "
+            f"[lower, upper], so a start outside it has no raw coordinate at "
+            f"all. EXOZIPPy used to move such a start onto the bound and "
+            f"carry on, which produced a plausible-looking fit from a point "
+            f"nobody chose; it now refuses.\n" + advice
+        )
+
+    # What to do about a SAMPLED element with no start value, keyed on the
+    # provenance ConfigManager recorded for it.  For the overwhelmingly common
+    # case nothing recorded anything and the label is "default"; the other
+    # three mean some channel is on record as the source while no number
+    # actually landed, which is worth saying out loud because it points at the
+    # channel rather than at the user.
+    _NO_START_ADVICE = {
+        "default": (
+            "Nothing supplied a start value: not your params file, not the "
+            "component's defaults.yaml, not a component hint or manifest "
+            "'overrides' entry, and the relaxation engine derived none. "
+            "Fix: add an 'initval' for this element to your params file -- or, "
+            "if every fit of this topology needs one, add an 'initval' to the "
+            "parameter's entry in the component's defaults.yaml."
+        ),
+        "user": (
+            "Your params file names this parameter, but the entry supplies no "
+            "usable 'initval' -- a 'lower'/'upper', a 'sigma', or a link on "
+            "some other field is not a start value. Fix: add 'initval:' to "
+            "that same entry."
+        ),
+        "solved": (
+            "The relaxation engine is on record as this element's source, but "
+            "it left the element itself unsolved, so no number reached the "
+            "model. Fix: seed it directly with an 'initval' (a user value "
+            "outranks a derivation), or supply the inputs the derivation "
+            "needs."
+        ),
+        "data": (
+            "A data-derived hint from the component that loaded your data is "
+            "on record as this element's source, but no number reached the "
+            "model -- most likely the hint covered other elements of the same "
+            "vector and not this one. Fix: seed this element directly with an "
+            "'initval'."
+        ),
+    }
+
+    def _no_start_value_message(self, offenders, lowers, uppers):
+        """Render the fatal 'sampled element with no start value' error.
+
+        Same family as the out-of-bounds error, but a genuinely different
+        mistake, so it says so.  A sampled element's start is ``initval`` and
+        there is no second channel for it: ``to_vec``'s ``fill=0.0`` used to
+        turn "nobody said" into the number 0.0 in whatever internal unit the
+        parameter happens to carry -- a start nobody chose, indistinguishable
+        downstream from a deliberate one -- and where the missing value was
+        spelled ``NaN`` instead it went on to build ``log(NaN/(1-NaN))`` into
+        the transform, so the fit died later inside PyMC's initial-point check
+        naming a raw variable rather than the parameter the user has to fix.
+
+        Bounds are quoted (in the user unit) only where they are finite; an
+        unbounded sampled element reaches this too.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
+                bounds = (
+                    f" (bounds [{user_units(lowers[i], i):.10g}, "
+                    f"{user_units(uppers[i], i):.10g}]{unit};"
+                )
+            else:
+                bounds = " (unbounded;"
+            lines.append(
+                f"  {self.get_display_label(int(i))}: no start value"
+                f"{bounds} provenance: {src})"
+            )
+
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        advice = "\n".join(self._NO_START_ADVICE[s] for s in sorted(sources))
+        return (
+            f"Sampled parameter with no start value{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + "A sampled element has to start SOMEWHERE, and 'initval' is the "
+            "only thing that says where. EXOZIPPy used to fill a missing one "
+            "with 0.0 in internal units and carry on, which produced a "
+            "plausible-looking fit from a point nobody chose; it now "
+            "refuses.\n" + advice
+        )
 
     def build_pymc(self, ndx=0, expression=None):
         """
@@ -806,6 +1074,103 @@ class Parameter:
         is_fixed = (sigmas == 0) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
 
+        # A PIN MUST SAY WHAT IT PINS TO.  `sigma: 0` is the one way to fix an
+        # element, and there is no second channel for the value it is fixed
+        # AT: the physical value of a fixed element is exactly inits[i], and
+        # to_vec fills a missing initval with 0.0.  So an element pinned with
+        # no value from ANY source -- the params file, defaults.yaml, a
+        # component "overrides" entry or hint, a link, or the relaxation
+        # engine's solution -- is silently held at zero in whatever internal
+        # unit it happens to carry, and nothing downstream can tell that apart
+        # from a deliberate pin at zero.  It also cannot be reported: for a
+        # fixed element with no initval to_latex_def emits no macro at all
+        # while latex.py's _value_cells still references one, so the generated
+        # table is an undefined control sequence by construction.
+        #
+        # Refuse, for the same reason validate_sigma_has_center refuses a
+        # sigma with no center: it does not describe a model.  If the user is
+        # fixing a parameter they should know what they are fixing it to.
+        #
+        # This runs at stage 5, which is deliberate: it is the earliest point
+        # that sees EVERY channel a value can arrive through.  The manifest
+        # "overrides" channel that pins whole vectors (GP, robust likelihood,
+        # band LD) and the plain manifest options are both applied inside
+        # this stage; a check at ConfigManager construction or at stage 3
+        # would have to guess about them and would fire falsely.
+        #
+        # Two exemptions, both because the value comes from somewhere other
+        # than initval:
+        #   - DERIVED elements: their value is the expression.  `sigma: 0`
+        #     there is a no-op, already warned about below -- a different
+        #     mistake with a different fix, so it keeps its own message.
+        #   - HARD-LINKED elements: the link expression IS the value.
+        has_value = self._initval_present(n_elements)
+        hard_linked = set((self.element_links or {}).get("hard", {}))
+        pinned_no_value = [
+            i
+            for i in np.where(is_fixed & ~has_value)[0]
+            if i not in hard_linked
+        ]
+        if pinned_no_value:
+            where = (
+                f" (params file: {self.source_file})"
+                if self.source_file
+                else ""
+            )
+            offenders = ", ".join(
+                self.get_display_label(int(i)) for i in pinned_no_value
+            )
+            raise ValueError(
+                f"Pinned parameter with no value{where}: {offenders}. "
+                f"'sigma: 0' fixes a parameter, but no start value was "
+                f"supplied for it anywhere -- not in the params file, not in "
+                f"{self.label.split('.')[0]}/defaults.yaml, and nothing "
+                f"derived one -- so it would be held at 0.0 in internal "
+                f"units, a value nobody chose. "
+                f"Fix: add an explicit 'initval' (the value you mean to fix "
+                f"it at) to the same params-file entry as the 'sigma: 0', or "
+                f"drop the 'sigma: 0' and let it be fitted."
+            )
+
+        # A SAMPLED ELEMENT MUST SAY WHERE IT STARTS.  The sibling of the pin
+        # check above, and for the same reason: `initval` is the ONLY channel
+        # for a start value, and `to_vec`'s `fill=0.0` turns "nobody said" into
+        # the number 0.0 in whatever internal unit the parameter carries.  For
+        # a pinned element that is the whole answer; for a sampled one it is
+        # the chain's starting point, the point the whitening probe measures
+        # around and the point every multi-seed start is derived from -- and
+        # 0.0 is a perfectly ordinary-looking value, so nothing downstream can
+        # tell it apart from a start the user chose.  Where the missing value
+        # arrives spelled NaN instead (ConfigManager.resolve writes NaN into a
+        # vector for "this element was never set"), the logit branch built
+        # log(NaN/(1-NaN)) and the fit died much later inside PyMC's
+        # initial-point check, naming a raw variable instead of the parameter.
+        #
+        # Stage 5 for the same reason the pin check is: it is the earliest
+        # point that sees EVERY channel a value can arrive through --
+        # defaults.yaml, the params file, a component hint, the manifest
+        # "overrides" and "options" channels, and the relaxation engine's
+        # solution have all landed in `initval` by now, so a check here cannot
+        # fire falsely on a value that was simply going to arrive later.
+        #
+        # No exemption list is needed here, unlike the pin check.  A DERIVED
+        # element is excluded already (`is_sampled` is false for it), and so
+        # is a HARD-LINKED one: Component._wire_user_links only classifies an
+        # initval link as "hard" when that element's sigma is 0, so a hard
+        # link implies a pin and the pin check above owns it.  A SOFT link
+        # (an initval link with sigma > 0, or a `mu` link) does reach here,
+        # and should: it adds a Gaussian potential tying the element to an
+        # expression, but the element is still sampled and still has to start
+        # somewhere.  A symbolic initval counts as present and is deliberately
+        # not evaluated.
+        sampled_no_value = [
+            int(i) for i in np.where(is_sampled & ~has_value)[0]
+        ]
+        if sampled_no_value:
+            raise ValueError(
+                self._no_start_value_message(sampled_no_value, lowers, uppers)
+            )
+
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
         # rescale in set_whitening supersedes it), so it is optional: a
         # missing entry falls back to a fraction of the bound span, or sigma
@@ -841,6 +1206,49 @@ class Parameter:
                     f"Developer Error: Sampled parameter '{self.label}' MUST have explicit "
                     f"'lower' and 'upper' bounds defined in its defaults.yaml."
                 )
+
+        # A START OUTSIDE THE HARD BOUNDS IS FATAL.  Two finite bounds mean the
+        # element is logit-transformed below and [lower, upper] IS its support
+        # -- there is no representable raw coordinate for a value outside it,
+        # and the transform's own inverse diverges at the wall.  The old code
+        # clipped such a start onto the wall (np.clip on q) behind a warning
+        # that described a different, benign situation, so a fit that began
+        # somewhere the user never asked for looked exactly like a fit that
+        # began where they did.  Refuse instead: a start value nobody chose is
+        # not a model, and no amount of sampling recovers the fact that the
+        # question asked was not the question answered.
+        #
+        # Deliberately NOT covered here:
+        #   - SOFT barriers (a single finite bound, or a derived element):
+        #     those are penalties, not support.  A start on the wrong side of
+        #     one is legal and merely improbable, and the barrier's gradient
+        #     is what pulls it back.
+        #   - EXACTLY ON a bound: representable as a physical value, just
+        #     infinitely far away in logit space, so such a start HAS to move.
+        #     Section 3 nudges those inward to the q_floor and logs the exact
+        #     displacement; see the q_floor comment there.
+        #   - FIXED elements (`sigma: 0`): not sampled, so no transform and no
+        #     barrier ever reads their bounds.  Nothing is clipped there.
+        # Every offending element of a vector is reported, not just the first.
+        #
+        # A NON-FINITE start never reaches here: NaN satisfies no bound either,
+        # but "you asked to start outside the bounds" is the wrong diagnosis
+        # for "nothing gave this element a start at all", and the fixes differ.
+        # The no-start-value check above catches every spelling of that
+        # (missing, NaN, or short of the vector's length) before this one runs.
+        two_finite = np.isfinite(lowers) & np.isfinite(uppers)
+        checkable = is_sampled & two_finite & (uppers > lowers)
+        bound_violations = [
+            int(i)
+            for i in np.where(checkable)[0]
+            if not (lowers[i] <= inits[i] <= uppers[i])
+        ]
+        if bound_violations:
+            raise ValueError(
+                self._out_of_bounds_message(
+                    bound_violations, inits, lowers, uppers
+                )
+            )
 
         # 3. PER-ELEMENT PARAMETERIZATION
         # use_logit[i]: finite bounds → logit transform (hard bounds). A sigma
@@ -898,14 +1306,39 @@ class Parameter:
                 # "essentially at the bound" in problem units); a span-based
                 # floor would be arbitrarily large for wide bounds. The 1e-12
                 # absolute floor keeps logit(q) within the ±30 sigmoid clip.
+                #
+                # q_raw is guaranteed to be in [0, 1] here: the pre-pass above
+                # made anything outside the bounds fatal.  So this clip is
+                # exactly and only the ON-THE-BOUND case -- a value that IS in
+                # the support but sits at (or unrepresentably close to) a
+                # wall, where logit(q) diverges and there is no raw coordinate
+                # to start from.  Such a start HAS to move; a start from
+                # outside does not have to be moved, it has to be refused,
+                # which is why one warns and the other raises.  A default that
+                # sits on its own bound (an angle defaulting to 0 on a
+                # [0, 2pi) range) is common and legitimate; raising on it
+                # would be noise.  The warning reports the actual displacement
+                # rather than a rule of thumb: the floor is the LARGER of
+                # 1e-6 * whitening scale and 1e-12 * span, and on a parameter
+                # whose span dwarfs its scale (transit jitter_variance, span
+                # 1e5, scale ~1e-8) it is the span term that binds, so the
+                # move can be a sizeable fraction of the start value itself.
                 q_floor = min(max(1e-6 * whiten / span, 1e-12), 0.25)
                 q_floors[i] = q_floor
                 q_init = np.clip(q_raw, q_floor, 1.0 - q_floor)
                 if q_init != q_raw:
+                    nudged_to = lowers[i] + q_init * span
                     logger.warning(
-                        f"Parameter '{self.label}'[{i}]: initval {inits[i]} is at or "
-                        f"within 1e-6*init_scale of bounds [{lowers[i]}, {uppers[i]}]; "
-                        f"starting value nudged to {lowers[i] + q_init * span}."
+                        f"Parameter '{self.label}'[{i}]: start value "
+                        f"{inits[i]} sits on (or unrepresentably close to) "
+                        f"its bounds [{lowers[i]}, {uppers[i]}], where the "
+                        f"logit transform diverges and no raw start exists; "
+                        f"nudged inward to {nudged_to}, a move of "
+                        f"{abs(nudged_to - inits[i]):.3g} (internal units). "
+                        f"This is the ON-THE-BOUND case only -- a start "
+                        f"OUTSIDE the bounds is refused outright, never "
+                        f"clipped. Set an 'initval' further inside the bound "
+                        f"to remove this nudge."
                     )
                 logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
                 jac = (

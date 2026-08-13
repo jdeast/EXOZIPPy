@@ -1,7 +1,9 @@
 """Reproduce VBM logp calls that hit PTDE's eval_timeout, from a run log.
 
-ptde.py logs a "raw params: {...}" dict (keyed by free-RV name, in the raw/
-unconstrained space) for every proposal that exceeds sampler.eval_timeout.
+Both PTDE samplers (ptde.py and the default ptde_async.py) log a "raw
+params: {...}" dict (keyed by free-RV name, in the raw/unconstrained space)
+for every proposal that exceeds sampler.eval_timeout.  Their surrounding
+sentences differ slightly and this script reads both -- see TIMEOUT_RE.
 This script parses those dicts back out of a run's log file, rebuilds the
 model from the corresponding YAML config, and replays each event's binary-
 lens magnification call directly against VBMicrolensing so the pathological
@@ -27,18 +29,36 @@ Without --epochs, only the whole-curve VBMDirectMagOp evaluation is timed.
 import argparse
 import ast
 import re
-import sys
 import time
-from pathlib import Path
 
 import numpy as np
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# No sys.path surgery here: like every other script in this directory, this
+# one imports the INSTALLED exozippy (`poetry run python scripts/...`).  The
+# `sys.path.insert(0, <repo>/src)` that used to live here was a global
+# mutation for any process that imported this file, and it bought nothing --
+# the editable install already resolves to that same tree.
 
+# The em dash both samplers put in this message.  Spelled as an escape so
+# this file stays plain ASCII; a raw string cannot carry it, hence the
+# concatenation below.
+EM_DASH = "\u2014"
+
+# Both samplers log the same sentence with a DIFFERENT location clause, and
+# the location clause is the only part that varies:
+#   ptde.py        "... at {step_label} ({who}) <dash> rejecting this ..."
+#   ptde_async.py  "... at rung {k} chain {i} <dash> rejecting this ..."
+# So capture the whole clause and split a trailing "(...)" off afterwards
+# rather than demanding parentheses.  Demanding them matched ptde.py only,
+# and ptde_async is the DEFAULT sampler -- the script reported "found 0
+# eval_timeout event(s)" on exactly the logs it was most likely aimed at.
 TIMEOUT_RE = re.compile(
-    r"logp call exceeded eval_timeout=([\d.]+)s at (.+?) \((.+?)\) — rejecting"
+    r"logp call exceeded eval_timeout=([\d.]+)s at (.+?) "
+    + EM_DASH
+    + r" rejecting"
 )
+LOCATION_WHO_RE = re.compile(r"^(.*?) \((.*)\)$")
 RAW_PARAMS_RE = re.compile(r"\s*raw params: (\{.*\})\s*$")
 
 
@@ -50,10 +70,13 @@ def parse_timeout_events(log_path):
         for line in f:
             m = TIMEOUT_RE.search(line)
             if m:
+                location = m.group(2)
+                who_m = LOCATION_WHO_RE.match(location)
+                step_label, who = who_m.groups() if who_m else (location, "")
                 pending = {
                     "timeout": float(m.group(1)),
-                    "step_label": m.group(2),
-                    "who": m.group(3),
+                    "step_label": step_label,
+                    "who": who,
                 }
                 continue
             m = RAW_PARAMS_RE.match(line)
@@ -62,6 +85,13 @@ def parse_timeout_events(log_path):
                 events.append(pending)
                 pending = None
     return events
+
+
+def _where(ev):
+    """Human label for an event; ptde_async's location carries no `who`."""
+    return (
+        f"{ev['step_label']} ({ev['who']})" if ev["who"] else ev["step_label"]
+    )
 
 
 def build_pvec_fn(config):
@@ -192,17 +222,14 @@ def main():
         missing = [n for n in raw_var_names if n not in raw]
         if missing:
             print(
-                f"[{i}] {ev['step_label']} ({ev['who']}): SKIP — "
+                f"[{i}] {_where(ev)}: SKIP -- "
                 f"log entry missing raw var(s) {missing} (model/config mismatch?)"
             )
             continue
         vals = [np.asarray(raw[n], dtype=np.float64) for n in raw_var_names]
         p = fn(*vals)
         vals_named = dict(zip(labels, p))
-        print(
-            f"\n[{i}] {ev['step_label']} ({ev['who']}), "
-            f"logged timeout={ev['timeout']:.0f}s"
-        )
+        print(f"\n[{i}] {_where(ev)}, logged timeout={ev['timeout']:.0f}s")
         print(
             "    " + "  ".join(f"{k}={v:.6g}" for k, v in vals_named.items())
         )

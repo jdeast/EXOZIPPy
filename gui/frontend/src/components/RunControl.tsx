@@ -37,7 +37,14 @@ export default function RunControl({ configPath, listing, setLogFile }: Props) {
     };
   }, [refresh]);
 
-  const active = Boolean(status?.active);
+  // A run that is over (done / stopped / crashed) is not "running": keep the
+  // Run button available and show why it ended. Without this a crashed fit
+  // sat behind a Stop button that could do nothing, and its phase read like
+  // progress. `terminal` comes from the server; the alive check is a fallback
+  // for a server that predates it.
+  const finished = Boolean(status?.terminal) || status?.alive === false;
+  const running = Boolean(status?.active) && !finished;
+  const failed = status?.phase === "error";
 
   const run = async () => {
     if (!configPath || !listing) return;
@@ -79,7 +86,22 @@ export default function RunControl({ configPath, listing, setLogFile }: Props) {
   return (
     <div className="run-control">
       {error && <span className="run-control-error" title={error}>run failed</span>}
-      {active ? (
+      {failed && (
+        // Hover for the recorded traceback / exit status; click to attach the
+        // bottom terminal to the captured console, where an early crash (one
+        // that never reached the fit's own log file) left its output.
+        <span
+          className="run-control-error"
+          title={status?.error || "the fit died"}
+          onClick={() => status?.console_path && setLogFile(status.console_path)}
+        >
+          run failed{status?.returncode != null ? ` (exit ${status.returncode})` : ""}
+        </span>
+      )}
+      {finished && !failed && status?.phase && (
+        <span className="run-control-status">{status.phase}</span>
+      )}
+      {running ? (
         <>
           <span className="run-control-status">
             {status?.phase || "running"}

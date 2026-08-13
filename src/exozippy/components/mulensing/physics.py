@@ -209,6 +209,180 @@ def clip_q_value(q, label="lens.q"):
     return float(np.clip(q, Q_MIN, Q_MAX))
 
 
+# --- Trajectory (PSPL) parameter floors -------------------------------------
+# The three RANGE decisions Lens._get_safe_mm_params makes on the single-source
+# trajectory parameters before handing them to a magnification backend.  Like
+# Q_MIN/Q_MAX above, each is a statement about where the model is DEFINED, and
+# each must stand alone: none of them may be paired with a NaN substitution.
+#
+# T_E_FLOOR  every backend divides by t_E, and t_E <= 0 is not a timescale.
+#            The same 1e-4 d is applied on the numeric Op path
+#            (op._base_mm_params), so the two paths agree exactly.
+# U_0_FLOOR  A = (u^2+2)/(u*sqrt(u^2+4)) diverges as u -> 0, so the peak
+#            magnification of an exactly-central trajectory is infinite.  The
+#            floor is applied to |u_0| with the sign kept, which keeps the
+#            u_0 -> -u_0 reflection exact (a real degeneracy: ob140939 has four
+#            Yee+2015 basins that differ by a sign flip).  It is applied by
+#            apply_u_0_floor / floor_u_0_value below and NOWHERE else -- there
+#            is one number and one expression, on every path.
+#
+#            It used to be TWO numbers: 1e-6 here and a hard-coded 1e-9 in
+#            op._base_mm_params (and a third copy, also 1e-9, in the flux
+#            bootstrap), so a fit visiting 1e-9 <= |u_0| < 1e-6 got a different
+#            answer depending on which backend it was on.  Unified at the
+#            looser 1e-9: the floor is a validity limit, not a preference, so
+#            the model should be clamped as little as the arithmetic allows,
+#            and 1e-9 costs nothing.  A(u) -> 1/u as u -> 0, so A(1e-9) = 1e9:
+#            finite in float64 with the FULL 16 digits intact, because the
+#            only term lost is the u^2 in (u^2 + 2), whose relative weight is
+#            5e-19 -- three orders below eps = 2.2e-16 -- and every operation
+#            in (u^2+2)/(u*sqrt(u^2+4)) is a product or a sum of positives, so
+#            there is no cancellation to be catastrophic.  Measured:
+#            A(U_0_FLOOR) equals 1/U_0_FLOOR exactly, to the bit.  Downstream
+#            the flux model f_s*A + f_b is linear in A and the Gaussian logp
+#            quadratic, so overflow needs f_s > 1e145 (F^2 < 1.8e308); a 1%
+#            error bar at A = 1e9 gives chi2 = 1e22, huge but finite, which is
+#            the sampler being pushed off the singularity as intended.
+#            No shipped example is anywhere near the floor: |u_0| ~ 0.5
+#            (ob08092), 0.14 (DC2018_128), 0.029 (KMT-2019-BLG-1806).
+# THETA_E_LENSING_MIN
+#            pi_E = pi_rel/theta_E, so as theta_E -> 0 the parallax vector
+#            diverges while the event itself stops being a lensing event at
+#            all.  Below this the trajectory is evaluated WITHOUT parallax
+#            (pi_E_N = pi_E_E = 0) rather than with a diverging one; the
+#            source_behind_lens / theta_E_singularity soft bounds in
+#            Lens.build_likelihood are what actually push the sampler out.
+#            It is a comparison, and a comparison against NaN is False, so
+#            this branch never needed a NaN substitution to begin with.
+T_E_FLOOR = 1e-4  # days
+U_0_FLOOR = 1e-9  # Einstein radii
+THETA_E_LENSING_MIN = 1e-6  # mas
+
+# --- Binary/finite-source floors --------------------------------------------
+# The same rule as the three above -- a statement about where the model is
+# DEFINED -- for the two parameters that only exist once the lens is binary or
+# the source is resolved.  They lived as five hard-coded literals (s three
+# times, rho twice) rather than here, which is how U_0_FLOOR came to disagree
+# with itself across backends; naming them is what stops that recurring.
+#
+# S_FLOOR    the binary-lens equation places the components at +/- s/2, so
+#            s <= 0 puts the secondary on the wrong side of the primary (or on
+#            top of it) and the caustic topology is undefined.  s -> 0 is also
+#            the close-binary limit where the central caustic shrinks as s^2
+#            and VBM's contour integration needs ever finer sampling, so a
+#            floor is a numerical necessity as well as a physical one.
+# RHO_FLOOR  the source radius in Einstein radii.  rho <= 0 is unphysical and
+#            the finite-source methods integrate over the source disc, so a
+#            non-positive radius is not merely small but meaningless.  It is
+#            floored rather than clipped away because rho -> 0 IS the correct
+#            point-source limit -- the floor only has to keep the integration
+#            well-posed, and 1e-9 is far below any resolvable source.
+#
+# Both are the values that were already in force everywhere they appeared, so
+# naming them changed no result; see the PR that introduced them.
+S_FLOOR = 1e-6  # Einstein radii (binary separation)
+RHO_FLOOR = 1e-9  # Einstein radii (source radius)
+
+
+def apply_u_0_floor(u_0):
+    """Move u_0 out of the open interval (-U_0_FLOOR, U_0_FLOOR) -- symbolic.
+
+    Written as a nearest-endpoint clip::
+
+        u_0 < 0  ->  min(u_0, -U_0_FLOOR)
+        u_0 >= 0 ->  max(u_0, +U_0_FLOOR)
+
+    which is exactly ``sign(u_0) * max(|u_0|, U_0_FLOOR)`` everywhere except at
+    u_0 = 0, and that exception is the point.  ``sign(0) = 0``, so the old
+    spelling returned ``0 * U_0_FLOOR = 0``: the floor did not engage at the
+    one value it exists to protect, and the peak magnification of an exactly
+    central trajectory stayed infinite.  ``u_0: 0`` is a perfectly plausible
+    seed for a high-magnification event, so this was reachable by typing a
+    round number.
+
+    **Zero goes to +U_0_FLOOR.**  The sign of a central crossing is genuinely
+    undefined -- the trajectory passes through the lens, there is no side --
+    and the two branches are physically the same event under the exact
+    reflection ``(u_0, pi_E_N, pi_E_E) -> (-u_0, -pi_E_N, -pi_E_E)``, so either
+    choice is defensible and what matters is that it is finite, deterministic
+    and written down.  Positive is chosen because it makes this map
+    monotonically non-decreasing (the interval's two endpoints are the only
+    candidates; 0 is equidistant, and ties break upward, the ordinary
+    round-half-up convention), because u_0 > 0 is the convention a PSPL
+    solution is quoted in when nothing breaks the degeneracy, and because it
+    keeps the two IEEE zeros together: ``-0.0 < 0`` is False, so +0.0 and -0.0
+    both map to +U_0_FLOOR rather than to opposite endpoints.
+
+    Gradient: piecewise constant inside the gap, the identity outside -- the
+    same derivative the sign/abs spelling had (``sign(u)**2 = 1``), so no fit
+    that stays outside the floor feels this at all.  Both branches of the
+    symbolic switch are finite for every input, including +/-inf, so there is
+    no NaN hiding in the unselected branch (the JAX where-trap).  A NaN input
+    still propagates: ``nan < 0`` is False and ``maximum(nan, F)`` is nan,
+    which is what PR #142 wants -- the floor is a range decision and must never
+    double as a NaN substitution.
+    """
+    return pt.where(
+        pt.lt(u_0, 0.0),
+        pt.minimum(u_0, -U_0_FLOOR),
+        pt.maximum(u_0, U_0_FLOOR),
+    )
+
+
+def floor_u_0_value(u_0):
+    """Numeric counterpart of :func:`apply_u_0_floor` -- same number, same
+    expression, same treatment of exactly zero.  See that function for why.
+
+    Used by the MulensModel/VBM Op path (``op._base_mm_params``) and by the
+    flux bootstrap (``MulensInstrument``), which had their own hard-coded
+    copies of the clip until the floors were unified.
+    """
+    v = float(u_0)
+    return float(min(v, -U_0_FLOOR) if v < 0.0 else max(v, U_0_FLOOR))
+
+
+_MM_NAN_ADVICE = (
+    "The trajectory parameters are derived from the sampled coordinates: "
+    "t_E and pi_E_N/pi_E_E from theta_E and the relative proper motion, "
+    "theta_E from the lens mass and pi_rel, pi_rel from the two "
+    "star.<...>.distance values.  Check the initval (and any 'sigma: 0' "
+    "link expression) on star.<lens>.logmass, star.<lens>.distance, "
+    "star.<source>.distance and the star.<...>.pm_ra/pm_dec pair, plus "
+    "lens.<...>.t_0 and lens.<...>.u_0, which are sampled directly."
+)
+
+
+def require_mm_number(value, label):
+    """Numeric guard for a trajectory parameter on its way to a backend.
+
+    The counterpart of :func:`clip_q_value` for the five quantities
+    ``Lens._get_safe_mm_params`` handles, and it exists for the same reason:
+    ``pt.nan_to_num`` used to replace a NaN t_E with 100 d, a NaN u_0 with 1,
+    and a NaN theta_E/pi_E_N/pi_E_E with 0 -- a complete, fabricated PSPL model
+    in place of the one quantity that would have named the failure.  That scrub
+    is gone (see ``Lens._get_safe_mm_params``); on the symbolic path a NaN now
+    reaches logp, which is the sampler's own reject signal, and on this numeric
+    path it raises with a message that says which parameter it was.
+
+    Every caller already has the error path that turns the raise into the right
+    thing: ``_MagOpBase.perform`` catches ValueError, warns once, and returns
+    NaN magnifications -- logp = -inf, proposal rejected, exactly what a NaN
+    handed to MulensModel produced anyway, only three frames further away and
+    under a generic message.
+
+    The infinities are NOT an error, the same split :func:`clip_q_value` makes:
+    an infinity carries a sign and is an ordinary out-of-range value, which the
+    caller's own floor then handles.  NaN is the case with no value at all.
+    """
+    v = float(value)
+    if np.isnan(v):
+        raise ValueError(
+            f"{label} is nan: a trajectory parameter must be a number.  "
+            f"{_MM_NAN_ADVICE}"
+        )
+    return v
+
+
 @register_physics
 def calc_mlens_total(*masses):
     # Total lens mass: sum over all lens bodies.  theta_E, t_E, rho, and pi_E
@@ -228,6 +402,31 @@ def calc_f_source(log_f_total, q_source):
 @register_physics
 def calc_f_blend(log_f_total, q_source):
     return pt.power(10, log_f_total) * (1.0 - q_source)
+
+
+@register_physics
+def calc_zeropoint(m_source_pred, zp_center, sed_constrained, f_source):
+    """Photometric zeropoint of one light curve's own flux system.
+
+    ``zp = m_SED + 2.5*log10(f_source)`` -- the offset between the SED's
+    calibrated source magnitude and the instrumental one, which is what the
+    ``zeropoint`` Gaussian prior constrains (see
+    ``MulensInstrument._build_sed_flux_constraint``).
+
+    The flux floor mirrors the one the hand-built node carried: f_source's
+    own lower bound is 0, and log10(0) is -inf.
+
+    ``sed_constrained`` is a 0/1 constant, zero for a light curve with no
+    band reference or whose band filter is missing from the SED's BC grid.
+    Such an element has no SED prediction to tie to, so it reports
+    ``zp_center`` (the resolved prior center) and its Gaussian penalty is
+    then exactly zero -- the same "no constraint" the hand-built loop
+    expressed by skipping the element.  It is a ``switch`` on an explicit
+    0/1 mask, not a NaN test: switch's gradient multiplies the unselected
+    branch by zero, and 0 * NaN is NaN.
+    """
+    zp = m_source_pred + 2.5 * pt.log10(pt.maximum(f_source, 1e-30))
+    return pt.switch(sed_constrained, zp, zp_center)
 
 
 @register_physics

@@ -317,6 +317,13 @@ class Component(ABC):
             expression=expression,
             element_links=element_links,
             user_params=self.config_manager.user_params,
+            source_file=getattr(self.config_manager, "param_file", None),
+            # Bound method: (component, param, element=i) -> "user" | "data" |
+            # "solved" | "default".  build_pymc quotes it when it refuses an
+            # out-of-bounds start, so the message blames the right input.
+            initval_source=getattr(
+                self.config_manager, "initval_source", None
+            ),
             **full_params,
         )
 

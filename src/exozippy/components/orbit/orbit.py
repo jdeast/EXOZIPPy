@@ -133,7 +133,17 @@ class Orbit(Component):
             ("companion", self.companion_bodies),
         ):
             types = {t for g in groups for (t, _) in g}
-            for ctype in types:
+            # Sorted: _group_w is a plain dict populated in THIS order, and
+            # add_parameter walks it to lazily materialize each referenced
+            # component's `mass` -- so an unsorted walk decides whether
+            # star.mass or planet.mass becomes a PyMC RV first.
+            # model.free_RVs order is the compiled input signature
+            # (system.py), the gradient-vector layout (polish.py) and the
+            # on-disk mass matrix (outputs/save_mass_matrix.py), none of
+            # which may depend on PYTHONHASHSEED.  Inert while one side
+            # references a single body type; live for a hierarchical group
+            # that mixes stars and planets.
+            for ctype in sorted(types):
                 section = sys_cfg.get(ctype) or []
                 if not isinstance(section, list):
                     section = [section]

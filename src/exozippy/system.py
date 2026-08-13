@@ -3,7 +3,6 @@ import logging
 import os
 
 import numpy as np
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +18,7 @@ from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
 from exozippy.outputs.prose import ProseCollector
+from exozippy.yamlio import load_yaml
 
 """
 The System Class builds an entire system to model from its components.
@@ -96,8 +96,7 @@ class System(Component):
                     f"run exozippy (currently: {os.getcwd()}). "
                     f"Check that the file exists and the path in your config YAML is correct."
                 )
-            with open(str(user_params_file), "r") as f:
-                self.user_params = yaml.safe_load(f)
+            self.user_params = load_yaml(str(user_params_file))
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
@@ -109,6 +108,11 @@ class System(Component):
         # each checkpoint.  add() is idempotent, so a second build_model()
         # on one System (the GUI) cannot accumulate copies.
         self.prose = ProseCollector()
+        # Record the params file ONLY when one was really read: an in-memory
+        # user_params dict must not be blamed on a parameter_file the config
+        # happens to name but System never opened.
+        if user_params is None:
+            self.config_manager.param_file = str(user_params_file)
         self.registry = discover_components()
         self.active_components = {}
 

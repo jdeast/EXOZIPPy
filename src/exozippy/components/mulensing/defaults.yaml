@@ -1,8 +1,19 @@
 lens:
+  # t_0 and u_0 are DATA-DERIVED: their real start comes from the NNLS/grid
+  # bootstrap or from MMEXOFAST seeds, both of which enter at
+  # RANK_DERIVED_DATA (60) and so beat these RANK_DEFAULT (20) values in
+  # every topology that supplies one.  The static numbers are a backstop for
+  # the case where nothing does -- every sampled parameter must carry an
+  # initval from somewhere, or `sigma: 0` on it would pin it at 0.0 (see the
+  # "pinned with no value" check in Parameter.build_pymc).  Neither symbol
+  # appears in any RELATION, so a defaults seed here cannot propagate into
+  # another parameter's provenance and cannot change what
+  # mmexofast_support.user_hints_sufficient concludes.
   t_0:
     unit: "d"
     lower: 2400000
     upper: 3000000
+    initval: 2460000  # a BJD_TDB inside the bounds; the data always override
     init_scale: 0.01
     internal_unit: "d"
     latex: "t_0"
@@ -11,6 +22,7 @@ lens:
     unit: ""
     lower: -18 # ~20 ppm peak magnification
     upper: 18 # ~20 ppm peak magnification
+    initval: 0.5  # a mid-range, unambiguously magnified trajectory
     init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
@@ -394,14 +406,36 @@ mulensinstrument:
     internal_unit: ""
     latex: "k"
     description: "error scale"
-  # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
-  # with this Gaussian prior as a potential (see
-  # mulensinstrument._build_sed_flux_constraint). Override per light curve
-  # in params.yaml; sigma must be nonzero.
+  # DERIVED, not sampled: zp = m_SED + 2.5*log10(f_source) is determined by
+  # f_source and the SED, so it adds no sampled dimension -- exactly the
+  # analytic substitution it has always been.  It IS an ordinary Parameter
+  # now, though (manifest entry registered by
+  # MulensInstrument.register_parameters when a sed: block exists), so the
+  # Gaussian below is applied by Parameter.build_pymc's derived-with-sigma
+  # branch rather than by a hand-built pm.Potential, and every generic
+  # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
+  # on it.  Override per light curve in params.yaml; sigma must be nonzero
+  # (an exact zeropoint would make f_source deterministic given the SED).
   zeropoint:
+    # No `initval:` key, like every other DERIVED parameter in this file
+    # (f_source, f_blend, s, ...): the expression IS the value.  It carried a
+    # purely defensive `initval: 0.0` only to satisfy "every sampled
+    # parameter carries an initval", and that check (pinned-with-no-value, in
+    # Parameter.build_pymc) exempts derived elements outright -- so the
+    # reason for it is gone, and a second number duplicating mu is one more
+    # thing to keep in sync.  `mu` is the start, through resolve()'s ordinary
+    # "user gave mu but no initval" rule, exactly as for every other
+    # Gaussian-prior parameter.
     mu: 0.0
     sigma: 0.2
     unit: "mag"
     internal_unit: "mag"
     latex: "ZP"
     description: "photometric zeropoint"
+    expressions:
+      default:
+        # m_source_pred / zp_center / sed_constrained are context nodes
+        # injected by MulensInstrument.add_parameter (see
+        # context_dep_names); only f_source is a manifest dependency.
+        func_name: "calc_zeropoint"
+        deps: ["m_source_pred", "zp_center", "sed_constrained", "f_source"]
