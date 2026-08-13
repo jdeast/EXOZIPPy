@@ -54,6 +54,28 @@ OVERRIDES = {
     "numba": "numba>=0.62.1,<0.63",
     # numba 0.62.1 requires numpy<2.4.
     "numpy": "numpy>=2.0,<2.4",
+    # celerite2 0.3.3 is a BUILD-TIME blocker, which is a different and
+    # nastier thing than the runtime ceilings above -- found by CI run
+    # 31742588763, not by reading metadata, because it is invisible from the
+    # top level.
+    #
+    # 0.3.3 ships no macOS x86_64 wheel, so pip source-builds it; and 0.3.3
+    # added `jax==0.8.0` to its [build-system] requires. Build isolation
+    # resolves that in a FRESH environment where our pins do not apply, so
+    # it goes looking for jaxlib 0.8.0, which has no Intel-Mac wheel, and
+    # the install dies before a single line of C++ is compiled. Nothing we
+    # pin at the top level can reach into that build environment --
+    # PIP_CONSTRAINT cannot help either, since constraints only narrow and
+    # celerite2 asks for jax==0.8.0 exactly.
+    #
+    # 0.3.2 is the fix and is a real candidate rather than a hack: it has
+    # cp312 macOS x86_64 wheels AND its build-system requires are
+    # jax-free ("scikit-build-core", "numpy", "pybind11"), the same set
+    # exoplanet-core still uses -- so even where no wheel matches (cp313) it
+    # can source-build. Whether 0.3.2's PyMC/PyTensor Op registration still
+    # works under PyTensor 3 is the open question; tests/test_gp.py in the
+    # smoke subset is what answers it.
+    "celerite2": "celerite2==0.3.2",
 }
 
 

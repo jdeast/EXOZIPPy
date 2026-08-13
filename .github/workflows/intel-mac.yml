@@ -183,6 +183,12 @@ jobs:
 
       # -n 2 matches tests.yml: this is a 4-CPU runner and each worker peaks
       # 1-2 GB building a System and compiling graphs.
+      #
+      # test_gp.py is the expensive one here and is in the set on purpose:
+      # it is the ONLY thing that imports celerite2, which this platform
+      # has to install at 0.3.2 rather than the pinned 0.3.3 (see
+      # intel_mac_deps.py). An install that succeeds tells us nothing about
+      # whether 0.3.2's Op registration survived PyTensor 3; this does.
       - name: Run the smoke subset
         if: ${{ !inputs.run_full_suite }}
         run: |
@@ -191,7 +197,8 @@ jobs:
             tests/test_physics_registry.py \
             tests/test_config_healing.py \
             tests/test_known_keys.py \
-            tests/test_negative_jitter.py
+            tests/test_negative_jitter.py \
+            tests/test_gp.py
 
       - name: Run the full suite
         if: ${{ inputs.run_full_suite }}
