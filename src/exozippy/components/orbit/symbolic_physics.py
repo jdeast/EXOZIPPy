@@ -3,18 +3,20 @@ import sympy as sp
 from ...constants import KEPLER_CONST
 from .bodies import parse_orbit_bodies
 
-# Define Symbols
-period, a, K, sini, cosi = sp.symbols("period a K sini cosi", real=True)
-ecc, omega, inc, Omega = sp.symbols("ecc omega inc Omega", real=True)
-tc, t_p = sp.symbols("tc t_p", real=True)
+# Define Symbols.  Only symbols that appear in RELATIONS below are declared:
+# ConfigManager binds a relation's free_symbols to the paths get_symbol_map
+# names, by symbol NAME, so a declared-but-unused symbol is inert.  (The map
+# itself is wider than this list on purpose -- every mapped path becomes a
+# leaf symbol in the relaxation engine whether or not a relation mentions it,
+# which is what carries `tc`.)
+period, a, sini, cosi = sp.symbols("period a sini cosi", real=True)
+ecc, omega, inc = sp.symbols("ecc omega inc", real=True)
 logP = sp.symbols("logP", real=True)
 secosw, sesinw = sp.symbols("secosw sesinw", real=True)
 ecosw, esinw = sp.symbols("ecosw esinw", real=True)
 m_total = sp.symbols(
     "m_total", real=True
 )  # Needs to be mapped to the planet's m_total
-M_c = sp.symbols("M_c", real=True)
-t_s, f_s, E_s, M_s, n = sp.symbols("t_s f_s E_s M_s n", real=True)
 bigomega, xbigomega, ybigomega = sp.symbols(
     "bigomega xbigomega ybigomega", real=True
 )
@@ -79,14 +81,12 @@ RELATIONS = [
     # (m_total has no closed-form relation here -- it is the sum of the
     # orbit's member-body masses, whose count varies per orbit; the custom
     # solver registered below computes it during relaxation.)
-    # the solver hangs on transcendental equations
-    # sp.Eq(t_p, tc - (M_c / (2*sp.pi/period))),
-    # sp.Eq(M_c, sp.symbols('E_c') - ecc * sp.sin(sp.symbols('E_c'))),
-    # sp.Eq(n, 2 * sp.pi / period),
-    # sp.Eq(f_s, 3*sp.pi/2 - w),
-    # sp.Eq(E_s, 2 * sp.atan(sp.sqrt((1-ecc)/(1+ecc)) * sp.tan(f_s/2))),
-    # sp.Eq(M_s, E_s - ecc * sp.sin(E_s)),
-    # sp.Eq(t_s, t_p + (M_s / n))
+    #
+    # There is deliberately no Kepler-equation chain here (t_p <-> tc, and the
+    # secondary-eclipse time t_s): sympy hangs on the transcendental
+    # M = E - e*sin(E).  tc's start comes from the data instead
+    # (Orbit._seeded_period sets its window), and t_p is a runtime
+    # Deterministic.
 ]
 
 

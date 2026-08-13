@@ -257,9 +257,8 @@ class Orbit(Component):
             # component's `mass` -- so an unsorted walk decides whether
             # star.mass or planet.mass becomes a PyMC RV first.
             # model.free_RVs order is the compiled input signature
-            # (system.py), the gradient-vector layout (polish.py) and the
-            # on-disk mass matrix (outputs/save_mass_matrix.py), none of
-            # which may depend on PYTHONHASHSEED.  Inert while one side
+            # (system.py) and the gradient-vector layout (polish.py),
+            # neither of which may depend on PYTHONHASHSEED.  Inert while one side
             # references a single body type; live for a hierarchical group
             # that mixes stars and planets.
             for ctype in sorted(types):

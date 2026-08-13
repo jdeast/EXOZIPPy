@@ -39,10 +39,3 @@ def get_symbol_map(config):
 # 'jitter_variance'.  Signed square, defined once on the shared Instrument
 # parent; see the note there.
 RELATIONS = list(JITTER_RELATIONS)
-
-
-def get_solver_paths():
-    """
-    Returns the equations defining the state of an Astrometry Instrument.
-    """
-    return RELATIONS

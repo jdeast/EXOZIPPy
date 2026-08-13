@@ -729,9 +729,20 @@ class System(Component):
         yield from crawl(self)
 
     def get_mcmc_init(self, model):
-        """
-        Generalized initialization for the whitened parameters.
-        Uses the agnostic parameter list to build metadata dictionaries.
+        """The sampler's start point, keyed by PyMC value-variable name.
+
+        The whitened start is 0.0 for every logit element and
+        ``(initval - mu)/sigma`` for a Gaussian-path one (see
+        ``get_raw_start``); this forwards it through each RV's transform so
+        PyMC can take it as an ``initvals`` dict.
+
+        Returns only that dict.  It used to return three more things -- a
+        vector of 1.0s sized by the total transformed dimension (for a NUTS
+        ``scaling`` argument nothing has passed since PTDE replaced
+        DEMetropolis), plus ``{label: initval}`` and ``{label: init_scale}``
+        maps -- and the two physical maps were dead by construction: the one
+        caller handed them straight to ``inspect_start``, which reads
+        ``p.initval`` / ``p.init_scale`` off the Parameters itself.
         """
         transformed_inits = {}
 
@@ -761,26 +772,7 @@ class System(Component):
                 # No transform, raw == value
                 transformed_inits[value_var.name] = unity_start
 
-        # 2. Extract Physical Metadata using the Master Parameter List
-        # This now uses the simplified get_all_parameters() which relies on the generator
-        all_params = self.get_all_parameters()
-
-        # Filter for only the 'Free' parameters (those being sampled, no expression)
-        sampling_params = [p for p in all_params if p.expression is None]
-
-        ordered_inits = {p.label: p.initval for p in sampling_params}
-        ordered_scales = {p.label: p.init_scale for p in sampling_params}
-
-        # Calculate total dimensions for the NUTS step scaling
-        total_dims = sum(np.size(val) for val in transformed_inits.values())
-
-        # Return order: NUTS scales (all 1.0), physical scales, physical inits, transformed dict
-        return (
-            np.ones(total_dims),
-            ordered_scales,
-            ordered_inits,
-            transformed_inits,
-        )
+        return transformed_inits
 
     def compile_plotter_functions(self, model):
         """

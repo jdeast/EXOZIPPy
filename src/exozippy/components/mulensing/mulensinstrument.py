@@ -1,11 +1,9 @@
 import logging
-import os
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-import astropy.units as u
 import pymc as pm
 import pytensor
 import pytensor.tensor as pt
@@ -216,7 +214,6 @@ class MulensInstrument(Instrument):
         self.fs_init = []
         self.q_source_init = []
         self.q_flux_init = []  # per-instrument f_s2/f_s1 (binary source)
-        self._raw_time_list = []
         blocks = self._concat_blocks()
 
         self._n_sources = int(system.lens.n_sources)
@@ -318,8 +315,6 @@ class MulensInstrument(Instrument):
                 self.config[i].get("file", f"instrument {i}"),
                 data_format=self.config[i].get("data_format", "magnitude"),
             )
-
-            self._raw_time_list.append(t)
 
             # Optional detrending against extra data columns (columns 4+ of
             # the file), exactly as rvinstrument/transit do: one coefficient
