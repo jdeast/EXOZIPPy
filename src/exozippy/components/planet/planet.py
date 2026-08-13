@@ -139,6 +139,20 @@ class Planet(Component):
                 f"component (beam is derived from K, which requires the "
                 f"orbital elements)."
             )
+        if (
+            len(set(self.beam_free)) > 1
+            or len(set(self.beam_constrains_mass)) > 1
+        ):
+            logger.warning(
+                f"[{self.prefix}] beam_free/beam_constrains_mass differ "
+                f"across planets (beam_free={self.beam_free}, "
+                f"beam_constrains_mass={self.beam_constrains_mass}); beam "
+                f"is a whole-component mode, not per-planet (see the "
+                f"comment above), so the resolved mode applies to every "
+                f"planet -- derived-from-K if any planet set "
+                f"beam_constrains_mass, else free-fit if any set "
+                f"beam_free, else pinned at 0."
+            )
         if any_beam_constrains_mass:
             self.manifest["beam"] = "default"
         elif any_beam_free:

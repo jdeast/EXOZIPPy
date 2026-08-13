@@ -637,3 +637,96 @@ def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
         float(np.atleast_1d(system.band.ellipsoidal.value.eval())[0]) == 0.0
     )
     assert float(np.atleast_1d(system.planet.beam.value.eval())[0]) == 0.0
+
+
+def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
+    """
+    Given a two-identical-star system (SED dilution = 0.5, same setup as
+    test_sed_deblending_dilutes_transit_depth in test_transit_band.py)
+    with beam_free on the planet and thermal/reflect/ellipsoidal left at
+    their default off,
+    When build_likelihood's actual mu is evaluated at quadrature phase
+    (tc + period/4 -- away from any transit/eclipse, where beam is
+    extremal and is the only active BEER term),
+    Then the beam deviation from baseline equals the UNDILUTED beam term
+    times the system's own transit.dilution factor (0.5), not the bare
+    undiluted term.
+
+    Regression test for the PR-review fix that folds beam into the
+    dil_obs/dil_node scaling (EXOFASTv2 parity: exofast_chi2v2.pro:
+    1517/1556 pass beam and dilute together into exofast_tran, which
+    dilutes beam at exofast_tran.pro:157, after adding it at :146).
+    Before that fix, `actual` below would equal the bare undiluted term
+    instead.
+    """
+    d = tmp_path_factory.mktemp("transit_beer_beam_dilution")
+    t_quad = _TC + _PERIOD / 4.0
+    lc = _write_lc_landmarks(d / "lc.dat", [t_quad])
+    sed_file = d / "two_star.sed"
+    sed_file.write_text("model: NextGen\nfilters: []\n")
+
+    config = {
+        "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
+        "planet": [{"name": "b", "beam_free": True}],
+        "orbit": [{"name": "b"}],
+        "band": [
+            {"name": "V", "filter": "V", "ld_law": "quadratic", "star_ndx": 0}
+        ],
+        "transit": [{"name": "inst0", "file": lc, "band": "V"}],
+        "sed": {"file": str(sed_file)},
+    }
+    _BEAM_PPM = 4000.0
+    params = {
+        "star.A.radius": {"initval": 1.0, "sigma": 0.05},
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.08},
+        "star.B.radius": {"initval": 1.0, "sigma": 0.05},
+        "star.B.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.B.teff": {"initval": 5800, "sigma": 100},
+        "star.B.feh": {"initval": 0.0, "sigma": 0.08},
+        "orbit.0.period": {"initval": _PERIOD},
+        "orbit.0.tc": {"initval": _TC},
+        "orbit.0.cosi": {"initval": 0.05},
+        "orbit.0.secosw": {"initval": 0.0, "sigma": 0.0},
+        "orbit.0.sesinw": {"initval": 0.0, "sigma": 0.0},
+        "planet.0.radius": {"initval": 1.7},
+        "planet.0.beam": {"initval": _BEAM_PPM, "sigma": 0.0},
+    }
+
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    assert "transit.dilution" in model.named_vars
+
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    mu = _likelihood_mu(system, model, point)
+    baseline = system.transit._baseline_for(point, 0)
+    times = system.transit.time
+    idx = _nearest_index(times, t_quad)
+    t_actual = times[idx]
+
+    dil_fn = pytensor.function(
+        [],
+        model.named_vars["transit.dilution"],
+        givens=[
+            (v, np.asarray(point[v.name]))
+            for v in model.free_RVs
+            if v.name in point
+        ],
+        on_unused_input="ignore",
+        mode="FAST_COMPILE",
+    )
+    dil = float(dil_fn()[0])
+    assert dil == pytest.approx(0.5, abs=1e-6)
+
+    phase = 2.0 * np.pi * (t_actual - _TC) / _PERIOD
+    undiluted_beam = 1e-6 * _BEAM_PPM * np.sin(phase)
+    expected = dil * undiluted_beam
+
+    actual = mu[idx] - baseline
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-9)
+    # Sanity: the undiluted prediction should NOT match -- if it did, the
+    # dilution-fold-in fix regressed back to skipping beam.
+    assert actual != pytest.approx(undiluted_beam, rel=1e-6)

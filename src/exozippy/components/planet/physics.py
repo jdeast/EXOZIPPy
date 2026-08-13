@@ -81,6 +81,14 @@ def calc_beam_from_K(K):
 
     K arrives in its internal unit (solRad/d, see planet/defaults.yaml);
     converted to m/s before forming the dimensionless K/c ratio.
+
+    step2pars.pro:258 itself stores the dimensionless 4*K/c straight into
+    a field documented (and later consumed elsewhere) as ppm -- it never
+    multiplies by 1e6, so downstream code that treats it as ppm silently
+    divides by 1e6 again to compensate. That's a bug in EXOFASTv2, not a
+    convention to match: the `* 1e6` here is the physically correct ppm
+    value, so a future exofast_tran.pro parity check should NOT "fix"
+    this back down to match step2pars.pro's unscaled number.
     """
     k_mps = K * SOLRAD_PER_DAY_TO_MPS
     return BEAM_FACTOR * (k_mps / C_MPS) * 1e6

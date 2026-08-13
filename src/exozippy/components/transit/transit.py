@@ -461,6 +461,11 @@ class Transit(Instrument):
         dil_inst = None
         if hasattr(system, "sed") and system.star.n_elements > 1:
             dil_inst = self._build_dilution(system)
+        # Flat per-observation dilution for the post-loop beam term below
+        # (EXOFASTv2 parity -- see the beam comment past the group loop).
+        dil_obs_flat = None
+        if dil_inst is not None:
+            dil_obs_flat = dil_inst[self.inst_map_tensor]  # (N_obs,)
 
         # 4. Exoplanet-core Transit Model, evaluated once per distinct
         # ninterp group (see _build_oversample_grid) instead of once for
@@ -603,12 +608,17 @@ class Transit(Instrument):
             tc_this = tc_p[p_idx]  # scalar, this planet's time of conjunction
             period_this = period_p[p_idx]
 
-            # Beaming and ellipsoidal (PR 1.b) are both *post*-dilution
-            # terms in the reference (exofast_tran.pro:138-152, after the
-            # dilution block at 134) -- unlike thermal/reflect, neither is
-            # scaled by dil_obs here, matching that placement. Both are
-            # stellar effects (the star's own RV motion / tidal shape), not
-            # gated by planetvisible either, since they're present
+            # Beaming is diluted the same way thermal/reflect are above --
+            # EXOFASTv2 parity: exofast_chi2v2.pro:1517/1556 pass both beam
+            # and dilute into exofast_tran, which adds beam at
+            # exofast_tran.pro:146 and applies the dilution scaling at
+            # exofast_tran.pro:157 (after beam, so beam is diluted too).
+            # Ellipsoidal is NOT diluted -- it's a multiplicative factor on
+            # the running lc_model (baseline + this planet's transit/
+            # eclipse/thermal/reflect/beam so far), not an additive flux
+            # term, so the dilution scaling doesn't apply to it the same
+            # way. Neither term is gated by planetvisible: both are stellar
+            # effects (the star's own RV motion / tidal shape), present
             # regardless of the planet's occultation state. Both are smooth
             # on-orbit and are deliberately NOT exposure-smeared -- they are
             # evaluated at the flat per-observation time, unlike thermal/
@@ -617,6 +627,8 @@ class Transit(Instrument):
             beam_term = physics.calc_beam_term(
                 time, tc_this, period_this, beam_p
             )
+            if dil_obs_flat is not None:
+                beam_term = beam_term * dil_obs_flat
             lc_model = lc_model + beam_term
 
             # Ellipsoidal is multiplicative (exofast_tran.pro:143), applied
@@ -693,14 +705,14 @@ class Transit(Instrument):
                 u2_inst = band.u2.value[band_idx]
             else:
                 u2_inst = pt.zeros_like(u1_inst)
-            # Same resolved-state gate as build_likelihood: no thermal
-            # graph at all when every band's thermal is pinned at 0.
+            # Same resolved-state gates as build_likelihood: no thermal or
+            # reflect graph at all when every band's value is pinned at 0.
             thermal_inst = None
             if band.thermal_may_be_nonzero():
                 thermal_inst = band.thermal.value[band_idx]  # scalar ppm
-            reflect_inst = band.reflect.value[
-                band_idx
-            ]  # scalar, 0 unless fitreflect
+            reflect_inst = None
+            if band.reflect_may_be_nonzero():
+                reflect_inst = band.reflect.value[band_idx]  # scalar ppm
             ellip_inst = band.ellipsoidal.value[
                 band_idx
             ]  # scalar, 0 unless fitellip
@@ -733,25 +745,37 @@ class Transit(Instrument):
                     blocked = blocked * dil_node[inst_idx]
 
                 # Secondary eclipse / constant thermal emission + reflection
-                # -- same shared helpers build_likelihood uses (physics.py).
-                # Both are pre-dilution terms, like the transit depth above.
-                planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
-                reflect_term = physics.calc_reflect_term(
-                    t_input, tc_this, period_this, reflect_inst, planetvisible
-                )
-                additive_term = reflect_term
-                if thermal_inst is not None:
-                    thermal_term = 1e-6 * thermal_inst * planetvisible
-                    additive_term = additive_term + thermal_term
+                # -- same shared helpers build_likelihood uses (physics.py),
+                # same resolved-state gates. Both are pre-dilution terms,
+                # like the transit depth above.
+                additive_term = pt.zeros_like(b_p)
+                if thermal_inst is not None or reflect_inst is not None:
+                    planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
+                    if reflect_inst is not None:
+                        reflect_term = physics.calc_reflect_term(
+                            t_input,
+                            tc_this,
+                            period_this,
+                            reflect_inst,
+                            planetvisible,
+                        )
+                        additive_term = additive_term + reflect_term
+                    if thermal_inst is not None:
+                        thermal_term = 1e-6 * thermal_inst * planetvisible
+                        additive_term = additive_term + thermal_term
                 if dil_node is not None:
                     additive_term = additive_term * dil_node[inst_idx]
 
-                # Beaming (post-dilution, undiluted, not gated by
-                # planetvisible -- same placement as build_likelihood).
+                # Beaming is diluted like thermal/reflect above (EXOFASTv2
+                # parity: exofast_chi2v2.pro:1517/1556, exofast_tran.pro:157
+                # -- see build_likelihood). Not gated by planetvisible --
+                # same placement as build_likelihood.
                 beam_p = planets.beam.value[p_idx]
                 beam_term = physics.calc_beam_term(
                     t_input, tc_this, period_this, beam_p
                 )
+                if dil_node is not None:
+                    beam_term = beam_term * dil_node[inst_idx]
 
                 # Ellipsoidal is multiplicative, applied to the running
                 # total *including baseline* (exofast_tran.pro:143). Since
