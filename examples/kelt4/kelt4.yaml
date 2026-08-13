@@ -24,7 +24,7 @@ planet:
 # orbits A(+b).  primary/companion entries name stars/planets (or
 # "star.X"/"planet.X" paths); a multi-body group is treated as a point
 # mass at its barycenter.  Each orbit derives m_primary/m_companion/
-# m_total/arsun/K from the same star.mass/planet.mass nodes, so the three
+# m_total/a/K from the same star.mass/planet.mass nodes, so the three
 # orbits are automatically mass-consistent.
 orbit:
   - name: "b"

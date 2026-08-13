@@ -6,6 +6,8 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
+from exozippy.outputs.prose import get_collector, join_names
+from exozippy.outputs.texutils import latex_escape
 from exozippy.potentials import soft_lower_bound
 
 from . import physics
@@ -136,7 +138,7 @@ class Planet(Component):
             self.manifest.update(
                 {
                     "p": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "ar": "default",
                     "b": "default",
                     "K": "default",
@@ -189,10 +191,10 @@ class Planet(Component):
                 pin[off] = 0.0
                 entry["overrides"] = {"sigma": pin.tolist()}
             self.manifest["beam"] = entry
-        else:
-            self.manifest["beam"] = {
-                "overrides": {"sigma": [0.0] * self.n_elements}
-            }
+        # Neither flag set anywhere: beam does not enter the manifest at
+        # all (no parameter, no table row), matching Band's opt-in gating
+        # for thermal/reflect/ellipsoidal.  Consumers guard on
+        # `"beam" in planets.manifest`.
 
         # Data-driven estimate: Initialize 'K' directly from the RV data variance
         rv_comps = [
@@ -480,6 +482,20 @@ class Planet(Component):
 
         self._add_chen_potential()
         self._annotate_chen_table_notes(system)
+        # Modeling-draft prose, declared next to the potential it describes
+        # (outputs/prose.py's declare-at-site rule).
+        enabled = [nm for nm, on in zip(self.names, self.chen) if on]
+        if enabled:
+            noun = "planet" if len(enabled) == 1 else "planets"
+            get_collector(system).add(
+                r"We imposed the \citet{Chen:2017} probabilistic "
+                rf"mass--radius relation on {noun} "
+                + join_names(latex_escape(n) for n in enabled)
+                + ", constraining whichever of the mass and radius the "
+                "data do not.",
+                section="planetary",
+                key=f"{self.prefix}.chen",
+            )
 
         if "orbit" not in system.active_components:
             return
@@ -500,7 +516,7 @@ class Planet(Component):
     def _initial_semimajor_axes(self, system, orbits):
         """Per-planet starting semi-major axis, solRad.
 
-        ``planet.arsun`` is a derived Parameter and carries no ``initval``
+        ``planet.a`` is a derived Parameter and carries no ``initval``
         of its own, so the start is recomputed here from the same relation
         (``physics.calc_arsun``) using the start values the relaxation
         engine did resolve.  Returns NaN wherever an input is missing; the
@@ -541,7 +557,7 @@ class Planet(Component):
           ``.orbit.a_val`` attributes, none of which have existed since the
           vectorized refactor -- so ANY system with two or more planets
           raised AttributeError here.  A planet's semi-major axis is
-          ``planet.arsun`` (solRad, derived from m_total and the orbit's
+          ``planet.a`` (internally solRad, derived from m_total and the orbit's
           period) and its eccentricity is its orbit's, via ``orbit_map``.
         - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
           gives NUTS no gradient to follow out of the forbidden region (and
@@ -561,7 +577,7 @@ class Planet(Component):
         first-order condition but not a stability criterion.
         """
         # Semi-major axis (solRad) and eccentricity, per planet.
-        a = self.arsun.value
+        a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
 
         a_init = self._initial_semimajor_axes(system, orbits)

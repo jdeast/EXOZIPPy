@@ -17,6 +17,7 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
 
 """
@@ -48,6 +49,11 @@ can generally construct any model containing arbitrary components.
 #                     trace, this one authorizes seeding the NEXT fit
 #                     from one.  See mkparam._refuse_invalid_seed_draws.
 #   gui            -- gui.status.gui_enabled: {snapshot}.
+#   modeling       -- run.py: {compile} for the generated paper-draft
+#                     scaffold (<prefix>_paper.tex).  Output-only, so
+#                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it
+#                     from the structural hash: adding the block or
+#                     flipping `compile` must not stale a finished trace.
 #
 # tests/test_known_keys.py cross-checks this set against the top-level-config
 # accesses in the source, in both directions, so it cannot silently drift.
@@ -62,6 +68,7 @@ RESERVED_CONFIG_KEYS = frozenset(
         "modes",
         "mkparam",
         "gui",
+        "modeling",
     }
 )
 
@@ -94,6 +101,13 @@ class System(Component):
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
+        # The modeling-prose collector (outputs/prose.py): components add
+        # sentences at the code sites that implement each feature (stages
+        # 1-6), run.py adds the sampling/results sentences, and
+        # outputs/modeling.py regenerates <prefix>_paper.tex from it at
+        # each checkpoint.  add() is idempotent, so a second build_model()
+        # on one System (the GUI) cannot accumulate copies.
+        self.prose = ProseCollector()
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
         # happens to name but System never opened.

@@ -55,6 +55,26 @@ def latex_escape(text):
     return out.replace(_BACKSLASH_PLACEHOLDER, r"\textbackslash{}")
 
 
+def latex_escape_prose(text):
+    """``latex_escape`` plus math-mode wrapping of ``<``/``>``/``>=``/``<=``.
+
+    For plain-text diagnostics (mode-weight provenance and friends) on
+    their way into LaTeX *text* mode, where ``latex_escape`` alone is not
+    enough: a bare ``<`` or ``>`` under OT1 encoding silently renders as
+    inverted punctuation rather than erroring.  The comparison operators
+    are the only such characters our diagnostic strings carry.
+    """
+    out = latex_escape(text)
+    for old, new in (
+        (">=", r"$\geq$"),
+        ("<=", r"$\leq$"),
+        (">", r"$>$"),
+        ("<", r"$<$"),
+    ):
+        out = out.replace(old, new)
+    return out
+
+
 # ----------------------------------------------------------------------
 # Macro name pieces
 # ----------------------------------------------------------------------

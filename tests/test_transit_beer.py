@@ -135,10 +135,9 @@ def test_reflect_regression_naive_cosine_would_go_negative_at_transit():
         visible,
     )
     naive = _eval(
-        lambda tt, vv: -1e-6
-        * 100.0
-        * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD)
-        * vv,
+        lambda tt, vv: (
+            -1e-6 * 100.0 * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD) * vv
+        ),
         t,
         visible,
     )
@@ -220,8 +219,9 @@ def test_ellipsoidal_regression_full_period_would_give_one_dip_not_two():
         conjunctions,
     )
     buggy = _eval(
-        lambda tt: 1.0
-        - 1e-6 * 100.0 * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD),
+        lambda tt: (
+            1.0 - 1e-6 * 100.0 * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD)
+        ),
         conjunctions,
     )
     assert correct[0] == pytest.approx(correct[1], abs=1e-12)
@@ -300,9 +300,7 @@ def test_beam_regression_cosine_would_move_the_zero_crossings():
         conjunctions,
     )
     buggy = _eval(
-        lambda tt: 1e-6
-        * 100.0
-        * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD),
+        lambda tt: 1e-6 * 100.0 * pt.cos(2.0 * np.pi * (tt - _TC) / _PERIOD),
         conjunctions,
     )
     np.testing.assert_allclose(correct, [0.0, 0.0], atol=1e-12)
@@ -377,10 +375,13 @@ def test_planet_beam_free_beam_constrains_mass_default_false():
     assert planet.beam_constrains_mass == [False]
 
 
-def test_planet_beam_pinned_when_neither_set():
+def test_planet_beam_absent_when_neither_set():
+    """Neither beam flag set anywhere: beam never enters the manifest
+    (no parameter, no table row) -- the same opt-in gating as Band's
+    thermal/reflect/ellipsoidal."""
     planet = _make_planet([{"name": "b"}])
     planet.register_parameters(system=_FakeSystemNoOrbit())
-    assert planet.manifest["beam"]["overrides"]["sigma"] == [0.0]
+    assert "beam" not in planet.manifest
 
 
 def test_planet_beam_free_with_beam_free():
@@ -466,7 +467,10 @@ def test_beam_off_does_not_require_K_no_orbit_config():
     system = System(config, user_params=params)
     system.prepare()
     system.build_model()
-    assert float(np.atleast_1d(system.planet.beam.value.eval())[0]) == 0.0
+    # beam is absent from the manifest entirely (opt-in gating); the
+    # regression this test guards -- graph.py demanding K for a
+    # pinned-off beam -- is covered by the build succeeding at all.
+    assert "beam" not in system.planet.manifest
 
 
 # ---------------------------------------------------------------------------
@@ -597,9 +601,7 @@ def test_ellipsoidal_survives_secondary_eclipse_thermal_and_reflect_dont(
     assert mu_secondary < baseline
     # And thermal/reflect's own contribution is negligible there (the
     # eclipse is close to total for this system's geometry):
-    assert mu_far - mu_secondary > 0.5 * (
-        (_THERMAL_PPM + _REFLECT_PPM) * 1e-6
-    )
+    assert mu_far - mu_secondary > 0.5 * ((_THERMAL_PPM + _REFLECT_PPM) * 1e-6)
 
 
 def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
@@ -632,11 +634,14 @@ def test_reflect_ellip_beam_are_exactly_zero_by_default(tmp_path_factory):
     system = System(config, user_params=params)
     system.prepare()
     system.build_model()
-    assert float(np.atleast_1d(system.band.reflect.value.eval())[0]) == 0.0
-    assert (
-        float(np.atleast_1d(system.band.ellipsoidal.value.eval())[0]) == 0.0
-    )
-    assert float(np.atleast_1d(system.planet.beam.value.eval())[0]) == 0.0
+    # Opt-in gating: with no fitreflect/fitellip/beam flag anywhere the
+    # parameters do not exist at all -- stronger than "evaluates to 0",
+    # and no table rows either.
+    assert "reflect" not in system.band.manifest
+    assert "ellipsoidal" not in system.band.manifest
+    assert "beam" not in system.planet.manifest
+    assert not hasattr(system.band, "reflect")
+    assert not hasattr(system.planet, "beam")
 
 
 def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
@@ -730,3 +735,81 @@ def test_beam_diluted_when_sed_dilution_active(tmp_path_factory):
     # Sanity: the undiluted prediction should NOT match -- if it did, the
     # dilution-fold-in fix regressed back to skipping beam.
     assert actual != pytest.approx(undiluted_beam, rel=1e-6)
+
+
+def test_ellipsoidal_diluted_when_sed_dilution_active(tmp_path_factory):
+    """
+    Given the same two-identical-star diluted system as the beam-dilution
+      test, but with fitellip on and everything else off,
+    When build_likelihood's mu is evaluated at secondary conjunction
+      (tc + P/2 -- the ellipsoidal extremum, no transit in the data),
+    Then the deviation from baseline is the UNDILUTED ellipsoidal
+      deviation times the dilution factor (0.5) -- exofast_tran.pro
+      applies the dilution to (modelflux - 1) AFTER the ellipsoidal
+      factor multiplies in, so ellipsoidal IS diluted there (PR #53
+      review finding; the implementation used to let it escape).
+    """
+    d = tmp_path_factory.mktemp("transit_beer_ellip_dilution")
+    t_conj = _TC + _PERIOD / 2.0
+    lc = _write_lc_landmarks(d / "lc.dat", [t_conj])
+    sed_file = d / "two_star.sed"
+    sed_file.write_text("model: NextGen\nfilters: []\n")
+
+    config = {
+        "star": [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "band": [
+            {
+                "name": "V",
+                "filter": "V",
+                "ld_law": "quadratic",
+                "star_ndx": 0,
+                "fitellip": True,
+            }
+        ],
+        "transit": [{"name": "inst0", "file": lc, "band": "V"}],
+        "sed": {"file": str(sed_file)},
+    }
+    _ELLIP = 4000.0
+    params = {
+        "star.A.radius": {"initval": 1.0, "sigma": 0.05},
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.08},
+        "star.B.radius": {"initval": 1.0, "sigma": 0.05},
+        "star.B.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.B.teff": {"initval": 5800, "sigma": 100},
+        "star.B.feh": {"initval": 0.0, "sigma": 0.08},
+        "orbit.0.period": {"initval": _PERIOD},
+        "orbit.0.tc": {"initval": _TC},
+        "orbit.0.cosi": {"initval": 0.05},
+        "orbit.0.secosw": {"initval": 0.0, "sigma": 0.0},
+        "orbit.0.sesinw": {"initval": 0.0, "sigma": 0.0},
+        "planet.0.radius": {"initval": 1.7},
+        "band.V.ellipsoidal": {"initval": _ELLIP, "sigma": 0.0},
+    }
+
+    system = System(config, user_params=params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    mu = _likelihood_mu(system, model, point)
+    baseline = system.transit._baseline_for(point, 0)
+    times = system.transit.time
+    idx = _nearest_index(times, t_conj)
+    t_actual = times[idx]
+
+    # ellip factor - 1 at this exact time (half-period cosine)
+    phase = 2.0 * np.pi * (t_actual - _TC) / (_PERIOD / 2.0)
+    undiluted_dev = -1e-6 * _ELLIP * np.cos(phase)
+    dil = 0.5  # two identical stars
+    # Secondary conjunction: no transit/eclipse terms in this config, so
+    # mu = baseline * (1 + diluted ellipsoidal deviation).
+    expected = baseline * dil * undiluted_dev
+
+    actual = mu[idx] - baseline
+    assert actual == pytest.approx(expected, rel=1e-6, abs=1e-9)
+    # Sanity: the undiluted prediction must NOT match.
+    assert actual != pytest.approx(baseline * undiluted_dev, rel=1e-6)

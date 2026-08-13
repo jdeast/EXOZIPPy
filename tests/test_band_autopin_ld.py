@@ -108,7 +108,8 @@ def point_source_with_band(pspl_lc):
 
 
 # --------------------------------------------------------------------------
-# 1. Point-source microlensing: the band's LD is unread, so it is pinned.
+# 1. Point-source microlensing: the band's LD is unread, so the parameters
+#    are omitted from the manifest entirely (no table rows at all).
 # --------------------------------------------------------------------------
 def test_point_source_mulens_band_has_no_free_ld_rvs(point_source_with_band):
     """
@@ -120,15 +121,19 @@ def test_point_source_mulens_band_has_no_free_ld_rvs(point_source_with_band):
     assert _band_rv_names(model) == []
 
 
-def test_pinned_band_reports_sigma_zero(point_source_with_band):
+def test_unread_band_has_no_ld_parameters_at_all(point_source_with_band):
     """
     Given the same fit,
-    When the resolved Band parameters are inspected,
-    Then q1 and q2 carry sigma == 0, the one way to pin an element.
+    When the Band component is inspected,
+    Then no limb-darkening parameter exists -- not even pinned: an
+    unconsumed band contributes nothing to the manifest, so the table
+    carries no Band section for it.
     """
     system, _model = point_source_with_band
-    np.testing.assert_array_equal(np.atleast_1d(system.band.q1.sigma), [0.0])
-    np.testing.assert_array_equal(np.atleast_1d(system.band.q2.sigma), [0.0])
+    assert "q1" not in system.band.manifest
+    assert "q2" not in system.band.manifest
+    assert not hasattr(system.band, "q1")
+    assert not hasattr(system.band, "q2")
 
 
 def test_band_block_costs_nothing_when_its_ld_is_unread(pspl_lc):
@@ -153,11 +158,11 @@ def test_band_block_costs_nothing_when_its_ld_is_unread(pspl_lc):
     assert lp_b == lp_n
 
 
-def test_pin_is_logged_at_info(pspl_lc, caplog):
+def test_omission_is_logged_at_info(pspl_lc, caplog):
     """
     Given a band whose limb darkening nothing reads,
     When the system is prepared,
-    Then an INFO record names the band and says why it was pinned.
+    Then an INFO record says the LD parameters were omitted and why.
     """
     with caplog.at_level(logging.INFO, logger="exozippy.components.band.band"):
         system = System(
@@ -166,7 +171,11 @@ def test_pin_is_logged_at_info(pspl_lc, caplog):
         )
         system.prepare()
 
-    msgs = [r.message for r in caplog.records if "pinning band.I" in r.message]
+    msgs = [
+        r.message
+        for r in caplog.records
+        if "no limb-darkening parameters" in r.message
+    ]
     assert len(msgs) == 1, msgs
     assert "nothing in this topology reads" in msgs[0]
 
@@ -192,33 +201,34 @@ def test_finite_source_frees_the_limb_darkening(pspl_lc):
 
 
 # --------------------------------------------------------------------------
-# 3. A user entry outranks the auto-pin (overrides layer UNDER params.yaml).
+# 3. With NO consumer the parameters do not exist, so a params entry cannot
+#    resurrect them (the pin-under-override escape applies only to the
+#    mixed case, where some other band forces the vector to exist).
 # --------------------------------------------------------------------------
-def test_explicit_user_entry_beats_the_auto_pin(pspl_lc):
+def test_user_entry_cannot_resurrect_an_unconsumed_ld(pspl_lc):
     """
     Given a point-source fit whose params file gives band.I.q1 a sigma,
     When the model is built,
-    Then q1 is sampled and only q2 keeps the auto-pin.
+    Then q1 still does not exist: nothing in the topology could consume
+    it, so a free q1 would be a parameter with no likelihood term.
     """
     params = _mulens_params()
     params["band.I.q1"] = {"initval": 0.4, "sigma": 0.1}
     system, model = _build(
         _mulens_config(pspl_lc, bands=[{"name": "I", "filter": "I"}]), params
     )
-    assert _band_rv_names(model) == ["band.q1_raw"]
-    np.testing.assert_array_equal(np.atleast_1d(system.band.q2.sigma), [0.0])
+    assert _band_rv_names(model) == []
+    assert not hasattr(system.band, "q1")
 
 
 # --------------------------------------------------------------------------
-# 4. A linear-law band pins u1 -- which is derived-looking in defaults.yaml
-#    (its Kipping expression is unused under this law) and used to trip
-#    graph.py's manifest-dict fallback into a "Dependency Error".
+# 4. A linear-law band with no consumer omits u1 too, and still builds.
 # --------------------------------------------------------------------------
-def test_linear_law_band_pins_u1_and_still_builds(pspl_lc):
+def test_linear_law_band_omits_u1_and_still_builds(pspl_lc):
     """
     Given a point-source fit whose band declares ld_law: linear,
     When the model is built,
-    Then u1 is pinned rather than sampled, and the build order resolves.
+    Then u1 does not exist, and the build order resolves.
     """
     system, model = _build(
         _mulens_config(
@@ -228,7 +238,7 @@ def test_linear_law_band_pins_u1_and_still_builds(pspl_lc):
         _mulens_params(),
     )
     assert _band_rv_names(model) == []
-    np.testing.assert_array_equal(np.atleast_1d(system.band.u1.sigma), [0.0])
+    assert not hasattr(system.band, "u1")
 
 
 # --------------------------------------------------------------------------

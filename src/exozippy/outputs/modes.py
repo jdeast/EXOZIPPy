@@ -18,6 +18,12 @@ Pipeline (see identify_modes):
      connecting each pair of cluster centers: if the empirical density does
      not dip between the two centers, they are one mode (this un-splits
      curved/banana-shaped posteriors that k-means fragments).
+  4b. Merge clusters connected by a populated, lp-flat path (the
+     lp-barrier ridge test, ``_lp_ridge_merge``): a flat likelihood ridge
+     -- an unconstrained degeneracy direction, e.g. m--cos i in an
+     RV-only fit -- separates in density without separating in
+     likelihood, and only an lp BARRIER makes two clusters two modes.
+     Skipped when the trace has no lp.
   5. Drop modes below ``min_weight``; order the survivors by weight.
   6. Compute per-chain occupancies and inter-mode transition counts, and
      derive a *provenance* label for the reported weights: draw-count
@@ -727,6 +733,108 @@ def _dip_merge(X, labels, centers, merge_ratio):
     return new_labels, new_centers, n_new != k
 
 
+def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
+    """Merge cluster pairs connected by a populated, lp-flat path.
+
+    Complements ``_dip_merge``, which asks whether the OCCUPANCY density
+    dips between two centers.  Occupancy is the wrong witness for a flat
+    likelihood ridge whose far end is stretched out by the raw-space
+    transform: on an RV-only fit (kelt4), the m--cos i degeneracy tail at
+    cos i -> 1 sits ~1500 raw units from the bulk -- a huge density gap,
+    so the dip test keeps it as a separate "mode" -- while the draws'
+    max-lp is flat to ~6 nats along the whole path, i.e. there is NO
+    likelihood barrier and it is one connected basin.
+
+    Two genuinely distinct modes ARE separated by an lp barrier: the
+    region between them is either empty of draws (chains rarely cross)
+    or populated only by stragglers whose lp sits far below both peaks.
+    So, for each cluster pair, project every draw in ``_dip_merge``'s
+    cylinder onto the center-to-center segment and bin the interior:
+    merge iff EVERY interior bin is populated (an empty bin is absence
+    of evidence and never merges -- this is also what keeps a curved
+    banana whose true path bows away from the straight segment safely
+    unmerged) AND no bin's max-lp dips more than ``k_sigma * sigma_lp``
+    below the lower of the two clusters' own lp peaks.
+
+    ``sigma_lp`` is the draw-to-draw lp scatter (the caller measures it
+    within the dominant cluster, floored at sqrt(n_dims/2), the chi2
+    width that scatter approaches for a well-sampled Gaussian): max-lp
+    per bin fluctuates by that much even along a perfectly flat ridge,
+    so the threshold must scale with it.
+
+    Returns ``(labels, centers, merged_any, merge_notes)``.
+    """
+    k = centers.shape[0]
+    parent = list(range(k))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    finite = np.isfinite(lp)
+    merge_notes = []
+    for i in range(k):
+        for j in range(i + 1, k):
+            mi, mj = labels == i, labels == j
+            if not ((mi & finite).any() and (mj & finite).any()):
+                continue
+            u = centers[j] - centers[i]
+            sep = np.linalg.norm(u)
+            if sep == 0:
+                parent[find(j)] = find(i)
+                continue
+            u = u / sep
+
+            t_all = (X - centers[i]) @ u / sep  # 0 at c_i, 1 at c_j
+            # same cylinder as _dip_merge: perpendicular radius from the
+            # two clusters' own scatter about the segment
+            perp2 = ((X - centers[i]) ** 2).sum(axis=1) - (t_all * sep) ** 2
+            r2 = np.median(perp2[mi | mj])
+            in_cyl = (perp2 <= 4.0 * max(r2, 1e-12)) & finite
+
+            peak = min(lp[mi & finite].max(), lp[mj & finite].max())
+            allowed_dip = k_sigma * sigma_lp
+
+            edges = np.linspace(0.0, 1.0, n_bins + 1)
+            bin_idx = np.digitize(t_all[in_cyl], edges) - 1
+            lp_cyl = lp[in_cyl]
+            connected = True
+            worst = 0.0
+            for b in range(n_bins):
+                sel = bin_idx == b
+                if not sel.any():
+                    connected = False
+                    break
+                worst = max(worst, peak - lp_cyl[sel].max())
+            if connected and worst <= allowed_dip:
+                parent[find(j)] = find(i)
+                merge_notes.append(
+                    f"clusters merged as one basin: the path between "
+                    f"their centers is populated in every one of "
+                    f"{n_bins} bins with max-lp within {worst:.1f} nats "
+                    f"of the lower peak (threshold {allowed_dip:.1f} = "
+                    f"{k_sigma:g} x sigma_lp {sigma_lp:.1f}) -- a flat "
+                    f"likelihood ridge (e.g. an unconstrained "
+                    f"degeneracy direction), not a separate mode"
+                )
+
+    roots = {}
+    new_labels = np.empty_like(labels)
+    for old in range(k):
+        r = find(old)
+        if r not in roots:
+            roots[r] = len(roots)
+    for old in range(k):
+        new_labels[labels == old] = roots[find(old)]
+    n_new = len(roots)
+    new_centers = np.vstack(
+        [X[new_labels == c].mean(axis=0) for c in range(n_new)]
+    )
+    return new_labels, new_centers, n_new != k, merge_notes
+
+
 def _count_transitions(labels_2d):
     """Inter-mode label changes along each chain, skipping unassigned draws."""
     return int(transition_stats(labels_2d)[0])
@@ -1023,6 +1131,38 @@ def identify_modes(
             Xs[idx_fit], fit_labels, centers, merge_ratio
         )
 
+    # lp-barrier ridge merge: the dip test above keeps any cluster the
+    # occupancy density separates, but a flat likelihood ridge (an
+    # unconstrained degeneracy direction, stretched out by the raw-space
+    # transform) separates in DENSITY without separating in LIKELIHOOD.
+    # Where lp exists, merge cluster pairs whose connecting path is
+    # populated end to end with no lp barrier; alternate with the dip
+    # merge until stable, since each merge moves centers.
+    if has_lp and centers.shape[0] > 1:
+        lp_fit = lp[valid][idx_fit]
+        big = np.argmax(np.bincount(fit_labels, minlength=centers.shape[0]))
+        lp_big = lp_fit[(fit_labels == big) & np.isfinite(lp_fit)]
+        # lp scatter along a flat ridge: measured in the dominant cluster,
+        # floored at the chi2 width sqrt(n_dims/2) it approaches for a
+        # well-sampled Gaussian (degenerate fallback: the floor alone).
+        sigma_lp = max(
+            float(np.std(lp_big)) if lp_big.size > 1 else 0.0,
+            float(np.sqrt(Xs.shape[1] / 2.0)),
+        )
+        merged = True
+        while merged and centers.shape[0] > 1:
+            fit_labels, centers, merged, ridge_notes = _lp_ridge_merge(
+                Xs[idx_fit], lp_fit, fit_labels, centers, sigma_lp
+            )
+            notes.extend(ridge_notes)
+            # a ridge merge moves centers; re-run the dip merge to its
+            # own fixpoint before asking about ridges again
+            dip = merged
+            while dip and centers.shape[0] > 1:
+                fit_labels, centers, dip = _dip_merge(
+                    Xs[idx_fit], fit_labels, centers, merge_ratio
+                )
+
     # assign every valid draw to nearest surviving center
     d2 = ((Xs[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
     labels_valid = np.argmin(d2, axis=1)
@@ -1136,7 +1276,7 @@ def identify_modes(
         reliable = chains_visiting_all and enough_transitions
         mixing = (
             f"{n_transitions} mode changes in the stored draws, "
-            f"{n_round_trips} round trips, "
+            f"{n_round_trips} mode round trips, "
             f"{n_no_switch}/{int((transitions_per_chain >= 0).sum())} chains "
             f"never switched; N_eff for the weights >= {min_ess:.1f}"
         )

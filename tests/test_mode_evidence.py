@@ -906,7 +906,7 @@ def test_evidence_provenance_replaces_occupancy_in_output(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         caption="toy",
         mode_report=report,
     )
@@ -942,7 +942,7 @@ def test_weight_err_reaches_text_latex_and_csv(tmp_path):
     build_latex_output(
         _StubSystem(),
         var_filename=str(var_file),
-        template_filename=str(tmpl_file),
+        table_filename=str(tmpl_file),
         mode_report=report,
     )
     build_csv_output(_StubSystem(), str(csv_file), mode_report=report)

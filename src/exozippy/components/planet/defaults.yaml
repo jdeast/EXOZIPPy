@@ -21,7 +21,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "\\log{q}"
-    description: "log10 of the planet/host star mass ratio"
+    description: "$\\log_{10}{M_P/M_\\star}$"
     # rank 5 (below mass's 10) is load-bearing: the relaxation engine's
     # Condition B rewrites the LOWEST-rank symbol of a violated relation, so
     # log_q always absorbs Eq(mass, 10**log_q * star_mass).  That both gives
@@ -103,11 +103,12 @@ planet:
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["mass", "m_total", "orbit.ecc", "arsun", "orbit.sini", "orbit.period"]
-  arsun:
-    unit: "solRad"
+        deps: ["mass", "m_total", "orbit.ecc", "a", "orbit.sini", "orbit.period"]
+  a:
+    unit: "AU"
     internal_unit: "solRad"
     latex: "a"
+    description: "Semi-major Axis"
     expressions:
       default:
         func_name: "calc_arsun"
@@ -119,7 +120,7 @@ planet:
     expressions:
       default:
         func_name: "calc_arstar"
-        deps: ["arsun", "star.radius"]
+        deps: ["a", "star.radius"]
   b:
     unit: ""
     internal_unit: ""

@@ -67,7 +67,7 @@ star.C.teff:
 # BC: B relative to C, one resolved epoch (2012.35): 49.14 mas -> 10.7 AU
 # projected at 218 pc; with M_B + M_C ~ 1.5 Msun, P ~ 29 yr.  logP is
 # seeded directly (the stage-2 tc window peeks at the logP initval before
-# the relaxation engine runs, so seeding through arsun would leave the tc
+# the relaxation engine runs, so seeding through a would leave the tc
 # bounds at the 10-day default).
 orbit.BC.logP:
   initval: 4.02      # ~29 yr

@@ -57,6 +57,7 @@ from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
 from .mkparam import write_param_file
+from .outputs.modeling import build_modeling_output, compile_modeling_pdf
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
 from .polish import polish_raw_starts, resolve_polish_steps
@@ -283,6 +284,20 @@ def _run_fit(config, gui, user_params=None):
             f"Set 'method: {rec_str}' in the sampler block."
         )
     method = method.lower()
+
+    # First modeling-draft checkpoint: the components declared their prose
+    # during stages 1-6 and the sampler is now resolved, so the citation
+    # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
+    # the user keeps it even if the fit dies hours in.  Regenerated (not
+    # appended) at wrap-up with the results/convergence/figures/table
+    # sections. Never fatal: the draft is a bonus deliverable.
+    _add_sampler_prose(system, method, swap_schedule=swap_schedule)
+    try:
+        build_modeling_output(system, prefix)
+    except Exception:
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
 
     # 4. Sample
     # We use adapt_diag to start exactly at our estimated means
@@ -770,6 +785,32 @@ def _run_fit(config, gui, user_params=None):
                 exc_info=True,
             )
 
+    # Final modeling-draft checkpoint: the table fragments and posterior
+    # plots now exist on disk and the convergence/mode facts are known, so
+    # regenerate <prefix>_paper.tex with its Results sections and
+    # (config `modeling: {compile: false}` to opt out) compile the draft
+    # PDF.  Compile failure or missing TeX never fails the fit.
+    modeling_cfg = config.get("modeling", {}) or {}
+    for _key in modeling_cfg:
+        if _key != "compile":
+            logger.warning(
+                f"Unrecognized key '{_key}' in the modeling block will be "
+                f"ignored (known: compile)."
+            )
+    try:
+        _add_wrapup_prose(system, burn_diag, mode_report)
+        # One posterior draw unlocks the model-bearing plot specs (phased
+        # panels), whose figures otherwise never enter the draft.
+        tex_path = build_modeling_output(
+            system, prefix, point=draws[0] if draws else None
+        )
+        if modeling_cfg.get("compile", True):
+            compile_modeling_pdf(tex_path)
+    except Exception:
+        logger.warning(
+            "modeling-draft generation failed (non-fatal)", exc_info=True
+        )
+
     try:
         # mkparam re-derives the structural fingerprint from this config and
         # the params, not from the live System; measured to reproduce the
@@ -1188,6 +1229,127 @@ def inspect_start(
             f"The following parameters in the parameter.yaml file did not match any model parameter "
             f"and were not applied: {unused_yaml}\n"
             "This can be safely ignored if intentional, but check for typos."
+        )
+
+
+def _add_sampler_prose(system, method, swap_schedule="deo"):
+    """Declare the run-level modeling prose (intro + sampler paragraph).
+
+    Config facts only, per the prose contract (outputs/prose.py): the
+    sampler's identity and citations.  The actual draw/burn-in counts are
+    measured facts and belong to ``_add_wrapup_prose``.
+    """
+    prose = system.prose
+    prose.add(
+        r"This analysis used the EXOZIPPy modeling suite (Eastman et al., "
+        r"in preparation), a successor to EXOFAST \citep{Eastman:2013} and "
+        r"EXOFASTv2 \citep{Eastman:2019} built on PyMC "
+        r"\citep{AbrilPla:2023}.",
+        section="intro",
+        key="run.exozippy",
+        rank=5,
+    )
+    if method in ("ptde", "ptde_async"):
+        swap_cite = (
+            r" and the non-reversible deterministic even--odd (DEO) swap "
+            r"schedule \citep{Syed:2022}"
+            if str(swap_schedule).lower() == "deo"
+            else ""
+        )
+        prose.add(
+            r"We sampled the posterior with a parallel-tempered "
+            r"differential-evolution MCMC "
+            r"\citep{terBraak:2006, terBraak:2008} with adaptive "
+            r"temperature-ladder placement \citep{Vousden:2016}"
+            + swap_cite
+            + ", as implemented in EXOZIPPy.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    else:
+        # nuts / numpyro / blackjax are all NUTS implementations.
+        prose.add(
+            r"We sampled the posterior with the No-U-Turn Sampler "
+            r"\citep{Hoffman:2014} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+
+
+def _add_wrapup_prose(system, diag, mode_report):
+    """Declare the post-fit prose: burn-in, convergence criteria, modes.
+
+    These are diagnostics of the run (the convergence criteria the user
+    asked the draft to record), not fitted values -- posterior numbers stay
+    in the table, whose macros are the mechanism for citing them in prose.
+    """
+    prose = system.prose
+    prose.add(
+        r"The median values and 68\% confidence intervals of the "
+        r"posterior are listed in Table~\ref{tab:"
+        + str(getattr(system, "name", "system"))
+        + r"}.",
+        section="results",
+        key="run.table_ref",
+        rank=10,
+    )
+    if diag:
+        prose.add(
+            f"We discarded the first {diag.get('burnin', 0)} draws "
+            f"({100 * diag.get('burnin_frac', 0.0):.0f}\\% of "
+            f"{diag.get('n_draws', 0)}) of each chain as burn-in, keeping "
+            f"{diag.get('n_chains_used')} chains.",
+            section="convergence",
+            key="run.burnin",
+            rank=10,
+        )
+        criteria = []
+        if diag.get("max_rhat_threshold") is not None:
+            criteria.append(rf"$\hat{{R}} \le {diag['max_rhat_threshold']}$")
+        if diag.get("min_ess_threshold") is not None:
+            criteria.append(rf"ESS $\ge {diag['min_ess_threshold']}$")
+        verdict = "met" if diag.get("converged", False) else "NOT met"
+        measured = []
+        if diag.get("max_rhat") is not None:
+            measured.append(rf"maximum $\hat{{R}} = {diag['max_rhat']:.3f}$")
+        if diag.get("min_ess") is not None:
+            measured.append(f"minimum ESS $= {diag['min_ess']:.0f}$")
+        prose.add(
+            r"Convergence was assessed with the rank-normalized "
+            r"Gelman--Rubin statistic and the effective sample size "
+            r"\citep{Gelman:1992, Vehtari:2021} as implemented in ArviZ "
+            r"\citep{Kumar:2019}"
+            + (
+                ", requiring "
+                + " and ".join(criteria)
+                + " for every sampled parameter"
+                if criteria
+                else ""
+            )
+            + f"; these criteria were {verdict}"
+            + (" (" + ", ".join(measured) + ")." if measured else "."),
+            section="convergence",
+            key="run.convergence",
+            rank=20,
+        )
+    if mode_report is not None and getattr(mode_report, "n_modes", 1) > 1:
+        # The provenance is plain text (N_eff, >=): escape it for LaTeX
+        # text mode, exactly as latex.py does for \tablecomments.
+        from .outputs.texutils import latex_escape_prose
+
+        provenance = latex_escape_prose(
+            getattr(mode_report, "provenance", "see the table notes")
+        )
+        prose.add(
+            f"The posterior is multimodal: {mode_report.n_modes} distinct "
+            "modes were identified and are reported separately in the "
+            f"parameter table. Mode weights: {provenance}.",
+            section="modes",
+            key="run.modes",
+            rank=10,
         )
 
 

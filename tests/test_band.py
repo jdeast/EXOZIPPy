@@ -11,6 +11,20 @@ def _make_band(config):
     return Band(config, _DummyConfigManager())
 
 
+class _ConsumingSystem:
+    """Minimal system whose transit config references every given band --
+    limb darkening only enters the manifest when something consumes it
+    (Band.register_parameters), so the law->manifest unit tests below need
+    a consumer in the topology."""
+
+    def __init__(self, band):
+        import types
+
+        self.transit = types.SimpleNamespace(
+            config=[{"band": name} for name in band.names]
+        )
+
+
 def _is_free(entry):
     """True when a manifest entry declares a SAMPLED (non-derived) parameter.
 
@@ -75,7 +89,7 @@ def test_register_parameters_quadratic_law_uses_kipping():
     """
     band = _make_band([{"ld_law": "quadratic"}])
     band.load_data(system=None)
-    band.register_parameters(system=None)
+    band.register_parameters(system=_ConsumingSystem(band))
     assert "q1" in band.manifest
     assert "q2" in band.manifest
     assert "u1" in band.manifest
@@ -97,7 +111,7 @@ def test_register_parameters_linear_law_samples_u1_directly():
     """
     band = _make_band([{"ld_law": "linear"}])
     band.load_data(system=None)
-    band.register_parameters(system=None)
+    band.register_parameters(system=_ConsumingSystem(band))
     assert "u1" in band.manifest
     assert _is_free(band.manifest["u1"])
     assert "q1" not in band.manifest
@@ -178,7 +192,7 @@ def test_uniform_ld_law_across_several_bands_is_allowed():
         ]
     )
     band.load_data(system=None)
-    band.register_parameters(system=None)
+    band.register_parameters(system=_ConsumingSystem(band))
     assert "u2" not in band.manifest
     assert _is_free(band.manifest["u1"])
 

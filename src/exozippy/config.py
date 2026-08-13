@@ -194,6 +194,38 @@ def _sigma_is_zero(value):
         return False
 
 
+def _reject_renamed_arsun(user_params):
+    """Raise, with the fix, on the pre-rename ``arsun`` parameter spelling.
+
+    The semi-major axis was renamed ``arsun`` -> ``a`` (2026-08: the name
+    dated from EXOFASTv2's fixed internal units; with unit handling the
+    user-facing value is AU and the name lied).  An unknown parameter path
+    in a params file is otherwise SILENTLY ignored, so without this check
+    an old file's ``orbit.b.arsun`` seed would simply stop doing anything
+    -- a silent behavior change, the exact failure mode pointed errors on
+    renames exist to prevent (compare planet.log_q's stale-restart-file
+    raise).  Checked on the raw params (before standardization, so the
+    message shows the user's own spelling) and inside link expressions.
+    """
+    for key, spec in (user_params or {}).items():
+        if str(key) == "arsun" or str(key).endswith(".arsun"):
+            raise ValueError(
+                f"'{key}': the semi-major axis parameter was renamed "
+                f"'arsun' -> 'a' (reported in AU; internally solRad). "
+                f"Rename the entry to "
+                f"'{str(key)[: -len('arsun')]}a'."
+            )
+        if isinstance(spec, dict):
+            for field, value in spec.items():
+                if isinstance(value, str) and "arsun" in value:
+                    raise ValueError(
+                        f"'{key}.{field}' links to '{value}': the "
+                        f"semi-major axis parameter was renamed 'arsun' "
+                        f"-> 'a' (reported in AU; internally solRad). "
+                        f"Update the expression."
+                    )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -396,6 +428,8 @@ class ConfigManager:
         self.custom_solvers = {}
         self.standalone_solvers = set()
 
+        _reject_renamed_arsun(user_params)
+
         # Path of the params FILE these entries were read from, set by System
         # only when it actually read one -- it stays None when the caller
         # passed user_params in memory, even if the config happens to name a
@@ -589,7 +623,7 @@ class ConfigManager:
         standalone=True additionally runs it once per iteration on its own:
         required when the target's defining relation always holds a second
         derived unknown (e.g. orbit.m_total in the Kepler relation, whose
-        other side is the equally-unknown arsun), so the equation path can
+        other side is the equally-unknown semi-major axis), so the equation path can
         never get down to one unknown by itself.
         """
         self.custom_solvers[target_str] = solver_func
@@ -2885,7 +2919,7 @@ class ConfigManager:
                     # entry from the default-armor pass either: reading
                     # resolved_scales[target_str] here used to raise KeyError
                     # straight out of prepare().  (Reproduced by naming
-                    # `orbit.<name>.arsun` in a params file -- it is solved
+                    # `orbit.<name>.a` in a params file -- it is solved
                     # from m_total and period, and none of the three carries
                     # an init_scale default.)  Skipping leaves the parameter
                     # with no preliminary scale, which is the documented and

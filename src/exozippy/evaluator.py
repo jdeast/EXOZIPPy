@@ -74,7 +74,9 @@ class NeedsResolve(Exception):
 # ---------------------------------------------------------------------------
 
 # Config keys that carry no structural meaning for the compiled graph.
-_NON_STRUCTURAL_CONFIG_KEYS = {"run"}
+# "modeling" is output-only (the generated paper-draft scaffold): adding
+# the block or flipping its `compile` key must not stale a finished trace.
+_NON_STRUCTURAL_CONFIG_KEYS = {"run", "modeling"}
 
 
 def _canon(value: Any) -> Any:

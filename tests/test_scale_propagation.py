@@ -112,10 +112,10 @@ def test_user_sigma_still_seeds_the_scale():
 # ---------------------------------------------------------------------------
 
 # star + planet + orbit is the smallest topology carrying Kepler's third law,
-# arsun**3 = C * m_total * period**2.  None of arsun, m_total or period has an
+# a**3 = C * m_total * period**2.  None of a, m_total or period has an
 # init_scale in defaults.yaml -- init_scale is optional -- so the forward
-# Jacobian pass scores the solved arsun scale at rank 0, which loses to arsun's
-# own (absent) rank-0 scale and is therefore never stored.  Naming arsun in a
+# Jacobian pass scores the solved a scale at rank 0, which loses to a's
+# own (absent) rank-0 scale and is therefore never stored.  Naming a in a
 # params file then used to send the sync step reading a key that was never
 # written: KeyError straight out of prepare().
 _ORBIT_CONFIG = {
@@ -127,7 +127,7 @@ _ORBIT_CONFIG = {
 
 def test_scaleless_solved_target_does_not_crash_the_engine():
     """
-    Given a params entry on a derived parameter (orbit arsun) whose relation
+    Given a params entry on a derived parameter (orbit a) whose relation
     parents carry no init_scale from any source,
     When the relaxation engine solves it (stage 3 of prepare),
     Then the solve completes and the entry simply gets no init_scale.
@@ -140,7 +140,7 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     cm = ConfigManager(
         {
             "orbit.b.period": {"initval": 2.9895933},
-            "orbit.b.arsun": {"lower": 0.0, "upper": 1000.0},
+            "orbit.b.a": {"lower": 0.0, "upper": 1000.0},
         },
         system_config=_ORBIT_CONFIG,
     )
@@ -148,11 +148,11 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     # Act
     cm.finalize_user_params()
 
-    # Assert: the solve ran and arsun got a start value ...
-    entry = cm.user_params["orbit.0.arsun"]
+    # Assert: the solve ran and a got a start value ...
+    entry = cm.user_params["orbit.0.a"]
     assert entry["initval"] is not None
     # ... but no preliminary scale, which is the handled state: build_pymc
     # falls back to a fraction of the bound span and the whitening probe
     # measures the real scale from the data.
     assert "init_scale" not in entry
-    assert cm.propagated_scales.get("orbit.0.arsun") is None
+    assert cm.propagated_scales.get("orbit.0.a") is None

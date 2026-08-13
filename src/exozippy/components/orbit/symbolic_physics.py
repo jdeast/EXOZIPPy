@@ -48,8 +48,8 @@ def get_symbol_map(config):
         # letting the relaxation engine equate different orbits' physics
         # (see the omega symbol-map bug).  m_total initvals come from the
         # custom solver below (sum of the member bodies' masses), which
-        # lets a user seed a wide orbit with arsun instead of logP.
-        "a": "arsun",
+        # lets a user seed a wide orbit with a instead of logP.
+        "a": "a",
         "m_total": "m_total",
     }
 

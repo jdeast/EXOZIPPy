@@ -10,11 +10,15 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
 from exozippy.components.limbdark import quad_limb_darkened_flux
+from exozippy.outputs.prose import get_collector
+from exozippy.outputs.texutils import latex_escape
 
 from . import physics
 
 
 class Transit(Instrument):
+    prose_noun = "transit photometry"
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
@@ -482,7 +486,16 @@ class Transit(Instrument):
         # smeared -- it stays a flat per-observation array, applied once
         # after the group loop.
         reflect_active = band.reflect_may_be_nonzero()
-        ellip_mapped = band.ellipsoidal.value[self.obs_band_map_tensor]
+        # Manifest-gated (see Band/Planet.register_parameters): with no
+        # fitellip / beam flag anywhere the parameters do not exist, and
+        # the terms are skipped entirely.
+        ellip_active = band.ellipsoidal_may_be_nonzero()
+        ellip_mapped = (
+            band.ellipsoidal.value[self.obs_band_map_tensor]
+            if ellip_active
+            else None
+        )
+        beam_active = "beam" in planets.manifest
 
         # 3b. SED deblending (EXOFASTv2 parity): with more than one
         # modeled star, only the host contributes the transit, so the
@@ -636,24 +649,35 @@ class Transit(Instrument):
             # on-orbit and are deliberately NOT exposure-smeared -- they are
             # evaluated at the flat per-observation time, unlike thermal/
             # reflect above.
-            beam_p = planets.beam.value[p_idx]  # scalar, ppm
-            beam_term = physics.calc_beam_term(
-                time, tc_this, period_this, beam_p
-            )
-            if dil_obs_flat is not None:
-                beam_term = beam_term * dil_obs_flat
-            lc_model = lc_model + beam_term
+            if beam_active:
+                beam_p = planets.beam.value[p_idx]  # scalar, ppm
+                beam_term = physics.calc_beam_term(
+                    time, tc_this, period_this, beam_p
+                )
+                if dil_obs_flat is not None:
+                    beam_term = beam_term * dil_obs_flat
+                lc_model = lc_model + beam_term
 
-            # Ellipsoidal is multiplicative (exofast_tran.pro:143), applied
-            # to the running lc_model (baseline + this planet's transit/
+            # Ellipsoidal is multiplicative (exofast_tran.pro), applied to
+            # the running lc_model (baseline + this planet's transit/
             # eclipse/thermal/reflect/beam so far). With >1 planet sharing
             # a band, each planet's factor multiplies in turn -- order-
-            # dependent for N>1, exact for the single-planet case this PR
-            # targets.
-            ellip_factor = physics.calc_ellipsoidal_factor(
-                time, tc_this, period_this, ellip_mapped
-            )
-            lc_model = lc_model * ellip_factor
+            # dependent for N>1, exact for the single-planet case this
+            # targets.  Its DEVIATION is diluted like every other term:
+            # exofast_tran.pro applies the dilution to (modelflux - 1)
+            # after the ellipsoidal factor multiplies in, so ellipsoidal
+            # IS diluted there (review of PR #53; the difference is the
+            # second-order (1-d)^2 vs (1-d) cross term, ~ppm x depth).
+            if ellip_mapped is not None:
+                ellip_dev = (
+                    physics.calc_ellipsoidal_factor(
+                        time, tc_this, period_this, ellip_mapped
+                    )
+                    - 1.0
+                )
+                if dil_obs_flat is not None:
+                    ellip_dev = ellip_dev * dil_obs_flat
+                lc_model = lc_model * (1.0 + ellip_dev)
 
         if self.total_detrend_cols > 0:
             detrend = pm.Data("transit_detrend", self.detrend_matrix)
@@ -673,8 +697,55 @@ class Transit(Instrument):
         # likelihood around this same transit model.
         sigma = self.total_sigma(err)
         self.add_observation_likelihood(
-            "transit_likelihood", mu=lc_model, sigma=sigma, observed=flux
+            "transit_likelihood",
+            mu=lc_model,
+            sigma=sigma,
+            observed=flux,
+            system=system,
         )
+
+        # Modeling-draft prose for the transit model itself (the shared
+        # data/noise sentences came from the dispatcher above).
+        terms = []
+        if thermal_active:
+            terms.append("constant thermal emission")
+        if reflect_active:
+            terms.append("reflected light")
+        if ellip_active:
+            terms.append("ellipsoidal variation")
+        if beam_active:
+            terms.append(r"Doppler beaming \citep{Faigler:2011}")
+        if terms:
+            from exozippy.outputs.prose import join_names
+
+            get_collector(system).add(
+                "The transit model includes phase-curve terms for "
+                + join_names(terms)
+                + ", following EXOFASTv2's parameterization "
+                + r"\citep{Eastman:2019}.",
+                section="planetary",
+                key=f"{self.prefix}.phase_curve",
+                rank=22,
+            )
+        get_collector(system).add(
+            r"We modeled each transit with the analytic quadratic "
+            r"limb-darkening light curve of \citet{Agol:2020}, as "
+            r"implemented in exoplanet-core \citep{ForemanMackey:2021}.",
+            section="planetary",
+            key=f"{self.prefix}.lc_model",
+            rank=20,
+        )
+        get_collector(system).add_software("exoplanet-core")
+        if getattr(system, "band", None) is not None and (
+            system.band.ld_laws and system.band.ld_laws[0] == "quadratic"
+        ):
+            get_collector(system).add(
+                r"Limb-darkening coefficients were sampled in the "
+                r"$(q_1, q_2)$ parameterization of \citet{Kipping:2013}.",
+                section="planetary",
+                key=f"{self.prefix}.ld_param",
+                rank=21,
+            )
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions for generating plotting lightcurves."""
@@ -726,9 +797,10 @@ class Transit(Instrument):
             reflect_inst = None
             if band.reflect_may_be_nonzero():
                 reflect_inst = band.reflect.value[band_idx]  # scalar ppm
-            ellip_inst = band.ellipsoidal.value[
-                band_idx
-            ]  # scalar, 0 unless fitellip
+            ellip_inst = None
+            if band.ellipsoidal_may_be_nonzero():
+                ellip_inst = band.ellipsoidal.value[band_idx]  # scalar ppm
+            beam_active = "beam" in planets.manifest
             baseline_inst = self.baseline.value[inst_idx]  # scalar
 
             decrement_matrix_list = []
@@ -774,13 +846,16 @@ class Transit(Instrument):
                 # Beaming is diluted like thermal/reflect above (EXOFASTv2
                 # parity: exofast_chi2v2.pro:1517/1556, exofast_tran.pro:157
                 # -- see build_likelihood). Not gated by planetvisible --
-                # same placement as build_likelihood.
-                beam_p = planets.beam.value[p_idx]
-                beam_term = physics.calc_beam_term(
-                    t_input, tc_this, period_this, beam_p
-                )
-                if dil_node is not None:
-                    beam_term = beam_term * dil_node[inst_idx]
+                # same placement as build_likelihood.  Manifest-gated: the
+                # parameter only exists when a beam flag is set.
+                beam_term = pt.zeros_like(b_p)
+                if beam_active:
+                    beam_p = planets.beam.value[p_idx]
+                    beam_term = physics.calc_beam_term(
+                        t_input, tc_this, period_this, beam_p
+                    )
+                    if dil_node is not None:
+                        beam_term = beam_term * dil_node[inst_idx]
 
                 # Ellipsoidal is multiplicative, applied to the running
                 # total *including baseline* (exofast_tran.pro:143). Since
@@ -788,19 +863,29 @@ class Transit(Instrument):
                 # (baseline is added back separately by callers -- see
                 # _eval_unphased_lc), fold baseline in locally so the
                 # multiplication is exact, then subtract it back out:
-                #   decrement = (baseline + additive)*ellip_factor - baseline
-                # Reduces to the plain additive decrement when ellip_factor
-                # == 1 (fitellip off). Only exact for a single planet per
-                # band; with >1 planet sharing a band, each gets its own
-                # fold-in, same simplification noted in build_likelihood.
-                ellip_factor = physics.calc_ellipsoidal_factor(
-                    t_input, tc_this, period_this, ellip_inst
-                )
+                #   decrement += (baseline + decrement) * (factor - 1)
+                # (algebraically (baseline+dec)*factor - baseline).  Only
+                # exact for a single planet per band; with >1 planet
+                # sharing a band, each gets its own fold-in, same
+                # simplification noted in build_likelihood.  The
+                # ellipsoidal DEVIATION is diluted like every other term,
+                # matching build_likelihood (and exofast_tran.pro, which
+                # dilutes (modelflux - 1) after the factor multiplies in).
                 planet_decrement = -blocked + additive_term + beam_term
-                decrement_matrix_list.append(
-                    (baseline_inst + planet_decrement) * ellip_factor
-                    - baseline_inst
-                )
+                if ellip_inst is not None:
+                    ellip_dev = (
+                        physics.calc_ellipsoidal_factor(
+                            t_input, tc_this, period_this, ellip_inst
+                        )
+                        - 1.0
+                    )
+                    if dil_node is not None:
+                        ellip_dev = ellip_dev * dil_node[inst_idx]
+                    planet_decrement = (
+                        planet_decrement
+                        + (baseline_inst + planet_decrement) * ellip_dev
+                    )
+                decrement_matrix_list.append(planet_decrement)
 
             lc_matrix = pt.stack(
                 decrement_matrix_list, axis=1
@@ -1067,6 +1152,11 @@ class Transit(Instrument):
                         "instrument": self.names[i],
                         "file_tag": f"LC_unphased_{self.names[i]}",
                         "figsize": (12, 5),
+                        "caption": (
+                            "Transit photometry from "
+                            + latex_escape(self.names[i])
+                            + " with the best-fit model (red)."
+                        ),
                     },
                 )
             )
@@ -1118,6 +1208,13 @@ class Transit(Instrument):
                         "file_tag": (f"LC_phased_{self.names[i]}_{pname}"),
                         "figsize": (10, 6),
                         "hline_y": 0.0,
+                        "caption": (
+                            "Phase-folded transit of planet "
+                            + latex_escape(pname)
+                            + " in "
+                            + latex_escape(self.names[i])
+                            + ", baseline and other planets removed."
+                        ),
                         # The phased DATA re-folds with tc/P and its cleaning
                         # subtracts the baseline, other planets and any GP --
                         # all point-dependent, so live evals must re-ship it.

@@ -12,6 +12,7 @@ from exozippy.constants import (
     HYDROGEN_BURNING_LIMIT,
     MSUN_TO_MEARTH,
 )
+from exozippy.outputs.prose import get_collector
 
 from . import physics
 
@@ -809,4 +810,13 @@ class Star(Component):
             latex=r"$p(d) \propto d^{2}$",
             text="p(d) propto d^2",
             supersedes_bounds=True,
+        )
+        get_collector(system).add(
+            r"We applied a constant-space-density (volume) prior, "
+            r"$p(d) \propto d^{2}$, to each modeled star's distance, the "
+            r"appropriate weighting for a poorly measured parallax "
+            r"\citep{Lutz:1973}.",
+            section="priors",
+            key=f"{self.prefix}.volume_prior",
+            rank=15,
         )

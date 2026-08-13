@@ -15,6 +15,7 @@ from exozippy.compat import patch_mulensmodel_method_order
 from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
+from exozippy.outputs.prose import get_collector
 
 from . import mmexofast_support
 from .physics import (
@@ -70,6 +71,7 @@ class MulensInstrument(Instrument):
 
     # Multiplicative per-instrument error scale (not additive jitter).
     noise_model = "err_scale"
+    prose_noun = "microlensing photometry"
 
     # Deps of the derived `zeropoint` that are injected as context nodes by
     # add_parameter below rather than resolved as manifest parameters, so
@@ -487,6 +489,16 @@ class MulensInstrument(Instrument):
         )
         mmexofast_support.push_errfac_hints(
             data, self.files, self.prefix, self.config_manager
+        )
+        # Start values move no posterior, but the error renormalization and
+        # any bad-data mask do -- so the draft must say where they came from.
+        get_collector(system).add(
+            "Starting values, per-instrument error renormalization "
+            "factors, and bad-data masks for the microlensing light "
+            "curves were derived with MMEXOFAST (in preparation).",
+            section="microlensing",
+            key=f"{self.prefix}.mmexofast",
+            rank=30,
         )
 
     def _resolve_source_radec_deg(self, system):
@@ -1182,11 +1194,58 @@ class MulensInstrument(Instrument):
         # likelihood around this same magnification model.
         sigma = self.total_sigma(obs_err)
 
+        # Modeling-draft prose for the magnification model and the flux-space
+        # likelihood, declared next to the model they describe.
+        lens = system.lens
+        if lens.uses_op(0):
+            if lens.backend == "mulensmodel":
+                mag_cite = (
+                    r"computed with MulensModel \citep{Poleski:2019}, which "
+                    r"wraps VBBinaryLensing \citep{Bozza:2010, Bozza:2018}"
+                )
+                get_collector(system).add_software("MulensModel")
+                get_collector(system).add_software("VBBinaryLensing")
+            else:
+                mag_cite = (
+                    r"computed with VBMicrolensing "
+                    r"\citep{Bozza:2010, Bozza:2018, Bozza:2025}"
+                )
+                get_collector(system).add_software("VBMicrolensing")
+        else:
+            mag_cite = r"the analytic point-lens form \citep{Paczynski:1986}"
+        get_collector(system).add(
+            f"The microlensing magnification was {mag_cite}.",
+            section="microlensing",
+            key=f"{self.prefix}.magnification",
+            rank=10,
+        )
+        get_collector(system).add(
+            r"The microlens parallax is parameterized in the geocentric "
+            r"frame of \citet{Gould:2004}, with observer positions "
+            r"expressed as geocentric deviations following "
+            r"\citet{Skowron:2011}; all sign conventions match "
+            r"MulensModel \citep{Poleski:2019}.",
+            section="microlensing",
+            key=f"{self.prefix}.parallax_convention",
+            rank=15,
+        )
+        get_collector(system).add(
+            "The microlensing likelihood is Gaussian in flux (never in "
+            "magnitudes): the model is linear in the per-instrument source "
+            "and blend fluxes, photon-counting noise is approximately "
+            "Gaussian in flux, and non-positive difference-imaging fluxes "
+            "are retained as-is.",
+            section="microlensing",
+            key=f"{self.prefix}.flux_likelihood",
+            rank=20,
+        )
+
         self.add_observation_likelihood(
             f"{self.prefix}.model",
             mu=model_flux,
             sigma=sigma,
             observed=obs_flux,
+            system=system,
         )
 
         # 5. SED-based source flux constraint (issue #18)
@@ -1637,6 +1696,15 @@ class MulensInstrument(Instrument):
                         "y_inverted": True,
                         "file_tag": "mulens",
                         "figsize": (12, 6),
+                        # Same caption as the model-bearing spec below: the
+                        # modes-CLI paper rebuild collects figures from the
+                        # data-only specs.
+                        "caption": (
+                            "Microlensing light curve. All instruments are "
+                            "aligned onto the reference instrument's flux "
+                            "system and shown in magnitudes; non-positive "
+                            "aligned fluxes are not drawn."
+                        ),
                     },
                 )
             ]
@@ -1750,6 +1818,12 @@ class MulensInstrument(Instrument):
             # with the point's fitted f_source/f_blend (values AND asymmetric
             # errors), so live evals must re-ship them along with the models.
             "dynamic_data": True,
+            "caption": (
+                "Microlensing light curve with the best-fit model (red). "
+                "All instruments are aligned onto the reference "
+                "instrument's flux system and shown in magnitudes; "
+                "non-positive aligned fluxes are not drawn."
+            ),
         }
         specs = [
             PlotSpec(
@@ -1777,6 +1851,10 @@ class MulensInstrument(Instrument):
                         meta,
                         file_tag="mulens_zoom",
                         x_range=[t0 - 3.0 * tE, t0 + 3.0 * tE],
+                        caption=(
+                            "As the previous figure, zoomed to "
+                            r"$t_0 \pm 3\,t_E$."
+                        ),
                     ),
                 )
             )

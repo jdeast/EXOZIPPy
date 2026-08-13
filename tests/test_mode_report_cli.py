@@ -4,7 +4,7 @@ pipeline it uses (outputs/report_pipeline.py).
 
 exozippy-modes reprocesses a previously saved trace (<prefix>_trace.nc)
 through outputs.modes.identify_modes and System.distribute_posterior without
-re-sampling, rewriting <prefix>_modes.txt/_definitions.tex/_template.tex/
+re-sampling, rewriting <prefix>_modes.txt/_definitions.tex/_table.tex/
 _results.csv and persisting the mode labels back into the trace file. It
 must use the exact same identify_modes -> distribute_posterior -> LaTeX/CSV
 pipeline that run.run_fit() uses on a live fit (outputs.report_pipeline.
@@ -131,7 +131,7 @@ def test_cli_reproduces_pipeline_outputs(tmp_path):
     for suffix in (
         "_modes.txt",
         "_definitions.tex",
-        "_template.tex",
+        "_table.tex",
         "_results.csv",
     ):
         p = tmp_path / (prefix.name + suffix)
@@ -322,7 +322,7 @@ def test_unimodal_fit_with_rejected_seeds_writes_a_rectangular_csv(tmp_path):
 def test_underscored_prefix_produces_a_compilable_caption(tmp_path):
     """
     Given an output prefix containing an underscore,
-    When the reporting pipeline writes <prefix>_template.tex,
+    When the reporting pipeline writes <prefix>_table.tex,
     Then the caption escapes it -- no bare underscore survives in the
       caption text, and (where pdflatex is installed) that caption text
       compiles.
@@ -332,7 +332,7 @@ def test_underscored_prefix_produces_a_compilable_caption(tmp_path):
     """
     # ARRANGE / ACT
     prefix = _pipeline_outputs(tmp_path, "KMT-2019-BLG-1806_nt8long")
-    tmpl = (prefix.parent / (prefix.name + "_template.tex")).read_text()
+    tmpl = (prefix.parent / (prefix.name + "_table.tex")).read_text()
 
     # ASSERT
     caption = next(

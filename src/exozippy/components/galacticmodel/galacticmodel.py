@@ -370,6 +370,68 @@ class GalacticModel(Component):
                 supersedes_bounds=True,
             )
 
+    def _add_mass_prior_prose(self, system, stars, ffp_mask):
+        """Modeling-draft sentences for the imf_prior potential.
+
+        Mirrors ``_declare_mass_prior``'s per-star split: the stellar IMF
+        sentence names its stars only when some star opted onto the FFP
+        mass function, and each FFP star gets the Sumi slope actually
+        applied.  Declared next to the potential (declare-at-site rule).
+        """
+        from ...outputs.prose import get_collector, join_names
+        from ...outputs.texutils import latex_escape
+
+        prose = get_collector(system)
+
+        if getattr(stars, "logmass", None) is None:
+            return
+        # Read the star inventory defensively: unit tests drive this
+        # potential through minimal mock star components.
+        star_names = [str(nm) for nm in (getattr(stars, "names", None) or [])]
+        n = max(
+            int(getattr(stars, "n_elements", len(star_names))),
+            len(star_names),
+            int(ffp_mask.size),
+        )
+        if len(star_names) < n:
+            star_names += [str(i) for i in range(len(star_names), n)]
+        mask = ffp_mask if ffp_mask.size else np.zeros(n, dtype=bool)
+        imf_cite = (
+            r"\citet{Salpeter:1955} power-law"
+            if self.imf == "salpeter"
+            else r"\citet{Chabrier:2003} lognormal"
+        )
+        imf_names = [nm for nm, f in zip(star_names, mask) if not f]
+        if imf_names:
+            target = (
+                "each modeled star"
+                if len(imf_names) == n
+                else (
+                    ("star " if len(imf_names) == 1 else "stars ")
+                    + join_names(latex_escape(nm) for nm in imf_names)
+                )
+            )
+            prose.add(
+                f"We applied the {imf_cite} initial mass function as a "
+                f"prior on the mass of {target}.",
+                section="priors",
+                key=f"{self.prefix}.imf",
+                rank=10,
+            )
+        alphas = np.atleast_1d(getattr(stars, "ffp_alpha", []))
+        for i in np.nonzero(mask)[0]:
+            alpha = float(alphas[i]) if i < alphas.size else float("nan")
+            prose.add(
+                f"For {latex_escape(star_names[i])}, we instead adopted "
+                r"the free-floating-planet mass function of "
+                r"\citet{Sumi:2023}, "
+                r"$dN/d\log M \propto M^{-\alpha}$ with "
+                rf"$\alpha = {alpha:g}$.",
+                section="priors",
+                key=f"{self.prefix}.ffp.{i}",
+                rank=11,
+            )
+
     def _declare_kinematic_prior(self, stars):
         """Describe the kinematic_prior potential.
 
@@ -395,6 +457,7 @@ class GalacticModel(Component):
                     latex="Galactic kinematic model",
                     supersedes_bounds=True,
                 )
+
     def _warn_if_anchor_coords_sampled(self, stars, ra_rad, dec_rad):
         """Warn once if the anchor star's ra/dec are SAMPLED, since the
         line-of-sight basis below is built from their start values and frozen.
@@ -566,6 +629,7 @@ class GalacticModel(Component):
         pm.Potential(f"{self.prefix}.imf_prior", pt.sum(imf_logp))
 
         self._declare_mass_prior(stars, ffp_mask)
+        self._add_mass_prior_prose(system, stars, ffp_mask)
         ######
 
         # even though non-physical values will be rejected
@@ -719,6 +783,17 @@ class GalacticModel(Component):
         pm.Potential(f"{self.prefix}.kinematic_prior", kinematic_penalty)
 
         self._declare_kinematic_prior(stars)
+        from ...outputs.prose import get_collector
+
+        get_collector(system).add(
+            r"We imposed Galactic density and kinematic priors on the "
+            r"distance, proper motion, and radial velocity of each modeled "
+            r"star, following a simplified version of the parametric "
+            r"Galactic model of \citet{Koshimoto:2021}.",
+            section="priors",
+            key=f"{self.prefix}.kinematic",
+            rank=20,
+        )
 
         # check parameters for debugging
         # pm.Deterministic(f"{self.prefix}.gal_x", x)

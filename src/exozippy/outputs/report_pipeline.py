@@ -48,7 +48,7 @@ def build_mode_reports(
     """Identify posterior modes, distribute the posterior, write tables.
 
     Writes ``<prefix>_modes.txt``, ``<prefix>_definitions.tex``,
-    ``<prefix>_template.tex``, and ``<prefix>_results.csv``.
+    ``<prefix>_table.tex``, and ``<prefix>_results.csv``.
 
     Mode identification is wrapped in a broad try/except: a broken mode
     pass must never take down the rest of a fit's outputs, so a failure
@@ -360,7 +360,7 @@ def build_mode_reports(
     build_latex_output(
         system,
         var_filename=str(prefix) + "_definitions.tex",
-        template_filename=str(prefix) + "_template.tex",
+        table_filename=str(prefix) + "_table.tex",
         caption=r"Median and 68\% Confidence intervals for "
         + latex_escape(prefix.stem),
         tablecomments=table_comments,

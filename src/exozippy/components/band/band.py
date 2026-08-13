@@ -301,14 +301,15 @@ class Band(Component):
 
         return consumers
 
-    def _pin_unread_limb_darkening(self, system, ld_params):
-        """Pin the LD parameters of every band nothing in the topology reads.
+    def _pin_unread_limb_darkening(self, system, ld_params, consumers=None):
+        """Pin the LD parameters of the bands nothing in the topology reads.
 
-        A `band:` block declares filter identity, which a point-source
-        microlensing fit needs and which says nothing about limb darkening.
-        Before this, adding one to such a fit also added two free RVs that no
-        likelihood term touched -- so `finite_source: true/false` was a
-        one-line config edit plus remembering to add or remove two pins.
+        Only reached when SOME band is consumed: with no consumer at all
+        the LD parameters are omitted from the manifest entirely
+        (register_parameters), so a filter-identity-only band contributes
+        no table rows.  This pin covers the mixed case -- the manifest is
+        per parameter, so one consumed band forces the whole vector to
+        exist, and the unread elements are fixed here.
 
         The pin goes through the manifest "overrides" channel, which layers
         UNDER the params file (`sigma` takes apply_value's last-writer-wins
@@ -316,7 +317,8 @@ class Band(Component):
         so an explicit `band.<name>.q1: {sigma: 0.1}` still frees it -- someone
         may deliberately want a free LD to put a prior on.
         """
-        consumers = self._ld_consumer_indices(system)
+        if consumers is None:
+            consumers = self._ld_consumer_indices(system)
         unread = [i for i in range(self.n_elements) if i not in consumers]
         if not unread:
             return
@@ -344,42 +346,70 @@ class Band(Component):
             )
 
     def register_parameters(self, system):
-        # Uniform by construction (_parse_ld_laws raises on a mix), so the
-        # first element's law is the system's law.
-        if self.ld_laws and self.ld_laws[0] == "linear":
-            self.manifest = {
-                "u1": None,
-            }
-            ld_params = ["u1"]
+        self.manifest = {}
+
+        # Limb darkening enters the manifest ONLY when something in the
+        # topology reads it (a transit, a finite-source microlensing light
+        # curve, or an rvinstrument rm: block).  A band on a point-source
+        # microlensing fit declares filter identity and nothing else --
+        # such a fit used to carry pinned-Fixed LD rows in every table.
+        # With SOME bands consumed, the whole vector must exist (the
+        # manifest is per parameter); the unread elements are pinned by
+        # _pin_unread_limb_darkening.
+        consumers = self._ld_consumer_indices(system)
+        if consumers:
+            # Uniform by construction (_parse_ld_laws raises on a mix), so
+            # the first element's law is the system's law.
+            if self.ld_laws and self.ld_laws[0] == "linear":
+                self.manifest["u1"] = None
+                ld_params = ["u1"]
+            else:
+                self.manifest.update(
+                    {
+                        "q1": None,
+                        "q2": None,
+                        "u1": "default",
+                        "u2": "default",
+                    }
+                )
+                # Pin the SAMPLED coordinates; u1/u2 are Kipping-derived
+                # from them and a sigma on a derived parameter is a silent
+                # no-op.
+                ld_params = ["q1", "q2"]
+            self._pin_unread_limb_darkening(
+                system, ld_params, consumers=consumers
+            )
         else:
-            self.manifest = {
-                "q1": None,
-                "q2": None,
-                "u1": "default",
-                "u2": "default",
-            }
-            # Pin the SAMPLED coordinates; u1/u2 are Kipping-derived from them
-            # and a sigma on a derived parameter is a silent no-op.
-            ld_params = ["q1", "q2"]
+            logger.info(
+                f"[{self.prefix}] no limb-darkening parameters: nothing in "
+                f"this topology reads any band's limb darkening (only a "
+                f"transit, a finite-source microlensing light curve, or an "
+                f"rvinstrument 'rm:' block does)."
+            )
 
-        self._pin_unread_limb_darkening(system, ld_params)
-
-        # thermal/reflect/ellipsoidal (all ppm) are opt-in per band via
-        # fitthermal/fitreflect/fitellip. Bands that don't opt in are pinned
-        # at sigma=0 (same "overrides" pattern Instrument._register_gp uses
-        # for terms an element didn't ask for), so the parameter's value is
-        # exactly 0 and the transit model is unchanged unless a band
-        # explicitly asks for it.
-        self.manifest["thermal"] = self._pinned_manifest_entry(self.fitthermal)
-        self.manifest["reflect"] = self._pinned_manifest_entry(self.fitreflect)
-        self.manifest["ellipsoidal"] = self._pinned_manifest_entry(
-            self.fitellip
-        )
+        # thermal/reflect/ellipsoidal (all ppm, opt-in per band via
+        # fitthermal/fitreflect/fitellip) enter the manifest ONLY when some
+        # band opts in; in a mixed set the opted-out bands are pinned at
+        # sigma=0 (the "overrides" pattern Instrument._register_gp uses),
+        # so their value is exactly 0 and the transit model is unchanged.
+        # With no opt-in anywhere the parameter does not exist at all --
+        # no table row, and <x>_may_be_nonzero() is False by construction.
+        # A params-file entry on band.<name>.<x> therefore requires the
+        # fit<x> flag on that band (the entry alone used to free it).
+        for name, flags in (
+            ("thermal", self.fitthermal),
+            ("reflect", self.fitreflect),
+            ("ellipsoidal", self.fitellip),
+        ):
+            if any(flags):
+                self.manifest[name] = self._pinned_manifest_entry(flags)
 
     def _pinned_manifest_entry(self, opt_in_flags):
         """A manifest entry that's free where opt_in_flags is True, and
         pinned to sigma=0 (fixed at its default initval, 0) elsewhere.
-        Shared by thermal/reflect/ellipsoidal's identical opt-in gating.
+        Shared by thermal/reflect/ellipsoidal's identical opt-in gating
+        (only reached when some flag is True -- an all-False parameter is
+        omitted from the manifest entirely).
         """
         off = [i for i in range(self.n_elements) if not opt_in_flags[i]]
         entry = {}
@@ -389,21 +419,26 @@ class Band(Component):
             entry["overrides"] = {"sigma": pin.tolist()}
         return entry
 
-    def _may_be_nonzero(self, param):
-        """True unless every element of `param` is pinned (sigma == 0) at
-        exactly 0 -- the RESOLVED parameter state, after user params.
+    def _may_be_nonzero(self, name):
+        """True unless every element of parameter ``name`` is pinned
+        (sigma == 0) at exactly 0 -- the RESOLVED state, after user params.
 
         Consumers (transit) use this to skip building an expensive graph
         (thermal: a second quad_solution_vector per planet; reflect: a
         planetvisible evaluation -- both as expensive as the transit
         itself) entirely when it can only ever evaluate to zero.
-        Deliberately not `any(self.fit<x>)`: the manifest "overrides" pin
-        is layered UNDER user params, so params.yaml can free the
-        parameter (sigma > 0) or fix it at a nonzero value without the
-        fit<x> flag, and the gate must stay open for those. Anything
+        With no fit<x> anywhere the parameter is not even in the manifest
+        (register_parameters) and this is False outright; with a mixed set
+        it is deliberately not `any(self.fit<x>)`: the manifest
+        "overrides" pin is layered UNDER user params, so params.yaml can
+        free an opted-out band's element (sigma > 0) or fix it at a
+        nonzero value, and the gate must stay open for those. Anything
         non-numeric (a linked expression, no sigma at all -> uniform
         prior) counts as active.
         """
+        if name not in self.manifest:
+            return False
+        param = getattr(self, name)
 
         def _vec(value, fill):
             arr = np.atleast_1d(value if value is not None else fill)
@@ -426,12 +461,17 @@ class Band(Component):
     def thermal_may_be_nonzero(self):
         """True unless every band's thermal is pinned at exactly 0 -- see
         _may_be_nonzero."""
-        return self._may_be_nonzero(self.thermal)
+        return self._may_be_nonzero("thermal")
 
     def reflect_may_be_nonzero(self):
         """True unless every band's reflect is pinned at exactly 0 -- see
         _may_be_nonzero."""
-        return self._may_be_nonzero(self.reflect)
+        return self._may_be_nonzero("reflect")
+
+    def ellipsoidal_may_be_nonzero(self):
+        """True unless every band's ellipsoidal is pinned at exactly 0 --
+        see _may_be_nonzero."""
+        return self._may_be_nonzero("ellipsoidal")
 
     def build_likelihood(self, model, system):
         pass

@@ -68,7 +68,7 @@ orbit:
       default:
         func_name: "calc_m_total"
         deps: ["m_primary", "m_companion"]
-  arsun:
+  a:
     unit: "AU"
     internal_unit: "solRad"
     latex: "a"
@@ -81,11 +81,11 @@ orbit:
     unit: "m/s"
     internal_unit: "solRad/d"
     latex: "K"
-    description: "RV Semi-amplitude (primary reflex)"
+    description: "RV Semi-amplitude"
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["m_companion", "m_total", "ecc", "arsun", "sini", "period"]
+        deps: ["m_companion", "m_total", "ecc", "a", "sini", "period"]
 
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
   secosw:

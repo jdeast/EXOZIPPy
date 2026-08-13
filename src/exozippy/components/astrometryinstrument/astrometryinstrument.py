@@ -126,6 +126,7 @@ def wrap_ra_diff_pt(delta_rad):
 
 
 class AstrometryInstrument(Instrument):
+    prose_noun = "astrometry"
     # No per-file Gaussian process here.  Unlike the other instruments, an
     # astrometric dataset carries two observables per epoch -- (dE, dN) in
     # 'abs' mode, (sep, PA) in 'rel' mode -- with different units, so a single
@@ -581,17 +582,17 @@ class AstrometryInstrument(Instrument):
         prim = [o for o, role in members if role == "primary"]
         if not prim:
             return None, None
-        if not hasattr(orbits, "arsun"):
+        if not hasattr(orbits, "a"):
             raise ValueError(
                 f"[{self.prefix}] astrometry needs the orbit scale "
-                f"parameters (arsun/masses), but the orbit component's "
+                f"parameters (a/masses), but the orbit component's "
                 f"body groups did not resolve against the active system."
             )
         omap = np.asarray(prim, dtype=int)
         mass_frac = orbits.m_companion.value[omap] / orbits.m_total.value[omap]
         plx = system.star.parallax.value[star_idx]
         return (
-            orbits.arsun.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
+            orbits.a.value[omap] * RSUN_AU * (mass_frac - beta) * plx,
             omap,
         )
 
@@ -669,15 +670,15 @@ class AstrometryInstrument(Instrument):
         """
         orbits = system.orbit
         o = self.rel_orbit[i]
-        if not hasattr(orbits, "arsun"):
+        if not hasattr(orbits, "a"):
             raise ValueError(
                 f"[{self.prefix}.{self.names[i]}] relative astrometry "
-                f"needs the orbit scale parameters (arsun/masses), but the "
+                f"needs the orbit scale parameters (a/masses), but the "
                 f"orbit component's body groups did not resolve against "
                 f"the active system."
             )
         plx = system.star.parallax.value[self.star_map[i]]
-        a_rel = orbits.arsun.value[o] * RSUN_AU * plx
+        a_rel = orbits.a.value[o] * RSUN_AU * plx
         dE_rel, dN_rel = orbits.get_sky_position(
             t_node, pt.stack([a_rel]), np.array([o]), relative=True
         )
@@ -696,13 +697,7 @@ class AstrometryInstrument(Instrument):
                 if beta is None:
                     continue
                 mfrac = orbits.m_companion.value[o2] / orbits.m_total.value[o2]
-                amp = (
-                    orbits.arsun.value[o2]
-                    * RSUN_AU
-                    * plx
-                    * (beta - mfrac)
-                    * sgn
-                )
+                amp = orbits.a.value[o2] * RSUN_AU * plx * (beta - mfrac) * sgn
                 dE2, dN2 = orbits.get_sky_position(
                     t_node, pt.stack([amp]), np.array([o2]), relative=True
                 )
@@ -747,6 +742,12 @@ class AstrometryInstrument(Instrument):
             raise ValueError(
                 f"[{self.prefix}] astrometry requires a star component."
             )
+        # Astrometry never calls the shared add_observation_likelihood
+        # dispatcher (two observables per epoch), so it declares the shared
+        # data/noise prose itself.  gp_terms/likelihood_kinds are absent
+        # here by construction (supports_gp = False), which the helper
+        # tolerates.
+        self._add_observation_prose(system)
         if any(m == "rel" for m in self.modes) and not hasattr(
             system, "orbit"
         ):
@@ -844,7 +845,7 @@ class AstrometryInstrument(Instrument):
         and plot_data() render the same charts either way; only the
         orbit-dependent pieces are skipped.
         """
-        has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "arsun")
+        has_orbit = hasattr(system, "orbit") and hasattr(system.orbit, "a")
 
         param_symbols = [p.value for p in system.plot_params]
         t_input = pt.vector("t_input")
