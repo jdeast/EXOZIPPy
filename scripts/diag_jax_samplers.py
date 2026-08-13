@@ -7,11 +7,18 @@ have no differentiation rule, which is exactly how ``nuts_sampler="numpyro"``
 died at HMC init on every transit model through exoplanet-core 0.4.0rc1
 (exoplanet-dev/exoplanet-core#144).  This script is that rule, automated.
 
-It exists because the answer is now PLATFORM DEPENDENT.  jaxlib's last
-macOS x86_64 wheel is 0.4.38 and there is no sdist, so an Intel Mac cannot
-have the jax version the rest of the tree is pinned to; the newest numpyro
-and blackjax that accept jax 0.4.38 are 0.19.0 and 1.3.  Whether that older
-stack still drives pymc 6 is an empirical question, and this is what asks it.
+It exists because the answer is PLATFORM DEPENDENT.  jaxlib's last macOS
+x86_64 wheel is 0.4.38 and there is no sdist, so an Intel Mac cannot have
+the jax the rest of the tree is pinned to -- and measurement (CI run
+31742944005) showed that installing 0.4.38 there is worse than installing
+none: exoplanet-core reaches ``jax.ffi``, public only since jax 0.5.0, and
+raises AttributeError past its own ImportError guard, so ``import exozippy``
+fails outright.  Intel Mac therefore ships without jax and both samplers
+report "not installed" here, which is the correct answer rather than a gap
+in the probe.
+
+The probe stays useful everywhere else: it is what catches an upstream
+release quietly removing a differentiation rule.
 
 Three probe models, cheapest first, each a strictly larger slice of the
 stack, so a failure localizes itself:
@@ -22,7 +29,7 @@ stack, so a failure localizes itself:
                is broken and the two below say nothing new.
     kepler     exoplanet_core.pymc.ops.kepler.  First of the two
                exoplanet-core Ops the tree uses, and the first thing that
-               needs the JAX FFI (jax.ffi.ffi_call, public since jax 0.4.35)
+               needs the JAX FFI (jax.ffi.ffi_call, public since jax 0.5.0)
                to have both a conversion AND a differentiation rule.
     limbdark   exoplanet_core.pymc.ops.quad_solution_vector.  The Op from
                issue #144, the one whose missing JAX grad rule is why

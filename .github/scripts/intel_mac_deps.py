@@ -42,13 +42,35 @@ from pathlib import Path
 # Every entry needs a reason, because each one is a ceiling imposed by wheel
 # availability rather than a compatibility bound we discovered:
 OVERRIDES = {
-    # Last macOS x86_64 wheels; no sdist exists, so this is a hard ceiling.
-    "jax": "jax==0.4.38",
-    "jaxlib": "jaxlib==0.4.38",
-    # numpyro 0.20.0 raised its floor to jax>=0.7.0.
-    "numpyro": "numpyro==0.19.0",
-    # blackjax 1.4 raised its floor to jax>=0.9.0.
-    "blackjax": "blackjax==1.3",
+    # DROPPED, not downgraded -- and the difference is the whole finding of
+    # CI run 31742944005.
+    #
+    # The obvious move is jax==0.4.38, the last version with a macOS x86_64
+    # wheel (there is no sdist, so that is a hard ceiling). It does not
+    # work, and it fails WORSE than having no jax at all:
+    #
+    #   exoplanet_core/pymc/__init__.py does
+    #       try:    from exoplanet_core.pymc import jax_support
+    #       except ImportError: pass
+    #   and jax_support reaches jax.ffi.register_ffi_target at module
+    #   scope. `jax.ffi` did not become public until jax 0.5.0 -- through
+    #   0.4.38 it was jax.extend.ffi -- so on 0.4.38 that is an
+    #   AttributeError, which that guard does NOT catch. `import exozippy`
+    #   dies in components/orbit/orbit.py.
+    #
+    # With jax simply ABSENT the same guard catches a real ImportError and
+    # the package imports fine. So exoplanet-core's `jax>=0.5.0` floor is a
+    # genuine requirement rather than a conservative one, and on this
+    # platform the only coherent configuration is no jax at all.
+    #
+    # numpyro and blackjax go with it: both are pure-Python but useless
+    # without jaxlib, and the newest that even accept jax 0.4.38 are 0.19.0
+    # and 1.3 respectively. Consequence for users: nuts / ptde / nutpie
+    # work on Intel Mac, numpyro and blackjax do not.
+    "jax": None,
+    "jaxlib": None,
+    "numpyro": None,
+    "blackjax": None,
     # Last numba with macOS x86_64 wheels is 0.62.1 (llvmlite 0.45.1).
     # PyTensor 3 accepts numba>=0.58, so this stays inside its range.
     "numba": "numba>=0.62.1,<0.63",

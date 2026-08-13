@@ -443,6 +443,14 @@ def test_celerite_ops_have_a_registered_jax_implementation():
     decision above rests on. If a celerite2 upgrade drops it, this fails here
     rather than at someone's first numpyro run.
     """
+    # Skipped where jax is absent rather than assumed present: importing
+    # pytensor.link.jax.dispatch imports jax itself, so without this the
+    # test ERRORS on a platform that legitimately ships no jax at all --
+    # which Intel macOS does, since jaxlib's last x86_64 wheel (0.4.38)
+    # predates the jax.ffi that exoplanet-core needs. The claim being
+    # checked is only meaningful where the JAX samplers can run anyway.
+    pytest.importorskip("jax")
+
     from celerite2.pymc.ops import _CeleriteOp
     from pytensor.link.jax.dispatch import jax_funcify
 
