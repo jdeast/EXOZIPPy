@@ -17,6 +17,7 @@ from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.manifest import interpret_manifest_entry
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
 
@@ -211,21 +212,20 @@ class System(Component):
         The static `expressions:` block in a defaults.yaml is not the answer:
         a component may declare the same parameter free in one topology and
         derived in another (planet.mass is sampled linearly when RV or
-        astrometry measures it, and derived from log_q otherwise). This
-        mirrors `Component.add_parameter`'s rule -- a manifest value that is a
-        string, or a dict carrying an "expr_key", names an expression; a bare
-        None is a free parameter.  Valid after stage 2.
+        astrometry measures it, and derived from log_q otherwise). The rule
+        is `manifest.interpret_manifest_entry`'s, shared with
+        `Component.add_parameter` (stage 5) and
+        `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
+        is a string, or a dict carrying an "expr_key", names an expression; a
+        bare None is a free parameter.  This is the structural question only:
+        it does not check that the named block exists in the component's
+        defaults.yaml (there is no resolved config here).  Valid after
+        stage 2.
         """
         out = set()
         for comp in self.active_components.values():
             for name, raw in getattr(comp, "manifest", {}).items():
-                if isinstance(raw, str):
-                    derived = True
-                elif isinstance(raw, dict):
-                    derived = raw.get("expr_key") is not None
-                else:
-                    derived = False
-                if derived:
+                if interpret_manifest_entry(raw).names_expression:
                     out.add((comp.prefix, name))
         return out
 
