@@ -674,6 +674,22 @@ class Lens(Component):
             "pi_E_E": per_source("default"),
         }
 
+        # The geocentric-frame caveat lives in ONE shared table note (the
+        # note_marks dedup collapses identical texts to one letter) rather
+        # than in every description -- the 25-character description budget
+        # is what sets the table's column width.
+        geo_note = (
+            r"Geocentric quantities are evaluated at the fiducial time "
+            r"$t_{0,\rm par}$ \citep{Gould:2004, Skowron:2011}."
+        )
+        for name in (
+            "t_E",
+            "mu_ra_rel_geo",
+            "mu_dec_rel_geo",
+            "mu_rel_geo_mag",
+        ):
+            self.manifest[name]["table_note"] = geo_note
+
         # Companion geometry: one (s, alpha) pair per lens body beyond the
         # primary. The shape override sizes these by companion count rather
         # than by component element count.

@@ -646,18 +646,20 @@ def test_latex_tablecomments_notes_invalid_draws(tmp_path):
 
 def test_instance_names_and_descriptions_are_escaped(tmp_path):
     """
-    Given a vector parameter whose instance names and description contain
-      underscores (MEARTH_20090513; 'ratio (M_2 / M_1)'),
+    Given a vector parameter whose instance names contain underscores
+      (MEARTH_20090513) and whose description carries deliberate math,
     When build_latex_output writes the table,
-    Then the instance sub-header, the symbol subscript and the description
-      column all carry \\_ and no bare underscore survives outside math --
-      while the parameter's own latex symbol is passed through untouched.
+    Then the instance sub-header and component label are escaped (they are
+      DATA -- user-chosen names), while the description and the latex
+      symbol pass through untouched: descriptions are trusted LaTeX now
+      (same contract as table_note; the defaults.yaml audit in
+      tests/test_prose.py guards raw specials in shipped descriptions).
     """
     # ARRANGE
     p = Parameter(
         label="transit.depth",
         latex=r"\delta_{\rm t}",
-        description="Binary lens mass ratio (M_2 / M_1)",
+        description=r"mass ratio ($M_2/M_1$)",
         initval=np.array([0.01, 0.02]),
         lower=0.0,
         upper=1.0,
@@ -679,7 +681,7 @@ def test_instance_names_and_descriptions_are_escaped(tmp_path):
     # ASSERT
     text = tmpl_path.read_text()
     assert r"\textit{MEARTH\_20090513:}" in text
-    assert r"Binary lens mass ratio (M\_2 / M\_1)" in text
+    assert r"mass ratio ($M_2/M_1$)" in text  # trusted LaTeX, unescaped
     assert r"\sidehead{Transit\_Parameters:}" in text
     assert r"\delta_{\rm t}" in text  # the symbol is markup: untouched
     body = [

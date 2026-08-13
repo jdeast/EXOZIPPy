@@ -323,7 +323,14 @@ def compile_modeling_pdf(tex_path, timeout=600):
         ["pdflatex", "-interaction=nonstopmode", stem + ".tex"],
     ]
 
+    # Best-effort: a failing pass does NOT abort the rest of the cycle.
+    # In nonstopmode pdflatex still writes a complete PDF past most errors,
+    # and the later passes are what resolve \cite and \ref -- aborting on
+    # pass 1 is how the DC2018_128 draft shipped with every citation as
+    # (?) and 'Table ??' over one undefined macro.  Failures are collected
+    # and reported once, naming the log.
     log_path = cwd / (stem + ".log")
+    failures = []
     for cmd in steps:
         try:
             result = subprocess.run(
@@ -348,22 +355,27 @@ def compile_modeling_pdf(tex_path, timeout=600):
             else result.returncode != 0
         )
         if failed:
-            logger.warning(
-                "%s exited %d while building the modeling draft; see %s "
-                "-- the .tex sources are unaffected",
-                cmd[0],
-                result.returncode,
-                log_path if cmd[0] != "bibtex" else cwd / (stem + ".blg"),
-            )
-            return None
+            failures.append(f"{cmd[0]} exited {result.returncode}")
 
     pdf_path = cwd / (stem + ".pdf")
     if not pdf_path.exists():
         logger.warning(
-            "pdflatex reported success but %s is missing; see %s",
+            "the modeling draft did not produce %s (%s); see %s -- the "
+            ".tex sources are unaffected",
             pdf_path,
+            "; ".join(failures) or "no step reported failure",
             log_path,
         )
         return None
-    logger.info("Compiled %s", pdf_path)
+    if failures:
+        logger.warning(
+            "Compiled %s, but with LaTeX errors (%s); inspect %s "
+            "(and %s for the bibliography)",
+            pdf_path,
+            "; ".join(failures),
+            log_path,
+            cwd / (stem + ".blg"),
+        )
+    else:
+        logger.info("Compiled %s", pdf_path)
     return pdf_path

@@ -315,7 +315,10 @@ class PosteriorSummary:
         em = abs(self.err_minus)
         ep = abs(self.err_plus)
         if em == 0 and ep == 0:
-            return (str(self.median), "0", "0")
+            # A pinned element reaching this path (e.g. a Deterministic of
+            # fixed inputs): full-precision repr here put
+            # '0.31622776601683794 +/- 0' in the table.
+            return (f"{self.median:.6g}", "0", "0")
 
         # Determine decimal places from error sig figs
         def decimals_from_sigfigs(val: float) -> int:
@@ -336,6 +339,10 @@ class PosteriorSummary:
 
     def latex_value(self, sigfigs: int = 2) -> str:
         med_s, em_s, ep_s = self.format(sigfigs=sigfigs)
+        if em_s == ep_s == "0":
+            # Zero spread = effectively fixed; render like the fixed path
+            # rather than 'x \pm 0'.
+            return f"\\equiv {med_s}"
         if em_s == ep_s:
             return f"{med_s}\\pm{ep_s}"
         return f"{med_s}^{{+{ep_s}}}_{{-{em_s}}}"
@@ -375,7 +382,12 @@ def _broadcast_to_shape(val, shape, label, name):
 
 
 def _fmt_prior_value(val, is_latex=True):
-    """Format one number for the Prior column (shared by every branch)."""
+    """Format one number for the Prior column (shared by every branch).
+
+    Out-of-range magnitudes render as powers of ten -- '-1.00e+05' set the
+    Prior column's width on every galactic-kinematic row, and in math mode
+    the raw 'e+05' typesets as an italic e plus a spaced binary '+'.
+    """
     if val is None or np.isnan(val):
         return "nan"
     if np.isinf(val):
@@ -384,9 +396,18 @@ def _fmt_prior_value(val, is_latex=True):
             if is_latex
             else ("inf" if val > 0 else "-inf")
         )
-    if 0.001 <= abs(val) < 10000:
+    if val == 0 or 0.001 <= abs(val) < 10000:
         return f"{val:.4f}".rstrip("0").rstrip(".")
-    return f"{val:.2e}"
+    mant, exp = f"{val:.2e}".split("e")
+    mant = mant.rstrip("0").rstrip(".")
+    exp = int(exp)
+    if not is_latex:
+        return f"{mant}e{exp}"
+    if mant == "1":
+        return rf"10^{{{exp}}}"
+    if mant == "-1":
+        return rf"-10^{{{exp}}}"
+    return rf"{mant}\times10^{{{exp}}}"
 
 
 def _normalize_prior_elements(elements):
@@ -1378,7 +1399,15 @@ class Parameter:
                     np.asarray(self._get_conversion_factors(), dtype=float)
                 )
             if val.size > 1:
-                return val
+                # Keep the posterior convention: elements first, SAMPLES
+                # last.  A bare (n_el,) array is indistinguishable from
+                # n_el samples of a scalar, and _summarize_array then pools
+                # the ELEMENTS into one summary -- star.luminosity with
+                # pinned teff/radius reported one pooled '3.0 +/- 1.4' for
+                # two constant per-star values, and the single unsuffixed
+                # macro it emitted left the table's per-element references
+                # undefined.
+                return val.reshape(-1, 1)
             return val.item()
 
         # 1. Compile the function for a single evaluation
@@ -1869,6 +1898,21 @@ class Parameter:
 
     def to_latex_def(self, sigfigs: int = 2) -> str:
 
+        def _fixed(val):
+            """'\\equiv <value>' at sensible precision; \\nodata if not finite.
+
+            The raw float repr used to reach the table verbatim
+            ('\\equiv 2.249201909620218'), and those cells set the whole
+            deluxetable's column width.
+            """
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return r"\nodata"
+            if not np.isfinite(v):
+                return r"\nodata"
+            return rf"\equiv {v:.6g}"
+
         # FIXED PARAMETER PATH
         if self.posterior is None:
             if self.initval is not None:
@@ -1880,16 +1924,31 @@ class Parameter:
                     for i, val in enumerate(inits):
                         idx_str = idx_to_words(i)
                         lines.append(
-                            rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{\equiv {val}}}}}"
+                            rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{{_fixed(val)}}}}}"
                             + "\n"
                         )
                     return "".join(lines)
                 else:
                     return (
-                        rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{\equiv {inits[0]}}}}}"
+                        rf"\providecommand{{\{self.latex_varname}}}{{\ensuremath{{{_fixed(inits[0])}}}}}"
                         + "\n"
                     )
-            return ""
+            # NO VALUE AT ALL (no posterior, no initval -- e.g. a derived
+            # parameter decoded from a trace that predates it).  The table
+            # body still cites the macro for every element, so the emitter
+            # MUST define it or the document dies with 'Undefined control
+            # sequence' at the end of the fit (the DC2018_128
+            # star.luminosity case).  \nodata is aastex's blank-cell mark.
+            n = int(np.prod(self.shape)) if self.shape != () else 1
+            if n > 1:
+                return "".join(
+                    rf"\providecommand{{\{self.latex_varname}{idx_to_words(i)}}}{{\nodata}}"
+                    + "\n"
+                    for i in range(n)
+                )
+            return (
+                rf"\providecommand{{\{self.latex_varname}}}{{\nodata}}" + "\n"
+            )
 
         # SAMPLED PARAMETER PATH
         if self.summary is None:
@@ -2097,18 +2156,10 @@ class Parameter:
             f = np.atleast_1d(self._get_conversion_factors())
             return f_val * float(f[index] if index < len(f) else f[0])
 
-        def _fmt(val, is_latex=True):
-            if val is None or np.isnan(val):
-                return "nan"
-            if np.isinf(val):
-                return (
-                    (r"\infty" if val > 0 else r"-\infty")
-                    if is_latex
-                    else ("inf" if val > 0 else "-inf")
-                )
-            if 0.001 <= abs(val) < 10000:
-                return f"{val:.4f}".rstrip("0").rstrip(".")
-            return f"{val:.2e}"
+        # One formatter for every Prior-column number (shared with
+        # _support_str) -- a second private copy is how '-1.00e+05' would
+        # creep back into half the branches.
+        _fmt = _fmt_prior_value
 
         sig = _scalar(self.sigma)
         if sig == 0:
@@ -2181,7 +2232,38 @@ class Parameter:
 
         return "", "none"
 
-    def to_latex_prior_def(self) -> str:
+    def prior_cell_and_notes(self, index=0):
+        """``(cell_latex, [note_latex, ...])`` for one Prior-column element.
+
+        The cell carries only what fits a column: the Parameter's OWN prior
+        ("Fixed", a Gaussian, the uniform-over-bounds).  Component-declared
+        contributions (``add_prior_contribution``) go to TABLE NOTES -- the
+        long Galactic-kinematic and IMF texts used to be appended to the
+        cell and set the whole table's Prior-column width.  When a
+        contribution supersedes the bounds-derived uniform, the note gains
+        the support it is normalized over and the cell keeps nothing but
+        the note mark (the caller appends it).
+        """
+        own, kind = self._own_prior_str(index=index, latex=True)
+        contributions = self.prior_contributions_at(index)
+        # A pinned element is a delta function; a potential evaluated on it
+        # is a constant that cannot move the posterior, so "Fixed" stays the
+        # honest and complete statement.
+        if not contributions or kind == "fixed":
+            return own, []
+        supersede = any(c.supersedes_bounds for c in contributions)
+        support = self._support_str(index, latex=True)
+        notes = []
+        for c in contributions:
+            note = c.latex
+            if c.supersedes_bounds and support:
+                note += ", normalized" + support
+            notes.append(note)
+        if supersede and kind == "bounds":
+            return "", notes
+        return own, notes
+
+    def to_latex_prior_def(self, mark_for=None) -> str:
         """Generate the \\providecommand(s) for the prior column value.
 
         The command name is ``\\<latex_varname><idx>prior`` -- the same
@@ -2197,6 +2279,12 @@ class Parameter:
         ``sigma: 0``).  Reading element 0 and reusing it made such a vector
         report "Fixed" for its genuinely sampled elements -- a false
         statement of the prior in a published table.
+
+        ``mark_for`` is the caller's note registry (text -> tablenote
+        letter, outputs/latex.py's ``note_marks``): component-declared
+        prior contributions render as shared table notes rather than
+        inline cell text.  Without it (a caller with no note machinery)
+        the historical inline composition is used.
         """
         n_elements = (
             int(np.prod(self.shape)) if self.shape not in ((), None) else 1
@@ -2204,7 +2292,12 @@ class Parameter:
         lines = []
         for i in range(n_elements):
             idx_str = idx_to_words(i) if n_elements > 1 else ""
-            prior_str = self.get_prior_str(index=i, latex=True)
+            if mark_for is None:
+                prior_str = self.get_prior_str(index=i, latex=True)
+            else:
+                prior_str, notes = self.prior_cell_and_notes(index=i)
+                for note in notes:
+                    prior_str += rf"\tablenotemark{{{mark_for(note)}}}"
             lines.append(
                 rf"\providecommand{{\{self.latex_varname}{idx_str}prior}}"
                 rf"{{{prior_str}}}" + "\n"
@@ -2239,11 +2332,12 @@ class Parameter:
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
-        # The Description column is prose (defaults.yaml), not LaTeX -- and
-        # several descriptions do contain raw underscores ('t0_par',
-        # 'M_2 / M_1', 'f_s / (f_s + f_b)'), which are a hard compile error
-        # in text mode.  The math belongs in `latex` (the symbol column).
-        desc = latex_escape(self.description)
+        # The Description column is trusted LaTeX (same contract as
+        # table_note): descriptions may carry math ($\alpha$, subscripts).
+        # Authors escape their own literal underscores/percent signs; the
+        # audit in tests/test_prose.py::test_descriptions_are_valid_latex
+        # catches raw specials in shipped defaults.yaml files.
+        desc = self.description
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
 
@@ -2313,7 +2407,7 @@ class Parameter:
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
-        desc = latex_escape(self.description)  # prose, not LaTeX
+        desc = self.description  # trusted LaTeX, same contract as table_note
 
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)

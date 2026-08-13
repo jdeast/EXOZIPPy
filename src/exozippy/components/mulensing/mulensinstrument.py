@@ -1569,6 +1569,15 @@ class MulensInstrument(Instrument):
                         "y_inverted": True,
                         "file_tag": "mulens",
                         "figsize": (12, 6),
+                        # Same caption as the model-bearing spec below: the
+                        # modes-CLI paper rebuild collects figures from the
+                        # data-only specs.
+                        "caption": (
+                            "Microlensing light curve. All instruments are "
+                            "aligned onto the reference instrument's flux "
+                            "system and shown in magnitudes; non-positive "
+                            "aligned fluxes are not drawn."
+                        ),
                     },
                 )
             ]

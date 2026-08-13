@@ -21,7 +21,7 @@ planet:
     unit: ""
     internal_unit: ""
     latex: "\\log{q}"
-    description: "log10 of the planet/host star mass ratio"
+    description: "$\\log_{10}{M_P/M_\\star}$"
     # rank 5 (below mass's 10) is load-bearing: the relaxation engine's
     # Condition B rewrites the LOWEST-rank symbol of a violated relation, so
     # log_q always absorbs Eq(mass, 10**log_q * star_mass).  That both gives

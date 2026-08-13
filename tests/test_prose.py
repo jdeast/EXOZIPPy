@@ -216,6 +216,40 @@ def test_provenance_text_escapes_for_latex_text_mode():
     assert out == r"N\_eff for the weights $\geq$ 4.6, q $<$ 1"
 
 
+def test_descriptions_are_valid_latex():
+    """
+    Given every ``description:`` in the shipped defaults.yaml files,
+    When their text spans (everything outside $...$ math) are scanned,
+    Then no LaTeX special appears raw -- descriptions are TRUSTED LaTeX
+      now (they may carry math like $\\log_{10}{M_P/M_\\star}$, so they are
+      no longer escaped on their way into the table), which makes a raw
+      underscore in one a hard 'Missing $ inserted' at the end of a fit.
+    """
+    import yaml
+
+    bad = []
+    for path in SRC.rglob("defaults.yaml"):
+
+        def walk(node, crumbs):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k == "description" and isinstance(v, str):
+                        text = re.sub(r"\$[^$]*\$", "", v)
+                        raw = set("_&%#^~{}<>|") & set(
+                            text.replace(r"\_", "").replace(r"\%", "")
+                        )
+                        if raw:
+                            bad.append(
+                                f"{path.relative_to(SRC)}: "
+                                f"{'.'.join(crumbs)}: {v!r} (raw {raw})"
+                            )
+                    else:
+                        walk(v, crumbs + [str(k)])
+
+        walk(yaml.safe_load(path.read_text()), [])
+    assert not bad, "descriptions with raw LaTeX specials:\n" + "\n".join(bad)
+
+
 def test_post_fit_sections_are_a_subset_of_the_vocabulary():
     """The writer's Results routing must stay inside SECTION_ORDER."""
     assert set(POST_FIT_SECTIONS) <= set(SECTION_ORDER)

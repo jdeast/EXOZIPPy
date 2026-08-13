@@ -250,16 +250,22 @@ def build_latex_output(
     all_defs = []
     all_table_lines = []
 
-    # Distinct Parameter.table_note texts get sequential tablenotemark
-    # letters; the matching \tablenotetext lines are emitted after \enddata.
+    # Distinct note texts get sequential tablenotemark letters; the matching
+    # \tablenotetext lines are emitted after \enddata.  One registry serves
+    # both sources of notes -- Parameter.table_note annotations and
+    # component-declared prior contributions (prior_cell_and_notes), which
+    # used to be appended inline and set the Prior column's width.
     note_marks = {}
+
+    def _mark_for_text(text):
+        if text not in note_marks:
+            note_marks[text] = chr(ord("a") + len(note_marks))
+        return note_marks[text]
 
     def _mark_for(p):
         if not getattr(p, "table_note", None):
             return None
-        if p.table_note not in note_marks:
-            note_marks[p.table_note] = chr(ord("a") + len(note_marks))
-        return note_marks[p.table_note]
+        return _mark_for_text(p.table_note)
 
     all_defs.append(
         r"\providecommand{\bjdtdb}{\ensuremath{\rm {BJD_{TDB}}}}" + "\n"
@@ -314,7 +320,7 @@ def build_latex_output(
                 _ensure_mode_summaries(system, p, mode_report)
             if not multimodal or p.posterior is None:
                 all_defs.append(p.to_latex_def())
-            all_defs.append(p.to_latex_prior_def())
+            all_defs.append(p.to_latex_prior_def(mark_for=_mark_for_text))
             if multimodal:
                 all_defs.append(p.to_latex_mode_defs())
 
@@ -456,6 +462,10 @@ def build_latex_output(
         # there, where the preamble now lives).
         f.write(r"\startlongtable" + "\n")
         f.write(rf"\begin{{deluxetable*}}{{{colspec}}}" + "\n")
+        # Four columns of prose-bearing cells; at the default size the
+        # widest description + value + prior rows overrun the page width
+        # (deluxetable does not wrap cells).
+        f.write(r"\tabletypesize{\scriptsize}" + "\n")
         if caption is not None:
             f.write(
                 rf"\tablecaption{{{caption} \label{{tab:{system.name}}}}}"

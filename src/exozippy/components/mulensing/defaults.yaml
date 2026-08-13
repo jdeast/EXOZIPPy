@@ -14,7 +14,7 @@ lens:
     init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
-    description: "Impact parameter (Einstein radii)"
+    description: "impact parameter"
   # t_E and the pi_E direction live in the light curve's GEOCENTRIC frame
   # (Skowron+2011 t0_par anchor), so they derive from mu_rel_geo, not from
   # the heliocentric pm difference.
@@ -23,7 +23,7 @@ lens:
     unit: "d"
     internal_unit: "d"
     latex: "t_E"
-    description: "Einstein crossing time (geocentric at t0_par)"
+    description: "Einstein crossing time"
     debug_print: true
     expressions:
       default:
@@ -64,7 +64,7 @@ lens:
     unit: "mas"
     internal_unit: "mas"
     latex: "\\pi_{rel}"
-    description: "Relative lens-source parallax"
+    description: "lens-source parallax"
     expressions:
       default:
         func_name: "calc_pi_rel"
@@ -90,7 +90,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha,rel,helio}"
-    description: "Relative lens-source proper motion (RA, heliocentric)"
+    description: "heliocentric lens-source pm RA"
     expressions:
       default:
         func_name: "calc_mu_ra_rel"
@@ -101,7 +101,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\delta,rel,helio}"
-    description: "Relative lens-source proper motion (Dec, heliocentric)"
+    description: "heliocentric lens-source pm Dec"
     expressions:
       default:
         func_name: "calc_mu_dec_rel"
@@ -112,7 +112,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{rel,helio}"
-    description: "Relative lens-source proper motion (heliocentric)"
+    description: "heliocentric lens-source pm"
     expressions:
       default:
         func_name: "calc_mu_rel_mag"
@@ -127,7 +127,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\alpha,rel,geo}"
-    description: "Relative lens-source proper motion (RA, geocentric at t0_par)"
+    description: "geocentric lens-source pm RA"
     expressions:
       default:
         func_name: "calc_mu_ra_rel_geo"
@@ -138,7 +138,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{\\delta,rel,geo}"
-    description: "Relative lens-source proper motion (Dec, geocentric at t0_par)"
+    description: "geocentric lens-source pm Dec"
     expressions:
       default:
         func_name: "calc_mu_dec_rel_geo"
@@ -149,7 +149,7 @@ lens:
     unit: "mas/yr"
     internal_unit: "mas/yr"
     latex: "\\mu_{rel,geo}"
-    description: "Relative lens-source proper motion (geocentric at t0_par)"
+    description: "geocentric lens-source pm"
     expressions:
       default:
         func_name: "calc_mu_rel_mag"
@@ -164,7 +164,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "\\rho"
-    description: 'Source radius (Einstein radii)'
+    description: "source radius"
     expressions:
       default:
         func_name: "calc_rho"
@@ -175,7 +175,7 @@ lens:
     unit: "solMass"
     internal_unit: "solMass"
     latex: "M_{\\rm L,tot}"
-    description: "Total lens mass (all bodies)"
+    description: "total lens mass"
     debug_print: true
     expressions:
       default:
@@ -192,7 +192,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "q"
-    description: "Binary lens mass ratio (M_2 / M_1)"
+    description: "mass ratio ($M_2/M_1$)"
     debug_print: true
     expressions:
       default:
@@ -226,7 +226,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "\\log{s}"
-    description: "log10 of projected binary separation (Einstein radii)"
+    description: "$\\log_{10}$ binary separation"
   # might want to parameterize this like Yee's that increases sampling at s=1
   s:
     # Derived from log_s (s = 10**log_s).  The bounds here mirror log_s's
@@ -242,7 +242,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "s"
-    description: "Projected binary separation (Einstein radii)"
+    description: "binary separation"
     expressions:
       default:
         func_name: "calc_s"
@@ -257,7 +257,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "x_{\\alpha}"
-    description: "x-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
+    description: "x-component of $\\alpha$"
   yalpha:
     lower: -100.0
     upper: 100.0
@@ -268,7 +268,7 @@ lens:
     unit: ""
     internal_unit: ""
     latex: "y_{\\alpha}"
-    description: "y-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
+    description: "y-component of $\\alpha$"
 mulensinstrument:
   # Optional detrending coefficients, one per extra data column per
   # instrument (see rvinstrument/transit for the same block-diagonal scheme).
@@ -336,7 +336,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "\\log{(f_s + f_b)}"
-    description: "log of baseline flux (Source + Blend)"
+    description: "log baseline flux ($f_s{+}f_b$)"
   q_source:
     initval: 0.95
     init_scale: 0.05
@@ -345,7 +345,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "q_s"
-    description: "Source fraction f_s / (f_s + f_b)"
+    description: "source flux fraction ($q_s$)"
   q_flux:
     initval: 1.0
     init_scale: 0.1
@@ -354,7 +354,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "q_F"
-    description: "Binary source flux ratio (f_s2 / f_s1)"
+    description: "binary source flux ratio"
   f_source:
     lower: 0.0
     upper: 1000.0
@@ -393,8 +393,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "k"
-    description: >-
-      Multiplicative scale on the reported FLUX errors (dimensionless)
+    description: "flux error scaling"
   # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
   # with this Gaussian prior as a potential (see
   # mulensinstrument._build_sed_flux_constraint). Override per light curve
@@ -405,4 +404,4 @@ mulensinstrument:
     unit: "mag"
     internal_unit: "mag"
     latex: "ZP"
-    description: "Photometric zeropoint of the light curve's magnitude system (m_cal = -2.5 log10(f) + ZP)"
+    description: "photometric zeropoint"
