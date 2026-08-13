@@ -13,6 +13,8 @@ from exozippy.compat import patch_mulensmodel_method_order
 
 from .physics import (
     _MM_NAN_ADVICE,
+    RHO_FLOOR,
+    S_FLOOR,
     T_E_FLOOR,
     clip_q_value,
     floor_u_0_value,
@@ -104,8 +106,12 @@ def _base_mm_params(p):
 
 
 def _safe_rho(value):
-    """rho <= 0 is unphysical and breaks finite-source methods; floor it."""
-    return float(max(float(value), 1e-9))
+    """Floor the source radius at physics.RHO_FLOOR.
+
+    One number, shared with the flux bootstrap's own copy of this clip, for
+    the same reason U_0_FLOOR is: two literals drift.
+    """
+    return float(max(float(value), RHO_FLOOR))
 
 
 def _build_pspl_model(p, coords, mag_method, use_rho=False):
@@ -156,7 +162,7 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     if use_rho:
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
-    mm_params["s"] = float(max(float(p[idx]), 1e-6))
+    mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
     mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
     mm_params["alpha"] = float(p[idx + 2])
 
@@ -565,7 +571,7 @@ class VBMDirectMagOp(Op):
         for j in range(self.n_companions):
             companions.append(
                 (
-                    float(max(float(p[idx]), 1e-6)),
+                    float(max(float(p[idx]), S_FLOOR)),
                     clip_q_value(p[idx + 1], f"lens.q[{j}]"),
                     float(np.radians(float(p[idx + 2]))),
                 )
