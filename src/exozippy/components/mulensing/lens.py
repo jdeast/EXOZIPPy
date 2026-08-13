@@ -17,11 +17,15 @@ from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
 from .op import BinaryLensMagOp, MulensMagOp, VBMDirectMagOp
 from .physics import (
+    _MM_NAN_ADVICE,
     _Q_NAN_ADVICE,
     MU_REL_FLOOR,
     Q_MAX,
     Q_MIN,
+    T_E_FLOOR,
     THETA_E_FLOOR,
+    THETA_E_LENSING_MIN,
+    U_0_FLOOR,
     clip_q,
 )
 
@@ -1106,9 +1110,86 @@ class Lens(Component):
                 "derived from) rather than relying on the clip."
             )
 
+    def _start_values(self, name):
+        """Resolved start value of a lens parameter as a 1-D float array, or
+        None when it has none (unset, or not castable -- a multi-seed entry
+        that survived as a ragged object array)."""
+        par = getattr(self, name, None)
+        if par is None or par.initval is None:
+            return None
+        try:
+            return np.atleast_1d(np.asarray(par.initval, dtype=float)).ravel()
+        except (TypeError, ValueError):
+            return None
+
+    def _validate_pspl_start(self):
+        """Stage 6: check the START values of the SAMPLED trajectory
+        parameters, loudly and once.  The sibling of
+        :meth:`_validate_q_start`, and it makes the same split for the same
+        reason: NaN raises (the fit cannot start), out of range warns (the fit
+        begins at the floored value rather than at the seeded one -- the "the
+        number I typed is not the number being fitted" case that goes
+        unnoticed for months).  This is the half of the old scrub worth
+        keeping, moved to where a raise is free: a check on the inputs at
+        build time, not a mid-graph assert that would kill a run over a
+        proposal the sampler already rejects on its own.
+
+        **Only t_0 and u_0 are checked, and that is deliberate.**  They are
+        the two trajectory parameters that are sampled, so their ``initval``
+        IS the start: raw = 0 maps to it through the logit transform.  The
+        other four quantities `_get_safe_mm_params` handles -- t_E, theta_E,
+        pi_E_N and pi_E_E -- are DERIVED, and for a derived parameter
+        ``initval``
+        is the relaxation engine's own bookkeeping, not the value the model
+        starts at; the graph recomputes it from the sampled coordinates.  The
+        two genuinely differ, so checking them here would be a false positive
+        on working configs.  Measured on `examples/ob161003` (2S2L, two source
+        slots): the engine leaves ``lens.theta_E.initval = [nan, 0.8393]`` and
+        ``lens.pi_rel.initval = [nan, 0.125]`` -- it only ever needed to solve
+        the second slot, both sources sharing one lens -- while the model
+        starts at a perfectly good ``theta_E = [0.8393, 0.8393]`` and a finite
+        logp.  A NaN there says nothing about the fit.  (That the engine
+        writes a NaN into a resolved value at all is a separate, pre-existing
+        oddity; it is not this guard's business to report it.)
+
+        The one range check is on ``|u_0| < U_0_FLOOR``.  Note that at u_0
+        EXACTLY zero the floor does not even engage: ``sign(0) = 0`` makes
+        ``sign(u_0) * maximum(|u_0|, U_0_FLOOR)`` return 0, so the peak
+        magnification stays singular.  ``u_0: 0`` is a plausible seed for a
+        high-magnification event, so the warning says so.  t_0 gets no range
+        check -- it carries two finite hard bounds of its own.
+        """
+        sampled = {
+            "t_0": self._start_values("t_0"),
+            "u_0": self._start_values("u_0"),
+        }
+        nan_named = [
+            f"{self.prefix}.{n} = {v.tolist()}"
+            for n, v in sampled.items()
+            if v is not None and np.any(np.isnan(v))
+        ]
+        if nan_named:
+            raise ValueError(
+                "The lensing trajectory starts at a value that is not a "
+                f"number: {'; '.join(nan_named)}.  {_MM_NAN_ADVICE}"
+            )
+
+        u_0 = sampled["u_0"]
+        if u_0 is not None and np.any(np.abs(u_0) < U_0_FLOOR):
+            small = u_0[np.abs(u_0) < U_0_FLOOR]
+            logger.warning(
+                f"{self.prefix}.u_0 starts at {small.tolist()}, inside the "
+                f"{U_0_FLOOR:g} floor on |u_0| (the magnification diverges "
+                "at u = 0), so the fit will actually START at the floored "
+                "value -- and at exactly 0 not even that, since sign(0) = 0 "
+                "leaves u_0 = 0 and the peak magnification infinite.  Seed a "
+                "small but nonzero impact parameter."
+            )
+
     def build_likelihood(self, model, system):
         """Stage 6: Observational penalties on the lensing geometry."""
         self._validate_q_start()
+        self._validate_pspl_start()
 
         # GEOCENTRIC mu_rel: the event-rate selection is the sky-sweep rate
         # in the frame the event is observed in (rp.py used the geocentric
@@ -1173,31 +1254,80 @@ class Lens(Component):
         return self.alpha.value[j] * _RAD_TO_DEG
 
     def _get_safe_mm_params(self, index=0):
-        """Sanitized single-source params.  ``index`` is the SOURCE slot: the
-        per-source vector parameters (t_0, u_0, t_E, pi_E_*) hold one element
-        per source body of the single event."""
+        """Range-limited single-source trajectory params.  ``index`` is the
+        SOURCE slot: the per-source vector parameters (t_0, u_0, t_E, pi_E_*)
+        hold one element per source body of the single event.
+
+        Three RANGE decisions survive here -- the t_E floor, the |u_0| floor
+        and the no-lensing parallax gate, all defined and justified next to
+        their constants in physics.py.  What is deliberately GONE is the NaN
+        substitution that used to precede them:
+
+            t_E -> 100 d,  u_0 -> 1,  theta_E -> 0,  pi_E_N -> 0,  pi_E_E -> 0
+
+        i.e. a complete, fabricated PSPL model in place of a failed
+        computation.  It is the same defect ``clip_q``'s ``pt.nan_to_num``
+        was (review item 4.5), five more times and with a much larger blast
+        radius: a fully-NaN parameter vector produced a healthy-looking light
+        curve and a finite likelihood.
+
+        Removing it is safe *and* strictly better, for the same two reasons:
+
+        * It is unreachable.  Every one of the five is finite for every finite
+          raw vector.  t_0 and u_0 are sampled with two finite hard bounds, so
+          the logit transform can only produce a finite number.  theta_E is
+          ``sqrt(max(KAPPA*max(M,1e-12)*max(pi_rel,0), THETA_E_FLOOR**2))``,
+          strictly positive and finite for any finite mass and pi_rel, and
+          pi_rel is a difference of two 1000/distance terms whose distances
+          are logit-bounded away from zero.  t_E = theta_E/(mu_rel_geo/365.25)
+          and pi_E = (pi_rel/theta_E)*(mu_i/mu_rel_geo) are then ratios whose
+          denominators are floored at THETA_E_FLOOR and MU_REL_FLOOR -- those
+          two floors, added in c178305, are exactly what closed the 0/0 that
+          made this scrub live when it was written (May 2026), back when
+          calc_mu_rel_mag was a bare sqrt that could return exactly 0.
+          Measured on examples/ob08092 (PSPL), examples/ob140939 (parallax +
+          Spitzer) and examples/DC2018_128 (binary lens): all five stay finite
+          over the entire raw support out to raw = +/-1e12, one variable at a
+          time and all at once, plus 2000 random raw points per event.  Three
+          real 300-tune/300-draw ptde_async fits (28 worker processes each,
+          172k / 215k / 223k evaluations) instrumented at the scrub itself
+          never once entered the branch.
+        * Where it could fire it could only do harm.  These five are NaN only
+          when an input is already NaN, i.e. the raw vector itself carries a
+          NaN -- and that raw variable's own N(0, 1) prior term already makes
+          the total logp NaN, so the proposal is rejected whatever this
+          function returns (verified on all three events, for every sampled
+          coordinate).  Substituting a "safe" value could never rescue a
+          sample; it invented an entire event geometry -- with a zero
+          gradient, since nan_to_num is a switch -- in place of the one
+          quantity that would have named the failure.
+
+        The theta_E substitution was not even that: ``theta_E_scrubbed`` fed
+        nothing but the ``pt.gt(..., 1e-6)`` comparison, and a comparison
+        against NaN is already False, so dropping it is a no-op in every case,
+        NaN included.
+
+        A NaN now propagates to logp, which is the sampler's own reject
+        signal, so nothing here needs a mid-graph assert (which would kill a
+        whole run over a proposal that is already being rejected) or a -inf
+        potential (no gradient, and the JAX where-trap).  The two SAMPLED
+        start values are checked once, loudly, in _validate_pspl_start; the
+        numeric Op path names the parameter through physics.require_mm_number.
+        """
         tE_raw = self.t_E.value[index]
         u0_raw = self.u_0.value[index]
         theta_E_raw = self.theta_E.value[index]
-        pi_N_raw = self.pi_E_N.value[index]
-        pi_E_raw = self.pi_E_E.value[index]
 
-        tE_scrubbed = pt.nan_to_num(tE_raw, nan=100.0)
-        u0_scrubbed = pt.nan_to_num(u0_raw, nan=1.0)
-        theta_E_scrubbed = pt.nan_to_num(theta_E_raw, nan=0.0)
-        pi_N_scrubbed = pt.nan_to_num(pi_N_raw, nan=0.0)
-        pi_E_scrubbed = pt.nan_to_num(pi_E_raw, nan=0.0)
-
-        tE_safe = pt.maximum(tE_scrubbed, 1e-4)
-        u0_safe = pt.sign(u0_scrubbed) * pt.maximum(pt.abs(u0_scrubbed), 1e-6)
-        is_physical = pt.gt(theta_E_scrubbed, 1e-6)
+        tE_safe = pt.maximum(tE_raw, T_E_FLOOR)
+        u0_safe = pt.sign(u0_raw) * pt.maximum(pt.abs(u0_raw), U_0_FLOOR)
+        is_physical = pt.gt(theta_E_raw, THETA_E_LENSING_MIN)
 
         return {
             "t0": self.t_0.value[index],
             "u0": u0_safe,
             "tE": tE_safe,
-            "pi_N": pt.switch(is_physical, pi_N_scrubbed, 0.0),
-            "pi_E": pt.switch(is_physical, pi_E_scrubbed, 0.0),
+            "pi_N": pt.switch(is_physical, self.pi_E_N.value[index], 0.0),
+            "pi_E": pt.switch(is_physical, self.pi_E_E.value[index], 0.0),
         }
 
     def _get_binary_mm_params(self, index=0):

@@ -209,6 +209,77 @@ def clip_q_value(q, label="lens.q"):
     return float(np.clip(q, Q_MIN, Q_MAX))
 
 
+# --- Trajectory (PSPL) parameter floors -------------------------------------
+# The three RANGE decisions Lens._get_safe_mm_params makes on the single-source
+# trajectory parameters before handing them to a magnification backend.  Like
+# Q_MIN/Q_MAX above, each is a statement about where the model is DEFINED, and
+# each must stand alone: none of them may be paired with a NaN substitution.
+#
+# T_E_FLOOR  every backend divides by t_E, and t_E <= 0 is not a timescale.
+#            The same 1e-4 d is applied on the numeric Op path
+#            (op._base_mm_params), so the two paths agree exactly.
+# U_0_FLOOR  A = (u^2+2)/(u*sqrt(u^2+4)) diverges as u -> 0, so the peak
+#            magnification of an exactly-central trajectory is infinite.  The
+#            floor is applied to |u_0| and the sign restored, which keeps the
+#            u_0 -> -u_0 reflection exact.  NOTE it is 1e-6 here and 1e-9 in
+#            op._base_mm_params: a pre-existing disagreement, deliberately left
+#            alone, because unifying them would move any fit that visits
+#            1e-9 <= |u_0| < 1e-6 -- a modelling change, not a sanitization one.
+# THETA_E_LENSING_MIN
+#            pi_E = pi_rel/theta_E, so as theta_E -> 0 the parallax vector
+#            diverges while the event itself stops being a lensing event at
+#            all.  Below this the trajectory is evaluated WITHOUT parallax
+#            (pi_E_N = pi_E_E = 0) rather than with a diverging one; the
+#            source_behind_lens / theta_E_singularity soft bounds in
+#            Lens.build_likelihood are what actually push the sampler out.
+#            It is a comparison, and a comparison against NaN is False, so
+#            this branch never needed a NaN substitution to begin with.
+T_E_FLOOR = 1e-4  # days
+U_0_FLOOR = 1e-6  # Einstein radii
+THETA_E_LENSING_MIN = 1e-6  # mas
+
+_MM_NAN_ADVICE = (
+    "The trajectory parameters are derived from the sampled coordinates: "
+    "t_E and pi_E_N/pi_E_E from theta_E and the relative proper motion, "
+    "theta_E from the lens mass and pi_rel, pi_rel from the two "
+    "star.<...>.distance values.  Check the initval (and any 'sigma: 0' "
+    "link expression) on star.<lens>.logmass, star.<lens>.distance, "
+    "star.<source>.distance and the star.<...>.pm_ra/pm_dec pair, plus "
+    "lens.<...>.t_0 and lens.<...>.u_0, which are sampled directly."
+)
+
+
+def require_mm_number(value, label):
+    """Numeric guard for a trajectory parameter on its way to a backend.
+
+    The counterpart of :func:`clip_q_value` for the five quantities
+    ``Lens._get_safe_mm_params`` handles, and it exists for the same reason:
+    ``pt.nan_to_num`` used to replace a NaN t_E with 100 d, a NaN u_0 with 1,
+    and a NaN theta_E/pi_E_N/pi_E_E with 0 -- a complete, fabricated PSPL model
+    in place of the one quantity that would have named the failure.  That scrub
+    is gone (see ``Lens._get_safe_mm_params``); on the symbolic path a NaN now
+    reaches logp, which is the sampler's own reject signal, and on this numeric
+    path it raises with a message that says which parameter it was.
+
+    Every caller already has the error path that turns the raise into the right
+    thing: ``_MagOpBase.perform`` catches ValueError, warns once, and returns
+    NaN magnifications -- logp = -inf, proposal rejected, exactly what a NaN
+    handed to MulensModel produced anyway, only three frames further away and
+    under a generic message.
+
+    The infinities are NOT an error, the same split :func:`clip_q_value` makes:
+    an infinity carries a sign and is an ordinary out-of-range value, which the
+    caller's own floor then handles.  NaN is the case with no value at all.
+    """
+    v = float(value)
+    if np.isnan(v):
+        raise ValueError(
+            f"{label} is nan: a trajectory parameter must be a number.  "
+            f"{_MM_NAN_ADVICE}"
+        )
+    return v
+
+
 @register_physics
 def calc_mlens_total(*masses):
     # Total lens mass: sum over all lens bodies.  theta_E, t_E, rho, and pi_E

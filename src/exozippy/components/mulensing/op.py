@@ -11,7 +11,12 @@ from pytensor.graph import Apply, Op
 
 from exozippy.compat import patch_mulensmodel_method_order
 
-from .physics import clip_q_value
+from .physics import (
+    _MM_NAN_ADVICE,
+    T_E_FLOOR,
+    clip_q_value,
+    require_mm_number,
+)
 
 # MulensModel dispatches magnification methods in PYTHONHASHSEED order, and
 # the VBMicrolensing backends are not order-independent, so identical inputs
@@ -59,14 +64,38 @@ def _dev_skycoord(obs_pos_np, cache):
     return cache[key]
 
 
+_BASE_LABELS = (
+    "lens.t_0",
+    "lens.u_0",
+    "lens.t_E",
+    "lens.pi_E_N",
+    "lens.pi_E_E",
+)
+
+
 def _base_mm_params(p):
-    """Sanitized parameters shared by all models: [t_0, u_0, t_E, pi_E_N, pi_E_E]."""
+    """Range-limited parameters shared by all models:
+    [t_0, u_0, t_E, pi_E_N, pi_E_E].
+
+    ``require_mm_number`` raises on a NaN instead of handing it to
+    MulensModel, which used to report whatever generic failure the NaN
+    happened to cause several frames away.  The caller's
+    ``except (ValueError, RuntimeError)`` turns it into the same all-NaN
+    answer as before, now under a message that names the parameter.  Finite
+    values, in range or out, are untouched.
+    """
+    t_0, u_0, t_E, pi_E_N, pi_E_E = (
+        require_mm_number(p[i], _BASE_LABELS[i]) for i in range(5)
+    )
     return {
-        "t_0": float(p[0]),
-        "u_0": float(np.sign(float(p[1])) * max(abs(float(p[1])), 1e-9)),
-        "t_E": float(max(float(p[2]), 1e-4)),
-        "pi_E_N": float(p[3]),
-        "pi_E_E": float(p[4]),
+        "t_0": t_0,
+        # NOTE the 1e-9 floor on |u_0| here vs physics.U_0_FLOOR = 1e-6 on the
+        # symbolic path: a pre-existing disagreement, deliberately left alone
+        # (unifying them would move any fit visiting 1e-9 <= |u_0| < 1e-6).
+        "u_0": float(np.sign(u_0) * max(abs(u_0), 1e-9)),
+        "t_E": float(max(t_E, T_E_FLOOR)),
+        "pi_E_N": pi_E_N,
+        "pi_E_E": pi_E_E,
     }
 
 
@@ -350,6 +379,9 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
+        # Warn-once flag for the non-finite guard in _compute, mirroring
+        # _MagOpBase._warned.
+        self._warned = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
@@ -473,6 +505,19 @@ class VBMDirectMagOp(Op):
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
+    def _param_labels(self):
+        """Names of the entries of this Op's param vector, in order -- so the
+        non-finite guard below can say WHICH parameter failed rather than
+        just that something did."""
+        labels = list(_BASE_LABELS)
+        if self.use_rho:
+            labels.append("lens.rho")
+        for j in range(self.n_companions):
+            labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
+        if self.bandpass is not None:
+            labels.append("band.u1")
+        return labels
+
     def _compute(self, p, times_np, obs_pos_np):
         # Non-finite check FIRST: it is the explicit handler for a NaN
         # parameter vector (return NaN magnifications -> logp = -inf ->
@@ -480,7 +525,30 @@ class VBMDirectMagOp(Op):
         # clip_q_value never has to be the one to notice.  It used to sit
         # after the unpacking, which only worked because np.clip passed NaN
         # through silently.
-        if not np.all(np.isfinite(p)):
+        #
+        # Warn once, naming the entries, for the same reason _MagOpBase warns
+        # once: a *misconfigured* model is non-finite on every proposal, which
+        # is indistinguishable from ordinary rejection unless the first one is
+        # reported.  This branch used to return NaN in complete silence.
+        bad = ~np.isfinite(np.asarray(p, dtype=float))
+        if np.any(bad):
+            if not self._warned:
+                self._warned = True
+                labels = self._param_labels()
+                named = ", ".join(
+                    f"{labels[i] if i < len(labels) else f'p[{i}]'}"
+                    f" = {float(p[i])!r}"
+                    for i in np.flatnonzero(bad)
+                )
+                warnings.warn(
+                    f"{type(self).__name__}: non-finite magnification "
+                    f"parameter(s) {named} -- returning NaN magnifications "
+                    "(logp = -inf) for this proposal.  If this repeats for "
+                    "every proposal the model is misconfigured, not merely "
+                    f"exploring bad parameters.  {_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             return np.full(len(times_np), np.nan)
 
         base = _base_mm_params(p)
