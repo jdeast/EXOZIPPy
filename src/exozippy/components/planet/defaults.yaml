@@ -103,8 +103,8 @@ planet:
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["mass", "m_total", "orbit.ecc", "arsun", "orbit.sini", "orbit.period"]
-  arsun:
+        deps: ["mass", "m_total", "orbit.ecc", "a", "orbit.sini", "orbit.period"]
+  a:
     unit: "AU"
     internal_unit: "solRad"
     latex: "a"
@@ -120,7 +120,7 @@ planet:
     expressions:
       default:
         func_name: "calc_arstar"
-        deps: ["arsun", "star.radius"]
+        deps: ["a", "star.radius"]
   b:
     unit: ""
     internal_unit: ""

@@ -24,7 +24,7 @@ class Orbit(Component):
     Two-body Keplerian orbit between a primary and a companion body group
     (see bodies.py for the group syntax).  Alongside the timing/geometry
     elements, each orbit derives its own physical scale -- m_primary,
-    m_companion, m_total, arsun, K -- from the masses of its member bodies,
+    m_companion, m_total, a, K -- from the masses of its member bodies,
     so hierarchical systems (e.g. B orbits C, B+C orbits A, planet b orbits
     A) stay mass-consistent automatically: every orbit touching a body
     reads the same star.mass/planet.mass nodes.  Each group is treated as a
@@ -176,7 +176,7 @@ class Orbit(Component):
         to ``10**logP``.
 
         Still not covered, because only the engine can get there: a period
-        implied by ``arsun`` plus the member masses.  Seed ``logP`` (or
+        implied by ``a`` plus the member masses.  Seed ``logP`` (or
         ``period``) directly when that is how the orbit is specified.
         """
         period_user = self._resolve_initval("period", shape)
@@ -256,7 +256,7 @@ class Orbit(Component):
                     "m_primary": {"expr_key": "default", "deps": group_deps},
                     "m_companion": {"expr_key": "default", "deps": group_deps},
                     "m_total": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "K": "default",
                 }
             )
@@ -452,7 +452,7 @@ class Orbit(Component):
                     logger.info(
                         f"[{self.prefix}.{self.names[i]}] implicit body "
                         f"'{ctype}.{idx}' is not in the system; orbit "
-                        f"mass/scale parameters (m_total, arsun, K) are "
+                        f"mass/scale parameters (m_total, a, K) are "
                         f"disabled."
                     )
                     return False

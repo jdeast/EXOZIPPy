@@ -21,9 +21,7 @@ logg = sp.symbols("logg", real=True)
 log_q = sp.symbols("log_q", real=True)
 ecc = sp.symbols("ecc", real=True)
 
-K, arsun, sini, period, m_total = sp.symbols(
-    "K arsun sini period m_total", real=True
-)
+K, a, sini, period, m_total = sp.symbols("K a sini period m_total", real=True)
 
 # ---------------------------------------------------------
 # 2. Symbol Map
@@ -47,7 +45,7 @@ def get_symbol_map(config):
         "p": "p",
         "ar": "ar",
         "K": "K",
-        "arsun": "arsun",
+        "a": "a",
         "m_total": "m_total",
         # Cross-Component Bridges:
         "sini": f"orbit.{orbit_idx}.sini",
@@ -82,8 +80,8 @@ RELATIONS = [
     ),  # You'll need to define star_radius as a symbol!
     # RV semi-amplitude
     # sp.Eq(m_total, star_mass + mass),
-    # sp.Eq(arsun, KEPLER_CONST * (m_total ** (1.0/3.0)) * (period ** (2.0/3.0))),
-    # sp.Eq(K, (2.0 * sp.pi * sini * arsun * mass) /
+    # sp.Eq(a, KEPLER_CONST * (m_total ** (1.0/3.0)) * (period ** (2.0/3.0))),
+    # sp.Eq(K, (2.0 * sp.pi * sini * a * mass) /
     #             (period * m_total * sp.sqrt(1.0 - ecc ** 2))),
     # sp.Eq(K,((2.0*sp.pi*G)/(period*(star_mass + mass)**2))**(1.0/3.0)*mass*sini/(sp.sqrt(1.0-ecc**2)))
     # sp.Eq(mass, sp.Symbol('mass_check_sentinel')) # this triggers our custom solver for K->mass

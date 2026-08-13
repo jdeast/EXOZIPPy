@@ -104,7 +104,7 @@ class Planet(Component):
             self.manifest.update(
                 {
                     "p": "default",
-                    "arsun": "default",
+                    "a": "default",
                     "ar": "default",
                     "b": "default",
                     "K": "default",
@@ -432,7 +432,7 @@ class Planet(Component):
     def _initial_semimajor_axes(self, system, orbits):
         """Per-planet starting semi-major axis, solRad.
 
-        ``planet.arsun`` is a derived Parameter and carries no ``initval``
+        ``planet.a`` is a derived Parameter and carries no ``initval``
         of its own, so the start is recomputed here from the same relation
         (``physics.calc_arsun``) using the start values the relaxation
         engine did resolve.  Returns NaN wherever an input is missing; the
@@ -473,7 +473,7 @@ class Planet(Component):
           ``.orbit.a_val`` attributes, none of which have existed since the
           vectorized refactor -- so ANY system with two or more planets
           raised AttributeError here.  A planet's semi-major axis is
-          ``planet.arsun`` (solRad, derived from m_total and the orbit's
+          ``planet.a`` (internally solRad, derived from m_total and the orbit's
           period) and its eccentricity is its orbit's, via ``orbit_map``.
         - The wall is a soft bound, not ``pt.switch(..., 0, -inf)``.  A -inf
           gives NUTS no gradient to follow out of the forbidden region (and
@@ -493,7 +493,7 @@ class Planet(Component):
         first-order condition but not a stability criterion.
         """
         # Semi-major axis (solRad) and eccentricity, per planet.
-        a = self.arsun.value
+        a = self.a.value
         ecc = orbits.ecc.value[self.orbit_map]
 
         a_init = self._initial_semimajor_axes(system, orbits)

@@ -1,6 +1,6 @@
 """
 Tests for hierarchical orbits: body groups on the orbit component,
-per-orbit mass/scale parameters (m_primary, m_companion, m_total, arsun,
+per-orbit mass/scale parameters (m_primary, m_companion, m_total, a,
 K), membership-based RV models, and orbit-referenced relative astrometry.
 
 Reference topology (KELT-4-like): stars A, B, C and planet b, with
@@ -150,14 +150,14 @@ def test_kepler_relation_symbols_are_instance_scoped():
     """
     Given a multi-orbit config,
     When the relaxation-engine relations are instantiated,
-    Then each orbit's Kepler relation uses its own arsun/m_total symbols
+    Then each orbit's Kepler relation uses its own a/m_total symbols
     (a bare shared 'a' or 'm_total' would let the engine equate different
     orbits' physics).
     """
     cm = ConfigManager(_hier_params(), system_config=_hier_config())
     sym_names = {s.name for rel in cm.all_relations for s in rel.free_symbols}
-    assert "orbit.0.arsun" in sym_names
-    assert "orbit.2.arsun" in sym_names
+    assert "orbit.0.a" in sym_names
+    assert "orbit.2.a" in sym_names
     assert "orbit.1.m_total" in sym_names
     assert "a" not in sym_names
     assert "m_total" not in sym_names
@@ -243,18 +243,18 @@ def test_orbit_group_masses_match_body_sums(hier_system):
 def test_orbit_scale_follows_keplers_third_law(hier_system):
     """
     Given the built hierarchical model,
-    When arsun and K are evaluated at the start point,
-    Then arsun = KEPLER_CONST * m_total^(1/3) * P^(2/3) per orbit, and K
+    When a and K are evaluated at the start point,
+    Then a = KEPLER_CONST * m_total^(1/3) * P^(2/3) per orbit, and K
     matches the two-body semi-amplitude of the primary group.
     """
     system, model = hier_system
     orb = system.orbit
-    m_t, arsun, K, period, sini, ecc = _eval_at_start(
+    m_t, a, K, period, sini, ecc = _eval_at_start(
         system,
         model,
         [
             orb.m_total.value,
-            orb.arsun.value,
+            orb.a.value,
             orb.K.value,
             orb.period.value,
             orb.sini.value,
@@ -263,11 +263,11 @@ def test_orbit_scale_follows_keplers_third_law(hier_system):
     )
     np.testing.assert_allclose(period, 10.0 ** np.array(LOGP), rtol=1e-6)
     np.testing.assert_allclose(
-        arsun, KEPLER_CONST * m_t ** (1 / 3) * period ** (2 / 3), rtol=1e-6
+        a, KEPLER_CONST * m_t ** (1 / 3) * period ** (2 / 3), rtol=1e-6
     )
     m_c = np.array([M_b, M_B, M_B + M_C])
     K_expected = (
-        2 * np.pi * arsun * sini * (m_c / m_t) / (period * np.sqrt(1 - ecc**2))
+        2 * np.pi * a * sini * (m_c / m_t) / (period * np.sqrt(1 - ecc**2))
     )
     np.testing.assert_allclose(K, K_expected, rtol=1e-3)
 

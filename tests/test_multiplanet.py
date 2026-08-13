@@ -188,7 +188,7 @@ def _crossing_fn(system, model):
     ecc = pt.dvector("ecc")
     node = graph_replace(
         pot,
-        {system.planet.arsun.value: a, system.orbit.ecc.value: ecc},
+        {system.planet.a.value: a, system.orbit.ecc.value: ecc},
     )
     return pytensor.function(
         [a, ecc], [node, pt.grad(node.sum(), a)], on_unused_input="ignore"

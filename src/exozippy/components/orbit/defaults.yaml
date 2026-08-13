@@ -68,7 +68,7 @@ orbit:
       default:
         func_name: "calc_m_total"
         deps: ["m_primary", "m_companion"]
-  arsun:
+  a:
     unit: "AU"
     internal_unit: "solRad"
     latex: "a"
@@ -85,7 +85,7 @@ orbit:
     expressions:
       default:
         func_name: "calc_K"
-        deps: ["m_companion", "m_total", "ecc", "arsun", "sini", "period"]
+        deps: ["m_companion", "m_total", "ecc", "a", "sini", "period"]
 
   # --- Conditionally Sampled or Derived (Geometry Swap) ---
   secosw:

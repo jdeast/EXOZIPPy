@@ -41,6 +41,9 @@ def calc_m_total(planet_mass, star_mass):
 
 
 @register_physics
+# The parameter this feeds is named `a` (user unit AU); the FUNCTION keeps
+# the arsun name because it computes the internal value, which is in solRad
+# -- the one layer where the unit is fixed by convention rather than config.
 def calc_arsun(m_total, period):
     m13 = pt.power(m_total, 1.0 / 3.0)
     p2 = pt.sqr(period)
@@ -49,8 +52,8 @@ def calc_arsun(m_total, period):
 
 
 @register_physics
-def calc_arstar(arsun, rstar):
-    return arsun / rstar
+def calc_arstar(a, rstar):
+    return a / rstar
 
 
 @register_physics
@@ -59,11 +62,9 @@ def calc_p(radius, star_radius):
 
 
 @register_physics
-def calc_K(mass, m_total, ecc, arsun, sini, period):
+def calc_K(mass, m_total, ecc, a, sini, period):
     ecc_factor = 1.0 / pt.sqrt(1.0 - pt.sqr(ecc))
-    return (
-        2.0 * np.pi * (arsun * sini * (mass / m_total) * ecc_factor / period)
-    )
+    return 2.0 * np.pi * (a * sini * (mass / m_total) * ecc_factor / period)
 
 
 @register_physics
