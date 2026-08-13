@@ -1,5 +1,7 @@
 import sympy as sp
 
+from ..instrument import JITTER_RELATIONS, JITTER_SYMBOL_MAP
+
 # ---------------------------------------------------------
 # 1. Define Symbols
 # ---------------------------------------------------------
@@ -7,9 +9,9 @@ import sympy as sp
 # All parameters are strictly real.
 # Positivity bounds are enforced downstream by defaults.yaml
 # NOTE: symbol names must match the get_symbol_map keys exactly; the
-# ConfigManager substitutes relation symbols by sym.name.
-jitter = sp.symbols("jitter", real=True)
-jitter_variance = sp.symbols("jitter_variance", real=True)
+# ConfigManager substitutes relation symbols by sym.name.  The jitter pair is
+# therefore not declared here: it comes from components/instrument.py, the
+# parent that owns the additive noise model.
 fluxfrac = sp.symbols("fluxfrac", real=True)
 
 comp_key = "astrometryinstrument"
@@ -23,9 +25,8 @@ comp_key = "astrometryinstrument"
 
 def get_symbol_map(config):
     return {
-        "jitter": "jitter",
-        "jitter_variance": "jitter_variance",
         "fluxfrac": "fluxfrac",
+        **JITTER_SYMBOL_MAP,
     }
 
 
@@ -34,11 +35,10 @@ def get_symbol_map(config):
 # ---------------------------------------------------------
 # Units: jitter in mas, jitter_variance in mas^2.
 
-RELATIONS = [
-    # Reparameterization bridge: user may provide 'jitter', sampler steps
-    # in 'jitter_variance'
-    sp.Eq(jitter_variance, jitter**2)
-]
+# Reparameterization bridge: user may provide 'jitter', sampler steps in
+# 'jitter_variance'.  Signed square, defined once on the shared Instrument
+# parent; see the note there.
+RELATIONS = list(JITTER_RELATIONS)
 
 
 def get_solver_paths():

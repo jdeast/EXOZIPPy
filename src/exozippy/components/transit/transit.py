@@ -9,6 +9,7 @@ import pytensor.tensor as pt
 from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.instrument import Instrument
+from exozippy.components.limbdark import quad_limb_darkened_flux
 
 from . import physics
 
@@ -115,13 +116,6 @@ class Transit(Instrument):
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
-        all_times, all_fluxes, all_errs, inst_indices, all_detrend = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -156,6 +150,7 @@ class Transit(Instrument):
             self.exptime_min[i] = exptime
             self.ninterp[i] = ninterp
 
+        blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
@@ -163,39 +158,24 @@ class Transit(Instrument):
             df = self._read_data(
                 i, roles=("time", "flux", "err"), detrend=True
             )
-            n_obs = len(df)
-            all_times.append(df.iloc[:, 0].values)
-            all_fluxes.append(df.iloc[:, 1].values)
-            all_errs.append(df.iloc[:, 2].values)
-            inst_indices.append(np.full(n_obs, i))
-
             self.baseline_init[i] = np.median(df.iloc[:, 1].values)
             self.jittervar_lower[i] = self._jitter_floor(df.iloc[:, 2].values)
 
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((n_obs, 0)))
+            blocks.add(
+                i,
+                time=df.iloc[:, 0].values,
+                obs=df.iloc[:, 1].values,
+                err=df.iloc[:, 2].values,
+                df=df,
+            )
 
-        self.time = np.concatenate(all_times).astype(float)
-        self.flux = np.concatenate(all_fluxes).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
-        self.inst_map = np.concatenate(inst_indices).astype(int)
-        self.n_total_obs = len(self.time)
+        # Shared accumulator: concatenation (time/flux/err), inst_map, the
+        # per-file row ranges, the block-diagonal detrend matrix, and the
+        # optional GP / robust-likelihood hooks.  No user_factor: the errors
+        # are already in the amplitude parameters' unit (relative flux).
+        blocks.finalize("flux")
 
         self._build_oversample_grid()
-
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # Errors are already in the amplitude parameter's unit (relative flux).
-        self._prepare_gp(self.time, self.err, self.inst_map)
-        self._prepare_robust(self.err, self.inst_map)
 
     def _build_oversample_grid(self):
         """
@@ -259,7 +239,8 @@ class Transit(Instrument):
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
-        self.manifest = {"baseline": {"initval": self.baseline_init}}
+        self._hint_baseline()
+        self.manifest = {"baseline": None}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
@@ -293,6 +274,43 @@ class Transit(Instrument):
             [name_to_idx[n] for n in self.band_names], dtype=int
         )
         self.obs_band_map = self.band_map[self.inst_map]
+
+    def _hint_baseline(self):
+        """Push each light curve's median flux as a RANK_DERIVED_DATA hint.
+
+        The median is measured in ``load_data`` (stage 1a), so it is ready
+        by the time this runs at stage 2 -- which is what lets it go through
+        the provenance pipeline at all.
+
+        It used to be a plain manifest option (``{"baseline": {"initval":
+        ...}}``), and options are merged as ``{**cfg, **options}`` AFTER
+        ``resolve()``: they beat the user's params file outright and never
+        acquire a rank.  For a data-derived START value that is backwards --
+        an explicit ``transit.<name>.baseline`` in a params file (a restart
+        file, say) was silently discarded.  As a hint it sits at
+        RANK_DERIVED_DATA (60), the tier this channel exists for: above the
+        defaults.yaml 1.0 (20) and below the user (100), exactly like
+        ``rvinstrument``'s gamma (median RV) and ``mulensinstrument``'s
+        f_source/log_f_total.
+
+        A non-finite median (a file with no usable flux) is skipped rather
+        than hinted: the defaults.yaml 1.0 is then what the engine resolves,
+        which is also the no-data fallback ``load_data`` seeds
+        ``baseline_init`` with, so the two agree by construction.
+        """
+        baseline_init = getattr(self, "baseline_init", None)
+        if baseline_init is None:
+            return  # register_parameters without load_data (bare harness)
+        arr = np.atleast_1d(baseline_init)
+        for i in range(self.n_elements):
+            val = float(arr[i])
+            if not np.isfinite(val):
+                logger.warning(
+                    f"transit {self.names[i]}: median flux is not finite; "
+                    f"leaving baseline at its defaults.yaml start value."
+                )
+                continue
+            self.config_manager.add_hint(f"{self.prefix}.{i}.baseline", val)
 
     def _build_dilution(self, system):
         """
@@ -369,8 +387,11 @@ class Transit(Instrument):
         denom_plus = pt.clip(1.0 + esinw_p, _GEOM_EPS, np.inf)
         sini_ar = pt.clip(pt.abs(sini_p * ar_p), _GEOM_EPS, np.inf)
 
-        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
-        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
+        # Winn 2010 eqs 7-8: the primary transit happens at true anomaly
+        # pi/2 - omega (see calc_tp), where r = a(1-e^2)/(1 + esinw); the
+        # secondary sits at the opposite conjunction, r = a(1-e^2)/(1 - esinw).
+        dur_b = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_plus
+        dur_bs = ar_p * cosi_p * (1.0 - pt.sqr(ecc_p)) / denom_minus
 
         def _arcsin_term(p_offset_sq, dur_bx):
             radicand = pt.clip(p_offset_sq - pt.sqr(dur_bx), 0.0, np.inf)
@@ -379,34 +400,43 @@ class Transit(Instrument):
             )
             return pt.arcsin(arg)
 
+        # Winn 2010 eqs 14-16: the duration's eccentricity correction is
+        # sqrt(1-e^2)/(1 + esinw) for the primary and sqrt(1-e^2)/(1 - esinw)
+        # for the secondary.
         dur_t14 = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 + p_p), dur_b)
             * ecc_factor
-            / denom_minus
+            / denom_plus
         )
         dur_t14s = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 + p_p), dur_bs)
             * ecc_factor
-            / denom_plus
+            / denom_minus
         )
 
-        dur_tfwhm = (
+        # The (1-p)^2 arcsin term is Winn 2010's t23 (full-occultation
+        # duration, 2nd to 3rd contact); the FWHM is (t14 + t23)/2 and the
+        # ingress/egress duration tau is (t14 - t23)/2 (EXOFASTv2
+        # derivepars.pro convention).
+        dur_t23 = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 - p_p), dur_b)
             * ecc_factor
-            / denom_minus
+            / denom_plus
         )
-        dur_tfwhms = (
+        dur_t23s = (
             (period_p / np.pi)
             * _arcsin_term(pt.sqr(1.0 - p_p), dur_bs)
             * ecc_factor
-            / denom_plus
+            / denom_minus
         )
 
-        dur_tau = (dur_t14 - dur_tfwhm) / 2.0
-        dur_taus = (dur_t14s - dur_tfwhms) / 2.0
+        dur_tfwhm = (dur_t14 + dur_t23) / 2.0
+        dur_tfwhms = (dur_t14s + dur_t23s) / 2.0
+        dur_tau = (dur_t14 - dur_t23) / 2.0
+        dur_taus = (dur_t14s - dur_t23s) / 2.0
 
         pm.Deterministic(f"{self.prefix}.b", dur_b)
         pm.Deterministic(f"{self.prefix}.bs", dur_bs)
@@ -517,17 +547,6 @@ class Transit(Instrument):
             if dil_inst is not None:
                 dil_obs = dil_inst[self.inst_map[rows]]  # (n_g,)
 
-            # exoplanet_core's quad_solution_vector returns s in starry's Green's basis,
-            # not powers of mu. Converting the quadratic law (u1, u2) into that basis
-            # requires the change-of-basis in Agol, Luger & Foreman-Mackey (2020),
-            # matching exoplanet.light_curves.limb_dark.get_cl():
-            #   c0 = 1 - u1 - 1.5*u2, c1 = u1 + 2*u2, c2 = -0.25*u2
-            #   norm = dot(s_off, c) = pi*(c0 + c1/1.5), s_off = [pi, 2pi/3, 0]
-            c0 = 1.0 - u1_mapped - 1.5 * u2_mapped
-            c1 = u1_mapped + 2.0 * u2_mapped
-            c2 = -0.25 * u2_mapped
-            ld_norm = np.pi * (c0 + c1 / 1.5)
-
             for p_idx in range(planets.n_elements):
                 b_p = b[
                     :, :, p_idx
@@ -537,18 +556,12 @@ class Transit(Instrument):
                 ]  # (n_g, k_g) line-of-sight coord (+ = planet in front of star)
                 r_p = planets.p.value[p_idx]  # scalar R_p/R_*
 
-                # quad_solution_vector(b, r) -> (n_g, k_g, 3) solution vector s.
-                # Broadcast scalar r_p to (n_g, k_g) following the ops.kepler() pattern.
-                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
-
                 # Limb-darkened flux fraction: 1.0 off-disk, <1.0 during transit.
-                # Verified against brute-force disk integration: lc = dot(s, c) / dot(s_off, c)
-                # c0/c1/c2/ld_norm are (n_g,); broadcast against the sub-exposure axis.
-                flux_frac = (
-                    sol[:, :, 0] * c0[:, None]
-                    + sol[:, :, 1] * c1[:, None]
-                    + sol[:, :, 2] * c2[:, None]
-                ) / ld_norm[:, None]  # (n_g, k_g)
+                # u1/u2_mapped are (n_g,); add the sub-exposure axis so they
+                # broadcast against b_p.
+                flux_frac = quad_limb_darkened_flux(
+                    b_p, r_p, u1_mapped[:, None], u2_mapped[:, None]
+                )  # (n_g, k_g)
 
                 # Fraction of stellar flux blocked (0 off-disk, ~ r^2 at disk centre)
                 blocked = 1.0 - flux_frac
@@ -717,11 +730,6 @@ class Transit(Instrument):
                 band_idx
             ]  # scalar, 0 unless fitellip
             baseline_inst = self.baseline.value[inst_idx]  # scalar
-            # See build_likelihood for the Green's-basis change-of-basis derivation.
-            c0_inst = 1.0 - u1_inst - 1.5 * u2_inst
-            c1_inst = u1_inst + 2.0 * u2_inst
-            c2_inst = -0.25 * u2_inst
-            ld_norm_inst = np.pi * (c0_inst + c1_inst / 1.5)
 
             decrement_matrix_list = []
             for p_idx in range(planets.n_elements):
@@ -731,12 +739,9 @@ class Transit(Instrument):
                 tc_this = orbits.tc.value[planets.orbit_map][p_idx]
                 period_this = orbits.period.value[planets.orbit_map][p_idx]
 
-                sol = ops.quad_solution_vector(b_p, r_p + pt.zeros_like(b_p))
-                flux_frac = (
-                    sol[:, 0] * c0_inst
-                    + sol[:, 1] * c1_inst
-                    + sol[:, 2] * c2_inst
-                ) / ld_norm_inst
+                flux_frac = quad_limb_darkened_flux(
+                    b_p, r_p, u1_inst, u2_inst
+                )  # (N_times,)
                 # Negative so that _compiled_full_lc output + baseline gives a transit dip
                 blocked = pt.where(Z_p > 0.0, 1.0 - flux_frac, 0.0)
                 # match the likelihood's SED depth dilution (built there first)
@@ -871,9 +876,27 @@ class Transit(Instrument):
     # always draw the exact same arrays (see plotspec.PlotSpec).
     # ------------------------------------------------------------------
     def _baseline_for(self, point, i):
-        """Baseline flux for instrument i from a point (default 1.0)."""
-        base_vals = np.atleast_1d(point.get(self.baseline.label, 1.0))
-        return float(base_vals[i])
+        """Baseline flux for instrument i, in internal units.
+
+        The value comes from the point when it is there, else from the
+        baseline Parameter's own initval -- the same fallback
+        _point_to_plot_params uses for every other plotted parameter.
+
+        A ``point.get(label, 1.0)`` here silently substituted UNITY for any
+        parameter absent from the draws, and pinned (``sigma: 0``)
+        parameters are always absent (an all-fixed vector never becomes a
+        pm.Deterministic, so it is in neither model.deterministics nor the
+        posterior).  Unity is not a neutral default: load_data seeds each
+        baseline with the light curve's own median flux, so on an
+        un-normalized light curve (raw counts) a pinned baseline plotted
+        the model curve and the phased panel's cleaned flux off by the
+        entire flux scale.
+        """
+        vals = point.get(self.baseline.label)
+        if vals is None:
+            vals = self.baseline.initval
+        base_vals = np.atleast_1d(vals)
+        return float(base_vals[i] if i < len(base_vals) else base_vals[0])
 
     def _eval_unphased_lc(self, system, point, i):
         """Full model light curve for instrument i: baseline + transit + GP.

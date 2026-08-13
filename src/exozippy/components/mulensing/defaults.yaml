@@ -1,8 +1,19 @@
 lens:
+  # t_0 and u_0 are DATA-DERIVED: their real start comes from the NNLS/grid
+  # bootstrap or from MMEXOFAST seeds, both of which enter at
+  # RANK_DERIVED_DATA (60) and so beat these RANK_DEFAULT (20) values in
+  # every topology that supplies one.  The static numbers are a backstop for
+  # the case where nothing does -- every sampled parameter must carry an
+  # initval from somewhere, or `sigma: 0` on it would pin it at 0.0 (see the
+  # "pinned with no value" check in Parameter.build_pymc).  Neither symbol
+  # appears in any RELATION, so a defaults seed here cannot propagate into
+  # another parameter's provenance and cannot change what
+  # mmexofast_support.user_hints_sufficient concludes.
   t_0:
     unit: "d"
     lower: 2400000
     upper: 3000000
+    initval: 2460000  # a BJD_TDB inside the bounds; the data always override
     init_scale: 0.01
     internal_unit: "d"
     latex: "t_0"
@@ -11,43 +22,54 @@ lens:
     unit: ""
     lower: -18 # ~20 ppm peak magnification
     upper: 18 # ~20 ppm peak magnification
+    initval: 0.5  # a mid-range, unambiguously magnified trajectory
     init_scale: 0.01
     internal_unit: ""
     latex: "u_0"
     description: "Impact parameter (Einstein radii)"
+  # t_E and the pi_E direction live in the light curve's GEOCENTRIC frame
+  # (Skowron+2011 t0_par anchor), so they derive from mu_rel_geo, not from
+  # the heliocentric pm difference.
   t_E:
     lower: 0.0
     unit: "d"
     internal_unit: "d"
     latex: "t_E"
-    description: "Einstein crossing time"
+    description: "Einstein crossing time (geocentric at t0_par)"
     debug_print: true
     expressions:
       default:
         func_name: "calc_t_E"
-        deps: [ "theta_E", "mu_rel_mag" ]
+        deps: [ "theta_E", "mu_rel_geo_mag" ]
   pi_E_N:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,N}"
+    latex: "\\pi_{\\rm E,N}"
     description: "Parallax vector (North)"
     debug_print: true
     expressions:
       default:
         func_name: "calc_pi_E_N"
-        deps: [ "pi_rel", "theta_E", "mu_dec_rel", "mu_rel_mag" ]
+        deps: [ "pi_rel", "theta_E", "mu_dec_rel_geo", "mu_rel_geo_mag" ]
   pi_E_E:
     initval: 0.0
     unit: ""
     internal_unit: ""
-    latex: "\\pi_{\rm E,E}"
+    latex: "\\pi_{\\rm E,E}"
     description: "Parallax vector (East)"
     debug_print: true
     expressions:
       default:
         func_name: "calc_pi_E_E"
-        deps: [ "pi_rel", "theta_E", "mu_ra_rel", "mu_rel_mag" ]
+        deps: [ "pi_rel", "theta_E", "mu_ra_rel_geo", "mu_rel_geo_mag" ]
+  # NOTE on lens_map: it names the primary lens body by INDEX only, and it
+  # serves two different roles -- the lensing MASS (star.mass[lens_map],
+  # theta_E below) and the KINEMATIC HOST (star.distance/pm_ra/pm_dec
+  # [lens_map], pi_rel and mu_rel).  Those coincide only because the primary
+  # lens body is always a star, which Lens._validate_bodies enforces; see
+  # the longer note in Lens.build_maps.  Do not add a non-star primary
+  # without splitting the two.
   pi_rel:
     lower: 0.0
     upper: 10000
@@ -70,13 +92,17 @@ lens:
       default:
         func_name: "calc_theta_E"
         deps: [ "star.mass[lens_map]", "pi_rel" ]
+  # mu_ra_rel / mu_dec_rel / mu_rel_mag are HELIOCENTRIC: differences of the
+  # stars' barycentric proper motions (the frame the galactic kinematic
+  # prior and Gaia priors constrain).  The *_geo trio below converts to the
+  # geocentric frame at t0_par for the light-curve chain.
   mu_ra_rel:
     lower: -10000.0
     upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{\\alpha,rel}"
-    description: "Relative lens-source proper motion (RA)"
+    latex: "\\mu_{\\alpha,rel,helio}"
+    description: "Relative lens-source proper motion (RA, heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_ra_rel"
@@ -86,8 +112,8 @@ lens:
     upper: 10000.0
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{\\delta,rel}"
-    description: "Relative lens-source proper motion (Dec)"
+    latex: "\\mu_{\\delta,rel,helio}"
+    description: "Relative lens-source proper motion (Dec, heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_dec_rel"
@@ -97,12 +123,49 @@ lens:
     upper: 10000
     unit: "mas/yr"
     internal_unit: "mas/yr"
-    latex: "\\mu_{rel}"
-    description: "Relative lens-source proper motion"
+    latex: "\\mu_{rel,helio}"
+    description: "Relative lens-source proper motion (heliocentric)"
     expressions:
       default:
         func_name: "calc_mu_rel_mag"
         deps: ["mu_ra_rel", "mu_dec_rel"]
+  # Geocentric (t0_par frame, Gould 2004): mu_geo = mu_helio -
+  # pi_rel * v_earth_perp(t0_par)/AU.  earth_vperp_e/n are context
+  # constants injected by Lens.add_parameter (Earth's velocity at t0_par
+  # projected on East/North, AU/yr), declared in Lens.context_dep_names.
+  mu_ra_rel_geo:
+    lower: -10000.0
+    upper: 10000.0
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\alpha,rel,geo}"
+    description: "Relative lens-source proper motion (RA, geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_ra_rel_geo"
+        deps: [ "mu_ra_rel", "pi_rel", "earth_vperp_e" ]
+  mu_dec_rel_geo:
+    lower: -10000.0
+    upper: 10000.0
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{\\delta,rel,geo}"
+    description: "Relative lens-source proper motion (Dec, geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_dec_rel_geo"
+        deps: [ "mu_dec_rel", "pi_rel", "earth_vperp_n" ]
+  mu_rel_geo_mag:
+    lower: 0.0
+    upper: 10000
+    unit: "mas/yr"
+    internal_unit: "mas/yr"
+    latex: "\\mu_{rel,geo}"
+    description: "Relative lens-source proper motion (geocentric at t0_par)"
+    expressions:
+      default:
+        func_name: "calc_mu_rel_mag"
+        deps: ["mu_ra_rel_geo", "mu_dec_rel_geo"]
   rho:
     # Soft upper barrier only: real events have rho <~ 0.5, and rho >~ a few
     # both erases the microlensing signal (A -> 1) and drives VBM's
@@ -220,8 +283,10 @@ lens:
     description: "y-component of trajectory angle direction (N(0,1) prior → uniform prior on alpha)"
 mulensinstrument:
   # Optional detrending coefficients, one per extra data column per
-  # instrument, applied to the model magnitude (see rvinstrument/transit for
-  # the same block-diagonal scheme).
+  # instrument (see rvinstrument/transit for the same block-diagonal scheme).
+  # These stay MAGNITUDE-space coefficients -- a throughput/extinction trend
+  # is multiplicative in flux -- so the flux model is scaled by
+  # 10**(-0.4 * X.c).  Unchanged by the move to a flux likelihood.
   detrend_coeffs:
     initval: 0.0
     init_scale: 0.01
@@ -231,31 +296,50 @@ mulensinstrument:
     internal_unit: "mag"
     latex: "c"
     description: "Detrending Coefficients"
-  # Optional GP amplitudes, in magnitudes (the observable this component
-  # models).  The rest of the GP blueprint is in components/defaults.yaml.
+  # UNIT CHANGE: these three amplitudes used to be in MAGNITUDES and are now
+  # in FLUX -- the observable this component models and fits (see
+  # MulensInstrument's class docstring).  A prior written against the old
+  # magnitude units means something different now; rewrite it.
+  #
+  # A light curve's flux zeropoint is arbitrary (10**(-0.4 m) ~ 1e-8 for a
+  # magnitude file, O(1) or O(1e4) counts for difference imaging), so the
+  # bounds and starts below are only ceilings and last-resort fallbacks:
+  # MulensInstrument._scale_flux_amplitudes installs the usable per-light-curve
+  # upper/initval from that file's bootstrapped baseline flux, through the
+  # "overrides" channel, i.e. still under any user override.
+  # The rest of the GP blueprint is in components/defaults.yaml.
   gp_rot_sigma:
     lower: 0.0
-    upper: 5.0
+    upper: 1.0e30
     initval: 0.02
     init_scale: 0.01
-    unit: "mag"
-    internal_unit: "mag"
+    unit: ""
+    internal_unit: ""
+    description: >-
+      GP rotation-term amplitude, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
   gp_sho_sigma:
     lower: 0.0
-    upper: 5.0
+    upper: 1.0e30
     initval: 0.02
     init_scale: 0.01
-    unit: "mag"
-    internal_unit: "mag"
-  # Optional hogg-mixture outlier scatter, in magnitudes (the rest of the
-  # robust-likelihood blueprint lives in components/defaults.yaml).
+    unit: ""
+    internal_unit: ""
+    description: >-
+      GP SHO-term amplitude, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
+  # Optional hogg-mixture outlier scatter; the rest of the robust-likelihood
+  # blueprint lives in components/defaults.yaml.
   out_scale:
     lower: 0.0
-    upper: 10.0
+    upper: 1.0e30
     initval: 0.2
     init_scale: 0.1
-    unit: "mag"
-    internal_unit: "mag"
+    unit: ""
+    internal_unit: ""
+    description: >-
+      Outlier-component scatter, in FLUX in the data file's own system
+      (was magnitudes before the flux-likelihood change)
   log_f_total:
     initval: -6
     init_scale: 3e-4
@@ -305,6 +389,14 @@ mulensinstrument:
       default:
         func_name: "calc_f_blend"
         deps: [ "log_f_total", "q_source" ]
+  # Multiplicative error scale: sigma = err * err_scale.  It is dimensionless
+  # in flux for the same reason it was dimensionless in magnitudes -- it
+  # multiplies whatever error bar the file reports -- so unlike the three
+  # amplitudes above it did not need a unit change.  It now scales the FLUX
+  # error; for a magnitude file that is the propagated sigma_F = F*sigma_m/K,
+  # so to first order an existing prior still says what it said.
+  # mulensinstrument has no jitter_variance (noise_model = "err_scale"), so
+  # there is no additive noise term to re-unit either.
   err_scale:
     initval: 1.0
     init_scale: 0.1
@@ -313,15 +405,38 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "k"
-    description: "Error scaling factor"
-  # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
-  # with this Gaussian prior as a potential (see
-  # mulensinstrument._build_sed_flux_constraint). Override per light curve
-  # in params.yaml; sigma must be nonzero.
+    description: >-
+      Multiplicative scale on the reported FLUX errors (dimensionless)
+  # DERIVED, not sampled: zp = m_SED + 2.5*log10(f_source) is determined by
+  # f_source and the SED, so it adds no sampled dimension -- exactly the
+  # analytic substitution it has always been.  It IS an ordinary Parameter
+  # now, though (manifest entry registered by
+  # MulensInstrument.register_parameters when a sed: block exists), so the
+  # Gaussian below is applied by Parameter.build_pymc's derived-with-sigma
+  # branch rather than by a hand-built pm.Potential, and every generic
+  # facility -- unit conversion, the LaTeX table, links, bound_scale -- works
+  # on it.  Override per light curve in params.yaml; sigma must be nonzero
+  # (an exact zeropoint would make f_source deterministic given the SED).
   zeropoint:
+    # No `initval:` key, like every other DERIVED parameter in this file
+    # (f_source, f_blend, s, ...): the expression IS the value.  It carried a
+    # purely defensive `initval: 0.0` only to satisfy "every sampled
+    # parameter carries an initval", and that check (pinned-with-no-value, in
+    # Parameter.build_pymc) exempts derived elements outright -- so the
+    # reason for it is gone, and a second number duplicating mu is one more
+    # thing to keep in sync.  `mu` is the start, through resolve()'s ordinary
+    # "user gave mu but no initval" rule, exactly as for every other
+    # Gaussian-prior parameter.
     mu: 0.0
     sigma: 0.2
     unit: "mag"
     internal_unit: "mag"
     latex: "ZP"
     description: "Photometric zeropoint of the light curve's magnitude system (m_cal = -2.5 log10(f) + ZP)"
+    expressions:
+      default:
+        # m_source_pred / zp_center / sed_constrained are context nodes
+        # injected by MulensInstrument.add_parameter (see
+        # context_dep_names); only f_source is a manifest dependency.
+        func_name: "calc_zeropoint"
+        deps: ["m_source_pred", "zp_center", "sed_constrained", "f_source"]

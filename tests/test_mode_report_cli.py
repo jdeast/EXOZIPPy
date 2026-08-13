@@ -11,6 +11,10 @@ pipeline that run.run_fit() uses on a live fit (outputs.report_pipeline.
 build_mode_reports), so the two call sites cannot drift apart.
 """
 
+import csv
+import shutil
+import subprocess
+
 import arviz as az
 import numpy as np
 import pytest
@@ -19,6 +23,8 @@ from click.testing import CliRunner
 
 from exozippy import cli_modes
 from exozippy import run as run_module
+from exozippy.outputs.ledger import SeedRecord
+from exozippy.outputs.report_pipeline import build_mode_reports
 from exozippy.system import System
 
 pytestmark = pytest.mark.slow
@@ -203,6 +209,156 @@ def test_cli_missing_trace_reports_error(tmp_path):
 
     assert result.exit_code != 0
     assert isinstance(result.exception, FileNotFoundError)
+
+
+# ----------------------------------------------------------------------
+# Review 2.8.1 / 2.8.2: the pipeline's own output files
+#
+# The trigger for both is the ob140939 setup -- a multi-seed fit with
+# rejected seeds whose surviving posterior is UNIMODAL -- run under a
+# prefix that contains an underscore (DC2018_128 and
+# KMT-2019-BLG-1806_nt8long are both real prefixes in this repo).
+# ----------------------------------------------------------------------
+
+# Spelled out rather than imported, so the test pins the contract instead
+# of whatever the code happens to define.
+MODE_COLUMNS = (
+    "parname",
+    "mode",
+    "weight",
+    "weight_err",
+    "value",
+    "up_err",
+    "low_err",
+)
+
+
+def _prepared_system():
+    config, user_params = _orbit_config_and_params()
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    return system, model
+
+
+def _unimodal_idata(names, rng):
+    posterior = {
+        n: rng.normal(0, 1, N).reshape(N_CHAIN, N_DRAW) for n in names
+    }
+    lp = rng.normal(1000, 3, N).reshape(N_CHAIN, N_DRAW)
+    return az.from_dict({"posterior": posterior, "sample_stats": {"lp": lp}})
+
+
+def _seed_ledger(names):
+    """Two Laplace records: one on the surviving mode, one far outside it
+    (rejected).  Hand-built so the test does not need a real polish pass."""
+
+    def rec(k, offset):
+        return SeedRecord(
+            seed_index=k,
+            lp_max=1000.0 - 10.0 * k,
+            delta_lp=10.0 * k,
+            laplace_logw=1000.0 - 10.0 * k,
+            raw_point={n: np.array([offset]) for n in names},
+            raw_scales={n: np.array([1.0]) for n in names},
+            phys={"orbit.logP": np.array([1.0 + offset])},
+            phys_sigma={"orbit.logP": np.array([0.1])},
+            sampled_idx={"orbit.logP": [0]},
+        )
+
+    return [rec(0, 0.0), rec(1, 500.0)]
+
+
+def _pipeline_outputs(tmp_path, prefix_name):
+    system, model = _prepared_system()
+    rng = np.random.default_rng(3)
+    names = [v.name for v in model.free_RVs]
+    idata = _unimodal_idata(names, rng)
+    prefix = tmp_path / prefix_name
+    report = build_mode_reports(
+        system,
+        idata,
+        str(prefix),
+        raise_on_invalid=False,
+        seed_ledger=_seed_ledger(names),
+    )
+    assert report.n_modes == 1  # the case the review is about
+    return prefix
+
+
+def test_unimodal_fit_with_rejected_seeds_writes_a_rectangular_csv(tmp_path):
+    """
+    Given a multi-seed fit whose surviving posterior is unimodal and whose
+      seed ledger holds a rejected solution,
+    When the reporting pipeline writes <prefix>_results.csv,
+    Then the file is rectangular and its header comment describes its rows:
+      csv.reader sees one row width, and DictReader keyed on the header
+      reads the rejected-seed row back with its mode key.
+
+    Regression for review 2.8.1: the header path took its column set from
+    the mode report (4 columns, unimodal) while append_ledger_csv always
+    wrote 7, so the file was unparseable.
+    """
+    # ARRANGE / ACT
+    prefix = _pipeline_outputs(tmp_path, "OB140939_unimodal")
+    csv_path = prefix.parent / (prefix.name + "_results.csv")
+
+    # ASSERT
+    lines = csv_path.read_text().splitlines()
+    header = lines[0]
+    assert [c.strip() for c in header.lstrip("# ").split(",")] == list(
+        MODE_COLUMNS
+    )
+
+    with open(csv_path, newline="") as f:
+        rows = [
+            r for r in csv.reader(f) if r and not r[0].lstrip().startswith("#")
+        ]
+    assert {len(r) for r in rows} == {len(MODE_COLUMNS)}
+    modes = {r[1] for r in rows}
+    assert "all" in modes and "rejected-seed1" in modes
+
+
+def test_underscored_prefix_produces_a_compilable_caption(tmp_path):
+    """
+    Given an output prefix containing an underscore,
+    When the reporting pipeline writes <prefix>_template.tex,
+    Then the caption escapes it -- no bare underscore survives in the
+      caption text, and (where pdflatex is installed) that caption text
+      compiles.
+
+    Regression for review 2.8.2: the raw prefix.stem went into
+    \\tablecaption{}, so the final table of a long fit would not compile.
+    """
+    # ARRANGE / ACT
+    prefix = _pipeline_outputs(tmp_path, "KMT-2019-BLG-1806_nt8long")
+    tmpl = (prefix.parent / (prefix.name + "_template.tex")).read_text()
+
+    # ASSERT
+    caption = next(
+        ln for ln in tmpl.splitlines() if ln.startswith(r"\tablecaption")
+    )
+    assert r"KMT-2019-BLG-1806\_nt8long" in caption
+    # everything before \label is typeset text: no bare underscore there
+    typeset = caption.split(r"\label")[0]
+    assert "_" not in typeset.replace(r"\_", "")
+
+    if shutil.which("pdflatex") is None:
+        pytest.skip("pdflatex not installed")
+    doc = tmp_path / "caption.tex"
+    body = caption[len(r"\tablecaption{") :].split(r"\label")[0]
+    doc.write_text(
+        "\\documentclass{article}\n\\begin{document}\n"
+        + body
+        + "\n\\end{document}\n"
+    )
+    proc = subprocess.run(
+        ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", doc.name],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:]
 
 
 def test_run_and_cli_share_the_same_pipeline_function():

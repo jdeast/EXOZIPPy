@@ -18,6 +18,7 @@ density = sp.symbols("density", real=True)
 
 # Log parameters
 logg = sp.symbols("logg", real=True)
+log_q = sp.symbols("log_q", real=True)
 ecc = sp.symbols("ecc", real=True)
 
 K, arsun, sini, period, m_total = sp.symbols(
@@ -39,6 +40,7 @@ def get_symbol_map(config):
 
     return {
         "mass": "mass",
+        "log_q": "log_q",
         "radius": "radius",
         "density": "density",
         "logg": "logg",
@@ -65,6 +67,12 @@ THREE = sp.Integer(3)
 Gsym = sp.Rational(int(round(G * 1e10)), 10000000000)
 
 RELATIONS = [
+    # Mass ratio to the host star.  In log_q mode this back-solves a user's
+    # planet.<i>.mass initval (or the K -> mass custom solver's result) into a
+    # log_q start.  In linear mode log_q is never materialized, and because it
+    # carries the lowest rank in this relation (planet/defaults.yaml) it always
+    # absorbs the residual, so the relation cannot perturb mass or star_mass.
+    sp.Eq(mass, (10**log_q) * star_mass),
     # Bulk Density (rho \propto M / R^3)
     sp.Eq(density, mass / (radius**THREE)),
     # Surface Gravity in cgs (g = G * M / R^2)
@@ -117,6 +125,34 @@ def register_solvers(config_manager):
         return float(solve_companion_mass(**deps))
 
     config_manager.register_custom_solver("planet.mass", solver_wrapper)
+
+    def log_q_wrapper(resolved, system_config, index):
+        """log_q from the planet mass and its host mass.
+
+        Registered so the transcendental inversion of
+        Eq(mass, 10**log_q * star_mass) never reaches sp.solve (2 s alarm).
+        A non-positive mass is not representable in this coordinate; abort
+        (KeyError is the documented "cannot solve yet" signal) and leave the
+        defaults.yaml start in place.  That case only arises in linear mode,
+        where the value is unused -- a log_q-mode planet with a negative mass
+        was already rejected by Planet._reconcile_mass_user_params.
+        """
+        planet_cfgs = system_config.get("planet", [{}])
+        p_cfg = planet_cfgs[index] if index < len(planet_cfgs) else {}
+        s_idx = p_cfg.get("star_ndx", 0)
+
+        mass = resolved.get(f"planet.{index}.mass")
+        star_mass = resolved.get(f"star.{s_idx}.mass")
+        if mass is None or star_mass is None:
+            raise KeyError("Missing dependencies for log_q solver")
+        if mass <= 0.0 or star_mass <= 0.0:
+            raise KeyError(
+                f"planet.{index}.mass = {mass} is not representable as log_q"
+            )
+
+        return float(np.log10(mass / star_mass))
+
+    config_manager.register_custom_solver("planet.log_q", log_q_wrapper)
 
 
 def solve_companion_mass(K, ecc, sini, period, primary_mass):

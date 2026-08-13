@@ -285,13 +285,14 @@ def test_make_starts_skips_probe_when_raw_scales_given(monkeypatch):
     Then the probe is never called (the model was whitened against the
     same start) and the provided scales disperse the chains.
     """
-    # Arrange
-    from exozippy.samplers import ptde
+    # Arrange -- patch the probe where _make_starts actually resolves it
+    # (samplers._common, the shared scaffolding module; ptde re-exports it).
+    from exozippy.samplers import _common, ptde
 
     def _boom(*a, **k):
         raise AssertionError("probe should not run")
 
-    monkeypatch.setattr(ptde, "_probe_scales", _boom)
+    monkeypatch.setattr(_common, "_probe_scales", _boom)
     rng = np.random.default_rng(0)
     start = {"a": np.zeros(2)}
 
@@ -477,4 +478,461 @@ def test_whitening_persistence_round_trip(tmp_path):
     assert not load_whitening(system, str(path))
     np.testing.assert_array_equal(
         p_x._whiten_state["sv_scale_logits"].get_value(), before
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review 2.10.1 / 2.10.4
+# ---------------------------------------------------------------------------
+
+
+def test_unbounded_no_sigma_posterior_invariant_under_rescale():
+    """Given a sampled element with INFINITE bounds and no sigma -- so
+    nothing cancels its raw N(0,1) and that raw prior IS its prior,
+    When set_whitening applies a probe-measured multiplier,
+    Then the logp as a function of the PHYSICAL value is unchanged.
+
+    Review 2.10.1: the rescale used to multiply this element's linear scale,
+    turning its prior from N(initval, init_scale) into N(initval,
+    m*init_scale) -- and m is measured from the data, so the prior width
+    became data-dependent.  The neighbouring unbounded-WITH-sigma case was
+    already excluded for exactly this reason; the guard was written as "has
+    an explicit sigma" instead of "the raw N(0,1) is the prior".
+    """
+    # Arrange
+    p = Parameter(
+        label="toy.u",
+        initval=0.0,
+        init_scale=1.0,
+        lower=-np.inf,
+        upper=np.inf,
+    )
+    with pm.Model() as model:
+        p.build_pymc()
+    logp = model.compile_logp()
+
+    def lp_at_physical(v):
+        gs = p._whiten_state["sv_gaussian_scales"].get_value()[0]
+        mu = p._raw_transform["gaussian_mus"][0]
+        return float(logp({"toy.u_raw": np.array([(v - mu) / gs])}))
+
+    physical = [0.0, 1.0, 2.0]
+    before = np.array([lp_at_physical(v) for v in physical])
+
+    # Act
+    p.set_whitening(np.array([3.0]))
+
+    # Assert -- same density over physical space, up to a constant
+    after = np.array([lp_at_physical(v) for v in physical])
+    np.testing.assert_allclose(
+        after - after[0], before - before[0], rtol=1e-10, atol=1e-10
+    )
+
+
+def test_unbounded_no_sigma_scale_is_reported_not_applied():
+    """Given the same element,
+    When set_whitening runs,
+    Then the shared linear scale is untouched and the measured value comes
+    back in the returned post-rescale scales (what PTDE disperses chains by).
+    """
+    # Arrange
+    p = Parameter(
+        label="toy.u",
+        initval=0.0,
+        init_scale=1.0,
+        lower=-np.inf,
+        upper=np.inf,
+    )
+    with pm.Model():
+        p.build_pymc()
+    before = p._whiten_state["sv_gaussian_scales"].get_value().copy()
+
+    # Act
+    post = p.set_whitening(np.array([7.0]))
+
+    # Assert
+    np.testing.assert_array_equal(
+        p._whiten_state["sv_gaussian_scales"].get_value(), before
+    )
+    np.testing.assert_array_equal(p._raw_transform["gaussian_scales"], before)
+    assert post.tolist() == [7.0]
+
+
+def test_load_whitening_rejects_a_file_missing_a_barrier_only_parameter(
+    tmp_path,
+):
+    """Given a persisted state that omits a DERIVED, barrier-only parameter
+    (no _whiten_state, so the old coverage check never looked at it),
+    When it is loaded,
+    Then the load is rejected and the caller re-measures.
+
+    Review 2.10.4: barriers ARE posterior terms, so a file that does not
+    describe every barrier describes a different logp than the one that
+    produced the trace being reused.
+    """
+    import json
+
+    from exozippy.whitening import (
+        load_whitening,
+        measure_and_whiten,
+        save_whitening,
+    )
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    raw_start = model.initial_point()
+    report = measure_and_whiten(system, model, raw_start)
+    path = tmp_path / "wh.json"
+    save_whitening(system, str(path), map_lp=report["map_lp"])
+
+    assert p_d._whiten_state is None and p_d._barrier_state is not None
+    data = json.loads(path.read_text())
+    assert "toy.d" in data["params"]
+    del data["params"]["toy.d"]
+    path.write_text(json.dumps(data))
+    barrier_before = p_d._barrier_state["sv"].get_value().copy()
+
+    # Act
+    ok = load_whitening(system, str(path))
+
+    # Assert
+    assert ok is False
+    np.testing.assert_array_equal(
+        p_d._barrier_state["sv"].get_value(), barrier_before
+    )
+
+
+def test_load_whitening_never_applies_a_state_partially(tmp_path):
+    """Given a persisted state whose FIRST parameter is valid and whose
+    second carries a mismatched vector,
+    When it is loaded,
+    Then nothing at all is applied -- the earlier parameter keeps its own
+    scales instead of being left half-restored.
+
+    Review 2.10.4: only scale_logits was validated up front, so a bad
+    gaussian_scales aborted inside the apply loop, after earlier parameters
+    had already been written, and the function still returned True.
+    """
+    import json
+
+    from exozippy.whitening import (
+        load_whitening,
+        measure_and_whiten,
+        save_whitening,
+    )
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    raw_start = model.initial_point()
+    report = measure_and_whiten(system, model, raw_start)
+    path = tmp_path / "wh.json"
+    save_whitening(system, str(path), map_lp=report["map_lp"])
+
+    data = json.loads(path.read_text())
+    # A value that would be visible if it were applied.
+    data["params"]["toy.x"]["scale_logits"] = [123.0]
+    # ...and a second parameter the apply loop would choke on.
+    data["params"]["toy.y"]["gaussian_scales"] = [1.0, 2.0]
+    path.write_text(json.dumps(data))
+    x_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    ok = load_whitening(system, str(path))
+
+    # Assert
+    assert ok is False
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), x_before
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reuse path: the whitening a saved trace was sampled under is a property of
+# draws that already exist, not a free choice of coordinates.  It is restored,
+# never re-measured, and never rewritten.
+# ---------------------------------------------------------------------------
+
+
+def _saved_whitening_setup(tmp_path):
+    """A whitened toy build plus the file its state was persisted to."""
+    from exozippy.whitening import measure_and_whiten, save_whitening
+
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    raw_start = model.initial_point()
+    report = measure_and_whiten(system, model, raw_start)
+    path = tmp_path / "fit_whitening.json"
+    save_whitening(system, str(path), map_lp=report["map_lp"])
+    return model, system, (p_x, p_y, p_d), path
+
+
+def test_restore_for_trace_applies_a_matching_file_without_rewriting_it(
+    tmp_path,
+):
+    """Given a whitening file that matches the build,
+    When it is restored on the trace-reuse path,
+    Then it applies and the file on disk is left byte-for-byte alone.
+    """
+    from exozippy.whitening import restore_whitening_for_trace
+
+    # Arrange
+    _model, system, (p_x, _p_y, _p_d), path = _saved_whitening_setup(tmp_path)
+    before_bytes = path.read_bytes()
+    before_scales = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+
+    # Act
+    status = restore_whitening_for_trace(system, str(path), "fit_trace.nc")
+
+    # Assert
+    assert status == "restored"
+    assert path.read_bytes() == before_bytes
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), before_scales
+    )
+
+
+def test_restore_for_trace_raises_instead_of_silently_recoordinating(
+    tmp_path,
+):
+    """Given a saved trace being REUSED and a whitening file that no longer
+    describes the build (it omits a barrier-only parameter),
+    When the whitening is restored,
+    Then StaleWhiteningError is raised naming the file, the reason and the
+    remedy -- and the file is NOT overwritten.
+
+    The gap this closes: run.py used to fall back to
+    measure_and_whiten + save_whitening here.  The trace's raw draws are
+    coordinates in the whitened space, so re-probing silently changed what
+    every stored draw decodes to -- and the overwrite destroyed the only
+    record of the coordinates they were actually sampled in.
+    """
+    import json
+
+    import pytest
+
+    from exozippy.whitening import (
+        StaleWhiteningError,
+        restore_whitening_for_trace,
+    )
+
+    # Arrange
+    _model, system, (p_x, _p_y, p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    assert p_d._whiten_state is None and p_d._barrier_state is not None
+    del data["params"]["toy.d"]
+    path.write_text(json.dumps(data))
+    before_bytes = path.read_bytes()
+    x_before = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+    d_before = p_d._barrier_state["sv"].get_value().copy()
+
+    # Act
+    with pytest.raises(StaleWhiteningError) as excinfo:
+        restore_whitening_for_trace(system, str(path), "fit_trace.nc")
+
+    # Assert -- diagnosable
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "fit_trace.nc" in message
+    assert "toy.d" in message  # WHY it does not apply
+    assert "recompute_trace: true" in message  # the remedy
+    # ...and nothing was rewritten or re-coordinated.
+    assert path.read_bytes() == before_bytes
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), x_before
+    )
+    np.testing.assert_array_equal(
+        p_d._barrier_state["sv"].get_value(), d_before
+    )
+
+
+def test_restore_for_trace_warns_and_keeps_preliminary_scales_when_absent(
+    tmp_path, caplog
+):
+    """Given a reused trace with NO whitening file beside it,
+    When the whitening is restored,
+    Then it is reported as unverifiable (not stale), the build keeps its
+    PRELIMINARY scales -- nothing is probed -- and no file is written.
+
+    Absent state is the trace_meta "unverifiable fingerprint" case, not the
+    stale one: a trace sampled with 'measure_scales: false' (or before the
+    state was persisted at all) legitimately has no file, and for the former
+    the preliminary scales ARE the ones it was sampled with.  Writing a
+    freshly measured file here would be worse than useless: the NEXT reload
+    would restore it silently, with no warning left to notice.
+    """
+    import logging
+
+    from exozippy.whitening import restore_whitening_for_trace
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    prelim_x = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+    prelim_d = p_d._barrier_state["sv"].get_value().copy()
+    missing = tmp_path / "fit_whitening.json"
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        status = restore_whitening_for_trace(
+            system, str(missing), "fit_trace.nc"
+        )
+
+    # Assert
+    assert status == "unverifiable"
+    assert not missing.exists()
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), prelim_x
+    )
+    np.testing.assert_array_equal(
+        p_d._barrier_state["sv"].get_value(), prelim_d
+    )
+    text = caplog.text
+    assert "UNVERIFIABLE WHITENING" in text
+    assert str(missing) in text
+    assert "fit_trace.nc" in text
+    assert "recompute_trace: true" in text
+
+
+def test_fresh_path_still_falls_back_and_re_measures(tmp_path, caplog):
+    """Given the same invalid whitening file but a run that is about to
+    SAMPLE (no trace being reused),
+    When load_whitening is called,
+    Then it still warns and returns False so the caller re-measures and
+    overwrites -- the coordinates are a free choice until draws exist, and
+    that path must not regress into raising.
+    """
+    import json
+    import logging
+
+    from exozippy.whitening import load_whitening
+
+    # Arrange
+    _model, system, (_p_x, _p_y, p_d), path = _saved_whitening_setup(tmp_path)
+    data = json.loads(path.read_text())
+    del data["params"]["toy.d"]
+    path.write_text(json.dumps(data))
+
+    # Act
+    with caplog.at_level(logging.WARNING):
+        ok = load_whitening(system, str(path))
+
+    # Assert
+    assert ok is False
+    assert "re-measuring" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# prepare_whitening: the branch run.py actually takes.  The bug was that both
+# arms of it did the same thing.
+# ---------------------------------------------------------------------------
+
+
+def _break_the_file(path):
+    """Drop the barrier-only parameter, so validation rejects the file."""
+    import json
+
+    data = json.loads(path.read_text())
+    del data["params"]["toy.d"]
+    path.write_text(json.dumps(data))
+
+
+def test_prepare_whitening_fresh_run_still_remeasures_and_overwrites(
+    tmp_path,
+):
+    """Given an invalid whitening file and a run that is about to SAMPLE,
+    When prepare_whitening runs with reusing_trace=False,
+    Then it measures and OVERWRITES the file, exactly as before.
+
+    This path is correct: no draws exist yet, so the coordinates are still
+    a free choice and a stale file must not block a fresh fit.  It must not
+    regress into the reuse path's raise.
+    """
+    from exozippy.whitening import prepare_whitening
+
+    # Arrange
+    model, system, (_p_x, _p_y, p_d), path = _saved_whitening_setup(tmp_path)
+    _break_the_file(path)
+    stale_bytes = path.read_bytes()
+
+    # Act
+    report = prepare_whitening(
+        system,
+        model,
+        model.initial_point(),
+        str(path),
+        str(tmp_path / "fit_trace.nc"),
+        reusing_trace=False,
+    )
+
+    # Assert
+    assert report is not None and "map_lp" in report
+    assert path.read_bytes() != stale_bytes
+    import json
+
+    assert "toy.d" in json.loads(path.read_text())["params"]
+
+
+def test_prepare_whitening_reuse_path_raises_and_leaves_the_file(tmp_path):
+    """Given the SAME invalid whitening file but a saved trace being reused,
+    When prepare_whitening runs with reusing_trace=True,
+    Then it raises StaleWhiteningError and the file is untouched.
+
+    Pre-fix, run.py took the fresh branch here too: the reused trace's raw
+    draws silently began decoding under a whitening they were never sampled
+    with, and the file that said what they WERE sampled with was overwritten
+    in the same breath.
+    """
+    import pytest
+
+    from exozippy.whitening import StaleWhiteningError, prepare_whitening
+
+    # Arrange
+    model, system, _params, path = _saved_whitening_setup(tmp_path)
+    _break_the_file(path)
+    stale_bytes = path.read_bytes()
+
+    # Act / Assert
+    with pytest.raises(StaleWhiteningError):
+        prepare_whitening(
+            system,
+            model,
+            model.initial_point(),
+            str(path),
+            str(tmp_path / "fit_trace.nc"),
+            reusing_trace=True,
+        )
+    assert path.read_bytes() == stale_bytes
+
+
+def test_prepare_whitening_reuse_path_writes_nothing_when_absent(tmp_path):
+    """Given a reused trace with no whitening file beside it,
+    When prepare_whitening runs with reusing_trace=True,
+    Then no probe is run and no file is created -- so the NEXT reload warns
+    again instead of silently trusting a file the trace never saw.
+    """
+    from exozippy.whitening import prepare_whitening
+
+    # Arrange
+    model, p_x, p_y, p_d = _barrier_model()
+    system = _StubSystem([p_x, p_y, p_d])
+    prelim = p_x._whiten_state["sv_scale_logits"].get_value().copy()
+    path = tmp_path / "fit_whitening.json"
+
+    # Act
+    report = prepare_whitening(
+        system,
+        model,
+        model.initial_point(),
+        str(path),
+        str(tmp_path / "fit_trace.nc"),
+        reusing_trace=True,
+    )
+
+    # Assert
+    assert report is None
+    assert not path.exists()
+    np.testing.assert_array_equal(
+        p_x._whiten_state["sv_scale_logits"].get_value(), prelim
     )

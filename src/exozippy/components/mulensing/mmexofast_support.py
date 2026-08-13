@@ -29,6 +29,23 @@ Only ``run_or_load`` touches the mmexofast package, and imports it lazily:
 exozippy must stay importable (and publishable) without it, since mmexofast
 is installable only from git (see the microlensing group in pyproject.toml).
 
+Failure policy: seeding that cannot happen must SAY so. Starting a raw
+light-curve fit from defaults.yaml is hopeless, and on a cluster expensively
+so, which is why the missing-package case raises rather than continuing (see
+``run_or_load``). A JSON that exists but cannot be parsed is the same failure
+wearing a quieter coat, so ``load_json`` distinguishes three cases and never
+collapses them:
+
+- ABSENT: ``None`` plus a warning; the caller decides (an explicit
+  ``mmexofast: <file>`` warns and skips, the auto path generates the file).
+- PRESENT and well-formed: the dict.
+- PRESENT and unreadable / unparseable / structurally wrong: raises
+  ``CorruptMMEXOFASTFileError``. ``run_or_load`` catches it for its OWN
+  cache -- a derived artifact with an unambiguous recovery (regenerate),
+  the same call ``utilities/zenodo.py`` makes for a corrupt download -- and
+  moves the bad file aside first so nothing is overwritten silently. A
+  user-named file is not ours to rebuild, so there the exception propagates.
+
 Time systems: newer MMEXOFAST adds ``jd_offset`` to every epoch parameter so
 the JSON is always full JD. EXOZIPPy's t_0 must live in the DATA's own time
 system (the initval is compared against raw file times), so seed extraction
@@ -48,49 +65,128 @@ from ...config import RANK_DERIVED_DATA
 logger = logging.getLogger(__name__)
 
 
-def load_json(path):
-    """Read an MMEXOFAST JSON; return the dict, or None with a warning."""
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError) as e:
-        logger.warning(f"Could not read mmexofast file '{path}': {e}.")
-        return None
+class CorruptMMEXOFASTFileError(ValueError):
+    """An MMEXOFAST JSON exists but cannot be used.
 
-
-def user_hints_sufficient(user_params, is_binary, want_rho):
-    """True when the user supplied a start value for every microlensing
-    observable this topology needs (t_0, u_0, t_E; rho when finite-source;
-    s-or-log_s, alpha, q when a lens companion exists).
-
-    ``user_params`` is the ConfigManager's standardized dict, so lens paths
-    are already in ``lens.0.<param>`` form. Bounds-only entries do not count:
-    the point of the check is whether the relaxation engine has a START, and
-    only initval (or a fixed mu) provides one.
+    Distinct from "absent" on purpose. Absent is a normal state with a
+    normal recovery (generate it, or run without seeds because the user said
+    so); present-but-broken is a state nobody chose, and the observed cause
+    -- a job killed while ``run_or_load`` was writing the cache -- leaves a
+    file whose only visible symptom, before this exception existed, was a
+    fit that quietly started from defaults.yaml.
     """
 
-    def has_start(*paths):
-        for p in paths:
-            entry = user_params.get(p)
-            if isinstance(entry, dict) and (
-                entry.get("initval") is not None or entry.get("mu") is not None
-            ):
-                return True
-        return False
 
-    ok = (
-        has_start("lens.0.t_0")
-        and has_start("lens.0.u_0")
-        and has_start("lens.0.t_E")
-    )
+# The one key every MMEXOFAST exozippy-init JSON carries. Its absence means
+# the file is not one (wrong path, half-written, hand-edited), which is
+# worth catching here: `push_seed_hints` would only log "no 'fits'" and let
+# the run continue seedless.
+_REQUIRED_KEY = "fits"
+
+
+def load_json(path):
+    """Read an MMEXOFAST JSON.
+
+    Returns
+    -------
+    dict or None
+        The parsed JSON object, or None when ``path`` does not exist (logged
+        as a warning; absence is the caller's decision to make).
+
+    Raises
+    ------
+    CorruptMMEXOFASTFileError
+        The file exists but could not be opened, is not valid JSON, is not a
+        JSON object, or lacks the ``fits`` key. Every one of those means the
+        seeds this file was supposed to supply will not be applied, and the
+        module's contract (see the module docstring) is that seeding which
+        cannot happen is reported, not absorbed. ``fits: []`` is legal -- an
+        MMEXOFAST run that found no solutions is a real answer, and
+        ``push_seed_hints`` already warns about it.
+    """
+    path = Path(path)
+    if not path.exists():
+        logger.warning(f"mmexofast file '{path}' does not exist.")
+        return None
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise CorruptMMEXOFASTFileError(
+            f"mmexofast file '{path}' exists but could not be read: {e}. "
+            f"A partially written file is usually a job killed mid-write. "
+            f"Delete it to regenerate, point 'mmexofast:' at a good file, "
+            f"supply start values for the microlensing parameters in the "
+            f"params file, or set 'mmexofast: false' on the lens block to "
+            f"opt out -- but do not let the fit start from defaults."
+        ) from e
+
+    if not isinstance(data, dict) or _REQUIRED_KEY not in data:
+        raise CorruptMMEXOFASTFileError(
+            f"mmexofast file '{path}' parsed but has no '{_REQUIRED_KEY}' "
+            f"key, so it is not MMEXOFAST exozippy-init output (got "
+            f"{type(data).__name__} with keys "
+            f"{sorted(data)[:6] if isinstance(data, dict) else 'n/a'}). "
+            f"Check the path, or delete the file to regenerate it."
+        )
+    return data
+
+
+def user_hints_sufficient(config_manager, is_binary, want_rho):
+    """True when every microlensing observable this topology needs (t_0, u_0,
+    t_E; rho when finite-source; s-or-log_s, alpha, q when a lens companion
+    exists) was either given outright or can be **derived** from what was.
+
+    Derivability, not literal presence, is the right question, because
+    several of these are derived parameters a params file legitimately never
+    names.  The case that matters is a restart file written by mkparam: it
+    carries only sampled coordinates, so `lens.q` (derived from the body
+    masses) and `lens.t_E` (from theta_E / mu_rel) are both absent -- yet
+    both are fully determined by the `planet.log_q`/`planet.mass`,
+    `star.logmass`, distance and proper-motion entries it does carry.
+    Scanning for literal keys therefore declared a complete restart file
+    "insufficient" and re-ran MMEXOFAST on every second-iteration fit.
+
+    So ask the relaxation engine (`ConfigManager.probe_derivable`), which
+    follows exactly the relations that will set these values for real at
+    stage 3.  Bounds-only entries still do not count: a bound is not a start.
+
+    A literal entry for every observable short-circuits the probe: naming a
+    value outright makes it RANK_USER, which is derivable by definition, so
+    the engine cannot change the answer.  That keeps the common hand-written
+    params file on the old zero-cost path and spends the extra solve only
+    where the literal scan would have been wrong.
+    """
+    required = ["lens.0.t_0", "lens.0.u_0", "lens.0.t_E"]
     if want_rho:
-        ok = ok and has_start("lens.0.rho")
+        required.append("lens.0.rho")
     if is_binary:
-        ok = (
-            ok
-            and has_start("lens.0.log_s", "lens.0.s")
-            and has_start("lens.0.alpha")
-            and has_start("lens.0.q")
+        required += ["lens.0.alpha", "lens.0.q"]
+
+    def named(path):
+        entry = config_manager.user_params.get(path)
+        return isinstance(entry, dict) and (
+            entry.get("initval") is not None or entry.get("mu") is not None
+        )
+
+    # s and log_s are one fact in two coordinates; either satisfies it.
+    if all(named(p) for p in required) and (
+        not is_binary or named("lens.0.s") or named("lens.0.log_s")
+    ):
+        return True
+
+    derivable = config_manager.probe_derivable(
+        required + ["lens.0.s", "lens.0.log_s"]
+    )
+    ok = all(p in derivable for p in required)
+    if is_binary:
+        ok = ok and ("lens.0.s" in derivable or "lens.0.log_s" in derivable)
+    if not ok:
+        missing = [p for p in required if p not in derivable]
+        logger.debug(
+            f"MMEXOFAST trigger: {missing} cannot be derived from the "
+            f"supplied parameters; a fit is needed."
         )
     return ok
 
@@ -110,12 +206,23 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
     Epochs are shifted back into the data's own time system by subtracting
     the JSON's ``jd_offset`` (0.0 when absent, and for pre-jd_offset files).
 
-    Rank sits between RANK_DERIVED_DATA and RANK_USER (config.add_seed_hints
-    default) so an explicit user initval list still wins.
+    Rank is RANK_DERIVED_DATA (config.add_seed_hints): MMEXOFAST is a very
+    fancy derivation FROM THE DATA, not a user statement, so it sits in the
+    same tier as any other data-driven hint and EVERY user entry -- an initval
+    list, and equally a plain scalar initval -- outranks it.
+
+    A fit missing some of the observables this topology needs seeds only the
+    ones it has -- PARTIAL seeding, which is worse than none because the
+    unseeded parameters fall back to defaults.yaml while the seeded ones do
+    not, putting the start in a place no MMEXOFAST solution ever occupied.
+    That cannot be silent, so every skipped observable is named in a warning.
+    It is not fatal: which observables matter is the topology's call (a PSPL
+    JSON reused for a binary lens is a real, if degraded, start), and
+    ``user_hints_sufficient`` re-asks the relaxation engine afterwards.
 
     Returns the number of seed solutions pushed (0 when the file has none).
     """
-    fits = data.get("fits", [])
+    fits = data.get("fits") or []
     if not fits:
         logger.warning(
             f"mmexofast output '{source}' has no 'fits'; no seeds loaded."
@@ -124,9 +231,24 @@ def push_seed_hints(data, config_manager, want_rho, is_binary, source="?"):
 
     jd_offset = float(data.get("jd_offset", 0.0) or 0.0)
 
+    wanted = ["t_0", "u_0", "t_E"]
+    if want_rho:
+        wanted.append("rho")
+    if is_binary:
+        wanted += ["s", "alpha", "q"]
+
     seed_sets = []
-    for fit in fits:
+    for i, fit in enumerate(fits):
         p = fit.get("parameters", {})
+        absent = [k for k in wanted if k not in p]
+        if absent:
+            logger.warning(
+                f"mmexofast output '{source}' fit {i} has no {absent}; "
+                f"those parameters keep their defaults.yaml start while the "
+                f"rest are seeded from this fit. Check that the file matches "
+                f"this lens topology (binary={is_binary}, "
+                f"finite_source={want_rho})."
+            )
         d = {}
         if "t_0" in p:
             d["lens.0.t_0"] = float(p["t_0"]) - jd_offset
@@ -289,27 +411,63 @@ def run_or_load(
     ``limb_darkening_coeffs_gamma``) forwarded verbatim, so anything the
     fitter accepts is reachable from YAML without a new exozippy knob.
 
+    A cache that exists but cannot be parsed is REGENERATED, not tolerated
+    and not raised on: this file is exozippy's own derived artifact, so the
+    recovery is unambiguous (delete it and refit) -- the same call
+    ``utilities/zenodo.py`` makes for a corrupt download. It is never
+    overwritten silently, though: the unreadable file is moved aside to
+    ``<name>.corrupt`` and the warning names it, so a half-written cache is
+    still there to look at. Contrast ``load_json`` on a user-named
+    ``mmexofast: <file>``, which raises -- exozippy did not write that file
+    and cannot rebuild it.
+
     Raises ImportError with install instructions when the package is
     missing: silently continuing would start the fit from defaults.yaml
     values, which for a raw light curve is a hopeless (and on a cluster,
     expensive) start. Opt out with ``mmexofast: false`` on the lens block.
     """
     json_path = Path(json_path)
+    corrupt = None
     if json_path.exists():
-        logger.info(f"MMEXOFAST: using cached output '{json_path}'.")
-        return load_json(json_path)
+        try:
+            data = load_json(json_path)
+        except CorruptMMEXOFASTFileError as e:
+            corrupt = e
+        else:
+            # Logged only once the cache is known to be usable -- the old
+            # order announced "using cached output" and then used nothing.
+            logger.info(f"MMEXOFAST: using cached output '{json_path}'.")
+            return data
 
     try:
         import mmexofast as mmexo
     except ImportError as e:
+        preamble = (
+            f"The cached MMEXOFAST output is unusable ({corrupt}) and "
+            f"cannot be regenerated: "
+            if corrupt is not None
+            else ""
+        )
         raise ImportError(
-            "MMEXOFAST auto-initialization needs the 'mmexofast' package "
+            preamble
+            + "MMEXOFAST auto-initialization needs the 'mmexofast' package "
             "(poetry install --with microlensing, or pip install "
             "git+https://github.com/jenniferyee/MMEXOFAST.git). Either "
             "install it, supply start values for the microlensing "
             "parameters in the params file, or set 'mmexofast: false' on "
             "the lens block to opt out."
         ) from e
+
+    if corrupt is not None:
+        # Quarantine rather than clobber: the bad file is the only evidence
+        # of how the previous run died, and an overwrite that says nothing
+        # is the failure mode this whole path exists to stop.
+        quarantine = json_path.with_name(json_path.name + ".corrupt")
+        json_path.replace(quarantine)
+        logger.warning(
+            f"MMEXOFAST: {corrupt} Regenerating it -- the unreadable file "
+            f"was moved to '{quarantine}' and MMEXOFAST is being re-run."
+        )
 
     kwargs = dict(
         files=[str(f) for f in files],
@@ -340,8 +498,14 @@ def run_or_load(
         fitter.fit()
         data = fitter.initialize_exozippy()
 
+    # Write through a .part file and rename: json.dump straight onto the
+    # cache path is what produced the truncated caches this function now has
+    # to detect (a cluster job killed mid-write). os.replace is atomic
+    # within a filesystem, so the cache path only ever holds a complete file.
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(json_path, "w") as f:
+    part = json_path.with_name(json_path.name + ".part")
+    with open(part, "w") as f:
         json.dump(data, f, indent=4)
+    os.replace(part, json_path)
     logger.info(f"MMEXOFAST: wrote '{json_path}'.")
     return data

@@ -10,7 +10,16 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 import pymc as pm
@@ -20,6 +29,12 @@ import pytensor.tensor as pt
 from astropy import units as u
 
 from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
+from exozippy.outputs.texutils import (
+    DIGIT_WORDS,
+    idx_to_words,
+    latex_escape,
+    mode_suffix,
+)
 from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 logger = logging.getLogger(__name__)
@@ -48,11 +63,47 @@ Number = Union[int, float, np.floating]
 # numerical time bomb.
 _RAW_CANCELLATION_CLIP = 1.0e4
 
+# phys_logit clips the sigmoid's argument to +/-30: sigmoid(30) = 1 - 9.4e-14,
+# closer to 1.0 than float64 can distinguish for any practical downstream use.
+# Every raw value that pushes |lq| past this is therefore physically identical
+# to the boundary value already -- no additional posterior mass lives out
+# there that isn't already accounted for at the boundary itself. Section C
+# adds a penalty beyond this same threshold (_LOGIT_SATURATION_PENALTY_K
+# below) so a data-unconstrained direction's chain can't wander arbitrarily
+# far into that degenerate, numerically-unsafe plateau -- without touching
+# the exact-uniform correction anywhere inside it.
+_LOGIT_SATURATION_LQ = 30.0
+
+# Quadratic-in-excess coefficient for the above penalty: -k*(|lq|-30)**2.
+# Picked to bite gently (a few nats) just past the threshold -- consistent
+# with ordinary sampling noise -- and overwhelmingly (thousands of nats) by
+# |lq| ~ 100, so it stops a runaway without shifting probability mass on
+# the representable [-30, 30] interior it leaves untouched.
+#
+# Tempering note: PTDE tempers the FULL logp (ptde.py accepts on
+# dlogp / T), so a rung at temperature T sees this wall softened to a
+# Gaussian of width sigma_lq = sqrt(T / (2k)) past the clip. The quadratic
+# (not linear) growth is what makes the guard survive tempering at all --
+# a bounded-slope penalty just rescales under 1/T. With k = 0.5 the
+# hottest default rung (T_max = 200) stays within |lq| ~ 70, comparable to
+# the +/-30 interior; if T_max is ever pushed to O(10^4), scale k with it
+# (k ~ T_max / 400 keeps the 3-sigma excursion at the interior width).
+# Raising k costs nothing statistically -- the posterior-invariance
+# argument is k-independent (the wall lives entirely where phys is the
+# same clipped value) -- so when in doubt, larger is safe.
+_LOGIT_SATURATION_PENALTY_K = 0.5
+
 # Preliminary whitening scale for a sampled bounded element whose
 # defaults.yaml provides no init_scale: this fraction of (upper - lower).
 # It only needs to land within the whitening probe's dynamic range -- the
 # measured rescale (Parameter.set_whitening) replaces it before sampling.
 _PRELIM_SCALE_SPAN_FRACTION = 0.1
+
+# The labels ConfigManager.initval_source may return.  Both start-value
+# errors key an advice table on one of these, so an unrecognized label is
+# normalized to "default" rather than KeyError-ing while rendering the very
+# message it is decorating.
+_INITVAL_SOURCES = frozenset({"user", "data", "solved", "default"})
 
 
 # ----------------------------
@@ -78,44 +129,18 @@ def _latex_varname(label: str, prefix: str = "ez") -> str:
     """
     Create a LaTeX-safe macro name from a label:
     - remove underscores and periods
-    - replace digits with words
+    - replace digits with words (outputs.texutils.DIGIT_WORDS -- the same
+      table idx_to_words uses, because this builds the <varname> half of
+      the very name idx_to_words builds the <idx> half of)
     - prefix to avoid global collisions
+
+    The digit substitutions are safe in any order: no replacement word
+    contains a digit, so none of them can be re-processed by a later rule.
     """
-    old = [".", "_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-    new = [
-        "",
-        "",
-        "zero",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-    ]
-    var = label
-    for o, n in zip(old, new):
-        var = var.replace(o, n)
+    var = label.replace(".", "").replace("_", "")
+    for digit, word in DIGIT_WORDS.items():
+        var = var.replace(digit, word)
     return prefix + var
-
-
-def _idx_to_words(n):
-    words = {
-        "0": "zero",
-        "1": "one",
-        "2": "two",
-        "3": "three",
-        "4": "four",
-        "5": "five",
-        "6": "six",
-        "7": "seven",
-        "8": "eight",
-        "9": "nine",
-    }
-    return "".join(words[char] for char in str(n))
 
 
 def _as_flat_array(x: Any) -> np.ndarray:
@@ -174,6 +199,34 @@ def to_vec(val, n_elements, fill=np.nan):
     n_to_copy = min(n_elements, arr.size)
     res[:n_to_copy] = arr.astype(float)[:n_to_copy]
     return res
+
+
+def sampled_bounds(param):
+    """(lower, upper) of a Parameter's hard support as float arrays.
+
+    Returns ``None`` when the bounds are missing, non-finite, or symbolic.
+    Every caller so far is a prior NORMALIZER (the galacticmodel IMF
+    branches, ``star``'s volume prior), and all of them treat ``None`` as
+    "leave this prior unnormalized" -- a constant offset never changes the
+    sampling, so a bound the component cannot read is not worth failing a
+    fit over.
+
+    NOTE this reads the STATIC bounds.  An element carrying a dynamic
+    (linked) ``lower``/``upper`` -- ``element_links`` -- has its real
+    support re-mapped inside ``build_pymc``; callers that care must check
+    ``param.element_links`` themselves.
+    """
+    try:
+        # atleast_1d: a scalar bound must still broadcast against the
+        # (n_elements,) sampled vector, and np.select wants real arrays.
+        lower = np.atleast_1d(np.asarray(param.lower, dtype=float))
+        upper = np.atleast_1d(np.asarray(param.upper, dtype=float))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    if not (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+        return None
+    return lower, upper
 
 
 class UnitTranslator:
@@ -327,6 +380,83 @@ def _broadcast_to_shape(val, shape, label, name):
     )
 
 
+def _fmt_prior_value(val, is_latex=True):
+    """Format one number for the Prior column (shared by every branch)."""
+    if val is None or np.isnan(val):
+        return "nan"
+    if np.isinf(val):
+        return (
+            (r"\infty" if val > 0 else r"-\infty")
+            if is_latex
+            else ("inf" if val > 0 else "-inf")
+        )
+    if 0.001 <= abs(val) < 10000:
+        return f"{val:.4f}".rstrip("0").rstrip(".")
+    return f"{val:.2e}"
+
+
+def _normalize_prior_elements(elements):
+    """Element selector for a PriorContribution -> frozenset of ints, or None.
+
+    Accepts None (every element), a boolean mask, or any iterable of indices.
+    """
+    if elements is None:
+        return None
+    arr = np.atleast_1d(np.asarray(elements))
+    if arr.dtype == bool:
+        return frozenset(int(i) for i in np.nonzero(arr)[0])
+    return frozenset(int(i) for i in arr.ravel())
+
+
+@dataclass(frozen=True, slots=True)
+class PriorContribution:
+    """A prior term a COMPONENT adds, declared against a Parameter.
+
+    ``Parameter.get_prior_str`` describes a prior from the Parameter's own
+    fields -- ``sigma``, ``mu``, ``lower``/``upper``.  A ``pm.Potential`` a
+    component adds in stage 6 is invisible to that, so a parameter carrying
+    one was reported as whatever its own fields implied, which for a bounded
+    no-sigma element is "Uniform".  Three shipped priors were misreported
+    that way: ``star.distance``'s d^2 volume prior, ``star.logmass``'s IMF,
+    and the free-floating-planet mass function that replaces the IMF per
+    star.
+
+    A component declares one of these next to the potential it is adding
+    (``Parameter.add_prior_contribution``) and both report paths -- run.py's
+    startup audit table and the LaTeX ``\\...prior`` macros -- compose it
+    with the parameter's own fields.  Reporting therefore stays completely
+    component-agnostic: ``parameter.py`` never learns a component's name,
+    and a component that adds a prior and forgets to declare it is the only
+    way to get a wrong table.
+
+    Fields:
+
+    ``latex`` / ``text``
+        The two renderings of the term.
+
+    ``elements``
+        Which elements of a vector parameter the term covers, as a frozenset
+        of indices, or None for all of them.  Per-element because the choice
+        genuinely is per element: ``mass_function: ffp`` swaps ONE star off
+        the stellar IMF.
+
+    ``supersedes_bounds``
+        True when the term replaces the uniform-over-bounds prior the logit
+        transform would otherwise imply, rather than multiplying a prior the
+        Parameter states itself.  The volume prior and the IMFs are of this
+        kind -- they are densities over exactly the parameter's own support,
+        which they normalize over -- so the rendered text is the term plus
+        that support, and the word "Uniform" never appears.  An explicit
+        Gaussian ``sigma`` is NOT dropped: a parallax measurement times the
+        volume prior is two statements and the table must make both.
+    """
+
+    latex: str
+    text: str
+    elements: Optional[frozenset] = None
+    supersedes_bounds: bool = False
+
+
 # ----------------------------
 # Parameter
 # ----------------------------
@@ -413,6 +543,16 @@ class Parameter:
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
+    # Params file these values came from, if any (Component.add_parameter
+    # forwards ConfigManager.param_file).  Metadata only -- it is quoted in
+    # the "pinned with no value" error so the user is told which file to edit.
+    source_file: Optional[str] = None
+    # Optional callable (component, param, element=i) -> "user" | "data" |
+    # "solved" | "default": ConfigManager.initval_source, forwarded by
+    # Component.add_parameter.  Metadata only -- it is quoted in the
+    # "start value outside its hard bounds" error so the message can say
+    # whether the offending number was written by the user or derived.
+    initval_source: Any = None
 
     # LaTeX/table metadata
     latex: Optional[str] = ""
@@ -432,6 +572,12 @@ class Parameter:
     # compute_mode_summaries when a mode report exists
     mode_summaries: Optional[list] = field(default=None, init=False)
     table_note: Optional[str] = None
+    # Prior terms added from OUTSIDE this Parameter -- a component's
+    # pm.Potential -- declared via add_prior_contribution so the reported
+    # tables can describe them. See PriorContribution.
+    prior_contributions: List["PriorContribution"] = field(
+        default_factory=list
+    )
 
     def __post_init__(self) -> None:
         """
@@ -549,6 +695,83 @@ class Parameter:
             f"Parameter {self.label} not found in point and has no expression."
         )
 
+    def element_is_sampled(self, index=0):
+        """True if element ``index`` is a FREE sampled element of this vector.
+
+        ``build_pymc`` writes the per-element ``is_sampled`` mask (neither
+        pinned by ``sigma: 0`` nor derived from an expression), so this is the
+        authoritative answer to "will the sampler move this?" -- as opposed to
+        guessing from the topology, which cannot see a user's ``sigma: 0`` or
+        a component's per-element ``"overrides"`` pin.
+
+        Callable only after the model has been built (stage 5 onwards); before
+        that the mask does not exist and this conservatively returns False.
+        """
+        mask = getattr(self, "is_sampled", None)
+        if mask is None:
+            return False
+        mask = np.atleast_1d(mask)
+        if mask.size == 0:
+            return False
+        return bool(mask[index] if mask.size > index else mask[0])
+
+    def element_start(self, index=0):
+        """Element ``index``'s start value, in INTERNAL units.
+
+        Prefer this over ``float(param.value[index].eval())`` whenever a
+        build-time constant is wanted: ``value`` of a *sampled* element is a
+        random variable, so ``.eval()`` DRAWS FROM ITS PRIOR rather than
+        returning the start value.  Falls back to evaluating the node only
+        when ``initval`` is not a plain number (a linked/symbolic initval).
+        """
+        init = getattr(self, "initval", None)
+        if init is not None:
+            try:
+                arr = np.atleast_1d(np.asarray(init, dtype=float))
+            except (TypeError, ValueError):
+                arr = None
+            if arr is not None and arr.size:
+                return float(arr[index] if arr.size > index else arr[0])
+        return float(np.atleast_1d(self.value[index].eval())[0])
+
+    def _initval_present(self, n_elements):
+        """Per-element mask: does this parameter actually carry a start value?
+
+        ``build_pymc`` reads ``initval`` through ``to_vec(..., fill=0.0)``, so
+        by the time it has a vector, "no value" and "the value 0.0" look
+        identical.  This answers the question *before* that fill, mirroring
+        ``to_vec``'s own broadcasting rules so the mask lines up element for
+        element with the vector ``to_vec`` returns:
+
+        - ``None``          -> nothing anywhere; every element absent.
+        - a symbolic node   -> a value (a linked/derived start); every element
+                               present.  It is deliberately not evaluated.
+        - a length-1 array  -> broadcast, so every element takes its value.
+        - a longer array    -> element-wise; elements past its end are absent
+                               (``to_vec`` fills them), and ``NaN`` means
+                               absent (``ConfigManager.resolve`` writes NaN
+                               into an array for "this element was never set").
+        """
+        init = self.initval
+        if init is None:
+            return np.zeros(n_elements, dtype=bool)
+        raw = getattr(init, "value", init)
+        if hasattr(raw, "owner") or "TensorVariable" in str(type(raw)):
+            return np.ones(n_elements, dtype=bool)
+        try:
+            arr = np.atleast_1d(np.asarray(raw, dtype=float))
+        except (TypeError, ValueError):
+            # Not numeric and not obviously symbolic: assume it is a value.
+            return np.ones(n_elements, dtype=bool)
+        if arr.size == 0:
+            return np.zeros(n_elements, dtype=bool)
+        if arr.size == 1:
+            return np.full(n_elements, not bool(np.isnan(arr[0])))
+        present = np.zeros(n_elements, dtype=bool)
+        n_copy = min(n_elements, arr.size)
+        present[:n_copy] = ~np.isnan(arr[:n_copy])
+        return present
+
     def get_display_label(self, index=0):
         parts = self.label.split(".")
         # If it's something like 'star.radius' (len 2) -> 'star.0.radius'
@@ -565,6 +788,220 @@ class Parameter:
             return f"{prefix}.{index}.{attr}"
 
         return self.label
+
+    # What to do about an out-of-bounds start, keyed on where the number came
+    # from (ConfigManager.initval_source).  The user wrote one of these
+    # numbers; they did not write the other three, and telling them to "fix
+    # the initval in your params file" for a value the relaxation engine
+    # derived sends them looking for a line that is not there.
+    _OUT_OF_BOUNDS_ADVICE = {
+        "user": (
+            "This start value is the 'initval' in your params file. Change it "
+            "to a value inside the bounds, or -- if the value is right -- "
+            "widen the bound. Note bounds may only be TIGHTENED by a params "
+            "file, so a value outside the range in the component's "
+            "defaults.yaml cannot be reached by editing bounds alone."
+        ),
+        "solved": (
+            "This start value was DERIVED by the relaxation engine from your "
+            "other inputs -- it is not written anywhere, so there is no line "
+            "to edit. Landing outside the bound means the inputs it was "
+            "solved from are inconsistent with that bound. Either seed this "
+            "parameter directly with an in-bounds 'initval' (that outranks "
+            "the derivation), or revisit the values it was derived from."
+        ),
+        "data": (
+            "This start value was estimated from your DATA by the component "
+            "that loaded it, not written in your params file. Either seed "
+            "this parameter directly with an in-bounds 'initval' (a user "
+            "value outranks a data-derived hint), or widen the bound if the "
+            "estimate is right."
+        ),
+        "default": (
+            "This start value is the default from the component's "
+            "defaults.yaml, and the bound excluding it was tightened "
+            "elsewhere (most likely a 'lower'/'upper' in your params file). "
+            "Add an explicit 'initval' inside the new bound, or relax the "
+            "bound."
+        ),
+    }
+
+    def _element_initval_source(self, i):
+        """Classify where element ``i``'s start came from.
+
+        Returns "user", "data", "solved" or "default" (see
+        ConfigManager.initval_source).  Pure metadata for an error message,
+        so a fault in the lookup must never replace the diagnosis it is
+        decorating: anything that goes wrong degrades to "default".  That
+        includes an unrecognized label -- both callers key an advice table on
+        the result, and a KeyError raised while rendering an error message
+        would replace the diagnosis with a traceback about the decoration.
+        """
+        if not callable(self.initval_source):
+            return "default"
+        comp, _, pname = self.label.rpartition(".")
+        name = (
+            self.names[i]
+            if self.names is not None and i < len(self.names)
+            else None
+        )
+        try:
+            src = self.initval_source(comp, pname, element=int(i), name=name)
+        except Exception:  # noqa: BLE001 -- metadata only, never fatal
+            return "default"
+        return src if src in _INITVAL_SOURCES else "default"
+
+    def _unit_suffix(self):
+        """The user unit as a message suffix (e.g. ' solMass'), or ''."""
+        try:
+            unit_str = str(self.unit[0]) if self.unit else ""
+        except (TypeError, IndexError):
+            return ""
+        if not unit_str or unit_str == "dimensionless":
+            return ""
+        return f" {unit_str}"
+
+    def _out_of_bounds_message(self, offenders, inits, lowers, uppers):
+        """Render the fatal 'start value outside its hard bounds' error.
+
+        ``offenders`` is the list of element indices; the three arrays are the
+        build's internal-unit vectors.  Values are reported in the USER unit
+        so the numbers match what the user typed, and every offending element
+        is listed.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            lines.append(
+                f"  {self.get_display_label(int(i))}: start "
+                f"{user_units(inits[i], i):.10g}{unit} is outside its bounds "
+                f"[{user_units(lowers[i], i):.10g}, "
+                f"{user_units(uppers[i], i):.10g}]{unit} (start value from: "
+                f"{src})"
+            )
+
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        advice = "\n".join(
+            self._OUT_OF_BOUNDS_ADVICE[s] for s in sorted(sources)
+        )
+        return (
+            f"Start value outside its hard bounds{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + f"These bounds are the parameter's SUPPORT, not a preference: "
+            f"'{self.label}' is sampled through a logit transform onto "
+            f"[lower, upper], so a start outside it has no raw coordinate at "
+            f"all. EXOZIPPy used to move such a start onto the bound and "
+            f"carry on, which produced a plausible-looking fit from a point "
+            f"nobody chose; it now refuses.\n" + advice
+        )
+
+    # What to do about a SAMPLED element with no start value, keyed on the
+    # provenance ConfigManager recorded for it.  For the overwhelmingly common
+    # case nothing recorded anything and the label is "default"; the other
+    # three mean some channel is on record as the source while no number
+    # actually landed, which is worth saying out loud because it points at the
+    # channel rather than at the user.
+    _NO_START_ADVICE = {
+        "default": (
+            "Nothing supplied a start value: not your params file, not the "
+            "component's defaults.yaml, not a component hint or manifest "
+            "'overrides' entry, and the relaxation engine derived none. "
+            "Fix: add an 'initval' for this element to your params file -- or, "
+            "if every fit of this topology needs one, add an 'initval' to the "
+            "parameter's entry in the component's defaults.yaml."
+        ),
+        "user": (
+            "Your params file names this parameter, but the entry supplies no "
+            "usable 'initval' -- a 'lower'/'upper', a 'sigma', or a link on "
+            "some other field is not a start value. Fix: add 'initval:' to "
+            "that same entry."
+        ),
+        "solved": (
+            "The relaxation engine is on record as this element's source, but "
+            "it left the element itself unsolved, so no number reached the "
+            "model. Fix: seed it directly with an 'initval' (a user value "
+            "outranks a derivation), or supply the inputs the derivation "
+            "needs."
+        ),
+        "data": (
+            "A data-derived hint from the component that loaded your data is "
+            "on record as this element's source, but no number reached the "
+            "model -- most likely the hint covered other elements of the same "
+            "vector and not this one. Fix: seed this element directly with an "
+            "'initval'."
+        ),
+    }
+
+    def _no_start_value_message(self, offenders, lowers, uppers):
+        """Render the fatal 'sampled element with no start value' error.
+
+        Same family as the out-of-bounds error, but a genuinely different
+        mistake, so it says so.  A sampled element's start is ``initval`` and
+        there is no second channel for it: ``to_vec``'s ``fill=0.0`` used to
+        turn "nobody said" into the number 0.0 in whatever internal unit the
+        parameter happens to carry -- a start nobody chose, indistinguishable
+        downstream from a deliberate one -- and where the missing value was
+        spelled ``NaN`` instead it went on to build ``log(NaN/(1-NaN))`` into
+        the transform, so the fit died later inside PyMC's initial-point check
+        naming a raw variable rather than the parameter the user has to fix.
+
+        Bounds are quoted (in the user unit) only where they are finite; an
+        unbounded sampled element reaches this too.
+        """
+        factors = np.atleast_1d(
+            np.asarray(self._get_conversion_factors(), dtype=float)
+        )
+
+        def user_units(val, i):
+            f = factors[i] if i < factors.size else factors[0]
+            return val * f
+
+        unit = self._unit_suffix()
+        sources = set()
+        lines = []
+        for i in offenders:
+            src = self._element_initval_source(i)
+            sources.add(src)
+            if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
+                bounds = (
+                    f" (bounds [{user_units(lowers[i], i):.10g}, "
+                    f"{user_units(uppers[i], i):.10g}]{unit};"
+                )
+            else:
+                bounds = " (unbounded;"
+            lines.append(
+                f"  {self.get_display_label(int(i))}: no start value"
+                f"{bounds} provenance: {src})"
+            )
+
+        where = (
+            f" (params file: {self.source_file})" if self.source_file else ""
+        )
+        advice = "\n".join(self._NO_START_ADVICE[s] for s in sorted(sources))
+        return (
+            f"Sampled parameter with no start value{where}:\n"
+            + "\n".join(lines)
+            + "\n"
+            + "A sampled element has to start SOMEWHERE, and 'initval' is the "
+            "only thing that says where. EXOZIPPy used to fill a missing one "
+            "with 0.0 in internal units and carry on, which produced a "
+            "plausible-looking fit from a point nobody chose; it now "
+            "refuses.\n" + advice
+        )
 
     def build_pymc(self, ndx=0, expression=None):
         """
@@ -608,15 +1045,123 @@ class Parameter:
 
         # 2. IDENTIFY ROLES
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
-        is_fixed = ((sigmas == 0) | (scales <= 1e-12)) & ~is_derived
+        # sigma == 0 is the ONE way to pin an element.  A tiny init_scale used
+        # to pin one too (`scales <= 1e-12`), which contradicted the premise
+        # that init_scale never affects the posterior -- it is a preliminary
+        # whitening scale the startup probe supersedes, not a modeling
+        # statement -- and gave pinning a second, undocumented spelling.
+        is_fixed = (sigmas == 0) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
+
+        # A PIN MUST SAY WHAT IT PINS TO.  `sigma: 0` is the one way to fix an
+        # element, and there is no second channel for the value it is fixed
+        # AT: the physical value of a fixed element is exactly inits[i], and
+        # to_vec fills a missing initval with 0.0.  So an element pinned with
+        # no value from ANY source -- the params file, defaults.yaml, a
+        # component "overrides" entry or hint, a link, or the relaxation
+        # engine's solution -- is silently held at zero in whatever internal
+        # unit it happens to carry, and nothing downstream can tell that apart
+        # from a deliberate pin at zero.  It also cannot be reported: for a
+        # fixed element with no initval to_latex_def emits no macro at all
+        # while latex.py's _value_cells still references one, so the generated
+        # table is an undefined control sequence by construction.
+        #
+        # Refuse, for the same reason validate_sigma_has_center refuses a
+        # sigma with no center: it does not describe a model.  If the user is
+        # fixing a parameter they should know what they are fixing it to.
+        #
+        # This runs at stage 5, which is deliberate: it is the earliest point
+        # that sees EVERY channel a value can arrive through.  The manifest
+        # "overrides" channel that pins whole vectors (GP, robust likelihood,
+        # band LD) and the plain manifest options are both applied inside
+        # this stage; a check at ConfigManager construction or at stage 3
+        # would have to guess about them and would fire falsely.
+        #
+        # Two exemptions, both because the value comes from somewhere other
+        # than initval:
+        #   - DERIVED elements: their value is the expression.  `sigma: 0`
+        #     there is a no-op, already warned about below -- a different
+        #     mistake with a different fix, so it keeps its own message.
+        #   - HARD-LINKED elements: the link expression IS the value.
+        has_value = self._initval_present(n_elements)
+        hard_linked = set((self.element_links or {}).get("hard", {}))
+        pinned_no_value = [
+            i
+            for i in np.where(is_fixed & ~has_value)[0]
+            if i not in hard_linked
+        ]
+        if pinned_no_value:
+            where = (
+                f" (params file: {self.source_file})"
+                if self.source_file
+                else ""
+            )
+            offenders = ", ".join(
+                self.get_display_label(int(i)) for i in pinned_no_value
+            )
+            raise ValueError(
+                f"Pinned parameter with no value{where}: {offenders}. "
+                f"'sigma: 0' fixes a parameter, but no start value was "
+                f"supplied for it anywhere -- not in the params file, not in "
+                f"{self.label.split('.')[0]}/defaults.yaml, and nothing "
+                f"derived one -- so it would be held at 0.0 in internal "
+                f"units, a value nobody chose. "
+                f"Fix: add an explicit 'initval' (the value you mean to fix "
+                f"it at) to the same params-file entry as the 'sigma: 0', or "
+                f"drop the 'sigma: 0' and let it be fitted."
+            )
+
+        # A SAMPLED ELEMENT MUST SAY WHERE IT STARTS.  The sibling of the pin
+        # check above, and for the same reason: `initval` is the ONLY channel
+        # for a start value, and `to_vec`'s `fill=0.0` turns "nobody said" into
+        # the number 0.0 in whatever internal unit the parameter carries.  For
+        # a pinned element that is the whole answer; for a sampled one it is
+        # the chain's starting point, the point the whitening probe measures
+        # around and the point every multi-seed start is derived from -- and
+        # 0.0 is a perfectly ordinary-looking value, so nothing downstream can
+        # tell it apart from a start the user chose.  Where the missing value
+        # arrives spelled NaN instead (ConfigManager.resolve writes NaN into a
+        # vector for "this element was never set"), the logit branch built
+        # log(NaN/(1-NaN)) and the fit died much later inside PyMC's
+        # initial-point check, naming a raw variable instead of the parameter.
+        #
+        # Stage 5 for the same reason the pin check is: it is the earliest
+        # point that sees EVERY channel a value can arrive through --
+        # defaults.yaml, the params file, a component hint, the manifest
+        # "overrides" and "options" channels, and the relaxation engine's
+        # solution have all landed in `initval` by now, so a check here cannot
+        # fire falsely on a value that was simply going to arrive later.
+        #
+        # No exemption list is needed here, unlike the pin check.  A DERIVED
+        # element is excluded already (`is_sampled` is false for it), and so
+        # is a HARD-LINKED one: Component._wire_user_links only classifies an
+        # initval link as "hard" when that element's sigma is 0, so a hard
+        # link implies a pin and the pin check above owns it.  A SOFT link
+        # (an initval link with sigma > 0, or a `mu` link) does reach here,
+        # and should: it adds a Gaussian potential tying the element to an
+        # expression, but the element is still sampled and still has to start
+        # somewhere.  A symbolic initval counts as present and is deliberately
+        # not evaluated.
+        sampled_no_value = [
+            int(i) for i in np.where(is_sampled & ~has_value)[0]
+        ]
+        if sampled_no_value:
+            raise ValueError(
+                self._no_start_value_message(sampled_no_value, lowers, uppers)
+            )
 
         # init_scale is a PRELIMINARY whitening scale only (the probe-based
         # rescale in set_whitening supersedes it), so it is optional: a
         # missing entry falls back to a fraction of the bound span, or sigma
         # when unbounded.  Non-sampled elements just need a finite
         # placeholder (a NaN scale would poison phys_linear via NaN * raw=0).
-        for i in np.where(~np.isfinite(scales))[0]:
+        # A non-POSITIVE scale takes the same fallback: a whitening scale of
+        # zero is not a scale, it is a degenerate raw direction the sampler
+        # cannot move (and it used to be silently reinterpreted as a pin --
+        # the `scales <= 1e-12` clause deleted above).  The user's sigma is
+        # synced into init_scale, so `sigma: 0` lands here; that element is
+        # already is_fixed and the placeholder never reaches the posterior.
+        for i in np.where(~(np.isfinite(scales) & (scales > 0)))[0]:
             if np.isfinite(lowers[i]) and np.isfinite(uppers[i]):
                 scales[i] = _PRELIM_SCALE_SPAN_FRACTION * (
                     uppers[i] - lowers[i]
@@ -641,6 +1186,49 @@ class Parameter:
                     f"'lower' and 'upper' bounds defined in its defaults.yaml."
                 )
 
+        # A START OUTSIDE THE HARD BOUNDS IS FATAL.  Two finite bounds mean the
+        # element is logit-transformed below and [lower, upper] IS its support
+        # -- there is no representable raw coordinate for a value outside it,
+        # and the transform's own inverse diverges at the wall.  The old code
+        # clipped such a start onto the wall (np.clip on q) behind a warning
+        # that described a different, benign situation, so a fit that began
+        # somewhere the user never asked for looked exactly like a fit that
+        # began where they did.  Refuse instead: a start value nobody chose is
+        # not a model, and no amount of sampling recovers the fact that the
+        # question asked was not the question answered.
+        #
+        # Deliberately NOT covered here:
+        #   - SOFT barriers (a single finite bound, or a derived element):
+        #     those are penalties, not support.  A start on the wrong side of
+        #     one is legal and merely improbable, and the barrier's gradient
+        #     is what pulls it back.
+        #   - EXACTLY ON a bound: representable as a physical value, just
+        #     infinitely far away in logit space, so such a start HAS to move.
+        #     Section 3 nudges those inward to the q_floor and logs the exact
+        #     displacement; see the q_floor comment there.
+        #   - FIXED elements (`sigma: 0`): not sampled, so no transform and no
+        #     barrier ever reads their bounds.  Nothing is clipped there.
+        # Every offending element of a vector is reported, not just the first.
+        #
+        # A NON-FINITE start never reaches here: NaN satisfies no bound either,
+        # but "you asked to start outside the bounds" is the wrong diagnosis
+        # for "nothing gave this element a start at all", and the fixes differ.
+        # The no-start-value check above catches every spelling of that
+        # (missing, NaN, or short of the vector's length) before this one runs.
+        two_finite = np.isfinite(lowers) & np.isfinite(uppers)
+        checkable = is_sampled & two_finite & (uppers > lowers)
+        bound_violations = [
+            int(i)
+            for i in np.where(checkable)[0]
+            if not (lowers[i] <= inits[i] <= uppers[i])
+        ]
+        if bound_violations:
+            raise ValueError(
+                self._out_of_bounds_message(
+                    bound_violations, inits, lowers, uppers
+                )
+            )
+
         # 3. PER-ELEMENT PARAMETERIZATION
         # use_logit[i]: finite bounds → logit transform (hard bounds). A sigma
         #   prior on a bounded element is applied as a Gaussian potential on
@@ -660,6 +1248,10 @@ class Parameter:
         # Gaussian: val = gaussian_mus + gaussian_scales * raw
         gaussian_mus = np.copy(inits)
         gaussian_scales = np.copy(scales)
+
+        # Sampled elements with neither two finite bounds nor a sigma: their
+        # prior is the uncancelled raw N(0,1), i.e. N(initval, init_scale).
+        implicit_prior_idx = []
 
         for i in range(n_elements):
             if not is_sampled[i]:
@@ -693,14 +1285,39 @@ class Parameter:
                 # "essentially at the bound" in problem units); a span-based
                 # floor would be arbitrarily large for wide bounds. The 1e-12
                 # absolute floor keeps logit(q) within the ±30 sigmoid clip.
+                #
+                # q_raw is guaranteed to be in [0, 1] here: the pre-pass above
+                # made anything outside the bounds fatal.  So this clip is
+                # exactly and only the ON-THE-BOUND case -- a value that IS in
+                # the support but sits at (or unrepresentably close to) a
+                # wall, where logit(q) diverges and there is no raw coordinate
+                # to start from.  Such a start HAS to move; a start from
+                # outside does not have to be moved, it has to be refused,
+                # which is why one warns and the other raises.  A default that
+                # sits on its own bound (an angle defaulting to 0 on a
+                # [0, 2pi) range) is common and legitimate; raising on it
+                # would be noise.  The warning reports the actual displacement
+                # rather than a rule of thumb: the floor is the LARGER of
+                # 1e-6 * whitening scale and 1e-12 * span, and on a parameter
+                # whose span dwarfs its scale (transit jitter_variance, span
+                # 1e5, scale ~1e-8) it is the span term that binds, so the
+                # move can be a sizeable fraction of the start value itself.
                 q_floor = min(max(1e-6 * whiten / span, 1e-12), 0.25)
                 q_floors[i] = q_floor
                 q_init = np.clip(q_raw, q_floor, 1.0 - q_floor)
                 if q_init != q_raw:
+                    nudged_to = lowers[i] + q_init * span
                     logger.warning(
-                        f"Parameter '{self.label}'[{i}]: initval {inits[i]} is at or "
-                        f"within 1e-6*init_scale of bounds [{lowers[i]}, {uppers[i]}]; "
-                        f"starting value nudged to {lowers[i] + q_init * span}."
+                        f"Parameter '{self.label}'[{i}]: start value "
+                        f"{inits[i]} sits on (or unrepresentably close to) "
+                        f"its bounds [{lowers[i]}, {uppers[i]}], where the "
+                        f"logit transform diverges and no raw start exists; "
+                        f"nudged inward to {nudged_to}, a move of "
+                        f"{abs(nudged_to - inits[i]):.3g} (internal units). "
+                        f"This is the ON-THE-BOUND case only -- a start "
+                        f"OUTSIDE the bounds is refused outright, never "
+                        f"clipped. Set an 'initval' further inside the bound "
+                        f"to remove this nudge."
                     )
                 logit_q_inits[i] = np.log(q_init / (1.0 - q_init))
                 jac = (
@@ -722,9 +1339,27 @@ class Parameter:
                 gaussian_mus[i] = mus[i] if has_mu else inits[i]
                 gaussian_scales[i] = sigmas[i]
             else:
-                # Unbounded, no sigma: fall back to linear with N(0,1)
+                # No two finite bounds and no sigma: fall back to linear with
+                # N(0,1).  Nothing cancels that raw prior, so this element's
+                # prior IS N(initval, init_scale) -- the one place where
+                # init_scale is a posterior term rather than pure
+                # conditioning.  set_whitening therefore refuses to rescale
+                # it (a data-measured multiplier would make the prior width
+                # data-dependent), so say so once per parameter.
                 gaussian_mus[i] = inits[i]
                 gaussian_scales[i] = scales[i]
+                implicit_prior_idx.append(i)
+
+        if implicit_prior_idx:
+            logger.warning(
+                f"Parameter '{self.label}': element(s) {implicit_prior_idx} "
+                f"are sampled with no finite lower/upper pair and no sigma, "
+                f"so their prior is N(initval, init_scale) from defaults -- "
+                f"init_scale is a real prior width here, and the whitening "
+                f"probe deliberately leaves it alone. Give the element two "
+                f"finite bounds (uniform prior) or a sigma (explicit "
+                f"Gaussian prior) to state the prior yourself."
+            )
 
         # 4. BUILD RAW VARIABLES
         raw_elements = [None] * n_elements
@@ -816,10 +1451,31 @@ class Parameter:
                 sv_gaussian_scales = pt.as_tensor_variable(gaussian_scales)
 
             # Logit branch: lower + (upper-lower)*sigmoid(logit_init + scale_logit*raw)
+            #
+            # The bound constants are SANITIZED on the non-logit elements
+            # (dummy [0, 1]) before they enter the graph.  Their real bounds
+            # are infinite there, and -inf + inf*sigmoid = NaN (or +inf for a
+            # half-bounded element): a NaN/inf sitting in the UNSELECTED
+            # branch of the pt.where below, which is the where-trap -- the
+            # switch VJP multiplies it by a zero and 0*inf = NaN poisons the
+            # gradient of the whole vector on every backend.  (A
+            # canonicalization rewrite currently sinks that zero into the
+            # switch and hides it, but a rewriter is not a correctness
+            # guarantee; with rewrites off the NaN is right there.)  Section
+            # A already sanitizes its sigmas the same way.  keep_bounds is a
+            # superset of use_logit, so every logit element is untouched and
+            # the selected branch is bit-for-bit what it always was.
+            keep_bounds = use_logit | (
+                np.isfinite(lowers) & np.isfinite(uppers)
+            )
+            safe_lowers = np.where(keep_bounds, lowers, 0.0)
+            safe_uppers = np.where(keep_bounds, uppers, 1.0)
             lq = sv_logit_q_inits + sv_scale_logits * raw_vector
-            phys_logit = pt.as_tensor_variable(lowers) + pt.as_tensor_variable(
-                uppers - lowers
-            ) * pt.sigmoid(pt.clip(lq, -30.0, 30.0))
+            phys_logit = pt.as_tensor_variable(
+                safe_lowers
+            ) + pt.as_tensor_variable(safe_uppers - safe_lowers) * pt.sigmoid(
+                pt.clip(lq, -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
+            )
 
             # Gaussian / linear branch: mu + sigma * raw  (or initval + scale * raw)
             phys_linear = (
@@ -847,7 +1503,6 @@ class Parameter:
 
         # 5b. USER-DEFINED ELEMENT LINKS (dynamic bounds + hard links)
         links = self.element_links or {}
-        dyn_span_logps = []
         if links:
             if expr_raw is not None and any(
                 k in links for k in ("hard", "lower", "upper")
@@ -881,14 +1536,21 @@ class Parameter:
                     else pt.constant(uppers[i])
                 )
                 span_t = pt.maximum(up_t - lo_t, 1e-12)
-                q_i = pt.sigmoid(pt.clip(lq[i], -30.0, 30.0))
+                q_i = pt.sigmoid(
+                    pt.clip(lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
+                )
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
-                if is_sampled[i]:
-                    # Normalize the conditional uniform: p(val | bounds) = 1/span.
-                    # For static bounds this term is a constant and is omitted;
-                    # for dynamic bounds it must be included or the bound
-                    # parameter feels a spurious flat-prior volume reward.
-                    dyn_span_logps.append(-pt.log(span_t))
+                # NO -log(span) normalization term here, deliberately.  The
+                # reparameterization already supplies it: with lq = c + s*raw
+                # and section C cancelling the raw N(0,1), the raw-space
+                # density is q(1-q), and dval/draw = span*q*(1-q)*s, so
+                # p(val) = 1/(sqrt(2pi)*s*span) -- exactly U(lo, up), whose
+                # integral over the interval is independent of span for ANY
+                # span, dynamic or not.  Adding -log(span) would multiply the
+                # joint by another 1/span and reward the bound-source
+                # parameter for shrinking the interval (an ordering link
+                # lower: star.B.av over av in [0, 100] would give av_B a
+                # spurious 1/(100 - av_B) factor pushing it to the wall).
 
             # Hard links (initval link with sigma=0): the element deterministically
             # tracks its expression.  Same-parameter references are applied in
@@ -984,10 +1646,6 @@ class Parameter:
                 -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2,
             )
 
-        # A3. Normalization of dynamic-bound conditional uniform priors.
-        if dyn_span_logps:
-            pm.Potential(f"link_span.{self.label}", sum(dyn_span_logps))
-
         # B. Soft bounds for derived params (and the rare half-bounded sampled
         #    param, where only one bound is finite so the logit transform does
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
@@ -1076,9 +1734,29 @@ class Parameter:
             raw_cancel_safe = pt.clip(
                 raw_vector, -_RAW_CANCELLATION_CLIP, _RAW_CANCELLATION_CLIP
             )
+            # Saturation guard: log_jac's restoring slope approaches a
+            # constant (not a growing one) as |lq| -> infinity, so a
+            # data-unconstrained direction (whitening sets a large scale_logit
+            # for it) can push |lq| far past _LOGIT_SATURATION_LQ before
+            # feeling much resistance -- even though phys_logit has already
+            # clipped there, so no distinguishable physical state, and no
+            # posterior mass, lives beyond it. This adds a quadratic-in-excess
+            # penalty only past that threshold: exactly zero (and the
+            # correction above stays an exact uniform prior) on the
+            # representable interior, growing sharply beyond it so the raw
+            # coordinate can't wander into that degenerate, numerically
+            # unsafe plateau. Independent of scale_logit and of any
+            # component's physics -- keyed on lq, the same coordinate
+            # phys_logit's clip already uses.
+            saturation_excess = pt.maximum(
+                pt.abs(lq) - _LOGIT_SATURATION_LQ, 0.0
+            )
+            saturation_penalty = -_LOGIT_SATURATION_PENALTY_K * pt.sqr(
+                saturation_excess
+            )
             correction = pt.where(
                 logit_mask,
-                log_jac + 0.5 * pt.sqr(raw_cancel_safe),
+                log_jac + 0.5 * pt.sqr(raw_cancel_safe) + saturation_penalty,
                 pt.zeros_like(raw_vector),
             )
             pm.Potential(
@@ -1296,12 +1974,21 @@ class Parameter:
         contour at exactly one raw unit, which is the "curvature = -1"
         conditioning the old init_scale tuning loop approximated by hand.
 
-        Deliberately does NOT recompute logit_q_inits / q_floors: the start
-        (raw = 0) must stay exactly where the probe measured, so the update
-        is a pure scale change in logit space.  Elements whose raw N(0,1) IS
-        the prior (unbounded with sigma) are never touched -- their scale is
-        the prior sigma, not a whitening choice.  Non-finite or non-positive
-        entries (a failed probe) leave that element's scale unchanged.
+        Deliberately does NOT recompute logit_q_inits / q_floors: the
+        anchor (raw = 0) stays exactly where build_pymc placed it, so the
+        update is a pure scale change in logit space.  A NONZERO
+        ``raw_initval`` (a pre-whitening seed polish moved the start off the
+        anchor) is rescaled by 1/multiplier in the same pass -- lq = lq0 +
+        scale*raw is invariant under (scale, raw) -> (scale*m, raw/m) -- so
+        the start stays the same PHYSICAL point the probe measured around.
+        Elements whose raw N(0,1) IS the prior -- every NON-LOGIT element,
+        i.e. anything without two finite bounds -- are never touched.  Their
+        scale is the prior width (sigma when one was given, init_scale when
+        the bounds are infinite and none was), not a whitening choice; only
+        the logit branch's correction potential cancels the raw N(0,1), and
+        only there is the rescale provably posterior-preserving.  Non-finite
+        or non-positive entries (a failed probe) leave that element's scale
+        unchanged.
 
         Because the scales live in pytensor.shared variables, every function
         already compiled from this model sees the new values immediately;
@@ -1334,16 +2021,37 @@ class Parameter:
         # raw unit); the measured value where the element is deliberately not
         # rescaled (Gaussian-prior elements); 1.0 where the probe failed.
         post = np.ones(len(idx))
+        rescaled = np.zeros(len(idx), dtype=bool)
         for j, i in enumerate(idx):
             m = raw_scale[j]
             if not np.isfinite(m) or m <= 0:
                 continue
             if tf["use_logit"][i]:
                 scale_logits[i] *= m
-            elif not ws["has_sigma_prior"][i]:
-                gauss_scales[i] *= m
+                rescaled[j] = True
             else:
+                # NON-LOGIT elements are never rescaled.  Nothing cancels
+                # their raw N(0,1) (section C fires only for use_logit), so
+                # the raw prior IS this element's prior: N(mu, sigma) when a
+                # sigma was given, N(initval, init_scale) when the bounds are
+                # infinite and no sigma was.  The multiplier is measured from
+                # the data, so rescaling would make the prior WIDTH
+                # data-dependent -- circular, and a violation of the
+                # "posterior provably unchanged" invariant that only holds
+                # for the logit branch.  Report the measured scale instead
+                # (PTDE uses it to disperse chains).
                 post[j] = m
+
+        # Keep a polished (nonzero) raw start pinned to the same physical
+        # point through the rescale.  Historically raw_initval was always 0
+        # for rescaled elements, making this a silent no-op.
+        if self.raw_initval is not None:
+            ri = np.asarray(self.raw_initval, dtype=float).reshape(-1).copy()
+            if ri.size == len(idx):
+                for j in np.nonzero(rescaled)[0]:
+                    ri[j] /= raw_scale[j]
+                self.raw_initval = ri
+
         self._apply_whitening_state(scale_logits, gauss_scales)
         return post
 
@@ -1368,9 +2076,20 @@ class Parameter:
             int(np.prod(self.shape)) if self.shape not in ((), None) else 1
         )
         phys_scales = to_vec(self.init_scale, n_elements, fill=1.0)
-        for i in tf["sampled_idx"]:
+        raw_init = (
+            np.asarray(self.raw_initval, dtype=float).reshape(-1)
+            if self.raw_initval is not None
+            else None
+        )
+        for j, i in enumerate(tf["sampled_idx"]):
             if tf["use_logit"][i]:
-                q_init = 1.0 / (1.0 + np.exp(-tf["logit_q_inits"][i]))
+                # Evaluate dphys/draw at the START (anchor + scale*raw_init):
+                # identical to the anchor historically (raw_init 0), but a
+                # polished start sits off the anchor.
+                lq = tf["logit_q_inits"][i]
+                if raw_init is not None and raw_init.size > j:
+                    lq = lq + scale_logits[i] * raw_init[j]
+                q_init = 1.0 / (1.0 + np.exp(-np.clip(lq, -100.0, 100.0)))
                 span = tf["uppers"][i] - tf["lowers"][i]
                 phys_scales[i] = (
                     scale_logits[i] * q_init * (1.0 - q_init) * span
@@ -1541,7 +2260,16 @@ class Parameter:
                     tf["logit_q_inits"][i]
                     + tf["init_scale_logits"][i] * raw[j]
                 )
-                q = 1.0 / (1.0 + np.exp(-np.clip(lq, -30.0, 30.0)))
+                q = 1.0 / (
+                    1.0
+                    + np.exp(
+                        -np.clip(
+                            lq,
+                            -_LOGIT_SATURATION_LQ,
+                            _LOGIT_SATURATION_LQ,
+                        )
+                    )
+                )
                 out[i] = (
                     tf["lowers"][i] + (tf["uppers"][i] - tf["lowers"][i]) * q
                 )
@@ -1583,7 +2311,7 @@ class Parameter:
                 if len(inits) > 1:
                     lines = []
                     for i, val in enumerate(inits):
-                        idx_str = _idx_to_words(i)
+                        idx_str = idx_to_words(i)
                         lines.append(
                             rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{\equiv {val}}}}}"
                             + "\n"
@@ -1604,7 +2332,7 @@ class Parameter:
             lines = []
             for i, summ in enumerate(self.summary):
                 val = summ.latex_value(sigfigs=sigfigs)
-                idx_str = _idx_to_words(i)
+                idx_str = idx_to_words(i)
                 lines.append(
                     rf"\providecommand{{\{self.latex_varname}{idx_str}}}{{\ensuremath{{{val}}}}}"
                     + "\n"
@@ -1629,12 +2357,12 @@ class Parameter:
             return ""
         lines = []
         for k, summary in enumerate(self.mode_summaries):
-            suffix = "mode" + _idx_to_words(k + 1)
+            suffix = mode_suffix(k)
             if isinstance(summary, list):
                 for i, summ in enumerate(summary):
                     val = summ.latex_value(sigfigs=sigfigs)
                     lines.append(
-                        rf"\providecommand{{\{self.latex_varname}{_idx_to_words(i)}{suffix}}}"
+                        rf"\providecommand{{\{self.latex_varname}{idx_to_words(i)}{suffix}}}"
                         rf"{{\ensuremath{{{val}}}}}" + "\n"
                     )
             else:
@@ -1654,7 +2382,136 @@ class Parameter:
             else ""
         )
 
+    # ------------------------------------------------------------------
+    # Component-declared prior contributions (see PriorContribution).
+    # ------------------------------------------------------------------
+
+    def add_prior_contribution(
+        self,
+        latex,
+        text=None,
+        elements=None,
+        supersedes_bounds=False,
+    ):
+        """Declare that something outside this Parameter adds a prior term.
+
+        Call this next to the ``pm.Potential`` it describes, in the
+        component's ``build_likelihood``.  ``latex``/``text`` are the two
+        renderings of the term ("$\\propto d^{2}$" / "propto d^2"); ``text``
+        defaults to ``latex`` with its ``$`` stripped.  ``elements`` selects
+        which elements of a vector the term covers -- ``None`` for all, or an
+        index iterable / boolean mask (the FFP mass function applies per
+        star).  ``supersedes_bounds`` says the term REPLACES the implicit
+        uniform prior over the element's bounds rather than multiplying an
+        explicit prior of this Parameter's own; see PriorContribution.
+
+        Idempotent: re-declaring an identical contribution (a second
+        ``build_model()`` on the same System, as the GUI does) is a no-op,
+        so priors cannot accumulate copies of themselves.
+        """
+        if text is None:
+            text = str(latex).replace("$", "")
+        contribution = PriorContribution(
+            latex=str(latex),
+            text=str(text),
+            elements=_normalize_prior_elements(elements),
+            supersedes_bounds=bool(supersedes_bounds),
+        )
+        if contribution in self.prior_contributions:
+            return contribution
+        self.prior_contributions.append(contribution)
+        return contribution
+
+    def prior_contributions_at(self, index=0):
+        """The declared contributions that cover element ``index``."""
+        return [
+            c
+            for c in self.prior_contributions
+            if c.elements is None or index in c.elements
+        ]
+
+    def _prior_scalar(self, val, index):
+        """One element of a numeric prior field, in USER units (or None)."""
+        if val is None:
+            return None
+        arr = np.atleast_1d(val)
+        raw = arr[index] if index < len(arr) else arr[0]
+        if hasattr(raw, "eval"):
+            try:
+                raw = raw.eval()
+            except Exception:
+                return None
+        try:
+            f_val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if np.isnan(f_val):
+            return None
+        if self.unit is None or self.internal_unit is None:
+            return f_val
+        f = np.atleast_1d(self._get_conversion_factors())
+        return f_val * float(f[index] if index < len(f) else f[0])
+
+    def _support_str(self, index, latex):
+        """``[lower, upper]`` for this element, or '' when not both finite.
+
+        Used to keep the support in the rendered prior when a component
+        contribution supersedes the bounds-derived uniform: the term is a
+        density over exactly that interval (both the volume prior and the
+        IMF branches normalize over it), and dropping the numbers would make
+        the new text less informative than the "Uniform" it replaces.
+        """
+        lo = self._prior_scalar(self.lower, index)
+        hi = self._prior_scalar(self.upper, index)
+        if lo is None or hi is None or np.isinf(lo) or np.isinf(hi):
+            return ""
+        l_s = _fmt_prior_value(lo, latex)
+        h_s = _fmt_prior_value(hi, latex)
+        return rf" on $[{l_s}, {h_s}]$" if latex else f" on [{l_s}, {h_s}]"
+
     def get_prior_str(self, index=0, latex=True):
+        """The Prior column text for one element.
+
+        Composes what this Parameter knows about its own prior (a Gaussian
+        ``sigma``, a pin, or the uniform implied by its bounds) with any
+        prior contributions a component declared against it
+        (``add_prior_contribution``).  Both report paths go through here --
+        run.py's startup audit table asks for ``latex=False`` and
+        ``to_latex_prior_def`` for ``latex=True`` -- so a component that
+        declares its potential is described in both.
+        """
+        own, kind = self._own_prior_str(index=index, latex=latex)
+
+        contributions = self.prior_contributions_at(index)
+        if not contributions:
+            return own
+
+        # A pinned element is a delta function; a potential evaluated on it
+        # is a constant that cannot move the posterior, so "Fixed" stays the
+        # honest and complete statement.
+        if kind == "fixed":
+            return own
+
+        parts = []
+        supersede = any(c.supersedes_bounds for c in contributions)
+        if own and not (supersede and kind == "bounds"):
+            parts.append(own)
+        parts.extend(c.latex if latex else c.text for c in contributions)
+        rendered = (r" $\times$ " if latex else " * ").join(parts)
+        if supersede and kind == "bounds":
+            rendered += self._support_str(index, latex)
+        return rendered
+
+    def _own_prior_str(self, index=0, latex=True):
+        """This Parameter's own prior text, plus which branch produced it.
+
+        Returns ``(text, kind)`` with ``kind`` in
+        ``{"fixed", "gaussian", "bounds", "none"}``.  The body is the
+        historical ``get_prior_str``, unchanged apart from reporting the
+        branch it took; ``get_prior_str`` returns it verbatim whenever no
+        component has declared a contribution.
+        """
+
         def _scalar(val):
             if val is None:
                 return None
@@ -1688,7 +2545,7 @@ class Parameter:
 
         sig = _scalar(self.sigma)
         if sig == 0:
-            return "Fixed"
+            return "Fixed", "fixed"
 
         lo = _scalar(self.lower)
         hi = _scalar(self.upper)
@@ -1699,7 +2556,7 @@ class Parameter:
 
         # Derived parameters with no custom constraint have no prior to display.
         if self.expression is not None and not (has_prior or has_bounds):
-            return ""
+            return "", "none"
 
         mu = _scalar(self.mu)
         if mu is None:
@@ -1710,7 +2567,7 @@ class Parameter:
             if has_prior:
                 strs.append(f"N({_fmt(mu, False)}, {_fmt(sig, False)})")
             if strs:
-                return " * ".join(strs)
+                return " * ".join(strs), "gaussian"
 
             if has_bounds:
                 l_s = (
@@ -1724,14 +2581,14 @@ class Parameter:
                     else ""
                 )
                 if l_s and h_s:
-                    return f"U({l_s}, {h_s})"
+                    return f"U({l_s}, {h_s})", "bounds"
                 if l_s:
-                    return f"> {l_s}"
+                    return f"> {l_s}", "bounds"
                 if h_s:
-                    return f"< {h_s}"
+                    return f"< {h_s}", "bounds"
 
             if self.expression is not None:
-                return ""
+                return "", "none"
 
         # --- LaTeX Formatting Block ---
         strs = []
@@ -1739,7 +2596,7 @@ class Parameter:
             strs.append(rf"$\mathcal{{N}}({_fmt(mu)}, {_fmt(sig)})$")
 
         if strs:
-            return r" $\times$ ".join(strs)
+            return r" $\times$ ".join(strs), "gaussian"
 
         if has_bounds:
             l_s, h_s = _fmt(lo), _fmt(hi)
@@ -1749,29 +2606,43 @@ class Parameter:
             hi_is_inf = (hi is None) or np.isinf(hi)
 
             if not lo_is_inf and not hi_is_inf:
-                return rf"$\mathcal{{U}}({l_s}, {h_s})$"
+                return rf"$\mathcal{{U}}({l_s}, {h_s})$", "bounds"
             if not lo_is_inf:
-                return rf"$> {l_s}$"
+                return rf"$> {l_s}$", "bounds"
             if not hi_is_inf:
-                return rf"$< {h_s}$"
+                return rf"$< {h_s}$", "bounds"
 
-        return ""
+        return "", "none"
 
     def to_latex_prior_def(self) -> str:
-        """Generate a \\providecommand for the prior column value.
+        """Generate the \\providecommand(s) for the prior column value.
 
-        The command name is ``\\<latex_varname>prior`` so the table body can
-        reference it symbolically rather than inlining the prior string.  A
-        single command is generated per parameter (not per element) because
-        all elements of a vector parameter share the same prior.
+        The command name is ``\\<latex_varname><idx>prior`` -- the same
+        ``<idx>`` word suffix ``to_latex_def`` puts on the value macros -- so
+        the table body can reference the prior symbolically rather than
+        inlining the string.  A scalar parameter keeps the unsuffixed
+        ``\\<latex_varname>prior``.
+
+        ONE COMMAND PER ELEMENT, not per parameter: elements of a vector
+        stopped sharing a prior when the manifest's per-element "overrides"
+        channel arrived (GP and robust-likelihood hyperparameters are
+        full-length vectors with the files that did not opt in pinned via
+        ``sigma: 0``).  Reading element 0 and reusing it made such a vector
+        report "Fixed" for its genuinely sampled elements -- a false
+        statement of the prior in a published table.
         """
-        prior_str = self.get_prior_str(index=0, latex=True)
-        if not prior_str:
-            return rf"\providecommand{{\{self.latex_varname}prior}}{{}}" + "\n"
-        return (
-            rf"\providecommand{{\{self.latex_varname}prior}}{{{prior_str}}}"
-            + "\n"
+        n_elements = (
+            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
         )
+        lines = []
+        for i in range(n_elements):
+            idx_str = idx_to_words(i) if n_elements > 1 else ""
+            prior_str = self.get_prior_str(index=i, latex=True)
+            lines.append(
+                rf"\providecommand{{\{self.latex_varname}{idx_str}prior}}"
+                rf"{{{prior_str}}}" + "\n"
+            )
+        return "".join(lines)
 
     def _value_cells(self, idx_str: str, mode_suffixes: Optional[list]) -> str:
         """The Value column(s) of a table row.
@@ -1801,16 +2672,21 @@ class Parameter:
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
+        # The Description column is prose (defaults.yaml), not LaTeX -- and
+        # several descriptions do contain raw underscores ('t0_par',
+        # 'M_2 / M_1', 'f_s / (f_s + f_b)'), which are a hard compile error
+        # in text mode.  The math belongs in `latex` (the symbol column).
+        desc = latex_escape(self.description)
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
 
         lines = []
         for i in range(n_elements):
-            idx_str = _idx_to_words(i) if n_elements > 1 else ""
+            idx_str = idx_to_words(i) if n_elements > 1 else ""
 
             if n_elements > 1:
                 if self.names and i < len(self.names):
-                    clean_name = str(self.names[i]).replace("_", r"\_")
+                    clean_name = latex_escape(str(self.names[i]))
                     symbol = self.latex + r"_{\rm " + clean_name + r"}"
                 else:
                     symbol = f"{self.latex}_{{{i}}}"
@@ -1835,11 +2711,13 @@ class Parameter:
                     + r"\dotfill"
                 )
 
-            prior_text = "\\" + self.latex_varname + "prior"
+            # Per-element prior macro (see to_latex_prior_def): a vector's
+            # elements may carry different priors.
+            prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
             lines.append(
                 rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
-                rf"{self.description}{unit_text}\dotfill & "
+                rf"{desc}{unit_text}\dotfill & "
                 rf"{val_txt} & "
                 rf"{prior_text} \\" + "\n"
             )
@@ -1863,11 +2741,12 @@ class Parameter:
             raise ValueError(f"{self.label}: description not set.")
 
         n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
-        idx_str = _idx_to_words(index) if n_elements > 1 else ""
+        idx_str = idx_to_words(index) if n_elements > 1 else ""
 
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
+        desc = latex_escape(self.description)  # prose, not LaTeX
 
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)
@@ -1886,11 +2765,11 @@ class Parameter:
                 + r"\dotfill"
             )
 
-        prior_text = "\\" + self.latex_varname + "prior"
+        prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
         return (
             rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
-            rf"{self.description}{unit_text}\dotfill & "
+            rf"{desc}{unit_text}\dotfill & "
             rf"{val_txt} & "
             rf"{prior_text} \\" + "\n"
         )

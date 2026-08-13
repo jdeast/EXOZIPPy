@@ -4,7 +4,22 @@ import pathlib
 import numpy as np
 
 from ..components import Parameter
-from ..components.parameter import _idx_to_words
+from .texutils import latex_escape, mode_suffix, mode_word
+
+# The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
+# whenever ANY row in the file needs a mode key -- a multimodal posterior,
+# or a unimodal one whose seed ledger contributes 'rejected-seed<k>' rows
+# (outputs.ledger.append_ledger_csv, which imports this to stay in step).
+CSV_COLUMNS_PLAIN = ("parname", "value", "up_err", "low_err")
+CSV_COLUMNS_MODE = (
+    "parname",
+    "mode",
+    "weight",
+    "weight_err",
+    "value",
+    "up_err",
+    "low_err",
+)
 
 
 def _instance_count(p):
@@ -20,10 +35,15 @@ def _instance_name(params, index):
 
 
 def _instance_subhead(name, n_cols=4):
-    """A secondary row that acts as an indented instance sub-header."""
+    """A secondary row that acts as an indented instance sub-header.
+
+    ``name`` is a user-chosen instance name (an instrument, band or star
+    name such as MEARTH_20090513), so it is escaped -- it is data, not
+    LaTeX.
+    """
     return (
         rf"\multicolumn{{{n_cols}}}{{l}}{{~~~~~\textit{{"
-        + name
+        + latex_escape(name)
         + r":}} \\"
         + "\n"
     )
@@ -31,6 +51,44 @@ def _instance_subhead(name, n_cols=4):
 
 def _multimodal(mode_report):
     return mode_report is not None and mode_report.n_modes > 1
+
+
+def _weight_err_cell(mode_info):
+    """CSV cell for a mode weight's 1-sigma; blank when unavailable."""
+    err = getattr(mode_info, "weight_err", np.nan)
+    return round(float(err), 4) if np.isfinite(err) else ""
+
+
+def _mixing_sentence(mode_report):
+    """One sentence of mode-mixing context for the table comments.
+
+    Occupancy weighting is unbiased when the sampler mixes between modes, but
+    its precision comes from the number of independent mode TRANSITIONS, not
+    from the number of draws -- so the transition count and the number of
+    chains that never switched belong next to the weights, in every format
+    that prints them.  Returns '' (no sentence) for a report predating these
+    fields.
+    """
+    per_chain = getattr(mode_report, "transitions_per_chain", None)
+    if per_chain is None:
+        return ""
+    text = (
+        f"Mode changes in the stored draws: {mode_report.n_transitions} "
+        f"({mode_report.n_round_trips} round trips); "
+        f"{mode_report.n_chains_no_switch} of "
+        f"{mode_report.n_chains_with_draws} chains never changed mode. "
+    )
+    if getattr(mode_report, "thin_factor", 1) > 1:
+        text += (
+            f"Draws are stored thinned by {mode_report.thin_factor}, so that "
+            f"count is a lower bound. "
+        )
+    elif not getattr(mode_report, "thin_known", True):
+        text += (
+            "The trace does not record its storage thinning; that count "
+            "assumes every sampler step was stored. "
+        )
+    return text
 
 
 def _ensure_mode_summaries(system, p, mode_report):
@@ -46,15 +104,31 @@ def _ensure_mode_summaries(system, p, mode_report):
     p.compute_mode_summaries(labels, mode_report.n_modes)
 
 
-def build_csv_output(system, csv_filename, mode_report=None):
+def build_csv_output(
+    system, csv_filename, mode_report=None, mode_columns=False
+):
     """Write a machine-readable CSV of posterior results.
 
     Comment header line lists columns: parname, value, up_err, low_err.
-    With a multimodal ``mode_report``, two extra leading columns (mode,
-    weight) are added; each parameter gets one row per mode plus a combined
-    row (mode 'all', weight 1).  Fixed parameters have empty error columns.
+    With a multimodal ``mode_report``, three extra leading columns (mode,
+    weight, weight_err) are added; each parameter gets one row per mode plus
+    a combined row (mode 'all', weight 1).  Fixed parameters have empty error
+    columns.  ``weight_err`` is the weight's 1-sigma -- from the mode
+    indicator's effective sample size for occupancy weights, from the
+    propagated lnZ error for evidence weights -- and is blank only when the
+    report predates it.
+
+    ``mode_columns`` forces the mode-keyed layout for a UNIMODAL posterior
+    (one 'all' row per parameter, no per-mode rows).  The caller sets it
+    when something else is going to append mode-keyed rows to the same file
+    -- in practice outputs.ledger.append_ledger_csv's 'rejected-seed<k>'
+    rows, whose whole content is a mode key plus a Laplace weight.  Without
+    it the file would carry a 4-column header over a mix of 4- and 7-column
+    rows (the multi-seed-with-rejected-seeds, unimodal-survivor case), which
+    no CSV reader can parse.
     """
-    multimodal = _multimodal(mode_report)
+    per_mode = _multimodal(mode_report)
+    mode_cols = per_mode or mode_columns
 
     rows = []
     for comp in system.get_all_components():
@@ -66,7 +140,7 @@ def build_csv_output(system, csv_filename, mode_report=None):
             n_instances = _instance_count(p)
             if p.posterior is not None and p.summary is None:
                 p.compute_summary()
-            if multimodal:
+            if per_mode:
                 _ensure_mode_summaries(system, p, mode_report)
 
             def emit(name, index):
@@ -80,24 +154,33 @@ def build_csv_output(system, csv_filename, mode_report=None):
 
                 if p.summary is not None:
                     med, ep, em = summ_at(p.summary).format(sigfigs=2)
-                    if multimodal:
-                        rows.append((name, "all", 1.0, med, ep, em))
+                    if mode_cols:
+                        rows.append((name, "all", 1.0, "", med, ep, em))
+                    else:
+                        rows.append((name, med, ep, em))
+                    if per_mode:
                         for k, m in enumerate(mode_report.modes):
                             med, ep, em = summ_at(p.mode_summaries[k]).format(
                                 sigfigs=2
                             )
                             rows.append(
-                                (name, k + 1, round(m.weight, 4), med, ep, em)
+                                (
+                                    name,
+                                    k + 1,
+                                    round(m.weight, 4),
+                                    _weight_err_cell(m),
+                                    med,
+                                    ep,
+                                    em,
+                                )
                             )
-                    else:
-                        rows.append((name, med, ep, em))
                 elif p.initval is not None:
                     inits = np.atleast_1d(p.from_internal(p.initval))
                     val = float(
                         inits[index] if index < len(inits) else inits[-1]
                     )
-                    if multimodal:
-                        rows.append((name, "all", 1.0, val, "", ""))
+                    if mode_cols:
+                        rows.append((name, "all", 1.0, "", val, "", ""))
                     else:
                         rows.append((name, val, "", ""))
 
@@ -107,12 +190,21 @@ def build_csv_output(system, csv_filename, mode_report=None):
                 for i in range(n_instances):
                     emit(p.get_display_label(i), i)
 
+    columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        if multimodal:
-            f.write("# parname, mode, weight, value, up_err, low_err\n")
-        else:
-            f.write("# parname, value, up_err, low_err\n")
+        f.write("# " + ", ".join(columns) + "\n")
+        if per_mode:
+            f.write("# mode weights: " + mode_report.provenance + "\n")
+            mixing = _mixing_sentence(mode_report)
+            if mixing:
+                f.write("# " + mixing.strip() + "\n")
+        elif mode_cols:
+            f.write(
+                "# unimodal posterior: mode 'all' is the whole posterior "
+                "(weight 1); 'rejected-seed<k>' rows are Laplace "
+                "approximations of seeded solutions the posterior rejected\n"
+            )
         writer.writerows(rows)
 
 
@@ -134,8 +226,10 @@ def build_latex_output(
     document; the unsuffixed macros keep their combined-posterior meaning.
     """
     multimodal = _multimodal(mode_report)
+    # THE cross-reference: these are the names Parameter.to_latex_mode_defs
+    # emits \providecommand for, so both sides call texutils.mode_suffix.
     mode_suffixes = (
-        [f"mode{_idx_to_words(k + 1)}" for k in range(mode_report.n_modes)]
+        [mode_suffix(k) for k in range(mode_report.n_modes)]
         if multimodal
         else None
     )
@@ -192,7 +286,11 @@ def build_latex_output(
         if not printable:
             continue
 
-        comp_label = getattr(comp, "label", comp.__class__.__name__)
+        # A section title, i.e. prose -- escaped like every other non-LaTeX
+        # string that reaches the table.
+        comp_label = latex_escape(
+            getattr(comp, "label", comp.__class__.__name__)
+        )
 
         # All \newcommand defs span every index — emit them once per parameter.
         # When multimodal, the unsuffixed def is the pooled-across-modes
@@ -247,13 +345,36 @@ def build_latex_output(
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.
+        # Each weight carries its 1-sigma: for occupancy weighting that is
+        # set by the number of independent mode transitions (NOT by the draw
+        # count), and for evidence weighting it is the propagated lnZ error.
+        # A weight printed bare invites reading 0.7 +/- 0.3 as 0.7 +/- 0.02.
+        # The weight macros carry the bare mode WORD (\ezmodeweightone), not
+        # the \...modeone suffix the value macros carry -- \ezmodeweight is
+        # already a mode-specific stem.  Same 0-based -> 1-based conversion
+        # either way, so both go through texutils.
         for k, m in enumerate(mode_report.modes):
+            suffix = mode_word(k)
             all_defs.append(
-                rf"\providecommand{{\ezmodeweight{_idx_to_words(k + 1)}}}"
+                rf"\providecommand{{\ezmodeweight{suffix}}}"
                 rf"{{\ensuremath{{{m.weight:.3f}}}}}" + "\n"
             )
+            if np.isfinite(getattr(m, "weight_err", np.nan)):
+                all_defs.append(
+                    rf"\providecommand{{\ezmodeweighterr{suffix}}}"
+                    rf"{{\ensuremath{{{m.weight_err:.3f}}}}}" + "\n"
+                )
+        # \pm needs math mode; the macros are each \ensuremath already, so
+        # wrap the pair (nested \ensuremath is a no-op inside math mode).
         weight_cells = " & ".join(
-            rf"\ezmodeweight{_idx_to_words(k + 1)}\dotfill"
+            (
+                rf"\ensuremath{{\ezmodeweight{mode_word(k)} \pm "
+                rf"\ezmodeweighterr{mode_word(k)}}}\dotfill"
+                if np.isfinite(
+                    getattr(mode_report.modes[k], "weight_err", np.nan)
+                )
+                else rf"\ezmodeweight{mode_word(k)}\dotfill"
+            )
             for k in range(mode_report.n_modes)
         )
         weight_row = (
@@ -266,7 +387,11 @@ def build_latex_output(
         all_table_lines.insert(0, weight_row)
 
         provenance_note = (
-            "Mode weights: " + mode_report.provenance + ". Combined "
+            "Mode weights: "
+            + mode_report.provenance
+            + ". "
+            + _mixing_sentence(mode_report)
+            + "Combined "
             "(pooled-across-modes) parameter values are suppressed above "
             "because pooled values inherit the mode-weight provenance; see "
             "the per-mode columns."
@@ -278,8 +403,12 @@ def build_latex_output(
         )
 
     if mode_report is not None and mode_report.n_invalid:
+        # The percentage MUST carry \% -- a bare % starts a LaTeX comment and
+        # would swallow the rest of the \tablecomments{...} line, including
+        # its closing brace.
         invalid_note = (
-            f"{mode_report.n_invalid} draws ({mode_report.invalid_frac:.2%}) "
+            f"{mode_report.n_invalid} draws "
+            rf"({100 * mode_report.invalid_frac:.2f}\%) "
             "rejected as numerically invalid -- this indicates a model or "
             "sampler bug; investigate before trusting this table."
         )
@@ -304,8 +433,17 @@ def build_latex_output(
         value_heads = r"\colhead{Value}"
 
     with open(template_filename, "w") as f:
+        # aastex701 and nothing else.  A \usepackage{apjfonts} line used to
+        # follow, and it made the generated template uncompilable anywhere
+        # that file was missing: apjfonts is a legacy AASTeX v5 font package,
+        # it is NOT on CTAN and NOT in TeX Live, and its absence is fatal
+        # ("LaTeX Error: File `apjfonts.sty' not found. Emergency stop."),
+        # not degraded.  AASTeX 7 sets its own fonts -- AAS's own
+        # aastex701-sample.tex does not load apjfonts -- and the reference
+        # manuscript compiles identically with it and without it.  So it
+        # bought nothing and cost a hard failure to everyone whose TeX
+        # installation did not happen to carry a file from 2005.
         f.write(r"\documentclass{aastex701}" + "\n")
-        f.write(r"\usepackage{apjfonts}" + "\n")
         f.write(rf"\input{{{pathlib.Path(var_filename).stem}}}" + "\n")
         f.write(r"\begin{document}" + "\n")
         f.write(r"\startlongtable" + "\n")

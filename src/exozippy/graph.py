@@ -31,26 +31,28 @@ def determine_pymc_build_order(active_components, config_manager):
             if isinstance(raw, str):
                 expr_key = raw  # e.g. "default"
             elif isinstance(raw, dict):
+                # A dict WITHOUT "expr_key" is a free parameter carrying only
+                # options -- an "overrides" pin, a shape, a table note.  Same
+                # rule Component.add_parameter (which needs a truthy expr_key
+                # to build an expression) and System.derived_params use.  This
+                # used to fall back to "default", which made graph.py the only
+                # place that read such an entry as derived: harmless while no
+                # pinned free parameter had an UNUSED `expressions:` block in
+                # its defaults.yaml, and a hard "Dependency Error" the moment
+                # one did (Band's linear-law u1, whose Kipping expression the
+                # manifest deliberately ignores).  The fallback could only ever
+                # add edges add_parameter does not use; it could never supply
+                # a needed one, since a parameter it applied to is free.
                 expr_key = raw.get("expr_key")  # explicit key or None
             else:
                 expr_key = None  # None → free parameter, no expression
-            # NOTE: no further fallback here. A dict manifest value with no
-            # explicit "expr_key" (e.g. {"overrides": {...}} used to pin a
-            # per-element free/fixed parameter, as Band/Planet do for their
-            # opt-in ppm terms) means "no expression" -- matching
-            # Component.add_parameter's actual behavior exactly
-            # (`expr_key = options.pop("expr_key", None)`, no dict-truthiness
-            # fallback). A prior version of this function inferred
-            # expr_key="default" from any non-None raw value regardless of
-            # whether an "expr_key" was actually present, which silently
-            # added a build-order dependency add_parameter itself would
-            # never create -- harmless for parameters with no `expressions`
-            # block at all (e.g. thermal/reflect/ellipsoidal), but a real
-            # bug for planet.beam: its {"overrides": ...}-shaped "off"/
-            # beam_free manifest entries were wrongly treated as requesting
-            # the "default" expression (calc_beam_from_K, deps: ["K"]),
-            # so any orbit-less config (no RV, no K) failed to build even
-            # with beaming off. See tests/test_transit_beer.py's
+            # NOTE: no further fallback here (see the comment above, in the
+            # dict branch). A concrete regression this caused: planet.beam's
+            # {"overrides": ...}-shaped "off"/beam_free manifest entries
+            # were wrongly treated as requesting the "default" expression
+            # (calc_beam_from_K, deps: ["K"]), so any orbit-less config (no
+            # RV, no K) failed to build even with beaming off. See
+            # tests/test_transit_beer.py's
             # test_beam_off_does_not_require_K_no_orbit_config.
             expressions_dict = cfg.get("expressions", {})
 
@@ -63,7 +65,14 @@ def determine_pymc_build_order(active_components, config_manager):
                     if manifest_deps is not None
                     else expressions_dict[expr_key].get("deps", [])
                 )
+                # Deps a component declares in context_dep_names are
+                # satisfied by context-node injection in its add_parameter
+                # override (constants, not manifest parameters) -- they are
+                # excluded from the build-order graph.
+                context_deps = getattr(comp, "context_dep_names", frozenset())
                 for d in dep_names:
+                    if d in context_deps:
+                        continue
                     if "." in d:
                         # Strip off any bracket indicators to get the raw structural key (e.g., "star.mass")
                         clean_dep = d.split("[")[0] if "[" in d else d
@@ -99,7 +108,20 @@ def determine_pymc_build_order(active_components, config_manager):
                 )
 
     # 4. Sort agnostically
-    sorter = graphlib.TopologicalSorter(forward_graph)
+    #
+    # Hand graphlib SORTED predecessor lists, not the raw sets.  The order
+    # returned here is the order the PyMC nodes -- and so the terms of the
+    # summed logp -- get created in, so a hash-ordered tie-break would move
+    # the last bits of every fit's logp from process to process.  Step 1
+    # above happens to make today's output independent of these sets (every
+    # node is already a key of forward_graph before the sorter sees it, so
+    # graphlib registers nodes in the dict's order, not the sets'), which is
+    # why sorting changes nothing right now -- but that is a property of
+    # step 1, not of graphlib, and it should not be the only thing standing
+    # between us and a PYTHONHASHSEED-dependent model.
+    sorter = graphlib.TopologicalSorter(
+        {node: sorted(deps) for node, deps in forward_graph.items()}
+    )
     try:
         return list(sorter.static_order())
     except graphlib.CycleError as e:

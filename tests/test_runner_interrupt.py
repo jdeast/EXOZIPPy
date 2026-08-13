@@ -7,13 +7,20 @@ import os
 
 import pytest
 from test_runner import (  # noqa: E402  (tests/ is on sys.path via conftest)
-    REACH_SAMPLING_TIMEOUT,
+    REACH_STATUS_FILE_TIMEOUT,
     _poll_until,
     _write_ptde_config,
     kelt4_workdir,
 )
 
 from exozippy.gui import TERMINAL_PHASES, runner
+
+# Budget: 180 s to see the first status doc (no model compile is involved --
+# see test_runner.REACH_STATUS_FILE_TIMEOUT) + 60 s to reap a process that
+# stop(force=True) has already SIGINT-SIGINT-SIGKILLed (that call itself blocks
+# ~50 s) + 60 s for the same in teardown = ~350 s worst case, well under the
+# 900 s mark below, so a hang fails on the assertion rather than the guard.
+FORCE_EXIT_TIMEOUT = 60.0
 
 
 @pytest.mark.slow
@@ -38,17 +45,23 @@ def test_interrupt_during_prepare_leaves_terminal_phase(
             lambda: (
                 os.path.exists(handle.status_path) or not handle.is_alive()
             ),
-            timeout=REACH_SAMPLING_TIMEOUT,
+            timeout=REACH_STATUS_FILE_TIMEOUT,
         )
-        assert appeared, "run never wrote an initial status or exited"
+        assert appeared, (
+            f"run never wrote an initial status at {handle.status_path} nor "
+            f"exited within {REACH_STATUS_FILE_TIMEOUT}s; pid={handle.pid}"
+        )
 
         handle.stop(force=True)
-        rc = handle.wait(timeout=120.0)
-        assert rc is not None, "process did not exit after stop"
+        rc = handle.wait(timeout=FORCE_EXIT_TIMEOUT)
+        assert rc is not None, (
+            f"process {handle.pid} did not exit within {FORCE_EXIT_TIMEOUT}s "
+            "after stop(force=True) (which already SIGKILLed it)"
+        )
     finally:
         if handle.is_alive():
             handle.stop(force=True)
-            handle.wait(timeout=60.0)
+            handle.wait(timeout=FORCE_EXIT_TIMEOUT)
 
     final = handle.status()
     assert final["phase"] in TERMINAL_PHASES, (

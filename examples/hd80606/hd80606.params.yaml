@@ -38,5 +38,7 @@ planet.0.radius:
   # ~3.94 M_Jup (You can comment this out to test your new K-based heuristic!)
   #initval: 3.94
 # --- Instrument Parameters ---
-inst.HIRES.gamma:
+# The RV instrument block is 'rvinstrument:', so the prefix here must match
+# it exactly ('inst.' was the pre-rename name and is a hard error now).
+rvinstrument.HIRES.gamma:
   initval: 0.0

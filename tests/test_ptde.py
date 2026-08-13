@@ -408,17 +408,18 @@ def test_probe_step_1d_lands_on_the_target_drop():
         assert eval_delta(sign * step) == pytest.approx(0.5, abs=0.05)
 
 
-def test_probe_scale_takes_nearer_contour_when_start_is_off_mode():
+def test_probe_scale_measures_curvature_when_start_is_off_mode():
     """
     Given a Gaussian logp probed from a start offset from its mode,
     When _probe_scales probes it,
-    Then the scale is the NEARER 0.5-nat contour, not the average of the two.
+    Then the scale is the curvature width sigma, NOT the one-sided 0.5-nat
+      drop distance (0.5/gradient) an off-mode start contaminates.
 
-    EXOFASTv2 averages the two directions because it probes from an AMOEBA best
-    fit, where they are near-symmetric.  Off the mode they are not: the uphill
-    direction only turns over on the far side, and averaging it in inflates the
-    scale enough to jitter chains past the logit transform's saturation walls,
-    starting them pinned at the bounds.
+    The symmetric second difference cancels the gradient term identically,
+    so the probe returns sigma from any start.  The old nearer-contour rule
+    returned sqrt(10)-3 ~ 0.16 here (and ~1e-3 sigma on ob140939's start
+    5900 nats below the posterior, whose mass matrix then re-widened the
+    raw posterior into parameter.py's _RAW_CANCELLATION_CLIP wall).
     """
     # ARRANGE: mode at 3.0, unit width, start 3 sigma away at 0.0
     start = {"x": np.zeros(1)}
@@ -430,15 +431,9 @@ def test_probe_scale_takes_nearer_contour_when_start_is_off_mode():
     _, scales = _probe_scales(start, logp_fn)
     s = float(scales["x"][0])
 
-    # ASSERT: logp(0) - logp(x) = 0.5 at (x-3)^2 = 10, so the contours are at
-    # x = 3 - sqrt(10) (near) and x = 3 + sqrt(10) (far).  Take the near one.
-    assert s == pytest.approx(np.sqrt(10.0) - 3.0, rel=0.05)
-
-    # ASSERT: still far looser than the old quadratic extrapolation, which
-    # collapsed to sqrt(0.5*|dp|/g) at the smallest rung of its probe ladder.
-    old = 0.003 * np.sqrt(0.5 / (3.0 * 0.003))
-    assert old < 0.03
-    assert s > 5 * old
+    # ASSERT: the local (and global) Gaussian width is 1.0 regardless of the
+    # 3-sigma displacement.
+    assert s == pytest.approx(1.0, rel=0.05)
 
 
 def test_probe_scale_linear_logp_is_not_extrapolated_quadratically():
@@ -689,3 +684,211 @@ def test_shutdown_pool_kills_workers_that_ignore_sigterm():
         assert pool2.apply_async(abs, (-3,)).get(timeout=10) == 3
     finally:
         _shutdown_pool(pool2)
+
+
+# ---------------------------------------------------------------------------
+# n_temps: "auto" resolution and ladder-health reporting
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_n_temps_auto_scales_with_dimension():
+    """
+    Given the "auto" n_temps mode,
+    When resolved for targets of increasing dimension,
+    Then the ladder size follows max(8, ceil(sqrt(D/2)*ln(T_max))) -- the
+      adjacent-rung energy-overlap rule -- and an explicit integer passes
+      through untouched.
+    """
+    from exozippy.samplers.ptde import resolve_n_temps
+
+    assert resolve_n_temps("auto", 5, 200.0) == 9
+    assert resolve_n_temps("auto", 27, 200.0) == 20
+    # tiny problems keep the EXOFASTv2-parity floor of 8
+    assert resolve_n_temps("auto", 2, 200.0) == 8
+    # explicit values (int or numeric string) are honored verbatim
+    assert resolve_n_temps(8, 27, 200.0) == 8
+    assert resolve_n_temps(12, 5, 200.0) == 12
+    with pytest.raises(ValueError, match="auto"):
+        resolve_n_temps("automagic", 27, 200.0)
+
+
+def test_ladder_health_report_warns_only_when_communication_limited(caplog):
+    """
+    Given end-of-run swap statistics,
+    When the ladder health report runs,
+    Then Lambda equals the summed adjacent-pair rejection rates, a healthy
+      ladder logs no warning, a choked one warns with the ~2*Lambda+1
+      recommendation, and degenerate inputs (no swaps) return None.
+    """
+    import logging
+
+    from exozippy.samplers.ptde import ladder_health_report
+
+    temps = _geometric_ladder(8, 200.0)
+
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        lam = ladder_health_report(temps, np.full(7, 90.0), np.full(7, 100.0))
+        assert np.isclose(lam, 0.7)
+        assert not caplog.records
+
+        lam = ladder_health_report(temps, np.full(7, 20.0), np.full(7, 100.0))
+        assert np.isclose(lam, 5.6)
+        assert any(
+            "communication-limited" in r.message for r in caplog.records
+        )
+        # recommendation is ceil(2*Lambda)+1
+        assert any("~13" in r.message for r in caplog.records)
+
+    assert ladder_health_report(temps, np.zeros(7), np.zeros(7)) is None
+    assert (
+        ladder_health_report(np.array([1.0]), np.zeros(1), np.zeros(1)) is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Seed polish and exact-start overdispersion cap
+# ---------------------------------------------------------------------------
+
+
+def _quad_logp_factory(center):
+    def logp(point):
+        return -0.5 * float(
+            sum(np.sum((v - center[k]) ** 2) for k, v in point.items())
+        )
+
+    return logp
+
+
+def test_polish_seed_starts_climbs_to_basin_optimum():
+    """
+    Given a seed displaced ~5 sigma from its basin's optimum (a rough
+      solution estimate, like an unpolished MMEXOFAST fit),
+    When polish_seed_starts runs a T=1 DE polish,
+    Then the returned start's logp improves by nearly the full deficit and
+      the reported per-seed dlp matches.
+    """
+    from exozippy.samplers.ptde import polish_seed_starts
+
+    rng = np.random.default_rng(3)
+    center = {"a": np.array([5.0, -3.0]), "b": np.array([2.0])}
+    logp = _quad_logp_factory(center)
+    seed = {"a": np.zeros(2), "b": np.zeros(1)}  # lp = -19
+    scales = {k: np.ones_like(v) for k, v in seed.items()}
+
+    polished, dlps = polish_seed_starts([seed], logp, rng, scales, n_steps=200)
+
+    assert logp(polished[0]) > -0.5  # from -19 to (near) 0
+    assert dlps[0] > 18.0
+
+
+def test_make_starts_caps_exact_seed_chains():
+    """
+    Given a params.2-style seed set nearly as large as the chain count,
+    When _make_starts builds the chain starts,
+    Then at most half the chains start exactly at a seed (the rest are
+      jittered), so a restart keeps overdispersed exploration power instead
+      of freezing the population at the previous run's posterior draws.
+    """
+    rng = np.random.default_rng(5)
+    logp = _quad_logp_factory({"a": np.zeros(2)})
+    K, n_chains = 10, 12
+    seeds = [{"a": np.array([float(k), float(-k)])} for k in range(K)]
+    scales = {"a": np.ones(2)}
+
+    starts, chain_seed_index = _make_starts(
+        n_chains, seeds, logp, rng, raw_scales=scales
+    )
+
+    assert len(starts) == n_chains
+    n_exact = sum(
+        any(np.array_equal(st["a"], sd["a"]) for sd in seeds) for st in starts
+    )
+    assert n_exact <= n_chains // 2
+    # every seed still contributes a chain (round-robin unchanged)
+    assert set(chain_seed_index) == set(range(K))
+
+
+# ---------------------------------------------------------------------------
+# review 2.9.3: a pair with ZERO swap proposals carries no measurement and
+# must not be scored as fully rejecting.
+# ---------------------------------------------------------------------------
+
+
+def test_unmeasured_swap_pair_does_not_inflate_the_barrier():
+    """
+    Given a 5-rung ladder in which every MEASURED adjacent pair rejects at
+      the same rate, and the other pairs were never proposed (the DEO
+      schedule alternates even/odd pairs and the counters reset every
+      adaptation window, so this is routine),
+    When the barrier-equalizing ladder update runs,
+    Then the ladder is unchanged -- a uniform barrier is already
+      equal-share, so the only honest update is none.
+
+    Regression (notes/code_review_20260808.txt 2.9.3): the old
+    `1 - accept/max(propose, 1)` read a never-proposed pair as 0/1 = fully
+    REJECTING, r = 1, the largest barrier a link can carry, so an
+    unmeasured link stole ladder resolution from the links that had
+    actually been measured.
+    """
+    # ARRANGE: pairs 0 and 2 measured at 20% rejection; pairs 1 and 3 never
+    # proposed.
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    accept = np.array([8.0, 0.0, 8.0, 0.0])
+    propose = np.array([10.0, 0.0, 10.0, 0.0])
+
+    # ACT
+    new_T = _update_ladder_barrier(temps, accept, propose)
+
+    # ASSERT
+    np.testing.assert_allclose(new_T, temps, rtol=1e-9)
+
+
+def test_unmeasured_pair_is_interpolated_from_its_measured_neighbours():
+    """
+    Given a ladder whose measured pairs have very different rejection rates
+      and an unmeasured pair between them,
+    When the ladder update runs,
+    Then the result matches what the same ladder would give if the gap had
+      been measured at the interpolated rate -- the gap inherits the local
+      barrier PROFILE rather than a global constant, and the total barrier
+      stays honest.
+    """
+    # ARRANGE
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    # measured: pair0 r=0.1, pair2 r=0.5 -> pair1 should read r=0.3, and
+    # pair3 (past the last measurement) clamps to 0.5.
+    accept = np.array([9.0, 0.0, 5.0, 0.0])
+    propose = np.array([10.0, 0.0, 10.0, 0.0])
+    equivalent_accept = np.array([9.0, 7.0, 5.0, 5.0])
+    equivalent_propose = np.full(4, 10.0)
+
+    # ACT
+    got = _update_ladder_barrier(temps, accept, propose)
+    want = _update_ladder_barrier(temps, equivalent_accept, equivalent_propose)
+
+    # ASSERT
+    np.testing.assert_allclose(got, want, rtol=1e-9)
+    # and it is NOT what scoring the gaps as fully-rejecting would give
+    old_style = _update_ladder_barrier(temps, accept, np.maximum(propose, 1.0))
+    assert not np.allclose(got, old_style)
+
+
+def test_ladder_update_is_a_noop_when_nothing_was_proposed():
+    """
+    Given an adaptation window in which no swap at all was proposed,
+    When the ladder update runs,
+    Then the ladder is returned unchanged rather than re-spaced against
+      four fabricated full-rejection links.
+    """
+    from exozippy.samplers.ptde import _update_ladder_barrier
+
+    temps = np.array([1.0, 2.0, 4.0, 8.0, 16.0])
+    zeros = np.zeros(4)
+
+    np.testing.assert_allclose(
+        _update_ladder_barrier(temps, zeros, zeros), temps
+    )

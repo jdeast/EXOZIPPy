@@ -3,7 +3,6 @@ import logging
 import os
 
 import numpy as np
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -13,16 +12,58 @@ import pytensor
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
-from exozippy.components.factory import discover_components
+from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
+from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
+from exozippy.yamlio import load_yaml
 
 """
 The System Class builds an entire system to model from its components.
-Critically, it contains no component-specific logic, so it 
+Critically, it contains no component-specific logic, so it
 can generally construct any model containing arbitrary components.
 """
+
+# Top-level config keys that are NOT component blocks. Every other top-level
+# key is looked up in the component registry and, failing that, warned about
+# as "will be ignored" -- so a key that some part of the codebase honors but
+# that is missing here produces a warning which is actively false, training
+# users to disbelieve the warning system. Each entry names its consumer:
+#
+#   run            -- documentation/bookkeeping block; deliberately inert.
+#                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it from
+#                     the structural hash, which is its only mention in code.
+#   name           -- System.name (below), read back by e.g.
+#                     astrometryinstrument's sky-plot title.
+#   parameter_file -- System.__init__, mkparam.write_param_file, gui.document.
+#   prefix         -- run.py, cli_modes.py, mkparam.py, gui/status.py,
+#                     gui/runner.py, mulensinstrument's mmexofast cache path.
+#   logger_level   -- run.py, cli.py, cli_modes.py.
+#   sampler        -- run.py (see run.KNOWN_SAMPLER_KEYS for its own block).
+#   modes          -- run.py: {ledger, max_invalid_frac, force, weights}.
+#   mkparam        -- mkparam.write_param_file: {n_seeds, force}.  `force`
+#                     is deliberately NOT `modes: {force: true}`: that one
+#                     authorizes forensic REPORTING off a known-bad
+#                     trace, this one authorizes seeding the NEXT fit
+#                     from one.  See mkparam._refuse_invalid_seed_draws.
+#   gui            -- gui.status.gui_enabled: {snapshot}.
+#
+# tests/test_known_keys.py cross-checks this set against the top-level-config
+# accesses in the source, in both directions, so it cannot silently drift.
+RESERVED_CONFIG_KEYS = frozenset(
+    {
+        "run",
+        "parameter_file",
+        "prefix",
+        "sampler",
+        "name",
+        "logger_level",
+        "modes",
+        "mkparam",
+        "gui",
+    }
+)
 
 
 class System(Component):
@@ -48,24 +89,21 @@ class System(Component):
                     f"run exozippy (currently: {os.getcwd()}). "
                     f"Check that the file exists and the path in your config YAML is correct."
                 )
-            with open(str(user_params_file), "r") as f:
-                self.user_params = yaml.safe_load(f)
+            self.user_params = load_yaml(str(user_params_file))
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
         )
+        # Record the params file ONLY when one was really read: an in-memory
+        # user_params dict must not be blamed on a parameter_file the config
+        # happens to name but System never opened.
+        if user_params is None:
+            self.config_manager.param_file = str(user_params_file)
         self.registry = discover_components()
         self.active_components = {}
 
         # 1. AGNOSTIC INSTANTIATION
-        reserved_keys = {
-            "run",
-            "parameter_file",
-            "prefix",
-            "sampler",
-            "name",
-            "logger_level",
-        }
+        reserved_keys = RESERVED_CONFIG_KEYS
         for key in self.config.keys():
             if key in self.registry:
                 CompClass = self.registry[key]
@@ -73,6 +111,21 @@ class System(Component):
                 self.active_components[key] = inst
                 setattr(self, key, inst)
             elif key not in reserved_keys:
+                # Distinguish "you typo'd a key" from "the component you
+                # asked for failed to import".  The old code said the
+                # former for both and then fitted a model missing an
+                # entire component and its data, quietly.
+                failed = import_failures().get(key)
+                if failed is not None:
+                    module_path, exc = failed
+                    raise ImportError(
+                        f"YAML key '{key}' names the component module "
+                        f"{module_path}, which failed to import: "
+                        f"{type(exc).__name__}: {exc}.  A missing optional "
+                        f"dependency is the usual cause.  Fix the import or "
+                        f"remove the '{key}' block -- continuing would fit a "
+                        f"model without it."
+                    ) from exc
                 logger.warning(
                     f"YAML key '{key}' does not match any registered component and will be ignored."
                 )
@@ -88,6 +141,36 @@ class System(Component):
         for comp_name, comp in self.active_components.items():
             for idx, name in enumerate(comp.names):
                 entity_directory[name] = (comp, idx)
+
+        # Structural fingerprint of the inputs, snapshotted HERE: after the
+        # components have normalized their own config blocks (Mann/Torres
+        # derive `name:` from their `star:` key in __init__), and before
+        # prepare() runs.  Both halves of that placement were measured, not
+        # assumed -- see the note on the recomputation in
+        # mkparam.write_param_file.  Taking it any earlier fingerprints a
+        # config spelling that exists only for the first few lines of
+        # __init__, so a fingerprint recomputed later would never match;
+        # taking it later would fold in whatever stages 1-6 might one day
+        # write.  The params half is safe at either point: ConfigManager
+        # deepcopies before it standardizes keys, strips links and injects
+        # solved initvals, so self.user_params stays exactly the file that
+        # was read.
+        self._structural_payload = structural_payload(
+            self.config, self.user_params
+        )
+        self._structural_hash = structural_hash(self.config, self.user_params)
+
+    def structural_fingerprint(self):
+        """``(hash, payload)`` of the config + params this System was built from.
+
+        The hash is ``evaluator.structural_hash``; the payload is the dict it
+        was taken over, kept so a mismatch can name what changed.  Both are
+        snapshotted at the END of ``__init__`` -- after the components have
+        normalized their own config blocks, before ``prepare()`` -- so that a
+        fingerprint recomputed from the same inputs later in the run
+        (mkparam.write_param_file) reproduces it exactly.
+        """
+        return self._structural_hash, self._structural_payload
 
     def prepare(self):
         # ==========================================================
@@ -107,6 +190,30 @@ class System(Component):
 
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
+
+    def derived_params(self):
+        """`(component_prefix, param_name)` pairs the manifests actually derive.
+
+        The static `expressions:` block in a defaults.yaml is not the answer:
+        a component may declare the same parameter free in one topology and
+        derived in another (planet.mass is sampled linearly when RV or
+        astrometry measures it, and derived from log_q otherwise). This
+        mirrors `Component.add_parameter`'s rule -- a manifest value that is a
+        string, or a dict carrying an "expr_key", names an expression; a bare
+        None is a free parameter.  Valid after stage 2.
+        """
+        out = set()
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                if isinstance(raw, str):
+                    derived = True
+                elif isinstance(raw, dict):
+                    derived = raw.get("expr_key") is not None
+                else:
+                    derived = False
+                if derived:
+                    out.add((comp.prefix, name))
+        return out
 
     def build_likelihood(self, model, system):
         pass
@@ -363,6 +470,70 @@ class System(Component):
             f"usable (seed indices {seed_indices})."
         )
         return starts, seed_indices
+
+    def apply_polished_starts(self, polished_raws, seed_indices):
+        """Adopt polished raw starts (polish.polish_raw_starts) as the
+        canonical starts.
+
+        Seed 0 is written into each Parameter's ``raw_initval`` -- which
+        get_raw_start, get_mcmc_init, and the sampler initvals all read --
+        and its physical values into ``Parameter.initval`` so the startup
+        table and diagnostics report the polished start.  set_whitening
+        keeps a nonzero raw_initval pinned to the same physical point
+        through later rescales.  Seeds k > 0 are written back into
+        config_manager.seed_resolved as physical (internal-unit) values, so
+        get_raw_starts re-derives them through the frozen transform in
+        whatever raw coordinates are current.
+        """
+        lookup = {p.label: p for p in self.get_all_parameters()}
+        seed_resolved = getattr(self.config_manager, "seed_resolved", None)
+
+        for s, raw in enumerate(polished_raws):
+            for key, vec in raw.items():
+                name = key[: -len("_raw")] if key.endswith("_raw") else key
+                par = lookup.get(name)
+                tf = (
+                    getattr(par, "_raw_transform", None)
+                    if par is not None
+                    else None
+                )
+                if tf is None:
+                    continue
+                new_raw = np.asarray(vec, dtype=float).reshape(-1)
+                if new_raw.size != len(tf["sampled_idx"]):
+                    continue
+                phys = np.asarray(par.phys_from_raw(new_raw), dtype=float)
+
+                if s == 0:
+                    par.raw_initval = new_raw.copy()
+                    n_elements = (
+                        int(np.prod(par.shape))
+                        if par.shape not in ((), None)
+                        else 1
+                    )
+                    iv = np.asarray(
+                        to_vec(par.initval, n_elements, fill=np.nan),
+                        dtype=float,
+                    )
+                    for i in tf["sampled_idx"]:
+                        iv[i] = phys[i]
+                    par.initval = (
+                        float(iv[0]) if par.shape in ((), None) else iv
+                    )
+                else:
+                    k = seed_indices[s]
+                    if (
+                        not seed_resolved
+                        or k >= len(seed_resolved)
+                        or seed_resolved[k] is None
+                    ):
+                        continue
+                    comp_type = par.label.split(".")[0]
+                    param_name = par.label.split(".", 1)[1]
+                    for i in tf["sampled_idx"]:
+                        seed_resolved[k][f"{comp_type}.{i}.{param_name}"] = (
+                            float(phys[i])
+                        )
 
     def _seed_initvals_for(self, par, resolved):
         """Internal-unit initval vector for one Parameter under one seed's solved

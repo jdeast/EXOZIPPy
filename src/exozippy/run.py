@@ -1,5 +1,6 @@
 import gc
 import importlib
+import itertools
 import logging
 import multiprocessing as mp
 import os
@@ -55,16 +56,27 @@ from exozippy.system import System
 from .corner_utils import collect_corner_samples, save_corner_plot
 from .diagnostics import ModelAuditor
 from .logger import setup_logging
-from .mkparam import mkprior
+from .mkparam import write_param_file
 from .outputs.modes import DEFAULT_MAX_INVALID_FRAC, mode_suffix
 from .outputs.report_pipeline import build_mode_reports
-from .whitening import load_whitening, measure_and_whiten, save_whitening
+from .polish import polish_raw_starts, resolve_polish_steps
+from .trace_meta import check_trace_freshness, stamp_structural_metadata
+from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
 # debugging imports
 # import ipdb
 
+# Every key `_run_fit` reads off the `sampler:` block. Anything else is
+# warned about and ignored, so this set must stay a superset of the keys the
+# code actually consumes: a key missing here produces a warning saying it will
+# be IGNORED about a key that is in fact HONORED, which is worse than no
+# warning at all (that is how 'jitter' -- the very key the sample_jax_nuts
+# comment tells users to opt back in with -- got flagged as unknown).
+# tests/test_known_keys.py cross-checks this set against the `sampler_cfg`
+# accesses in this module's own source, in both directions, so it cannot
+# silently drift again. Add the key here in the same edit that consumes it.
 KNOWN_SAMPLER_KEYS = {
     "init",
     "tune",
@@ -84,12 +96,31 @@ KNOWN_SAMPLER_KEYS = {
     "max_rhat",
     "maxtime",
     "chain_method",
+    "jitter",
     "eval_timeout",
     "rung_thin_factor",
     "rung_thin_start",
     "collect_rung_timing",
     "swap_schedule",
+    "seed_polish",
+    "store_hot_chains",
 }
+
+
+def warn_unknown_sampler_keys(sampler_cfg):
+    """Warn about `sampler:` keys this module does not consume.
+
+    Returns the sorted list of unrecognized keys (empty when all are known),
+    so the check is exercisable without running a fit.
+    """
+    unknown = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
+    if unknown:
+        logger.warning(
+            f"Unrecognized key(s) in the sampler block will be ignored: "
+            f"{unknown}. "
+            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
+        )
+    return unknown
 
 
 def run_fit(config, user_params=None):
@@ -168,7 +199,12 @@ def _run_fit(config, gui, user_params=None):
     method = sampler_cfg.get(
         "method", None
     )  # None → auto-select after system is built
-    n_temps = int(sampler_cfg.get("n_temps", 8))
+    # "auto" passes through to the sampler, which sizes the ladder from the
+    # parameter count once the model is built (ptde.resolve_n_temps).
+    _n_temps_raw = sampler_cfg.get("n_temps", 8)
+    n_temps = (
+        _n_temps_raw if isinstance(_n_temps_raw, str) else int(_n_temps_raw)
+    )
     T_max = float(sampler_cfg.get("T_max", 200.0))
     _n_chains_raw = sampler_cfg.get("n_chains", None)
     n_chains = int(_n_chains_raw) if _n_chains_raw is not None else None
@@ -190,6 +226,15 @@ def _run_fit(config, gui, user_params=None):
     eval_timeout = (
         float(_eval_timeout_raw) if _eval_timeout_raw is not None else None
     )
+    # Thinned hot-rung retention (ptde_async only): detector data for
+    # post-hoc discovery of posterior-suppressed modes; see
+    # outputs.ledger.discover_hot_modes.  "auto" | False | True (thin 20) |
+    # int thin.  "auto" (the default) is resolved from the TOPOLOGY -- on for
+    # microlensing, off otherwise -- in
+    # samplers._common.resolve_store_hot_chains, which logs the decision and
+    # its trace-size cost.  Passed through unresolved on purpose: the
+    # component list does not exist yet at this point in run_fit.
+    store_hot_chains = sampler_cfg.get("store_hot_chains", "auto")
     rung_thin_factor = int(sampler_cfg.get("rung_thin_factor", 1))
     _rung_thin_start_raw = sampler_cfg.get("rung_thin_start", None)
     rung_thin_start = (
@@ -201,13 +246,7 @@ def _run_fit(config, gui, user_params=None):
         pytensor.config.profile = True
 
     # Warn about unrecognized keys in the sampler block so they are never silently ignored.
-    _unknown_sampler_keys = sorted(set(sampler_cfg) - KNOWN_SAMPLER_KEYS)
-    if _unknown_sampler_keys:
-        logger.warning(
-            f"Unrecognized key(s) in the sampler block will be ignored: "
-            f"{_unknown_sampler_keys}. "
-            f"Did you mean 'method'? Valid sampler keys: {sorted(KNOWN_SAMPLER_KEYS)}"
-        )
+    warn_unknown_sampler_keys(sampler_cfg)
 
     # 3. Build the stellar system into a PyMC Graph
     system = System(config, user_params=user_params)
@@ -227,10 +266,15 @@ def _run_fit(config, gui, user_params=None):
         if "reason" in reqs:
             _reasons.append(reqs["reason"])
 
+    # sorted(), not next(iter(...)): _recommended is a set, so with two
+    # components recommending different samplers the choice would be a
+    # PYTHONHASHSEED coin flip -- i.e. a different sampler per run.  Only one
+    # component recommends anything today (mulensing's Lens), so this is
+    # inert; it stops being inert silently.
     if method is None:
-        method = next(iter(_recommended)) if _recommended else "nuts"
+        method = sorted(_recommended)[0] if _recommended else "nuts"
     elif method.lower() in _incompatible:
-        rec_str = next(iter(_recommended)) if _recommended else "ptde"
+        rec_str = sorted(_recommended)[0] if _recommended else "ptde_async"
         reason_str = (
             "; ".join(_reasons) if _reasons else "incompatible with this model"
         )
@@ -260,22 +304,71 @@ def _run_fit(config, gui, user_params=None):
         # (recompute_trace: false with an existing trace) restores the exact
         # scales the trace was sampled with instead of re-probing -- raw
         # draws only decode correctly under the whitening they were sampled
-        # under.  Any model mismatch falls back to a fresh measurement.
+        # under.  On a FRESH run a model mismatch falls back to a fresh
+        # measurement (nothing is sampled yet, so the coordinates are still
+        # a free choice); on the reuse path they are not, and a mismatch
+        # raises instead -- see whitening.restore_whitening_for_trace.
         trace_path = str(prefix) + "_trace.nc"
         whitening_path = str(prefix) + "_whitening.json"
         reusing_trace = os.path.exists(trace_path) and not recompute_trace
+
+        # Pre-whitening seed polish (sampler-config `seed_polish`): promote
+        # each solution-estimate start to its basin's optimum BEFORE the
+        # whitening probe measures scales around it.  A start far below its
+        # optimum makes the probe gradient-dominated (scales come out
+        # orders of magnitude too tight -- examples/ob140939 measured
+        # ~1000x tight from a start ~5900 nats low and diverged on 86% of
+        # its draws), freezes the barrier steepness against dishonest unit
+        # steps, and starts every sampler outside the typical set.  'auto'
+        # (default) polishes the canonical single start and MMEXOFAST seed
+        # sets, never multi-seed posterior-draw restart sets (already at
+        # equilibrium; polishing would collapse their overdispersion);
+        # on/off/int override (int = step count).  L-BFGS on logp+grad
+        # when the model is differentiable, the PR #56 T=1 DE polish
+        # otherwise.  Skipped when reusing an existing trace (nothing will
+        # be sampled).  This supersedes the PTDE-internal seed polish,
+        # which ran after the probe and only under PTDE.
+        if not reusing_trace:
+            raw_starts_pre, seed_indices_pre = system.get_raw_starts(model)
+            polish_steps = resolve_polish_steps(
+                sampler_cfg.get("seed_polish", "auto"),
+                n_seeds=len(raw_starts_pre),
+                has_seed_hints=bool(
+                    getattr(system.config_manager, "seed_hint_sets", None)
+                ),
+            )
+            if polish_steps:
+                polished, _dlps, _pmethod = polish_raw_starts(
+                    model,
+                    raw_starts_pre,
+                    n_steps=polish_steps,
+                    seed_indices=seed_indices_pre,
+                )
+                system.apply_polished_starts(polished, seed_indices_pre)
+                raw_start = system.get_raw_start(model)
+
         whiten_report = None
         if measure_scales:
-            loaded = (
-                reusing_trace
-                and os.path.exists(whitening_path)
-                and load_whitening(system, whitening_path)
+            # Fresh run -> measure + persist.  Reuse -> restore only: the
+            # whitening is a property of the draws being decoded, so it is
+            # never re-measured and never rewritten there (a mismatch
+            # raises StaleWhiteningError, a missing file warns and keeps
+            # the preliminary scales).  The old code fell back to
+            # measure + save on BOTH, silently re-coordinating the trace it
+            # was reusing and overwriting the only record of how to read it.
+            whiten_report = prepare_whitening(
+                system,
+                model,
+                raw_start,
+                whitening_path,
+                trace_path,
+                reusing_trace=reusing_trace,
             )
-            if not loaded:
-                whiten_report = measure_and_whiten(system, model, raw_start)
-                save_whitening(
-                    system, whitening_path, map_lp=whiten_report["map_lp"]
-                )
+            if whiten_report is not None:
+                # The rescale re-expressed a polished (nonzero) start in
+                # the new raw coordinates; re-read it for every consumer
+                # below (a no-op for an unpolished all-zeros start).
+                raw_start = system.get_raw_start(model)
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
@@ -294,7 +387,35 @@ def _run_fit(config, gui, user_params=None):
         # Multi-seed starts (P4): a list of raw start dicts (one per solved
         # seed) plus their original seed indices. seed 0 == raw_start above;
         # get_raw_starts returns just [raw_start], [0] for the ordinary case.
+        # After a polish, seed 0 comes from the polished raw_initval and
+        # seeds k>0 are re-derived from their polished physical values.
         raw_starts, seed_indices = system.get_raw_starts(model)
+
+        # Seeded-solution ledger (multi-seed fits only): a Laplace record
+        # of every polished seed -- peak logp and curvature widths at the
+        # basin optimum -- measured NOW, while the seeds exist, so the
+        # final report can distinguish "considered and rejected at
+        # delta lp = X" from "never looked" even for modes the T=1
+        # posterior abandons entirely. Costs n_seeds x n_params x O(15)
+        # logp calls on the freshly whitened model. Disable with config
+        # `modes: {ledger: false}`.
+        # (Skipped when reusing an existing trace: the polish was skipped
+        # there too, so seed lp would be a start value, not a basin peak.)
+        seed_ledger = None
+        _ledger_on = (config.get("modes", {}) or {}).get("ledger", True)
+        if len(raw_starts) > 1 and _ledger_on and not reusing_trace:
+            from .outputs.ledger import build_seed_ledger
+
+            try:
+                seed_ledger = build_seed_ledger(
+                    system, model, raw_starts, seed_indices
+                )
+            except Exception:
+                logger.warning(
+                    "Seed ledger measurement failed; final report will "
+                    "not carry rejected-mode records",
+                    exc_info=True,
+                )
 
         # convert raw starting point to the internal starting point
         internal_start = system.get_internal_point(model, raw_start)
@@ -318,6 +439,13 @@ def _run_fit(config, gui, user_params=None):
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
             idata = az.from_netcdf(trace_path)
+            # ...but only if it was sampled from THIS model. The raw draws
+            # decode through this build's bounds/links/whitening, so a trace
+            # from an edited config would be relabeled and reported as if it
+            # belonged here. Unlike the whitening reload above, which can
+            # honestly re-measure on a mismatch, there is no load-time repair
+            # for foreign draws: a mismatch raises (trace_meta).
+            check_trace_freshness(idata, system, trace_path)
         else:
             # do the sampling and save the results
             gui.phase("sampling")
@@ -358,19 +486,19 @@ def _run_fit(config, gui, user_params=None):
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":
-                # EXPERIMENTAL (hpc_optimization.txt PROMPT 13): a separate,
-                # non-blocking PTDE dispatch loop -- see
-                # exozippy/samplers/ptde_async.py's module docstring for the
-                # statistical caveat around stale DE partner states before
-                # using this for a production posterior. rung_thin_factor/
-                # rung_thin_start are ptde-only (thinning addresses the
-                # blocking problem that async dispatch removes outright) and
-                # are not forwarded here.
+                # The non-blocking PTDE dispatch loop (hpc_optimization.txt
+                # PROMPT 13) -- the recommended default for Op-based models;
+                # see exozippy/samplers/ptde_async.py's module docstring for
+                # the stale-DE-partner caveat and how swaps stay rigorous.
+                # rung_thin_factor/rung_thin_start are ptde-only (thinning
+                # addresses the blocking problem that async dispatch removes
+                # outright) and are not forwarded here.
                 idata = ptde_async_sample(
                     model,
                     system,
                     draws,
                     tune,
+                    store_hot_chains=store_hot_chains,
                     n_temps=n_temps,
                     T_max=T_max,
                     n_chains=n_chains,
@@ -480,6 +608,12 @@ def _run_fit(config, gui, user_params=None):
                     signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
+            # Record the storage thinning on the trace.  Consecutive stored
+            # draws that are really nthin sampler steps apart make mode
+            # changes look more independent than they are, so outputs.modes
+            # must be told rather than left to assume 1 (see
+            # ModeReport.thin_factor / thin_known).
+            idata.posterior.attrs["nthin"] = int(nthin)
             # Ensure lp is in sample_stats; compute and persist if missing.
             ss_vars = (
                 list(idata.sample_stats.data_vars)
@@ -506,6 +640,9 @@ def _run_fit(config, gui, user_params=None):
                 idata, system.get_parameter_lookup()
             )
             _sanitize_netcdf_attrs(idata)
+            # Stamp the structural fingerprint of the config + params that
+            # produced these draws, so any later reload can verify it.
+            stamp_structural_metadata(idata, system)
             idata.to_netcdf(trace_path)
 
         # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
@@ -522,6 +659,26 @@ def _run_fit(config, gui, user_params=None):
     # the fix for the DC2018_128 pathology (notes/todo.txt): the reported
     # summary previously discarded zero burn-in even though a likelihood-flat
     # degenerate direction drifted for ~half the run.
+    # Hot-chain mode discovery (store_hot_chains): cluster the thinned
+    # hot-rung draws, polish each new basin's best point, and append
+    # Laplace records to the seed ledger -- so a mode the T=1 posterior
+    # never held still shows up as "considered and rejected" in the final
+    # report. Runs BEFORE burn-in trimming (hot draws are detectors; no
+    # burn-in semantics) and tolerates a missing/empty group.
+    # The outcome is recorded in `hot_status` and rendered into
+    # <prefix>_modes.txt: "searched and found nothing", "never searched"
+    # (what a non-microlensing topology gets by default) and "the search
+    # crashed" used to be indistinguishable in every output the user reads,
+    # which turns a silent failure into false assurance that a candidate
+    # mode was considered.  The catch stays broad and stays
+    # NON-FATAL -- a wrap-up diagnostic must not kill a finished multi-day
+    # fit -- but the exception type and message now reach the report.
+    from .outputs.ledger import run_hot_mode_discovery
+
+    seed_ledger, hot_status = run_hot_mode_discovery(
+        system, model, idata, seed_ledger
+    )
+
     idata, burn_diag = convergence.analyze_idata(
         idata, min_ess=min_ess, max_rhat=max_rhat
     )
@@ -549,6 +706,8 @@ def _run_fit(config, gui, user_params=None):
         raise_on_invalid=True,
         evidence_weights=str(modes_cfg.get("weights", "")).lower()
         == "evidence",
+        seed_ledger=seed_ledger,
+        hot_status=hot_status,
     )
 
     summary_path = Path(str(prefix) + "_summary.txt")
@@ -612,9 +771,87 @@ def _run_fit(config, gui, user_params=None):
             )
 
     try:
-        mkprior(config, trace_path=trace_path)
+        # mkparam re-derives the structural fingerprint from this config and
+        # the params, not from the live System; measured to reproduce the
+        # System snapshot exactly (see the note at the check inside
+        # mkparam.write_param_file).  The params half has to be handed over
+        # when run_fit was called with an in-memory dict: the file at
+        # config['parameter_file'] is then not what was fitted (it may be
+        # stale, or absent), and write_param_file would merge ITS priors and
+        # bounds into the restart file.  Left None for a file-driven run, so
+        # that path still reads the file itself and its error messages still
+        # name it.
+        write_param_file(
+            config, trace_path=trace_path, user_params=user_params
+        )
     except Exception:
-        logger.exception("mkprior failed (non-fatal)")
+        logger.exception("mkparam failed (non-fatal)")
+
+
+def _element_conversion_factor(par, index):
+    """Internal -> user conversion factor for element ``index`` of ``par``."""
+    f = par._get_conversion_factors()
+    if np.size(f) > 1:
+        return float(np.ravel(f)[index])
+    if np.size(f) == 1:
+        return float(np.ravel(f)[0])
+    return float(f)
+
+
+def _user_initval(config_manager, par, index):
+    """Start value (INTERNAL units) for element ``index`` of ``par`` as spelled
+    in the user/solved parameter table, or None if the table does not set one.
+
+    The key lookup mirrors ``ConfigManager.resolve``: the same three forms
+    (``comp.param``, ``comp.<index>.param``, ``comp.<name>.param``) in the same
+    precedence (later wins), each canonicalized through
+    ``ConfigManager.canonical_key``.  Without that canonicalization a NAMED
+    instance never matches, because ``standardize_param_names`` stores every
+    entry in index form -- so the lookup used to succeed or fail depending on
+    whether the user had named their components.
+    """
+    prefix = par.label.split(".")[0]
+    attr = par.label.split(".")[-1]
+    candidates = [
+        f"{prefix}.{attr}",
+        f"{prefix}.{index}.{attr}",
+        par.get_display_label(index),
+    ]
+
+    val = None
+    for key in candidates:
+        entry = config_manager.user_params.get(
+            config_manager.canonical_key(key)
+        )
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            entry = {"initval": entry}  # bare scalar, as resolve() treats it
+        if "initval" not in entry:
+            continue
+        v = entry["initval"]
+        # List-valued initvals are per-seed starts (P4); seed 0 is canonical.
+        if isinstance(v, (list, tuple)):
+            v = v[0] if len(v) else None
+        if v is not None:
+            val = v
+
+    if val is None:
+        return None
+    try:
+        return float(val) / _element_conversion_factor(par, index)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _is_unset(x):
+    """True when a start-value element carries no usable number."""
+    if x is None:
+        return True
+    try:
+        return bool(np.isnan(float(x)))
+    except (TypeError, ValueError):
+        return False
 
 
 def inspect_start(
@@ -713,17 +950,21 @@ def inspect_start(
         raw_v = p.initval
         raw_s = p.init_scale
 
+        n_elements = int(np.prod(p.shape)) if p.shape not in ((), None) else 1
+        cfg_mgr = auditor.system.config_manager
+
         if raw_v is None:
-            # 1. Try to get it from the expression's dependency-solved graph
+            # 1. Try the user/solved parameter table, one element at a time so
+            #    a vector parameter still reports every element.
             try:
-                if p.label in auditor.system.config_manager.user_params:
-                    user_val = auditor.system.config_manager.user_params[
-                        p.label
-                    ].get("initval")
-                    if user_val is not None:
-                        # Convert to internal units so it matches expectations
-                        raw_v = p.to_internal(user_val)
-            except:
+                vals = np.full(n_elements, np.nan)
+                for i in range(n_elements):
+                    uv = _user_initval(cfg_mgr, p, i)
+                    if uv is not None:
+                        vals[i] = uv
+                if np.any(np.isfinite(vals)):
+                    raw_v = vals if n_elements > 1 else float(vals[0])
+            except Exception:
                 pass
 
             # 2. Last resort: Eval the expression if it exists
@@ -742,7 +983,13 @@ def inspect_start(
         if raw_v is None:
             continue
 
-        v_phys = np.atleast_1d(raw_v)
+        # inspect_start is a READ-ONLY diagnostic.  np.atleast_1d returns the
+        # SAME object for a 1-D array, so without the copy every write below
+        # lands in Parameter.initval itself -- which used to revert the
+        # polished starts apply_polished_starts had just stored there, so the
+        # table lied AND get_raw_starts/_seed_initvals_for rebuilt the later
+        # seeds from the reverted values.
+        v_phys = np.atleast_1d(raw_v).copy()
         s_phys = np.atleast_1d(raw_s if raw_s is not None else np.nan)
         m_phys = np.atleast_1d(mult_map.get(p.label, [np.nan] * len(v_phys)))
 
@@ -751,20 +998,19 @@ def inspect_start(
         for i in range(len(v_phys)):
             row_label = p.get_display_label(i)
 
-            # Grab the solver's reconciled value if it exists ---
-            if row_label in auditor.system.config_manager.user_params:
-                resolved_data = auditor.system.config_manager.user_params[
-                    row_label
-                ]
-                if "initval" in resolved_data:
-                    # Fetch the conversion factor and apply it backwards
-                    f = p._get_conversion_factors()
-                    f_val = (
-                        f[i]
-                        if np.size(f) > 1
-                        else (f[0] if np.size(f) == 1 else f)
-                    )
-                    v_phys[i] = float(resolved_data["initval"]) / float(f_val)
+            # Parameter.initval is the AUTHORITATIVE start: it is what
+            # get_raw_start encodes and what the sampler actually begins from.
+            # ConfigManager.resolve already layered the solver-reconciled
+            # user_params value into it at construction, and a pre-whitening
+            # seed polish (apply_polished_starts) may legitimately have moved
+            # it since.  So the user_params entry is only a FALLBACK, for an
+            # element the Parameter never got a number for -- re-asserting it
+            # over a live initval would make this table report a start the
+            # sampler is not going to use.
+            if _is_unset(v_phys[i]):
+                uv = _user_initval(cfg_mgr, p, i)
+                if uv is not None:
+                    v_phys[i] = uv
 
             def safe_float(x):
                 if x is None or (hasattr(x, "size") and x.size == 0):
@@ -1096,29 +1342,244 @@ def _compute_lp_from_model(model, idata):
         return None
 
 
-def _n_trace_rows(idata, var_names, group="posterior"):
-    """Total rows az.plot_trace needs: 1 row per element (shape product) per var."""
-    rows = 0
-    dataset = idata[group]
-    for v in var_names:
-        shape = dataset[v].shape[2:]  # drop (chain, draw) dims
-        rows += int(np.prod(shape)) if shape else 1
-    return rows
+def _chunk_by_rows(specs, rows_per_page):
+    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows.
 
-
-def _chunk_by_rows(idata, var_names, rows_per_page):
-    """Yield (chunk, n_rows) pairs sized so each page needs <= rows_per_page rows."""
+    ``specs`` is a list of (var_name, coords, n_rows) triples as produced by
+    _split_degenerate_vars.  A spec carrying a non-None ``coords`` element
+    selection gets a page to itself: ArviZ takes ONE coords mapping for the
+    whole call, so two variables sharing a dimension name but needing
+    different element subsets would silently cross-contaminate.
+    """
     chunk, chunk_rows = [], 0
-    for v in var_names:
-        r = _n_trace_rows(idata, [v])
-        if chunk_rows + r > rows_per_page and chunk:
+    for name, coords, r in specs:
+        solo = coords is not None
+        if chunk and (solo or chunk_rows + r > rows_per_page):
             yield chunk, chunk_rows
-            chunk, chunk_rows = [v], r
-        else:
-            chunk.append(v)
-            chunk_rows += r
+            chunk, chunk_rows = [], 0
+        chunk.append((name, coords))
+        chunk_rows += r
+        if solo:
+            yield chunk, chunk_rows
+            chunk, chunk_rows = [], 0
     if chunk:
         yield chunk, chunk_rows
+
+
+# arviz_stats builds its KDE on a fixed 512-interval grid spanning exactly
+# [min, max] of the finite draws (bound_correction=True, so the grid is NOT
+# widened by a bandwidth).  np.histogram then raises
+#   ValueError: Too many bins for data range. Cannot create 512 finite-sized bins.
+# whenever np.linspace(min, max, 513) cannot produce 513 strictly increasing
+# float64 edges -- i.e. whenever the entire range spans fewer than ~512 ULPs.
+# That kills the whole page, and with it the rest of the PDF and all of
+# wrap-up, for one variable that did not move.
+_KDE_GRID_LEN = 512
+
+
+def _dist_degeneracy(values):
+    """Why no density can be drawn for ``values``, or None if one can.
+
+    Returns a short human-readable reason string.  Three shapes qualify, and
+    all three are things a real fit produces:
+
+    * no finite draws at all (a Deterministic whose physics went NaN);
+    * exactly constant (an element pinned with ``sigma: 0`` inside an
+      otherwise-sampled vector -- GP and robust-likelihood hyperparameters
+      are full-length vectors with the non-opted-in files pinned, and such a
+      vector IS tracked as a Deterministic, so its pinned elements reach the
+      plot as constants);
+    * finite but spanning fewer than _KDE_GRID_LEN float64 steps -- a chain
+      that never moved except in the last few bits, which is what a
+      gracefully stopped, unmixed run produces and what actually crashed CI.
+
+    The third test is the exact condition numpy itself raises on, so it
+    tracks the failure rather than approximating it.
+    """
+    x = np.asarray(values, dtype=float).ravel()
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return "no finite draws"
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return f"constant at {lo:.10g}"
+    if np.any(np.diff(np.linspace(lo, hi, _KDE_GRID_LEN + 1)) <= 0):
+        return (
+            f"range {hi - lo:.3g} around {lo:.10g} spans fewer than "
+            f"{_KDE_GRID_LEN} float64 steps"
+        )
+    return None
+
+
+class _DegenerateRow:
+    """One (variable, element) row whose density cannot be drawn."""
+
+    __slots__ = ("label", "reason", "values")
+
+    def __init__(self, label, reason, values):
+        self.label = label
+        self.reason = reason
+        self.values = values
+
+
+def _element_rows(dataset, var):
+    """Yield (selection, label, values) for every plotted row of ``var``.
+
+    One row per element, matching _render_trace_page's compact=False layout
+    (the row count that used to come from a separate _n_trace_rows helper is
+    just len(list(_element_rows(...))) now).  ``selection`` is the label
+    mapping that isolates the element -- ``{}`` for a scalar variable, and
+    None when a dimension carries no coordinates and so cannot be
+    label-selected at all; ``values`` is the element's (chain, draw) array.
+    """
+    da = dataset[var]
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if not extra:
+        yield {}, var, np.asarray(da.values)
+        return
+    labelled = all(d in da.coords for d in extra)
+    for combo in itertools.product(*(range(da.sizes[d]) for d in extra)):
+        pos = dict(zip(extra, combo))
+        # .isel, not .sel: a dimension without coordinates cannot be
+        # label-selected, and only a label-selectable one can be handed back
+        # to ArviZ as a ``coords`` mapping (see _split_degenerate_vars).
+        vals = np.asarray(da.isel(pos).values)
+        if labelled:
+            sel = {
+                d: np.asarray(da.coords[d].values)[i] for d, i in pos.items()
+            }
+        else:
+            sel = None
+        shown = sel if sel is not None else pos
+        label = f"{var}[{', '.join(str(shown[d]) for d in extra)}]"
+        yield sel, label, vals
+
+
+def _split_degenerate_vars(idata, var_names, group="posterior"):
+    """Split plot rows into ArviZ-renderable ones and density-less ones.
+
+    Returns ``(specs, degenerate)``:
+
+    * ``specs`` -- list of (var_name, coords, n_rows) for _chunk_by_rows.
+      ``coords`` is None when the whole variable renders normally (so a fit
+      with no degenerate element takes byte-identical code to before), and a
+      {dim: [kept values]} mapping when only some elements of a vector do.
+    * ``degenerate`` -- list of _DegenerateRow, rendered on their own pages.
+
+    Each degenerate row is logged as a warning naming the variable element
+    and the reason: a missing density is reported, never swallowed.
+    """
+    dataset = idata[group]
+    specs, degenerate = [], []
+    for v in var_names:
+        if v not in dataset.data_vars:
+            # Unknown name: pass it straight through so ArviZ raises the same
+            # error it always did rather than having it silently disappear.
+            specs.append((v, None, 1))
+            continue
+        rows = list(_element_rows(dataset, v))
+        bad = [
+            i
+            for i, (_, _, vals) in enumerate(rows)
+            if _dist_degeneracy(vals) is not None
+        ]
+        if not bad:
+            specs.append((v, None, len(rows)))
+            continue
+        for i in bad:
+            _, label, vals = rows[i]
+            reason = _dist_degeneracy(vals)
+            logger.warning(
+                f"trace plot: no density for {label} ({reason}); its trace "
+                "panel is still drawn"
+            )
+            degenerate.append(_DegenerateRow(label, reason, vals))
+        good = [i for i in range(len(rows)) if i not in set(bad)]
+        if not good:
+            continue
+        extra = [d for d in dataset[v].dims if d not in ("chain", "draw")]
+        if len(extra) == 1 and rows[good[0]][0] is not None:
+            dim = extra[0]
+            kept = [rows[i][0][dim] for i in good]
+            specs.append((v, {dim: kept}, len(kept)))
+        else:
+            # >= 2 element dimensions (a coords mapping would select the
+            # CROSS PRODUCT of the per-dimension survivors, which can readmit
+            # a degenerate element) or an unlabelled dimension ArviZ cannot be
+            # given a coords mapping for.  No EXOZIPPy Parameter is shaped
+            # either way (Parameter vectors are 1-D and ArviZ always names
+            # their dimension), so rather than risk a re-crash the surviving
+            # elements go on the annotated pages too, saying so.
+            for i in good:
+                _, label, vals = rows[i]
+                degenerate.append(
+                    _DegenerateRow(
+                        label,
+                        f"density omitted: other elements of {v} are "
+                        "degenerate and this variable's element layout "
+                        "cannot be split",
+                        vals,
+                    )
+                )
+    return specs, degenerate
+
+
+def _render_degenerate_page(idata, rows, title, group="posterior"):
+    """One page of rows whose density cannot be drawn.
+
+    Same two-column geometry as _render_trace_page (dist column then trace
+    column, one row per element), so the page reads continuously with the
+    ArviZ ones and _shade_trace_axes_by_mode's even/odd axis convention still
+    holds.  The trace panel is drawn for real -- a flat chain is exactly what
+    the reader needs to see -- and the dist panel carries the reason and the
+    value instead of a density.
+
+    Annotating beats the alternatives: a skipped panel looks like a plotting
+    bug, and a single-bin histogram looks like a real (if uninformative)
+    density while conveying neither the value nor why it is the only bin.
+    """
+    dataset = idata[group]
+    draw_coord = np.asarray(dataset["draw"].values)
+    n = len(rows)
+    fig, axes = plt.subplots(n, 2, figsize=(12, 3 * n), squeeze=False)
+    for r, row in enumerate(rows):
+        ax_dist, ax_trace = axes[r]
+        ax_dist.set_title(row.label)
+        ax_dist.text(
+            0.5,
+            0.5,
+            f"no density\n{row.reason}",
+            ha="center",
+            va="center",
+            transform=ax_dist.transAxes,
+            fontsize=9,
+            color="0.25",
+        )
+        ax_dist.set_xticks([])
+        ax_dist.set_yticks([])
+
+        vals = np.atleast_2d(np.asarray(row.values, dtype=float))
+        finite = np.isfinite(vals)
+        if finite.any():
+            for c in range(vals.shape[0]):
+                ax_trace.plot(draw_coord, vals[c], lw=0.8)
+        else:
+            ax_trace.text(
+                0.5,
+                0.5,
+                "no finite draws",
+                ha="center",
+                va="center",
+                transform=ax_trace.transAxes,
+                fontsize=9,
+                color="0.25",
+            )
+        ax_trace.set_xlabel("Draw")
+        ax_trace.set_ylabel(row.label)
+    fig.suptitle(title, fontsize=14)
+    _shade_trace_axes_by_mode(fig, idata)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    return fig
 
 
 def save_multipage_trace(
@@ -1191,29 +1652,67 @@ def save_multipage_trace(
         # into its own floating figure, leaving our fig blank.  Let ArviZ
         # own the figure and retrieve it from the returned axes instead.
         if lp_var and lp_idata is not None:
-            fig_lp = _render_trace_page(
+            for fig in _trace_page_figures(
                 lp_idata,
                 [lp_var],
-                n_rows=1,
-                title="Trace Plots: log-posterior (lp)",
+                rows_per_page=1,
                 group="sample_stats",
-            )
-            pdf.savefig(fig_lp)
-            plt.close(fig_lp)
-            gc.collect()
+                title_fn=lambda _i: "Trace Plots: log-posterior (lp)",
+            ):
+                pdf.savefig(fig)
+                plt.close(fig)
+                gc.collect()
 
-        for page_num, (chunk, n_rows) in enumerate(
-            _chunk_by_rows(idata, var_names, rows_per_page), start=1
+        for fig in _trace_page_figures(
+            idata,
+            var_names,
+            rows_per_page=rows_per_page,
+            group="posterior",
+            title_fn=lambda i: f"Trace Plots: Page {i}",
         ):
-            fig = _render_trace_page(
-                idata, chunk, n_rows, title=f"Trace Plots: Page {page_num}"
-            )
             pdf.savefig(fig)
             plt.close(fig)
             gc.collect()
 
 
-def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
+def _trace_page_figures(idata, var_names, rows_per_page, group, title_fn):
+    """Yield one figure per page, ArviZ pages first then annotated ones.
+
+    Variables (or single vector elements) whose draws admit no density are
+    routed to _render_degenerate_page instead of being handed to ArviZ, whose
+    KDE grid is what raises on them.  With no such element the split is the
+    identity and the ArviZ call is exactly the one made before this existed.
+    """
+    specs, degenerate = _split_degenerate_vars(idata, var_names, group=group)
+
+    page_num = 0
+    for chunk, n_rows in _chunk_by_rows(specs, rows_per_page):
+        page_num += 1
+        names = [name for name, _ in chunk]
+        coords = next((c for _, c in chunk if c is not None), None)
+        yield _render_trace_page(
+            idata,
+            names,
+            n_rows,
+            title=title_fn(page_num),
+            group=group,
+            coords=coords,
+        )
+
+    for start in range(0, len(degenerate), max(1, rows_per_page)):
+        page_num += 1
+        rows = degenerate[start : start + max(1, rows_per_page)]
+        yield _render_degenerate_page(
+            idata,
+            rows,
+            title=f"{title_fn(page_num)} (no density)",
+            group=group,
+        )
+
+
+def _render_trace_page(
+    idata, var_names, n_rows, title, group="posterior", coords=None
+):
     """One trace-plot page: dist column + trace column, one row per element.
 
     plot_trace_dist (not plot_trace) is the ArviZ 1.0 equivalent of the old
@@ -1226,11 +1725,16 @@ def _render_trace_page(idata, var_names, n_rows, title, group="posterior"):
     whenever a chain carries fewer than 100 draws -- the dist column then plots
     a cumulative curve that plateaus at 1.0, which reads as a posterior clipped
     at its maximum.  A density is always what this column is meant to show.
+
+    ``coords`` restricts which elements of a vector variable are drawn; it is
+    set only when some of that vector's elements have no density (see
+    _split_degenerate_vars) and is None for every ordinary page.
     """
     pc = az.plot_trace_dist(
         idata,
         var_names=var_names,
         group=group,
+        coords=coords,
         compact=False,
         kind="kde",
         figure_kwargs={"figsize": (12, 3 * n_rows)},

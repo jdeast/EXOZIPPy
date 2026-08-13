@@ -1,32 +1,51 @@
-# From Yee+2014, Table 1
-# https://iopscience.iop.org/article/10.1088/0004-637X/802/2/76/pdf
+# From Yee et al. 2015 (ApJ 802, 76), Table 1 (free F_B).
+# The initval lists are per-seed starts (multi-seed sampling), one per
+# Refsdal four-fold degenerate solution, in Table 1's column order:
+#   seed 0: u0,-,+  chi2/dof = 273.1/265
+#   seed 1: u0,-,-  273.7/265  (ecliptic twin of seed 0; the paper's
+#                               proper-motion argument prefers this one)
+#   seed 2: u0,+,+  281.5/265  (dchi2 = 8)
+#   seed 3: u0,+,-  290.2/265  (dchi2 = 17)
 # eventually, we'd like to get this from MMEXOFAST
 lens.Lens.t_0:
-    initval: 2456836.22
+    initval: [2456836.22, 2456836.20, 2456836.06, 2456835.95]
 lens.Lens.u_0:
-    initval: 0.922
+    initval: [0.922, -0.913, 0.897, -0.843]
 lens.Lens.t_E:
-    initval: 22.87
+    initval: [22.87, 22.99, 22.91, 23.87]
 lens.Lens.pi_E_N:
-    initval: -0.248
+    initval: [-0.248, 0.220, -1.370, 1.325]
 lens.Lens.pi_E_E:
-    initval: 0.234
+    initval: [0.234, 0.238, -0.060, 0.024]
 
 # the solver needs this, but it shouldn't
 #star.Lens.mass:
 #    initval: 0.23
 
-# From Yee+2014 Table 3: F_S,OGLE=13.2, F_B,OGLE=-2.19 → q = F_S/(F_S+F_B) = 1.199
-# Negative blending is common for OGLE difference imaging in the crowded Galactic bulge.
+# Yee+2015 Table 1: q = F_S/(F_S+F_B) per solution (same column order).
+# OGLE: 13.20/11.01, 12.95/11.02, 12.51/11.02, 11.09/11.01. Negative
+# blending is common for OGLE difference imaging in the crowded bulge.
 mulensinstrument.OGLE4.q_source:
-    initval: 1.199
-
-# From Yee+2014 Table 3: F_S,Spitzer=4.31, F_B,Spitzer=-0.08 → q = 4.31/4.23 = 1.019
+    initval: [1.199, 1.175, 1.135, 1.007]
+# Spitzer: 4.31/4.23, 4.37/4.22, 3.32/4.28, 3.30/4.32.
 mulensinstrument.Spitzer.q_source:
-    initval: 1.019
+    initval: [1.019, 1.036, 0.776, 0.764]
 
+# Starting err_scale near its posterior keeps the whitening probe measuring
+# posterior widths instead of a huge start-point gradient (a start thousands
+# of nats low once measured scales ~1000x too small and ~90% of draws
+# diverged).
+# OGLE errors are underestimated ~1.65x (difference-imaging convention).
+mulensinstrument.OGLE4.err_scale:
+    initval: 1.65
+# The Spitzer file is Yee's RAW published photometry (flux errors ~0.09% ->
+# ~1 mmag). Her fits imply working errors ~17x larger: the paper never states
+# a renormalization, but every fit lands at chi2/dof ~ 1 (Spitzer-only:
+# 28.0/26, Table 3) and the Fig. 1 Spitzer residuals scatter ~+/-20 mmag --
+# so the errors were evidently rescaled between the raw data and the fits.
+# err_scale absorbs that factor here; do not "fix" the data file.
 mulensinstrument.Spitzer.err_scale:
-    upper: 1.1
+    initval: 17.0
 
 # this come from a catalog and only influences the galactic model prior (with course precision)
 # we probably want to link the ra/dec of source/lens within the model
@@ -50,8 +69,26 @@ star.Source.dec:
     initval: -21.3829722222
     sigma: 0
 
-# I think Yee+2014 constrains this with Finite Source Effects?
-# We ignore that for now, so let's fix it at the Yee value
+# Source proper motion measured from 4 years of OGLE-IV astrometry of the
+# baseline object: mu_S,hel(N,E) = (-0.64, -5.31) +/- 0.45 mas/yr (Yee+2015
+# Eq. 8). This is the datum behind her degeneracy-breaking argument: with
+# mu_S measured, the disk-rotation term in the galactic kinematic prior
+# predicts the lens-source relative motion direction to ~8.5 deg, which
+# excludes the u0,-,+ mode (direction ~130 deg vs expected ~54). Without it
+# the source pm marginalizes over the ~2.6 mas/yr bulge dispersion and the
+# prior discriminates between the ecliptic-degenerate modes by only ~1 nat.
+star.Source.pm_ra:
+    initval: -5.31
+    mu: -5.31
+    sigma: 0.45
+star.Source.pm_dec:
+    initval: -0.64
+    mu: -0.64
+    sigma: 0.45
+
+# Yee+2015 is pure PSPL (their Eq. 4) -- no finite source, no limb darkening
+# (u0 ~ 0.9 makes them negligible). The source radius only enters rho, which
+# is unused with finite_source: False; fix it at an arbitrary sane value.
 star.Source.radius:
     initval: 0.519
     sigma: 0.0

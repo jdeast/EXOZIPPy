@@ -14,5 +14,9 @@ you need one, wrap it here.
 """
 
 from .blackjax_progressbar import patch_blackjax_progress_bar
+from .mulensmodel_method_order import patch_mulensmodel_method_order
 
-__all__ = ["patch_blackjax_progress_bar"]
+__all__ = [
+    "patch_blackjax_progress_bar",
+    "patch_mulensmodel_method_order",
+]

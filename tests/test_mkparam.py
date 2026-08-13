@@ -1,10 +1,12 @@
 """Tests for mkparam MAP-seeding logic."""
 
+import copy
+
 import numpy as np
 import pytest
 import xarray as xr
 
-from exozippy.mkparam import mkprior
+from exozippy.mkparam import write_param_file
 
 
 def _make_idata(
@@ -19,7 +21,7 @@ def _make_idata(
 
     Pass ``derived_vars`` (a set of names) for variables that represent
     Deterministic nodes and should NOT get a ``_raw`` companion — their
-    absence of a raw counterpart is what signals "derived" to mkprior.
+    absence of a raw counterpart is what signals "derived" to mkparam.
     """
     import arviz as az
 
@@ -62,7 +64,7 @@ def _make_idata(
 def test_no_prior_writes_initval(tmp_path):
     """
     Given a sampled parameter with no existing mu/sigma,
-    When mkprior runs,
+    When mkparam runs,
     Then the output entry has initval=MAP and init_scale=std, not mu.
     """
     trace = _make_idata({"star.mass": 0.95}, tmpdir=tmp_path)
@@ -72,7 +74,7 @@ def test_no_prior_writes_initval(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -92,7 +94,7 @@ def test_no_prior_writes_initval(tmp_path):
 def test_with_explicit_mu_preserved(tmp_path):
     """
     Given a sampled parameter whose existing entry has an explicit mu+sigma,
-    When mkprior runs,
+    When mkparam runs,
     Then initval is set to the MAP, mu is preserved unchanged, sigma is preserved.
     The prior center (mu) must never drift toward the MAP.
     """
@@ -110,7 +112,7 @@ def test_with_explicit_mu_preserved(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -132,7 +134,7 @@ def test_with_explicit_mu_preserved(tmp_path):
 def test_initval_sigma_promotes_mu(tmp_path):
     """
     Given an existing entry with initval+sigma but no explicit mu,
-    When mkprior runs,
+    When mkparam runs,
     Then the original initval is promoted to mu (preserving the prior center)
     and initval is updated to the MAP so the chain starts there next run.
     """
@@ -150,7 +152,7 @@ def test_initval_sigma_promotes_mu(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -172,7 +174,7 @@ def test_initval_sigma_promotes_mu(tmp_path):
 def test_fixed_sigma_zero_no_mu_promotion(tmp_path):
     """
     Given an existing entry with sigma=0 (fixed parameter),
-    When mkprior runs,
+    When mkparam runs,
     Then initval is updated to the MAP and mu is NOT added — sigma=0 means
     fixed, not a Gaussian prior, so the original initval is not a prior center.
     """
@@ -190,7 +192,7 @@ def test_fixed_sigma_zero_no_mu_promotion(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -211,7 +213,7 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
     """
     Given an existing entry with only initval (no mu/sigma/upper/lower)
     for a parameter that was NOT sampled in the trace,
-    When mkprior runs,
+    When mkparam runs,
     Then that entry is absent from the output (stale guess, not a prior).
     """
     import yaml
@@ -233,7 +235,7 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
         "star": [{"name": "Lens"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -255,7 +257,7 @@ def test_non_sampled_initval_only_is_discarded(tmp_path):
 def test_non_sampled_with_upper_limit_is_kept(tmp_path):
     """
     Given an existing entry with only an upper limit and no other prior fields,
-    When mkprior runs,
+    When mkparam runs,
     Then the entry is preserved (the bound is a meaningful constraint).
     """
     import yaml
@@ -275,7 +277,7 @@ def test_non_sampled_with_upper_limit_is_kept(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -296,7 +298,7 @@ def test_non_sampled_with_upper_limit_is_kept(tmp_path):
 def test_output_filename_uses_dots(tmp_path):
     """
     Given parameter_file = "kelt4.params.yaml",
-    When mkprior runs without an explicit output_path,
+    When mkparam runs without an explicit output_path,
     Then the output file is named "kelt4.params.2.yaml" (dots, not underscores).
     """
     import yaml
@@ -311,7 +313,7 @@ def test_output_filename_uses_dots(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace)
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
 
     assert out.name == "kelt4.params.2.yaml"
 
@@ -320,7 +322,7 @@ def test_derived_parameter_excluded_from_output(tmp_path):
     """
     Given a trace containing orbit.logP (sampled, has orbit.logP_raw) and
       orbit.period (derived Deterministic, no _raw counterpart),
-    When mkprior runs,
+    When mkparam runs,
     Then orbit.logP IS written to the output but orbit.period is NOT.
 
     This is a regression test: the old code filtered on "_raw" not in v, so
@@ -346,7 +348,7 @@ def test_derived_parameter_excluded_from_output(tmp_path):
         "orbit": [{"name": "b"}],
     }
 
-    out = mkprior(
+    out = write_param_file(
         config,
         base_dir=tmp_path,
         trace_path=trace,
@@ -370,7 +372,7 @@ def test_derived_parameter_excluded_from_output(tmp_path):
 def test_output_filename_increments(tmp_path):
     """
     Given parameter_file = "kelt4.params.2.yaml",
-    When mkprior runs,
+    When mkparam runs,
     Then the output is kelt4.params.3.yaml (existing 3.yaml would be overwritten).
     """
     import yaml
@@ -385,7 +387,7 @@ def test_output_filename_increments(tmp_path):
         "star": [{"name": "Host"}],
     }
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace)
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
 
     assert out.name == "kelt4.params.3.yaml"
 
@@ -393,7 +395,7 @@ def test_output_filename_increments(tmp_path):
 def test_flat_dict_component_writes_two_part_key(tmp_path):
     """
     Regression: components with a flat-dict YAML config (e.g. sed: {path: ...})
-    have no named instance list, so mkprior used to generate 'sed.0.errscale'
+    have no named instance list, so mkparam used to generate 'sed.0.errscale'
     (3-part key with a numeric index) instead of 'sed.errscale' (2-part key).
     When that generated file was fed back as parameter_file, standardize_param_names
     tried to enumerate the dict's string keys and crashed with
@@ -409,12 +411,12 @@ def test_flat_dict_component_writes_two_part_key(tmp_path):
     }
 
     trace = _make_idata({"sed.errscale": 0.75}, tmpdir=tmp_path)
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace)
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
 
     with open(out) as f:
         written = yaml.safe_load(f)
 
-    # mkprior must write 'sed.errscale' (2-part) NOT 'sed.0.errscale' (3-part)
+    # mkparam must write 'sed.errscale' (2-part) NOT 'sed.0.errscale' (3-part)
     assert "sed.errscale" in written, (
         f"Expected 'sed.errscale' in output; got keys: {list(written)}"
     )
@@ -427,7 +429,7 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
     """
     Regression: non-sampled constraint parameters (e.g. a Gaia parallax prior
     applied as a potential on the derived parallax / sampled distance) went
-    through the pass-through path without mu-promotion.  On successive mkprior
+    through the pass-through path without mu-promotion.  On successive mkparam
     runs the prior center was carried only implicitly via initval; editing
     initval would silently shift the prior.
 
@@ -449,7 +451,7 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
     # distance is sampled; parallax is derived → not in trace
     trace = _make_idata({"star.distance": 133.3}, tmpdir=tmp_path)
 
-    out = mkprior(config, base_dir=tmp_path, trace_path=trace)
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
 
     with open(out) as f:
         written = yaml.safe_load(f)
@@ -467,6 +469,183 @@ def test_non_sampled_constraint_gets_mu_promotion(tmp_path):
     )
     assert np.isclose(parallax_entry["mu"], 7.45278, rtol=1e-6)
     assert np.isclose(parallax_entry["sigma"], 0.01745, rtol=1e-6)
+
+
+def test_angle_entry_takes_map_initval_and_keeps_prior(tmp_path):
+    """
+    Given an existing lens.L.alpha entry carrying a Gaussian prior
+      (initval + sigma, no explicit mu) and a trace whose xalpha/yalpha MAP
+      direction is a different angle,
+    When mkparam runs,
+    Then the written alpha entry has the NEW MAP angle as initval, keeps
+      sigma, and promotes the stale initval to mu (the prior center must not
+      follow the MAP).
+
+    Regression (review 1.17): alpha/bigomega are synthesized from the sampled
+    x/y pair AFTER the main loop, so they were never in consumed_existing.
+    The pass-through loop then overwrote the fresh MAP angle with the stale
+    entry, so restart files violated the "initval at the trace MAP" contract.
+    """
+    import yaml
+
+    existing_params = {"lens.L.alpha": {"initval": 12.0, "sigma": 5.0}}
+    param_file = tmp_path / "ob.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(1, 0) = +90 deg
+    trace = _make_idata(
+        {"lens.xalpha": 0.0, "lens.yalpha": 1.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/ob",
+        "parameter_file": "ob.params.yaml",
+        "lens": [{"name": "L"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    entry = result["lens.L.alpha"]
+
+    assert entry["initval"] == pytest.approx(90.0, abs=1e-6), (
+        "alpha initval must be the trace MAP angle, not the stale entry"
+    )
+    assert entry["sigma"] == pytest.approx(5.0), "user prior must survive"
+    assert entry["mu"] == pytest.approx(12.0, abs=1e-6), (
+        "stale initval promoted to mu -- the prior center must not move"
+    )
+    assert not any(k.endswith(("xalpha", "yalpha")) for k in result)
+
+
+def test_angle_entry_index_notation_merges_without_duplicate(tmp_path):
+    """
+    Given an existing orbit.0.bigomega entry written in index notation with an
+      explicit mu + sigma, and a trace whose xbigomega/ybigomega MAP is a
+      different angle,
+    When mkparam runs,
+    Then exactly one bigomega entry is written, under the name notation, with
+      the MAP initval and the explicit mu/sigma untouched.
+    """
+    import yaml
+
+    existing_params = {"orbit.0.bigomega": {"mu": 30.0, "sigma": 10.0}}
+    param_file = tmp_path / "kelt4.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(0, -1) = 180 deg
+    trace = _make_idata(
+        {"orbit.xbigomega": -1.0, "orbit.ybigomega": 0.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "orbit": [{"name": "b"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+
+    assert "orbit.0.bigomega" not in result, (
+        "stale index-notation entry must be consumed, not passed through"
+    )
+    entry = result["orbit.b.bigomega"]
+    assert entry["initval"] == pytest.approx(180.0, abs=1e-6)
+    assert entry["mu"] == pytest.approx(30.0, abs=1e-6), (
+        "explicit mu must be preserved exactly"
+    )
+    assert entry["sigma"] == pytest.approx(10.0)
+
+
+def test_angle_entry_keeps_bounds_and_adds_no_mu(tmp_path):
+    """
+    Given an existing lens.L.alpha entry carrying only bounds (a constraint,
+      so the pass-through loop used to keep it and clobber the angle),
+    When mkparam runs,
+    Then the bounds survive, initval is the MAP angle, and no mu is invented
+      (bounds are not a Gaussian prior center).
+    """
+    import yaml
+
+    existing_params = {"lens.L.alpha": {"lower": -180.0, "upper": 180.0}}
+    param_file = tmp_path / "ob.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    # arctan2(-1, 0) = -90 deg
+    trace = _make_idata(
+        {"lens.xalpha": 0.0, "lens.yalpha": -1.0}, tmpdir=tmp_path
+    )
+    config = {
+        "prefix": "fitresults/ob",
+        "parameter_file": "ob.params.yaml",
+        "lens": [{"name": "L"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    entry = result["lens.L.alpha"]
+
+    assert entry["initval"] == pytest.approx(-90.0, abs=1e-6)
+    assert entry["lower"] == pytest.approx(-180.0)
+    assert entry["upper"] == pytest.approx(180.0)
+    assert "mu" not in entry, "bounds are not a prior center"
+
+
+def test_uncentered_sigma_in_params_file_is_fatal(tmp_path):
+    """
+    Given an existing params file with sigma > 0 and no mu/initval,
+    When mkparam runs,
+    Then it raises and names the offending file.
+
+    mkparam reads the params file directly (bypassing ConfigManager), and its
+    pass-through loop copies constraint-bearing entries verbatim -- so without
+    this check it would launder an uncentered Gaussian prior into the restart
+    file, where the prior ends up centered on a data-derived start value.
+    """
+    import yaml
+
+    existing_params = {"star.Host.teff": {"sigma": 100.0}}
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        write_param_file(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+        )
+
+    msg = str(exc.value)
+    assert "star.Host.teff" in msg
+    assert "star.params.yaml" in msg, "the input file must be named"
 
 
 def test_standardize_param_names_flat_dict_component_no_crash(tmp_path):
@@ -490,3 +669,107 @@ def test_standardize_param_names_flat_dict_component_no_crash(tmp_path):
 
     # The key should pass through unchanged (no list to look up names in)
     assert "sed.0.errscale" in result
+
+
+# ---------------------------------------------------------------------------
+# In-memory user_params (run_fit(config, user_params=<dict>))
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_user_params_beat_the_file_on_disk(tmp_path):
+    """
+    Given a fit driven by an in-memory user_params dict while a DIFFERENT
+    params file happens to sit at config['parameter_file'],
+    When mkparam is given those in-memory params,
+    Then the restart file carries the priors that were actually fitted and
+    none of the on-disk file's.
+
+    The two differ only in the magnitudes of mu/sigma, which
+    evaluator.structural_hash deliberately does not cover -- so nothing else
+    in the pipeline would have caught the substitution.
+    """
+    import yaml
+
+    stale_on_disk = {"star.Host.teff": {"mu": 4000.0, "sigma": 500.0}}
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(stale_on_disk, f)
+
+    fitted = {"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}}
+
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+        user_params=fitted,
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["mu"] == pytest.approx(5800.0), (
+        "prior center must be the one fitted"
+    )
+    assert entry["sigma"] == pytest.approx(100.0)
+    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6)
+
+
+def test_in_memory_user_params_are_not_mutated(tmp_path):
+    """
+    Given an in-memory user_params dict,
+    When mkparam consumes it,
+    Then the caller's dict is untouched -- run_fit hands over the same object
+    the live System was built from.
+    """
+    fitted = {"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}}
+    before = copy.deepcopy(fitted)
+
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": None,
+        "star": [{"name": "Host"}],
+    }
+
+    write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+        user_params=fitted,
+    )
+
+    assert fitted == before
+
+
+def test_in_memory_user_params_still_validated(tmp_path):
+    """
+    Given in-memory params with a centerless Gaussian prior (sigma, no
+    mu/initval),
+    When mkparam consumes them,
+    Then the same fatal check the on-disk path runs fires, naming the source.
+    """
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": None,
+        "star": [{"name": "Host"}],
+    }
+
+    with pytest.raises(ValueError) as exc:
+        write_param_file(
+            config,
+            base_dir=tmp_path,
+            trace_path=trace,
+            output_path=tmp_path / "out.yaml",
+            user_params={"star.Host.teff": {"sigma": 100.0}},
+        )
+
+    assert "star.Host.teff" in str(exc.value)
+    assert "in-memory" in str(exc.value)

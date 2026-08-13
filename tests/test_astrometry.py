@@ -343,6 +343,140 @@ def test_parallax_factors_match_exact_geometry(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: RA offsets must wrap across the 0/360 branch cut (review 3.8)
+# ---------------------------------------------------------------------------
+
+
+class _ConstParam:
+    """Minimal stand-in for a Parameter with a constant value vector."""
+
+    def __init__(self, values):
+        self.value = pt.as_tensor_variable(np.asarray(values, dtype=float))
+
+
+def _abs_dataset_across_ra_zero(tmp_path, ra_ref_deg, ra_obs_deg, dec_deg):
+    """An abs-mode instrument whose observed RA sits on the far side of the
+    0/360 branch cut from the reference RA.  Returns (component, dataset)."""
+    t = np.linspace(2457000.0, 2457365.0, 5)
+    data = np.column_stack(
+        [
+            t,
+            np.full_like(t, ra_obs_deg),
+            np.full_like(t, dec_deg),
+            np.ones_like(t),
+            np.ones_like(t),
+        ]
+    )
+    f = tmp_path / "abs_wrap.astrom"
+    np.savetxt(f, data)
+
+    cm = ConfigManager(
+        {
+            "star.0.ra": {"initval": ra_ref_deg},
+            "star.0.dec": {"initval": dec_deg},
+        }
+    )
+    comp = AstrometryInstrument(
+        [{"name": "T", "file": str(f), "mode": "abs"}], cm
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+    comp.load_data(system)
+    return comp, comp.datasets[0]
+
+
+def test_abs_mode_wraps_ra_offsets_across_zero(tmp_path):
+    """
+    Given: an abs-mode target at RA = 0.1 deg with the reference at 359.9 deg
+    When:  load_data turns the observed positions into (dE, dN) offsets
+    Then:  dE_obs is the short way round (+0.2 deg of RA times cos(dec)),
+           not the unwrapped -359.8 deg
+
+    The unwrapped difference is 1.1e9 mas, i.e. ~1e9 sigma from any model at
+    the start of the fit -- catastrophic for every target straddling RA = 0.
+    """
+    # Arrange / Act: dec = 0 so cos(dec) = 1 and the offset IS the RA
+    # difference, making the assertion read in degrees of RA.
+    _, d = _abs_dataset_across_ra_zero(tmp_path, 359.9, 0.1, 0.0)
+
+    # Assert
+    offset_deg = np.degrees(d["dE_obs"] / RAD2MAS)
+    np.testing.assert_allclose(offset_deg, 0.2, atol=1e-9)
+    assert np.all(np.abs(d["dE_obs"]) < 1e6), (
+        "RA offset was not wrapped across the 0/360 branch cut"
+    )
+    # Dec has no branch cut to cross and must be untouched.
+    np.testing.assert_allclose(d["dN_obs"], 0.0, atol=1e-9)
+
+
+def test_abs_mode_ra_offsets_are_continuous_across_zero(tmp_path):
+    """
+    Given: an abs-mode dataset with epochs on BOTH sides of RA = 0
+    When:  the observed offsets are computed
+    Then:  they span the true 0.15 deg of sky, not 360 deg
+
+    This is the half of the bug no single value of star.ra could ever absorb:
+    unwrapped, consecutive rows of ONE file differ by 360 deg.
+    """
+    # Arrange
+    t = np.linspace(2457000.0, 2457730.0, 8)
+    ra_obs = np.where(np.arange(len(t)) % 2 == 0, 359.95, 0.1)
+    data = np.column_stack(
+        [t, ra_obs, np.zeros_like(t), np.ones_like(t), np.ones_like(t)]
+    )
+    f = tmp_path / "abs_straddle.astrom"
+    np.savetxt(f, data)
+    cm = ConfigManager(
+        {"star.0.ra": {"initval": 0.0}, "star.0.dec": {"initval": 0.0}}
+    )
+    comp = AstrometryInstrument(
+        [{"name": "T", "file": str(f), "mode": "abs"}], cm
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+    span_deg = np.degrees(np.ptp(comp.datasets[0]["dE_obs"]) / RAD2MAS)
+
+    # Assert
+    np.testing.assert_allclose(span_deg, 0.15, atol=1e-9)
+
+
+def test_absolute_model_wraps_ra_offset_across_zero(tmp_path):
+    """
+    Given: an abs-mode reference at RA = 359.9 deg and star.ra at 0.1 deg
+    When:  the symbolic model term dE is evaluated
+    Then:  it reproduces the +0.2 deg offset the (wrapped) data carry
+
+    The model side has to wrap too: star.ra carries hard bounds [0, 360] in
+    star/defaults.yaml, so with the reference near 360 an unwrapped model term
+    cannot produce a negative RA offset at all -- the fit is unreachable, not
+    merely offset.
+    """
+    # Arrange
+    comp, d = _abs_dataset_across_ra_zero(tmp_path, 359.9, 0.1, 0.0)
+
+    star = _DummySystem()
+    star.ra = _ConstParam(np.radians([0.1]))
+    star.dec = _ConstParam(np.radians([0.0]))
+    star.pm_ra = _ConstParam([0.0])
+    star.pm_dec = _ConstParam([0.0])
+    star.parallax = _ConstParam([0.0])
+    system = _DummySystem()
+    system.star = star
+    comp.epoch = float(d["time"][0])
+
+    # Act
+    dE, _dN = comp._absolute_model(system, d, d["time"], None)
+    dE_val = np.asarray(dE.eval())
+
+    # Assert: the model matches the wrapped observed offset, to the mas
+    np.testing.assert_allclose(np.degrees(dE_val / RAD2MAS), 0.2, atol=1e-9)
+    np.testing.assert_allclose(dE_val, d["dE_obs"], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Unit test: orbit manifest gating
 # ---------------------------------------------------------------------------
 
@@ -802,3 +936,352 @@ def test_jax_gradient_finite_with_massive_companion(astrometry_system):
         if not np.all(np.isfinite(np.asarray(g)))
     ]
     assert not bad, f"non-finite JAX gradients: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# Review 2.6.1: the rel-mode jitter-variance floor must cover BOTH channels
+# ---------------------------------------------------------------------------
+
+# Interferometric-style relative astrometry: the TANGENTIAL error
+# (err_pa * sep) is far better than the radial one (err_sep).  That is the
+# regime in which a jitter legal for the separation channel still makes the
+# position-angle variance err_pa^2 + jv/sep^2 negative.
+_INTERF = dict(P=300.0, tp=2457000.0, a_rel=50.0, err_sep=0.05, err_pa=0.02)
+
+
+def _write_interferometric_rel(path):
+    """Write a rel-mode file whose PA channel is the tighter constraint."""
+    rng = np.random.default_rng(3)
+    t = np.sort(rng.uniform(2456900.0, 2457900.0, 20))
+    ph = 2 * np.pi * (t - _INTERF["tp"]) / _INTERF["P"]
+    dE = _INTERF["a_rel"] * np.cos(ph)
+    dN = _INTERF["a_rel"] * 0.7 * np.sin(ph)
+    np.savetxt(
+        path,
+        np.column_stack(
+            [
+                t,
+                np.hypot(dE, dN),
+                np.full_like(t, _INTERF["err_sep"]),
+                np.degrees(np.arctan2(dE, dN)),
+                np.full_like(t, _INTERF["err_pa"]),
+            ]
+        ),
+    )
+    return t
+
+
+def test_rel_jitter_floor_covers_the_pa_channel(tmp_path):
+    """
+    Given: rel-mode data whose tangential error (err_pa*sep) is much smaller
+           than its separation error
+    When: load_data computes the jitter-variance floor
+    Then: the floor keeps the PA channel's variance positive as well -- it is
+          set by whichever channel is tighter, not by err_sep alone
+
+    Regression (review 2.6.1): the floor was -0.95*min(err_sep)**2, which for
+    these data still allows a jitter that drives err_pa**2 + jv/sep**2
+    negative -> NaN sigma over a region the sampler may visit.
+    """
+    # Arrange
+    f = tmp_path / "interf.astrom"
+    _write_interferometric_rel(f)
+    comp = AstrometryInstrument(
+        [{"name": "I", "file": str(f), "mode": "rel"}], ConfigManager({})
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+    floor = float(np.atleast_1d(comp.jittervar_lower[0])[0])
+    d = comp.datasets[0]
+    tangential = d["err_pa"] * d["sep"]  # mas
+
+    # Assert: this file really is PA-limited (else the test proves nothing)
+    assert np.min(tangential) < np.min(d["err_sep"])
+    # every allowed jitter keeps BOTH variances positive
+    assert np.all(d["err_sep"] ** 2 + floor > 0.0)
+    assert np.all(d["err_pa"] ** 2 + floor / d["sep"] ** 2 > 0.0)
+    # and it is the shared -0.95 * min(err)**2 margin over the tighter channel
+    assert floor == pytest.approx(-0.95 * np.min(tangential) ** 2)
+
+
+@pytest.fixture(scope="module")
+def interferometric_rel_system(tmp_path_factory):
+    """A one-instrument rel-mode System on PA-limited data."""
+    tmp_dir = tmp_path_factory.mktemp("interf")
+    _write_interferometric_rel(tmp_dir / "interf.astrom")
+
+    config = {
+        "name": "interf",
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "astrometryinstrument": [
+            {
+                "name": "I",
+                "file": str(tmp_dir / "interf.astrom"),
+                "mode": "rel",
+            }
+        ],
+    }
+    user_params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "star.A.distance": {"initval": 100.0},
+        "planet.b.mass": {"initval": 300.0},
+        "orbit.b.period": {"initval": _INTERF["P"]},
+        "orbit.b.tc": {"initval": _INTERF["tp"]},
+    }
+
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    return system, model, model.initial_point()
+
+
+@pytest.mark.slow
+def test_rel_jitter_inside_its_bound_has_finite_logp_and_gradient(
+    interferometric_rel_system,
+):
+    """
+    Given: a rel-mode model on PA-limited data
+    When: jitter_variance is set to values strictly INSIDE its resolved
+          lower bound (the region the sampler is free to visit)
+    Then: logp and every dlogp entry are finite there
+
+    Regression (review 2.6.1): with the floor taken from err_sep alone the
+    bound resolved to -0.002375 while the PA channel needs jv > -1.5e-4, and
+    logp at jitter_variance = -0.0023726 was -inf with a non-finite
+    gradient -- a wall of NaN inside the allowed interval.
+    """
+    system, model, point = interferometric_rel_system
+    jv = system.astrometryinstrument.jitter_variance
+    lower = float(np.atleast_1d(jv.lower)[0])
+    assert lower < 0.0  # the bound under test is the negative floor
+
+    key = f"{jv.label}_raw"
+    logp_fn = model.compile_logp()
+    dlogp_fn = model.compile_dlogp()
+
+    for frac in (0.999, 0.5, 0.0):  # 0.999*lower is a hair inside the wall
+        probe = dict(point)
+        probe[key] = jv.raw_from_initval(np.array([frac * lower]))
+        logp = logp_fn(probe)
+        dlogp = dlogp_fn(probe)
+        assert np.isfinite(logp), f"logp = {logp} at jv = {frac * lower:.6g}"
+        assert np.all(np.isfinite(dlogp)), (
+            f"non-finite dlogp at jv = {frac * lower:.6g}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Reviews 2.6.2 / 2.6.3 / 2.6.4: plots of an orbit-less gaia fit
+# ---------------------------------------------------------------------------
+
+# Proper motion is PINNED here (sigma: 0), so it is absent from every draw --
+# which is exactly what point.get(label, 0.0) used to turn into zero.
+_PM = dict(ra0=262.171207, dec0=-0.581091, pmra=-7.70, pmdec=-25.85, plx=2.09)
+
+
+@pytest.fixture(scope="module")
+def pm_only_gaia_system(tmp_path_factory):
+    """A legal gaia fit with NO orbit: proper motion + parallax only."""
+    tmp_dir = tmp_path_factory.mktemp("pmonly")
+    rng = np.random.default_rng(5)
+    t = np.sort(rng.uniform(2456900.0, 2457900.0, 40))
+    psi = rng.uniform(0, 2 * np.pi, 40)
+    err = np.full(40, 0.1)
+    np.savetxt(
+        tmp_dir / "pm.astrom",
+        np.column_stack([t, rng.normal(0, err), err, np.degrees(psi)]),
+    )
+
+    config = {
+        "name": "pmonly",
+        "star": [{"name": "A", "mist": False}],
+        "astrometryinstrument": [
+            {
+                "name": "G",
+                "file": str(tmp_dir / "pm.astrom"),
+                "mode": "gaia",
+                "observer_location": "earth",
+            }
+        ],
+    }
+    user_params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "star.A.ra": {"initval": _PM["ra0"]},
+        "star.A.dec": {"initval": _PM["dec0"]},
+        "star.A.pm_ra": {"initval": _PM["pmra"], "sigma": 0},
+        "star.A.pm_dec": {"initval": _PM["pmdec"], "sigma": 0},
+        "star.A.distance": {"initval": 1000.0 / _PM["plx"]},
+    }
+
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    point = system.get_internal_point(model, model.initial_point())
+    system.compile_plotter_functions(model)
+    return system, model, point
+
+
+@pytest.mark.slow
+def test_plot_model_uses_pinned_proper_motion(pm_only_gaia_system):
+    """
+    Given: a fit whose proper motion is PINNED (sigma: 0) and therefore
+           absent from the point
+    When: the along-scan model trace is built by plot_data
+    Then: it carries the pinned proper motion, matching an independent
+          pm + parallax evaluation
+
+    Regression (review 2.6.2): _linear_terms read the point with
+    point.get(label, 0.0), so every pinned parameter silently plotted as
+    zero -- the star stood still in the plots while the likelihood used
+    its real proper motion.
+    """
+    system, _, point = pm_only_gaia_system
+    comp = system.astrometryinstrument
+    d = comp.datasets[0]
+
+    # Act
+    spec = comp.plot_data(system, point)[0]
+    model_trace = [tr for tr in spec.traces if tr.role == "model"][0]
+
+    # Assert: independent pm + parallax along-scan reference (no orbit)
+    dt_yr = (d["time"] - comp.epoch) / 365.25
+    dE = _PM["pmra"] * dt_yr + _PM["plx"] * d["P_E"]
+    dN = _PM["pmdec"] * dt_yr + _PM["plx"] * d["P_N"]
+    expected = dE * d["sin_psi"] + dN * d["cos_psi"]
+    np.testing.assert_allclose(model_trace.y, expected, atol=1e-6)
+
+    # ... and the pm term genuinely dominates, so dropping it is not a
+    # rounding-level difference: with pm = 0 the trace would be tiny
+    parallax_only = (
+        _PM["plx"] * d["P_E"] * d["sin_psi"]
+        + _PM["plx"] * d["P_N"] * d["cos_psi"]
+    )
+    assert np.ptp(expected) > 5 * np.ptp(parallax_only)
+
+
+@pytest.mark.slow
+def test_orbitless_gaia_fit_still_renders_its_plots(
+    pm_only_gaia_system, tmp_path
+):
+    """
+    Given: a legal gaia fit with no orbit component
+    When: plot_data (data-only and with a point) and plot() are called
+    Then: specs come back and the PDFs are written -- neither the data nor
+          the pm+parallax model nor the sky plot needs an orbit
+
+    Regression (review 2.6.3): compile_plotters returned early without an
+    orbit, leaving _compiled_photo unset, and plot() bailed on that -- an
+    orbit-less astrometry fit produced no astrometry PDFs at all.
+    """
+    system, _, point = pm_only_gaia_system
+    comp = system.astrometryinstrument
+
+    # data-only specs are usable without a model at all
+    assert len(comp.plot_data(system, None)) == 1
+    assert len(comp.plot_data(system, point)) == 1
+
+    prefix = str(tmp_path / "px")
+    comp.plot(system, [point], filename_prefix=prefix)
+    assert (tmp_path / "px_astrometry_G.pdf").exists()
+    assert (tmp_path / "px_astrometry_G_sky.pdf").exists()
+
+
+@pytest.mark.slow
+def test_gaia_param_deps_include_the_linear_terms(pm_only_gaia_system):
+    """
+    Given: a gaia spec whose model is the numpy pm+parallax _linear_terms
+    When: its param_deps are declared
+    Then: they name the star's ra/dec/pm/distance labels
+
+    Regression (review 2.6.4): param_deps only ever came from walking the
+    photocenter-orbit tensor graph, so the NumPy linear terms contributed
+    nothing.  With no orbit the list was empty, the Evaluator's
+    changed_label filter skipped the component for every slider, and the
+    GUI live chart froze completely.
+    """
+    system, _, point = pm_only_gaia_system
+    spec = system.astrometryinstrument.plot_data(system, point)[0]
+
+    star = system.star
+    for par in (star.ra, star.dec, star.pm_ra, star.pm_dec, star.distance):
+        assert par.label in spec.param_deps, f"{par.label} missing"
+    # every declared dep must be a label the Evaluator can actually send
+    known = {p.label for p in system.plot_params}
+    assert set(spec.param_deps) <= known
+
+
+def test_conflicting_per_dataset_epochs_raise(tmp_path):
+    """
+    Given: two astrometry datasets that each declare a different `epoch:`
+    When: load_data resolves the reference epoch for ra/dec/pm
+    Then: it raises naming both epochs
+
+    Regression (silent-bandaid audit): `epoch:` is advertised per instrument
+    in config_schema, but there is only ONE reference epoch because there is
+    only one star.ra/dec/pm to propagate from.  The code took epochs[0] and
+    dropped the rest, so the canonical Hipparcos (1991.25) + Gaia (2016.0)
+    combination silently propagated the second dataset from the first one's
+    epoch -- an offset of pm * 24.75 yr, absorbed by ra/dec/pm.
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {
+                "name": "A",
+                "file": str(f1),
+                "mode": "rel",
+                "epoch": 2448349.0625,
+            },
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match=r"conflicting `epoch:` values"):
+        comp.load_data(system)
+
+
+def test_repeated_identical_epochs_are_accepted(tmp_path):
+    """
+    Given: two datasets that name the SAME epoch
+    When: load_data runs
+    Then: it is accepted and used -- the guard only rejects disagreement
+    """
+    # Arrange
+    f1 = tmp_path / "a.astrom"
+    f2 = tmp_path / "b.astrom"
+    _write_interferometric_rel(f1)
+    _write_interferometric_rel(f2)
+    comp = AstrometryInstrument(
+        [
+            {"name": "A", "file": str(f1), "mode": "rel", "epoch": 2457389.0},
+            {"name": "B", "file": str(f2), "mode": "rel", "epoch": 2457389.0},
+        ],
+        ConfigManager({}),
+    )
+    system = _DummySystem()
+    system.star = _DummyComponent(1)
+
+    # Act
+    comp.load_data(system)
+
+    # Assert
+    assert comp.epoch == pytest.approx(2457389.0)

@@ -24,7 +24,7 @@ from ..star.physics import calc_logg_from_logmass, calc_luminosity
 # it registers all the mathematical relations
 from . import physics
 from .bc_grid import (
-    DEFAULT_BC_ROOT,
+    DEFAULT_MODEL_ROOT,
     RegularGridInterpolator,
     _collect_facility_files,
     _load_alias_table,
@@ -96,7 +96,9 @@ class SED(Component):
         self.config = config if isinstance(config, dict) else config[0]
 
         self.label = "SED Parameters"
-        self.bc_root = Path(self.config.get("bc_root", DEFAULT_BC_ROOT))
+        self.model_root = Path(
+            self.config.get("model_root", DEFAULT_MODEL_ROOT)
+        )
 
         # for now lets assume only one SED file
         self.sedfile = self.config.get("file")
@@ -125,8 +127,8 @@ class SED(Component):
         # are kept on the component so build_likelihood can consult
         # the (logg_min, logg_max) range when adding a soft potential
         # on the inline loggsed expression (loggsed isn't a named
-        # star Parameter, so it can't be bounded via user_params the
-        # way teffsed/feh/av are).
+        # star Parameter, so it can't be bounded through the override
+        # channel the way teffsed/feh/av are).
         self.grid_axes = [None]
         self._inject_grid_bounds()
 
@@ -137,35 +139,46 @@ class SED(Component):
     # grid in ex: (teff, logg, feh, av). Letting the sampler wander
     # outside those ranges produces NaNs or garbage. Rather than push
     # that responsibility onto the user's YAML, we read the grid axes
-    # here and inject them as overrides into config_manager.user_params
-    # BEFORE any component's build_parameters() runs.
+    # here and register them on config_manager's cross-component
+    # override channel BEFORE any component's build_parameters() runs.
     #
     # Why this works timing-wise:
     #   System.__init__ instantiates every Component in one loop, then
     #   System.build_model() calls build_parameters() for every
-    #   component in a second loop. So any mutation of
-    #   config_manager.user_params from SED.__init__ is visible by the
-    #   time star.build_parameters() calls config_manager.resolve().
+    #   component in a second loop. So any add_override call from
+    #   SED.__init__ is visible by the time star.build_parameters()
+    #   calls config_manager.resolve().
+    #
+    # Why add_override and not user_params:
+    #   These bounds are a VALIDITY LIMIT of this component's model grid,
+    #   not a start value and not a user statement.  Writing them into
+    #   config_manager.user_params (what this did until 2026-08) made the
+    #   provenance ledger, export_solution, initval_source and the GUI all
+    #   report that the user had bounded star.teffsed/feh/av themselves, and
+    #   left finalize_user_params registering `star.av` & co. as leaf symbols
+    #   in the relaxation engine (which is where export_solution's "orphaned
+    #   2-part star rows" came from).  add_override is the same "overrides"
+    #   channel a component uses for its OWN parameters -- layered under the
+    #   user, so the user still wins -- reachable by path.
     #
     # Why the bound-tightening semantics are safe:
     #   ConfigManager.resolve() applies `max` to competing lower bounds
     #   and `min` to competing upper bounds. So:
-    #     * user silent  + grid bound  -> grid bound wins  ✓
-    #     * user tighter + grid bound  -> user wins        ✓
-    #     * user looser  + grid bound  -> grid wins        ✓ (safe,
-    #       sampler is kept inside the physically valid region)
-    #
-    # Future refinement (see README): the cleaner long-term design is
-    # a `contribute_param_overrides(config_manager)` hook on Component
-    # called explicitly before build_parameters in System.build_model.
-    # That requires touching component.py/system.py/config.py, which
-    # is deliberately out of scope for this scaffold — the __init__
-    # channel is functionally equivalent and zero-patch.
+    #     * user silent  + grid bound  -> grid bound wins
+    #     * user tighter + grid bound  -> user wins
+    #     * user looser  + grid bound  -> grid wins, with a warning naming
+    #       the parameter (safe: the sampler is kept inside the region the
+    #       interpolator can actually evaluate)
+    #   The third line is what the old `setdefault` could never do -- it saw
+    #   the user's key, left it alone, and never applied the grid bound at
+    #   all -- so this comment was wrong from the day it was written.
     # ------------------------------------------------------------------
     def _inject_grid_bounds(self):
 
         try:
-            axes = peek_grid_axes(model=self.sedmodel, bc_root=self.bc_root)
+            axes = peek_grid_axes(
+                model=self.sedmodel, model_root=self.model_root
+            )
         except FileNotFoundError as e:
             # If the grid isn't findable at construction time,
             # defer to load_data's own error handling rather than
@@ -173,8 +186,12 @@ class SED(Component):
             # that's a load-time failure, not an init failure.
             logger.warning(
                 f"SED could not peek grid axes for model={self.sedmodel} "
-                f"at {self.bc_root}: {e}. Skipping bound injection."
+                f"at {self.model_root}: {e}. Skipping bound injection."
             )
+            # The `return` was missing, so the handler never worked: `axes`
+            # is unbound on this path and the next line raised
+            # UnboundLocalError immediately after promising to skip.
+            return
 
         self.grid_axes = axes
 
@@ -186,31 +203,15 @@ class SED(Component):
         av_hi = float(axes["av_pts"].max())
 
         overrides = {
-            f"star.teffsed": {"lower": teff_lo, "upper": teff_hi},
-            f"star.feh": {"lower": feh_lo, "upper": feh_hi},
-            f"star.av": {"lower": av_lo, "upper": av_hi},
+            "star.teffsed": {"lower": teff_lo, "upper": teff_hi},
+            "star.feh": {"lower": feh_lo, "upper": feh_hi},
+            "star.av": {"lower": av_lo, "upper": av_hi},
         }
 
+        # 2-part (broadcast) paths: every star is interpolated on the same
+        # grid, so every star gets the same validity limits.
         for key, bounds in overrides.items():
-            existing = self.config_manager.user_params.get(key)
-            if existing is None:
-                self.config_manager.user_params[key] = dict(bounds)
-            elif isinstance(existing, dict):
-                # Don't clobber — only fill in bounds the user
-                # hasn't already specified. ConfigManager.resolve
-                # will tighten correctly when both are present,
-                # but we still want the grid bound to appear on
-                # the other side (lower *or* upper) when the user
-                # only set one of them.
-                for bk, bv in bounds.items():
-                    existing.setdefault(bk, bv)
-            else:
-                # User supplied a scalar initval shorthand; promote
-                # to dict and tack on the grid bounds.
-                self.config_manager.user_params[key] = {
-                    "initval": existing,
-                    **bounds,
-                }
+            self.config_manager.add_override(key, **bounds)
 
     @property
     def prefix(self):
@@ -254,13 +255,14 @@ class SED(Component):
                 ),
             },
             {
-                "key": "bc_root",
+                "key": "model_root",
                 "kind": "option",
                 "accepts": None,
                 "required": False,
                 "doc": (
-                    "Directory holding the bolometric-correction tables. "
-                    "Defaults to the packaged BC root."
+                    "Directory holding the stellar-model trees (BC "
+                    "tables, evolutionary grids). Defaults to the "
+                    "packaged model root."
                 ),
             },
             {
@@ -428,7 +430,7 @@ class SED(Component):
         """
         from .make_bc import ensure_model_data
 
-        ensure_model_data(self.sedmodel, current_dir / "models")
+        ensure_model_data(self.sedmodel, DEFAULT_MODEL_ROOT)
 
     def _collect_band_filters(self):
         """
@@ -460,7 +462,9 @@ class SED(Component):
             svo = resolve_filter_name(name, alias_df, alias="SVO")
             facility = facility_from_svo_name(svo)
             try:
-                _collect_facility_files(self.bc_root, self.sedmodel, facility)
+                _collect_facility_files(
+                    self.model_root, self.sedmodel, facility
+                )
             except (FileNotFoundError, NotImplementedError) as e:
                 logger.warning(
                     f"SED: no BC tables for band filter '{name}' "
@@ -505,7 +509,7 @@ class SED(Component):
         grid = build_bc_grid(
             user_filter_names=self.all_filters,
             model=self.sedmodel,
-            bc_root=self.bc_root,
+            model_root=self.model_root,
         )
         self.bc_grid_data = grid
         self.mist_filters = grid["filter_order"]
@@ -525,9 +529,9 @@ class SED(Component):
                 self.filter_columns.setdefault(key, col)
 
         # Build the BC interpolator now, using config_manager.resolve() for
-        # the star parameter bounds. _inject_grid_bounds() already wrote the
-        # grid-axis limits into config_manager.user_params during __init__,
-        # so resolve() returns the correct tightened bounds here.
+        # the star parameter bounds. _inject_grid_bounds() already registered
+        # the grid-axis limits on config_manager's override channel during
+        # __init__, so resolve() returns the correct tightened bounds here.
         teff_cfg = self.config_manager.resolve("star", "teffsed")
         feh_cfg = self.config_manager.resolve("star", "feh")
         av_cfg = self.config_manager.resolve("star", "av")
@@ -589,11 +593,42 @@ class SED(Component):
     # the same (nstars, nfilters) apparent-magnitude graph; build it
     # once and cache the node.
     # ------------------------------------------------------------------
+    # Star Parameters the BC forward model below reads directly.  They are
+    # not declared as manifest deps of anything on this component, so a
+    # cross-component caller that runs at stage 5 (mulensinstrument's derived
+    # zeropoint) can reach here before the topological order has built them.
+    _STAR_NODE_DEPS = (
+        "teffsed",
+        "radiussed",
+        "logmass",
+        "feh",
+        "av",
+        "distance",
+    )
+
+    def _ensure_star_nodes(self, system):
+        """Materialize the star Parameters ``_predicted_appmag_node`` reads.
+
+        This is the same lazy build ``Component.add_parameter`` performs for
+        a declared cross-component dep ("star.mass[lens_map]"); these are
+        read through the predict_* API instead of being declared, so the
+        build has to happen here.  A no-op at stage 6, where every manifest
+        parameter already exists.
+        """
+        star = getattr(system, "star", None)
+        if star is None:
+            return
+        model = pm.modelcontext(None)
+        for name in self._STAR_NODE_DEPS:
+            if not isinstance(getattr(star, name, None), Parameter):
+                star.add_parameter(model, name, system)
+
     def _predicted_appmag_node(self, system):
         """Per-star predicted apparent mags, shape (nstars, n_all_filters)."""
         if getattr(self, "_m_pred_matrix", None) is not None:
             return self._m_pred_matrix
 
+        self._ensure_star_nodes(system)
         star = system.star
         teffsed = star.teffsed.value  # K,        (nstars,)
         radiussed = star.radiussed.value  # R_sun,    (nstars,)
@@ -807,7 +842,7 @@ class SED(Component):
         converts observed magnitudes to flux for the given draws.
         """
         plot_class_path = Path(
-            current_dir / "models" / system.sed.sedmodel / "plot.py"
+            DEFAULT_MODEL_ROOT / system.sed.sedmodel / "BCs" / "plot.py"
         )
         parsed_ast = ast.parse(plot_class_path.read_text())
         plot_cls_str = [
@@ -815,7 +850,7 @@ class SED(Component):
             for node in parsed_ast.body
             if isinstance(node, ast.ClassDef)
         ][0]
-        mod_name = f"exozippy.components.sed.models.{system.sed.sedmodel}.plot"
+        mod_name = f"exozippy.models.{system.sed.sedmodel}.BCs.plot"
         module = importlib.import_module(mod_name)
         plot_cls = getattr(module, plot_cls_str)
         return plot_cls(system, points)
@@ -1149,7 +1184,7 @@ class SED(Component):
 
     def _filter_wave_eff_micron(self):
         """Effective wavelength (micron) of each .sed filter row."""
-        from .filters import filter as VOID
+        from ...filters import filter as VOID
 
         alias_df = _load_alias_table()
         waves = []

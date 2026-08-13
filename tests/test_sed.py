@@ -14,7 +14,7 @@ import pytest
 
 import exozippy.components.sed.physics  # registers calc_absbolmag etc.
 from exozippy.components.sed.bc_grid import (
-    DEFAULT_BC_ROOT,
+    DEFAULT_MODEL_ROOT,
     RegularGridInterpolator,
     _parse_feh_from_filename,
     _range_indices,
@@ -30,9 +30,9 @@ from exozippy.physics_registry import PHYSICS_REGISTRY
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
 
-_BC_ROOT = DEFAULT_BC_ROOT
+_MODEL_ROOT = DEFAULT_MODEL_ROOT
 _SOLAR_FEH_2MASS_NEXTGEN = (
-    _BC_ROOT / "NextGen" / "BCs" / "2MASS" / "feh+0.0_afe+0.0.2MASS"
+    _MODEL_ROOT / "NextGen" / "BCs" / "2MASS" / "feh+0.0_afe+0.0.2MASS"
 )
 
 
@@ -186,6 +186,62 @@ def test_resolve_filter_name_passthrough_when_alias_table_is_none():
     assert result == user_label
 
 
+def test_alias_table_cells_are_stripped_of_alignment_whitespace():
+    """
+    Given filternames.txt, whose columns are hand-aligned with literal
+    spaces (so cells such as 'TESS/TESS.Red     ' carry trailing blanks),
+    When _load_alias_table loads it,
+    Then no cell retains leading or trailing whitespace.
+
+    Without the strip the padding is invisible in every printout and only
+    shows up as a lookup that quietly misses -- see the companion test
+    below for what that costs.
+    """
+    # ARRANGE
+    from exozippy.components.sed.bc_grid import _load_alias_table
+
+    alias_df = _load_alias_table()
+    assert alias_df is not None, "shipped alias table should be findable"
+
+    # ACT
+    padded = [
+        value
+        for col in alias_df.select_dtypes(include="object").columns
+        for value in alias_df[col].dropna()
+        if value != value.strip()
+    ]
+
+    # ASSERT
+    assert padded == []
+
+
+def test_resolve_filter_name_matches_a_whitespace_padded_alias_cell():
+    """
+    Given 'TESS/TESS.Red', whose SVO cell in filternames.txt is padded
+    with trailing spaces for column alignment,
+    When resolve_filter_name looks it up for the MIST alias,
+    Then the table's own answer 'TESS' comes back.
+
+    Regression: unstripped, the .eq() row match fails, resolve falls
+    through to synthesize_mist_name and returns 'TESS_Red' -- a BC column
+    that does not exist in models/NextGen/BCs/TESS (whose one column is
+    'TESS'). No exception is raised at resolve time; the fit dies later,
+    or worse, regenerates a duplicate column under the wrong name.
+    """
+    # ARRANGE
+    from exozippy.components.sed.bc_grid import _load_alias_table
+
+    alias_df = _load_alias_table()
+
+    # ACT
+    mist_name = resolve_filter_name("TESS/TESS.Red", alias_df, alias="MIST")
+    svo_name = resolve_filter_name("TESS.Red", alias_df, alias="SVO")
+
+    # ASSERT
+    assert mist_name == "TESS"
+    assert svo_name == "TESS/TESS.Red"
+
+
 # ---------------------------------------------------------------------------
 # Section 3 — Grid axis slicer (_range_indices)
 # ---------------------------------------------------------------------------
@@ -270,7 +326,7 @@ def test_peek_grid_axes_returns_all_four_axis_keys():
     'teff_pts', 'logg_pts', 'feh_pts', and 'av_pts'.
     """
     # ACT
-    axes = peek_grid_axes(model="NextGen", bc_root=_BC_ROOT)
+    axes = peek_grid_axes(model="NextGen", model_root=_MODEL_ROOT)
 
     # ASSERT
     for key in ("teff_pts", "logg_pts", "feh_pts", "av_pts"):
@@ -285,7 +341,7 @@ def test_peek_grid_axes_teff_range_is_physically_plausible():
     atmospheres: minimum > 2000 K and maximum < 100000 K.
     """
     # ACT
-    axes = peek_grid_axes(model="NextGen", bc_root=_BC_ROOT)
+    axes = peek_grid_axes(model="NextGen", model_root=_MODEL_ROOT)
 
     # ASSERT
     assert axes["teff_pts"].min() > 2000
@@ -300,7 +356,7 @@ def test_peek_grid_axes_raises_for_nonexistent_model():
     """
     # ACT & ASSERT
     with pytest.raises(FileNotFoundError):
-        peek_grid_axes(model="FakeModel_XYZ", bc_root=_BC_ROOT)
+        peek_grid_axes(model="FakeModel_XYZ", model_root=_MODEL_ROOT)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +375,7 @@ def test_build_bc_grid_returns_dict_with_required_keys():
 
     # ACT
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
 
     # ASSERT
@@ -346,7 +402,7 @@ def test_build_bc_grid_bc_values_shape_matches_axes_and_filters():
 
     # ACT
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
 
     # ASSERT
@@ -372,7 +428,7 @@ def test_build_bc_grid_contains_no_nan_values():
 
     # ACT
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
 
     # ASSERT
@@ -392,7 +448,7 @@ def test_build_bc_grid_filter_order_matches_mist_names():
 
     # ACT
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
 
     # ASSERT
@@ -411,7 +467,7 @@ def test_build_bc_grid_raises_for_nonexistent_facility():
     # ACT & ASSERT
     with pytest.raises((FileNotFoundError, NotImplementedError, KeyError)):
         build_bc_grid(
-            user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+            user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
         )
 
 
@@ -430,7 +486,7 @@ def test_slice_bc_reduces_axis_length_when_range_is_tighter_than_full_grid():
     # ARRANGE
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
     axes = (
         {k: grid[k] for k in ("teff", "logg", "feh", "av")}
@@ -467,7 +523,7 @@ def test_slice_bc_preserves_filter_axis_length():
     # ARRANGE
     filters = ["2MASS.J", "2MASS.H", "2MASS.Ks"]
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
     axes = {
         "teff": grid["teff_pts"],
@@ -497,7 +553,7 @@ def test_slice_bc_raises_for_unknown_parameter_name():
     # ARRANGE
     filters = ["2MASS.J"]
     grid = build_bc_grid(
-        user_filter_names=filters, model="NextGen", bc_root=_BC_ROOT
+        user_filter_names=filters, model="NextGen", model_root=_MODEL_ROOT
     )
     axes = {
         "teff": grid["teff_pts"],
@@ -793,32 +849,45 @@ def _make_sed(minimal_sed_file):
         "star.av": {"initval": 0.0},
     }
     cm = ConfigManager(user_params)
-    config = {"file": minimal_sed_file, "bc_root": str(_BC_ROOT)}
+    config = {"file": minimal_sed_file, "model_root": str(_MODEL_ROOT)}
     return SED(config, cm), cm
 
 
-def test_sed_init_injects_grid_bounds_into_config_manager(minimal_sed_file):
+def test_sed_init_registers_grid_bounds_on_the_override_channel(
+    minimal_sed_file,
+):
     """
     Given a SED component initialised with a valid .sed file pointing at
     the NextGen BC tree,
     When __init__ runs,
-    Then config_manager.user_params should contain 'star.teffsed',
+    Then config_manager.param_overrides should contain 'star.teffsed',
     'star.feh', and 'star.av' entries whose 'lower' and 'upper' keys
-    bracket the BC grid's physical range.
+    bracket the BC grid's physical range -- and the user's own params should
+    be untouched.
+
+    The channel changed in 2026-08: these bounds used to be written straight
+    into config_manager.user_params, where nothing downstream could tell them
+    apart from something the user wrote.  The substance asserted here is
+    unchanged (the grid's validity limits are registered, and they are
+    physically sane); tests/test_component_override_channel.py covers the
+    provenance consequences.
     """
     # ARRANGE / ACT
     sed, cm = _make_sed(minimal_sed_file)
 
-    # ASSERT — keys injected
+    # ASSERT — bounds registered on the component override channel
     for key in ("star.teffsed", "star.feh", "star.av"):
-        assert key in cm.user_params, f"config_manager missing key: {key}"
-        entry = cm.user_params[key]
+        assert key in cm.param_overrides, f"config_manager missing key: {key}"
+        entry = cm.param_overrides[key]
         assert "lower" in entry and "upper" in entry, (
             f"{key} entry is missing 'lower' / 'upper': {entry}"
         )
+        # ...and NOT written into the user's params.
+        user_entry = cm.user_params.get(key) or {}
+        assert "lower" not in user_entry and "upper" not in user_entry
 
     # ASSERT — teff bounds are physically sane
-    teff_entry = cm.user_params["star.teffsed"]
+    teff_entry = cm.param_overrides["star.teffsed"]
     assert teff_entry["lower"] > 100
     assert teff_entry["upper"] < 200_000
 

@@ -38,6 +38,12 @@ from astroquery.vizier import Vizier
 try:
     from zero_point import zpt as _gaia_zpt
 
+    # get_zpt() raises "The table of coefficients have not been
+    # initialized!!" until this runs.  It never ran, so the Lindegren+2021
+    # parallax zero point silently evaluated to 0.0 on every target, for
+    # every run, and the uncorrected parallax became the star's distance
+    # PRIOR (mu/sigma) in the params file the user then fits with.
+    _gaia_zpt.load_tables()
     HAS_GAIADR3_ZPT = True
 except ImportError:
     HAS_GAIADR3_ZPT = False
@@ -84,6 +90,20 @@ def _gets(table, col, row=0):
         return str(val).strip()
     except Exception:
         return ""
+
+
+def _is_distinct(mag, ref, tol=0.01):
+    """True if `mag` is a different measurement from the reference `ref`.
+
+    Used to keep a catalog's photometry from entering the SED twice when two
+    catalogs report the same measurement. A non-finite `ref` means the
+    comparison star was never found, so there is nothing to duplicate and the
+    magnitude is kept -- the NaN must not silently vote "drop it", which is
+    what a bare ``abs(mag - ref) > tol`` does.
+    """
+    if not np.isfinite(ref):
+        return True
+    return abs(mag - ref) > tol
 
 
 def _sep(ra1, dec1, ra2, dec2):
@@ -138,14 +158,16 @@ def schlegel_av(ra, dec):
         for col in ("ext SFD mean", "EBV_SFD", "ext SFD", "E(B-V)"):
             if col in t.colnames:
                 return float(t[col][0]) * 3.1
-        # last resort: first finite positive column value
-        for col in t.colnames:
-            try:
-                val = float(t[col][0])
-                if 0 < val < 50:
-                    return val * 3.1
-            except Exception:
-                pass
+        # No "last resort: first column that parses in (0, 50)".  That
+        # returned an arbitrary column -- a coordinate, or SandF rather than
+        # SFD -- times 3.1, and the caller writes the result as a HARD upper
+        # bound on star.av (the logit transform truncates the posterior
+        # there) under a note claiming Schlegel+1998 provenance it does not
+        # have.  Returning None is handled by the caller.
+        warnings.warn(
+            f"IRSA dust table has none of the expected E(B-V) columns "
+            f"(got {list(t.colnames)}); no Av upper limit will be written."
+        )
     except Exception as e:
         warnings.warn(f"Dust map query failed: {e}")
     return None
@@ -160,6 +182,75 @@ def _sed_entry(svo_name, mag, used_err, enabled=True, magsys="Vega"):
         "err": round(float(used_err), 6),
         "magsys": magsys,
     }
+
+
+def _write_parallax_prior(yaml_data, notes, key, plx, uplx):
+    """Record the astrometric measurement as a prior in PARALLAX space.
+
+    The measurement is Gaussian in parallax, so that is where the prior
+    belongs.  Propagating it into a distance prior
+    (``d = 1000/plx``, ``sigma_d = 1000*sigma_plx/plx**2``) is a
+    first-order expansion of a nonlinear map: it is symmetric in distance
+    while the true distance posterior implied by a Gaussian parallax is
+    skewed with a long far-side tail, so it biases whenever
+    ``plx/sigma_plx`` is not large (Lutz & Kelker 1973; Bailer-Jones 2015).
+    EXOFASTv2's ``mkticsed.pro`` writes ``parallax`` too; the distance
+    conversion was introduced by the Python port.
+
+    ``star.parallax`` is a derived parameter (``1000/distance``) and takes
+    an ordinary ``mu``/``sigma`` Gaussian prior through the standard
+    machinery -- ``Parameter.build_pymc`` adds ``gaussian_prior.<label>``
+    for derived elements with a sigma.  The relaxation engine then
+    inverts ``Eq(parallax, 1000/distance)`` to seed ``distance``, so no
+    distance entry is written here.
+
+    A NEGATIVE parallax is written live rather than commented out.  It is
+    a perfectly good measurement, and in parallax space it is well
+    defined: ``distance`` is the sampled coordinate and is bounded
+    positive, so ``1000/distance`` is always positive and a Gaussian
+    centered below zero is a finite one-sided penalty favoring large
+    distances -- nothing ever inverts a negative parallax at runtime.
+    (``mkticsed.pro`` comments the line out with "Negative parallax is not
+    allowed"; that reflects EXOFASTv2 sampling distance directly.)  The
+    relaxation engine declines to seed a distance from it, so ``distance``
+    keeps its defaults.yaml start -- which can be a poor one, hence the
+    suggested seed in the notes.
+    """
+    yaml_data[key("parallax")] = {
+        "mu": round(float(plx), 5),
+        "sigma": round(float(uplx), 5),
+    }
+    if plx > 0:
+        notes.append(
+            f"parallax prior N({plx:.5f}, {uplx:.5f}) mas -> "
+            f"distance ~ {1000.0 / plx:.3f} pc.  The prior is applied in "
+            f"parallax space (star.parallax = 1000/distance): a distance "
+            f"prior from first-order propagation biases below "
+            f"plx/sigma ~ 10"
+        )
+        return
+    notes.append(
+        f"WARNING: the corrected parallax is NEGATIVE ({plx:.5f} +/- "
+        f"{uplx:.5f} mas).  It is still applied, as a prior on "
+        f"star.parallax: distance is the sampled coordinate and is bounded "
+        f"positive, so the prior is a finite one-sided penalty favoring "
+        f"large distances."
+    )
+    hi = plx + 3.0 * uplx
+    if hi > 0:
+        notes.append(
+            f"WARNING: no distance start can be derived from a negative "
+            f"parallax, so star.distance keeps its 10 pc default -- a very "
+            f"poor start here.  To start at the 3-sigma minimum distance "
+            f"instead, add:  {key('distance')}: {{initval: "
+            f"{1000.0 / hi:.3f}}}"
+        )
+    else:
+        notes.append(
+            "WARNING: the 3-sigma upper limit on the parallax is still "
+            "negative; the astrometry constrains the distance only very "
+            "weakly.  Set a star.distance initval by hand."
+        )
 
 
 def _write_sed_yaml(path, sed_entries, model="NextGen", nstars=1, notes=None):
@@ -365,7 +456,6 @@ def mkticsed(
     target_dec = tic_dec
     target_pmra = float("nan")
     target_pmdec = float("nan")
-    target_plx = float("nan")
     gaia_dr3_done = False
 
     if qgaia3 is not None and len(qgaia3) > 0:
@@ -405,7 +495,9 @@ def mkticsed(
                     "RUWE > 1.4 is a strong indicator of stellar multiplicity"
                 )
 
-            if np.isfinite(g3_plx) and np.isfinite(g3_eplx) and g3_plx > 0:
+            # No positivity gate: the prior is written in PARALLAX space, so
+            # a negative measured parallax is representable (see below).
+            if np.isfinite(g3_plx) and np.isfinite(g3_eplx):
                 uplx = math.sqrt(
                     g3_eplx**2 + 0.01**2
                 )  # 0.01 mas systematic floor
@@ -430,18 +522,38 @@ def mkticsed(
                         and 6 <= g3_gmag <= 21
                     ):
                         try:
-                            zp = _gaia_zpt.get_zpt(
-                                g3_gmag,
-                                g3_nueff,
-                                g3_pscol,
-                                g3_elat,
-                                int(g3_solv),
+                            # numpy scalars, not Python floats: under NEP 50
+                            # (numpy >= 2, our floor) zpt's internal
+                            # np.can_cast(inp, float) raises TypeError on a
+                            # Python float.  That was the second reason the
+                            # correction never once applied.
+                            zp = float(
+                                _gaia_zpt.get_zpt(
+                                    np.float64(g3_gmag),
+                                    np.float64(g3_nueff),
+                                    np.float64(g3_pscol),
+                                    np.float64(g3_elat),
+                                    np.int64(int(g3_solv)),
+                                )
                             )
                             zp_msg = (
-                                f"corrected by -{zp:.5f} mas (Lindegren+2021)"
+                                f"corrected by {-zp:+.5f} mas (Lindegren+2021)"
                             )
-                        except Exception:
-                            zp_msg = "correction failed; using raw"
+                        except Exception as exc:
+                            # Do NOT fall through with zp = 0.  The result
+                            # here is not a missing number, it is a distance
+                            # PRIOR biased by the whole zero point (~0.02-0.05
+                            # mas, i.e. several sigma at 1 kpc) with nothing
+                            # but a note string to say so.  The out-of-range
+                            # case is handled by the else branch below and is
+                            # a legitimate "no published correction".
+                            raise RuntimeError(
+                                f"Gaia DR3 parallax zero-point correction "
+                                f"failed for this target "
+                                f"({type(exc).__name__}: {exc}).  Refusing to "
+                                f"write a distance prior from the uncorrected "
+                                f"parallax."
+                            ) from exc
                     else:
                         zp_msg = "out of Lindegren+2021 range; using raw"
 
@@ -451,16 +563,10 @@ def mkticsed(
                     f"uncertainty {g3_eplx:.5f} + 0.01 mas systematic = {uplx:.5f}"
                 )
 
-                if corrected_plx > 0:
-                    d_pc = 1000.0 / corrected_plx
-                    d_sig = 1000.0 * uplx / corrected_plx**2
-                    target_plx = corrected_plx
-                    yaml_data[key("distance")] = {
-                        "initval": round(d_pc, 3),
-                        "mu": round(d_pc, 3),
-                        "sigma": round(d_sig, 3),
-                    }
-                    gaia_dr3_done = True
+                _write_parallax_prior(
+                    yaml_data, notes, key, corrected_plx, uplx
+                )
+                gaia_dr3_done = True
 
                 target_ra = _get(qgaia3, "RA_ICRS", g3row)
                 target_dec = _get(qgaia3, "DE_ICRS", g3row)
@@ -489,13 +595,9 @@ def mkticsed(
         notes.append(
             "DR3 parallax unavailable; using Gaia DR2 with Lindegren+2018 correction"
         )
-        d_pc = 1000.0 / dr2_fallback_plx
-        d_sig = 1000.0 * dr2_fallback_uplx / dr2_fallback_plx**2
-        yaml_data[key("distance")] = {
-            "initval": round(d_pc, 3),
-            "mu": round(d_pc, 3),
-            "sigma": round(d_sig, 3),
-        }
+        _write_parallax_prior(
+            yaml_data, notes, key, dr2_fallback_plx, dr2_fallback_uplx
+        )
 
     # --- 4. 2MASS photometry --------------------------------------------------
     print("Querying 2MASS ...", flush=True)
@@ -698,6 +800,12 @@ def mkticsed(
         notes.append("[Fe/H]: no value found; using wide prior N(0, 1)")
 
     # --- 8. Optional: Tycho-2 BT/VT (disabled by default) ---------------------
+    # BT/VT of the *matched* Tycho star, carried into section 9 as the APASS
+    # dedup reference. Reading row 0 instead would compare the target's APASS
+    # photometry against an unrelated star whenever the cone holds more than
+    # one Tycho source.
+    bt_ref = float("nan")
+    vt_ref = float("nan")
     qtyc2 = query_region("I/259/TYC2", tic_ra, tic_dec, dist / 60.0)
     if qtyc2 is not None and len(qtyc2) > 0:
         t_row = 0
@@ -707,6 +815,8 @@ def mkticsed(
         ebt = _get(qtyc2, "e_BTmag", t_row)
         vt = _get(qtyc2, "VTmag", t_row)
         evt = _get(qtyc2, "e_VTmag", t_row)
+        bt_ref = bt
+        vt_ref = vt
         if np.isfinite(bt) and np.isfinite(ebt):
             sed_entries.append(
                 _sed_entry("TYCHO/TYCHO.B", bt, max(0.02, ebt), enabled=tycho)
@@ -715,8 +825,6 @@ def mkticsed(
             sed_entries.append(
                 _sed_entry("TYCHO/TYCHO.V", vt, max(0.02, evt), enabled=tycho)
             )
-    else:
-        qtyc2 = None
 
     # --- 9. Optional: UCAC4 / APASS DR6 (disabled by default) -----------------
     qucac = query_region("UCAC4", tic_ra, tic_dec, dist / 60.0)
@@ -724,8 +832,6 @@ def mkticsed(
         u_row = 0
         if len(qucac) > 1:
             u_row, _ = _nearest(qucac, tic_ra, tic_dec)
-        bt_ref = _get(qtyc2, "BTmag", 0) if qtyc2 is not None else float("nan")
-        vt_ref = _get(qtyc2, "VTmag", 0) if qtyc2 is not None else float("nan")
         B_mag = _get(qucac, "Bmag", u_row)
         eB = _get(qucac, "e_Bmag", u_row)
         V_mag = _get(qucac, "Vmag", u_row)
@@ -736,12 +842,16 @@ def mkticsed(
         er = _get(qucac, "e_rmag", u_row)
         i_mag = _get(qucac, "imag", u_row)
         ei = _get(qucac, "e_imag", u_row)
-        # UCAC4 stores APASS errors as 0.01 mag integers; avoid duplicating Tycho
+        # UCAC4 stores APASS errors as 0.01 mag integers, with 99 as the
+        # catalog's "no data" sentinel -- it must be rejected on every band,
+        # or it survives as a fabricated max(0.02, 99 * 0.01) = 0.99 mag error
+        # on a magnitude that was never measured. Also avoid duplicating the
+        # Tycho photometry the SED already carries.
         if (
             np.isfinite(B_mag)
             and np.isfinite(eB)
             and eB != 99
-            and abs(B_mag - bt_ref) > 0.01
+            and _is_distinct(B_mag, bt_ref)
         ):
             sed_entries.append(
                 _sed_entry(
@@ -755,7 +865,7 @@ def mkticsed(
             np.isfinite(V_mag)
             and np.isfinite(eV)
             and eV != 99
-            and abs(V_mag - vt_ref) > 0.01
+            and _is_distinct(V_mag, vt_ref)
         ):
             sed_entries.append(
                 _sed_entry(
@@ -765,19 +875,19 @@ def mkticsed(
                     enabled=ucac,
                 )
             )
-        if np.isfinite(g_mag) and np.isfinite(eg):
+        if np.isfinite(g_mag) and np.isfinite(eg) and eg != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.g", g_mag, max(0.02, eg * 0.01), enabled=ucac
                 )
             )
-        if np.isfinite(r_mag) and np.isfinite(er):
+        if np.isfinite(r_mag) and np.isfinite(er) and er != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.r", r_mag, max(0.02, er * 0.01), enabled=ucac
                 )
             )
-        if np.isfinite(i_mag) and np.isfinite(ei):
+        if np.isfinite(i_mag) and np.isfinite(ei) and ei != 99:
             sed_entries.append(
                 _sed_entry(
                     "SLOAN/SDSS.i", i_mag, max(0.02, ei * 0.01), enabled=ucac
@@ -805,16 +915,27 @@ def mkticsed(
             and np.isfinite(by)
             and np.isfinite(m1)
             and np.isfinite(c1)
+            # A finite uncertainty is a PRECONDITION for inclusion, exactly
+            # as it is for every other photometry block in this file.  The
+            # old `evmag if np.isfinite(evmag) else 0.01` turned an ABSENT
+            # uncertainty into an implausibly tight one (0.01 mag is near
+            # the best achievable in Stromgren V), which then over-weighted
+            # this photometry in the SED likelihood and biased Teff, radius
+            # and Av.
+            and np.isfinite(evmag)
+            and np.isfinite(eby)
+            and np.isfinite(em1)
+            and np.isfinite(ec1)
         ):
             u_m, su, v_m, sv, b_m, sb, y_m, sy = strom_conv(
                 vmag,
-                max(0.01, evmag if np.isfinite(evmag) else 0.01),
+                max(0.01, evmag),
                 by,
-                max(0.02, eby if np.isfinite(eby) else 0.02),
+                max(0.02, eby),
                 m1,
-                max(0.02, em1 if np.isfinite(em1) else 0.02),
+                max(0.02, em1),
                 c1,
-                max(0.02, ec1 if np.isfinite(ec1) else 0.02),
+                max(0.02, ec1),
             )
             if np.isfinite(u_m):
                 sed_entries.append(

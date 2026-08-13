@@ -441,3 +441,279 @@ def test_legacy_plot_still_renders_at_start(rvonly_built, tmp_path):
 
     produced = list(Path(tmp_path).glob("kelt4_start*.pdf"))
     assert len(produced) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: a PINNED gamma must reach the RV plots (not plot as zero)
+# ---------------------------------------------------------------------------
+
+# A large, unmistakable offset: nothing else in the model can produce it, so
+# any leak of the old 0.0 default shows up as the whole instrument sitting
+# _GAMMA_PINNED m/s away from the model curve.
+_PIN = dict(gamma=-12345.0, K=100.0, P=10.0, tc=2450005.0)
+
+
+@pytest.fixture(scope="module")
+def pinned_gamma_rv_system(tmp_path_factory):
+    """One-instrument RV system whose gamma is PINNED (sigma: 0).
+
+    A gamma vector with no free element never becomes a pm.Deterministic,
+    so its label is absent from both model.deterministics and the
+    posterior -- which is exactly the condition the bug needed.
+    """
+    tmp_dir = tmp_path_factory.mktemp("pinned_gamma")
+    path = tmp_dir / "pinned.rv"
+
+    t = np.linspace(2450000.0, 2450100.0, 40)
+    rv = _PIN["gamma"] + _PIN["K"] * np.sin(
+        2 * np.pi * (t - _PIN["tc"]) / _PIN["P"]
+    )
+    np.savetxt(path, np.column_stack([t, rv, np.full_like(t, 5.0)]))
+
+    config = {
+        "run": {"name": "pinned_gamma"},
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+        "rvinstrument": [{"name": "HIRES", "file": str(path)}],
+    }
+    user_params = {
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.radius": {"initval": 1.0, "sigma": 0.1},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.1},
+        "orbit.b.period": {"initval": _PIN["P"]},
+        "orbit.b.tc": {"initval": _PIN["tc"]},
+        "rvinstrument.HIRES.gamma": {"initval": _PIN["gamma"], "sigma": 0},
+    }
+
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    system.compile_plotter_functions(model)
+    return system, model, point, t, rv
+
+
+def test_pinned_gamma_is_absent_from_the_point(pinned_gamma_rv_system):
+    """
+    Given an RV fit whose gamma is pinned with sigma: 0,
+    When the plotting point is built from the model,
+    Then gamma is not in it -- so any plot helper reading the point needs a
+    real fallback, and this fixture genuinely exercises that path.
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+
+    label = system.rvinstrument.gamma.label
+
+    assert label not in point
+
+
+def test_unphased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
+    """
+    Given an RV fit whose gamma is PINNED at a large nonzero value,
+    When plot_data builds the unphased chart,
+    Then the plotted (gamma-subtracted) data carry that pinned offset.
+
+    Regression: _instrument_gamma read the point with
+    point.get(label, 0.0), and a pinned parameter is always absent from the
+    draws, so the whole instrument plotted -12345 m/s away from the model
+    curve while the likelihood used the real offset.
+    """
+    system, _, point, _, rv_ms = pinned_gamma_rv_system
+    comp = system.rvinstrument
+
+    specs = comp.plot_data(system, point)
+    unphased = [s for s in specs if not s.meta["phase_folded"]][0]
+    data_trace = [t for t in unphased.traces if t.role == "data"][0]
+
+    # independent reference: the file's own RVs minus the pinned gamma
+    expected = rv_ms - _PIN["gamma"]
+    np.testing.assert_allclose(data_trace.y, expected, atol=1e-6)
+    # and the offset dominates the signal, so plotting gamma as 0 is not a
+    # rounding-level difference: it is a 123x shift of the whole series
+    assert abs(_PIN["gamma"]) > 100 * np.ptp(expected) / 2.0
+    # the pre-fix value, explicitly excluded
+    assert not np.allclose(data_trace.y, rv_ms, atol=1.0)
+
+
+def test_gamma_helper_returns_the_pinned_value(pinned_gamma_rv_system):
+    """
+    Given the same pinned-gamma fit,
+    When _instrument_gamma is asked for the instrument's offset,
+    Then it returns the pinned value (in internal units), not zero.
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+    comp = system.rvinstrument
+
+    g_ms = comp._instrument_gamma(point, 0) * comp._rv_factor()
+
+    assert g_ms == pytest.approx(_PIN["gamma"], rel=1e-9)
+
+
+def test_phased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
+    """
+    Given the same pinned-gamma fit,
+    When plot_data builds the phased chart for the single orbit,
+    Then its cleaned data are gamma-subtracted with the pinned value too
+    (the phased panel calls the same helper, one orbit -> no other signal).
+    """
+    system, _, point, _, rv_ms = pinned_gamma_rv_system
+    comp = system.rvinstrument
+
+    specs = comp.plot_data(system, point)
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert len(phased) == 1
+    data_trace = [t for t in phased[0].traces if t.role == "data"][0]
+
+    expected = rv_ms - _PIN["gamma"]
+    # the phase fold reorders nothing here (traces keep data order), so
+    # compare the sorted values -- the offset is what is under test
+    np.testing.assert_allclose(
+        np.sort(data_trace.y), np.sort(expected), atol=1e-6
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: a PINNED baseline must reach the transit plots (not plot as 1.0)
+# ---------------------------------------------------------------------------
+
+# An UN-NORMALIZED light curve: raw counts, so the baseline the likelihood
+# uses is nowhere near the old 1.0 default and any leak of it shifts both
+# panels by the entire flux scale.
+_LC = dict(baseline=20000.0, depth=0.01, P=3.0, tc=2459000.0, err=20.0)
+
+
+@pytest.fixture(scope="module")
+def pinned_baseline_transit_system(tmp_path_factory):
+    """One-instrument transit system on raw counts whose baseline is PINNED.
+
+    A baseline vector with no free element never becomes a
+    pm.Deterministic, so its label is absent from both
+    model.deterministics and the posterior -- the condition the bug needed.
+    """
+    tmp_dir = tmp_path_factory.mktemp("pinned_baseline")
+    path = tmp_dir / "pinned.TESS.dat"
+
+    # One transit, sampled densely enough that the median flux is still the
+    # out-of-transit level (so baseline_init is the pinned value too).
+    t = np.linspace(_LC["tc"] - 0.25, _LC["tc"] + 0.25, 200)
+    flux = np.full_like(t, _LC["baseline"])
+    in_transit = np.abs(t - _LC["tc"]) < 0.05
+    flux[in_transit] -= _LC["baseline"] * _LC["depth"]
+    np.savetxt(path, np.column_stack([t, flux, np.full_like(t, _LC["err"])]))
+
+    config = {
+        "run": {"name": "pinned_baseline"},
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
+        "band": [{"name": "TESS", "filter": "TESS"}],
+        "transit": [{"name": "TESS_S48", "file": str(path), "band": "TESS"}],
+    }
+    user_params = {
+        "star.A.radius": {"initval": 1.0, "sigma": 0.05},
+        "star.A.mass": {"initval": 1.0, "sigma": 0.05},
+        "star.A.teff": {"initval": 5800, "sigma": 100},
+        "star.A.feh": {"initval": 0.0, "sigma": 0.08},
+        "orbit.b.period": {"initval": _LC["P"]},
+        "orbit.b.tc": {"initval": _LC["tc"]},
+        "orbit.b.cosi": {"initval": 0.0},
+        "planet.b.radius": {"initval": 1.0},
+        "transit.TESS_S48.baseline": {
+            "initval": _LC["baseline"],
+            "sigma": 0,
+        },
+    }
+
+    system = System(config, user_params=user_params)
+    system.prepare()
+    model = system.build_model()
+    with model:
+        point = system.get_internal_point(model, system.get_raw_start(model))
+    return system, model, point, t, flux
+
+
+def test_pinned_baseline_is_absent_from_the_point(
+    pinned_baseline_transit_system,
+):
+    """
+    Given a transit fit whose baseline is pinned with sigma: 0,
+    When the plotting point is built from the model,
+    Then the baseline is not in it -- so any plot helper reading the point
+    needs a real fallback, and this fixture exercises that path.
+    """
+    system, _, point, _, _ = pinned_baseline_transit_system
+
+    label = system.transit.baseline.label
+
+    assert label not in point
+
+
+def test_baseline_helper_returns_the_pinned_value(
+    pinned_baseline_transit_system,
+):
+    """
+    Given the same pinned-baseline fit,
+    When _baseline_for is asked for the instrument's baseline,
+    Then it returns the pinned raw-count value, not 1.0.
+    """
+    system, _, point, _, _ = pinned_baseline_transit_system
+
+    base = system.transit._baseline_for(point, 0)
+
+    assert base == pytest.approx(_LC["baseline"], rel=1e-9)
+
+
+def test_unphased_transit_model_uses_the_pinned_baseline(
+    pinned_baseline_transit_system,
+):
+    """
+    Given a transit fit on RAW COUNTS whose baseline is PINNED,
+    When plot_data builds the unphased chart,
+    Then the plotted model curve sits at that baseline, not at 1.0.
+
+    Regression: _baseline_for read the point with
+    point.get(label, 1.0), and a pinned parameter is always absent from the
+    draws, so the model curve plotted at unity -- 20000 counts below the
+    data the likelihood actually fit.
+    """
+    system, _, point, _, flux = pinned_baseline_transit_system
+    comp = system.transit
+
+    specs = comp.plot_data(system, point)
+    unphased = [s for s in specs if not s.meta["phase_folded"]][0]
+    model_trace = [t for t in unphased.traces if t.role == "model"][0]
+
+    # out-of-transit the curve is the baseline itself; in transit it dips by
+    # at most the depth, so the whole curve lives within a percent of it
+    assert np.max(model_trace.y) == pytest.approx(_LC["baseline"], rel=1e-9)
+    assert np.min(model_trace.y) > 0.9 * _LC["baseline"]
+    # the pre-fix value, explicitly excluded: the data are 20000x above it
+    assert np.max(model_trace.y) > 0.5 * np.median(flux)
+
+
+def test_phased_transit_data_uses_the_pinned_baseline(
+    pinned_baseline_transit_system,
+):
+    """
+    Given the same pinned-baseline fit,
+    When plot_data builds the phased chart for the single planet,
+    Then the cleaned flux is the data minus that baseline (one planet and
+    no GP, so nothing else is removed) rather than the data minus 1.0.
+    """
+    system, _, point, _, flux = pinned_baseline_transit_system
+    comp = system.transit
+
+    specs = comp.plot_data(system, point)
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert len(phased) == 1
+    data_trace = [t for t in phased[0].traces if t.role == "data"][0]
+
+    expected = flux - _LC["baseline"]
+    np.testing.assert_allclose(
+        np.sort(data_trace.y), np.sort(expected), atol=1e-6
+    )
+    # the pre-fix cleaned flux (data - 1.0) is off by the whole flux scale
+    assert not np.allclose(data_trace.y, flux - 1.0, atol=1.0)

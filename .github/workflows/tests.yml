@@ -3,8 +3,18 @@ name: Tests
 on:
   push:
     branches: [master]
+  # NO `branches:` filter here, deliberately. With `branches: [master]` a pull
+  # request targeting anything else got NO CI AT ALL -- and retargeting it to
+  # master afterwards did not start one, because GitHub dispatches on opened /
+  # reopened / synchronize and a base change is none of those. Such a PR sat
+  # at "no checks reported", which reads as "not finished yet" rather than
+  # "never tested", and the only way to start it was to close and reopen the
+  # PR by hand. That is a footgun aimed squarely at stacked pull requests.
+  #
+  # The cost is running the suite on PRs between topic branches too, which is
+  # the point: a stacked PR is exactly where a bad merge hides, since its diff
+  # is read against its parent rather than against master.
   pull_request:
-    branches: [master]
   # Nightly, for the unlocked-resolution job below -- it catches an upstream
   # release breaking us, which has nothing to do with when we push.
   schedule:
@@ -89,11 +99,49 @@ jobs:
       # The key embeds the md5 already pinned in make_bc._MODEL_DATA, so it is
       # correct by construction: change the data, change the key. Keep it in
       # sync if that pin ever moves.
+      #
+      # The PATH is NOT correct by construction, and has to be kept in sync by
+      # hand with bc_grid.DEFAULT_MODEL_ROOT (= src/exozippy/models). It was
+      # not. This block originally read src/exozippy/components/sed/models/
+      # NextGen, correct when it was written (#29, 2026-07-28 13:46) and
+      # stranded three hours later when the "Changed models/filters directory
+      # structure" branch merged and moved the tree (2026-07-28 16:36).
+      #
+      # Nothing caught it, and the failure mode is worth understanding because
+      # it looks healthy from the outside. actions/cache neither warns nor
+      # fails on a path the code does not read: the pre-restructure entry kept
+      # reporting "Cache hit ... not saving cache" on every job, restoring
+      # 132 MB into a directory nothing opens, while the SED tests downloaded
+      # the spectra from Zenodo again -- exactly the load this block exists to
+      # remove. Restoring also refreshes the entry's last-accessed time, so it
+      # never aged out either: a self-sustaining zombie.
+      #
+      # The key carries a `p2` generation marker because a cache entry stores
+      # the paths it was SAVED with. Repointing `path:` alone would still hit
+      # the old entry and still unpack it at the old location; the key has to
+      # change for a new entry to be written at the new one.
+      #
+      # The path names the two DOWNLOADED files, not their directory. Both
+      # land in models/NextGen/BCs/ next to 68 TRACKED BC tables, and a cache
+      # is restored after checkout and overwrites what it finds. Caching the
+      # directory would therefore let a stale entry silently revert a tracked
+      # table -- and the key, being the spectra md5, would not change when a
+      # table did, so it would never self-heal. That is not hypothetical: the
+      # "sed: fix Av bug in shipped 2MASS/WISE/GAIA BC tables" commit is
+      # exactly the change that would have been reverted under CI while
+      # passing locally.
+      #
+      # The other Zenodo asset, the 128 MB MIST EEP grid (models/MIST/eep_grid
+      # .py, same fetch_assets core), is deliberately not cached: the only
+      # test that touches it monkeypatches _EEP_GRID_ASSETS and EEP_GRID_DIR,
+      # so CI never downloads it. Add it here if that ever changes.
       - name: Cache the Zenodo model spectra
         uses: actions/cache@v6
         with:
-          path: src/exozippy/components/sed/models/NextGen
-          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+          path: |
+            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
+          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
 
       # The mulensing component sets astropy's solar-system ephemeris to
       # "jpl", which downloads the ~115 MB de430 kernel into ~/.astropy/cache
@@ -171,13 +219,17 @@ jobs:
           pip install ".[gui]"
           pip install pytest pytest-timeout pytest-xdist httpx
 
-      # Same Zenodo spectra cache as the other jobs -- see the comment there.
-      # Shares their key, so this job is usually a cache hit populated by them.
+      # Same Zenodo spectra cache as the other jobs -- see the comment there,
+      # including why this path has to be kept in sync with
+      # bc_grid.DEFAULT_MODEL_ROOT by hand. Shares their key, so this job is
+      # usually a cache hit populated by them.
       - name: Cache the Zenodo model spectra
         uses: actions/cache@v6
         with:
-          path: src/exozippy/components/sed/models/NextGen
-          key: nextgen-spectra-7a2b81333f6a5bfccd4cbc07bdea6648
+          path: |
+            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
+          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
 
       # Same astropy ephemeris-kernel cache as the matrix job -- see the
       # comment there.

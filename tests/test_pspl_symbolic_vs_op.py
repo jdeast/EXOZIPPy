@@ -52,11 +52,15 @@ def _build_system(extra_params=None):
     return system, model
 
 
-def _eval_both(system, model, obs_abs, t_vals):
-    """Compile and evaluate symbolic + Op magnification at raw=0 (initvals)."""
+def _eval_both(system, model, obs_dev, t_vals):
+    """Compile and evaluate symbolic + Op magnification at raw=0 (initvals).
+
+    obs_dev: Skowron+2011 geocentric deviations (AU) -- the single obs_pos
+    convention both magnification paths consume.
+    """
     with model:
         A_sym_node = system.lens.get_magnification(
-            t_vals, obs_abs, system, index=0
+            t_vals, obs_dev, system, index=0
         )
 
         sp = system.lens._get_safe_mm_params(0)
@@ -66,7 +70,7 @@ def _eval_both(system, model, obs_abs, t_vals):
         A_op_node = mag_op(
             pt.stack([sp["t0"], sp["u0"], sp["tE"], sp["pi_N"], sp["pi_E"]]),
             pt.as_tensor_variable(t_vals),
-            pt.as_tensor_variable(obs_abs),
+            pt.as_tensor_variable(obs_dev),
         )
 
         f_sym = pytensor.function(
@@ -101,23 +105,12 @@ def test_pspl_symbolic_vs_op_no_parallax():
     )
 
 
-def test_pspl_symbolic_vs_op_with_earth_parallax():
-    """
-    Given a satellite observer (Earth + constant ~0.05 AU displacement) and
-      non-zero pi_E so parallax changes the light curve,
-    When symbolic and Op are evaluated,
-    Then they agree to < 1e-3.
+def _skowron_deviations(t_vals, t0_par, offset=None):
+    """Skowron+2011 geocentric deviations for an Earth(+offset) observer.
 
-    This test guards against the ephemeris-convention bug where the symbolic
-    formula received Skowron+2011 geocentric deviations while MulensModel
-    expected absolute barycentric positions.
-
-    Uses a ±1-day window centred on t0: Earth's orbit deviates from a linear
-    fit by < 1.5e-4 AU over that interval (far smaller than the 0.05 AU
-    satellite offset), so the symbolic linear-Earth approximation and the Op's
-    real ephemeris both yield geocentric ≈ satellite_offset.  No mocking needed.
-    Earth-ephemeris accuracy error → < 2.6e-5 in u → < 5e-4 in magnification,
-    well within the 1e-3 tolerance.
+    delta(t) = earth(t) - [earth(t0_par) + v_earth(t0_par)*(t - t0_par)],
+    using astropy's builtin ephemeris (no network).  ``offset`` adds a
+    constant satellite displacement in AU.
     """
     import astropy.units as u_ast
     from astropy.coordinates import (
@@ -128,9 +121,6 @@ def test_pspl_symbolic_vs_op_with_earth_parallax():
 
     solar_system_ephemeris.set("builtin")
 
-    t0 = 2460025.0
-    t_vals = np.linspace(t0 - 1.0, t0 + 1.0, 10)
-
     def _earth(t_arr):
         return (
             get_body_barycentric(
@@ -140,38 +130,90 @@ def test_pspl_symbolic_vs_op_with_earth_parallax():
             .value.T
         )  # (N, 3)
 
-    earth_xyz = _earth(t_vals)
-    satellite_offset = np.array([0.04, 0.03, 0.01])
-    xyz_abs = earth_xyz + satellite_offset[np.newaxis, :]
-
     dt = 0.5
-    earth_pos_ref = _earth(np.array([t0]))[0]
-    earth_vel_ref = (
-        _earth(np.array([t0 + dt]))[0] - _earth(np.array([t0 - dt]))[0]
+    pos_ref = _earth(np.array([t0_par]))[0]
+    vel_ref = (
+        _earth(np.array([t0_par + dt]))[0] - _earth(np.array([t0_par - dt]))[0]
     ) / (2.0 * dt)
+    dev = _earth(t_vals) - (
+        pos_ref[None, :] + vel_ref[None, :] * (t_vals - t0_par)[:, None]
+    )
+    if offset is not None:
+        dev = dev + np.asarray(offset)[None, :]
+    return dev
 
+
+def test_pspl_symbolic_vs_op_with_annual_parallax():
+    """
+    Given a full observing season of ground-based Skowron+2011 geocentric
+      deviations (Earth's orbit departs from the linear reference by O(1) AU)
+      and non-zero pi_E,
+    When symbolic and Op are evaluated on the SAME deviation array,
+    Then (a) they agree to < 1e-6 -- both paths consume one obs_pos
+      convention -- and (b) the Op's magnification RESPONDS to the
+      deviations (max |A - A_no_parallax| > 0.01).
+
+    (b) is the regression for the 2026-08-08 review item 1.1: the Op used to
+    subtract the ACTUAL Earth ephemeris from the observer positions, which
+    deleted annual parallax entirely (pi_E had zero likelihood response for
+    every ground-based Op-path fit).
+    """
+    t0 = 2460025.0
+    t_vals = np.linspace(t0 - 150.0, t0 + 150.0, 200)
+    dev = _skowron_deviations(t_vals, t0)
+
+    # pi_E is derived from the pm/mass/distance chain (~0.18 here);
+    # initvals on lens.pi_E_* would be ignored (derived parameter).
     extra = {
-        "lens.Lens.pi_E_N": {"initval": 0.3, "sigma": 0.0},
-        "lens.Lens.pi_E_E": {"initval": 0.2, "sigma": 0.0},
         "star.Lens.pm_ra": {"initval": 10.0},
         "star.Lens.pm_dec": {"initval": 5.0},
     }
     system, model = _build_system(extra)
 
-    class _MockInstr:
-        pass
-
-    instr = _MockInstr()
-    instr._t0_par = t0
-    instr._earth_pos_ref = earth_pos_ref
-    instr._earth_vel_ref = earth_vel_ref
-    system.mulensinstrument = instr
-
-    m_sym, m_op = _eval_both(system, model, xyz_abs, t_vals)
+    m_sym, m_op = _eval_both(system, model, dev, t_vals)
 
     max_diff = np.max(np.abs(m_sym - m_op))
-    assert max_diff < 1e-3, (
-        f"max |A_sym - A_op| with satellite parallax = {max_diff:.2e}\n"
-        "Possible ephemeris-convention mismatch: check that both paths "
-        "receive absolute barycentric AU and convert consistently."
+    assert max_diff < 1e-6, (
+        f"max |A_sym - A_op| with annual parallax = {max_diff:.2e}\n"
+        "Possible obs_pos-convention mismatch: both paths must consume "
+        "Skowron+2011 geocentric deviations."
+    )
+
+    zero_obs = np.zeros_like(dev)
+    _, m_op_no_par = _eval_both(system, model, zero_obs, t_vals)
+    response = np.max(np.abs(m_op - m_op_no_par))
+    assert response > 0.01, (
+        f"Op magnification ignores annual parallax: max |dA| = {response:.2e}"
+    )
+
+
+def test_pspl_symbolic_vs_op_with_satellite_offset():
+    """
+    Given annual deviations plus a constant ~0.05 AU satellite displacement,
+    When symbolic and Op are evaluated on the same deviations,
+    Then they agree to < 1e-6 and differ from the ground-only curve (the
+      satellite term survives on top of the annual term).
+    """
+    t0 = 2460025.0
+    t_vals = np.linspace(t0 - 30.0, t0 + 30.0, 60)
+    dev_ground = _skowron_deviations(t_vals, t0)
+    dev_sat = dev_ground + np.array([0.04, 0.03, 0.01])[None, :]
+
+    # pm values give a finite t_E (~23 d) so the curve actually varies
+    # over the window; pi_E is derived (~0.18) from the same chain.
+    extra = {
+        "star.Lens.pm_ra": {"initval": 10.0},
+        "star.Lens.pm_dec": {"initval": 5.0},
+    }
+    system, model = _build_system(extra)
+
+    m_sym, m_op = _eval_both(system, model, dev_sat, t_vals)
+    max_diff = np.max(np.abs(m_sym - m_op))
+    assert max_diff < 1e-6, (
+        f"max |A_sym - A_op| with satellite offset = {max_diff:.2e}"
+    )
+
+    _, m_op_ground = _eval_both(system, model, dev_ground, t_vals)
+    assert np.max(np.abs(m_op - m_op_ground)) > 1e-4, (
+        "satellite displacement has no effect on the Op magnification"
     )

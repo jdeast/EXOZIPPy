@@ -29,7 +29,8 @@ internally.  Angles in radians.  Returns the RM anomaly in m/s.
 
 import numpy as np
 import pytensor.tensor as pt
-from exoplanet_core.pymc import ops
+
+from .limbdark import quad_limb_darkened_flux
 
 
 # ==========================================================================
@@ -37,10 +38,18 @@ from exoplanet_core.pymc import ops
 # ==========================================================================
 def _bessj0_small(x):
     y = x * x
-    ans1 = 57568490574.0 + y * (-13362590354.0 + y * (651619640.7 + y * (
-        -11214424.18 + y * (77392.33017 + y * (-184.9052456)))))
-    ans2 = 57568490411.0 + y * (1029532985.0 + y * (9494680.718 + y * (
-        59272.64853 + y * (267.8532712 + y * 1.0))))
+    ans1 = 57568490574.0 + y * (
+        -13362590354.0
+        + y
+        * (
+            651619640.7
+            + y * (-11214424.18 + y * (77392.33017 + y * (-184.9052456)))
+        )
+    )
+    ans2 = 57568490411.0 + y * (
+        1029532985.0
+        + y * (9494680.718 + y * (59272.64853 + y * (267.8532712 + y * 1.0)))
+    )
     return ans1 / ans2
 
 
@@ -54,11 +63,17 @@ def _bessj0_large(ax):
     z = 8.0 / ax
     y = z * z
     xx = ax - 0.785398164
-    ans1 = 1.0 + y * (-0.1098628627e-2 + y * (0.2734510407e-4 + y * (
-        -0.2073370639e-5 + y * 0.2093887211e-6)))
-    ans2 = -0.1562499995e-1 + y * (0.1430488765e-3 + y * (
-        -0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934945152e-7)))
-    return pt.sqrt(0.636619772 / ax) * (pt.cos(xx) * ans1 - z * pt.sin(xx) * ans2)
+    ans1 = 1.0 + y * (
+        -0.1098628627e-2
+        + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6))
+    )
+    ans2 = -0.1562499995e-1 + y * (
+        0.1430488765e-3
+        + y * (-0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934945152e-7))
+    )
+    return pt.sqrt(0.636619772 / ax) * (
+        pt.cos(xx) * ans1 - z * pt.sin(xx) * ans2
+    )
 
 
 def _bessj0_abs(ax):
@@ -81,7 +96,9 @@ def bessj0(x):
 # ==========================================================================
 def _gl_nodes_weights(n_gl=64):
     nodes, weights = np.polynomial.legendre.leggauss(n_gl)
-    return (0.5 * (nodes + 1.0)).astype("float64"), (0.5 * weights).astype("float64")
+    return (0.5 * (nodes + 1.0)).astype("float64"), (0.5 * weights).astype(
+        "float64"
+    )
 
 
 def _trapz(y, x):
@@ -100,9 +117,12 @@ def _m_kernel(sigma, vsini_kms, u1, u2, zeta_kms, t_gl, w_gl):
     s = sigma[:, None]
     sqrt_1mt2 = pt.sqrt(pt.maximum(0.0, 1.0 - t * t))
     limb = (1.0 - u1 * (1.0 - sqrt_1mt2) - u2 * (1.0 - sqrt_1mt2) ** 2) / (
-        1.0 - u1 / 3.0 - u2 / 6.0)
+        1.0 - u1 / 3.0 - u2 / 6.0
+    )
     pz2 = (np.pi * zeta_kms) ** 2 * s * s
-    exp_macro = pt.exp(-pz2 * (1.0 - t * t)[None, :]) + pt.exp(-pz2 * (t * t)[None, :])
+    exp_macro = pt.exp(-pz2 * (1.0 - t * t)[None, :]) + pt.exp(
+        -pz2 * (t * t)[None, :]
+    )
     # argument is always >= 0 (sigma, vsini, t all >= 0) -> use the abs-free J0
     j0 = _bessj0_abs(2.0 * np.pi * s * vsini_kms * t[None, :])
     integrand = limb[None, :] * exp_macro * j0 * t[None, :]
@@ -112,9 +132,21 @@ def _m_kernel(sigma, vsini_kms, u1, u2, zeta_kms, t_gl, w_gl):
 # ==========================================================================
 # Core RM kernel: takes geometry + flux, returns delta_v [m/s].
 # ==========================================================================
-def rm_delta_v_core(x, y, z, flux, vsini, u1, u2,
-                    vzeta=4000.0, vbeta=4000.0, vgamma=1000.0,
-                    n_sigma=201, n_gl=64, sigma_floor_kms=0.1):
+def rm_delta_v_core(
+    x,
+    y,
+    z,
+    flux,
+    vsini,
+    u1,
+    u2,
+    vzeta=4000.0,
+    vbeta=4000.0,
+    vgamma=1000.0,
+    n_sigma=201,
+    n_gl=64,
+    sigma_floor_kms=0.1,
+):
     """Differentiable Hirano+2011 RM anomaly [m/s].
 
     x, y, z : planet sky position in stellar radii, with projected obliquity
@@ -139,9 +171,9 @@ def rm_delta_v_core(x, y, z, flux, vsini, u1, u2,
     # lengths) while the node COUNT stays static -- so the fixed n_sigma nodes
     # keep the same relative resolution at any vsini (a grid frozen to a constant
     # under-resolves once the sampled vsini exceeds the frozen reference).
-    sigma_max = 5.0 / (vsini_kms + zeta_kms + sigma_floor_kms)     # scalar tensor
+    sigma_max = 5.0 / (vsini_kms + zeta_kms + sigma_floor_kms)  # scalar tensor
     u = np.linspace(1e-8, 1.0, n_sigma).astype("float64")
-    sigma = sigma_max * pt.as_tensor_variable(u)                   # (n_sigma,)
+    sigma = sigma_max * pt.as_tensor_variable(u)  # (n_sigma,)
 
     t_gl, w_gl = _gl_nodes_weights(n_gl)
     m = _m_kernel(sigma, vsini_kms, u1, u2, zeta_kms, t_gl, w_gl)  # (n_sigma,)
@@ -163,11 +195,17 @@ def rm_delta_v_core(x, y, z, flux, vsini, u1, u2,
     s = sigma[None, :]
     s2 = s * s
     mrow = m[None, :]
-    em = pt.exp(-2.0 * np.pi ** 2 * beta_kms ** 2 * s2
-                - 4.0 * np.pi * gamma_kms * s) * mrow
+    em = (
+        pt.exp(
+            -2.0 * np.pi**2 * beta_kms**2 * s2 - 4.0 * np.pi * gamma_kms * s
+        )
+        * mrow
+    )
     pz = (np.pi * zeta_kms) ** 2
-    theta = 0.5 * (pt.exp(-pz * cos_th2[:, None] * s2)
-                   + pt.exp(-pz * sin_th2[:, None] * s2))
+    theta = 0.5 * (
+        pt.exp(-pz * cos_th2[:, None] * s2)
+        + pt.exp(-pz * sin_th2[:, None] * s2)
+    )
     tp_vp_s = 2.0 * np.pi * v_sub[:, None] * s
     numer = em * theta * pt.sin(tp_vp_s) * s
     denom = em * (mrow - f[:, None] * theta * pt.cos(tp_vp_s)) * s2
@@ -175,9 +213,11 @@ def rm_delta_v_core(x, y, z, flux, vsini, u1, u2,
     num_int = _trapz(numer, sigma)
     den_int = _trapz(denom, sigma)
     den_safe = pt.switch(pt.abs(den_int) > 1e-30, den_int, 1e-30)
-    delta_v = f / (2.0 * np.pi) * num_int / den_safe               # km/s; outer f zeroes OOT
-    delta_v = pt.switch(pt.ge(z, 0.0), delta_v, 0.0)               # occultation -> 0
-    return -delta_v * 1e3                                          # m/s (allesfast sign)
+    delta_v = (
+        f / (2.0 * np.pi) * num_int / den_safe
+    )  # km/s; outer f zeroes OOT
+    delta_v = pt.switch(pt.ge(z, 0.0), delta_v, 0.0)  # occultation -> 0
+    return -delta_v * 1e3  # m/s (allesfast sign)
 
 
 def rm_delta_v_hirano2010(x, flux, vsini, vbeta):
@@ -191,13 +231,13 @@ def rm_delta_v_hirano2010(x, flux, vsini, vbeta):
     there -- no explicit z mask needed. vsini, vbeta in m/s; returns m/s."""
     vsini_kms = vsini / 1e3
     beta_kms = vbeta / 1e3
-    sigma_kms = vsini_kms / 1.31                       # Hirano+2010 approximation
-    vp = vsini_kms * x                                 # subplanet velocity [km/s]
-    F = 1.0 - flux                                     # blocked flux fraction
-    den = 2.0 * beta_kms ** 2 + sigma_kms ** 2
-    pref = ((2.0 * beta_kms ** 2 + 2.0 * sigma_kms ** 2) / den) ** 1.5
-    series = 1.0 - pt.sqr(vp) / den + pt.sqr(pt.sqr(vp)) / (2.0 * den ** 2)
-    return -1000.0 * vp * F * pref * series            # m/s (rmfit sign)
+    sigma_kms = vsini_kms / 1.31  # Hirano+2010 approximation
+    vp = vsini_kms * x  # subplanet velocity [km/s]
+    F = 1.0 - flux  # blocked flux fraction
+    den = 2.0 * beta_kms**2 + sigma_kms**2
+    pref = ((2.0 * beta_kms**2 + 2.0 * sigma_kms**2) / den) ** 1.5
+    series = 1.0 - pt.sqr(vp) / den + pt.sqr(pt.sqr(vp)) / (2.0 * den**2)
+    return -1000.0 * vp * F * pref * series  # m/s (rmfit sign)
 
 
 # ==========================================================================
@@ -205,7 +245,7 @@ def rm_delta_v_hirano2010(x, flux, vsini, vbeta):
 # _planet_xy), from the true anomaly.  a_scale = a/Rstar.
 # ==========================================================================
 def rm_planet_xyz(true_anom, ecc, omega, ar, inc, lam):
-    r = ar * (1.0 - ecc ** 2) / (1.0 + ecc * pt.cos(true_anom))
+    r = ar * (1.0 - ecc**2) / (1.0 + ecc * pt.cos(true_anom))
     wf = true_anom + omega
     x_old = -r * pt.cos(wf)
     y_old = -r * pt.sin(wf) * pt.cos(inc)
@@ -214,6 +254,27 @@ def rm_planet_xyz(true_anom, ecc, omega, ar, inc, lam):
     y = x_old * sl + y_old * cl
     z = r * pt.sin(wf) * pt.sin(inc)
     return x, y, z
+
+
+def rm_primary_star_index(orbit, orbit_idx):
+    """Index of the transited star -- the star in this orbit's PRIMARY group.
+
+    Deliberately has no `next(..., 0)` default.  "There is no star in this
+    orbit's primary group" is not "use star 0": star 0's macroturbulence,
+    line dispersion and microturbulence would go into the Hirano broadening
+    kernel and bias exactly the two numbers an RM fit exists to measure,
+    vsini and lambda.  In a single-star system the fallback was harmless,
+    which is why it survived; in a multi-star one it is silent and wrong.
+    """
+    for ctype, idx in orbit.primary_bodies[orbit_idx]:
+        if ctype == "star":
+            return idx
+    raise ValueError(
+        f"[rm] orbit {orbit_idx} has no star in its primary body group, so "
+        f"there is no transited star whose line broadening the "
+        f"Rossiter-McLaughlin model can use.  Put the transited star in the "
+        f"orbit's `primary:` group."
+    )
 
 
 def resolve_rm_indices(system, orbit_name, band_name=None):
@@ -244,8 +305,15 @@ def resolve_rm_indices(system, orbit_name, band_name=None):
     return orbit_idx, planet_idx, band_idx
 
 
-def compute_rm_rv(system, time, orbit_idx, planet_idx, band_idx, n_sigma=201,
-                  model="hirano2011"):
+def compute_rm_rv(
+    system,
+    time,
+    orbit_idx,
+    planet_idx,
+    band_idx,
+    n_sigma=201,
+    model="hirano2011",
+):
     """Assemble the RM RV distortion [m/s] for one orbit at ``time``.
 
     Geometry reuses ``orbit.get_true_anomaly`` (differentiable, exoplanet-core
@@ -260,32 +328,42 @@ def compute_rm_rv(system, time, orbit_idx, planet_idx, band_idx, n_sigma=201,
     rm_delta_v_core) or ``hirano2010`` (the fast closed-form series, uses only
     vsini + vbeta).  Both share the geometry (x, flux) computed here.
     """
-    orbit, star, planet, band = system.orbit, system.star, system.planet, system.band
+    orbit, star, planet, band = (
+        system.orbit,
+        system.star,
+        system.planet,
+        system.band,
+    )
 
     ecc = orbit.ecc.value[orbit_idx]
     omega = orbit.omega.value[orbit_idx]
     inc = orbit.inc.value[orbit_idx]
     lam = orbit.lam.value[orbit_idx]
-    ar = planet.ar.value[planet_idx]          # a / Rstar
-    rprs = planet.p.value[planet_idx]         # Rp / Rstar
+    ar = planet.ar.value[planet_idx]  # a / Rstar
+    rprs = planet.p.value[planet_idx]  # Rp / Rstar
     u1 = band.u1.value[band_idx]
-    u2 = band.u2.value[band_idx]
+    # With ld_law: linear the Band manifest has no u2 at all (same guard
+    # transit.py uses). The quadratic term is then exactly zero, which the
+    # Green's-basis coefficients in quad_limb_darkened_flux handle natively
+    # (c2 = 0, c1 = u1, c0 = 1 - u1), as does the _m_kernel broadening
+    # profile below -- neither needs a separate linear formula.
+    if "u2" in band.manifest:
+        u2 = band.u2.value[band_idx]
+    else:
+        u2 = pt.zeros_like(u1)
 
     f = orbit.get_true_anomaly(time)[:, orbit_idx]
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)
 
-    # limb-darkened blocked flux at the RV times (same LD basis as transit.py)
+    # Limb-darkened blocked flux at the RV times -- the same shared helper
+    # (and therefore the same Green's-basis conversion) transit.py uses.
     rho = pt.sqrt(x * x + y * y)
-    s_vec = ops.quad_solution_vector(rho, rprs + pt.zeros_like(rho))
-    c = pt.stack([1.0 - u1 - u2, u1, u2])
-    s_off = pt.as_tensor_variable(np.array([np.pi, 2.0 * np.pi / 3.0, 0.0]))
-    flux = pt.dot(s_vec, c) / pt.dot(s_off, c)
+    flux = quad_limb_darkened_flux(rho, rprs, u1, u2)
     flux = pt.switch(pt.ge(z, 0.0), flux, 1.0)
 
     # Broadening (vmacro/vbeta/vmicro) belongs to the transited star -- the
     # primary of this orbit -- not necessarily star 0 (multi-star systems).
-    star_idx = next((idx for (ctype, idx) in orbit.primary_bodies[orbit_idx]
-                     if ctype == "star"), 0)
+    star_idx = rm_primary_star_index(orbit, orbit_idx)
     vsini = orbit.vsini.value[orbit_idx]
     vzeta = star.vmacro.value[star_idx]
     vbeta = star.vbeta.value[star_idx]
@@ -293,9 +371,19 @@ def compute_rm_rv(system, time, orbit_idx, planet_idx, band_idx, n_sigma=201,
 
     if model == "hirano2010":
         return rm_delta_v_hirano2010(x, flux, vsini, vbeta)
-    return rm_delta_v_core(x, y, z, flux, vsini, u1, u2,
-                           vzeta=vzeta, vbeta=vbeta, vgamma=vgamma,
-                           n_sigma=n_sigma)
+    return rm_delta_v_core(
+        x,
+        y,
+        z,
+        flux,
+        vsini,
+        u1,
+        u2,
+        vzeta=vzeta,
+        vbeta=vbeta,
+        vgamma=vgamma,
+        n_sigma=n_sigma,
+    )
 
 
 # ==========================================================================

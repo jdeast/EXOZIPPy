@@ -21,6 +21,54 @@ class SymbolicTimeout(Exception):
     pass
 
 
+def parse_unit(unit_str, where):
+    """Parse a unit string strictly, or raise naming the offending string.
+
+    An unparseable ``unit:`` used to be swallowed here (the conversion
+    factor silently fell back to 1.0), which does not mean "no conversion"
+    -- it means the user's number is reinterpreted in whatever the internal
+    unit happens to be.  ``planet.b.mass: {initval: 1.0, unit: earthMasses}``
+    (note the typo) became one SOLAR mass, a factor of 333000, with no
+    message anywhere.  Same policy as ``rvinstrument._parse_rv_unit`` and
+    ``Parameter.__post_init__``: an unrecognized unit is an error.
+    """
+    try:
+        return u.Unit(unit_str)
+    except Exception as exc:
+        raise ValueError(
+            f"[{where}] unit: {unit_str!r} is not a unit astropy can parse "
+            f"(e.g. 'earthMass', 'jupiterMass', 'deg', 'm/s', 'd')."
+        ) from exc
+
+
+def unit_conversion(from_str, to_str, where):
+    """Multiplier converting a value in ``from_str`` to ``to_str``.
+
+    Both strings must parse and must be mutually convertible; either
+    failure raises, naming ``where`` (the parameter path the unit came
+    from).  Log-space units short-circuit to 1.0 exactly as they always
+    have -- ``dex`` conversions are handled by the physics, not here -- but
+    the strings are still validated first.
+    """
+    if from_str == to_str:
+        return 1.0
+
+    from_u = parse_unit(from_str, where)
+    to_u = parse_unit(to_str, where)
+
+    if "dex" in str(from_str) or "dex" in str(to_str):
+        return 1.0
+
+    try:
+        return float(from_u.to(to_u))
+    except Exception as exc:
+        raise ValueError(
+            f"[{where}] cannot convert '{from_str}' to '{to_str}': the two "
+            f"units are not compatible.  Check the unit: key on this "
+            f"parameter."
+        ) from exc
+
+
 import contextlib
 
 # SIGALRM is POSIX-only -- Windows has no such signal, and touching
@@ -126,6 +174,143 @@ def validate_instance_names(system_config):
                 )
 
 
+def _sigma_is_zero(value):
+    """True only if ``value`` is definitively zero (scalar or all-zero list).
+
+    Anything unparseable -- a link expression string, None-free junk -- returns
+    False, i.e. "treat as a real prior width", which is the conservative answer
+    for validate_sigma_has_center.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return False
+        try:
+            return all(float(v) == 0.0 for v in value)
+        except (TypeError, ValueError):
+            return False
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_sigma_has_center(user_params, links=None, source=None):
+    """Fatal-error check: a Gaussian prior must have an explicit center.
+
+    ``sigma > 0`` on a user parameter asks for a Gaussian prior.  When neither
+    ``mu`` nor ``initval`` is given, Parameter.build_pymc centers that prior on
+    whatever start value the system resolved (``prior_mus = np.where(~isnan(mus),
+    mus, inits)``) -- and that start is frequently DERIVED FROM THE DATA: a
+    component's RANK_DERIVED_DATA hint, a relaxation-engine solution, or a
+    start value mkparam seeded from a previous fit's MAP.  A prior centered on
+    the data's own best fit double-counts the data, so there is no
+    configuration in which it is what the user meant.  We refuse to run rather
+    than silently produce it.
+
+    Legitimate, and NOT flagged:
+      - ``sigma: 0`` (any all-zero form) -- a fixed pin, not a prior.  It means
+        "hold this at whatever it resolves to", which double-counts nothing.
+      - a LINK expression in ``mu`` or ``initval`` -- a center is specified, it
+        is just computed from another parameter.
+
+    A ``sigma`` that is itself a link expression still requires a center: its
+    width is dynamic but its center is no less obliged to be independent.
+
+    Parameters
+    ----------
+    user_params : dict
+        Standardized user params.  Entries that are not dicts are skipped.
+    links : dict, optional
+        ``{target_path: {field: ParamLink}}`` from ``extract_links``, which
+        DELETES the link string from the entry -- so a linked mu/sigma is
+        invisible in ``user_params`` and must be read from here instead.
+    source : str, optional
+        File the params came from, quoted in the error message.
+    """
+    links = links or {}
+    offenders = []
+    for key, entry in (user_params or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        entry_links = links.get(key, {})
+        sigma_linked = "sigma" in entry_links
+        sigma_val = entry.get("sigma")
+        if not sigma_linked and ("sigma" not in entry or sigma_val is None):
+            continue  # no sigma at all (an absent or null sigma is not a prior)
+        if not sigma_linked and _sigma_is_zero(sigma_val):
+            continue  # fixed pin, not a Gaussian prior
+        if {"mu", "initval"} & (set(entry) | set(entry_links)):
+            continue  # a center is specified (numerically or via a link)
+        offenders.append(key)
+
+    if offenders:
+        where = f" in {source}" if source else ""
+        raise ValueError(
+            f"Gaussian prior with no center{where}: "
+            f"{', '.join(sorted(offenders))}. "
+            f"A 'sigma' greater than 0 asks for a Gaussian prior, but with "
+            f"neither 'mu' nor 'initval' given the prior is centered on "
+            f"whatever start value the system resolves -- and that start is "
+            f"frequently derived FROM THE DATA (a component's data hint, a "
+            f"relaxation-engine solution, or a start value mkparam seeded "
+            f"from a previous fit's MAP). A prior "
+            f"centered on the data's own best fit double-counts that data, "
+            f"so it can never be justified. "
+            f"Fix: give an explicit 'mu' (the independent prior center you "
+            f"actually mean), or use 'sigma: 0' to hold the parameter fixed "
+            f"at its resolved value (a pin, which applies no prior)."
+        )
+
+
+def canonical_param_key(key, system_config):
+    """Canonical (index-form) spelling of a user-facing parameter key.
+
+    ``star.A.mass`` -> ``star.0.mass`` when the config's ``star`` list has an
+    entry named ``A``.  This is the ONE place the name -> index translation
+    lives: ``standardize_param_names`` uses it to store ``user_params``, and
+    anything looking a key up in ``user_params`` must go through it too --
+    otherwise the lookup silently depends on whether the user named their
+    instances.
+
+    Keys that are not 3-part, that name a flat-dict (non-list) component, or
+    that name an instance the config does not define are returned unchanged,
+    which is exactly how ``standardize_param_names`` stores them.
+    """
+    parts = key.split(".", 2)
+    if len(parts) != 3:
+        return key
+
+    comp_type, comp_name, param_name = parts
+    comp_list = (system_config or {}).get(comp_type)
+    if not isinstance(comp_list, list):
+        return key
+
+    for idx, entry in enumerate(comp_list):
+        if isinstance(entry, dict) and entry.get("name") == comp_name:
+            return f"{comp_type}.{idx}.{param_name}"
+    return key
+
+
+def _declared_instance_names(system_config):
+    """Every ``name:`` declared by any list-instanced component in the config.
+
+    This is the universe of legal instance names in a 3-part parameter key.
+    It is deliberately NOT per component: a component's per-element names are
+    a manifest option that may borrow another component's instance names --
+    the lens's per-source vectors are addressed by the SOURCE STAR's name
+    (``lens.SourceA.t_0``), for instance.  Used by
+    ``standardize_param_names`` to reject typo'd instance names.
+    """
+    names = set()
+    for entries in (system_config or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                names.add(entry["name"])
+    return names
+
+
 # Provenance Ranks
 RANK_USER = 100  # Explicitly in params.yaml
 RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
@@ -211,6 +396,14 @@ class ConfigManager:
         self.custom_solvers = {}
         self.standalone_solvers = set()
 
+        # Path of the params FILE these entries were read from, set by System
+        # only when it actually read one -- it stays None when the caller
+        # passed user_params in memory, even if the config happens to name a
+        # parameter_file it did not use.  Metadata only: error messages that
+        # ask the user to edit an entry quote it so they know which file to
+        # open.
+        self.param_file = None
+
         # User-defined parameter links (expression strings in numeric fields).
         # Populated by extract_links, which also strips the strings from
         # user_params so downstream numeric code never sees them.
@@ -228,6 +421,12 @@ class ConfigManager:
             self.user_params = user_params
             self._strip_user_init_scales()
 
+        # Must run AFTER extract_links: that call deletes the link string from
+        # the entry, so a linked mu/initval is only visible in self.links.  In
+        # the no-system_config branch extract_links never ran and the link
+        # strings are still in the entries, which the same check accepts.
+        validate_sigma_has_center(self.user_params, self.links)
+
         self.system_config = system_config or {}
         self.base_defaults = {}
         self.all_relations = []
@@ -237,18 +436,23 @@ class ConfigManager:
         self.hints = {}
         self.hint_ranks = {}
 
+        # Cross-component parameter overrides (see add_override).  Same
+        # channel as a manifest entry's "overrides" dict -- layered UNDER the
+        # user's params.yaml -- for a component that must constrain a
+        # parameter another component owns.  path -> {field: value}.
+        self.param_overrides = {}
+
         # Multi-seed sampling (P4).  seed_resolved holds K fully-solved start
         # points (list of {internal_path: internal_value} dicts) after
         # finalize_user_params runs the relaxation engine once per seed; it
         # stays None for the ordinary single-start case (K == 1).  seed_hint_sets
         # is a per-seed observable channel that components (e.g. the MMEXOFAST
-        # loader) push into; it feeds the relaxation engine at a rank between
-        # RANK_DERIVED_DATA and RANK_USER so an explicit user initval list wins.
+        # loader) push into; it feeds the relaxation engine at RANK_DERIVED_DATA
+        # -- MMEXOFAST is a (very fancy) derivation FROM THE DATA, not a user
+        # statement, so it sits in the same tier as any other data-driven hint
+        # and every user entry outranks it.
         self.seed_resolved = None
         self.seed_hint_sets = []
-        self.seed_hint_rank = (
-            RANK_DERIVED_USER  # 80: below RANK_USER, above data
-        )
         self.scale_hints = {}  # path -> init_scale in internal units
         self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
         self.dependencies = {}
@@ -272,7 +476,20 @@ class ConfigManager:
 
         components_dir = Path(__file__).parent / "components"
 
-        for py_file in components_dir.rglob("symbolic_physics.py"):
+        # Sorted: rglob yields entries in filesystem directory order, which is
+        # stable on one machine but differs between machines (ext4's hashed
+        # btree vs xfs/NFS), so it survives PYTHONHASHSEED randomization and
+        # looks perfectly reproducible until you compare two boxes.  This order
+        # sets all_relations order, which sets the order the relaxation engine
+        # visits equations, which decides WHICH member of a symmetric pair it
+        # solves for -- e.g. mu_rel_mag**2 = mu_ra_rel**2 + mu_dec_rel**2 and
+        # pi_rel = KAPPA*m*(pi_E_N**2 + pi_E_E**2) are both symmetric under
+        # swapping the pair, so nothing in the equation itself breaks the tie.
+        # Unsorted, an Ubuntu 26.04 box transposed (pm_ra, pm_dec),
+        # (mu_ra_rel, mu_dec_rel) and (pi_E_N, pi_E_E) relative to a RHEL8 box:
+        # t_E came out 11.54 d instead of 18.29 d and DC2018_128's logp at the
+        # pinned GOOD_RAW went -945.57 -> -113614.65.
+        for py_file in sorted(components_dir.rglob("symbolic_physics.py")):
             module_name = (
                 f"exozippy.components.{py_file.parent.name}.symbolic_physics"
             )
@@ -329,8 +546,13 @@ class ConfigManager:
                         for rel in getattr(module, "RELATIONS", []):
                             module_symbols.update(rel.free_symbols)
 
+                        # Sorted: module_symbols is a set, so its walk order
+                        # is PYTHONHASHSEED-dependent, and `subs` below is
+                        # applied as an unordered mapping.  The renaming is
+                        # order-independent today (disjoint symbols), but the
+                        # cost of stating the order is zero.
                         subs = {}
-                        for sym in module_symbols:
+                        for sym in sorted(module_symbols, key=str):
                             if sym.name in instance_map:
                                 subs[sym] = sp.Symbol(instance_map[sym.name])
 
@@ -342,7 +564,12 @@ class ConfigManager:
                             if rel_inst not in self.all_relations:
                                 self.all_relations.append(rel_inst)
 
-        for defaults_file in components_dir.rglob("defaults.yaml"):
+        # Sorted for the same reason as the symbolic_physics walk above.  No
+        # root-level key is currently defined by two components (a test pins
+        # that), so today this is future-proofing rather than a live fix --
+        # _deep_merge is last-writer-wins, so the first such collision would
+        # otherwise resolve by walk order.
+        for defaults_file in sorted(components_dir.rglob("defaults.yaml")):
             with open(defaults_file, "r") as f:
                 comp_defaults = yaml.safe_load(f) or {}
                 self._deep_merge(self.base_defaults, comp_defaults)
@@ -483,16 +710,54 @@ class ConfigManager:
         self.hints[translated_path] = internal_value
         self.hint_ranks[translated_path] = rank
 
-    def add_seed_hints(self, seed_dicts, rank=None):
+    def add_override(self, path, **fields):
+        """Register a component-computed override on a parameter it does NOT own.
+
+        This is the cross-component spelling of a manifest entry's
+        ``"overrides"`` dict, and it behaves identically: the fields are
+        applied inside ``resolve()`` through ``apply_value`` *before* the
+        user's params.yaml, so the user still wins -- with the one deliberate
+        exception ``apply_value`` builds in, that competing bounds combine as
+        ``max(lower)`` / ``min(upper)`` order-independently.  That is what
+        makes this the right channel for a **validity limit** (a range past
+        which the likelihood is NaN or meaningless, e.g. the coverage of an
+        interpolation grid) and the wrong one for a preference: a user bound
+        it clips is applied and logged, not silently dropped.
+
+        It exists because ``add_hint`` cannot express any of this.  A hint is
+        a ranked *start value*: one scalar, feeding ``initval`` only, competing
+        in the relaxation engine's provenance ledger.  A bound or a structural
+        pin is neither a start value nor ranked -- ``lower``/``upper``/``sigma``
+        never enter the ledger at all.
+
+        Writing into ``user_params`` instead (what the SED did until this was
+        added) is what this replaces: those entries are indistinguishable from
+        the user's own, so the ledger, ``export_solution``, ``initval_source``
+        and the GUI all report a value the user never wrote, and
+        ``finalize_user_params`` additionally registers the path as a leaf
+        symbol in the relaxation engine.
+
+        ``path`` may be any of the three spellings ``resolve()`` accepts --
+        ``comp.param`` (broadcast to every element), ``comp.<i>.param`` or
+        ``comp.<name>.param``.  Values are in the parameter's **defaults.yaml
+        unit**, like every other override (a user ``unit:`` rescales them, the
+        same way it rescales the defaults).  Per-element lists are accepted
+        with the same conventions as a manifest override: ``NaN`` means "leave
+        this element alone", ``+/-inf`` is a real bound.
+        """
+        self.param_overrides.setdefault(path, {}).update(fields)
+
+    def add_seed_hints(self, seed_dicts):
         """Register K per-seed observable sets for multi-seed sampling (P4).
 
         `seed_dicts` is a list of length K; each entry maps a parameter path
         (human-readable or index form) to a value in that parameter's user
         unit.  These feed the relaxation engine as one complete start point per
-        seed (see finalize_user_params).  Rank sits between RANK_DERIVED_DATA
-        and RANK_USER by default so an explicit user initval list still wins;
-        the MMEXOFAST loader is the primary caller.  Paths absent from a given
-        seed fall back to the base (defaults/hints/user) solution for that seed.
+        seed (see finalize_user_params), at RANK_DERIVED_DATA -- the same tier
+        as ``add_hint``'s default, because the MMEXOFAST loader (the primary
+        caller) is a derivation from the data, not a user statement.  Every
+        user entry therefore outranks a seed.  Paths absent from a given seed
+        fall back to the base (defaults/hints/user) solution for that seed.
         """
         processed = []
         for d in seed_dicts:
@@ -502,8 +767,29 @@ class ConfigManager:
                 pd[tpath] = ival
             processed.append(pd)
         self.seed_hint_sets = processed
-        if rank is not None:
-            self.seed_hint_rank = rank
+
+    def seed_start_value(self, path, seed=0):
+        """Seed-hint start value for ``path`` in USER units, or None.
+
+        ``add_seed_hints`` stores values in index-form paths and INTERNAL
+        units (via ``_translate_and_scale``).  Stage-1 consumers that read
+        raw ``user_params`` entries -- which are still in user units before
+        ``finalize_user_params`` runs -- use this as the matching-unit
+        fallback (e.g. the mulens flux bootstrap needs alpha in degrees,
+        the MulensModel convention, not the internal radians).
+        """
+        sets = self.seed_hint_sets or []
+        if seed >= len(sets):
+            return None
+        tpath, _ = self._translate_and_scale(path, 0.0)
+        if tpath not in sets[seed]:
+            return None
+        parts = tpath.split(".")
+        factor = self.get_conversion_factor(
+            parts[0], parts[-1], full_path=path
+        )
+        val = float(sets[seed][tpath])
+        return val / factor if factor else val
 
     def add_scale_hint(self, path, scale):
         """
@@ -591,9 +877,17 @@ class ConfigManager:
             return element if (element is not None and n_elements == 1) else i
 
         base_unit_str = base.get("unit", "")
-        new_unit_str = None
 
-        keys_to_check_global = []
+        # The `unit:` override is resolved PER ELEMENT.  It used to be a
+        # single global scan that stopped at the first element carrying one
+        # and applied that element's unit -- and its scaling -- to the whole
+        # vector: `planet.b.mass: {unit: earthMass}` silently relabeled
+        # planet.c as earthMass too, so its defaults.yaml bounds (the actual
+        # uniform prior range) came out 318x too wide and its start value
+        # disagreed with what get_conversion_factor, which IS per element,
+        # told the relaxation engine.
+        elem_units = []
+        elem_scaling = np.ones(n_elements, dtype=float)
         for i in range(n_elements):
             keys = [
                 f"{component_type}.{param_name}",
@@ -601,26 +895,39 @@ class ConfigManager:
             ]
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
-            keys_to_check_global.extend(keys)
 
-        for k in keys_to_check_global:
-            if k in self.user_params and isinstance(self.user_params[k], dict):
-                if "unit" in self.user_params[k]:
-                    new_unit_str = self.user_params[k]["unit"]
+            u_str = None
+            u_src = None
+            for k in keys:
+                entry = self.user_params.get(k)
+                if isinstance(entry, dict) and "unit" in entry:
+                    u_str = entry["unit"]
+                    u_src = k
                     break
 
-        unit_scaling = 1.0
-        if new_unit_str and base_unit_str and new_unit_str != base_unit_str:
-            try:
-                unit_scaling = u.Unit(base_unit_str).to(u.Unit(new_unit_str))
-            except Exception:
-                unit_scaling = 1.0
+            if u_str:
+                # A user `unit:` that astropy cannot parse, or that is not
+                # convertible to the parameter's own unit, RAISES.  Falling
+                # back to 1.0 silently reinterpreted the user's number in
+                # the wrong unit -- see unit_conversion's docstring.  A
+                # dimensionless parameter (base_unit_str == "") is included
+                # deliberately: a unit on it cannot mean anything.
+                elem_scaling[i] = unit_conversion(base_unit_str, u_str, u_src)
+                elem_units.append(u_str)
+            else:
+                elem_units.append(base_unit_str)
+
+        # Keep the scalar spelling when every element agrees, so the common
+        # case is byte-for-byte what it always was; Parameter accepts either.
+        unit_field = (
+            elem_units[0] if len(set(elem_units)) == 1 else list(elem_units)
+        )
 
         resolved = {
             "shape": shape,
             "user_modified": False,
             "user_prior_modified": False,
-            "unit": new_unit_str if new_unit_str else base_unit_str,
+            "unit": unit_field,
             "internal_unit": base.get("internal_unit"),
             "latex": base.get("latex", ""),
             "description": base.get("description", ""),
@@ -639,9 +946,7 @@ class ConfigManager:
         for key in all_numeric:
             val = base.get(key)
             if val is not None:
-                resolved[key] = np.full(
-                    n_elements, float(val) * unit_scaling, dtype=float
-                )
+                resolved[key] = float(val) * elem_scaling
             else:
                 resolved[key] = None
 
@@ -663,29 +968,59 @@ class ConfigManager:
             return current_arr
 
         resolved["auto_estimated"] = False
-        if internal_overrides:
+        # Component-computed bounds that were actually applied, so a user bound
+        # they later clip can be reported instead of silently overridden (the
+        # clip itself is deliberate: these are validity limits, e.g.
+        # Instrument._register_noise's jitter-variance floor).
+        override_bounds = {}
+
+        def apply_overrides(od, indices):
+            """Layer one component override dict onto elements `indices`."""
             for key in all_numeric:
-                if key in internal_overrides:
-                    val = internal_overrides[key]
-                    for i in range(n_elements):
-                        v = (
-                            val[i]
-                            if isinstance(val, (list, np.ndarray))
-                            else val
-                        )
-                        if v is None:
-                            continue
-                        v = float(v)
-                        # NaN means "leave this element alone".  Component-supplied
-                        # overrides are frequently per-element and sparse (e.g.
-                        # Instrument._register_gp pins only the files that did not
-                        # opt into a GP term); NaN lets one array express that
-                        # without inventing a value for the others.  +/-inf is a
-                        # legitimate bound and is NOT skipped.
-                        if np.isnan(v):
-                            continue
-                        resolved["auto_estimated"] = True
-                        apply_value(key, resolved[key], i, v * unit_scaling)
+                if key not in od:
+                    continue
+                val = od[key]
+                for i in indices:
+                    v = val[i] if isinstance(val, (list, np.ndarray)) else val
+                    if v is None:
+                        continue
+                    v = float(v)
+                    # NaN means "leave this element alone".  Component-supplied
+                    # overrides are frequently per-element and sparse (e.g.
+                    # Instrument._register_gp pins only the files that did not
+                    # opt into a GP term); NaN lets one array express that
+                    # without inventing a value for the others.  +/-inf is a
+                    # legitimate bound and is NOT skipped.
+                    if np.isnan(v):
+                        continue
+                    resolved["auto_estimated"] = True
+                    apply_value(key, resolved[key], i, v * elem_scaling[i])
+                    if key in ("lower", "upper"):
+                        override_bounds[(key, i)] = v * elem_scaling[i]
+
+        if internal_overrides:
+            apply_overrides(internal_overrides, range(n_elements))
+
+        # Cross-component overrides (ConfigManager.add_override): the same
+        # channel, for a component constraining a parameter it does not own --
+        # today the SED, whose model grid bounds star.teffsed/feh/av.  Keyed by
+        # path rather than reached through the owner's manifest, and read here
+        # under the same three spellings resolve() accepts everywhere else, so
+        # a broadcast `star.av` covers every element and a per-element
+        # `star.0.av` refines it.  Applied BEFORE the user's params below, so
+        # the user still wins (bounds combine, per apply_value).
+        if self.param_overrides:
+            for i in range(n_elements):
+                keys = [
+                    f"{component_type}.{param_name}",
+                    f"{component_type}.{_eff_idx(i)}.{param_name}",
+                ]
+                if names and i < len(names):
+                    keys.append(f"{component_type}.{names[i]}.{param_name}")
+                for k in keys:
+                    od = self.param_overrides.get(k)
+                    if od:
+                        apply_overrides(od, [i])
 
         # propagated_scales and scale_hints are stored in internal units.
         # Divide by get_conversion_factor (user→internal) to recover user units
@@ -769,6 +1104,22 @@ class ConfigManager:
                             if isinstance(v_ov, (list, tuple)):
                                 v_ov = v_ov[0]
                             apply_value(key, resolved[key], i, v_ov)
+                            # apply_value keeps the TIGHTER of the two bounds.
+                            # When the winner is a component-computed one, say
+                            # so: these are validity limits (the likelihood is
+                            # NaN past them), but the user asked for something
+                            # else and deserves to hear that it did not apply.
+                            if (key, i) in override_bounds and not np.isclose(
+                                resolved[key][i], float(v_ov)
+                            ):
+                                logger.warning(
+                                    f"[{component_type}.{_eff_idx(i)}."
+                                    f"{param_name}] user {key}={float(v_ov):g}"
+                                    f" is outside the component-computed "
+                                    f"validity bound "
+                                    f"{override_bounds[(key, i)]:g}; using "
+                                    f"{resolved[key][i]:g}."
+                                )
 
                     for str_key in ["unit", "latex", "description"]:
                         if str_key in ov:
@@ -811,6 +1162,7 @@ class ConfigManager:
         self, component_type, param_name, full_path=None
     ):
         u_str = None
+        user_supplied = False
         # 1. Check if the user explicitly provided a unit in their config
         if (
             full_path
@@ -818,6 +1170,7 @@ class ConfigManager:
             and isinstance(self.user_params[full_path], dict)
         ):
             u_str = self.user_params[full_path].get("unit")
+            user_supplied = bool(u_str)
 
         # 2. Fallback to defaults
         comp_cfg = self.base_defaults.get(component_type, {})
@@ -828,15 +1181,35 @@ class ConfigManager:
         i_str = param_cfg.get("internal_unit", "")
 
         if not u_str or not i_str:
+            # No declared pair -> genuinely nothing to convert.  But a unit
+            # the USER supplied on a parameter that declares no
+            # internal_unit cannot be honored, and returning 1.0 would read
+            # their number as if it had been written in the default unit.
+            if user_supplied and not i_str:
+                raise ValueError(
+                    f"[{full_path}] unit: {u_str!r} was given, but "
+                    f"{component_type}.{param_name} declares no "
+                    f"internal_unit, so the value cannot be converted.  "
+                    f"Remove the unit: key or give the parameter an "
+                    f"internal_unit in its defaults.yaml."
+                )
             return 1.0
 
-        try:
-            if "dex" in u_str or "dex" in i_str:
-                return 1.0
-            # Returns the multiplier to convert FROM user TO internal
-            return u.Unit(u_str).to(u.Unit(i_str))
-        except Exception:
-            return 1.0
+        # Multiplier to convert FROM user TO internal.  Raises on an
+        # unparseable or incompatible unit rather than silently using 1.0.
+        return unit_conversion(
+            u_str, i_str, full_path or f"{component_type}.{param_name}"
+        )
+
+    def canonical_key(self, key):
+        """Index-form spelling of ``key`` under THIS manager's system config.
+
+        Thin instance wrapper around :func:`canonical_param_key`, for callers
+        that hold a ConfigManager and need to look a user-facing (possibly
+        name-form) path up in ``self.user_params``, which is stored in index
+        form.
+        """
+        return canonical_param_key(key, self.system_config)
 
     @staticmethod
     def standardize_param_names(user_params, config):
@@ -856,6 +1229,17 @@ class ConfigManager:
 
         After this function, self.user_params contains only indexed or flat-dict
         keys internally.  The 2-part form is purely a user convenience.
+
+        EVERY pass deepcopies the entry.  The returned dict must share no object
+        with the caller's, because downstream code writes through these entries
+        in place: extract_links deletes the link-expression fields, and
+        finalize_user_params' inject-back sets initval/derived.  Aliasing them
+        would (a) strip a caller's link strings out of their own dict, so a
+        second ConfigManager built from it sees no links and a hard link
+        silently degrades to a fixed parameter, and (b) feed the previous
+        solve's answer back in as RANK_USER input.  Pass 2 additionally needs
+        the copy per broadcast instance, so the last instance's write does not
+        clobber all the others (e.g. per-source radii solved from rho).
         """
         if not user_params:
             return {}
@@ -880,22 +1264,73 @@ class ConfigManager:
 
             comp_list = config[comp_type]
             if not isinstance(comp_list, list):
-                standardized[key] = (
-                    val  # flat-dict component 3-part key: keep as-is
-                )
+                # flat-dict component 3-part key: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
-            try:
-                idx = next(
-                    i
-                    for i, c in enumerate(comp_list)
-                    if isinstance(c, dict) and c.get("name") == comp_name
+            # An UNKNOWN INSTANCE NAME is as fatal as an unknown component
+            # prefix, and for the same reason.  canonical_param_key returns
+            # such a key unchanged (deliberately -- it is also the lookup
+            # helper behind ConfigManager.canonical_key, which must stay
+            # total), so it used to be stored verbatim, registered as an inert
+            # leaf symbol by finalize_user_params, and never reach any
+            # parameter: `star.Aa.teff` silently dropped the user's value,
+            # bounds, mu and sigma.  A typo'd PRIOR that changes the posterior
+            # without a word is the worst version of this, so refuse to run.
+            #
+            # The accepted name set is every `name:` DECLARED ANYWHERE in the
+            # config, not just this component's own list, and that width is
+            # load-bearing -- a component's per-element names need not be its
+            # config entries' names:
+            #   * `lens.SourceA.t_0` (examples/ob161003) addresses element j
+            #     of the lens's per-source vectors by the SOURCE STAR's name;
+            #     the lens block itself has one entry, named "Lens".  The
+            #     per-parameter `names` list is a manifest option and is not
+            #     known until stage 2, long after this runs.
+            #   * `mann.B.ks_offset` names a mann block that has no `name:`
+            #     yet: this ConfigManager is built BEFORE the component loop
+            #     in System.__init__, and mann/torres derive their name from
+            #     their `star:` key inside their own __init__.
+            # Both are covered because the borrowed name is always some other
+            # component's instance name.  A genuine typo is a string that
+            # appears nowhere, which is what we reject.  Numeric index forms
+            # (`star.0.teff`) are pass-through by design.
+            if (
+                not comp_name.isdigit()
+                and canonical_param_key(key, config) == key
+                and comp_name not in _declared_instance_names(config)
+            ):
+                own = [
+                    e["name"]
+                    for e in comp_list
+                    if isinstance(e, dict) and e.get("name") is not None
+                ]
+                own_msg = (
+                    f"'{comp_type}' instances are: "
+                    f"{', '.join(repr(n) for n in own)}."
+                    if own
+                    else f"No '{comp_type}' entry declares a 'name:', so its "
+                    f"instances are addressable by index only."
                 )
-                standardized[f"{comp_type}.{idx}.{param_name}"] = val
-            except StopIteration:
-                standardized[key] = (
-                    val  # numeric index or unknown name: keep as-is
+                raise ValueError(
+                    f"\n!!! STRICT NAMING ERROR !!!\n"
+                    f"Parameter '{key}' names the instance '{comp_name}', "
+                    f"which is not declared by any component in your system "
+                    f"configuration.\n"
+                    f"{own_msg} "
+                    f"Indices 0-{len(comp_list) - 1} also work "
+                    f"(e.g. '{comp_type}.0.{param_name}'), as does the "
+                    f"instance-less broadcast form "
+                    f"'{comp_type}.{param_name}'.\n"
+                    f"Fix the spelling, or delete the entry: it is otherwise "
+                    f"ignored outright, silently discarding its value, bounds "
+                    f"and prior."
                 )
+
+            # Numeric index or resolved name: canonical_param_key returns the
+            # index form.  deepcopy so broadcast instances never share one
+            # dict (see the aliasing fix in #76).
+            standardized[canonical_param_key(key, config)] = copy.deepcopy(val)
 
         # Pass 2: expand 2-part keys for list components.
         # Indexed entries written by Pass 1 are never overwritten (explicit beats broadcast).
@@ -908,25 +1343,19 @@ class ConfigManager:
             comp_list = config.get(comp_type)
 
             if not isinstance(comp_list, list):
-                standardized[key] = (
-                    val  # flat-dict or unknown component: keep as-is
-                )
+                # flat-dict or unknown component: keep the key as-is
+                standardized[key] = copy.deepcopy(val)
                 continue
 
             for i in range(len(comp_list)):
                 indexed_key = f"{comp_type}.{i}.{param_name}"
                 if indexed_key not in standardized:
-                    # Each instance must get its OWN dict: downstream code
-                    # (finalize_user_params inject-back, init_scale sync)
-                    # mutates these entries per-instance, and a shared object
-                    # would let the last instance's write clobber all others
-                    # (e.g. per-source radii solved from rho).
                     standardized[indexed_key] = copy.deepcopy(val)
 
         # Pass 3: 1-part and other unhandled keys (e.g. 'run').
         for key, val in user_params.items():
             if "." not in key and key not in standardized:
-                standardized[key] = val
+                standardized[key] = copy.deepcopy(val)
 
         return standardized
 
@@ -1025,15 +1454,18 @@ class ConfigManager:
         base_flat = {str(k): v for k, v in flat_params.items()}
 
         # --- MULTI-SEED SOLVE (P4) ---
-        # Build K per-seed RANK_USER override sets (user initval lists win over
-        # MMEXOFAST-style seed hints; both fall back to the shared base_flat for
-        # any path they do not touch), then run the relaxation engine once per
+        # Build the K per-seed override sets in their two provenance channels
+        # (user initval lists at RANK_USER, component/MMEXOFAST seed hints at
+        # RANK_DERIVED_DATA; both fall back to the shared base_flat for any
+        # path they do not touch), then run the relaxation engine once per
         # seed inside this single prepare() call so every seed shares one symbol
         # environment (guards against the known cross-build nondeterminism).
         # Bounds/scales are taken from seed 0 only -- seeds move the START, never
         # the bounds -- so self.propagated_scales is restored to seed 0's after
         # the loop.
-        K, seed_overrides = self._build_seed_overrides(name_to_index)
+        K, user_overrides, seed_hint_overrides = self._build_seed_overrides(
+            name_to_index
+        )
 
         # Solve seed 0 LAST so the final self.propagated_scales and any
         # init_scale synced back into self.user_params by _execute_solve both
@@ -1042,8 +1474,10 @@ class ConfigManager:
         seed_resolved = [None] * K
         for k in list(range(1, K)) + [0]:
             flat_k = dict(base_flat)
-            flat_k.update(seed_overrides[k])
-            seed_resolved[k] = self.resolve_and_validate_parameters(flat_k)
+            flat_k.update(user_overrides[k])
+            seed_resolved[k] = self.resolve_and_validate_parameters(
+                flat_k, seed_hints=seed_hint_overrides[k]
+            )
 
         # seed 0 remains the canonical single start injected back into
         # user_params below; the full K-set is stored for get_raw_starts.
@@ -1066,8 +1500,12 @@ class ConfigManager:
                     if c_type == comp_type and str(i) == str(idx):
                         final_path = f"{comp_type}.{c_name}.{param}"
                         break
+                # `path` (index form), not `final_path` (name form): a user
+                # `unit:` override lives under the standardized index key, so
+                # looking it up by name silently falls back to the default
+                # unit and the injected start is off by that factor.
                 factor = self.get_conversion_factor(
-                    comp_type, param, full_path=final_path
+                    comp_type, param, full_path=path
                 )
                 user_val = val / factor
             else:
@@ -1085,7 +1523,33 @@ class ConfigManager:
                     break
 
             if existing_key is None:
-                self.user_params[final_path] = {
+                # A NEW entry is written in the INDEX form (`path`), never the
+                # config-instance-name form (`final_path`).  resolve() looks a
+                # per-element entry up under three keys -- `comp.param`,
+                # `comp.<i>.param` and `comp.<names[i]>.param` -- and only the
+                # index one is guaranteed to address element i: `names` is a
+                # manifest option, so a component may label its elements with
+                # something other than its own config instances' names.
+                #
+                # `lens` does exactly that (examples/ob161003): its per-source
+                # vectors are named for the SOURCE STARS ("SourceA",
+                # "SourceB"), while the lens block has a single entry named
+                # "Lens" at index 0.  So the engine's answer for source slot 0
+                # -- `lens.0.theta_E` -- used to be filed as
+                # `lens.Lens.theta_E`, which matches none of element 0's three
+                # keys, and the solved value was silently dropped.  With no
+                # `initval` in mulensing/defaults.yaml (theta_E is derived) and
+                # element 1 filed readably as `lens.1.theta_E`, apply_value
+                # allocated a NaN-filled vector and wrote only element 1:
+                # `lens.theta_E.initval == [nan, 0.839]`.  Element 0 was the
+                # only one affected because index 0 is the only index a lens
+                # instance name collides with.
+                #
+                # The index form is also the documented internal spelling (see
+                # standardize_param_names) and is what get_conversion_factor,
+                # propagated_scales, scale_hints and the engine's own symbol
+                # paths already use.
+                self.user_params[path] = {
                     "initval": user_val,
                     "derived": True,
                 }
@@ -1141,19 +1605,29 @@ class ConfigManager:
                 )
 
     def _build_seed_overrides(self, name_to_index):
-        """Assemble the per-seed RANK_USER override sets for multi-seed sampling.
+        """Assemble the per-seed override sets for multi-seed sampling.
 
-        Two sources feed the seeds, in priority order:
+        Two sources feed the seeds, and they are kept in SEPARATE channels
+        because they carry different provenance:
           1. User initval lists in params.yaml (`initval: [v0, v1, ...]`) --
-             highest priority (an explicit user list always wins).
+             RANK_USER, merged into the engine's user_provided_params.
           2. Component seed hints (config_manager.seed_hint_sets), e.g. the
-             MMEXOFAST loader -- lower priority.
+             MMEXOFAST loader -- RANK_DERIVED_DATA, passed to the engine as
+             `seed_hints` and layered in with the other data-driven hints.
 
-        Returns (K, overrides) where K is the seed count and overrides is a
-        length-K list of {internal_path_str: internal_value} dicts.  Every list
-        must have length K or 1 (length-1 broadcasts to all seeds).  When no
-        list initvals and no seed hints exist, K == 1 and overrides == [{}],
-        exactly reproducing the legacy single-solve behavior.
+        Merging them into one RANK_USER dict (as this did until the 2.1.2
+        review fix) had two consequences: a seed silently clobbered a user's
+        *scalar* initval for the same path -- the scalar lives in base_flat,
+        which the merged override dict overwrote -- and a seed that disagreed
+        with a genuine user entry made every symbol of the connecting relation
+        RANK_USER, tripping the "over-constrained" contradiction clause.
+
+        Returns (K, user_overrides, seed_hint_overrides) where K is the seed
+        count and each override list has length K of {internal_path_str:
+        internal_value} dicts.  Every initval list must have length K or 1
+        (length-1 broadcasts to all seeds).  When no list initvals and no seed
+        hints exist, K == 1 and both lists are [{}], exactly reproducing the
+        legacy single-solve behavior.
         """
         # 1. User initval lists -> {sym_path: [internal values]}
         user_lists = {}
@@ -1194,18 +1668,25 @@ class ConfigManager:
                 f"component seed hints. Provide matching counts (or length 1)."
             )
 
-        # 3. Merge per seed (mm first, user lists override).
-        overrides = []
+        # 3. Split per seed.  No merge: the two channels enter the engine at
+        #    different ranks, and a path in both is resolved by rank, not by
+        #    dict order (a user list is RANK_USER and wins).
+        user_overrides = []
+        seed_hint_overrides = []
         for k in range(K):
-            d = {}
             if mm_sets:
                 src = mm_sets[k] if len(mm_sets) > 1 else mm_sets[0]
-                d.update(src)
-            for p, vals in user_lists.items():
-                d[p] = vals[k] if len(vals) > 1 else vals[0]
-            overrides.append(d)
+                seed_hint_overrides.append(dict(src))
+            else:
+                seed_hint_overrides.append({})
+            user_overrides.append(
+                {
+                    p: (vals[k] if len(vals) > 1 else vals[0])
+                    for p, vals in user_lists.items()
+                }
+            )
 
-        return K, overrides
+        return K, user_overrides, seed_hint_overrides
 
     def _to_symbol_path(self, path, name_to_index):
         """Translate a user_params key to the internal-index path string used by
@@ -1244,8 +1725,10 @@ class ConfigManager:
         measured directly from the data at startup (see exozippy/whitening.py)
         and any user value would be overwritten anyway.  Old params files keep
         working -- the key is simply ignored with a warning.  Entries are
-        removed via a rebuilt per-parameter dict so a caller's original dict
-        (raw_user_params) is never mutated.
+        removed via a rebuilt per-parameter dict; the caller's original dict
+        (raw_user_params) is already insulated by standardize_param_names,
+        which deepcopies every entry, so this is belt and braces for the
+        no-config path that skips standardization.
         """
         stripped = []
         for k, v in list(self.user_params.items()):
@@ -1291,8 +1774,66 @@ class ConfigManager:
             return "solved"
         return "default"
 
-    def export_solution(self):
+    def initval_source(self, component, param, element=None, name=None):
+        """Where did this element's START VALUE come from?
+
+        Returns one of the ``_provenance_label`` strings -- "user" (written in
+        the params file), "data" (a component's data-derived hint), "solved"
+        (the relaxation engine derived it from other inputs) or "default"
+        (defaults.yaml) -- for the parameter ``component.param`` at element
+        index ``element``.
+
+        This exists so an error about a start value can say WHOSE start value
+        it is: blaming a user's params file for a number the engine derived is
+        worse than saying nothing.  Parameter.build_pymc is the only caller
+        (Component.add_parameter hands it this bound method).
+
+        Two known limits, both of which only soften the wording of a message
+        and never change a decision:
+          - it reports the provenance of the engine's LAST solve, so a
+            parameter the engine rewrote after reading a user value reports
+            the rewrite ("solved"), not "user";
+          - a parameter with no symbol in the master symbol map has no rank at
+            all, so it falls back to looking for the user's own numeric
+            ``initval`` in the params file (safe there: the inject-back only
+            writes into mapped paths).
+        """
+        # Index form first (what _last_provenance and a standardized
+        # user_params are keyed on), then the instance-name form (which
+        # survives when no system_config was attached, e.g. a unit test or a
+        # component driven directly), then the 2-part broadcast form.
+        paths = []
+        if element is not None:
+            paths.append(f"{component}.{element}.{param}")
+        if name is not None:
+            paths.append(f"{component}.{name}.{param}")
+        paths.append(f"{component}.{param}")
+
+        for path in paths:
+            rank = (self._last_provenance or {}).get(path)
+            if rank is not None:
+                return self._provenance_label(rank)
+
+        for path in paths:
+            entry = (self.user_params or {}).get(path)
+            if isinstance(entry, dict) and entry.get("initval") is not None:
+                return "user"
+            if path in (self.links or {}) and (
+                "initval" in self.links[path] or "mu" in self.links[path]
+            ):
+                return "user"
+        return "default"
+
+    def export_solution(self, derived_params=None):
         """Export the resolved parameter solution as JSON-friendly dicts.
+
+        `derived_params`, when given, is the set of `(component_prefix,
+        param_name)` pairs the built manifests actually derive
+        (`System.derived_params()`).  Pass it whenever a System is in scope:
+        the fallback -- "this parameter has an expressions: block in its
+        defaults.yaml" -- is only an approximation, since a component may
+        declare the same parameter free in one topology and derived in
+        another (see planet.mass's linear vs log_q coordinate).
 
         Returns a dict with:
           - "parameters": {user_path: {value, unit, internal_unit, lower,
@@ -1382,7 +1923,10 @@ class ConfigManager:
                 value = _clean(self._last_resolved[internal_path] / factor)
             else:
                 value = _first("initval")
-            derived = bool(cfg.get("expressions"))
+            if derived_params is None:
+                derived = bool(cfg.get("expressions"))
+            else:
+                derived = (c_type, p_name) in derived_params
             # A parameter is fixed when it has a hardcoded value or sigma == 0.
             fixed = (cfg.get("value") is not None) or (
                 sigma is not None and sigma == 0
@@ -1435,9 +1979,99 @@ class ConfigManager:
 
         return result
 
+    # Every mutable ConfigManager attribute the relaxation engine writes to.
+    # probe_derivable deep-copies each one before running the engine and puts
+    # the copy back in a finally block, which is what makes a probe genuinely
+    # read-only.  If the engine ever starts writing somewhere new, it belongs
+    # in this tuple -- a mutation missing from it silently survives the probe.
+    _PROBE_SNAPSHOT_ATTRS = (
+        "user_params",  # _execute_solve syncs solved init_scale back
+        "diagnostics",  # _record_diagnostic appends contradictions
+        "propagated_scales",  # refreshed at the end of every solve
+        "symbolic_blacklist",  # a 2 s sp.solve timeout adds the target
+        "_last_provenance",
+        "_last_scale_provenance",
+        "_last_resolved",
+        "_last_solved_by",
+    )
+
+    def probe_derivable(self, paths, tolerance=1e-3):
+        """Which of `paths` the relaxation engine can pin down from what is
+        known now, as opposed to falling back on a bare defaults.yaml value.
+
+        Runs the engine on a snapshot and rolls every mutation back, so this
+        is a read-only question: `finalize_user_params` still does the real
+        solve later, from the same inputs plus whatever stages 1-2 add.
+
+        The test is on **provenance**, not on presence: the engine's "default
+        armor" step seeds every mapped path from defaults.yaml, so almost
+        everything comes back resolved.  A rank above RANK_DEFAULT means the
+        value traces back to a user entry or a component hint rather than to
+        a default -- i.e. someone actually told us, directly or through a
+        relation.
+
+        Called at stage 1a (before most hints exist), so a False here means
+        "not derivable *yet*"; callers that must decide early -- notably the
+        MMEXOFAST trigger -- get the conservative answer.
+        """
+        flat = {}
+        for upath, data in self.user_params.items():
+            sym = self.master_symbol_map.get(upath)
+            if sym is None:
+                continue
+            val = data.get("initval") if isinstance(data, dict) else data
+            if val is None and isinstance(data, dict):
+                val = data.get("mu")
+            if isinstance(val, (list, tuple)):
+                val = val[0] if len(val) else None
+            if val is None:
+                continue
+            c_type, p_name = upath.split(".")[0], upath.split(".")[-1]
+            factor = (
+                self.get_conversion_factor(c_type, p_name, full_path=upath)
+                or 1.0
+            )
+            flat[str(sym)] = float(val) * factor
+
+        # The engine writes back init_scale into user_params, appends
+        # diagnostics, blacklists any inversion whose sp.solve hits the 2 s
+        # alarm, and refreshes the export snapshots.  None of that may leak
+        # out of a probe -- least of all the blacklist, which is consulted
+        # for the rest of the process: one slow inversion during this
+        # throwaway stage-1a probe would otherwise disable that relation for
+        # the real stage-3 solve, which has different inputs and might well
+        # have solved it in time.
+        saved = {
+            attr: copy.deepcopy(getattr(self, attr))
+            for attr in self._PROBE_SNAPSHOT_ATTRS
+        }
+        prev_level = logger.level
+        try:
+            logger.setLevel(logging.WARNING)
+            self.resolve_and_validate_parameters(flat, tolerance)
+            ranks = dict(self._last_provenance)
+        except Exception as e:
+            # A probe must never break a run that would otherwise work; the
+            # caller's fallback is simply "not derivable".
+            logger.debug(f"Derivability probe failed ({e}); assuming unknown.")
+            ranks = {}
+        finally:
+            logger.setLevel(prev_level)
+            for attr, value in saved.items():
+                setattr(self, attr, value)
+
+        return {p for p in paths if ranks.get(p, 0) > RANK_DEFAULT}
+
     def resolve_and_validate_parameters(
-        self, user_provided_params, tolerance=1e-3
+        self, user_provided_params, tolerance=1e-3, seed_hints=None
     ):
+        """Run the relaxation engine.
+
+        ``user_provided_params`` is {internal_path: internal_value} at
+        RANK_USER.  ``seed_hints`` is the optional per-seed hint set for this
+        seed (see ``_build_seed_overrides``), layered in at RANK_DERIVED_DATA
+        alongside ``self.hints``.
+        """
         resolved = {str(k): float(v) for k, v in user_provided_params.items()}
         provenance = {str(k): RANK_USER for k in user_provided_params.keys()}
         resolved_scales = {}
@@ -1468,7 +2102,12 @@ class ConfigManager:
             )
 
             if path_str not in resolved and cfg.get("initval") is not None:
-                factor = self.get_conversion_factor(c_type, p_name)
+                # resolve() returns the initval in USER units, so the factor
+                # must honor a user `unit:` override -- pass full_path, the
+                # same way the init_scale conversion below does.
+                factor = self.get_conversion_factor(
+                    c_type, p_name, full_path=path_str
+                )
                 resolved[path_str] = to_scalar(cfg["initval"]) * factor
                 provenance[path_str] = param_rank
 
@@ -1488,6 +2127,23 @@ class ConfigManager:
                 provenance[path_str] = self.hint_ranks.get(
                     path_str, RANK_DERIVED_DATA
                 )
+
+        # 1.5b LAYER IN THIS SEED'S HINT SET (RANK_DERIVED_DATA)
+        # Same tier as the component hints above: an MMEXOFAST solution is a
+        # derivation from the data, not a user statement.  The guard is `<=`
+        # rather than `<` so a seed WINS a tie with an ordinary component
+        # hint -- a per-seed fit of the actual light curve is strictly more
+        # informative than the generic guess a component pushes for every
+        # seed alike.  (Today no real path is in both channels: the seeds
+        # carry lens.0.{t_0,u_0,t_E,rho,log_s,alpha,q}, and the only
+        # component hint that touches one of those, lens.0.alpha, is rank
+        # 20.  The rule is stated so a future overlap has a defined answer.)
+        # Anything above RANK_DERIVED_DATA -- every user entry, in particular
+        # a scalar initval, which lives in user_provided_params -- wins.
+        for path_str, val in (seed_hints or {}).items():
+            if provenance.get(path_str, 0) <= RANK_DERIVED_DATA:
+                resolved[path_str] = val
+                provenance[path_str] = RANK_DERIVED_DATA
 
         # 1.6 LAYER IN SCALE HINTS (correct indexed paths)
         # The initialization loop above calls resolve() without an index, so a hint
@@ -1666,8 +2322,25 @@ class ConfigManager:
         map.  A solver that raises (missing dependencies) is retried next
         iteration; results carry RANK_DERIVED_MIXED so user values and
         data-derived hints always win, and re-fire as inputs refine.
+
+        "Always win" has to be enforced here, not just asserted: unlike the
+        equation path (``_attempt_solve``), which picks the LOWEST-ranked
+        symbol of a violated relation, a standalone solver writes its target
+        unconditionally.  ``_meaningful_change`` compares values, not ranks,
+        so before the guard below an explicit ``orbit.b.m_total`` in
+        params.yaml (RANK_USER) was overwritten every iteration by the body
+        mass sum and its provenance DOWNGRADED to RANK_DERIVED_MIXED --
+        exactly the inversion the ranking system exists to prevent.  A path
+        already held at a rank the solver cannot beat is therefore skipped;
+        one held at RANK_DERIVED_MIXED or below (including the solver's own
+        previous answer) still re-fires as its inputs refine.
         """
-        for lookup_key in self.standalone_solvers:
+        # Sorted: standalone_solvers is a set, and each solver both reads and
+        # writes `resolved`, so with two of them registered the walk order
+        # decides whether one sees the other's answer from this iteration or
+        # the last -- feeding _meaningful_change, the provenance ranks and
+        # the cycle history.  Only orbit.m_total is registered today.
+        for lookup_key in sorted(self.standalone_solvers):
             solver_func = self.custom_solvers[lookup_key]
             comp, param = lookup_key.split(".")[0], lookup_key.split(".")[-1]
             for path in list(self.master_symbol_map):
@@ -1680,6 +2353,13 @@ class ConfigManager:
                 ):
                     continue
                 if pinned_vars and path in pinned_vars:
+                    continue
+                if provenance.get(path, 0) > RANK_DERIVED_MIXED:
+                    logger.debug(
+                        f"Standalone solver for {path} skipped: already held "
+                        f"at rank {provenance.get(path)} > "
+                        f"{RANK_DERIVED_MIXED}."
+                    )
                     continue
                 try:
                     val = float(
@@ -1797,7 +2477,11 @@ class ConfigManager:
         if not isinstance(eq, sp.Eq):
             return False
 
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+        # Sorted: free_symbols is a set of Symbols whose hashes include the
+        # PYTHONHASHSEED-randomized name string, so bare iteration order
+        # varies per process.  The July-2026 init_scale flakiness came from
+        # exactly this in the (since-deleted) scale passes.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         # 1. Gatekeeper: Skip if equation contains undefined variables
         if not all(s in self.master_symbol_map for s in symbols_in_eq):
@@ -1964,8 +2648,15 @@ class ConfigManager:
             # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
             eq_str = f"{eq.lhs} = {eq.rhs}"
 
-            # Replace only the known symbols so the math structure is preserved
-            for s in eq.free_symbols:
+            # Replace only the known symbols so the math structure is
+            # preserved.  Sorted for the same reason as _execute_solve's walk
+            # (free_symbols is a set of Symbols whose hashes include the
+            # string hash): successive re.sub calls are not commutative when
+            # one symbol's name is a substring of another's, so an unsorted
+            # walk could render this line differently in two processes.  It
+            # is only a debug string today -- but a diagnostic that varies
+            # run to run is the one thing a diagnostic must not do.
+            for s in sorted(eq.free_symbols, key=str):
                 s_str = str(s)
                 if s_str in resolved:
                     # Format to 5 sig figs (handles scientific notation automatically)
@@ -2062,8 +2753,11 @@ class ConfigManager:
         if len(valid_solutions) == 1:
             valid_val, valid_sol = valid_solutions[0]
         else:
+            # Sorted by value: sp.solve's root order is not contractual, and
+            # the strict < below means equal-score roots go to whichever came
+            # first -- break that tie by value, not arrival order.
             best_val, best_sol, best_score = None, None, float("inf")
-            for val, sol in valid_solutions:
+            for val, sol in sorted(valid_solutions, key=lambda vs: vs[0]):
                 temp = {**resolved, target_str: val}
                 score = 0.0
                 for other_eq in self.all_relations:
@@ -2183,8 +2877,23 @@ class ConfigManager:
                         resolved_scales[target_str] = new_scale
                         scale_provenance[target_str] = new_scale_rank
 
-                    if target_str in self.user_params and isinstance(
-                        self.user_params[target_str], dict
+                    # Sync the solved scale back into user_params -- but only
+                    # when there IS one.  init_scale is optional at every
+                    # source (defaults.yaml, component hints, user sigmas), so
+                    # a target whose parents are ALL scale-less scores
+                    # new_scale_rank == 0, fails the guard above, and has no
+                    # entry from the default-armor pass either: reading
+                    # resolved_scales[target_str] here used to raise KeyError
+                    # straight out of prepare().  (Reproduced by naming
+                    # `orbit.<name>.arsun` in a params file -- it is solved
+                    # from m_total and period, and none of the three carries
+                    # an init_scale default.)  Skipping leaves the parameter
+                    # with no preliminary scale, which is the documented and
+                    # handled state: build_pymc falls back to a fraction of
+                    # the bound span, and the startup whitening probe measures
+                    # the real scale from the data regardless.
+                    if target_str in resolved_scales and isinstance(
+                        self.user_params.get(target_str), dict
                     ):
                         factor = self.get_conversion_factor(
                             parts[0], parts[-1], full_path=target_str
@@ -2200,7 +2909,10 @@ class ConfigManager:
     def _attempt_rank_upgrade(
         self, eq, resolved, provenance, resolved_scales, scale_provenance
     ):
-        symbols_in_eq = [str(s) for s in eq.free_symbols]
+        # Sorted for the same reason as _execute_solve's walk: free_symbols is a
+        # set of Symbols whose hashes include the PYTHONHASHSEED-randomized name
+        # string, so bare iteration order varies per process.
+        symbols_in_eq = sorted(str(s) for s in eq.free_symbols)
 
         def get_rank(s):
             return provenance.get(s, RANK_DEFAULT)
@@ -2211,8 +2923,10 @@ class ConfigManager:
             return False
 
         # 2. Identify the target:
-        # Pick the symbol with the lowest provenance.
-        target = min(symbols_in_eq, key=get_rank)
+        # Pick the symbol with the lowest provenance, breaking rank ties
+        # alphabetically -- a bare min() returns the first minimum it meets, so
+        # on tied ranks the winner would follow iteration order.
+        target = min(symbols_in_eq, key=lambda s: (get_rank(s), s))
 
         # 3. Check dependencies: Are all inputs known?
         inputs = [s for s in symbols_in_eq if s != target]
@@ -2279,9 +2993,13 @@ class ConfigManager:
         if not solutions:
             try:
                 guess = float(resolved.get(target_str, 1.0))
+                # Sorted: sympy applies an unordered subs mapping in its own
+                # canonical order, but the dict's own insertion order comes
+                # straight off a hash-randomized set -- do not rely on a
+                # third party to launder that for us.
                 sub_dict = {
                     s: resolved[str(s)]
-                    for s in eq.free_symbols
+                    for s in sorted(eq.free_symbols, key=str)
                     if str(s) != target_str
                 }
                 expr = (eq.lhs - eq.rhs).subs(sub_dict).evalf()
@@ -2309,7 +3027,15 @@ class ConfigManager:
             # Propagate Scale (Calculus-based)
             if hasattr(valid_sol, "free_symbols"):
                 scale_variance = 0.0
-                for parent_sym in valid_sol.free_symbols:
+                # Sorted for the same reason as _execute_solve's walk (whose
+                # `inputs` list is already derived from a sorted
+                # symbols_in_eq): free_symbols is a set of Symbols whose
+                # hashes include the PYTHONHASHSEED-randomized name string.
+                # Here the order is doubly load-bearing -- it is the
+                # SUMMATION order of the float accumulation below, so an
+                # unsorted walk makes init_scale differ in its last bits
+                # between two processes running identical code.
+                for parent_sym in sorted(valid_sol.free_symbols, key=str):
                     parent_str = str(parent_sym)
                     # Fallback to a small epsilon if parent scale is missing
                     parent_scale = resolved_scales.get(parent_str, 1e-9)

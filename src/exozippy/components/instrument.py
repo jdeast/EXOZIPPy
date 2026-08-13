@@ -10,6 +10,15 @@ common machinery so it is written and tested once; the physics (RV curve vs
 transit light curve vs magnification vs astrometric position) stays in each
 child.
 
+Reading a file is ``_read_data``; turning the per-file blocks into this
+component's concatenated arrays is ``ConcatenatedData`` (below), the shared
+template the three single-observable children drive from their own
+``load_data``.  ``astrometryinstrument`` is deliberately not one of them: it
+models TWO observables per epoch (dE/dN or sep/PA) in different units, so it
+keeps one dict per file rather than concatenating -- the same asymmetry that
+makes it set ``supports_gp = False`` and ``supports_robust_likelihood =
+False``.
+
 This class is deliberately NOT a discoverable component: it declares none of
 ``Component``'s abstract methods (``prefix``, ``register_parameters``,
 ``build_likelihood``), so it stays abstract and ``factory.discover_components``
@@ -56,7 +65,9 @@ import numpy as np
 import pandas as pd
 import pymc as pm
 import pytensor.tensor as pt
+import sympy as sp
 
+from ..physics_registry import register_physics
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
@@ -76,6 +87,299 @@ _TIME_FRAMES = {"jd": None, "hjd": "heliocentric", "bjd": "barycentric"}
 # anything below this is a truncated time (BJD-2450000, MJD, ...) that
 # needs time_offset first.
 _MIN_ABS_JD = 2_000_000.0
+
+# Radicand floor for the reported jitter's square root, in the parameter's
+# INTERNAL units.  Two knobs in one number: the reported jitter is quantized
+# to sqrt(eps) = 1e-15 near zero (8e-12 m/s for rv, 1e-15 in relative flux for
+# transit, 1e-15 mas for astrometry -- all far below any real error bar), and
+# the slope is capped at 0.5/sqrt(eps).  Only |jitter_variance| < 1e-30 sees
+# either, and at exactly zero the sign factor makes both the value and the
+# gradient exactly zero.
+_JITTER_EPS = 1e-30
+
+
+@register_physics
+def calc_jitter(jitter_variance):
+    """Reported jitter: the SIGNED square root of ``jitter_variance``.
+
+    ``sign(v) * sqrt(|v|)``, so the reported jitter stays in the data's own
+    units, is monotonic in the sampled ``jitter_variance``, and has a finite
+    gradient everywhere.
+
+    ``jitter_variance`` is deliberately allowed to go negative -- down to
+    ``Instrument._jitter_floor``'s validity limit, ``-0.95 * min(err)**2``,
+    which is what keeps ``total_sigma``'s own ``sqrt`` real.  A negative
+    jitter variance is a *result*, not a pathology: it says the quoted error
+    bars are too large.  Clamping the report to zero there (what this did
+    until 2026-08) cost two things: a Lucy-Sweeney-style upward bias on a
+    marginally detected jitter, exactly as forcing e >= 0 biases
+    eccentricity; and a zero-gradient plateau over the whole negative
+    half-axis, so a user prior or link on ``jitter`` had nothing to push
+    against over half of the parameter's legal range.
+
+    The floor goes on the RADICAND, following ``calc_theta_E``: ``sqrt'(0)``
+    is infinite, and clamping the result afterwards multiplies that infinity
+    by ``pt.maximum``'s zero gradient to give NaN.  Flooring the argument
+    instead keeps the derivative finite.  It has to be floored at all because
+    ``jitter_variance``'s defaults.yaml initval is exactly 0.0, i.e. every
+    fit starts on the cusp: the pre-fix ``pt.switch`` reported
+    ``d jitter / d jitter_variance = inf`` there.
+
+    DELIBERATE DEPARTURE FROM EXOFASTv2, which floors the jitter at zero.
+    This is an upgrade, not a port bug -- do not "restore" the floor.  The
+    argument is the one ``planet.mass`` in ``linear`` mode already makes (see
+    the mass-parametrization section of CLAUDE.md): a positive-definite
+    coordinate biases a marginal detection upward, because the half of the
+    posterior that would have balanced it is folded onto the boundary.  Here
+    the floor would also throw information away -- a negative jitter is the
+    fit telling you the quoted error bars are too large, which is a result
+    worth reporting.  And it would buy nothing in exchange: ``total_sigma``
+    uses ``jitter_variance`` directly and NOTHING in any physics path consumes
+    this function's output, so ``jitter`` is purely the reported form and a
+    floor could only ever hide a negative variance the sampler had already
+    visited.  The one cost of the sign is that a reader must know what it
+    means, which the defaults.yaml ``description`` says and the ``latex``
+    label carries: ``J``, not a ``sigma``, which would promise positivity.
+
+    One function, three components (rv/transit/astrometry): it is pure
+    algebra on the shared noise model this module owns, so it lives here
+    rather than as three byte-identical copies under three registry names.
+    Its sympy counterpart lives just below, for the same reason.
+    """
+    return pt.sign(jitter_variance) * pt.sqrt(
+        pt.maximum(pt.abs(jitter_variance), _JITTER_EPS)
+    )
+
+
+# ---------------------------------------------------------------------------
+# The symbolic counterpart of calc_jitter
+# ---------------------------------------------------------------------------
+# The relaxation engine needs the same relation in sympy so a user may seed
+# EITHER side -- ``jitter`` in the data's own units (what anyone actually has a
+# number for) or the sampled ``jitter_variance`` -- and get the other derived.
+# It is the SIGNED square, the exact inverse of calc_jitter's signed square
+# root, because ``jitter_variance`` is deliberately allowed to go negative down
+# to ``Instrument._jitter_floor``.  Written as ``jitter**2`` it would fold a
+# negative seed onto a POSITIVE variance: a silent sign flip on the one
+# direction of this relation that matters.
+#
+# WHY THE DEFINITION LIVES HERE BUT THE REGISTRATION DOES NOT.  ConfigManager
+# discovers relations by walking ``components/*/symbolic_physics.py`` and keys
+# each file on its directory name (or its ``comp_key``), which must match a
+# single YAML block; the symbol map it then applies is per component INSTANCE
+# (``transit.0.jitter``, ...).  So there is no file this parent class could own
+# that would register one relation against three different YAML blocks -- and
+# it should not want to: ``mulensinstrument`` is an ``Instrument`` too, with
+# ``noise_model = "err_scale"`` and no jitter at all, so the set of children
+# that get this relation is a per-child fact.  Each additive-noise child
+# therefore imports these two objects into its own ``symbolic_physics.py`` and
+# registers them; the definition, like ``calc_jitter`` above, exists once.
+JITTER_SYMBOLS = {
+    "jitter": sp.Symbol("jitter", real=True),
+    "jitter_variance": sp.Symbol("jitter_variance", real=True),
+}
+
+# Keys must equal the sympy symbol NAMES above: ConfigManager substitutes
+# relation symbols by ``sym.name``, so a map key that does not match leaves the
+# symbol unbound and the relation silently inert.  Sharing one dict across the
+# three children is what makes that failure mode unreachable -- transit's copy
+# named its symbol "jittervar" against a "jitter_variance" key and was inert
+# from the day it was written until 2026-08.
+JITTER_SYMBOL_MAP = {
+    "jitter": "jitter",
+    "jitter_variance": "jitter_variance",
+}
+
+JITTER_RELATIONS = [
+    sp.Eq(
+        JITTER_SYMBOLS["jitter_variance"],
+        JITTER_SYMBOLS["jitter"] * sp.Abs(JITTER_SYMBOLS["jitter"]),
+    )
+]
+
+
+class ConcatenatedData:
+    """Per-file accumulator for the arrays an instrument concatenates.
+
+    Every child that models ONE observable per epoch (rv, transit, mulens)
+    builds the same things in ``load_data``: one concatenated time /
+    observable / error array, the ``inst_map`` naming which file each row came
+    from, the block-diagonal detrend design matrix, and -- last -- the GP and
+    robust-likelihood indices derived from all of the above.  This class owns
+    that template so it exists once.
+
+    Usage (the child keeps only its own per-file physics)::
+
+        blocks = self._concat_blocks()
+        for i in range(self.n_elements):
+            df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
+            ...per-file work...
+            blocks.add(i, time=..., obs=..., err=..., df=df)
+        blocks.finalize("rv", user_factor=...)
+
+    WHY AN ACCUMULATOR AND NOT A TEMPLATE METHOD WITH A PER-FILE HOOK.  The
+    three children disagree about *when* the files are read:
+    ``mulensinstrument`` reads every file in a first pass because the Skowron
+    reference epoch (``t0_par``) is resolved from ALL the times before the
+    per-file observer positions can be computed in a second.  A template method
+    owning the loop would have to grow a "read everything first" mode for that
+    one caller; an accumulator the child feeds is indifferent to the loop
+    structure, which is the part that genuinely differs.
+
+    THE ROW-RANGE INVARIANT IS ENFORCED, NOT ASSUMED.  Each instrument's rows
+    must be a single contiguous block, in config order, in every concatenated
+    array simultaneously: ``Instrument._build_block_detrend`` lays its blocks
+    on the diagonal by walking the per-file row counts in order, and
+    ``mulensinstrument.observer_pos`` is addressed row-for-row against
+    ``time``.  Both break silently if a file is added out of order or a side
+    array disagrees in length, so ``add`` rejects both, and ``finalize``
+    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``
+    rather than leaving every consumer to re-derive them from ``inst_map``.
+    """
+
+    def __init__(self, owner, n_roles=3):
+        self.owner = owner
+        # Number of canonical (non-detrend) columns in the child's `roles`
+        # tuple: the detrend columns are whatever follows them.
+        self.n_roles = int(n_roles)
+        self.times = []
+        self.obs = []
+        self.errs = []
+        self.detrend = []
+        self.counts = []
+        self.sides = {}
+
+    # -- per file --------------------------------------------------------
+    def add(self, i, time, obs, err, df=None, detrend=None, **sides):
+        """Append file ``i``'s block to every array.
+
+        ``time``/``obs``/``err`` are the per-file arrays in the units the
+        child wants concatenated (any unit conversion is the child's, applied
+        before the call).  ``df`` is the DataFrame ``_read_data`` returned:
+        its columns past ``n_roles`` become this file's detrend block.  Pass
+        ``detrend`` explicitly to override that, or leave both unset for a
+        file with no detrend columns.  Extra keyword arguments are per-epoch
+        SIDE ARRAYS (mulensing's ``observer_pos``): they are concatenated
+        along axis 0 and set on the owner under their keyword name, so they
+        stay row-aligned with ``time`` by construction.
+        """
+        if i != len(self.counts):
+            raise ValueError(
+                f"[{self.owner.prefix}] data blocks must be added in config "
+                f"order: expected element {len(self.counts)}, got {i}. The "
+                f"concatenated arrays address each instrument as one "
+                f"contiguous row range (block-diagonal detrending, per-epoch "
+                f"side arrays), which out-of-order blocks break silently."
+            )
+        time = np.asarray(time)
+        n_obs = len(time)
+        for name, arr in (("obs", obs), ("err", err)):
+            if len(np.asarray(arr)) != n_obs:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] "
+                    f"{name} has {len(np.asarray(arr))} rows but time has "
+                    f"{n_obs}."
+                )
+
+        if detrend is None:
+            if df is not None and df.shape[1] > self.n_roles:
+                detrend = df.iloc[:, self.n_roles :].values.astype(float)
+            else:
+                detrend = np.empty((n_obs, 0))
+        detrend = np.asarray(detrend)
+        if detrend.shape[0] != n_obs:
+            raise ValueError(
+                f"[{self.owner.prefix}[{self.owner.names[i]}]] detrend block "
+                f"has {detrend.shape[0]} rows but time has {n_obs}."
+            )
+
+        for name, arr in sides.items():
+            arr = np.asarray(arr)
+            if arr.shape[0] != n_obs:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] per-epoch "
+                    f"array '{name}' has {arr.shape[0]} rows but time has "
+                    f"{n_obs}; side arrays must stay row-aligned with the "
+                    f"observations."
+                )
+            if i == 0:
+                self.sides[name] = []
+            elif name not in self.sides:
+                raise ValueError(
+                    f"[{self.owner.prefix}[{self.owner.names[i]}]] per-epoch "
+                    f"array '{name}' was not supplied for earlier files; a "
+                    f"side array must cover every element or none."
+                )
+            self.sides[name].append(arr)
+        missing = set(self.sides) - set(sides)
+        if missing:
+            raise ValueError(
+                f"[{self.owner.prefix}[{self.owner.names[i]}]] missing "
+                f"per-epoch array(s) {sorted(missing)} supplied by earlier "
+                f"files; a side array must cover every element or none."
+            )
+
+        self.times.append(time)
+        self.obs.append(obs)
+        self.errs.append(err)
+        self.detrend.append(detrend)
+        self.counts.append(n_obs)
+
+    # -- after the loop --------------------------------------------------
+    def finalize(self, observable, user_factor=1.0):
+        """Concatenate, publish on the owner, and run the optional hooks.
+
+        Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
+        ``n_total_obs``, ``row_ranges``, every side array, and the
+        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols``
+        triple; then calls ``_prepare_gp`` and ``_prepare_robust``, which are
+        no-ops unless a file set ``gp:`` / ``likelihood:``.
+
+        ``user_factor`` converts the concatenated error from the internal unit
+        it is held in to the user unit the GP amplitude and the robust
+        ``out_scale`` are declared in (both are declared in the same unit as
+        the data, so one factor serves both).
+        """
+        owner = self.owner
+        if len(self.counts) != owner.n_elements:
+            raise ValueError(
+                f"[{owner.prefix}] {len(self.counts)} of {owner.n_elements} "
+                f"elements contributed data blocks; every element must."
+            )
+
+        owner.time = np.concatenate(self.times).astype(float)
+        setattr(owner, observable, np.concatenate(self.obs).astype(float))
+        owner.err = np.concatenate(self.errs).astype(float)
+        # Named `inst_map` so Component.build_tensor_maps auto-generates
+        # `inst_map_tensor` in stage 4.
+        owner.inst_map = np.repeat(
+            np.arange(owner.n_elements), self.counts
+        ).astype(int)
+        owner.n_total_obs = int(owner.inst_map.size)
+        owner.row_ranges = self.row_ranges()
+
+        for name, blocks in self.sides.items():
+            setattr(owner, name, np.concatenate(blocks, axis=0).astype(float))
+
+        (
+            owner.detrend_matrix,
+            owner.n_detrend_per_inst,
+            owner.total_detrend_cols,
+        ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
+
+        owner._prepare_gp(
+            owner.time, owner.err, owner.inst_map, user_factor=user_factor
+        )
+        owner._prepare_robust(
+            owner.err, owner.inst_map, user_factor=user_factor
+        )
+
+    def row_ranges(self):
+        """``[(start, stop), ...]``: file ``i``'s rows in every array."""
+        edges = np.concatenate(([0], np.cumsum(self.counts))).astype(int)
+        return [
+            (int(edges[i]), int(edges[i + 1])) for i in range(len(self.counts))
+        ]
 
 
 class Instrument(Component):
@@ -101,6 +405,10 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # Per-element (start, stop) row ranges into the concatenated arrays,
+        # published by ConcatenatedData.finalize.  Empty for a child that does
+        # not concatenate (astrometryinstrument keeps per-file datasets).
+        self.row_ranges = []
         # Optional per-file exclusion mask (see _apply_mask). Parsed here so a
         # malformed spec fails at construction, not mid-load.
         self.mask_specs = [c.get("mask") for c in self.config]
@@ -176,6 +484,15 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared data loading
     # ------------------------------------------------------------------
+    def _concat_blocks(self, n_roles=3):
+        """A fresh ``ConcatenatedData`` accumulator for this component.
+
+        ``n_roles`` is the number of canonical columns in the child's
+        ``_read_data(roles=...)`` tuple; anything past them is that file's
+        detrend block.
+        """
+        return ConcatenatedData(self, n_roles=n_roles)
+
     @staticmethod
     def _sort_by_time(df, time_col=0):
         """Return ``df`` sorted ascending by its time column.
@@ -307,7 +624,7 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared file reading: columns, mask, time system, sort
     # ------------------------------------------------------------------
-    def _read_data(self, i, roles, detrend=False):
+    def _read_data(self, i, roles, detrend=False, shared_roles=()):
         """Read data file ``i`` into canonical column order, ready to use.
 
         One call replaces the read/mask/sort triplet every child used to
@@ -328,6 +645,10 @@ class Instrument(Component):
         ``roles[j]``, columns ``len(roles):`` are the detrend columns.
         With none of the optional keys set this is byte-for-byte the old
         read (all columns, as-is on disk, sorted by column 0).
+
+        ``shared_roles`` names groups of roles this component allows to
+        read the SAME file column (see ``_check_no_duplicate_columns``);
+        every other collision is an error.
         """
         if roles[0] != "time":
             raise ValueError(
@@ -337,7 +658,7 @@ class Instrument(Component):
         df = pd.read_csv(
             self.files[i], sep=r"\s+", engine="c", header=None, comment="#"
         )
-        df = self._select_columns(df, i, roles, detrend)
+        df = self._select_columns(df, i, roles, detrend, shared_roles)
         df = self._apply_mask(df, i)
         t = self._to_bjd_tdb(df.iloc[:, 0].values.astype(float), i)
         df[df.columns[0]] = t
@@ -392,7 +713,7 @@ class Instrument(Component):
                 out[k] = _col(v)
         return out
 
-    def _select_columns(self, df, i, roles, detrend):
+    def _select_columns(self, df, i, roles, detrend, shared_roles=()):
         """Apply file ``i``'s ``columns:`` spec, returning the canonical layout.
 
         Without a spec the file is returned untouched (the on-disk order IS
@@ -432,9 +753,68 @@ class Instrument(Component):
                 f"[{label}] columns indices are 0-based and the data file "
                 f"has {df.shape[1]} columns; got {sorted(set(too_big))}."
             )
+        self._check_no_duplicate_columns(label, roles, idx, det, shared_roles)
         out = df.iloc[:, idx + det].copy()
         out.columns = range(out.shape[1])
         return out
+
+    @staticmethod
+    def _check_no_duplicate_columns(label, roles, idx, det, shared_roles=()):
+        """Reject a ``columns:`` spec that points two roles at one column.
+
+        A PARTIAL spec is the trap this closes: ``columns: {time: 1}``
+        names only the time column, every other role keeps its canonical
+        position, and ``rv`` is canonically column 1 -- so the RVs are
+        silently the times, and the fit runs on a dataset nobody wrote.
+        Nothing downstream can notice: ``df.iloc`` is happy to select a
+        column twice.
+
+        Two reuses are legitimate and survive:
+
+        * The TIME column may ALSO be a detrend column.  Detrending
+          against a linear trend in time is a real use case, and there is
+          no other way to spell it (the detrend list may not name a
+          column that is not in the file).
+        * Roles the component declares interchangeable through
+          ``shared_roles``, a sequence of role-name groups.  Astrometry's
+          ``abs`` mode passes ``("err_e", "err_n")`` so one symmetric
+          per-epoch uncertainty column can serve both sky axes -- a
+          common catalog layout.
+
+        Everything else is an error, including a ``detrend`` list that
+        repeats a column (two identical basis vectors are an exactly
+        degenerate pair of coefficients) and two roles in different units
+        (astrometry ``rel``'s ``err_sep`` in mas vs ``err_pa`` in deg).
+        """
+        names = list(roles) + [f"detrend[{k}]" for k in range(len(det))]
+        by_column = {}
+        for name, col in zip(names, list(idx) + list(det)):
+            by_column.setdefault(col, []).append(name)
+
+        groups = [set(g) for g in shared_roles]
+        for col, hits in sorted(by_column.items()):
+            if len(hits) == 1:
+                continue
+            # time, reused as exactly one detrend column
+            if (
+                len(hits) == 2
+                and "time" in hits
+                and any(h.startswith("detrend[") for h in hits)
+            ):
+                continue
+            if any(set(hits) <= g for g in groups):
+                continue
+            allowed = "".join(
+                f"; '{sorted(g)}' may share one" for g in shared_roles
+            )
+            raise ValueError(
+                f"[{label}] columns maps {hits} to the same file column "
+                f"{col}. Each role needs its own column -- note that roles "
+                f"the spec does not name keep their canonical position, so "
+                f"a partial spec can collide with a default. (The only "
+                f"reuse allowed is the time column doubling as a detrend "
+                f"column{allowed}.)"
+            )
 
     @staticmethod
     def _columns_config_schema(roles, detrend=True, note=""):
@@ -455,7 +835,10 @@ class Instrument(Component):
                 f"Optional column layout: a mapping from role name to "
                 f"0-based column index in the data file. Roles: "
                 f"{', '.join(roles)}{extra}. Unnamed roles keep their "
-                f"default position. Default: the documented column order."
+                f"default position -- so two roles must not end up on the "
+                f"same column, which a partial spec can cause (that is an "
+                f"error; the time column may also be a detrend column). "
+                f"Default: the documented column order."
                 + (f" {note}" if note else "")
             ),
         }
@@ -1355,6 +1738,13 @@ class Instrument(Component):
         Keeps the total variance ``err**2 + jitter_variance`` strictly
         positive.  ``factor`` converts the raw error column to the internal
         unit first (rv scales to m/s; transit/astrometry use factor 1).
+
+        This is a **validity** bound, not a preference: at exactly
+        ``-min(err)**2`` the best-measured point's sigma is zero (infinite
+        logp), and below it ``total_sigma``'s ``sqrt`` is NaN for that point
+        and its gradient with it.  The 0.95 keeps 5% of the variance as
+        margin.  Hence it is applied as a floor the user may tighten but not
+        loosen -- see ``_register_noise``.
         """
         scaled_min = np.min(np.asarray(err, dtype=float)) * factor
         return -0.95 * scaled_min**2
@@ -1366,6 +1756,18 @@ class Instrument(Component):
         ``jittervar_lower`` floor) plus a reported ``jitter``.
         ``"err_scale"``: a single multiplicative scale.
         Returns ``manifest`` for chaining.
+
+        The computed floor goes through the ``"overrides"`` channel, NOT the
+        plain manifest options: options are merged as ``{**cfg, **options}``
+        and so REPLACE the resolved array, which silently discarded a user's
+        explicit ``jitter_variance: {lower: ...}``.  ``"overrides"`` are
+        applied inside ``ConfigManager.resolve``, which special-cases bounds
+        (``lower`` -> ``max``, ``upper`` -> ``min``), so the resolved lower is
+        ``max(defaults.yaml, floor, user)`` regardless of application order:
+        the user can tighten the bound freely, and can only be clipped by the
+        floor, which is a hard validity limit (see ``_jitter_floor``) -- below
+        it the likelihood is NaN, so there is nothing there to sample.  That
+        clip is warned about, not silent (ConfigManager.resolve).
         """
         if self.noise_model == "err_scale":
             manifest["err_scale"] = None
@@ -1375,7 +1777,9 @@ class Instrument(Component):
                     f"[{self.prefix}] jitter_variance noise model requires a "
                     f"jittervar_lower floor."
                 )
-            manifest["jitter_variance"] = {"lower": jittervar_lower}
+            manifest["jitter_variance"] = {
+                "overrides": {"lower": jittervar_lower}
+            }
             manifest["jitter"] = "default"
         return manifest
 

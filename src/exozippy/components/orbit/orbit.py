@@ -11,6 +11,7 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.component import Component
 from exozippy.components.parameter import Parameter
+from exozippy.potentials import soft_upper_bound
 
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
@@ -132,7 +133,17 @@ class Orbit(Component):
             ("companion", self.companion_bodies),
         ):
             types = {t for g in groups for (t, _) in g}
-            for ctype in types:
+            # Sorted: _group_w is a plain dict populated in THIS order, and
+            # add_parameter walks it to lazily materialize each referenced
+            # component's `mass` -- so an unsorted walk decides whether
+            # star.mass or planet.mass becomes a PyMC RV first.
+            # model.free_RVs order is the compiled input signature
+            # (system.py), the gradient-vector layout (polish.py) and the
+            # on-disk mass matrix (outputs/save_mass_matrix.py), none of
+            # which may depend on PYTHONHASHSEED.  Inert while one side
+            # references a single body type; live for a hierarchical group
+            # that mixes stars and planets.
+            for ctype in sorted(types):
                 section = sys_cfg.get(ctype) or []
                 if not isinstance(section, list):
                     section = [section]
@@ -147,21 +158,55 @@ class Orbit(Component):
                             W[i, idx] = 1.0
                 self._group_w[side][ctype] = W
 
+    def _resolve_initval(self, name, shape):
+        """This orbit's stage-2 initval for ``name``, NaN where unseeded.
+
+        Stage 2 runs BEFORE the relaxation engine, so this sees only what
+        the user wrote (plus component hints and defaults.yaml) -- nothing
+        the engine will later derive.  Values are in the parameter's own
+        user unit; the caller converts.
+        """
+        n_el = int(np.prod(shape))
+        val = self.config_manager.resolve(
+            self.prefix, name, shape=shape, names=self.names
+        )["initval"]
+        if val is None:
+            return np.full(n_el, np.nan)
+        return np.atleast_1d(val).astype(float).copy()
+
+    def _seeded_period(self, shape):
+        """The per-orbit period in days implied by the stage-2 seeds.
+
+        BOTH spellings are legal in a params file, and the relaxation
+        engine (stage 3) is what normally reconciles them -- but it has not
+        run yet, so a user-supplied ``period:`` has NOT been propagated
+        into ``logP``.  Reading ``logP`` alone therefore returns its
+        defaults.yaml initval (1.0 -> 10 d) for every fit that seeds
+        ``period:``.  Prefer the directly seeded ``period`` and fall back
+        to ``10**logP``.
+
+        Still not covered, because only the engine can get there: a period
+        implied by ``arsun`` plus the member masses.  Seed ``logP`` (or
+        ``period``) directly when that is how the orbit is specified.
+        """
+        period_user = self._resolve_initval("period", shape)
+        logP = self._resolve_initval("logP", shape)
+        return np.where(np.isnan(period_user), 10.0**logP, period_user)
+
     def register_parameters(self, system):
         """Stage 2: Calculate window constraints and declare the manifest."""
         shape = (self.n_elements,)
 
         # 1. Peer into the config (Pre-flight windows)
-        logP_cfg = self.config_manager.resolve(
-            self.prefix, "logP", shape=shape, names=self.names
-        )
         tc_cfg = self.config_manager.resolve(
             self.prefix, "tc", shape=shape, names=self.names
         )
 
-        logP_init = np.atleast_1d(logP_cfg["initval"])
         tc_init = np.atleast_1d(tc_cfg["initval"])
-        half_period = (10**logP_init) / 2.0
+        # tc is periodic (tc and tc + P are the same solution), so one full
+        # period is the right hard window -- but it must be the period the
+        # user actually seeded, in either spelling.  See _seeded_period.
+        half_period = self._seeded_period(shape) / 2.0
 
         self.manifest = {
             "logP": None,
@@ -231,13 +276,16 @@ class Orbit(Component):
         # sqrt(vsini)cos/sin(lambda) pair and derives vsini/lam from them
         # (mirrors the secosw/sesinw -> ecc/omega idiom above).
         from ..rm import rm_enabled
+
         if rm_enabled(system):
-            self.manifest.update({
-                "svcoslam": None,
-                "svsinlam": None,
-                "vsini": {"expr_key": "from_sv"},
-                "lam": {"expr_key": "from_sv"},
-            })
+            self.manifest.update(
+                {
+                    "svcoslam": None,
+                    "svsinlam": None,
+                    "vsini": {"expr_key": "from_sv"},
+                    "lam": {"expr_key": "from_sv"},
+                }
+            )
 
         # Astrometry constrains the longitude of the ascending node and
         # breaks the i <-> 180-i degeneracy, so sample the node direction
@@ -298,15 +346,9 @@ class Orbit(Component):
         # bigomega initval; the manifest initvals set below override the
         # relaxation-engine seeds at build time.
         cm = self.config_manager
-        n_el = int(np.prod(shape))
 
         def rslv(name):
-            val = cm.resolve(self.prefix, name, shape=shape, names=self.names)[
-                "initval"
-            ]
-            if val is None:
-                return np.full(n_el, np.nan)
-            return np.atleast_1d(val).astype(float).copy()
+            return self._resolve_initval(name, shape)
 
         factor_bo = cm.get_conversion_factor(self.prefix, "bigomega") or 1.0
         bo = rslv("bigomega") * factor_bo  # rad; NaN where unseeded
@@ -339,12 +381,7 @@ class Orbit(Component):
             ss0 = np.where(have_ew, np.sqrt(np.abs(e_u)) * np.sin(om), ss0)
 
             tc0 = rslv("tc")
-            # The relaxation engine has not run yet, so a user-supplied
-            # 'period' has not been propagated to logP; prefer it directly.
-            period_user = rslv("period")
-            period = np.where(
-                ~np.isnan(period_user), period_user, 10.0 ** rslv("logP")
-            )
+            period = self._seeded_period(shape)
 
             def _M_c(ecc, w):
                 E_c = 2.0 * np.arctan2(
@@ -353,7 +390,9 @@ class Orbit(Component):
                 )
                 return E_c - ecc * np.sin(E_c)
 
-            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, 0.9999)
+            # Same ceiling calc_ecc applies, for the same reason: this is a
+            # forward-model evaluation (a Kepler solve), not a bound.
+            ecc0 = np.clip(sc0**2 + ss0**2, 0.0, physics.MAX_ECC)
             w0 = np.arctan2(ss0, sc0)
             n_mm = 2.0 * np.pi / period
             tp = tc0 - _M_c(ecc0, w0) / n_mm
@@ -487,7 +526,74 @@ class Orbit(Component):
         return super().add_parameter(model, param_name, system, context_nodes)
 
     def build_likelihood(self, model, system):
-        pass
+        self._add_eccentricity_bound(system)
+
+    def _add_eccentricity_bound(self, system):
+        """Soft upper bound on every orbit's eccentricity.
+
+        The barrier is applied to the UNCLIPPED sum secosw^2 + sesinw^2, not
+        to self.ecc: calc_ecc clips at MAX_ECC = 0.9999, so feeding the
+        clipped node here froze the penalty at a constant on the whole
+        e > 0.9999 region -- a flat plateau with exactly zero gradient, and
+        no restoring force for NUTS to follow back out.  That region is not
+        a corner case: secosw and sesinw are each uniform on [-1, 1], so the
+        clipped part of the sampled square has area 4 - pi * 0.9999, i.e.
+        21.5% of the prior volume.  This is the identical mistake documented
+        (and already fixed) for m_total in Planet.build_likelihood.
+
+        The bound lives here, not on the planet component, because
+        eccentricity is a property of the ORBIT: a stellar binary with no
+        planet at all used to get no eccentricity bound whatsoever.  Where a
+        planet does orbit, its collision limit (planet.max_ecc, the
+        eccentricity at which periastron reaches the stellar surface) is the
+        tighter constraint, so the per-orbit threshold is the minimum of
+        MAX_ECC and the max_ecc of every planet mapped to that orbit.  One
+        potential per orbit, planet or no planet.
+
+        scale = 0.88 with the default 1% softness gives the historical
+        steepness of 4.4 / 0.0088 = 500 nats per unit eccentricity, matching
+        the barrier this replaces (and Planet's mass barrier).
+        """
+        e_unclipped = self._unclipped_ecc()
+        if e_unclipped is None:
+            return
+
+        threshold = pt.as_tensor_variable(
+            np.full(self.n_elements, physics.MAX_ECC)
+        )
+        planets = system.active_components.get("planet")
+        if isinstance(getattr(planets, "max_ecc", None), Parameter):
+            for p, o in enumerate(np.atleast_1d(planets.orbit_map)):
+                o = int(o)
+                threshold = pt.set_subtensor(
+                    threshold[o],
+                    pt.minimum(threshold[o], planets.max_ecc.value[p]),
+                )
+
+        pm.Potential(
+            f"{self.prefix}.e_collision_bound",
+            soft_upper_bound(e_unclipped, threshold, scale=0.88),
+        )
+
+    def _unclipped_ecc(self):
+        """secosw^2 + sesinw^2, or None when that pair is not sampled.
+
+        Every current parameterization samples the pair (the vcve branch
+        raises NotImplementedError in register_parameters), so this is a
+        guard, not a code path: an eccentricity built some other way has no
+        unclipped node to bound and is left to its own parameter bounds.
+        """
+        secosw = getattr(self, "secosw", None)
+        sesinw = getattr(self, "sesinw", None)
+        if not (
+            isinstance(secosw, Parameter) and isinstance(sesinw, Parameter)
+        ):
+            logger.debug(
+                "[orbit] secosw/sesinw are not built; skipping the "
+                "eccentricity bound."
+            )
+            return None
+        return physics.ecc_from_sqrte(secosw.value, sesinw.value)
 
     def get_true_anomaly(self, t):
         """Returns the true anomaly f for all planets at all times."""

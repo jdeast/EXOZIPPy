@@ -32,9 +32,12 @@ def test_config_derives_te_from_physical_input():
     cm = ConfigManager(user_params, system_config=system_config)
     cm.finalize_user_params()
 
-    # Check if t_E was derived and injected
-    assert "lens.Lens.t_E" in cm.user_params
-    derived_te = cm.user_params["lens.Lens.t_E"]["initval"]
+    # Check if t_E was derived and injected.  The engine's solution is filed
+    # under the canonical INDEX form (lens.0.t_E) -- the only spelling
+    # ConfigManager.resolve reads for every element of every component.  See
+    # the inject-back comment in finalize_user_params and tests/test_nsnl.py.
+    assert "lens.0.t_E" in cm.user_params
+    derived_te = cm.user_params["lens.0.t_E"]["initval"]
 
     # Manual check:
     # pi_rel = 1000/4000 - 1000/8000 = 0.125

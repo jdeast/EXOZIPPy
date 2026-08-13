@@ -154,7 +154,11 @@ def build_config(name, files, prefix, mmx_json, args):
         ],
         "sampler": {
             "method": args.sampler,
-            "n_temps": 8,
+            "n_temps": (
+                args.n_temps
+                if str(args.n_temps).lower() == "auto"
+                else int(args.n_temps)
+            ),
             "T_max": 200,
             "cores": args.cores,
             "tune": args.tune,
@@ -163,6 +167,12 @@ def build_config(name, files, prefix, mmx_json, args):
             "recompute_trace": bool(args.recompute),
             "eval_timeout": 10,
         },
+        # Degenerate events routinely leave chains split across solution
+        # branches with no inter-mode mixing; occupancy weights then reflect
+        # initialization, not posterior mass (event 128: 52/54 chains in a
+        # branch 500 nats WORSE than the one the other 2 found). Per-mode
+        # bridge-sampling evidence weights are the designed remedy.
+        "modes": {"weights": "evidence"},
     }
     return config
 
@@ -170,19 +180,22 @@ def build_config(name, files, prefix, mmx_json, args):
 def build_user_params(ra, dec):
     """Fixed-parameter overrides, mirroring examples/DC2018_128.
 
-    Coordinates come from event_info.txt. The radius/teff/feh fixes are the
-    same 'not constrainable without SED data' hack the DC2018_128 example
-    documents; the microlensing start values are deliberately ABSENT so the
-    MMEXOFAST auto-initialization triggers.
+    Coordinates come from event_info.txt. The Lens's radius/teff/feh fixes
+    are the same 'not constrainable without SED data' hack the DC2018_128
+    example documents; the microlensing start values are deliberately
+    ABSENT so the MMEXOFAST auto-initialization triggers. The Source star
+    needs none of this: star.py pins its mass/teff/feh/radius/ra/dec
+    automatically for any star that is purely a microlensing source (never
+    also a lens body), falling back to the Lens's coordinates here.
     """
-    params = {}
-    for star in ("Lens", "Source"):
-        params[f"star.{star}.ra"] = {"initval": ra, "sigma": 0}
-        params[f"star.{star}.dec"] = {"initval": dec, "sigma": 0}
-        params[f"star.{star}.teff"] = {"sigma": 0.0}
-        params[f"star.{star}.feh"] = {"sigma": 0.0}
-        params[f"star.{star}.radius"] = {"sigma": 0.0}
-    params["planet.Companion.radius"] = {"sigma": 0}
+    params = {
+        "star.Lens.ra": {"initval": ra, "sigma": 0},
+        "star.Lens.dec": {"initval": dec, "sigma": 0},
+        "star.Lens.teff": {"sigma": 0.0},
+        "star.Lens.feh": {"sigma": 0.0},
+        "star.Lens.radius": {"sigma": 0.0},
+        "planet.Companion.radius": {"sigma": 0},
+    }
     return params
 
 
@@ -227,6 +240,13 @@ def main(argv=None):
         "--finite-source",
         action="store_true",
         help="Model finite-source effects (default off, as in DC2018_128)",
+    )
+    ap.add_argument(
+        "--n-temps",
+        default="8",
+        help="PT temperature rungs: an integer or 'auto' "
+        "(max(8, ceil(sqrt(D/2)*ln(T_max))); use when the ladder-health "
+        "warning reports a communication-limited ladder)",
     )
     ap.add_argument(
         "--recompute",

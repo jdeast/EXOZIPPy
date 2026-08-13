@@ -211,7 +211,12 @@ def test_set_whitening_handles_partially_frozen_vector_parameters():
 
     with pm.Model() as model:
         # PyMC compresses 'star.mass_raw' to shape (1,): only element 0 samples.
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=system)
 
     p = star.mass
@@ -523,7 +528,12 @@ def test_explicit_initval_is_not_overwritten_by_derived_expression():
     with pm.Model() as model:
         # build_parameters calls build_core_parameters, which triggers
         # add_parameter for "mass".
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
@@ -668,6 +678,70 @@ def test_logit_prior_is_flat_in_physical_space():
     assert np.allclose(residuals, residuals[0], atol=1e-6), (
         f"Prior is not flat in physical space: residuals = {residuals}"
     )
+
+
+def test_logit_saturation_guard_is_inert_inside_and_quadratic_outside():
+    """
+    Given a bounded sampled parameter with no sigma,
+    When the logp is evaluated at raw values mapping inside and beyond the
+    sigmoid's +/-30 saturation clip,
+    Then inside the clip the logp exactly matches the analytic flat-prior
+      pushforward (the guard contributes nothing -- posterior unchanged),
+      and beyond it the logp additionally falls by k*(|lq|-30)^2 (the
+      confinement that keeps unconstrained directions off the degenerate
+      plateau, where every raw maps to the identical clipped physical value).
+    """
+    from exozippy.components.parameter import (
+        _LOGIT_SATURATION_LQ,
+        _LOGIT_SATURATION_PENALTY_K,
+    )
+
+    # ARRANGE: q0 = 0.5, span = 10, init_scale = 1 -> lq = 0.4 * raw,
+    # so raw = 75 sits exactly at the clip and raw = 100 well beyond it.
+    initval, lower, upper, init_scale = 5.0, 0.0, 10.0, 1.0
+    with pm.Model() as model:
+        p = Parameter(
+            label="p",
+            initval=initval,
+            init_scale=init_scale,
+            lower=lower,
+            upper=upper,
+        )
+        p.build_pymc()
+        logp_fn = model.compile_logp()
+
+    span = upper - lower
+    q0 = (initval - lower) / span
+    c = init_scale / (q0 * (1 - q0) * span)  # d(lq)/d(raw) = 0.4
+
+    def expected_shape(raw):
+        # logp up to a raw-independent constant: the exact log-Jacobian
+        # (softplus form, matching build_pymc) plus the saturation guard.
+        # The N(0,1) prior is cancelled by the +raw^2/2 correction term.
+        lq = c * raw
+        log_jac = -np.logaddexp(0.0, lq) - np.logaddexp(0.0, -lq)
+        excess = max(abs(lq) - _LOGIT_SATURATION_LQ, 0.0)
+        return log_jac - _LOGIT_SATURATION_PENALTY_K * excess**2
+
+    # ACT: measure logp differences against raw = 0 (constant drops out)
+    lp0 = float(logp_fn({"p_raw": np.array([0.0])}))
+    raws = [-100.0, -80.0, -74.0, -3.0, 3.0, 74.0, 80.0, 100.0]
+    measured = [float(logp_fn({"p_raw": np.array([r])})) - lp0 for r in raws]
+    predicted = [expected_shape(r) - expected_shape(0.0) for r in raws]
+
+    # ASSERT
+    assert np.allclose(measured, predicted, atol=1e-6), (
+        f"logp shape deviates from analytic flat-prior + saturation guard:\n"
+        f"raws      = {raws}\nmeasured  = {measured}\npredicted = {predicted}"
+    )
+    # And the guard is strictly confining: logp decreases monotonically
+    # outward beyond the clip.
+    lp_74, lp_80, lp_100 = (
+        measured[raws.index(74.0)],
+        measured[raws.index(80.0)],
+        measured[raws.index(100.0)],
+    )
+    assert lp_74 > lp_80 > lp_100
 
 
 def test_bounded_sigma_param_logp_matches_truncated_normal():
@@ -1144,3 +1218,262 @@ def test_parameter_rejects_an_unparseable_unit_at_construction():
     # ARRANGE / ACT / ASSERT
     with pytest.raises(ValueError, match="not_a_real_unit"):
         Parameter(label="star.0.mass", unit="not_a_real_unit", initval=1.0)
+
+
+def test_derived_star_mass_builds_no_barrier_potentials():
+    """
+    Given the production star manifest, where mass is DERIVED from logmass,
+    When the parameters are built,
+    Then no soft-bound barrier Potential is created for star.mass, while
+      logmass keeps the hard [-9, 2.5] dex support that the logit transform
+      enforces exactly.
+
+    star/defaults.yaml used to declare mass bounds of [0.1, 250] solMass
+    alongside logmass's [-9, 2.5] dex ([1e-9, 316] solMass) -- eight orders
+    of magnitude apart.  Because mass is derived, those could only ever act
+    as barrier potentials layered on top of the hard bound, so they added
+    numerical machinery without adding a constraint.
+    """
+    # Arrange
+    config_manager = ConfigManager({})
+    star = Star([{"name": "A"}], config_manager)
+
+    # Act
+    with pm.Model() as model:
+        star.manifest = {"mass": "default", "logmass": None}
+        star.add_parameter(model=model, param_name="mass", system=None)
+
+    # Assert
+    barriers = [
+        k
+        for k in model.named_vars
+        if k.startswith(("low_bound.", "up_bound."))
+        and k.endswith("star.mass")
+    ]
+    assert barriers == [], f"unexpected star.mass barrier(s): {barriers}"
+    assert star.mass.lower is None and star.mass.upper is None
+    assert np.allclose(np.atleast_1d(star.logmass.lower), -9.0)
+    assert np.allclose(np.atleast_1d(star.logmass.upper), 2.5)
+
+
+# ---------------------------------------------------------------------------
+# Review 2.10.2 / 2.10.3 / 2.10.5
+# ---------------------------------------------------------------------------
+
+
+def _mixed_bounded_unbounded_model(sigma_on_unbounded):
+    """A single vector Parameter whose element 0 is logit-bounded and whose
+    element 1 has infinite bounds (the only construction that reaches
+    build_pymc's pt.where over the two branches)."""
+    p = Parameter(
+        label="mix",
+        initval=[0.5, 1.0],
+        init_scale=[0.1, 1.0],
+        sigma=[np.nan, sigma_on_unbounded],
+        lower=[0.0, -np.inf],
+        upper=[1.0, np.inf],
+        shape=(2,),
+        unit="",
+        internal_unit="",
+    )
+    with pm.Model() as model:
+        p.build_pymc()
+        pm.Potential("like", pt.sum(p.value**2))
+    return model, p
+
+
+@pytest.mark.parametrize("sigma_on_unbounded", [2.0, np.nan])
+def test_mixed_bounded_unbounded_vector_gradient_is_finite(sigma_on_unbounded):
+    """
+    Given a vector parameter mixing a logit-bounded element with an element
+    whose bounds are +/-inf (CLAUDE.md: "+/-inf is a real bound and is
+    applied"),
+    When the logp gradient is compiled on the C backend, the JAX backend and
+    with graph rewrites DISABLED,
+    Then it is finite on all three.
+
+    Regression: the infinite bounds were fed straight into the *unselected*
+    logit branch of the pt.where, where -inf + inf*sigmoid = NaN.  The switch
+    VJP then multiplies that by zero and 0*inf = NaN poisons the gradient of
+    the whole vector.  FAST_RUN and JAX happened to survive because a
+    canonicalization rewrite sinks the zero into the switch -- a rewriter is
+    not a correctness guarantee, so the unoptimized mode is the one that
+    pins the fix.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, _ = _mixed_bounded_unbounded_model(sigma_on_unbounded)
+    raw = model.value_vars[0]
+    grad = pt.grad(model.logp(), raw)
+    point = np.array([0.3, 0.7])
+
+    # Act / Assert
+    for mode in ["FAST_RUN", Mode(linker="py", optimizer="None"), "JAX"]:
+        fn = pytensor.function(
+            [raw], grad, mode=mode, on_unused_input="ignore"
+        )
+        got = np.asarray(fn(point))
+        assert np.all(np.isfinite(got)), f"mode={mode}: dlogp = {got}"
+
+
+def test_unselected_logit_branch_carries_no_nan_or_inf():
+    """
+    Given the same mixed vector,
+    When the raw (unrewritten) physical value of BOTH branches is evaluated,
+    Then neither branch holds a NaN or an inf -- the where-trap is removed at
+    the source rather than papered over downstream.
+    """
+    from pytensor.compile.mode import Mode
+
+    # Arrange
+    model, p = _mixed_bounded_unbounded_model(2.0)
+    raw = model.value_vars[0]
+    node = model.replace_rvs_by_values([p.value])[0]
+
+    # Act
+    fn = pytensor.function(
+        [raw],
+        node,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+    # Every intermediate elemwise result feeding the value must be finite.
+    from pytensor.graph.traversal import ancestors
+
+    inner = [
+        v
+        for v in ancestors([node])
+        if v.owner is not None and v.dtype.startswith("float")
+    ]
+    probe = pytensor.function(
+        [raw],
+        inner,
+        mode=Mode(linker="py", optimizer="None"),
+        on_unused_input="ignore",
+    )
+
+    # Assert
+    assert np.all(np.isfinite(np.asarray(fn(np.array([0.3, 0.7])))))
+    for var, val in zip(inner, probe(np.array([0.3, 0.7]))):
+        assert np.all(np.isfinite(np.asarray(val))), (
+            f"non-finite intermediate {var}: {val}"
+        )
+
+
+def test_tiny_init_scale_does_not_fix_a_parameter():
+    """
+    Given a sampled parameter whose preliminary init_scale is far below the
+    old 1e-12 threshold,
+    When the PyMC model is built,
+    Then it is still SAMPLED (a raw RV exists and its scale is positive).
+
+    Review 2.10.3: `scales <= 1e-12` was a second, undocumented spelling of
+    `sigma: 0`, and it contradicted the premise that init_scale -- a
+    preliminary whitening scale the startup probe supersedes -- never
+    affects the posterior.
+    """
+    # Arrange / Act
+    with pm.Model() as model:
+        p = Parameter(
+            label="tiny", initval=0.5, init_scale=1e-18, lower=0.0, upper=1.0
+        )
+        p.build_pymc()
+
+    # Assert
+    assert [rv.name for rv in model.free_RVs] == ["tiny_raw"]
+    assert p.is_sampled.tolist() == [True]
+    assert p._whiten_state is not None
+
+
+def test_zero_init_scale_falls_back_instead_of_freezing():
+    """
+    Given a sampled parameter handed a non-positive init_scale,
+    When the model is built,
+    Then it takes the same span-fraction fallback a missing scale takes --
+    a zero whitening scale is a degenerate raw direction, not a pin.
+    """
+    # Arrange / Act
+    with pm.Model():
+        p = Parameter(
+            label="zeroscale",
+            initval=0.5,
+            init_scale=0.0,
+            lower=0.0,
+            upper=1.0,
+        )
+        p.build_pymc()
+
+    # Assert
+    assert p.is_sampled.tolist() == [True]
+    assert float(p._whiten_state["sv_scale_logits"].get_value()[0]) > 0.0
+
+
+def test_to_latex_prior_def_is_per_element_for_a_mixed_vector():
+    """
+    Given a vector parameter whose element 0 is pinned (sigma=0) and whose
+    element 1 is sampled with a uniform prior -- exactly what the manifest's
+    per-element "overrides" channel builds for GP / robust-likelihood
+    hyperparameters,
+    When the prior \\providecommand defs and the table rows are generated,
+    Then each element gets its OWN prior macro and the sampled element is
+    NOT reported as "Fixed".
+    """
+    # Arrange
+    p = Parameter(
+        label="gp.amp",
+        initval=[1.0, 2.0],
+        sigma=[0.0, np.nan],
+        lower=[0.0, 0.0],
+        upper=[10.0, 10.0],
+        shape=(2,),
+        names=["fileA", "fileB"],
+        unit="",
+        internal_unit="",
+    )
+    p.latex = "A"
+    p.latex_prefix = "ez"
+    p.description = "GP amplitude"
+    v = p.latex_varname
+
+    # Act
+    defs = p.to_latex_prior_def()
+    rows = p.to_table_line().splitlines()
+
+    # Assert -- two distinct macros, the sampled one uniform, not "Fixed"
+    assert rf"\providecommand{{\{v}zeroprior}}{{Fixed}}" in defs
+    assert rf"\providecommand{{\{v}oneprior}}" in defs
+    one_body = defs.split(rf"\{v}oneprior}}", 1)[1]
+    assert "Fixed" not in one_body
+    assert r"\mathcal{U}" in one_body
+    # ...and each table row cites its own element's macro
+    assert f"\\{v}zeroprior" in rows[0]
+    assert f"\\{v}oneprior" in rows[1]
+    assert f"\\{v}oneprior" not in rows[0]
+
+
+def test_to_latex_prior_def_stays_unsuffixed_for_a_scalar():
+    """
+    Given a scalar parameter,
+    When the prior def and table row are generated,
+    Then the macro is still the unsuffixed \\<varname>prior -- the
+    per-element naming only kicks in for vectors, mirroring to_latex_def.
+    """
+    # Arrange
+    p = Parameter(
+        label="star.teff",
+        initval=5778.0,
+        mu=5778.0,
+        sigma=100.0,
+        unit="K",
+        internal_unit="K",
+    )
+    p.latex = r"T_{\rm eff}"
+    p.latex_prefix = "ez"
+    p.description = "Effective temperature"
+
+    # Act / Assert
+    assert rf"\providecommand{{\{p.latex_varname}prior}}" in (
+        p.to_latex_prior_def()
+    )
+    assert f"\\{p.latex_varname}prior" in p.to_table_line()

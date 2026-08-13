@@ -19,6 +19,8 @@ import glob
 import os
 import sys
 
+import numpy as np
+
 
 def build_parser():
     """Return the argparse parser for the getdata utility."""
@@ -81,40 +83,166 @@ def build_parser():
     return parser
 
 
+def tic_contamination_ratio(target_id, verbose=False):
+    """Return the TIC-8.2 contamination ratio Rcont for ``target_id``.
+
+    Rcont = (flux from contaminating neighbors) / (flux from the target),
+    measured in the TIC's own fixed aperture. Returns 0.0 when the TIC has
+    no contamination entry for the star. Only used as a fallback when the
+    light curve itself does not carry CROWDSAP (see crowding_fraction).
+    """
+    # this feature probably won't be used often. don't make it a
+    # dependency if not used
+    from astroquery.vizier import Vizier
+
+    v = Vizier(
+        columns=["TIC", "Ncont", "Rcont", "_r"], catalog="IV/39/tic82"
+    ).query_object(target_id)[0]
+    ndx = np.argmin(v["_r"])
+    v = v[ndx]
+
+    if str(v["Rcont"]) == "--":
+        if verbose:
+            print("No contamination listed in the TIC for " + str(target_id))
+        return 0.0
+
+    if verbose:
+        print(
+            "TIC lists "
+            + str(v["Ncont"])
+            + " contaminating stars (Rcont = "
+            + str(v["Rcont"])
+            + ")"
+        )
+    return float(v["Rcont"])
+
+
+def crowding_fraction(lc, contratio=0.0):
+    """Return (crowdsap, source) for a light curve about to be re-blended.
+
+    CROWDSAP is the fraction of the flux in the photometric aperture that
+    belongs to the target. The SPOC/PDC pipeline used exactly this number to
+    subtract the contaminating flux, so taking it from the light curve's own
+    header is the exact inverse of the correction we are undoing (it is
+    per-sector and measured for the aperture actually used, unlike the TIC's
+    single all-sky number).
+
+    When the header does not carry it -- older products, QLP and other
+    non-SPOC pipelines, or a light curve that has already been un-corrected
+    -- fall back on the TIC contamination ratio, which is the same quantity
+    in a different form: Rcont = F_contam / F_target, so
+
+        crowdsap = F_target / (F_target + F_contam) = 1 / (1 + Rcont)
+
+    FLFRCSAP (the fraction of the target's flux that lands inside the
+    aperture) is deliberately unused: the pipeline divides the flux by it,
+    and a multiplicative constant cancels exactly under normalization.
+
+    Returns (1.0, "none") when there is nothing to undo.
+    """
+    meta = getattr(lc, "meta", None) or {}
+    raw = None
+    for key in ("CROWDSAP", "crowdsap"):
+        if key in meta:
+            raw = meta[key]
+            break
+
+    if raw is not None:
+        try:
+            crowdsap = float(raw)
+        except (TypeError, ValueError):
+            crowdsap = np.nan
+        if np.isfinite(crowdsap) and 0.0 < crowdsap <= 1.0:
+            return crowdsap, "CROWDSAP"
+        print(
+            "WARNING: ignoring unusable CROWDSAP = "
+            + str(raw)
+            + " in the light curve header"
+        )
+
+    if contratio > 0.0:
+        print(
+            "WARNING: no usable CROWDSAP in the light curve header; falling "
+            "back on the TIC contamination ratio (Rcont = "
+            + str(contratio)
+            + "), which was measured in the TIC aperture, not this "
+            "pipeline's"
+        )
+        return 1.0 / (1.0 + contratio), "Rcont"
+
+    print(
+        "WARNING: no CROWDSAP in the light curve header and no TIC "
+        "contamination ratio -- leaving the light curve as delivered "
+        "(no deblending undone)"
+    )
+    return 1.0, "none"
+
+
+def reblend_lightcurve(lc, crowdsap):
+    """Put back the contaminating flux the pipeline subtracted.
+
+    SPOC/PDC removes crowding *additively*, then divides by the aperture
+    throughput (Kepler Data Processing Handbook, KSCI-19081):
+
+        F_pdc = (F_sap - (1 - CROWDSAP) * median(F_sap)) / FLFRCSAP
+
+    Taking the median of both sides gives
+
+        median(F_sap) = FLFRCSAP * median(F_pdc) / CROWDSAP
+
+    and substituting back inverts the correction exactly:
+
+        F_sap = FLFRCSAP * (F_pdc + (1 - CROWDSAP)/CROWDSAP * median(F_pdc))
+
+    The FLFRCSAP factor is a constant, so it cancels under normalize(); the
+    additive term does not. In normalized units the whole operation is
+
+        f_blended = CROWDSAP * f + (1 - CROWDSAP)
+
+    so a transit of undiluted depth d comes back at depth CROWDSAP * d, and
+    the errors scale by CROWDSAP with it (the transit S/N is unchanged).
+    That dilution is the whole point of the -u flag: the fit then models it
+    with its own dilution parameter.
+
+    The old code multiplied the flux by the constant (1 + Rcont) instead,
+    which normalize() divided straight back out -- a no-op that left users
+    with undiluted depths while their file said otherwise.
+    """
+    if not np.isfinite(crowdsap) or crowdsap <= 0.0 or crowdsap > 1.0:
+        raise ValueError("crowdsap must be in (0, 1]; got " + repr(crowdsap))
+    if crowdsap == 1.0:
+        # no contaminating flux in the aperture: nothing to put back
+        return lc
+
+    median = np.nanmedian(np.asarray(lc.flux.value, dtype=float))
+    if not np.isfinite(median) or median <= 0.0:
+        raise ValueError(
+            "cannot undo deblending: the median flux is "
+            + repr(median)
+            + ", so the contaminating flux level is undefined"
+        )
+
+    excess = (1.0 - crowdsap) / crowdsap * median
+    unit = getattr(lc.flux, "unit", None)
+    if unit is not None:
+        excess = excess * unit
+    return lc + excess
+
+
 def run(args):
     """Download and write light curves for the parsed argparse namespace."""
     import lightkurve as lk
-    import numpy as np
 
-    # undo the deblending applied to TESS/Kepler lightcurves
+    # undo the deblending applied to TESS/Kepler lightcurves.
+    # contratio is None for a lightcurve that must be left as delivered;
+    # otherwise it is the TIC contamination ratio, used only as a fallback
+    # when the lightcurve header has no CROWDSAP.
     if args.undeblend:
-        # this feature probably won't be used often. don't make it a dependency if not used
-        from astroquery.vizier import Vizier
-
-        v = Vizier(
-            columns=["TIC", "Ncont", "Rcont", "_r"], catalog="IV/39/tic82"
-        ).query_object(args.id)[0]
-        ndx = np.argmin(v["_r"])
-        v = v[ndx]
-
-        if str(v["Rcont"]) == "--":
-            if args.verbose:
-                print("No deblending to undo")
-            og_contratio = 0.0
-        else:
-            if args.verbose:
-                print(
-                    "Undoing deblending for "
-                    + str(v["Ncont"])
-                    + " stars ("
-                    + str(v["Rcont"])
-                    + ")"
-                )
-            og_contratio = float(v["Rcont"])
+        og_contratio = tic_contamination_ratio(args.id, verbose=args.verbose)
         file_ext = ".undeblended.dat"
     else:
         file_ext = ".dat"
-        contratio = 0.0
+        contratio = None
 
     t0 = datetime.datetime(2000, 1, 1)
     jd0 = 2451544.5
@@ -160,10 +288,17 @@ def run(args):
         pass
     else:
         if len(unique_ids) > 1 and "TIC" in args.id:
-            match = np.where(search_results.target_name == args.id[3:])
-            if len(match) > 0:
-                search_results = search_results[match]
-                unique_ids = list(set(search_results.target_name))
+            match = np.where(search_results.target_name == args.id[3:])[0]
+            if len(match) == 0:
+                raise ValueError(
+                    "No light curves match the requested TIC ID "
+                    + args.id
+                    + ". The search returned these target names: "
+                    + ", ".join(sorted(str(u) for u in unique_ids))
+                    + ". Specify the target by one of those TIC IDs."
+                )
+            search_results = search_results[match]
+            unique_ids = list(set(search_results.target_name))
 
         if len(unique_ids) > 1:
             print("Multiple IDs match " + args.id)
@@ -253,6 +388,24 @@ def run(args):
                         )[0]
                     if len(match3) == 1:
                         to_download.append(match[match2[match3[0]]])
+                    else:
+                        # Every other skip in this loop prints; this one
+                        # dropped a whole sector from the download in
+                        # silence, so the light curve came back short with
+                        # no indication that anything was missing.
+                        print(
+                            f"WARNING: {len(match3)} products remain for "
+                            f"sector {sector} after author priority "
+                            f"filtering; skipping this sector.  Authors: "
+                            f"{list(search_results[match[match2]].author)}"
+                        )
+                if len(match2) == 0:
+                    print(
+                        f"WARNING: no product with a recognized exposure "
+                        f"time for sector {sector}; skipping it. "
+                        f"Exposure times offered: "
+                        f"{list(search_results[match].exptime.value)}"
+                    )
 
     for search_result in search_results[to_download]:
         author = search_result.author[0]  # SPOC, QLP, etc
@@ -266,7 +419,7 @@ def run(args):
             filter = "Kepler"
             telescope = "Kepler"
             if args.undeblend:
-                contratio = 0.0
+                contratio = None
                 file_ext = ".dat"
                 print(
                     "WARNING: undeblending not supported for Kepler -- ignoring -u option"
@@ -283,7 +436,7 @@ def run(args):
             filter = "Kepler"
             telescope = "Kepler"
             if args.undeblend:
-                contratio = 0.0
+                contratio = None
                 file_ext = ".dat"
                 print(
                     "WARNING: undeblending not supported for Kepler -- ignoring -u option"
@@ -333,7 +486,21 @@ def run(args):
 
         lc = search_result.download()
         lc = lc.remove_nans()
-        lc *= 1.0 + contratio
+        if contratio is not None:
+            # must happen before normalize(): the correction is additive,
+            # and normalize() would divide any multiplicative one back out
+            crowdsap, source = crowding_fraction(lc, contratio)
+            lc = reblend_lightcurve(lc, crowdsap)
+            if crowdsap < 1.0:
+                print(
+                    "Undoing deblending of "
+                    + sector
+                    + " with crowdsap = "
+                    + "%.6f" % crowdsap
+                    + " (from "
+                    + source
+                    + "); transit depths are diluted by that factor"
+                )
         lc = lc.normalize()
 
         time = np.array(lc.time.value) + bjd_offset

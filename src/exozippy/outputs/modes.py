@@ -37,6 +37,16 @@ from typing import Any, List, Optional
 
 import numpy as np
 
+from .autocorr import iact
+
+# Re-exported, not defined here: mode_suffix names both the per-mode LaTeX
+# macros (emitted in components/parameter.py, referenced in outputs/latex.py)
+# and the per-mode plot files (run.py), so it has to be spelled in a module
+# components/ can import -- see the "Macro name pieces" note in texutils.py.
+# Kept importable from here because `mode_suffix` reads as a modes concept
+# at every call site.
+from .texutils import mode_suffix  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # Draws whose |lp| exceeds this are numerically broken, not a mode.  A real
@@ -50,6 +60,19 @@ DEFAULT_LP_ABS_MAX = 1e12
 # runaways pinned at bounds (observed values: 1e3..1e27 vs bulk ~1e2).
 DEFAULT_Z_MAX = 50.0
 
+# lp exemption from the raw-z filter: a draw far outside the bulk in raw
+# space but with lp this close to (or better than) the z-passing bulk's
+# median is a CANDIDATE MODE, not a runaway, and is routed into clustering
+# instead of being invalidated.  Every genuine runaway population observed
+# to date sat >~1000 nats below the bulk (saturated-plateau states;
+# lp-insane states are caught by DEFAULT_LP_ABS_MAX separately), while a
+# real minority mode can sit ABOVE the bulk -- DC2018 event 128's true
+# s~0.98 branch was found by 2/54 chains at +500 nats and was discarded as
+# 'raw-z invalid', reporting the wrong branch as a clean unimodal fit.  A
+# genuinely-real mode more than this many nats BELOW the dominant one
+# carries e^-50 of its mass and loses nothing by staying flagged.
+DEFAULT_LP_EXEMPT_MARGIN = 50.0
+
 # With the runaway-lp cancellation bug fixed, ONLY a model or sampler bug
 # should produce invalid draws.  Above this fraction of the trace, run.py
 # refuses to emit final tables (evidence -- trace + mode report -- is written
@@ -58,21 +81,85 @@ DEFAULT_MAX_INVALID_FRAC = 0.01
 
 _INVALID_REASONS = ("nonfinite-raw", "nonfinite-lp", "lp-ceiling", "raw-z")
 
+# Below this effective sample size the occupancy weights carry an error bar
+# comparable to the weights themselves and the report says so in plain
+# language.  ADVISORY ONLY: the weights are still reported, with their
+# uncertainty, and nothing is substituted or suppressed -- the project warns
+# rather than blocks.  N_eff = 30 puts sigma_w at ~0.09 for w = 0.5.
+DEFAULT_MIN_WEIGHT_ESS = 30.0
 
-def _idx_to_words(n):
-    words = {
-        "0": "zero",
-        "1": "one",
-        "2": "two",
-        "3": "three",
-        "4": "four",
-        "5": "five",
-        "6": "six",
-        "7": "seven",
-        "8": "eight",
-        "9": "nine",
-    }
-    return "".join(words[char] for char in str(n))
+
+# Outcome vocabulary for one mode-identification attempt, following the
+# status-dict pattern of outputs/ledger.py's hot-chain search (HOT_*) and
+# outputs/evidence.py's per-mode bridge estimates (EV_*).
+#
+# The distinction that matters is between the last two.  Both end with
+# ``mode_report = None`` at the call site, and until 2026-08-12 that was the
+# ONLY thing the caller could see -- so the numerical-validity gate below,
+# which returns immediately on a None report, was bypassed in exactly the
+# worst case: EVERY draw rejected.  A trace with 1.1% invalid draws refused
+# to emit tables while a trace with 100% invalid draws emitted a full set
+# that read as clean (review item 3.17).  MODE_NO_VALID_DRAWS is the signal
+# that separates "the draws are unusable" from "we could not tell you
+# anything, for some other reason"; it can only be set from
+# NoValidDrawsError, which identify_modes raises from one place.
+MODE_OK = "ok"
+MODE_NO_VALID_DRAWS = "no-valid-draws"
+MODE_FAILED = "failed"
+
+
+class NoValidDrawsError(ValueError):
+    """Every draw in the trace failed identify_modes' validity filter.
+
+    A ValueError subclass, so any pre-existing ``except ValueError`` around
+    identify_modes keeps behaving as before.
+
+    It carries the counts because it is the only channel through which the
+    all-invalid case can reach ``check_invalid_frac``: there is nothing to
+    cluster, so no ModeReport exists to read ``n_invalid``/``invalid_frac``
+    off, and a bare exception would leave the gate with nothing to gate on.
+    """
+
+    def __init__(self, n_invalid, n_draws, reason_counts=None, per_chain=None):
+        self.n_invalid = int(n_invalid)
+        self.n_draws = int(n_draws)
+        self.invalid_frac = (
+            self.n_invalid / self.n_draws if self.n_draws else 0.0
+        )
+        self.reason_counts = dict(reason_counts or {})
+        self.per_chain_invalid = (
+            list(per_chain) if per_chain is not None else []
+        )
+        # The leading clause is load-bearing: callers and tests match on
+        # "no valid draws".
+        super().__init__(
+            f"identify_modes: no valid draws in trace -- all "
+            f"{self.n_invalid} draws ({self.invalid_frac:.2%}) failed the "
+            f"numerical-validity filter (reasons={self.reason_counts}, "
+            f"per-chain invalid counts={self.per_chain_invalid})"
+        )
+
+
+def _invalid_reason_hint(reason_counts):
+    """One actionable sentence about the dominant rejection reason."""
+    if not reason_counts:
+        return ""
+    dominant = max(reason_counts, key=lambda r: reason_counts[r])
+    if dominant == "nonfinite-raw":
+        return (
+            " The sampled parameter values themselves are non-finite, so "
+            "the sampler never produced a usable point: check the model's "
+            "logp at the start point and the sampler's step-size adaptation."
+        )
+    if dominant in ("nonfinite-lp", "lp-ceiling"):
+        return (
+            " The stored log-posterior is non-finite (or beyond "
+            f"|lp| = {DEFAULT_LP_ABS_MAX:g}) for every draw. The parameter "
+            "values may still look perfectly reasonable in the tables, "
+            "which is exactly why this cannot be allowed to pass quietly: "
+            "check the model's logp for NaN/inf-producing terms."
+        )
+    return ""
 
 
 def check_invalid_frac(
@@ -81,36 +168,137 @@ def check_invalid_frac(
     force=False,
     trace_path=None,
     modes_path=None,
+    status=None,
 ):
-    """Raise if ``mode_report``'s invalid-draw fraction exceeds the threshold.
+    """Raise if the trace's invalid-draw fraction exceeds the threshold.
 
     A trace this numerically broken must not silently emit final tables.
     Call this only after the trace and mode report have already been
     written to disk, so the raise preserves that evidence for forensics.
     ``force=True`` (config ``modes: {force: true}``) or a higher
     ``max_invalid_frac`` re-enables processing of a known-bad trace.
+
+    ``mode_report`` may be None, which is ambiguous on its own and so is
+    disambiguated by ``status`` (the dict build_mode_reports fills in):
+
+    * ``state == MODE_NO_VALID_DRAWS`` -- identify_modes rejected EVERY
+      draw and could not build a report.  That is a 100% invalid fraction,
+      the most extreme form of exactly what this gate exists to catch, and
+      it is gated on the same comparison and honours the same overrides as
+      a partially-invalid report.  Passing it silently is review item 3.17.
+    * anything else (including no status at all) -- mode identification
+      produced no report for a reason that says nothing about the draws'
+      numerical validity (an unclustered trace, a crash in the mode pass).
+      There is nothing to gate on and this returns, unchanged.
     """
-    if force or mode_report is None or not mode_report.n_invalid:
+    if mode_report is not None:
+        n_invalid = int(mode_report.n_invalid)
+        frac = mode_report.invalid_frac
+        reason_counts = dict(mode_report.invalid_reason_counts or {})
+        per_chain = None
+        all_invalid = False
+    elif status and status.get("state") == MODE_NO_VALID_DRAWS:
+        n_invalid = int(status.get("n_invalid", 0))
+        frac = float(status.get("invalid_frac", 0.0))
+        reason_counts = dict(status.get("reasons") or {})
+        per_chain = status.get("per_chain_invalid")
+        all_invalid = True
+    else:
         return
-    if mode_report.invalid_frac <= max_invalid_frac:
+
+    if not n_invalid or frac <= max_invalid_frac:
         return
+    if force:
+        logger.warning(
+            "modes: %d draws (%.2f%%) are numerically invalid, above "
+            "max_invalid_frac=%.2f%%, but `modes: {force: true}` was set -- "
+            "emitting tables from a trace known to be broken. reasons=%s",
+            n_invalid,
+            100 * frac,
+            100 * max_invalid_frac,
+            reason_counts,
+        )
+        return
+
     where = ""
     if trace_path or modes_path:
         where = f" The trace ({trace_path}) and mode report ({modes_path}) have already been written."
+    override = (
+        " Override with config `modes: {force: true}` (or raise "
+        "`modes.max_invalid_frac`) to re-process forensically."
+    )
+    if all_invalid:
+        raise RuntimeError(
+            f"identify_modes: ALL {n_invalid} draws ({frac:.2%}) were "
+            "rejected as numerically invalid, so no posterior mode could be "
+            "identified and NO summary of this trace is meaningful -- the "
+            "tables would describe draws that were all rejected. "
+            f"reasons={reason_counts}, per-chain invalid counts={per_chain}."
+            + _invalid_reason_hint(reason_counts)
+            + where
+            + " Re-run `exozippy-modes <config>` to inspect the trace "
+            "without raising." + override
+        )
     raise RuntimeError(
-        f"identify_modes: {mode_report.n_invalid} draws "
-        f"({mode_report.invalid_frac:.2%}) rejected as numerically invalid, "
+        f"identify_modes: {n_invalid} draws "
+        f"({frac:.2%}) rejected as numerically invalid, "
         f"exceeding max_invalid_frac={max_invalid_frac:.2%}. This indicates "
         "a model or sampler bug -- investigate before trusting any output."
         + where
-        + " Override with config `modes: {force: true}` (or raise "
-        "`modes.max_invalid_frac`) to re-process forensically."
+        + override
     )
 
 
-def mode_suffix(k):
-    """LaTeX-macro-safe suffix for mode ``k`` (0-based): 'modeone', ..."""
-    return "mode" + _idx_to_words(k + 1)
+def mode_status_to_text(status):
+    """Render a MODE_NO_VALID_DRAWS outcome for ``<prefix>_modes.txt``.
+
+    Mirrors ``ledger.hot_status_to_text``: returns "" for anything it has
+    nothing to say about, so callers can pass a status dict unconditionally.
+
+    Only the all-invalid state renders.  MODE_OK writes a real report (that
+    is ModeReport.to_text's job) and MODE_FAILED is deliberately left
+    byte-identical to its pre-3.17 behaviour -- a crash in the mode pass is
+    not evidence about the draws, and the file it would write here would be
+    the only place claiming otherwise.
+    """
+    if not status or status.get("state") != MODE_NO_VALID_DRAWS:
+        return ""
+    n_invalid = int(status.get("n_invalid", 0))
+    frac = float(status.get("invalid_frac", 0.0))
+    lines = [
+        "Posterior mode report",
+        "=====================",
+        "",
+        "*** NO VALID DRAWS ***",
+        "",
+        f"All {n_invalid} draws ({frac:.2%}) in this trace were rejected as",
+        "numerically invalid, so no mode could be identified and no mode",
+        "report exists. Any table or plot generated from this trace",
+        "describes draws that the validity filter rejected in full.",
+        "",
+        f"reasons: {status.get('reasons') or {}}",
+        f"per-chain invalid counts: {status.get('per_chain_invalid')}",
+    ]
+    hint = _invalid_reason_hint(status.get("reasons") or {})
+    if hint:
+        lines += ["", hint.strip()]
+    lines += [
+        "",
+        "This is a model or sampler bug, not a reporting problem. A live",
+        "fit refuses to write final tables in this state; this file was",
+        "written by a forensic re-processing run (exozippy-modes) or by a",
+        "run with `modes: {force: true}` set.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _fmt_pm(value, err, fmt="{:.4f}"):
+    """'0.7000 +/- 0.1400', or just the value when the error is unavailable."""
+    text = fmt.format(value)
+    if err is not None and np.isfinite(err):
+        text += " +/- " + fmt.format(err)
+    return text
 
 
 @dataclass
@@ -127,11 +315,31 @@ class ModeInfo:
     center: dict = field(
         default_factory=dict
     )  # feature var -> center (raw units)
+    center_scale: dict = field(
+        default_factory=dict
+    )  # feature var -> robust per-dim MARGINAL scale of the mode's own
+    # draws (raw units). The seed ledger's matching normalizes by this:
+    # a seed's curvature widths are CONDITIONAL scales, and on correlated
+    # posteriors the marginal median sits tens of conditional sigmas from
+    # the basin peak, so normalizing by the seed widths alone falsely
+    # rejects seeds whose basins plainly survived.
+    # 1-sigma on `weight`, whatever its provenance: identify_modes fills it
+    # from the mode indicator's effective sample size (occupancy weighting),
+    # and outputs.evidence.apply_evidence_weighting overwrites it with the
+    # lnZ-propagated value when evidence weights replace the occupancy ones.
+    weight_err: float = float("nan")
+    # The occupancy weight and its uncertainty are ALWAYS kept, even after
+    # evidence weighting overwrites `weight`: reporting the two side by side
+    # is what makes evidence weighting a usable cross-check on occupancy
+    # (agreement means the weights can be trusted; disagreement localizes the
+    # problem to ladder tuning or to the bridge proposal).
+    occ_weight: float = float("nan")
+    occ_weight_err: float = float("nan")
+    weight_ess: float = float("nan")  # effective draws behind occ_weight
+    weight_iact: float = float("nan")  # IACT of this mode's indicator series
     # Optional evidence-weighting fields (populated by
     # outputs.evidence.apply_evidence_weighting when modes: {weights: evidence}
-    # is requested and every mode's bridge estimate is trustworthy).  weight is
-    # then the softmax evidence weight and weight_err its propagated 1-sigma.
-    weight_err: float = float("nan")  # 1-sigma on weight (evidence weighting)
+    # is requested and every mode's bridge estimate is trustworthy).
     lnZ: float = float("nan")  # local log-evidence (bridge sampling)
     lnZ_err: float = float("nan")  # 1-sigma on lnZ
 
@@ -150,6 +358,19 @@ class ModeReport:
     notes: List[str] = field(default_factory=list)
     invalid_reason_counts: dict = field(default_factory=dict)
     invalid_per_chain: Optional[np.ndarray] = None
+    # Mode-change bookkeeping (see transition_stats).  These are counts of
+    # MODE changes in the stored draws, not the sampler's temperature-swap
+    # statistics; ladder_round_trips below carries the latter when the
+    # sampler recorded it, purely as context.
+    transitions_per_chain: Optional[np.ndarray] = None
+    n_round_trips: int = 0
+    # Storage thinning of the trace these labels came from.  1 = stored every
+    # sampler step.  thin_known=False means nothing recorded it and 1 was
+    # assumed, which the report says out loud rather than quietly implying.
+    thin_factor: int = 1
+    thin_known: bool = True
+    ladder_round_trips: Optional[int] = None
+    ladder_swap_rounds: Optional[int] = None
 
     @property
     def n_modes(self):
@@ -160,12 +381,40 @@ class ModeReport:
         return [m.weight for m in self.modes]
 
     @property
+    def weight_errs(self):
+        return [m.weight_err for m in self.modes]
+
+    @property
     def invalid_frac(self):
         n_total = self.labels.size
         return self.n_invalid / n_total if n_total else 0.0
 
+    @property
+    def n_chains_no_switch(self):
+        """Chains holding assigned draws that never changed mode."""
+        if self.transitions_per_chain is None:
+            return 0
+        has_draws = np.array(
+            [bool((row >= 0).any()) for row in np.atleast_2d(self.labels)]
+        )
+        return int(
+            ((np.asarray(self.transitions_per_chain) == 0) & has_draws).sum()
+        )
+
+    @property
+    def n_chains_with_draws(self):
+        return int(
+            sum(bool((row >= 0).any()) for row in np.atleast_2d(self.labels))
+        )
+
     def attach(self, idata):
-        """Store labels as posterior variable ``mode`` on the InferenceData."""
+        """Store labels as posterior variable ``mode`` on the InferenceData.
+
+        Idempotent, and deliberately re-callable: ``apply_evidence_weighting``
+        rewrites the weights and provenance on this report in place, so it
+        calls back here to keep ``idata.posterior['mode'].attrs`` from holding
+        the superseded occupancy values.
+        """
         import xarray as xr
 
         post = idata.posterior
@@ -176,8 +425,15 @@ class ModeReport:
         )
         da.attrs["n_modes"] = self.n_modes
         da.attrs["weights"] = [float(w) for w in self.weights]
+        da.attrs["weight_errs"] = [float(e) for e in self.weight_errs]
+        da.attrs["occupancy_weights"] = [
+            float(m.occ_weight) for m in self.modes
+        ]
         da.attrs["provenance"] = self.provenance
         da.attrs["n_invalid"] = int(self.n_invalid)
+        da.attrs["n_transitions"] = int(self.n_transitions)
+        da.attrs["n_round_trips"] = int(self.n_round_trips)
+        da.attrs["n_chains_no_switch"] = int(self.n_chains_no_switch)
         post["mode"] = da
         return idata
 
@@ -202,13 +458,25 @@ class ModeReport:
             lines.append("")
         lines.append(f"modes found: {self.n_modes}")
         lines.append(f"weight provenance: {self.provenance}")
-        lines.append(
-            f"inter-mode transitions (all chains): {self.n_transitions}"
-        )
+        lines.extend(self._mixing_lines())
         for m in self.modes:
             lines.append("")
             lines.append(f"mode {m.index + 1}:")
-            lines.append(f"  weight   = {m.weight:.4f}")
+            lines.append(f"  weight   = {_fmt_pm(m.weight, m.weight_err)}")
+            if np.isfinite(m.occ_weight) and np.isfinite(m.weight_ess):
+                extra = ""
+                if np.isfinite(m.lnZ):
+                    extra = (
+                        f"; evidence weight "
+                        f"{_fmt_pm(m.weight, m.weight_err)} "
+                        f"(lnZ = {_fmt_pm(m.lnZ, m.lnZ_err)})"
+                    )
+                lines.append(
+                    f"    occupancy weight "
+                    f"{_fmt_pm(m.occ_weight, m.occ_weight_err)} "
+                    f"from N_eff = {m.weight_ess:.1f} independent draws "
+                    f"(IACT {m.weight_iact:.1f}){extra}"
+                )
             lines.append(f"  n_draws  = {m.n_draws}")
             lines.append(
                 f"  lp med/max = {m.lp_med:.2f} / {m.lp_max:.2f}"
@@ -228,10 +496,90 @@ class ModeReport:
                 lines.append(f"  - {n}")
         return "\n".join(lines) + "\n"
 
+    def _mixing_lines(self):
+        """The mode-mixing block: how much the relative weights can be trusted.
+
+        Deliberately spells out what it is counting.  'Swap' is ambiguous in a
+        parallel-tempering run, so the mode-change counts and the ladder's own
+        temperature round trips are labelled separately and never added.
+        """
+        lines = [
+            f"inter-mode transitions (mode changes in the stored draws, "
+            f"all chains): {self.n_transitions}"
+            + (
+                f"; round trips (k -> j -> k): {self.n_round_trips}"
+                if self.n_modes > 1
+                else ""
+            )
+        ]
+        if self.transitions_per_chain is not None:
+            per = np.asarray(self.transitions_per_chain).tolist()
+            lines.append(f"  per chain: {per}")
+            lines.append(
+                f"  chains that never changed mode: "
+                f"{self.n_chains_no_switch}/{self.n_chains_with_draws}"
+            )
+        if self.thin_factor > 1:
+            lines.append(
+                f"  NOTE: draws are stored thinned by {self.thin_factor}, so "
+                f"the transition count above is a LOWER BOUND -- mode changes "
+                f"inside a thinning block are invisible.  N_eff below is "
+                f"measured on the stored series and is unaffected (thinning "
+                f"divides both the draw count and the IACT), or conservative "
+                f"once the thinning exceeds the correlation time."
+            )
+        elif not self.thin_known:
+            lines.append(
+                "  NOTE: the trace does not record its storage thinning; "
+                "these counts assume every sampler step was stored.  If it "
+                "was thinned, the transition count is a lower bound."
+            )
+        if self.ladder_round_trips is not None:
+            lines.append(
+                f"  for context, the sampler's own ladder statistic "
+                f"(temperature round trips of a replica, T=1 -> T=max -> "
+                f"T=1 -- NOT mode changes): {self.ladder_round_trips}"
+                + (
+                    f" over {self.ladder_swap_rounds} swap rounds"
+                    if self.ladder_swap_rounds is not None
+                    else ""
+                )
+            )
+        return lines
+
 
 # ----------------------------
 # internals
 # ----------------------------
+
+
+def _int_attr(idata, name):
+    """Integer posterior-group attribute, or None if the trace lacks it."""
+    try:
+        value = idata.posterior.attrs.get(name)
+    except AttributeError:
+        return None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trace_thinning(idata):
+    """Storage thinning of the trace: ``(thin_factor, known)``.
+
+    ``run.py`` stamps ``posterior.attrs['nthin']`` on every freshly sampled
+    trace; older traces carry nothing, and the difference matters -- consecutive
+    stored draws that are really ``t`` sampler steps apart make mode changes
+    look more independent than they are, so an unknown thinning is reported as
+    unknown rather than silently assumed to be 1.
+    """
+    value = _int_attr(idata, "nthin")
+    if value is None or value < 1:
+        return 1, False
+    return value, True
 
 
 def _feature_matrix(post, feature_vars):
@@ -381,12 +729,112 @@ def _dip_merge(X, labels, centers, merge_ratio):
 
 def _count_transitions(labels_2d):
     """Inter-mode label changes along each chain, skipping unassigned draws."""
-    n = 0
-    for row in labels_2d:
+    return int(transition_stats(labels_2d)[0])
+
+
+def transition_stats(labels_2d):
+    """Mode-change bookkeeping for a (chain, draw) label array.
+
+    Returns ``(n_transitions, per_chain, n_round_trips)``:
+
+    * ``n_transitions`` -- total inter-mode label changes along the chains,
+      skipping unassigned (-1) draws;
+    * ``per_chain`` -- the same count for each chain, because a chain that
+      never leaves one mode contributes **zero** information about the
+      relative weights no matter how many draws it holds;
+    * ``n_round_trips`` -- returns of the form k -> j -> k, counted on the
+      run-length-compressed visit sequence.  This is the stricter quantity:
+      a single one-way crossing tells you the two modes communicate, but only
+      a round trip says the chain sampled the ratio of their masses.
+
+    These are counts of MODE changes in the stored draws.  For a parallel
+    tempering run they are not the sampler's temperature-swap or ladder
+    round-trip statistics -- a T=1 replica can change mode precisely because
+    it swapped with a hotter rung, and it is the resulting mode change in the
+    stored T=1 draws that occupancy weighting rests on.
+    """
+    labels_2d = np.atleast_2d(np.asarray(labels_2d))
+    per_chain = np.zeros(labels_2d.shape[0], dtype=int)
+    round_trips = 0
+    for c, row in enumerate(labels_2d):
         assigned = row[row >= 0]
-        if assigned.size > 1:
-            n += int((np.diff(assigned) != 0).sum())
-    return n
+        if assigned.size < 2:
+            continue
+        change_at = np.flatnonzero(np.diff(assigned) != 0)
+        per_chain[c] = int(change_at.size)
+        # run-length-compressed sequence of visited modes
+        visits = assigned[np.concatenate(([0], change_at + 1))]
+        if visits.size >= 3:
+            round_trips += int((visits[:-2] == visits[2:]).sum())
+    return int(per_chain.sum()), per_chain, round_trips
+
+
+def mode_indicator_chains(labels_2d, mode):
+    """Per-chain 0/1 indicator series for ``mode``, over assigned draws only.
+
+    Unassigned (-1) draws are dropped rather than zeroed: they are rejected
+    runaways, not evidence that the chain was somewhere else.
+    """
+    out = []
+    for row in np.atleast_2d(np.asarray(labels_2d)):
+        assigned = row[row >= 0]
+        if assigned.size:
+            out.append((assigned == mode).astype(float))
+    return out
+
+
+def weight_ess(labels_2d, mode):
+    """Effective sample size behind ``mode``'s occupancy weight.
+
+    Occupancy weighting is unbiased when the sampler mixes between modes, but
+    its PRECISION is set by the number of independent mode transitions, not
+    by the number of draws: a 50000-draw run that changed mode five times
+    knows the weight to roughly 40%.  Treating the mode indicator as a time
+    series and dividing its length by its IACT is exactly that statement.
+
+    Returns ``(n_eff, tau)``.  ``outputs.autocorr.iact`` supplies both the
+    within-chain autocorrelation and the between-chain scatter of the chain
+    means, and the second term is what makes chains stuck in different modes
+    come out at ``n_eff ~ n_chains``, rather than ``n_eff = n_draws`` with a
+    spuriously tight weight.
+    """
+    segs = mode_indicator_chains(labels_2d, mode)
+    n_total = sum(s.size for s in segs)
+    if n_total == 0:
+        return 0.0, 1.0
+    tau = iact(segs)
+    return n_total / tau, tau
+
+
+def markov_indicator_iact(labels_2d, mode):
+    """IACT of the mode indicator under a two-state Markov approximation.
+
+    For a two-state chain with transition probabilities p01 (enter ``mode``)
+    and p10 (leave it), the indicator's IACT is exactly ``2/(p01+p10) - 1``.
+    Estimating p01/p10 from the observed one-step transition counts gives an
+    independent cross-check on the time-series estimate in ``weight_ess``:
+    the two should agree to within their sampling noise on a chain that is
+    close to Markov in the mode label.  Returns NaN when either state is
+    never entered (no transitions to estimate from).
+    """
+    n01 = n0 = n10 = n1 = 0
+    for row in np.atleast_2d(np.asarray(labels_2d)):
+        assigned = row[row >= 0]
+        if assigned.size < 2:
+            continue
+        ind = assigned == mode
+        a, b = ind[:-1], ind[1:]
+        n0 += int((~a).sum())
+        n1 += int(a.sum())
+        n01 += int((~a & b).sum())
+        n10 += int((a & ~b).sum())
+    if n0 == 0 or n1 == 0:
+        return float("nan")
+    p01 = n01 / n0
+    p10 = n10 / n1
+    if p01 + p10 <= 0:
+        return float("inf")
+    return 2.0 / (p01 + p10) - 1.0
 
 
 # ----------------------------
@@ -401,6 +849,7 @@ def identify_modes(
     max_modes: int = 8,
     z_max: float = DEFAULT_Z_MAX,
     lp_abs_max: float = DEFAULT_LP_ABS_MAX,
+    lp_exempt_margin: float = DEFAULT_LP_EXEMPT_MARGIN,
     merge_ratio: float = 0.5,
     subsample: int = 20000,
     seed: int = 20260711,
@@ -420,6 +869,9 @@ def identify_modes(
     max_modes : upper limit for the BIC scan.
     z_max : robust z-score threshold for the invalid-draw filter.
     lp_abs_max : |lp| above this marks a draw invalid (numerically broken).
+    lp_exempt_margin : a draw beyond z_max whose lp is within this many
+        nats of the z-passing bulk's median (or better) is exempted from
+        raw-z invalidation and clustered as a candidate mode.
     merge_ratio : density-dip merge threshold; higher merges more eagerly.
     subsample : cluster on at most this many draws (assignment of the rest
         is by nearest center); keeps k selection fast on huge traces.
@@ -486,6 +938,29 @@ def identify_modes(
         scale = np.where(mad > 0, mad, 1.0)
         z = np.abs((X - med) / scale)
         z_ok = np.nan_to_num(z, nan=np.inf).max(axis=1) <= z_max
+        # lp exemption: a z-failing draw whose lp is within
+        # lp_exempt_margin of the z-PASSING bulk's median (or better) is a
+        # candidate mode, not a runaway -- route it into clustering.  Real
+        # runaways (saturated-plateau states) sit >~1000 nats below the
+        # bulk; a true minority mode can sit ABOVE it (see
+        # DEFAULT_LP_EXEMPT_MARGIN).  Skipped when lp is unavailable.
+        if has_lp and (valid & z_ok).any():
+            lp_bulk_med = np.median(lp[valid & z_ok])
+            exempt = (
+                valid
+                & ~z_ok
+                & np.nan_to_num(lp >= lp_bulk_med - lp_exempt_margin)
+            )
+            n_exempt = int(exempt.sum())
+            if n_exempt:
+                notes.append(
+                    f"{n_exempt} draws beyond raw-z {z_max:g} kept as "
+                    f"candidate modes: their lp is within "
+                    f"{lp_exempt_margin:g} nats of the in-bulk median "
+                    f"({lp_bulk_med:.2f}) or better -- a displaced basin, "
+                    f"not a runaway."
+                )
+                z_ok |= exempt
         valid &= z_ok
         reasons[(reasons == "") & ~z_ok] = "raw-z"
 
@@ -516,7 +991,15 @@ def identify_modes(
             invalid_per_chain.tolist(),
         )
     if not valid.any():
-        raise ValueError("identify_modes: no valid draws in trace")
+        # Carries the counts so the caller's validity gate has something to
+        # gate on: no ModeReport can exist here, and a bare exception is
+        # indistinguishable from any other mode-pass failure (review 3.17).
+        raise NoValidDrawsError(
+            n_invalid,
+            n_samples,
+            reason_counts=invalid_reason_counts,
+            per_chain=invalid_per_chain.tolist(),
+        )
 
     # ---- standardize + cluster ------------------------------------------
     Xv = X[valid]
@@ -587,13 +1070,30 @@ def identify_modes(
             [(row == m).sum() / max((row >= 0).sum(), 1) for row in labels_2d]
         )
         center_raw = {}
+        center_scale_raw = {}
         sel_v = labels_valid == order[m]
         for jn, name in enumerate(dim_names):
-            center_raw[name] = float(np.median(Xv[sel_v, jn]))
+            col = Xv[sel_v, jn]
+            center_raw[name] = float(np.median(col))
+            # 1.4826 * MAD: robust marginal sigma of this mode along jn
+            center_scale_raw[name] = float(
+                1.4826 * np.median(np.abs(col - np.median(col)))
+            )
+        # Occupancy weight uncertainty.  The weight is a mean of the mode
+        # indicator, so its variance is w(1-w)/N_eff with N_eff = N/IACT --
+        # governed by the number of independent mode transitions, NOT by the
+        # number of draws.
+        w_m = float(w_assigned[m])
+        n_eff, tau_m = weight_ess(labels_2d, m)
+        sigma_w = (
+            float(np.sqrt(w_m * (1.0 - w_m) / max(n_eff, 1.0)))
+            if n_modes > 1
+            else 0.0
+        )
         modes.append(
             ModeInfo(
                 index=m,
-                weight=float(w_assigned[m]),
+                weight=w_m,
                 n_draws=int(sel.sum()),
                 lp_med=float(np.median(lp_m)) if lp_m.size else np.nan,
                 lp_max=float(lp_m.max()) if lp_m.size else np.nan,
@@ -602,11 +1102,27 @@ def identify_modes(
                 ),
                 per_chain_weight=per_chain,
                 center=center_raw,
+                center_scale=center_scale_raw,
+                weight_err=sigma_w,
+                occ_weight=w_m,
+                occ_weight_err=sigma_w,
+                weight_ess=float(n_eff),
+                weight_iact=float(tau_m),
             )
         )
 
     # ---- mixing diagnostics / weight provenance --------------------------
-    n_transitions = _count_transitions(labels_2d)
+    n_transitions, transitions_per_chain, n_round_trips = transition_stats(
+        labels_2d
+    )
+    thin_factor, thin_known = _trace_thinning(idata)
+    n_no_switch = int(
+        (
+            (transitions_per_chain == 0)
+            & np.array([bool((row >= 0).any()) for row in labels_2d])
+        ).sum()
+    )
+    min_ess = min((m_.weight_ess for m_ in modes), default=float("nan"))
     if n_modes <= 1:
         provenance = "unimodal"
         reliable = True
@@ -618,21 +1134,49 @@ def identify_modes(
         )
         enough_transitions = n_transitions >= 10 * (n_modes - 1)
         reliable = chains_visiting_all and enough_transitions
+        mixing = (
+            f"{n_transitions} mode changes in the stored draws, "
+            f"{n_round_trips} round trips, "
+            f"{n_no_switch}/{int((transitions_per_chain >= 0).sum())} chains "
+            f"never switched; N_eff for the weights >= {min_ess:.1f}"
+        )
         if reliable:
-            provenance = (
-                f"occupancy (validated: {n_transitions} inter-mode "
-                f"transitions; every chain visits every mode)"
-            )
+            provenance = f"occupancy (validated: {mixing})"
         else:
             provenance = (
-                "occupancy (UNRELIABLE: chains do not mix between modes -- "
-                "weights reflect initialization, not posterior mass; use "
-                "per-mode evidence weighting or a folded likelihood)"
+                f"occupancy (UNRELIABLE: chains do not mix between modes -- "
+                f"weights reflect initialization, not posterior mass; use "
+                f"per-mode evidence weighting or a folded likelihood) "
+                f"[{mixing}]"
             )
             notes.append(
                 "relative mode weights are NOT trustworthy: "
                 f"{n_transitions} inter-mode transitions; "
                 "see provenance"
+            )
+        # Advisory verdict, never a gate: the weights are always reported.
+        if not np.isfinite(min_ess) or min_ess < DEFAULT_MIN_WEIGHT_ESS:
+            worst = max(
+                (m_ for m_ in modes),
+                key=lambda m_: (
+                    m_.occ_weight_err
+                    if np.isfinite(m_.occ_weight_err)
+                    else -1.0
+                ),
+            )
+            notes.append(
+                f"mode-weight precision: the mode-label series is worth only "
+                f"N_eff ~ {min_ess:.1f} independent draws ({n_transitions} "
+                f"mode changes, {n_round_trips} round trips, "
+                f"{n_no_switch} chain(s) never switched), so the occupancy "
+                f"weights carry ~{worst.occ_weight_err:.2f} 1-sigma "
+                f"(mode {worst.index + 1}: "
+                f"{_fmt_pm(worst.occ_weight, worst.occ_weight_err)}). "
+                f"The weights above are still the best estimate available -- "
+                f"treat their ORDERING as informative and their VALUES as "
+                f"uncertain at that level. A longer run, a better-tuned "
+                f"temperature ladder, or per-mode evidence weighting "
+                f"(modes: {{weights: evidence}}) would tighten them."
             )
 
     report = ModeReport(
@@ -648,13 +1192,19 @@ def identify_modes(
         notes=notes,
         invalid_reason_counts=invalid_reason_counts,
         invalid_per_chain=invalid_per_chain,
+        transitions_per_chain=transitions_per_chain,
+        n_round_trips=n_round_trips,
+        thin_factor=thin_factor,
+        thin_known=thin_known,
+        ladder_round_trips=_int_attr(idata, "ptde_ladder_round_trips"),
+        ladder_swap_rounds=_int_attr(idata, "ptde_swap_rounds"),
     )
     if attach:
         report.attach(idata)
     logger.info(
         "identify_modes: %d mode(s), weights=%s, %s",
         report.n_modes,
-        [f"{w:.3f}" for w in report.weights],
+        [f"{m_.weight:.3f}+/-{m_.weight_err:.3f}" for m_ in report.modes],
         provenance,
     )
     return report

@@ -11,14 +11,14 @@ import pytensor.tensor as pt
 
 from exozippy.components.instrument import Instrument
 
-from . import physics
-
 
 class RVInstrument(Instrument):
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Instrument Parameters"
-        self.units = [c.get("unit", u.m / u.s) for c in self.config]
+        self.units = [
+            self._parse_rv_unit(i, c) for i, c in enumerate(self.config)
+        ]
         # Which star the RVs are of; its Doppler signal is the sum over
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
@@ -44,6 +44,26 @@ class RVInstrument(Instrument):
     @property
     def prefix(self):
         return "rvinstrument"
+
+    def _parse_rv_unit(self, i, entry):
+        """Resolve a file's ``unit:`` key to an astropy Unit.
+
+        The YAML value is a plain string (``unit: km/s``), so it has to go
+        through ``u.Unit`` before ``load_data`` can call ``.to()`` on it --
+        exactly what ``astrometryinstrument`` does for its ``sep_unit``.
+        Anything astropy accepts as a velocity works; the default is m/s.
+        """
+        raw = entry.get("unit", "m/s")
+        name = entry.get("name", i)
+        try:
+            unit = u.Unit(raw)
+            unit.to(u.m / u.s)
+        except Exception as exc:
+            raise ValueError(
+                f"[{self.prefix}] {name}: unit: {raw!r} is not a velocity "
+                f"astropy can parse (e.g. 'm/s', 'km/s', 'km s-1')."
+            ) from exc
+        return unit
 
     @classmethod
     def get_utilities(cls):
@@ -106,27 +126,16 @@ class RVInstrument(Instrument):
 
     def load_data(self, system):
         """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
-        all_times, all_rvs, all_errs, inst_indices, all_detrend = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
+        blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
             # sort per file before anything is derived from it, keeping the
             # RVs, errors and detrend columns aligned by construction.
             df = self._read_data(i, roles=("time", "rv", "err"), detrend=True)
-            n_obs = len(df)
             factor = self.units[i].to(u.solRad / u.d)
-            all_times.append(df.iloc[:, 0].values)
-            all_rvs.append(df.iloc[:, 1].values * factor)
-            all_errs.append(df.iloc[:, 2].values * factor)
-            inst_indices.append(np.full(n_obs, i))
 
             m_s_factor = self.units[i].to(u.m / u.s)
             self.gamma_init[i] = np.mean(df.iloc[:, 1].values) * m_s_factor
@@ -134,45 +143,68 @@ class RVInstrument(Instrument):
                 df.iloc[:, 2].values, factor=m_s_factor
             )
 
-            if df.shape[1] > 3:
-                all_detrend.append(df.iloc[:, 3:].values.astype(float))
-            else:
-                all_detrend.append(np.empty((n_obs, 0)))
+            blocks.add(
+                i,
+                time=df.iloc[:, 0].values,
+                obs=df.iloc[:, 1].values * factor,
+                err=df.iloc[:, 2].values * factor,
+                df=df,
+            )
 
-        self.time = np.concatenate(all_times).astype(float)
-        self.rv = np.concatenate(all_rvs).astype(float)
-        self.err = np.concatenate(all_errs).astype(float)
+        # Shared accumulator: concatenation (time/rv/err), inst_map, the
+        # per-file row ranges, the block-diagonal detrend matrix, and the
+        # optional GP / robust-likelihood hooks.  self.err ends up in
+        # solRad/d while the GP amplitude and out_scale are declared in m/s,
+        # hence user_factor.
+        blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
 
-        # By naming this `inst_map`, the base class auto-generates `inst_map_tensor`
-        self.inst_map = np.concatenate(inst_indices).astype(int)
+        self.k_init = self._estimate_k_init()
 
-        self.n_total_obs = len(self.time)
-        self.k_init = (
-            ((u.solRad / u.d).to(u.m / u.s)) * np.sqrt(2.0) * np.std(self.rv)
+    def _estimate_k_init(self):
+        """Seed for the planetary RV semi-amplitude, in m/s.
+
+        ``sqrt(2) * std`` is the semi-amplitude of a sinusoid, but only when
+        the scatter it is measured on is the SIGNAL's.  Measured on the raw
+        concatenation of every instrument it is dominated instead by the
+        constant offsets BETWEEN instruments: one absolute-RV instrument
+        sitting at a ~30 km/s systemic velocity next to a relative one seeds
+        ``planet.K`` at ~20 km/s for an m/s-level planet.  So each file's own
+        ``gamma_init`` (its mean, already computed above) is removed first.
+
+        With a single instrument this is identical to the old expression --
+        subtracting a constant does not change a standard deviation.
+
+        Degenerate inputs (one point per file, a file whose RVs are all
+        identical, zero-variance data) leave no scatter to measure at all and
+        would seed K = 0, which the relaxation engine happily turns into a
+        ~1e-20 Mjup planet mass.  There the median error bar -- the white
+        noise level, i.e. the amplitude at the detection limit -- is the
+        honest answer, and 1 m/s the last resort if even that vanishes.
+        """
+        to_ms = (u.solRad / u.d).to(u.m / u.s)
+        gammas = np.asarray(self.gamma_init, dtype=float)
+        residual = self.rv * to_ms - gammas[self.inst_map]
+        k = np.sqrt(2.0) * np.std(residual)
+        if np.isfinite(k) and k > 0.0:
+            return float(k)
+
+        median_err = float(np.median(self.err)) * to_ms
+        if np.isfinite(median_err) and median_err > 0.0:
+            logger.warning(
+                "[%s] the RVs carry no scatter about their per-instrument "
+                "means; seeding K from the median error bar (%.3g m/s) "
+                "instead.",
+                self.prefix,
+                median_err,
+            )
+            return median_err
+
+        logger.warning(
+            "[%s] the RVs carry neither scatter nor usable error bars; "
+            "seeding K at 1 m/s.",
+            self.prefix,
         )
-
-        # Block Diagonal Matrix (shared builder keeps coeffs per-instrument)
-        (
-            self.detrend_matrix,
-            self.n_detrend_per_inst,
-            self.total_detrend_cols,
-        ) = self._build_block_detrend(all_detrend, self.n_total_obs)
-
-        # Optional per-file Gaussian process (no-op unless a file sets `gp:`).
-        # self.err is in solRad/d; the amplitude parameter is declared in m/s.
-        self._prepare_gp(
-            self.time,
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
-        # Optional per-file robust likelihood (no-op unless `likelihood:` is
-        # set).  Same unit conversion: out_scale is declared in m/s.
-        self._prepare_robust(
-            self.err,
-            self.inst_map,
-            user_factor=(u.solRad / u.d).to(u.m / u.s),
-        )
+        return 1.0
 
     def register_parameters(self, system):
         """Stage 2: Embed data-driven hints into the PyMC manifest."""
@@ -256,6 +288,16 @@ class RVInstrument(Instrument):
         # set `rm: <orbit_name>` -> the RV model above is unchanged byte for
         # byte (mirrors the GP opt-in). compute_rm_rv returns m/s; convert to
         # the internal RV unit (solRad/d) and add only to that file's rows.
+        #
+        # INDEX, do not pt.switch. A switch over the branch VALUES would
+        # evaluate the Hirano kernel at every instrument's timestamps and then
+        # throw away the rows it does not apply to -- the JAX where-trap
+        # (CLAUDE.md): a `where` whose unselected branch can be invalid poisons
+        # the gradient of the selected one too. Slicing the RM instrument's own
+        # rows makes the unselected rows unreachable by construction instead of
+        # merely masked, and is cheaper by exactly the fraction of the data
+        # that is not the RM file (the H2011 kernel is a 201 x 64 quadrature
+        # PER ROW; on a 40-of-73-row example it was 83% wasted work).
         if any(self.rm_orbit):
             from ..rm import compute_rm_rv, resolve_rm_indices
 
@@ -263,15 +305,22 @@ class RVInstrument(Instrument):
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
+                rows = np.flatnonzero(self.inst_map == i)
+                if rows.size == 0:
+                    continue
                 oidx, pidx, bidx = resolve_rm_indices(
                     system, oname, self.rm_band[i]
                 )
                 rm_ms = compute_rm_rv(
-                    system, time, oidx, pidx, bidx, model=self.rm_model[i]
-                )  # (N_obs,) m/s
-                rm_internal = rm_ms / rv_ms_per_internal
-                rv_model += pt.switch(
-                    pt.eq(self.inst_map_tensor, i), rm_internal, 0.0
+                    system,
+                    time[rows],
+                    oidx,
+                    pidx,
+                    bidx,
+                    model=self.rm_model[i],
+                )  # (len(rows),) m/s
+                rv_model = pt.inc_subtensor(
+                    rv_model[rows], rm_ms / rv_ms_per_internal
                 )
 
         # detrending
@@ -433,8 +482,24 @@ class RVInstrument(Instrument):
         return out
 
     def _instrument_gamma(self, point, i):
-        """The reference-point gamma for instrument i, in internal units."""
-        gamma_vals = np.atleast_1d(point.get(self.gamma.label, 0.0))
+        """The reference-point gamma for instrument i, in internal units.
+
+        The value comes from the point when it is there, else from the
+        gamma Parameter's own initval -- the same fallback
+        _point_to_plot_params uses for every other plotted parameter.
+
+        A ``point.get(label, 0.0)`` here silently substituted ZERO for any
+        parameter absent from the draws, and pinned (``sigma: 0``)
+        parameters are always absent (an all-fixed vector never becomes a
+        pm.Deterministic, so it is in neither model.deterministics nor the
+        posterior).  A fit with a pinned nonzero offset therefore plotted
+        every point of that instrument shifted by the whole gamma away
+        from the model curve the likelihood actually fit.
+        """
+        vals = point.get(self.gamma.label)
+        if vals is None:
+            vals = self.gamma.initval
+        gamma_vals = np.atleast_1d(vals)
         return gamma_vals[i] if i < len(gamma_vals) else gamma_vals[0]
 
     def _phased_arrays(self, system, point, col, o_idx):

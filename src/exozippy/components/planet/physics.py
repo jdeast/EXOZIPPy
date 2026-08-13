@@ -30,6 +30,18 @@ def calc_logg_from_mass(mass, radius):
 
 
 @register_physics
+def calc_mass_from_log_q(log_q, star_mass):
+    """Planet mass from the sampled log10 mass ratio and the host mass.
+
+    log_q: log10(m_planet / m_host), dimensionless
+    star_mass: solar masses
+    returns: solar masses (always positive -- see
+    Planet._resolve_mass_parameterization for when this coordinate applies)
+    """
+    return pt.power(10.0, log_q) * star_mass
+
+
+@register_physics
 def calc_m_total(planet_mass, star_mass):
     return pt.maximum(star_mass + planet_mass, 1e-9)
 

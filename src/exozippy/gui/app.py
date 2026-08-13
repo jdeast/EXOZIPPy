@@ -300,6 +300,16 @@ def _log_path(handle):
     return _prefix_path(handle) + ".log"
 
 
+def _console_path(handle):
+    """The captured stdout+stderr of the fit subprocess, when there is one.
+
+    This is where a crash that never reached the fit's own logger (an
+    unreadable config, an import error) leaves its traceback. Optional: a
+    hand-built handle (tests, a run adopted from elsewhere) has none.
+    """
+    return getattr(handle, "console_path", None)
+
+
 def _read_snapshot_meta(handle):
     """Latest partial.json snapshot metadata for the run, or None if absent."""
     path = os.path.join(handle.snapshot_dir, "partial.json")
@@ -317,20 +327,31 @@ def run_status_payload(handle):
     to auto-attach the terminal to, the results directory to link, and the
     latest downsampled-snapshot metadata (n_draws/max_rhat/min_ess/updated_at)
     for the progress strip and rhat sparkline.
+
+    `terminal` says the run is over (done/stopped/error, from RunHandle's own
+    liveness-checked phase) so the frontend can stop offering Stop and show
+    `error` -- a crashed run and a finished one must not look alike.
     """
+    from ..gui import TERMINAL_PHASES
+
     status = handle.status()
+    phase = status.get("phase")
     return {
         "active": True,
-        "phase": status.get("phase"),
+        "phase": phase,
+        "terminal": phase in TERMINAL_PHASES,
         "state": status.get("state", {}),
         "alive": status.get("alive"),
         "pid": status.get("pid"),
+        "run_id": status.get("run_id"),
+        "stale_status": bool(status.get("stale_status")),
         "returncode": status.get("returncode"),
         "error": status.get("error"),
         "prefix": handle.prefix,
         "config_path": handle.config_path,
         "cwd": handle.cwd,
         "log_path": _log_path(handle),
+        "console_path": _console_path(handle),
         "results_dir": _results_dir(handle),
         "snapshot": _read_snapshot_meta(handle),
     }
@@ -347,6 +368,35 @@ def _list_prefix_images(handle, pattern):
     return out
 
 
+def _params_file_of(config_path, cwd):
+    """Absolute path of the params file a run of ``config_path`` will read.
+
+    Read from the config on disk rather than taken from the caller: the fit
+    subprocess resolves ``config['parameter_file']`` relative to its own cwd
+    (System.__init__), so this is by construction the file the fit uses, and it
+    cannot drift from it the way a separately-passed path can. Returns None
+    when the config names no parameter_file or cannot be read -- the snapshot
+    is best-effort and never blocks a run.
+    """
+    path = (
+        config_path
+        if os.path.isabs(config_path)
+        else os.path.join(cwd, config_path)
+    )
+    try:
+        with open(path, "r") as fh:
+            config = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    params = config.get("parameter_file")
+    if not params:
+        return None
+    params = str(params)
+    return params if os.path.isabs(params) else os.path.join(cwd, params)
+
+
 def _snapshot_run_inputs(handle, params_path=None):
     """Copy the exact config/params used into the output dir for reproducibility.
 
@@ -354,6 +404,12 @@ def _snapshot_run_inputs(handle, params_path=None):
     carries a frozen copy of what produced it, even if the source yaml is later
     edited. Copying onto the source path is skipped. Best-effort: an I/O error
     never blocks the run. Returns the list of copies made.
+
+    ``params_path`` is an explicit override; with none given the config's own
+    ``parameter_file`` is followed. That default is the point: no caller ever
+    passed the argument, so the params half of the snapshot never happened, and
+    the params file is precisely where the start values, priors and fixed flags
+    that a rerun must reproduce are written.
     """
     results_dir = _results_dir(handle)
     try:
@@ -364,6 +420,9 @@ def _snapshot_run_inputs(handle, params_path=None):
     src_config = handle.config_path
     if not os.path.isabs(src_config):
         src_config = os.path.join(handle.cwd, src_config)
+
+    if params_path is None:
+        params_path = _params_file_of(src_config, handle.cwd)
 
     copied = []
     for src in (src_config, params_path):
@@ -509,12 +568,63 @@ def create_app(project_dir=None, initial_config=None):
             {name: spec.to_schema() for name, spec in specs.items()}
         )
 
+    def _reset_tune_session():
+        """Drop the Tune session (solved values + live evaluator worker).
+
+        Closing runs on a DETACHED thread, never inline: ``close()`` joins the
+        worker subprocess (up to ~2 s), and a solve may still be in flight
+        against it, so the request that triggered the reset must not wait. The
+        abandoned session object keeps the old worker alive only until that
+        thread finishes with it.
+        """
+        session = tune_state.get("session")
+        tune_state["session"] = None
+        if session is not None:
+            threading.Thread(target=session.close, daemon=True).start()
+
+    def _is_inside(directory, path):
+        """True if ``path`` lies inside ``directory`` (both realpath'd)."""
+        if path is None:
+            return False
+        try:
+            root = os.path.realpath(str(directory))
+            target = os.path.realpath(str(path))
+            return os.path.commonpath([root, target]) == root
+        except ValueError:  # different drives / unrelated roots
+            return False
+
     @app.post("/api/project/open")
     def project_open(req: OpenProjectRequest):
         try:
-            return JSONResponse(open_project(req.path))
+            listing = open_project(req.path)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+        # Opening a project must not leave the PREVIOUS project's state behind.
+        # Every piece of per-project state below outlived the switch, so
+        # project B showed A's solved parameters and A's plots under B's name
+        # until a re-Solve -- and an edit made against those stale values was
+        # committed into B's params file (review 2.11.1). Order matters: the
+        # heavy tune session goes first so its worker starts winding down while
+        # the rest is cleared.
+        _reset_tune_session()
+        preview_cache.clear()
+
+        doc = state["doc"]
+        if doc is not None and not _is_inside(listing["dir"], doc.config_path):
+            # A document from another project can no longer be what the GUI is
+            # editing: /api/doc, every doc command, and the Solve fallback all
+            # read this one slot, so keeping it would mean B's screen editing
+            # A's files. Unsaved edits are flushed to the autosave sidecar
+            # first, so re-opening A offers them back via `recovery`.
+            if doc.dirty:
+                try:
+                    doc.autosave()
+                except OSError:  # pragma: no cover - best effort
+                    pass
+            state["doc"] = None
+
+        return JSONResponse(listing)
 
     # --- config document editing (G8) ----------------------------------------
 
@@ -811,10 +921,12 @@ def create_app(project_dir=None, initial_config=None):
         except Exception as exc:  # start_run failures surface as a 400
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+        # None (the usual case) -> the snapshot follows the config's own
+        # parameter_file, which is what the fit subprocess reads.
         params_path = req.params
         if params_path and not os.path.isabs(params_path):
             params_path = os.path.join(cwd, params_path)
-        _snapshot_run_inputs(new_handle, params_path)
+        _snapshot_run_inputs(new_handle, params_path or None)
 
         run_state["handle"] = new_handle
         return JSONResponse(run_status_payload(new_handle))

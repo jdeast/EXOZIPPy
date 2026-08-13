@@ -24,7 +24,29 @@ from exozippy.gui import TERMINAL_PHASES
 
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
+# Poll budgets for the slow end-to-end test at the bottom. Their sum must sit
+# comfortably UNDER that test's @pytest.mark.timeout(900): if the guard fires
+# first, pytest-timeout kills the test instead of letting the poll report what
+# it was waiting for (and under xdist that used to surface as a nameless dead
+# worker). Warm, that test measures 52-84 s end to end; a cold pytensor compile
+# cache alone has been seen to multiply it ~6x, so the one budget that spans a
+# compile stays large and the post-stop ones -- which only cover wrap-up and
+# process reaping -- are sized to that work, not to the compile.
+#
+#   REACH_SAMPLING_TIMEOUT 360 s  subprocess + imports + model build + a COLD
+#                                 pytensor compile + tune + 100 draws
+#   GRACEFUL_EXIT_TIMEOUT  240 s  wrap-up: save partial trace + reports/plots
+#                                 (~20-30 s warm, so ~8x headroom)
+#   FORCE_EXIT_TIMEOUT      45 s  only reached after stop(force=True), which
+#                                 itself blocks ~50 s through second-SIGINT and
+#                                 SIGKILL; the terminal phase is then written
+#                                 (or synthesized by RunHandle.status) at once
+#
+# Worst case, counting the ~50 s each force stop blocks internally:
+# 360 + 240 + 50 + 45 + 50 = 745 s < 900 s.
 REACH_SAMPLING_TIMEOUT = 360.0
+GRACEFUL_EXIT_TIMEOUT = 240.0
+FORCE_EXIT_TIMEOUT = 45.0
 POLL_INTERVAL = 0.5
 
 
@@ -210,6 +232,90 @@ def test_run_snapshots_config_into_output_dir(client, monkeypatch, tmp_path):
     assert (tmp_path / "out" / "cfg.used.yaml").is_file()
 
 
+def test_run_snapshots_the_params_file_the_fit_will_read(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a config naming a parameter_file,
+    When POST /api/run runs with no explicit params argument,
+    Then that params file is snapshotted into the output dir too.
+
+    Reproduces review 2.11.2: every caller omitted the argument, so the params
+    branch of _snapshot_run_inputs never ran and the promised '.used' copy of
+    the file that actually sets the start values was never written.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text(
+        "prefix: out/RUN\nparameter_file: cfg.params.yaml\n"
+    )
+    (tmp_path / "cfg.params.yaml").write_text("star.A.teff: {initval: 5800}\n")
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
+
+    used = tmp_path / "out" / "cfg.params.used.yaml"
+    assert used.is_file()
+    assert used.read_text() == (tmp_path / "cfg.params.yaml").read_text()
+
+
+def test_run_snapshot_prefers_an_explicit_params_argument(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a request that names its own params file,
+    When POST /api/run runs,
+    Then that file is snapshotted instead of the config's parameter_file.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text(
+        "prefix: out/RUN\nparameter_file: cfg.params.yaml\n"
+    )
+    (tmp_path / "cfg.params.yaml").write_text("star.A.teff: {initval: 5800}\n")
+    (tmp_path / "other.params.yaml").write_text(
+        "star.A.teff: {initval: 6100}\n"
+    )
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    client.post(
+        "/api/run",
+        json={
+            "config": "cfg.yaml",
+            "params": "other.params.yaml",
+            "project_dir": str(tmp_path),
+        },
+    )
+
+    assert (tmp_path / "out" / "other.params.used.yaml").is_file()
+    assert not (tmp_path / "out" / "cfg.params.used.yaml").exists()
+
+
+def test_run_snapshot_survives_a_config_without_a_params_file(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a config with no parameter_file key (or an unreadable one),
+    When POST /api/run runs,
+    Then the config snapshot still happens and nothing raises.
+    """
+    from exozippy.gui import runner
+
+    (tmp_path / "cfg.yaml").write_text("prefix: out/RUN\n")
+    fake = _FakeHandle(tmp_path, config_path="cfg.yaml")
+    monkeypatch.setattr(runner, "start_run", lambda *a, **k: fake)
+
+    resp = client.post(
+        "/api/run", json={"config": "cfg.yaml", "project_dir": str(tmp_path)}
+    )
+    assert resp.status_code == 200
+    assert (tmp_path / "out" / "cfg.used.yaml").is_file()
+
+
 def test_run_image_rejects_outside_tree(client, monkeypatch, tmp_path):
     """
     Given an active run,
@@ -341,7 +447,8 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             )
 
         assert _poll_until(_sampling_with_progress, REACH_SAMPLING_TIMEOUT), (
-            "run never reported n_draws>=100 during sampling; last status: "
+            "run never reported n_draws>=100 during sampling within "
+            f"{REACH_SAMPLING_TIMEOUT}s; last status: "
             f"{client.get('/api/run/status').json()}"
         )
 
@@ -366,14 +473,20 @@ def test_endpoint_run_lifecycle_start_sampling_stop(kelt4_workdir, tmp_path):
             final_status.update(st)
             return st["phase"] if st.get("phase") in TERMINAL_PHASES else None
 
-        final_phase = _poll_until(_terminal, timeout=600.0)
-        if final_phase is None:
+        final_phase = _poll_until(_terminal, timeout=GRACEFUL_EXIT_TIMEOUT)
+        escalated = final_phase is None
+        if escalated:
             client.post("/api/run/stop", json={"force": True})
-            final_phase = _poll_until(_terminal, timeout=120.0)
+            final_phase = _poll_until(_terminal, timeout=FORCE_EXIT_TIMEOUT)
     finally:
         client.post("/api/run/stop", json={"force": True})
 
-    assert final_phase in {
-        "stopped",
-        "done",
-    }, f"non-terminal end: {final_phase}; status: {final_status}"
+    how = (
+        f"graceful stop timed out after {GRACEFUL_EXIT_TIMEOUT}s and was "
+        "force-escalated"
+        if escalated
+        else "graceful stop was honored"
+    )
+    assert final_phase in {"stopped", "done"}, (
+        f"non-terminal end: {final_phase}; {how}; last status: {final_status}"
+    )

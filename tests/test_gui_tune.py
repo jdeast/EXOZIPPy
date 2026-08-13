@@ -15,6 +15,7 @@ skipped when the optional 'gui' extra is absent.
 """
 
 import os
+import queue
 import shutil
 import time
 from pathlib import Path
@@ -286,3 +287,93 @@ def test_slider_edit_params_roundtrip_and_prepare(client, rvonly_project):
         system.prepare()
     finally:
         os.chdir(prev)
+
+
+def test_opening_a_project_resets_the_tune_session(
+    client, monkeypatch, tmp_path
+):
+    """
+    Given a solved (live) Tune session for project A,
+    When a different project is opened,
+    Then the session is dropped -- status is idle again and A's solved
+        parameters are no longer served under B.
+
+    Reproduces review 2.11.1: the stale session left project A's solved values
+    and plots on screen under B's name, and an edit made against them was
+    committed into B's params file.
+    """
+    monkeypatch.setattr("exozippy.gui.tune.EvaluatorWorker", _StubWorker)
+    client.post(
+        "/api/tune/solve",
+        json={"config": {"star": [{"name": "A"}]}, "params": {}},
+    )
+    assert _wait_live(client)["phase"] == "live"
+    assert (
+        "orbit.b.logP" in client.get("/api/tune/result").json()["parameters"]
+    )
+
+    other = tmp_path / "projectB"
+    other.mkdir()
+    assert (
+        client.post("/api/project/open", json={"path": str(other)}).status_code
+        == 200
+    )
+
+    st = client.get("/api/tune/status").json()
+    assert st["phase"] == "idle"
+    assert st["has_result"] is False
+    assert st["structural_hash"] is None
+    assert client.get("/api/tune/result").status_code == 409
+    assert (
+        client.post(
+            "/api/tune/eval", json={"path": "orbit.b.logP", "value": 0.6}
+        ).status_code
+        == 409
+    )
+
+
+def test_opening_a_project_drops_a_foreign_document(client, tmp_path):
+    """
+    Given a document open from project A,
+    When project B is opened,
+    Then the stale document is dropped, so an edit or a Solve cannot be
+        applied to A's files while B is on screen (a doc inside the newly
+        opened project is kept).
+    """
+    proj_a = tmp_path / "A"
+    proj_a.mkdir()
+    (proj_a / "a.yaml").write_text(
+        "prefix: out/A\nparameter_file: a.params.yaml\n"
+    )
+    (proj_a / "a.params.yaml").write_text("star.A.teff: {initval: 5800}\n")
+    proj_b = tmp_path / "B"
+    proj_b.mkdir()
+
+    client.post("/api/doc/open", json={"config_path": str(proj_a / "a.yaml")})
+    assert client.get("/api/doc").status_code == 200
+
+    # Re-opening A keeps its document.
+    client.post("/api/project/open", json={"path": str(proj_a)})
+    assert client.get("/api/doc").status_code == 200
+
+    # Opening B drops it: the next doc/open decides what B edits.
+    client.post("/api/project/open", json={"path": str(proj_b)})
+    assert client.get("/api/doc").status_code == 404
+
+
+def test_worker_await_raises_when_the_process_dies(monkeypatch):
+    """
+    Given a worker whose process is gone with no reply queued,
+    When the parent waits for a response,
+    Then it raises instead of blocking forever (a closed-mid-solve worker
+        would otherwise wedge the server's single-slot tune pool).
+    """
+    from exozippy.gui import tune
+
+    monkeypatch.setattr(tune, "_AWAIT_POLL_S", 0.01)
+    worker = tune.EvaluatorWorker()
+    worker._resp_q = queue.Queue()  # a plain queue: same get(timeout=) API
+    assert worker.is_alive() is False  # never started -> no process
+
+    with pytest.raises(RuntimeError, match="worker exited"):
+        worker.solve({}, {}, None)

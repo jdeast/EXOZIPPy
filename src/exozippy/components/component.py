@@ -24,6 +24,21 @@ class Component(ABC):
     Stage 6: build_likelihood()    - Defines observational Likelihoods and Potentials.
     """
 
+    # Does this component's parameter space routinely carry posterior-
+    # SUPPRESSED but physically plausible alternative solutions -- distinct
+    # basins with near-zero T=1 occupancy that a referee will still ask
+    # about?  Declared per component and read only in aggregate ("does any
+    # active component say yes"), so the sampler layer can default hot-rung
+    # retention (samplers._common.resolve_store_hot_chains) ON for the
+    # topologies where the suppressed-mode search earns its trace size and
+    # off for the ones where it does not.
+    #
+    # A flag here rather than a component-name test up in run.py for the
+    # same reason `supports_gp` is one: the higher-level code is
+    # component-agnostic by design, and a future component with degenerate
+    # solutions must be able to opt in without anyone editing the sampler.
+    expects_suppressed_modes = False
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config
@@ -259,6 +274,23 @@ class Component(ABC):
                     if hasattr(self, map_attr):
                         map_tensor = getattr(self, map_attr)
                         dep_nodes.append(ext_param.value[map_tensor])
+                    elif custom_slice:
+                        # A dep that NAMES its map ("star.mass[lens_map]")
+                        # asked for specific elements.  Falling back to the
+                        # unsliced vector does not mean "no slice" -- where
+                        # the lengths happen to match it broadcasts silently
+                        # and pairs the wrong bodies (a different star's mass
+                        # into a lens's theta_E).  The unnamed
+                        # "{comp}_map_tensor" convenience path keeps its
+                        # fallback.
+                        raise AttributeError(
+                            f"[{self.prefix}.{param_name}] dependency '{d}' "
+                            f"names the index map '{custom_slice}', but "
+                            f"{self.prefix} has no '{map_attr}'.  Build it in "
+                            f"build_maps() (build_tensor_maps converts "
+                            f"'{custom_slice}' automatically) or drop the "
+                            f"[...] from the dep."
+                        )
                     else:
                         dep_nodes.append(ext_param.value)
                 else:
@@ -285,6 +317,13 @@ class Component(ABC):
             expression=expression,
             element_links=element_links,
             user_params=self.config_manager.user_params,
+            source_file=getattr(self.config_manager, "param_file", None),
+            # Bound method: (component, param, element=i) -> "user" | "data" |
+            # "solved" | "default".  build_pymc quotes it when it refuses an
+            # out-of-bounds start, so the message blames the right input.
+            initval_source=getattr(
+                self.config_manager, "initval_source", None
+            ),
             **full_params,
         )
 

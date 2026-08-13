@@ -34,7 +34,7 @@ mulensinstrument:
   - name: "OGLE4"
     file: "n20100310.I.OGLE.OB140939.dat"
     zero_point: ""
-    observer_location: "earth" # earth, spitzer, kepler, roman, lat/lon, or filename of horizons ephemeris to interpolate
+    observer_location: "earth" # earth, spitzer, kepler, roman, a site name (CTIO), "lon_deg,lat_deg[,height_m]" (lon FIRST), or filename of horizons ephemeris to interpolate
     band: "OGLE_I"
     reference: true # peg all plotted data + model curves to this instrument's f_source/f_blend (defaults to the first instrument)
   - name: "Spitzer"
@@ -46,11 +46,38 @@ mulensinstrument:
 parameter_file: "ob140939.params.yaml"
 
 sampler:
-  method: nuts
-  tune: 4000              # generally need longer tuning for mulensing
-  draws: 5000
-  chains: 4
-  cores: 4
-  init: adapt_diag
-  target_accept: 0.99
+  # ptde_async: the params file seeds all FOUR Yee+2015 degenerate
+  # solutions (initval lists), and only PTDE round-robins its chains
+  # across seeds -- nuts would start every chain at seed 0. PTDE's
+  # tempering also lets chains cross between the degenerate basins;
+  # outputs/modes.py then reports each mode separately.
+  method: ptde_async
+  # PTDE: no separate tuning phase needed -- the seeds are polished to
+  # their basin optima before sampling and burn-in is trimmed at wrap-up
+  # (convergence.find_burnin); long draws instead, for round trips
+  # between the four degenerate basins.
+  tune: 0
+  draws: 50000
+  # Densified tempering ladder, validated empirically: auto (17 rungs)
+  # left adjacent-swap acceptance at 5-7% and 3 round trips -- the
+  # ladder froze below T ~ 75 and the mode weights were initialization
+  # artifacts. At 24 rungs (measured Lambda = 9.4; use > 2*Lambda+1
+  # with margin) swap acceptance is 50-65%, round trips flow, and the
+  # per-rung basin-occupancy profile is smooth equilibrium from T=200
+  # (50/50) to T=1 (~98/2) -- the mode weights become a real posterior
+  # statement (u0,-,- ~ 98%, agreeing with the ledger's Laplace
+  # estimate and Yee+2015's proper-motion argument).
+  n_temps: 24
+  # Keep thinned hot-rung draws: they detect posterior-suppressed modes
+  # (occupancy ~exp(-dlp/T)) for the seeded-solution ledger, so solutions
+  # nobody seeded still show up as "considered and rejected".  Left explicit
+  # for documentation only -- 'auto' (the default) already turns this on for
+  # a microlensing topology.  Costs ~37% of the trace file here.
+  store_hot_chains: true
   recompute_trace: True
+  # The seeds are literature solution estimates, not posterior draws,
+  # so force the pre-whitening polish, which 'auto' skips for hint-less
+  # multi-seed sets.  Quoted: bare `on` is a boolean to PyYAML (YAML 1.1) and
+  # the string "on" to the GUI's ruamel loader (YAML 1.2); both resolve to the
+  # same default step cap here, but only the quoted form says so unambiguously.
+  seed_polish: "on"

@@ -23,8 +23,16 @@ from exozippy.gui.status import GuiReporter, gui_enabled
 EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "kelt4"
 
 # Generous ceilings: subprocess start + import + graph compile + reaching the
-# first convergence check (100 stored draws) all happen inside these.
+# first convergence check (100 stored draws) all happen inside this one. It is
+# the only budget in these tests that spans a pytensor compile, so it stays big
+# enough for a COLD compile cache (~6x the warm cost has been measured).
 REACH_SAMPLING_TIMEOUT = 360.0
+# Waiting only for the child to write its FIRST status doc: interpreter start +
+# `import exozippy` + config load, i.e. everything before build_model. That is
+# ~15-30 s and involves no model compile, so it needs a fraction of the budget
+# above. Callers must keep their total under their own timeout mark -- a poll
+# that outlives its mark is killed by pytest-timeout and reports nothing.
+REACH_STATUS_FILE_TIMEOUT = 180.0
 POLL_INTERVAL = 0.5
 
 

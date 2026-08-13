@@ -166,10 +166,23 @@ def test_solve_is_repeatable_in_one_process(kelt4_inputs):
     """
     Given solve() must not leak module-level state,
     When it is called twice consecutively in one process,
-    Then both calls succeed and report the same parameter set.
+    Then both calls succeed, report the same parameter set, and leave the
+    caller's config and params dicts untouched.
+
+    The immutability half is load-bearing for the repeatability claim in
+    solve()'s docstring: ConfigManager writes through its parameter entries
+    (extract_links strips link expressions, finalize_user_params injects the
+    solved initval back), so any entry shared with the caller would make the
+    second call see different inputs from the first.
     """
-    # Arrange
+    # Arrange -- private copies: the module fixture is shared, so an earlier
+    # test's solve would otherwise have pre-mutated it and the assertions
+    # below would compare contaminated inputs against themselves.
     config, user_params, workdir = kelt4_inputs
+    config = copy.deepcopy(config)
+    user_params = copy.deepcopy(user_params)
+    config_before = copy.deepcopy(config)
+    params_before = copy.deepcopy(user_params)
 
     # Act
     first = solve(config, user_params, workdir)
@@ -179,6 +192,8 @@ def test_solve_is_repeatable_in_one_process(kelt4_inputs):
     assert set(first.parameters) == set(second.parameters)
     assert first.parameters["star.A.radius"]["provenance"]["label"] == "user"
     assert second.parameters["star.A.radius"]["provenance"]["label"] == "user"
+    assert user_params == params_before
+    assert config == config_before
 
 
 def test_solve_accepts_user_params_from_file(kelt4_inputs):

@@ -81,15 +81,24 @@ export interface SnapshotMeta {
 export interface RunStatus {
   active: boolean;
   phase: string;
+  // The run is over -- finished, stopped, or crashed. The server sets it from
+  // the handle's liveness-checked phase, so a crashed run never renders as the
+  // previous run's "done".
+  terminal?: boolean;
   state?: RunState;
   alive?: boolean;
   pid?: number;
+  run_id?: string | null;
+  stale_status?: boolean;
   returncode?: number | null;
   error?: string | null;
   prefix?: string;
   config_path?: string;
   cwd?: string;
   log_path?: string;
+  // Captured stdout+stderr of the fit subprocess: where a crash that never
+  // reached the fit's own logger leaves its traceback.
+  console_path?: string | null;
   results_dir?: string;
   snapshot?: SnapshotMeta | null;
 }

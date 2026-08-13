@@ -24,10 +24,16 @@ galacticmodel:
   - name: "OB08092"
     anchor_idx: 1
 
+band:
+  - name: "Cousins_I"
+    filter: "Cousins_I"
+
 mulensinstrument:
   - name: "OGLE4"
     file: "n20100309.I.OGLE4.ob08092.dat"
-    filter: "I"
+    # OGLE observes in Cousins I.  A bare "I" would name two rows of the
+    # filter alias table (Bessell and Cousins), so the band spells it out.
+    band: "Cousins_I"
     zero_point: ""
 
 parameter_file: "ob08092.params.yaml"

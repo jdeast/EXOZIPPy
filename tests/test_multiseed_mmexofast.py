@@ -31,7 +31,6 @@ class _RecordingConfigManager:
         self.system_config = system_config or {}
         self.user_params = user_params or {}
         self.seed_hint_sets = []
-        self.seed_hint_rank = None
         self.scale_hints = {}
 
     def add_hint(self, *args, **kwargs):
@@ -40,10 +39,8 @@ class _RecordingConfigManager:
     def add_scale_hint(self, path, scale):
         self.scale_hints[path] = scale
 
-    def add_seed_hints(self, seed_dicts, rank=None):
+    def add_seed_hints(self, seed_dicts):
         self.seed_hint_sets = seed_dicts
-        if rank is not None:
-            self.seed_hint_rank = rank
 
 
 def _make_binary_lens(mmexofast_path, finite_source=True):
@@ -112,6 +109,50 @@ def test_mmexofast_loader_missing_file_warns_and_noops(caplog):
 
     assert cfg_manager.seed_hint_sets == []
     assert any("mmexofast" in rec.message.lower() for rec in caplog.records)
+
+
+def test_mmexofast_loader_corrupt_file_raises_rather_than_seeding_nothing(
+    tmp_path,
+):
+    """
+    Given a lens config naming an mmexofast file that exists but is
+    truncated (a job killed mid-write),
+    When _load_mmexofast_seeds runs,
+    Then it raises CorruptMMEXOFASTFileError and pushes no seeds, instead of
+    warning once and letting the fit start from defaults.yaml. A user-named
+    file is not exozippy's to regenerate -- only run_or_load's own cache is
+    (tests/test_mmexofast_support.py covers that half).
+    """
+    from exozippy.components.mulensing.mmexofast_support import (
+        CorruptMMEXOFASTFileError,
+    )
+
+    good = {
+        "fits": [
+            {
+                "parameters": {
+                    "t_0": 2458554.9,
+                    "u_0": 0.14,
+                    "t_E": 18.2,
+                    "rho": 1e-3,
+                    "s": 0.98,
+                    "q": 1.1e-3,
+                    "alpha": -52.0,
+                },
+                "sigmas": {},
+            }
+        ]
+    }
+    bad = tmp_path / "mmexofast.json"
+    full = json.dumps(good, indent=4)
+    bad.write_text(full[: len(full) // 2])
+
+    lens, cfg_manager = _make_binary_lens(bad)
+    with pytest.raises(CorruptMMEXOFASTFileError) as exc:
+        lens._load_mmexofast_seeds()
+
+    assert "mmexofast.json" in str(exc.value)
+    assert cfg_manager.seed_hint_sets == []
 
 
 def test_mmexofast_key_absent_is_a_noop():

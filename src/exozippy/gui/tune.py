@@ -30,12 +30,17 @@ import gc
 import logging
 import multiprocessing
 import os
+import queue
 import signal
 import sys
 import threading
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# How long the parent waits on the response queue before re-checking that the
+# worker process is still alive (see EvaluatorWorker._next_message).
+_AWAIT_POLL_S = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +109,9 @@ def _do_solve(state, msg, resp_q):
 
         system = System(config, user_params=params)
         system.prepare()
-        export = system.config_manager.export_solution()
+        export = system.config_manager.export_solution(
+            derived_params=system.derived_params()
+        )
         # Relaxation done; the seconds-scale compile begins now. Ship the
         # data-only plots along so the GUI has something to draw meanwhile.
         resp_q.put(
@@ -158,7 +165,8 @@ def _do_eval(state, msg):
         for name, xy in traces.items():
             entry = {"x": _round_list(xy["x"]), "y": _round_list(xy["y"])}
             # dynamic_data specs re-ship their data traces, whose errors can
-            # move too (the mulens flux alignment is nonlinear in magnitude).
+            # move too (mulens re-aligns every data set onto the reference
+            # instrument's flux system and then plots delta-magnitudes).
             if xy.get("yerr") is not None:
                 entry["yerr"] = _round_list(xy["yerr"])
             packed[name] = entry
@@ -264,9 +272,31 @@ class EvaluatorWorker:
         self._req_q.put({"op": "eval", "path": path, "value": value})
         return self._await(None)
 
+    def _next_message(self):
+        """Next queue message, raising if the worker died without answering.
+
+        Polls rather than blocking forever on ``get()``: a worker that dies --
+        or is closed out from under an in-flight solve, which is what opening a
+        different project does -- never answers, and an unbounded get() would
+        wedge the caller. The server's tune pool has a single slot, so one such
+        stuck thread would block every later solve.
+        """
+        while True:
+            try:
+                return self._resp_q.get(timeout=_AWAIT_POLL_S)
+            except queue.Empty:
+                if self.is_alive():
+                    continue
+                try:
+                    # Last drain: the child may have answered as it exited,
+                    # with the payload still in flight through the pipe.
+                    return self._resp_q.get(timeout=_AWAIT_POLL_S)
+                except queue.Empty:
+                    raise RuntimeError("evaluator worker exited") from None
+
     def _await(self, on_progress):
         while True:
-            msg = self._resp_q.get()
+            msg = self._next_message()
             if "progress" in msg:
                 if on_progress:
                     # The full message: phase string plus any payload riding

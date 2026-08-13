@@ -1,11 +1,11 @@
 """Tests for the asynchronous PTDE sampler (ptde_async.py, hpc_optimization.txt PROMPT 13).
 
 Mirrors tests/test_ptde.py's structure and toy model so the two samplers'
-behavior can be compared directly. ptde_async is experimental (see its module
-docstring's statistical caveat on stale DE partners); these tests validate
-that it (a) produces well-formed output, (b) recovers known posterior
-moments on a toy model, and (c) survives edge cases (single core, eval
-timeouts, rung timing) without crashing or deadlocking.
+behavior can be compared directly. ptde_async is the recommended default for
+Op-based models (see its module docstring for the stale-DE-partner caveat);
+these tests validate that it (a) produces well-formed output, (b) recovers
+known posterior moments on a toy model, and (c) survives edge cases (single
+core, eval timeouts, rung timing) without crashing or deadlocking.
 """
 
 import multiprocessing as mp
@@ -273,3 +273,162 @@ def test_ptde_async_early_stop_via_maxtime():
     )
     assert idata.posterior.sizes["draw"] >= 1
     assert idata.posterior.sizes["draw"] <= 5000
+
+
+def test_ptde_async_warns_once_when_t1_lp_exceeds_plausibility_ceiling(
+    caplog,
+):
+    """
+    Given a plausibility ceiling set far below any lp this model can
+    legitimately reach,
+    When ptde_async_sample runs and a T=1 chain's accepted lp exceeds it,
+    Then a single loud warning is logged (not one per evaluation) naming the
+      offending chain and lp -- the same runaway-lp early-detection guard
+      the synchronous sampler has (the two used to drift here: sync had the
+      check, async silently lacked it; code_review_20260808.txt 1.15/sec 4).
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("WARNING", logger="exozippy.samplers.ptde_async"):
+        ptde_async_sample(
+            model,
+            system,
+            draws=20,
+            tune=20,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=1,
+            log_interval=100,
+            lp_plausibility_ceiling=0.1,
+        )
+    warnings = [
+        r.message
+        for r in caplog.records
+        if "plausibility ceiling" in r.message
+    ]
+    assert len(warnings) == 1, (
+        f"expected exactly one plausibility-ceiling warning, got "
+        f"{len(warnings)}: {warnings}"
+    )
+    assert "T=1 chain" in warnings[0]
+
+
+def test_ptde_async_freezes_gamma_when_first_chain_starts_recording(caplog):
+    """
+    Given adapt_gamma=True (the default) and asynchronous per-chain pacing,
+    When the first T=1 chain finishes its tune phase,
+    Then gamma is frozen (logged once) so recorded draws never come from a
+      kernel that slower chains' tune-phase proposals are still mutating
+      (code_review_20260808.txt 1.15c).
+    """
+    model = _simple_model()
+    system = _MinimalSystem()
+    with caplog.at_level("INFO", logger="exozippy.samplers.ptde_async"):
+        ptde_async_sample(
+            model,
+            system,
+            draws=30,
+            tune=30,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=2,
+            log_interval=1000,
+        )
+    freeze_msgs = [
+        r.message for r in caplog.records if "gamma: frozen at" in r.message
+    ]
+    assert len(freeze_msgs) == 1, (
+        f"expected exactly one gamma-freeze message, got {freeze_msgs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# review 2.9.4: n_chains = 2 (reachable at n_params = 1 with the default
+# 2 * n_params) has no valid DE move.
+# ---------------------------------------------------------------------------
+
+
+def test_pick_two_raises_a_clear_error_below_three_chains():
+    """
+    Given a population of 2,
+    When a DE proposal tries to pick two OTHER members,
+    Then it raises with a message naming n_chains and the minimum.
+
+    Regression (notes/code_review_20260808.txt 2.9.4): this died inside
+    numpy as "Cannot take a larger sample than population when replace is
+    False", which says nothing about n_chains.
+    """
+    from exozippy.samplers._common import _pick_two
+
+    with pytest.raises(ValueError, match="two other population members"):
+        _pick_two(np.random.default_rng(0), 2, 0)
+    # three is enough to form a difference vector (degenerately: the two
+    # others are forced) and must still work
+    assert _pick_two(np.random.default_rng(0), 3, 0) in [(1, 2), (2, 1)]
+
+
+def test_default_n_chains_is_floored_above_the_de_minimum():
+    """
+    Given a one-parameter model, where the default n_chains = 2 * n_params
+      would be 2,
+    When the population size is resolved,
+    Then it is floored at MIN_DE_CHAINS so the DEFAULT can never land on a
+      population too small to make a DE move.
+    """
+    import logging
+
+    from exozippy.samplers._common import MIN_DE_CHAINS, resolve_n_chains
+
+    log = logging.getLogger("test")
+    assert resolve_n_chains(None, 1, "PTDE", log) == MIN_DE_CHAINS
+    # the default is untouched wherever it is already large enough
+    assert resolve_n_chains(None, 6, "PTDE", log) == 12
+
+
+def test_explicitly_requesting_two_chains_raises_rather_than_being_bumped():
+    """
+    Given a user explicitly asking for n_chains = 2,
+    When the population size is resolved,
+    Then it RAISES with a message explaining why -- quietly running a
+      different sampler than the one requested is worse than stopping, and
+      unlike the default case there is a human to tell.
+    """
+    import logging
+
+    from exozippy.samplers._common import resolve_n_chains
+
+    log = logging.getLogger("test")
+    with pytest.raises(ValueError, match="two OTHER population members"):
+        resolve_n_chains(2, 1, "PTDE-async", log)
+
+
+def test_one_parameter_model_samples_end_to_end_on_the_default_population():
+    """
+    Given a one-parameter model and no explicit n_chains -- exactly the
+      configuration that used to crash inside numpy,
+    When the async sampler runs,
+    Then it completes and returns MIN_DE_CHAINS chains of draws.
+    """
+    from exozippy.samplers._common import MIN_DE_CHAINS
+
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+
+    idata = ptde_async_sample(
+        model,
+        _MinimalSystem(),
+        draws=30,
+        tune=10,
+        n_temps=2,
+        T_max=4.0,
+        cores=1,
+        seed=5,
+        log_interval=10000,
+    )
+
+    assert idata.posterior.sizes["chain"] == MIN_DE_CHAINS
+    assert idata.posterior.sizes["draw"] == 30

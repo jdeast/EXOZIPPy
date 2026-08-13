@@ -1,72 +1,117 @@
+import warnings
+
 import astropy.units as u
 import MulensModel as mm
 import numpy as np
 import pytensor.tensor as pt
 import VBMicrolensing
-from astropy.coordinates import (
-    SkyCoord,
-    get_body_barycentric,
-    solar_system_ephemeris,
-)
-from astropy.time import Time
+from astropy.coordinates import SkyCoord
 from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
-# Cache Earth positions keyed on sorted unique times (immutable between MCMC steps).
-_earth_pos_cache = {}
+from exozippy.compat import patch_mulensmodel_method_order
+
+from .physics import (
+    _MM_NAN_ADVICE,
+    RHO_FLOOR,
+    S_FLOOR,
+    T_E_FLOOR,
+    clip_q_value,
+    floor_u_0_value,
+    require_mm_number,
+)
+
+# MulensModel dispatches magnification methods in PYTHONHASHSEED order, and
+# the VBMicrolensing backends are not order-independent, so identical inputs
+# give different answers in different processes.  This is the exozippy module
+# that owns the MulensModel import, so patch it here, before any Op can build
+# an mm.Model.  See exozippy/compat/mulensmodel_method_order.py.
+patch_mulensmodel_method_order()
 
 
-def _earth_xyz_at(times_np):
-    """Return (N,3) AU array of Earth barycentric positions, cached by times."""
-    times_np = np.asarray(times_np)
-    key = hash(times_np.tobytes())
-    if key not in _earth_pos_cache:
-        # Set lazily, not at import: the first set downloads the ~115 MB
-        # de430 kernel, and doing that at import time made `import exozippy`
-        # itself require network (and fail suite-wide when JPL was slow).
-        # Same pattern as ephemeris.get_observer_position.
-        solar_system_ephemeris.set("jpl")
-        t = Time(times_np, format="jd", scale="tdb")
-        _earth_pos_cache[key] = (
-            get_body_barycentric("earth", t).xyz.to("au").value.T
-        )
-    return _earth_pos_cache[key]
+def _clear_mm_satellite_cache():
+    """Drop MulensModel's class-level satellite-delta cache before each call.
 
-
-def _get_sat_coord(obs_pos_abs_np, times_np, cache):
-    """Build and cache a geocentric SkyCoord from absolute observer positions.
-
-    MulensModel's _get_delta_satellite computes -dot(satellite_skycoord, north),
-    so satellite_skycoord must be GEOCENTRIC (obs_abs - earth_actual), not absolute.
+    Trajectory._get_delta_satellite_results is keyed on (ra, dec, times)
+    ONLY -- it ignores the satellite positions themselves -- so two
+    evaluations sharing a time grid but carrying different observer
+    deviations (e.g. ground and satellite model curves on one plot grid)
+    would silently reuse the first observer's parallax deltas.  Clearing is
+    cheap next to the mm.Model rebuild this path already pays per call; the
+    speed-critical binary path (VBMDirectMagOp) has its own correctly-keyed
+    cache and never enters MulensModel.
     """
-    obs_pos_2d = np.atleast_2d(obs_pos_abs_np)
+    mm.Trajectory._get_delta_satellite_results.clear()
+
+
+def _dev_skycoord(obs_pos_np, cache):
+    """Build and cache a SkyCoord from Skowron+2011 geocentric deviations.
+
+    ``obs_pos_np`` are the observer's deviations from the linear Earth
+    trajectory anchored at t0_par (MulensInstrument._abs_to_delta) -- the
+    same array the symbolic path consumes.  Fed to MulensModel as
+    satellite_skycoord with parallax(satellite=True, earth_orbital=False):
+    _get_delta_satellite computes -dot(satellite_skycoord, north/east),
+    which on these deviations carries ALL parallax (annual + satellite),
+    exactly matching Lens.get_magnification.
+    """
+    obs_pos_2d = np.atleast_2d(obs_pos_np)
     key = (obs_pos_2d.shape, hash(obs_pos_2d.tobytes()))
     if key not in cache:
-        earth_xyz = _earth_xyz_at(times_np)
-        geocentric = obs_pos_2d - earth_xyz
         cache[key] = SkyCoord(
-            x=geocentric[:, 0] * u.au,
-            y=geocentric[:, 1] * u.au,
-            z=geocentric[:, 2] * u.au,
+            x=obs_pos_2d[:, 0] * u.au,
+            y=obs_pos_2d[:, 1] * u.au,
+            z=obs_pos_2d[:, 2] * u.au,
             representation_type="cartesian",
         )
     return cache[key]
 
 
+_BASE_LABELS = (
+    "lens.t_0",
+    "lens.u_0",
+    "lens.t_E",
+    "lens.pi_E_N",
+    "lens.pi_E_E",
+)
+
+
 def _base_mm_params(p):
-    """Sanitized parameters shared by all models: [t_0, u_0, t_E, pi_E_N, pi_E_E]."""
+    """Range-limited parameters shared by all models:
+    [t_0, u_0, t_E, pi_E_N, pi_E_E].
+
+    ``require_mm_number`` raises on a NaN instead of handing it to
+    MulensModel, which used to report whatever generic failure the NaN
+    happened to cause several frames away.  The caller's
+    ``except (ValueError, RuntimeError)`` turns it into the same all-NaN
+    answer as before, now under a message that names the parameter.  Finite
+    values, in range or out, are untouched.
+    """
+    t_0, u_0, t_E, pi_E_N, pi_E_E = (
+        require_mm_number(p[i], _BASE_LABELS[i]) for i in range(5)
+    )
     return {
-        "t_0": float(p[0]),
-        "u_0": float(np.sign(float(p[1])) * max(abs(float(p[1])), 1e-9)),
-        "t_E": float(max(float(p[2]), 1e-4)),
-        "pi_E_N": float(p[3]),
-        "pi_E_E": float(p[4]),
+        "t_0": t_0,
+        # Same floor, same expression as the symbolic path
+        # (Lens._get_safe_mm_params): both go through physics, so the two
+        # backends cannot disagree about where the model is defined.  This
+        # used to be a hard-coded 1e-9 against physics.U_0_FLOOR = 1e-6, so a
+        # fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer depending
+        # on which backend it was on.
+        "u_0": floor_u_0_value(u_0),
+        "t_E": float(max(t_E, T_E_FLOOR)),
+        "pi_E_N": pi_E_N,
+        "pi_E_E": pi_E_E,
     }
 
 
 def _safe_rho(value):
-    """rho <= 0 is unphysical and breaks finite-source methods; floor it."""
-    return float(max(float(value), 1e-9))
+    """Floor the source radius at physics.RHO_FLOOR.
+
+    One number, shared with the flux bootstrap's own copy of this clip, for
+    the same reason U_0_FLOOR is: two literals drift.
+    """
+    return float(max(float(value), RHO_FLOOR))
 
 
 def _build_pspl_model(p, coords, mag_method, use_rho=False):
@@ -80,10 +125,11 @@ def _build_pspl_model(p, coords, mag_method, use_rho=False):
         mm_params["rho"] = _safe_rho(p[5])
 
     model = mm.Model(parameters=mm_params, coords=coords)
-    # We supply geocentric satellite_skycoord, so satellite=True covers all
-    # parallax.  Annual Earth parallax (earth_orbital) needs t_0_par which is
-    # not in the Op param vector and would fail; its contribution is also
-    # already embedded in the geocentric conversion (satellite - earth_actual).
+    # The satellite channel is fed the Skowron+2011 geocentric deviations
+    # (see _dev_skycoord), which already contain the annual Earth term, so
+    # satellite=True covers ALL parallax.  earth_orbital stays False: it
+    # would double-count the annual term (and needs t_0_par, which is not
+    # in the Op param vector).
     model.parallax(earth_orbital=False, satellite=True, topocentric=False)
 
     if isinstance(mag_method, list):
@@ -116,18 +162,27 @@ def _build_binary_model(p, coords, mag_method, use_rho=False):
     if use_rho:
         mm_params["rho"] = _safe_rho(p[idx])
         idx += 1
-    mm_params["s"] = float(max(float(p[idx]), 1e-6))
-    mm_params["q"] = float(np.clip(float(p[idx + 1]), 1e-9, 100.0))
+    mm_params["s"] = float(max(float(p[idx]), S_FLOOR))
+    mm_params["q"] = clip_q_value(p[idx + 1], "lens.q")
     mm_params["alpha"] = float(p[idx + 2])
 
     model = mm.Model(parameters=mm_params, coords=coords)
+    # Same convention as _build_pspl_model: the satellite channel carries
+    # all parallax via the Skowron geocentric deviations.
     model.parallax(earth_orbital=False, satellite=True, topocentric=False)
 
     if isinstance(mag_method, list):
         model.set_magnification_methods(mag_method)
     elif mag_method == "auto_vbbl":
         # Keyed on the finite_source config flag, not the runtime rho value.
-        method = "VBM" if use_rho else "VBBL"
+        # Point source must NOT ask for VBBL/VBM: MulensModel's _check_methods
+        # only allows "point_source"/"point_source_point_lens" when the
+        # parameters carry no rho, and otherwise raises ValueError -- which
+        # perform() would swallow into an all-NaN (i.e. -inf logp) curve for
+        # every proposal.  "point_source" selects
+        # BinaryLensPointSourceMagnification, the exact binary point-source
+        # solver (it reproduces VBBL at rho -> 0 to machine precision).
+        method = "VBM" if use_rho else "point_source"
         model.set_magnification_methods([0.0, method])
     else:
         model.set_magnification_methods([0.0, mag_method])
@@ -161,6 +216,7 @@ class _MagOpBase(Op):
             bandpass  # None = no LD; str = apply u1 LD for this bandpass
         )
         self._coord_cache = {}
+        self._warned = False
 
     def infer_shape(self, node, input_shapes):
         return [input_shapes[1]]
@@ -171,7 +227,8 @@ class _MagOpBase(Op):
             model = self._builder(
                 p, self.coords, self.mag_method, self.use_rho
             )
-            sat_coord = _get_sat_coord(obs_pos_np, times_np, self._coord_cache)
+            sat_coord = _dev_skycoord(obs_pos_np, self._coord_cache)
+            _clear_mm_satellite_cache()
             with np.errstate(invalid="ignore", divide="ignore"):
                 if self.bandpass is not None:
                     model.set_limb_coeff_u(self.bandpass, float(p[-1]))
@@ -184,10 +241,26 @@ class _MagOpBase(Op):
                     A = model.get_magnification(
                         times_np, satellite_skycoord=sat_coord
                     )
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
             # Invalid parameter combination (e.g. NaN source position from extreme
             # parallax values during sampler exploration). Return NaN so the
             # likelihood evaluates to -inf and the sampler rejects the proposal.
+            #
+            # Warn once per Op instance: a *misconfigured* backend raises here
+            # on every single proposal, which is indistinguishable from a
+            # rejected proposal unless the first one is reported (this is
+            # exactly how the point-source-binary "VBBL" bug stayed hidden).
+            if not self._warned:
+                self._warned = True
+                warnings.warn(
+                    f"{type(self).__name__}: MulensModel raised "
+                    f"{type(exc).__name__}: {exc} -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal. "
+                    "If this repeats for every proposal the backend is "
+                    "misconfigured, not merely exploring bad parameters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A)
 
@@ -254,9 +327,10 @@ class VBMDirectMagOp(Op):
 
     Parallax convention mirrors the MulensModel Ops exactly (validated by
     tests/test_vbm_direct_vs_mulensmodel.py): observer positions arrive as
-    absolute barycentric AU, are converted to geocentric (obs - earth_actual),
-    projected on sky-plane north/east with a minus sign
-    (MulensModel Trajectory._get_delta_satellite), and applied as
+    Skowron+2011 geocentric deviations in AU (MulensInstrument._abs_to_delta,
+    the same array the symbolic path consumes), are projected on sky-plane
+    north/east with a minus sign (MulensModel
+    Trajectory._get_delta_satellite), and applied as
     delta_tau = +dN*pi_E_N + dE*pi_E_E, delta_beta = -dN*pi_E_E + dE*pi_E_N
     (Trajectory._project_delta).
 
@@ -315,6 +389,9 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
+        # Warn-once flag for the non-finite guard in _compute, mirroring
+        # _MagOpBase._warned.
+        self._warned = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
@@ -347,18 +424,18 @@ class VBMDirectMagOp(Op):
     def infer_shape(self, node, input_shapes):
         return [input_shapes[1]]
 
-    def _deltas(self, times_np, obs_pos_np):
-        """Cached parallax offsets (delta_N, delta_E) for a (times, obs) pair.
+    def _deltas(self, obs_pos_np):
+        """Cached parallax offsets (delta_N, delta_E) for a deviation array.
 
+        ``obs_pos_np`` are Skowron+2011 geocentric deviations (AU).
         Independent of the sampled parameters: depend only on epochs, event
         coordinates, and the observer ephemeris, so they are computed once and
         reused for every proposal.
         """
-        obs = np.atleast_2d(obs_pos_np)
-        key = (hash(times_np.tobytes()), obs.shape, hash(obs.tobytes()))
+        dev = np.atleast_2d(obs_pos_np)
+        key = (dev.shape, hash(dev.tobytes()))
         if key not in self._delta_cache:
-            geo = obs - _earth_xyz_at(times_np)
-            self._delta_cache[key] = (-geo @ self._north, -geo @ self._east)
+            self._delta_cache[key] = (-dev @ self._north, -dev @ self._east)
         return self._delta_cache[key]
 
     def _magnify(self, companions, x, y, rho, u1):
@@ -438,7 +515,52 @@ class VBMDirectMagOp(Op):
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
+    def _param_labels(self):
+        """Names of the entries of this Op's param vector, in order -- so the
+        non-finite guard below can say WHICH parameter failed rather than
+        just that something did."""
+        labels = list(_BASE_LABELS)
+        if self.use_rho:
+            labels.append("lens.rho")
+        for j in range(self.n_companions):
+            labels += [f"lens.s[{j}]", f"lens.q[{j}]", f"lens.alpha[{j}]"]
+        if self.bandpass is not None:
+            labels.append("band.u1")
+        return labels
+
     def _compute(self, p, times_np, obs_pos_np):
+        # Non-finite check FIRST: it is the explicit handler for a NaN
+        # parameter vector (return NaN magnifications -> logp = -inf ->
+        # proposal rejected), and running it before the unpacking below means
+        # clip_q_value never has to be the one to notice.  It used to sit
+        # after the unpacking, which only worked because np.clip passed NaN
+        # through silently.
+        #
+        # Warn once, naming the entries, for the same reason _MagOpBase warns
+        # once: a *misconfigured* model is non-finite on every proposal, which
+        # is indistinguishable from ordinary rejection unless the first one is
+        # reported.  This branch used to return NaN in complete silence.
+        bad = ~np.isfinite(np.asarray(p, dtype=float))
+        if np.any(bad):
+            if not self._warned:
+                self._warned = True
+                labels = self._param_labels()
+                named = ", ".join(
+                    f"{labels[i] if i < len(labels) else f'p[{i}]'}"
+                    f" = {float(p[i])!r}"
+                    for i in np.flatnonzero(bad)
+                )
+                warnings.warn(
+                    f"{type(self).__name__}: non-finite magnification "
+                    f"parameter(s) {named} -- returning NaN magnifications "
+                    "(logp = -inf) for this proposal.  If this repeats for "
+                    "every proposal the model is misconfigured, not merely "
+                    f"exploring bad parameters.  {_MM_NAN_ADVICE}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return np.full(len(times_np), np.nan)
+
         base = _base_mm_params(p)
         idx = 5
         rho = 0.0
@@ -446,21 +568,18 @@ class VBMDirectMagOp(Op):
             rho = _safe_rho(p[idx])
             idx += 1
         companions = []
-        for _ in range(self.n_companions):
+        for j in range(self.n_companions):
             companions.append(
                 (
-                    float(max(float(p[idx]), 1e-6)),
-                    float(np.clip(float(p[idx + 1]), 1e-9, 100.0)),
+                    float(max(float(p[idx]), S_FLOOR)),
+                    clip_q_value(p[idx + 1], f"lens.q[{j}]"),
                     float(np.radians(float(p[idx + 2]))),
                 )
             )
             idx += 3
         u1 = float(p[-1]) if self.bandpass is not None else None
 
-        if not np.all(np.isfinite(p)):
-            return np.full(len(times_np), np.nan)
-
-        dN, dE = self._deltas(times_np, obs_pos_np)
+        dN, dE = self._deltas(obs_pos_np)
         tau = (
             (times_np - base["t_0"]) / base["t_E"]
             + dN * base["pi_E_N"]
@@ -550,7 +669,10 @@ class _MagGradOp(Op):
         params, times_np, obs_pos_np, g = inputs
         out = np.zeros(params.shape, dtype=params.dtype)
         times_1d = np.atleast_1d(times_np)
-        sat_coord = _get_sat_coord(obs_pos_np, times_1d, self._coord_cache)
+        sat_coord = _dev_skycoord(obs_pos_np, self._coord_cache)
+        # One clear covers the whole finite-difference loop: every _calc
+        # below shares this sat_coord and time grid.
+        _clear_mm_satellite_cache()
         f_x = self._calc(params, times_1d, sat_coord)
         for i in range(len(params)):
             p_plus = params.copy()

@@ -114,7 +114,20 @@ def test_unrecognized_top_level_yaml_key_triggers_auditor_warning(
     system.star = star
 
     with pm.Model(name="model_test5") as model:
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper AND a start inside them.  The initval is
+        # required as of the out-of-bounds-start check: derived star.mass
+        # carries no defaults.yaml initval, so to_vec's fill made this
+        # vehicle's start 0.0 -- below the 0.1 lower bound it declares --
+        # and the old code silently clipped that phantom start onto the
+        # wall.  The subject of this test is the orphaned-key warning, not
+        # the start value, so the start is simply made explicit.
+        star.manifest = {
+            "mass": {"lower": 0.1, "upper": 250.0, "initval": 1.0}
+        }
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ACT
@@ -167,11 +180,18 @@ def test_user_boundary_overrides_tighten_but_never_expand_limits():
             label: {s["type"]: s["user"], s["other_type"]: s["other_val"]}
         }
 
-        # Inject the internal defaults directly into the base dictionary
+        # Inject the internal defaults directly into the base dictionary.
+        # The initval is required as of the out-of-bounds-start check: with
+        # none, to_vec's fill made the start 0.0, which the `lower: 0.5`
+        # scenario excludes -- and the old code silently clipped that
+        # phantom start onto the wall.  1.0 is inside every scenario's
+        # resolved bounds, so the subject of this test (which bound wins)
+        # is unchanged.
         cm = ConfigManager(user_params)
         cm.base_defaults[f"mass_{s['type']}"] = {
             s["type"]: s["internal"],
             s["other_type"]: s["other_val"],
+            "initval": 1.0,
             "unit": "",
             "internal_unit": "",
         }
@@ -295,7 +315,12 @@ def test_vectorized_overrides_apply_to_correct_indices():
 
     # ACT
     with pm.Model(name="model_vector") as model:
-        star.manifest = {"mass": {}}
+        # star.mass is DERIVED in production (mass = 10**logmass), so
+        # defaults.yaml gives it no bounds -- logmass carries the hard
+        # support.  This manifest entry deliberately makes it a FREE
+        # parameter as a test vehicle, and a free parameter must declare
+        # its own lower/upper.
+        star.manifest = {"mass": {"lower": 0.1, "upper": 250.0}}
         star.add_parameter(model=model, param_name="mass", system=None)
 
     # ASSERT
