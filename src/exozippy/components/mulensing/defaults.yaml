@@ -393,7 +393,7 @@ mulensinstrument:
     unit: ""
     internal_unit: ""
     latex: "k"
-    description: "flux error scaling"
+    description: "error scale"
   # Not sampled: realized as a Deterministic zp = m_SED + 2.5*log10(f_source)
   # with this Gaussian prior as a potential (see
   # mulensinstrument._build_sed_flux_constraint). Override per light curve

@@ -62,4 +62,4 @@ band:
     unit: ""
     internal_unit: ""
     latex: "A_T"
-    description: "Constant thermal emission from the planet (ppm)"
+    description: "Planet thermal emission"

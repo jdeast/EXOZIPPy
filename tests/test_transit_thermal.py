@@ -54,19 +54,17 @@ def test_load_data_fitthermal_true():
     assert band.fitthermal == [True]
 
 
-def test_register_parameters_thermal_pinned_when_no_band_opts_in():
+def test_register_parameters_thermal_absent_when_no_band_opts_in():
     """
     Given two bands, neither with fitthermal set,
     When register_parameters is called,
-    Then thermal's manifest override pins sigma=0 for every band, so the
-    parameter is fixed rather than sampled.
+    Then thermal never enters the manifest at all: the parameter (and its
+    table row) exists only when some band opts in with fitthermal: true.
     """
     band = _make_band([{}, {}])
     band.load_data(system=None)
     band.register_parameters(system=None)
-    assert "thermal" in band.manifest
-    overrides = band.manifest["thermal"]["overrides"]
-    assert overrides["sigma"] == [0.0, 0.0]
+    assert "thermal" not in band.manifest
 
 
 def test_register_parameters_thermal_free_only_for_opted_in_band():
@@ -393,7 +391,11 @@ def test_thermal_pinned_is_not_a_free_parameter(thermal_off_system):
     """
     system, model, point = thermal_off_system
     assert not any("band.thermal" in n for n in model.named_vars)
-    assert float(np.atleast_1d(system.band.thermal.value.eval())[0]) == 0.0
+    # No fitthermal anywhere: the parameter is not in the manifest at all
+    # (no table row), and the transit consumer's gate is False outright.
+    assert "thermal" not in system.band.manifest
+    assert not hasattr(system.band, "thermal")
+    assert system.band.thermal_may_be_nonzero() is False
 
 
 def _count_quad_solution_ops(node):
