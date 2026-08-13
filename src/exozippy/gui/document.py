@@ -35,6 +35,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from ..linking import LINKABLE_FIELDS, is_link_expression
+from ..yamlio import check_yaml_booleans
 
 # --- YAML round-trip machinery ------------------------------------------------
 
@@ -90,6 +91,22 @@ _YAML = make_yaml()
 
 def _load_yaml_text(text):
     return _YAML.load(text)
+
+
+def _load_user_yaml(path):
+    """Load a user file into a round-trip tree, refusing ambiguous booleans.
+
+    ruamel (YAML 1.2) reads ``finite_source: no`` as the truthy STRING "no"
+    while the fit's PyYAML (YAML 1.1) reads it as ``False`` -- so the editor
+    would show, and could save, the opposite of what the fit does. The shared
+    ``exozippy.yamlio`` guard refuses those spellings for both paths; it is
+    applied here, on the read from disk, and not in ``_load_yaml_text``, whose
+    other caller is the undo/redo round trip of text this module itself
+    dumped.
+    """
+    text = Path(path).read_text()
+    check_yaml_booleans(text, source=str(path))
+    return _load_yaml_text(text)
 
 
 def _dump_yaml_text(tree):
@@ -446,14 +463,14 @@ class ProjectDocument:
         used, resolved relative to the config file's directory.
         """
         config_path = Path(config_path)
-        config = _load_yaml_text(config_path.read_text())
+        config = _load_user_yaml(config_path)
         if params_path is None:
             pf = config.get("parameter_file")
             if pf:
                 params_path = config_path.parent / str(pf)
         params = CommentedMap()
         if params_path is not None and Path(params_path).exists():
-            params = _load_yaml_text(Path(params_path).read_text())
+            params = _load_user_yaml(Path(params_path))
         return cls(
             config,
             params,
