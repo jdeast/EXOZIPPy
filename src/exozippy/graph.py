@@ -46,6 +46,14 @@ def determine_pymc_build_order(active_components, config_manager):
                 expr_key = raw.get("expr_key")  # explicit key or None
             else:
                 expr_key = None  # None → free parameter, no expression
+            # NOTE: no further fallback here (see the comment above, in the
+            # dict branch). A concrete regression this caused: planet.beam's
+            # {"overrides": ...}-shaped "off"/beam_free manifest entries
+            # were wrongly treated as requesting the "default" expression
+            # (calc_beam_from_K, deps: ["K"]), so any orbit-less config (no
+            # RV, no K) failed to build even with beaming off. See
+            # tests/test_transit_beer.py's
+            # test_beam_off_does_not_require_K_no_orbit_config.
             expressions_dict = cfg.get("expressions", {})
 
             if expr_key is not None and expr_key in expressions_dict:
