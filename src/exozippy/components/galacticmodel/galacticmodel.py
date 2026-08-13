@@ -17,7 +17,6 @@ from exozippy.constants import (
     BULGE_DENSITY_X_0,
     BULGE_DENSITY_Y_0,
     BULGE_DENSITY_Z_0,
-    BULGE_GAMMA,
     BULGE_RC,
     BULGE_RC_WIDTH,
     BULGE_ROTATION_ANGULAR_VELOCITY,
@@ -794,20 +793,6 @@ class GalacticModel(Component):
             key=f"{self.prefix}.kinematic",
             rank=20,
         )
-
-        # check parameters for debugging
-        # pm.Deterministic(f"{self.prefix}.gal_x", x)
-        # pm.Deterministic(f"{self.prefix}.gal_y", y)
-        # pm.Deterministic(f"{self.prefix}.gal_z", z)
-        # pm.Deterministic(f"{self.prefix}.gal_r", r)
-        # pm.Deterministic(f"{self.prefix}.v_x", v_x)
-        # pm.Deterministic(f"{self.prefix}.v_y", v_y)
-        # pm.Deterministic(f"{self.prefix}.v_z", v_z)
-        # pm.Deterministic(f"{self.prefix}.v_r", v_r)
-        # pm.Deterministic(f"{self.prefix}.v_phi", v_phi)
-        # pm.Deterministic(f"{self.prefix}.L_disk", log_dens_disk + log_vel_disk)
-        # pm.Deterministic(f"{self.prefix}.L_bulge", log_dens_bulge + log_vel_bulge)
-        # pm.Deterministic(f"{self.prefix}.log_imf_weight", log_m_weight)
 
     def compile_plotters(self, model, system):
         pass
