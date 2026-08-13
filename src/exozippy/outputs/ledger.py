@@ -138,26 +138,20 @@ def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
             p0 = np.asarray(par.phys_from_raw(c), dtype=float)
             p_hi = np.asarray(par.phys_from_raw(c + sc), dtype=float)
             p_lo = np.asarray(par.phys_from_raw(c - sc), dtype=float)
-            # internal -> user units
-            factors = np.asarray(
-                par._get_conversion_factors(), dtype=float
-            ).reshape(-1)
-            # A SCALAR `unit:` normalizes to a one-element list in
-            # Parameter.__post_init__, so factors.size is 1 for every
-            # multi-element parameter -- and 1 broadcasts correctly.  The old
-            # `if factors.size != p0.size: factors = np.ones(...)` therefore
-            # fired for EVERY vector parameter and reported internal units
-            # under the user-unit label: radians labelled deg for orbit.omega
-            # / inc / bigomega / lam and star.ra / dec, off by 57.3x, in the
-            # rejected-modes table and the results CSV, as soon as a system
-            # had two orbits or two stars.
-            if factors.size not in (1, p0.size):
-                raise ValueError(
-                    f"[{name}] {factors.size} unit conversion factors for "
-                    f"{p0.size} elements -- cannot report physical units."
-                )
-            phys[name] = p0 / factors
-            phys_sigma[name] = 0.5 * np.abs(p_hi - p_lo) / factors
+            # internal -> user units.  Through Parameter.from_internal, and
+            # NOT by dividing by _get_conversion_factors: that factor is the
+            # internal -> user multiplier (config.py's get_conversion_factor
+            # is the reciprocal), so the division this line used to do was
+            # wrong by factor**2 for every converted parameter -- e.g. the
+            # planet mass in examples/hd80606 was reported as 1.45e-06
+            # jupiterMass for a start of 1.596, and every angle came out in
+            # units of 1/3283 degree.  A SCALAR `unit:` normalizes to a
+            # one-element list in Parameter.__post_init__, so the factor
+            # vector is size 1 for every multi-element parameter and
+            # broadcasts; a genuine per-element/element-count mismatch is
+            # rejected inside from_internal.
+            phys[name] = par.from_internal(p0)
+            phys_sigma[name] = par.from_internal(0.5 * np.abs(p_hi - p_lo))
             sampled_idx[name] = list(tf["sampled_idx"])
 
         records.append(

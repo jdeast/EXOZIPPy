@@ -149,14 +149,6 @@ class System(Component):
         for key, comp in self.active_components.items():
             logger.info(f"  {key} ({comp.n_elements})")
 
-        # ==========================================================
-        # THE WIRING PASS (Universal Topology)
-        # ==========================================================
-        entity_directory = {}
-        for comp_name, comp in self.active_components.items():
-            for idx, name in enumerate(comp.names):
-                entity_directory[name] = (comp, idx)
-
         # Structural fingerprint of the inputs, snapshotted HERE: after the
         # components have normalized their own config blocks (Mann/Torres
         # derive `name:` from their `star:` key in __init__), and before

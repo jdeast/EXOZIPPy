@@ -417,11 +417,9 @@ class Evaluator:
             )
 
         # user -> internal units
-        factors = np.atleast_1d(
-            np.asarray(par._get_conversion_factors(), dtype=float)
+        val_internal = float(
+            par.to_internal(float(value_in_user_units), index=elem)
         )
-        factor = factors[elem] if elem < factors.size else factors[0]
-        val_internal = float(value_in_user_units) / factor
 
         raw_key = f"{par.label}_raw"
         if raw_key not in raw_point:
