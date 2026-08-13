@@ -1307,6 +1307,28 @@ class Instrument(Component):
                 manifest[param] = dict(entry)
         return manifest
 
+    def _build_log10_deterministics(self, log_params):
+        """Expose the linear value of every log10-sampled parameter.
+
+        ``log_params`` is a ``{log_name: linear_name}`` table -- today
+        ``gp.GP_LOG_PARAMS`` and ``likelihood.LIKELIHOOD_LOG_PARAMS``, which
+        is why this is one function over two tables rather than two copies of
+        it.  Both features sample a positive quantity in log10 (see the
+        ``gp_*_log_q*`` convention) and both owe the posterior tables the
+        linear quantity the model actually uses; a parameter the topology
+        never built is skipped.  Returns the ``{linear_name: tensor}`` cache
+        the feature's own code reads back.
+        """
+        linear = {}
+        for log_name, lin_name in log_params.items():
+            param = getattr(self, log_name, None)
+            if param is None or param.value is None:
+                continue
+            linear[lin_name] = pm.Deterministic(
+                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
+            )
+        return linear
+
     def _build_gp_deterministics(self):
         """Record the linear value of every log-sampled hyperparameter.
 
@@ -1315,14 +1337,9 @@ class Instrument(Component):
         posterior tables and plots report the quantity the kernel actually
         uses, and caches the tensors for ``_gp_kernel``.
         """
-        self._gp_linear = {}
-        for log_name, lin_name in gp_support.GP_LOG_PARAMS.items():
-            param = getattr(self, log_name, None)
-            if param is None or param.value is None:
-                continue
-            self._gp_linear[lin_name] = pm.Deterministic(
-                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
-            )
+        self._gp_linear = self._build_log10_deterministics(
+            gp_support.GP_LOG_PARAMS
+        )
 
     def _gp_kernel(self, i):
         """The summed celerite2 kernel for element ``i``."""
@@ -1750,14 +1767,9 @@ class Instrument(Component):
         exposes ``t_nu`` as a Deterministic so posterior tables report the
         degrees of freedom the likelihood actually uses.
         """
-        self._robust_linear = {}
-        for log_name, lin_name in robust_support.LIKELIHOOD_LOG_PARAMS.items():
-            param = getattr(self, log_name, None)
-            if param is None or param.value is None:
-                continue
-            self._robust_linear[lin_name] = pm.Deterministic(
-                f"{self.prefix}.{lin_name}", pt.power(10.0, param.value)
-            )
+        self._robust_linear = self._build_log10_deterministics(
+            robust_support.LIKELIHOOD_LOG_PARAMS
+        )
 
     def _add_robust_likelihoods(self, name, mu, sigma, observed):
         """Add each robust file's likelihood term (from the dispatcher)."""
