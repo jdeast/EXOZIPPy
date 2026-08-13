@@ -220,11 +220,31 @@ def clip_q_value(q, label="lens.q"):
 #            (op._base_mm_params), so the two paths agree exactly.
 # U_0_FLOOR  A = (u^2+2)/(u*sqrt(u^2+4)) diverges as u -> 0, so the peak
 #            magnification of an exactly-central trajectory is infinite.  The
-#            floor is applied to |u_0| and the sign restored, which keeps the
-#            u_0 -> -u_0 reflection exact.  NOTE it is 1e-6 here and 1e-9 in
-#            op._base_mm_params: a pre-existing disagreement, deliberately left
-#            alone, because unifying them would move any fit that visits
-#            1e-9 <= |u_0| < 1e-6 -- a modelling change, not a sanitization one.
+#            floor is applied to |u_0| with the sign kept, which keeps the
+#            u_0 -> -u_0 reflection exact (a real degeneracy: ob140939 has four
+#            Yee+2015 basins that differ by a sign flip).  It is applied by
+#            apply_u_0_floor / floor_u_0_value below and NOWHERE else -- there
+#            is one number and one expression, on every path.
+#
+#            It used to be TWO numbers: 1e-6 here and a hard-coded 1e-9 in
+#            op._base_mm_params (and a third copy, also 1e-9, in the flux
+#            bootstrap), so a fit visiting 1e-9 <= |u_0| < 1e-6 got a different
+#            answer depending on which backend it was on.  Unified at the
+#            looser 1e-9: the floor is a validity limit, not a preference, so
+#            the model should be clamped as little as the arithmetic allows,
+#            and 1e-9 costs nothing.  A(u) -> 1/u as u -> 0, so A(1e-9) = 1e9:
+#            finite in float64 with the FULL 16 digits intact, because the
+#            only term lost is the u^2 in (u^2 + 2), whose relative weight is
+#            5e-19 -- three orders below eps = 2.2e-16 -- and every operation
+#            in (u^2+2)/(u*sqrt(u^2+4)) is a product or a sum of positives, so
+#            there is no cancellation to be catastrophic.  Measured:
+#            A(U_0_FLOOR) equals 1/U_0_FLOOR exactly, to the bit.  Downstream
+#            the flux model f_s*A + f_b is linear in A and the Gaussian logp
+#            quadratic, so overflow needs f_s > 1e145 (F^2 < 1.8e308); a 1%
+#            error bar at A = 1e9 gives chi2 = 1e22, huge but finite, which is
+#            the sampler being pushed off the singularity as intended.
+#            No shipped example is anywhere near the floor: |u_0| ~ 0.5
+#            (ob08092), 0.14 (DC2018_128), 0.029 (KMT-2019-BLG-1806).
 # THETA_E_LENSING_MIN
 #            pi_E = pi_rel/theta_E, so as theta_E -> 0 the parallax vector
 #            diverges while the event itself stops being a lensing event at
@@ -235,8 +255,66 @@ def clip_q_value(q, label="lens.q"):
 #            It is a comparison, and a comparison against NaN is False, so
 #            this branch never needed a NaN substitution to begin with.
 T_E_FLOOR = 1e-4  # days
-U_0_FLOOR = 1e-6  # Einstein radii
+U_0_FLOOR = 1e-9  # Einstein radii
 THETA_E_LENSING_MIN = 1e-6  # mas
+
+
+def apply_u_0_floor(u_0):
+    """Move u_0 out of the open interval (-U_0_FLOOR, U_0_FLOOR) -- symbolic.
+
+    Written as a nearest-endpoint clip::
+
+        u_0 < 0  ->  min(u_0, -U_0_FLOOR)
+        u_0 >= 0 ->  max(u_0, +U_0_FLOOR)
+
+    which is exactly ``sign(u_0) * max(|u_0|, U_0_FLOOR)`` everywhere except at
+    u_0 = 0, and that exception is the point.  ``sign(0) = 0``, so the old
+    spelling returned ``0 * U_0_FLOOR = 0``: the floor did not engage at the
+    one value it exists to protect, and the peak magnification of an exactly
+    central trajectory stayed infinite.  ``u_0: 0`` is a perfectly plausible
+    seed for a high-magnification event, so this was reachable by typing a
+    round number.
+
+    **Zero goes to +U_0_FLOOR.**  The sign of a central crossing is genuinely
+    undefined -- the trajectory passes through the lens, there is no side --
+    and the two branches are physically the same event under the exact
+    reflection ``(u_0, pi_E_N, pi_E_E) -> (-u_0, -pi_E_N, -pi_E_E)``, so either
+    choice is defensible and what matters is that it is finite, deterministic
+    and written down.  Positive is chosen because it makes this map
+    monotonically non-decreasing (the interval's two endpoints are the only
+    candidates; 0 is equidistant, and ties break upward, the ordinary
+    round-half-up convention), because u_0 > 0 is the convention a PSPL
+    solution is quoted in when nothing breaks the degeneracy, and because it
+    keeps the two IEEE zeros together: ``-0.0 < 0`` is False, so +0.0 and -0.0
+    both map to +U_0_FLOOR rather than to opposite endpoints.
+
+    Gradient: piecewise constant inside the gap, the identity outside -- the
+    same derivative the sign/abs spelling had (``sign(u)**2 = 1``), so no fit
+    that stays outside the floor feels this at all.  Both branches of the
+    symbolic switch are finite for every input, including +/-inf, so there is
+    no NaN hiding in the unselected branch (the JAX where-trap).  A NaN input
+    still propagates: ``nan < 0`` is False and ``maximum(nan, F)`` is nan,
+    which is what PR #142 wants -- the floor is a range decision and must never
+    double as a NaN substitution.
+    """
+    return pt.where(
+        pt.lt(u_0, 0.0),
+        pt.minimum(u_0, -U_0_FLOOR),
+        pt.maximum(u_0, U_0_FLOOR),
+    )
+
+
+def floor_u_0_value(u_0):
+    """Numeric counterpart of :func:`apply_u_0_floor` -- same number, same
+    expression, same treatment of exactly zero.  See that function for why.
+
+    Used by the MulensModel/VBM Op path (``op._base_mm_params``) and by the
+    flux bootstrap (``MulensInstrument``), which had their own hard-coded
+    copies of the clip until the floors were unified.
+    """
+    v = float(u_0)
+    return float(min(v, -U_0_FLOOR) if v < 0.0 else max(v, U_0_FLOOR))
+
 
 _MM_NAN_ADVICE = (
     "The trajectory parameters are derived from the sampled coordinates: "

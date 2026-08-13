@@ -15,6 +15,7 @@ from .physics import (
     _MM_NAN_ADVICE,
     T_E_FLOOR,
     clip_q_value,
+    floor_u_0_value,
     require_mm_number,
 )
 
@@ -89,10 +90,13 @@ def _base_mm_params(p):
     )
     return {
         "t_0": t_0,
-        # NOTE the 1e-9 floor on |u_0| here vs physics.U_0_FLOOR = 1e-6 on the
-        # symbolic path: a pre-existing disagreement, deliberately left alone
-        # (unifying them would move any fit visiting 1e-9 <= |u_0| < 1e-6).
-        "u_0": float(np.sign(u_0) * max(abs(u_0), 1e-9)),
+        # Same floor, same expression as the symbolic path
+        # (Lens._get_safe_mm_params): both go through physics, so the two
+        # backends cannot disagree about where the model is defined.  This
+        # used to be a hard-coded 1e-9 against physics.U_0_FLOOR = 1e-6, so a
+        # fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer depending
+        # on which backend it was on.
+        "u_0": floor_u_0_value(u_0),
         "t_E": float(max(t_E, T_E_FLOOR)),
         "pi_E_N": pi_E_N,
         "pi_E_E": pi_E_E,
