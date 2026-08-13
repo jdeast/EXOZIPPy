@@ -26,7 +26,9 @@ from .physics import (
     THETA_E_FLOOR,
     THETA_E_LENSING_MIN,
     U_0_FLOOR,
+    apply_u_0_floor,
     clip_q,
+    floor_u_0_value,
 )
 
 logger = logging.getLogger(__name__)
@@ -1152,12 +1154,14 @@ class Lens(Component):
         writes a NaN into a resolved value at all is a separate, pre-existing
         oddity; it is not this guard's business to report it.)
 
-        The one range check is on ``|u_0| < U_0_FLOOR``.  Note that at u_0
-        EXACTLY zero the floor does not even engage: ``sign(0) = 0`` makes
-        ``sign(u_0) * maximum(|u_0|, U_0_FLOOR)`` return 0, so the peak
-        magnification stays singular.  ``u_0: 0`` is a plausible seed for a
-        high-magnification event, so the warning says so.  t_0 gets no range
-        check -- it carries two finite hard bounds of its own.
+        The one range check is on ``|u_0| < U_0_FLOOR``: the fit will not start
+        where the seed says, it will start at the floored value.  ``u_0: 0`` --
+        a plausible seed for a high-magnification event -- is included, and it
+        used to be the one case the floor MISSED (``sign(0) = 0`` made the old
+        ``sign(u_0) * maximum(|u_0|, U_0_FLOOR)`` return 0 and left the peak
+        magnification singular).  ``physics.apply_u_0_floor`` now sends it to
+        ``+U_0_FLOOR``; the warning names the value it will actually start at.
+        t_0 gets no range check -- it carries two finite hard bounds of its own.
         """
         sampled = {
             "t_0": self._start_values("t_0"),
@@ -1177,13 +1181,14 @@ class Lens(Component):
         u_0 = sampled["u_0"]
         if u_0 is not None and np.any(np.abs(u_0) < U_0_FLOOR):
             small = u_0[np.abs(u_0) < U_0_FLOOR]
+            floored = [floor_u_0_value(v) for v in small]
             logger.warning(
                 f"{self.prefix}.u_0 starts at {small.tolist()}, inside the "
                 f"{U_0_FLOOR:g} floor on |u_0| (the magnification diverges "
-                "at u = 0), so the fit will actually START at the floored "
-                "value -- and at exactly 0 not even that, since sign(0) = 0 "
-                "leaves u_0 = 0 and the peak magnification infinite.  Seed a "
-                "small but nonzero impact parameter."
+                f"at u = 0), so the fit will actually START at {floored} -- "
+                "and an exactly central trajectory has no side, so u_0 = 0 "
+                f"is floored to +{U_0_FLOOR:g} by convention.  Seed the "
+                "impact parameter you mean, with the sign you mean."
             )
 
     def build_likelihood(self, model, system):
@@ -1319,7 +1324,7 @@ class Lens(Component):
         theta_E_raw = self.theta_E.value[index]
 
         tE_safe = pt.maximum(tE_raw, T_E_FLOOR)
-        u0_safe = pt.sign(u0_raw) * pt.maximum(pt.abs(u0_raw), U_0_FLOOR)
+        u0_safe = apply_u_0_floor(u0_raw)
         is_physical = pt.gt(theta_E_raw, THETA_E_LENSING_MIN)
 
         return {

@@ -17,7 +17,7 @@ from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 
 from . import mmexofast_support
-from .physics import clip_q_value
+from .physics import clip_q_value, floor_u_0_value
 
 
 def _raw_initval(data, default=None):
@@ -591,7 +591,6 @@ class MulensInstrument(Instrument):
 
         pi_E_N = _get("lens.0.pi_E_N", 0.0)
         pi_E_E = _get("lens.0.pi_E_E", 0.0)
-        tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
 
         x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
         delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
@@ -600,11 +599,9 @@ class MulensInstrument(Instrument):
             - y * np.sin(ra_rad) * np.sin(dec_rad)
             + z * np.cos(dec_rad)
         )
-        tau = (t - float(t0)) / tE_safe
-        tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
-        u_traj = np.sqrt(tau_p**2 + u_p**2)
-        A_traj = (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
+        A_traj = self._pspl_magnification(
+            t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E
+        )
 
         baseline_mask = A_traj < 1.1
         peak_mask = A_traj > 1.5
@@ -642,11 +639,23 @@ class MulensInstrument(Instrument):
 
     @staticmethod
     def _pspl_magnification(t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E):
-        """Point-source Paczynski magnification along one source trajectory."""
+        """Point-source Paczynski magnification along one source trajectory.
+
+        u_0 goes through ``physics.floor_u_0_value`` -- the same floor both
+        magnification backends apply -- so the bootstrap's design matrix
+        cannot contain the ``A = inf`` column an exactly central seed produces
+        (``u_traj = 0`` at ``t = t_0``, which NNLS has no answer for).  This
+        is also the expression ``_check_flux_direction`` uses; it carried a
+        verbatim second copy, unfloored, until the floors were unified.
+        """
         tE_safe = max(abs(float(tE)), 1.0) if tE is not None else 30.0
         tau = (t - float(t0)) / tE_safe
         tau_p = tau - delta_n * float(pi_E_N) - delta_e * float(pi_E_E)
-        u_p = float(u0) + delta_n * float(pi_E_E) - delta_e * float(pi_E_N)
+        u_p = (
+            floor_u_0_value(u0)
+            + delta_n * float(pi_E_E)
+            - delta_e * float(pi_E_N)
+        )
         u_traj = np.sqrt(tau_p**2 + u_p**2)
         return (u_traj**2 + 2.0) / (u_traj * np.sqrt(u_traj**2 + 4.0))
 
@@ -697,7 +706,10 @@ class MulensInstrument(Instrument):
                     return None
                 params = {
                     "t_0": float(t0),
-                    "u_0": float(np.sign(u0) * max(abs(u0), 1e-9)),
+                    # physics.U_0_FLOOR, the one floor both magnification
+                    # backends use.  This was a third hard-coded copy of the
+                    # clip (and, like them, engaged at every u_0 except 0).
+                    "u_0": floor_u_0_value(u0),
                     "t_E": max(float(tE), 1e-4),
                     "s": max(float(s_val), 1e-6),
                     "q": clip_q_value(q_val, "lens.0.q (flux bootstrap)"),

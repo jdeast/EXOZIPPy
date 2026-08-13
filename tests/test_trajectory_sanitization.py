@@ -11,8 +11,15 @@ was tangled up with (the t_E floor, the |u_0| floor, the no-lensing parallax
 gate) survive, and the failure now names the parameter -- in the graph by
 propagating to logp, on the numeric Op path by raising, and at build time by
 ``Lens._validate_pspl_start``.
+
+The last section covers the sequel: the |u_0| floor was TWO different numbers
+(1e-6 symbolic, a hard-coded 1e-9 on the Op path, plus a third copy in the flux
+bootstrap), and in all three spellings it failed to engage at u_0 = 0 --
+``sign(0) = 0`` -- which is the one value it exists to protect.  One constant,
+one expression, 1e-9, and zero floors to +U_0_FLOOR.
 """
 
+import functools
 import inspect
 import warnings
 
@@ -21,7 +28,11 @@ import pytensor
 import pytensor.tensor as pt
 import pytest
 
+from exozippy.components.mulensing import lens as lens_module
+from exozippy.components.mulensing import mulensinstrument as mi_module
+from exozippy.components.mulensing import op as op_module
 from exozippy.components.mulensing.lens import Lens
+from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     MulensMagOp,
     VBMDirectMagOp,
@@ -32,11 +43,18 @@ from exozippy.components.mulensing.physics import (
     T_E_FLOOR,
     THETA_E_LENSING_MIN,
     U_0_FLOOR,
+    apply_u_0_floor,
+    floor_u_0_value,
     require_mm_number,
 )
 from exozippy.system import System
 
 _COORDS = "268.0d -29.0d"
+
+# The floor the SYMBOLIC path used before the two were unified.  Kept as a
+# named constant so the byte-identity test below can say exactly where the
+# pre-#142 expression and the current one are allowed to differ.
+_LEGACY_U_0_FLOOR = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -173,24 +191,44 @@ def test_finite_inputs_are_byte_identical_to_the_old_expression(vals):
     Then they are bit-identical to the pre-fix expression that scrubbed with
       nan_to_num first.  Removing the scrub is a change to the NaN case only;
       no working fit may move.
+
+    The ONE documented exception is ``u0`` inside the legacy 1e-6 floor: the
+    two floors have since been unified at 1e-9 (the Op path's), and exactly
+    zero now floors to +U_0_FLOOR instead of being missed by ``sign(0) = 0``.
+    Outside that band -- which is everything a real event visits -- u0 too is
+    bit-identical, and it is asserted as such here rather than exempted.
     """
     f_new, f_old = _compiled_pair()
     args = [np.array([v], dtype=float) for v in vals]
-    for k, a, b in zip(_KEYS, f_new(*args), f_old(*args)):
+    new, old = f_new(*args), f_old(*args)
+    u_0 = vals[1]
+
+    for k, a, b in zip(_KEYS, new, old):
         a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        if k == "u0" and abs(u_0) < _LEGACY_U_0_FLOOR:
+            # The floors used to disagree here; pin the new value outright.
+            assert float(a) == floor_u_0_value(u_0)
+            continue
         assert a.tobytes() == b.tobytes(), f"{k}: {a} != {b}"
 
 
-def test_the_floors_are_the_historical_literals():
+def test_the_floors_are_the_documented_constants():
     """
-    Given the three range decisions, now named constants in physics.py,
+    Given the three range decisions, named constants in physics.py,
     When their values are read,
-    Then they are exactly the literals that were open-coded in the old
-      expression -- naming a constant must not move a number.
+    Then t_E's and theta_E's are the literals that were open-coded in the old
+      expression -- naming a constant must not move a number -- and |u_0|'s is
+      1e-9, the value the two paths were UNIFIED at.
+
+    U_0_FLOOR is the one that moved, deliberately: it was 1e-6 on the symbolic
+    path against a hard-coded 1e-9 in ``op._base_mm_params``, so a fit visiting
+    ``1e-9 <= |u_0| < 1e-6`` got a different answer depending on which backend
+    it was on.  The looser of the two wins: the floor is a validity limit and
+    the model should be clamped as little as float64 allows.
     """
     assert T_E_FLOOR == 1e-4
-    assert U_0_FLOOR == 1e-6
     assert THETA_E_LENSING_MIN == 1e-6
+    assert U_0_FLOOR == 1e-9
 
 
 def test_t_E_is_floored_and_u_0_keeps_its_sign():
@@ -335,7 +373,8 @@ def test_no_scrub_survives_in_the_source():
     src = inspect.getsource(Lens._get_safe_mm_params)
     body = src.split('"""')[-1]
     assert "nan_to_num" not in body
-    assert "1e-4" not in body and "1e-6" not in body
+    assert "1e-4" not in body
+    assert "1e-6" not in body and "1e-9" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -451,13 +490,13 @@ def test_base_mm_params_is_unchanged_for_finite_input():
     Given finite trajectory parameters,
     When _base_mm_params runs,
     Then every field is what the old body produced: t_0 and the two pi_E
-      untouched, |u_0| floored at 1e-9 with its sign, t_E floored at
+      untouched, |u_0| floored at U_0_FLOOR with its sign, t_E floored at
       T_E_FLOOR.
     """
     p = np.array([2458554.89, -1e-12, -3.0, 0.02, -0.01])
     got = _base_mm_params(p)
     assert got["t_0"] == 2458554.89
-    assert got["u_0"] == -1e-9
+    assert got["u_0"] == -U_0_FLOOR
     assert got["t_E"] == T_E_FLOOR
     assert got["pi_E_N"] == 0.02
     assert got["pi_E_E"] == -0.01
@@ -637,15 +676,16 @@ def test_a_derived_parameters_initval_is_not_treated_as_the_start(
     assert "starts at" not in caplog.text
 
 
-@pytest.mark.parametrize("u0", [0.0, 1e-12, -1e-9])
+@pytest.mark.parametrize("u0", [0.0, 1e-12, -1e-10])
 def test_a_tiny_u_0_start_warns(pspl_system, caplog, u0):
     """
     Given an impact parameter seeded inside the |u_0| floor -- including
       exactly zero, a plausible seed for a high-magnification event,
     When the guard runs,
-    Then it warns.  At exactly zero the floor does not even engage
-      (sign(0) = 0 leaves u_0 = 0 and the peak magnification infinite), which
-      is why the message says so.
+    Then it warns, and the message names the value the fit will actually START
+      at.  Exactly zero now floors (to +U_0_FLOOR) rather than slipping through
+      ``sign(0) = 0``, so the warning reports a seed/start mismatch instead of
+      confessing that the floor gave up.
     """
     system, _ = pspl_system
     par = system.lens.u_0
@@ -657,6 +697,27 @@ def test_a_tiny_u_0_start_warns(pspl_system, caplog, u0):
     finally:
         par.initval = saved
     assert ".u_0 starts at" in caplog.text
+    assert repr(floor_u_0_value(u0)) in caplog.text
+
+
+def test_a_u_0_start_exactly_at_the_floor_does_not_warn(pspl_system, caplog):
+    """
+    Given a seed exactly at -U_0_FLOOR,
+    When the guard runs,
+    Then it is silent: the clip is inert there, so the fit starts exactly
+      where the seed says and there is nothing to report.  The warning fires
+      on a seed/start MISMATCH, not on smallness.
+    """
+    system, _ = pspl_system
+    par = system.lens.u_0
+    saved = par.initval
+    try:
+        par.initval = np.array([-U_0_FLOOR])
+        with caplog.at_level("WARNING"):
+            system.lens._validate_pspl_start()
+    finally:
+        par.initval = saved
+    assert ".u_0 starts at" not in caplog.text
 
 
 def test_an_infinite_start_does_not_raise(pspl_system, caplog):
@@ -694,3 +755,323 @@ def test_the_examples_that_ship_build_without_the_guard_firing(pspl_system):
     assert '"t_0"' in body and '"u_0"' in body
     for derived in ("t_E", "theta_E", "pi_E_N", "pi_E_E"):
         assert f'"{derived}"' not in body
+
+
+# ---------------------------------------------------------------------------
+# One floor, one expression, every path
+#
+# |u_0| used to be floored at 1e-6 on the symbolic path (physics.U_0_FLOOR)
+# and at a hard-coded 1e-9 in op._base_mm_params -- three orders of magnitude
+# apart, so a fit visiting 1e-9 <= |u_0| < 1e-6 got a different answer
+# depending on which magnification backend it happened to be on.  A third copy
+# of the clip (also 1e-9) sat in the flux bootstrap.  All three now call
+# physics.apply_u_0_floor / physics.floor_u_0_value, unified at 1e-9.
+#
+# And all three shared a second defect: written as
+# ``sign(u_0) * max(|u_0|, FLOOR)``, the floor did not engage at u_0 = 0 --
+# ``sign(0) = 0`` gives ``0 * FLOOR = 0`` -- so the one value the floor exists
+# to protect was the one it missed.  Zero now floors to +U_0_FLOOR.
+# ---------------------------------------------------------------------------
+
+
+def _u_0_grid():
+    """|u_0| from 1e-12 to 1e-3, both signs, plus the boundary cases."""
+    mags = [m * 10.0**e for e in range(-12, -2) for m in (1.0, 2.5, 5.0, 9.99)]
+    vals = set(mags) | {-m for m in mags}
+    vals |= {0.0, -0.0, 1e-3, -1e-3, U_0_FLOOR, -U_0_FLOOR}
+    return np.array(sorted(vals))
+
+
+class _FakeStarParam:
+    def __init__(self, value):
+        self.value = pt.as_tensor_variable(np.array([value], dtype=float))
+
+
+class _FakeSystem:
+    """Enough of a System for Lens.get_magnification: star.ra / star.dec."""
+
+    def __init__(self, ra_rad, dec_rad):
+        self.star = type(
+            "S",
+            (),
+            {"ra": _FakeStarParam(ra_rad), "dec": _FakeStarParam(dec_rad)},
+        )()
+
+
+@functools.lru_cache(maxsize=1)
+def _symbolic_A():
+    """Compile the PRODUCTION symbolic magnification as a function of u_0.
+
+    Uses ``Lens.get_magnification`` itself -- not a transcription of the
+    Paczynski formula -- so the comparison below really is between the two
+    backends and not between two copies of the same algebra.
+    """
+    fake = _FakeLens()
+    fake.source_map = np.array([0])
+    # get_magnification calls self._get_safe_mm_params -- bind the production
+    # method so the clip under test is the one the model really uses.
+    fake._get_safe_mm_params = functools.partial(
+        Lens._get_safe_mm_params, fake
+    )
+    system = _FakeSystem(np.deg2rad(268.0), np.deg2rad(-29.0))
+    times = pt.dvector("times")
+    obs = pt.dmatrix("obs")
+    node = Lens.get_magnification(fake, times, obs, system, 0)
+    fn = pytensor.function(
+        fake.inputs() + [times, obs], node, on_unused_input="ignore"
+    )
+
+    def A(u_0, t_0=2458554.0, t_E=20.0, times_np=None):
+        t = np.array([t_0]) if times_np is None else np.asarray(times_np)
+        one = lambda v: np.array([v], dtype=float)  # noqa: E731
+        return np.asarray(
+            fn(
+                one(t_0),
+                one(u_0),
+                one(t_E),
+                one(1.0),  # theta_E: above THETA_E_LENSING_MIN
+                one(0.0),
+                one(0.0),
+                t,
+                np.zeros((len(t), 3)),
+            ),
+            dtype=float,
+        )
+
+    return A
+
+
+def _op_A(u_0, t_0=2458554.0, t_E=20.0, times_np=None):
+    """The MulensModel backend's magnification, through _base_mm_params."""
+    t = np.array([t_0]) if times_np is None else np.asarray(times_np)
+    model = _build_pspl_model(
+        np.array([t_0, u_0, t_E, 0.0, 0.0]),
+        _COORDS,
+        "point_source",
+        use_rho=False,
+    )
+    return np.asarray(model.get_magnification(t), dtype=float)
+
+
+def test_the_two_paths_apply_the_same_u_0_clip_bit_for_bit():
+    """
+    Given |u_0| across twelve decades, both signs, and both IEEE zeros,
+    When the symbolic clip and the numeric one are applied,
+    Then they return bit-identical values.  This is the unification itself:
+      one constant, one expression, no second copy to drift.
+    """
+    grid = _u_0_grid()
+    x = pt.dvector("x")
+    sym = np.asarray(pytensor.function([x], apply_u_0_floor(x))(grid))
+    num = np.array([floor_u_0_value(v) for v in grid])
+    assert sym.tobytes() == num.tobytes()
+    assert np.all(np.abs(sym) >= U_0_FLOOR)
+
+
+def test_the_two_backends_agree_on_the_magnification_across_the_grid():
+    """
+    Given |u_0| from 1e-12 to 1e-3 -- spanning the whole band where the two
+      floors used to disagree (1e-9 to 1e-6) -- and both signs,
+    When the magnification is evaluated at peak on the symbolic path and on
+      the MulensModel Op path,
+    Then the two agree exactly.  Before the floors were unified the Op path
+      saw the true u_0 and the symbolic path saw 1e-6 anywhere below 1e-6, so
+      the same event had two peak magnifications up to 1000x apart depending
+      on whether it was PSPL (symbolic, NUTS) or binary/finite-source (Op).
+    """
+    A_sym = _symbolic_A()
+    for u_0 in _u_0_grid():
+        a = float(A_sym(u_0)[0])
+        b = float(_op_A(u_0)[0])
+        assert np.isfinite(a) and np.isfinite(b), u_0
+        assert abs(a - b) <= 1e-12 * abs(a), (
+            f"u_0={u_0!r}: symbolic {a!r} vs Op {b!r}"
+        )
+
+
+def test_an_exactly_zero_u_0_gives_a_finite_magnification_on_both_paths():
+    """
+    Given u_0 = 0 -- an exactly central trajectory, and a perfectly plausible
+      seed for a high-magnification event,
+    When the magnification is evaluated AT t_0 on both paths,
+    Then it is finite and equal to 1/U_0_FLOOR on both.
+
+    This is the second bug the unification fixes.  ``sign(0) = 0`` made
+    ``sign(u_0) * max(|u_0|, FLOOR)`` return 0, so the floor missed the one
+    point it exists to protect and A(0) = inf reached the likelihood -- on the
+    symbolic path, the Op path and the flux bootstrap alike.
+    """
+    A_sym = _symbolic_A()
+    for zero in (0.0, -0.0):
+        a = float(A_sym(zero)[0])
+        b = float(_op_A(zero)[0])
+        assert np.isfinite(a) and np.isfinite(b)
+        assert a == pytest.approx(1.0 / U_0_FLOOR, rel=1e-12)
+        assert b == pytest.approx(1.0 / U_0_FLOOR, rel=1e-12)
+
+
+def test_zero_floors_positive_and_the_two_ieee_zeros_land_together():
+    """
+    Given +0.0 and -0.0,
+    When the clip is applied,
+    Then both give +U_0_FLOOR.
+
+    The sign of a central crossing is genuinely undefined -- there is no side
+    to be on -- and the two branches are the same event under the exact
+    reflection (u_0, pi_E_N, pi_E_E) -> (-u_0, -pi_E_N, -pi_E_E), so either is
+    defensible.  Positive is chosen because it keeps the map monotonically
+    non-decreasing (0 is equidistant from the interval's two endpoints and
+    ties break upward) and because ``-0.0 < 0`` is False, so the two IEEE
+    zeros cannot land on opposite endpoints.
+    """
+    assert floor_u_0_value(0.0) == U_0_FLOOR
+    assert floor_u_0_value(-0.0) == U_0_FLOOR
+    x = pt.dvector("x")
+    got = pytensor.function([x], apply_u_0_floor(x))(np.array([0.0, -0.0]))
+    assert list(np.asarray(got)) == [U_0_FLOOR, U_0_FLOOR]
+
+
+@pytest.mark.parametrize(
+    "u_0", [U_0_FLOOR, 1e-8, 1e-6, 1e-3, 0.029, 0.14, 0.523, 1.7]
+)
+def test_the_reflection_symmetry_is_still_exact_on_both_paths(u_0):
+    """
+    Given a trajectory and its mirror image u_0 -> -u_0 (no parallax, so the
+      two are the same event),
+    When the magnification is evaluated on both paths,
+    Then A(u_0) and A(-u_0) are bit-identical.
+
+    The clip restores the sign for exactly this reason: the reflection is a
+    real degeneracy (ob140939 has four Yee+2015 basins that differ by a sign
+    flip), and a clip that broke it would make one branch of a genuine
+    degeneracy unreachable.
+    """
+    A_sym = _symbolic_A()
+    t = np.linspace(2458554.0 - 40.0, 2458554.0 + 40.0, 101)
+    assert (
+        A_sym(u_0, times_np=t).tobytes() == A_sym(-u_0, times_np=t).tobytes()
+    )
+    assert (
+        _op_A(u_0, times_np=t).tobytes() == _op_A(-u_0, times_np=t).tobytes()
+    )
+
+
+def test_the_clip_matches_the_old_sign_abs_spelling_everywhere_but_zero():
+    """
+    Given the same floor in both spellings,
+    When they are compared over the grid,
+    Then they are bit-identical except at u_0 = 0, where the old one returned
+      0 and the new one returns +U_0_FLOOR.
+
+    Changing HOW the clip is written must not change WHAT it does; the whole
+    behavioural difference has to be the one value that was broken.
+    """
+    grid = _u_0_grid()
+    x = pt.dvector("x")
+    new = np.asarray(pytensor.function([x], apply_u_0_floor(x))(grid))
+    old = np.asarray(
+        pytensor.function([x], pt.sign(x) * pt.maximum(pt.abs(x), U_0_FLOOR))(
+            grid
+        )
+    )
+    differ = [g for g, a, b in zip(grid, new, old) if a != b]
+    assert differ == [0.0], differ
+    assert float(old[list(grid).index(0.0)]) == 0.0
+
+
+def test_the_clip_has_no_nan_gradient_and_no_nan_in_the_unselected_branch():
+    """
+    Given the switch-based clip,
+    When its value and its gradient are evaluated at the boundaries, at both
+      infinities and inside the floor,
+    Then everything is finite -- a NaN in the UNSELECTED branch of a where is
+      the JAX trap that freezes numpyro chains (see CLAUDE.md), and both
+      branches here are min/max against a finite constant.  NaN INPUT still
+      propagates, which is PR #142's rule: a floor is a range decision and
+      must never double as a NaN substitution.
+    """
+    x = pt.dvector("x")
+    y = apply_u_0_floor(x)
+    val = pytensor.function([x], y)
+    grad = pytensor.function([x], pt.grad(pt.sum(y), x))
+
+    probe = np.array(
+        [-1.0, -1e-3, -U_0_FLOOR, -1e-12, 0.0, 1e-12, U_0_FLOOR, 1e-3, 1.0]
+    )
+    assert np.all(np.isfinite(val(probe)))
+    assert np.all(np.isfinite(grad(probe)))
+
+    edge = np.array([np.inf, -np.inf])
+    assert list(np.asarray(val(edge))) == [np.inf, -np.inf]
+    assert np.all(np.isfinite(grad(edge)))
+
+    assert np.isnan(float(np.asarray(val(np.array([np.nan])))[0]))
+
+
+def test_the_floor_costs_no_precision_at_the_magnification_it_allows():
+    """
+    Given the loosest floor of the two, 1e-9,
+    When the magnification there and the flux model built on it are computed,
+    Then A(U_0_FLOOR) equals its analytic limit 1/U_0_FLOOR to the bit, and
+      nothing downstream overflows.
+
+    A -> 1/u as u -> 0, so A(1e-9) = 1e9 -- large, but the only term lost is
+    the u^2 in (u^2 + 2), whose relative weight is 5e-19, three orders below
+    eps = 2.2e-16.  Every operation in (u^2+2)/(u*sqrt(u^2+4)) is a product or
+    a sum of positives, so there is no cancellation to be catastrophic, and
+    the full float64 mantissa survives.  Loosening the floor from 1e-6 to 1e-9
+    therefore buys three decades of unclamped model for no arithmetic at all.
+    """
+    u = U_0_FLOOR
+    A = (u * u + 2.0) / (u * np.sqrt(u * u + 4.0))
+    assert A == 1.0 / u
+    assert A == pytest.approx(1e9, rel=1e-12)
+
+    # ... and the flux model / Gaussian logp built on it, across the three
+    # flux zeropoints mulensinstrument actually sees (magnitude files ~1e-8,
+    # difference imaging O(1) to O(1e4)).
+    for f_s in (1e-8, 1.0, 1e4):
+        F = f_s * A + f_s
+        chi2 = ((F - f_s) / (0.01 * f_s)) ** 2
+        assert np.isfinite(F) and np.isfinite(chi2)
+        assert F < np.sqrt(np.finfo(float).max)
+
+
+def test_the_flux_bootstrap_uses_the_shared_floor_too():
+    """
+    Given a central seed (u_0 = 0) and a time grid that contains t_0 exactly,
+    When the flux bootstrap's PSPL magnification column is built,
+    Then it is finite.
+
+    This was the third hard-coded copy of the clip.  Unfloored, ``u_traj = 0``
+    at ``t = t_0`` makes the column ``inf``, and NNLS has no answer for a
+    design matrix with an infinity in it -- so a round-number seed silently
+    destroyed the flux bootstrap for every instrument.
+    """
+    t = np.array([2458554.0 - 1.0, 2458554.0, 2458554.0 + 1.0])
+    zeros = np.zeros_like(t)
+    col = MulensInstrument._pspl_magnification(
+        t, zeros, zeros, 2458554.0, 0.0, 20.0, 0.0, 0.0
+    )
+    assert np.all(np.isfinite(col))
+    assert float(col[1]) == pytest.approx(1.0 / U_0_FLOOR, rel=1e-12)
+
+
+def test_no_hard_coded_u_0_clip_survives_in_the_mulensing_sources():
+    """
+    Given the three modules that used to carry their own copy of the clip,
+    When their sources are scanned,
+    Then none of them spells it out again: the ``sign(...) * max(abs(...))``
+      form appears nowhere, and every u_0 floor goes through the two shared
+      helpers.  Three copies drifting apart is exactly how the 1e-6 / 1e-9
+      disagreement happened; a fourth must not be able to appear silently.
+    """
+    for module in (lens_module, op_module, mi_module):
+        src = inspect.getsource(module)
+        code = "\n".join(
+            line
+            for line in src.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "np.sign(u0)" not in code and "np.sign(u_0)" not in code
+        assert "pt.sign(u0" not in code and "pt.sign(u_0" not in code
