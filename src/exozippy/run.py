@@ -281,7 +281,7 @@ def _run_fit(config, gui, user_params=None):
 
     # First modeling-draft checkpoint: the components declared their prose
     # during stages 1-6 and the sampler is now resolved, so the citation
-    # scaffold (<prefix>_modeling.tex) can be written BEFORE sampling --
+    # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
     # the user keeps it even if the fit dies hours in.  Regenerated (not
     # appended) at wrap-up with the results/convergence/figures/table
     # sections. Never fatal: the draft is a bonus deliverable.
@@ -781,7 +781,7 @@ def _run_fit(config, gui, user_params=None):
 
     # Final modeling-draft checkpoint: the table fragments and posterior
     # plots now exist on disk and the convergence/mode facts are known, so
-    # regenerate <prefix>_modeling.tex with its Results sections and
+    # regenerate <prefix>_paper.tex with its Results sections and
     # (config `modeling: {compile: false}` to opt out) compile the draft
     # PDF.  Compile failure or missing TeX never fails the fit.
     modeling_cfg = config.get("modeling", {}) or {}

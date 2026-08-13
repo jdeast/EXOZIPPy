@@ -50,7 +50,7 @@ can generally construct any model containing arbitrary components.
 #                     from one.  See mkparam._refuse_invalid_seed_draws.
 #   gui            -- gui.status.gui_enabled: {snapshot}.
 #   modeling       -- run.py: {compile} for the generated paper-draft
-#                     scaffold (<prefix>_modeling.tex).  Output-only, so
+#                     scaffold (<prefix>_paper.tex).  Output-only, so
 #                     evaluator._NON_STRUCTURAL_CONFIG_KEYS excludes it
 #                     from the structural hash: adding the block or
 #                     flipping `compile` must not stale a finished trace.
@@ -105,7 +105,7 @@ class System(Component):
         # The modeling-prose collector (outputs/prose.py): components add
         # sentences at the code sites that implement each feature (stages
         # 1-6), run.py adds the sampling/results sentences, and
-        # outputs/modeling.py regenerates <prefix>_modeling.tex from it at
+        # outputs/modeling.py regenerates <prefix>_paper.tex from it at
         # each checkpoint.  add() is idempotent, so a second build_model()
         # on one System (the GUI) cannot accumulate copies.
         self.prose = ProseCollector()

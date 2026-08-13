@@ -351,11 +351,13 @@ class RVInstrument(Instrument):
         get_collector(system).add(
             "Radial velocities were modeled as a sum of Keplerian orbits "
             "(every orbit containing the observed star), plus a "
-            "per-instrument velocity offset.",
+            "per-instrument velocity offset, using the Kepler solver in "
+            r"exoplanet-core \citep{ForemanMackey:2021}.",
             section="orbits",
             key=f"{self.prefix}.rv_model",
             rank=20,
         )
+        get_collector(system).add_software("exoplanet-core")
 
     def compile_plotters(self, model, system):
         """Compiles the fast PyTensor functions used by the plot_data specs."""

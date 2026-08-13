@@ -1,6 +1,6 @@
 # LaTeX package data shipped with EXOZIPPy
 
-Everything here is copied next to every generated `<prefix>_modeling.tex`
+Everything here is copied next to every generated `<prefix>_paper.tex`
 by `outputs/modeling.py`, making the output directory a self-contained
 LaTeX project: `pdflatex && bibtex && pdflatex && pdflatex` works on any
 machine with a bare TeX Live, whether or not AASTeX is installed.  This is
@@ -25,7 +25,7 @@ unmodified, is allowed.
 
 ### Why they are in the repo rather than a setup step
 
-The generated `<prefix>_modeling.tex` (and the deluxetable fragment it
+The generated `<prefix>_paper.tex` (and the deluxetable fragment it
 `\input`s) is a deliverable meant to compile out of the box; a TeX
 installation without AASTeX is the common case (this project's own dev box
 has `pdflatex` and no `aastex*.cls`).  The same file makes the

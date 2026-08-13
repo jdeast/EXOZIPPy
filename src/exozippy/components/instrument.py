@@ -1402,7 +1402,7 @@ class Instrument(Component):
         else:
             prose.add(
                 f"For each {noun} dataset we fit an additive noise "
-                '("jitter") variance, added in quadrature to the reported '
+                "(``jitter'') variance, added in quadrature to the reported "
                 "uncertainties; a negative value indicates the reported "
                 "uncertainties are overestimated.",
                 section="noise",

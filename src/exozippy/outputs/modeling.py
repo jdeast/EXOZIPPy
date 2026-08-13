@@ -1,4 +1,4 @@
-"""The ``<prefix>_modeling.tex`` writer: a compilable paper-draft scaffold.
+"""The ``<prefix>_paper.tex`` writer: a compilable paper-draft scaffold.
 
 Renders ``system.prose`` (see ``outputs/prose.py``) into ONE minimal but
 compilable aastex document, and copies the shipped support files
@@ -185,7 +185,7 @@ def render_document(
     prose = system.prose
     stem = basename[: -len(".tex")] if basename.endswith(".tex") else basename
     lines = [_HEADER.format(basename=basename, stem=stem)]
-    lines.append(r"\documentclass{aastex701}")
+    lines.append(r"\documentclass[twocolumn]{aastex701}")
     if var_stem:
         # The \providecommand set: every \ez... macro the table (and any
         # prose that cites a fitted value) resolves against.
@@ -195,9 +195,7 @@ def render_document(
     # top-level name: -- the output prefix is the better identity then.
     name = getattr(system, "name", None)
     if not name or name == "system":
-        name = (
-            stem[: -len("_modeling")] if stem.endswith("_modeling") else stem
-        )
+        name = stem[: -len("_paper")] if stem.endswith("_paper") else stem
     lines.append(rf"\title{{Draft: modeling of {latex_escape(name)}}}")
     lines.append("")
 
@@ -252,7 +250,7 @@ def copy_support_files(out_dir):
 
 
 def build_modeling_output(system, prefix, point=None):
-    """(Re)generate ``<prefix>_modeling.tex`` and its support files.
+    """(Re)generate ``<prefix>_paper.tex`` and its support files.
 
     Called at both checkpoints (post-``build_model()`` and wrap-up); what
     differs between them is only what exists -- post-fit prose sections in
@@ -262,7 +260,7 @@ def build_modeling_output(system, prefix, point=None):
     the .tex.
     """
     prefix = str(prefix)
-    tex_path = prefix + "_modeling.tex"
+    tex_path = prefix + "_paper.tex"
     base = os.path.basename(prefix)
 
     # The fragments report_pipeline writes at wrap-up; \input'd by bare

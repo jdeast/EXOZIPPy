@@ -105,9 +105,10 @@ planet:
         func_name: "calc_K"
         deps: ["mass", "m_total", "orbit.ecc", "arsun", "orbit.sini", "orbit.period"]
   arsun:
-    unit: "solRad"
+    unit: "AU"
     internal_unit: "solRad"
     latex: "a"
+    description: "Semi-major Axis"
     expressions:
       default:
         func_name: "calc_arsun"

@@ -9,13 +9,13 @@ astrometryinstrument:
     # Signed: it may go negative down to Instrument._jitter_floor, so neither
     # the label nor the description may promise a square. See calc_jitter.
     latex: "J|J|"
-    description: "Astrometric jitter variance (signed), added to the quoted squared errors"
+    description: "Astrometric jitter variance"
   jitter:
     unit: "mas"
     internal_unit: "mas"
     # Not \sigma_A: this is signed, and a sigma promises positivity.
     latex: "J"
-    description: "Astrometric jitter (signed): its magnitude adds in quadrature to the quoted errors, and a negative value means they are overestimated"
+    description: "Astrometric jitter"
     expressions:
       default:
         func_name: "calc_jitter"

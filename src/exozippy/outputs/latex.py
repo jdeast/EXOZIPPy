@@ -78,7 +78,7 @@ def _mixing_sentence(mode_report):
         return ""
     text = (
         f"Mode changes in the stored draws: {mode_report.n_transitions} "
-        f"({mode_report.n_round_trips} round trips); "
+        f"({mode_report.n_round_trips} mode round trips); "
         f"{mode_report.n_chains_no_switch} of "
         f"{mode_report.n_chains_with_draws} chains never changed mode. "
     )
@@ -225,7 +225,7 @@ def build_latex_output(
     Both outputs are fragments, meant to be ``\\input`` by a wrapper
     document: ``var_filename`` gets the ``\\providecommand`` set,
     ``table_filename`` the ``deluxetable*`` body.  The one standalone
-    wrapper is ``<prefix>_modeling.tex`` (``outputs/modeling.py``), which
+    wrapper is ``<prefix>_paper.tex`` (``outputs/modeling.py``), which
     supplies the ``aastex701`` preamble, inputs both files, and carries the
     bibliography -- the table file itself used to be that wrapper, minus
     the prose and with a ``\\bibliography{References}`` line pointing at a

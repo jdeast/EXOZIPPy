@@ -270,7 +270,7 @@ def test_build_modeling_output_regenerates_with_what_exists(tmp_path):
     assert "FAKE_definitions" not in first
     assert "FAKE_table" not in first
     assert r"\citet{Chen:2017}" in first
-    assert r"\documentclass{aastex701}" in first
+    assert r"\documentclass[twocolumn]{aastex701}" in first
     assert r"\bibliography{references}" in first
     # Support files were copied: the output directory is self-contained.
     for name in modeling.SUPPORT_FILES:
@@ -399,7 +399,7 @@ def test_modeling_document_compiles_with_bibliography(tmp_path):
     pdf = modeling.compile_modeling_pdf(tex_path)
 
     assert pdf is not None and Path(pdf).exists()
-    bbl = tmp_path / "E2E_modeling.bbl"
+    bbl = tmp_path / "E2E_paper.bbl"
     assert bbl.exists()
     for key_fragment in ("Chen", "Braak", "Vousden"):
         assert key_fragment in bbl.read_text()

@@ -18,13 +18,13 @@ rvinstrument:
     # Signed: it may go negative down to Instrument._jitter_floor, so neither
     # the label nor the description may promise a square. See calc_jitter.
     latex: "J|J|"
-    description: "RV jitter variance (signed), added to the quoted squared errors"
+    description: "RV jitter variance"
   jitter:
     unit: "m/s"
     internal_unit: "solRad/d"
     # Not \sigma_J: this is signed, and a sigma promises positivity.
     latex: "J"
-    description: "RV jitter (signed): its magnitude adds in quadrature to the quoted errors, and a negative value means they are overestimated"
+    description: "RV jitter"
     expressions:
       default:
         func_name: "calc_jitter"

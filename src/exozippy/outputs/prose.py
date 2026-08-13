@@ -1,4 +1,4 @@
-"""The prose collector behind ``<prefix>_modeling.tex``.
+"""The prose collector behind ``<prefix>_paper.tex``.
 
 Components (and run.py) declare one crude sentence per modeling decision --
 "We imposed the \\citet{Chen:2017} mass--radius relation on planet b." --

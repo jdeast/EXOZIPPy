@@ -1136,7 +1136,7 @@ def identify_modes(
         reliable = chains_visiting_all and enough_transitions
         mixing = (
             f"{n_transitions} mode changes in the stored draws, "
-            f"{n_round_trips} round trips, "
+            f"{n_round_trips} mode round trips, "
             f"{n_no_switch}/{int((transitions_per_chain >= 0).sum())} chains "
             f"never switched; N_eff for the weights >= {min_ess:.1f}"
         )
