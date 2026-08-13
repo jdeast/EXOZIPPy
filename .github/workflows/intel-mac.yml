@@ -166,10 +166,26 @@ jobs:
       # downgrades numpy under it -- a compiled module running against an
       # older numpy than it was built for, which fails at import in a way
       # that looks nothing like its cause.
+      # setuptools_scm is in this list but NOT in celerite2's
+      # [build-system] requires, which is a second upstream packaging bug
+      # rather than an oversight here: its pyproject sets
+      #     [tool.scikit-build] metadata.version.provider =
+      #         "scikit_build_core.metadata.setuptools_scm"
+      # so the backend imports setuptools_scm to compute the version and
+      # dies with ModuleNotFoundError without it (run 31745147326). An
+      # ISOLATED build hits this too -- run 31742588763 simply never got
+      # that far, dying while resolving jax==0.8.0 first. Both belong in
+      # the same upstream report.
+      #
+      # No SETUPTOOLS_SCM_PRETEND_VERSION: setuptools_scm reads the version
+      # from an sdist's PKG-INFO when there is no .git, which is the
+      # supported path and keeps the built version honest instead of
+      # asserting one that might not match what pip resolved.
       - name: Pre-build celerite2 without its jax build dependency
         run: |
           set -euo pipefail
-          pip install scikit-build-core "numpy>=2.0,<2.4" pybind11 cmake ninja
+          pip install scikit-build-core "numpy>=2.0,<2.4" pybind11 \
+            cmake ninja setuptools setuptools_scm
           pip install --no-build-isolation \
             --config-settings=cmake.define.BUILD_JAX=OFF \
             "celerite2>=0.3.3,<0.4.0"
