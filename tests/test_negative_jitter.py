@@ -145,18 +145,25 @@ def test_every_additive_noise_component_wires_the_shared_relation():
         assert block["deps"] == ["jitter_variance"]
 
 
-def test_the_labels_and_descriptions_do_not_promise_a_positive_jitter():
+def test_the_labels_and_prose_do_not_promise_a_positive_jitter():
     """
-    Given a reader meeting a negative jitter in an output table for the first
+    Given a reader meeting a negative jitter in an output for the first
     time,
-    When they look at the symbol and the description,
+    When they look at the symbol and read the paper draft,
     Then neither claims positivity: the label is not a sigma (and the
-    variance's is not a square), and the description says the value is signed
-    and what a negative one means.
+    variance's is not a square), and the draft's noise-model sentence says
+    what a negative value means.
 
-    EXOFASTv2 floors the jitter at zero; this code deliberately does not (see
-    calc_jitter), so the table is the only place that difference is explained.
+    EXOFASTv2 floors the jitter at zero; this code deliberately does not
+    (see calc_jitter).  The sign-convention explanation used to live in
+    the defaults.yaml descriptions, but those set the table's Description
+    column width and are deliberately terse now ("RV jitter") -- the
+    modeling-draft prose (Instrument._add_observation_prose) is where the
+    explanation lives, and it reaches the reader with the table.
     """
+    import inspect
+
+    from exozippy.components.instrument import Instrument
     from exozippy.config import ConfigManager
 
     cm = ConfigManager({}, {})
@@ -167,16 +174,19 @@ def test_the_labels_and_descriptions_do_not_promise_a_positive_jitter():
 
             assert "sigma" not in block["latex"], where
             assert "^2" not in block["latex"], where
-            assert "signed" in block["description"].lower(), where
+            # Terse on purpose (it sets the table column width), so it
+            # must at least not CONTRADICT the signedness: no sigma.
+            assert "sigma" not in block["description"].lower(), where
 
             # Descriptions reach LaTeX *text* mode through latex_escape,
             # which covers ^ but not these -- they would silently render as
             # something else.
             assert not set("<>|") & set(block["description"]), where
 
-        described = cm.base_defaults[comp]["jitter"]["description"].lower()
-        assert "quadrature" in described, comp
-        assert "overestimated" in described, comp
+    prose_source = inspect.getsource(Instrument._add_observation_prose)
+    assert "quadrature" in prose_source
+    assert "negative value indicates" in prose_source
+    assert "overestimated" in prose_source
 
 
 # ---------------------------------------------------------------------------
