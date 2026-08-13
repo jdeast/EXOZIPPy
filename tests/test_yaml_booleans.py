@@ -142,7 +142,7 @@ def test_quoted_string_is_not_a_boolean():
     Then it passes: a quoted scalar is a string to both loaders, so quoting
       is the documented escape hatch.
     """
-    text = 'sampler:\n  seed_polish: "on"\nname: \'no\'\n'
+    text = "sampler:\n  seed_polish: \"on\"\nname: 'no'\n"
 
     check_yaml_booleans(text)  # must not raise
     assert load_yaml_text(text)["sampler"]["seed_polish"] == "on"

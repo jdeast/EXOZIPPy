@@ -161,6 +161,9 @@ def test_every_example_directory_has_a_config():
         # README only -- no data and no config committed yet.
         "KMT-2021-BLG-1122L",
         "ob161045",
+        # In-progress event: data and outputs only, no config committed
+        # yet (untracked local work as of 2026-08-13).
+        "kb180087_obj3",
     }
     covered = {rel.split("/")[0] for _, rel in _CONFIGS}
 
