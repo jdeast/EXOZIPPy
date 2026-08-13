@@ -61,7 +61,7 @@ rvinstrument:
 parameter_file: "wasp18.params.yaml"
 
 sampler:
-  method: nuts      # nuts, numpyro, blackjax, nutpie, ptde
+  method: nuts   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 2000
   draws: 4000
   init: adapt_diag

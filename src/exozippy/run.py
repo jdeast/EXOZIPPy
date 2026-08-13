@@ -1,3 +1,4 @@
+import contextlib
 import gc
 import importlib
 import itertools
@@ -13,40 +14,10 @@ import arviz as az
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
+import pytensor
 from matplotlib.backends.backend_pdf import PdfPages
 
-# import pytensor
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-
-
-# PyMC 5.25.1 bug fix: stats_dtypes_shapes declares scaling/lambda as scalar []
-# but np.atleast_1d always produces a 1-D array, crashing the NDArray backend.
-# Not currently used (PTDE replaced DEMetropolis), kept for future experiments.
-def _fix_de_stats(astep_fn):
-    def wrapper(self, q0):
-        result, stats = astep_fn(self, q0)
-        for s in stats:
-            for key in ("scaling", "lambda"):
-                if key in s and np.ndim(s[key]) > 0:
-                    s[key] = float(np.ravel(s[key])[0])
-        return result, stats
-
-    return wrapper
-
-
-class DEMetropolisZ(pm.DEMetropolisZ):
-    astep = _fix_de_stats(pm.DEMetropolisZ.astep)
-
-
-class DEMetropolis(pm.DEMetropolis):
-    astep = _fix_de_stats(pm.DEMetropolis.astep)
-
-
-import pytensor
-
-from exozippy.samplers import convergence
+from exozippy.samplers import convergence, de_metropolis
 from exozippy.samplers.ptde import ptde_sample
 from exozippy.samplers.ptde_async import ptde_async_sample
 from exozippy.system import System
@@ -64,7 +35,10 @@ from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
-# debugging imports
+# debugging knobs
+# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
+# pytensor.config.allow_gc = True
+# pytensor.config.linker = "py"
 # import ipdb
 
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
@@ -104,6 +78,24 @@ KNOWN_SAMPLER_KEYS = {
     "seed_polish",
     "store_hot_chains",
 }
+
+
+@contextlib.contextmanager
+def sigterm_as_interrupt():
+    """Map SIGTERM to Python's default SIGINT handler while sampling.
+
+    A batch scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`) can
+    then interrupt sampling the same way a terminal Ctrl+C already does,
+    instead of Python's default SIGTERM action (immediate termination with no
+    partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
+    raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
+    work. Used by every branch that calls ``pm.sample`` directly.
+    """
+    old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def warn_unknown_sampler_keys(sampler_cfg):
@@ -579,6 +571,35 @@ def _run_fit(config, gui, user_params=None):
                     cores=cores,
                     return_inferencedata=True,
                 )
+            elif method in de_metropolis.STEP_CLASSES:
+                # Gradient-free differential-evolution MCMC (ter Braak 2006 /
+                # ter Braak & Vrugt 2008) on PyMC's own step methods, started
+                # from the same over-dispersed population PTDE's T=1 rung
+                # uses -- see samplers/de_metropolis.py, which also documents
+                # the (now dormant) PyMC stats-shape patch.  `chains` is read
+                # off the raw config rather than the resolved default so an
+                # unset key can mean "size the DE population from the
+                # parameter count" (2 x n_params) instead of silently
+                # accepting the generic 4.
+                with sigterm_as_interrupt():
+                    idata = de_metropolis.de_metropolis_sample(
+                        model,
+                        system,
+                        draws,
+                        tune,
+                        variant=method,
+                        chains=sampler_cfg.get("chains", None),
+                        cores=cores,
+                        raw_starts=raw_starts,
+                        seed_indices=seed_indices,
+                        raw_scales=(
+                            whiten_report["raw_scales"]
+                            if whiten_report
+                            else None
+                        ),
+                        maxtime=maxtime,
+                        plot_prefix=str(prefix),
+                    )
             else:
                 nuts_callback = None
                 if maxtime is not None:
@@ -592,17 +613,7 @@ def _run_fit(config, gui, user_params=None):
                             raise KeyboardInterrupt
 
                 step = pm.NUTS(target_accept=target_accept)
-                # Map SIGTERM to Python's default SIGINT handler so a batch
-                # scheduler (`qsig -s SIGTERM <job_id>` / `kill -TERM <pid>`)
-                # can interrupt sampling the same way a terminal Ctrl+C
-                # already does, instead of Python's default SIGTERM action
-                # (immediate termination with no partial trace saved). pm.sample
-                # already handles a KeyboardInterrupt raised mid-sampling
-                # gracefully -- that's exactly how the maxtime cutoff above works.
-                old_sigterm = signal.signal(
-                    signal.SIGTERM, signal.default_int_handler
-                )
-                try:
+                with sigterm_as_interrupt():
                     idata = pm.sample(
                         draws=draws,
                         tune=tune,
@@ -613,8 +624,6 @@ def _run_fit(config, gui, user_params=None):
                         return_inferencedata=True,
                         callback=nuts_callback,
                     )
-                finally:
-                    signal.signal(signal.SIGTERM, old_sigterm)
             if nthin > 1:
                 idata = idata.sel(draw=slice(None, None, nthin))
             # Record the storage thinning on the trace.  Consecutive stored
@@ -1258,6 +1267,25 @@ def _add_sampler_prose(system, method, swap_schedule="deo"):
             r"temperature-ladder placement \citep{Vousden:2016}"
             + swap_cite
             + ", as implemented in EXOZIPPy.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demc":
+        prose.add(
+            r"We sampled the posterior with differential-evolution MCMC "
+            r"\citep{terBraak:2006} as implemented in PyMC "
+            r"\citep{AbrilPla:2023}.",
+            section="sampling",
+            key="run.sampler",
+            rank=10,
+        )
+    elif method == "demcz":
+        prose.add(
+            r"We sampled the posterior with the DE-MC$_Z$ variant of "
+            r"differential-evolution MCMC, which draws its proposal vectors "
+            r"from each chain's own past states \citep{terBraak:2008}, as "
+            r"implemented in PyMC \citep{AbrilPla:2023}.",
             section="sampling",
             key="run.sampler",
             rank=10,
