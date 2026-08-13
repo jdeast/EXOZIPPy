@@ -2648,8 +2648,15 @@ class ConfigManager:
             # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
             eq_str = f"{eq.lhs} = {eq.rhs}"
 
-            # Replace only the known symbols so the math structure is preserved
-            for s in eq.free_symbols:
+            # Replace only the known symbols so the math structure is
+            # preserved.  Sorted for the same reason as _execute_solve's walk
+            # (free_symbols is a set of Symbols whose hashes include the
+            # string hash): successive re.sub calls are not commutative when
+            # one symbol's name is a substring of another's, so an unsorted
+            # walk could render this line differently in two processes.  It
+            # is only a debug string today -- but a diagnostic that varies
+            # run to run is the one thing a diagnostic must not do.
+            for s in sorted(eq.free_symbols, key=str):
                 s_str = str(s)
                 if s_str in resolved:
                     # Format to 5 sig figs (handles scientific notation automatically)

@@ -17,7 +17,13 @@ from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 
 from . import mmexofast_support
-from .physics import clip_q_value, floor_u_0_value
+from .physics import (
+    RHO_FLOOR,
+    S_FLOOR,
+    T_E_FLOOR,
+    clip_q_value,
+    floor_u_0_value,
+)
 
 
 def _raw_initval(data, default=None):
@@ -710,14 +716,14 @@ class MulensInstrument(Instrument):
                     # backends use.  This was a third hard-coded copy of the
                     # clip (and, like them, engaged at every u_0 except 0).
                     "u_0": floor_u_0_value(u0),
-                    "t_E": max(float(tE), 1e-4),
-                    "s": max(float(s_val), 1e-6),
+                    "t_E": max(float(tE), T_E_FLOOR),
+                    "s": max(float(s_val), S_FLOOR),
                     "q": clip_q_value(q_val, "lens.0.q (flux bootstrap)"),
                     "alpha": float(alpha),
                 }
                 rho = _get(f"lens.{j}.rho")
                 if rho is not None:
-                    params["rho"] = max(float(rho), 1e-9)
+                    params["rho"] = max(float(rho), RHO_FLOOR)
                 model = mm.Model(params)
                 if rho is not None:
                     window = 3.0 * params["t_E"]

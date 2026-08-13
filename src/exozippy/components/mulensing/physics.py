@@ -258,6 +258,31 @@ T_E_FLOOR = 1e-4  # days
 U_0_FLOOR = 1e-9  # Einstein radii
 THETA_E_LENSING_MIN = 1e-6  # mas
 
+# --- Binary/finite-source floors --------------------------------------------
+# The same rule as the three above -- a statement about where the model is
+# DEFINED -- for the two parameters that only exist once the lens is binary or
+# the source is resolved.  They lived as five hard-coded literals (s three
+# times, rho twice) rather than here, which is how U_0_FLOOR came to disagree
+# with itself across backends; naming them is what stops that recurring.
+#
+# S_FLOOR    the binary-lens equation places the components at +/- s/2, so
+#            s <= 0 puts the secondary on the wrong side of the primary (or on
+#            top of it) and the caustic topology is undefined.  s -> 0 is also
+#            the close-binary limit where the central caustic shrinks as s^2
+#            and VBM's contour integration needs ever finer sampling, so a
+#            floor is a numerical necessity as well as a physical one.
+# RHO_FLOOR  the source radius in Einstein radii.  rho <= 0 is unphysical and
+#            the finite-source methods integrate over the source disc, so a
+#            non-positive radius is not merely small but meaningless.  It is
+#            floored rather than clipped away because rho -> 0 IS the correct
+#            point-source limit -- the floor only has to keep the integration
+#            well-posed, and 1e-9 is far below any resolvable source.
+#
+# Both are the values that were already in force everywhere they appeared, so
+# naming them changed no result; see the PR that introduced them.
+S_FLOOR = 1e-6  # Einstein radii (binary separation)
+RHO_FLOOR = 1e-9  # Einstein radii (source radius)
+
 
 def apply_u_0_floor(u_0):
     """Move u_0 out of the open interval (-U_0_FLOOR, U_0_FLOOR) -- symbolic.
