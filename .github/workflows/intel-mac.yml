@@ -1,0 +1,210 @@
+name: Intel macOS
+
+# A SEPARATE WORKFLOW, DELIBERATELY -- read before folding this into
+# tests.yml.
+#
+# The branch ruleset requires a status check named `test`, aggregated by the
+# gate job at the bottom of tests.yml. Anything living in that file is one
+# `needs:` edit away from becoming a merge blocker, and this platform must
+# never be one: it is a probe of a stack we do not yet claim to support, on
+# hardware Apple has stopped making. Keeping it in its own file means it
+# cannot gate a pull request by accident.
+#
+# Being a separate file is also what makes running on every pull request
+# affordable. This job is slow -- exoplanet-core and celerite2 ship no
+# macOS x86_64 wheels and source-build here -- but it is not in the `test`
+# gate's `needs:`, so however long it takes and however red it goes, a pull
+# request stays mergeable on the strength of the Linux matrix alone.
+on:
+  # `branches: [master]` here and NO `branches:` filter on pull_request, for
+  # the reason spelled out at the top of tests.yml: a pull request targeting
+  # anything other than master would otherwise get no run at all, and
+  # retargeting it later does not start one. Keep the two workflows'
+  # triggers in agreement -- a platform job that skips exactly the stacked
+  # pull requests is a platform job that misses the bad merges.
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_full_suite:
+        description: "Run the whole pytest suite instead of the smoke subset"
+        type: boolean
+        default: false
+      strict_probe:
+        description: "Fail the job if any JAX sampler probe fails"
+        type: boolean
+        default: false
+  schedule:
+    # 08:00 UTC, an hour after tests.yml's nightly, so the two do not
+    # contend for runners or interleave in the Actions list.
+    - cron: "0 8 * * *"
+
+jobs:
+  probe:
+    name: probe
+    # macos-15-intel is a STANDARD runner (4 CPU / 14 GB), which the GitHub
+    # docs describe as "free and unlimited on public repositories" -- and
+    # this repository is public, so this job costs nothing. Do NOT switch to
+    # `macos-15-large`: that label points at the same image but is a LARGER
+    # runner (12 CPU / 30 GB) and is billed even on public repositories.
+    #
+    # macos-13, the old free Intel runner, has been REMOVED from
+    # actions/runner-images -- not deprecated, removed -- so a workflow
+    # naming it fails to find a runner rather than warning. `macos-26-intel`
+    # is the other current Intel label; macOS 26 is expected to be the last
+    # Intel release, so these labels have a finite life and this job will
+    # eventually need the same retirement treatment macos-13 got.
+    runs-on: macos-15-intel
+    # Source builds plus a full suite is the worst case; the smoke path is
+    # far quicker. Generous rather than tight, since a job cancelled at the
+    # cap produces no result at all -- the mistake Windows CI made.
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 is deliberately absent and is not an oversight: the Intel-Mac
+        # ceiling for numba is 0.62.1 and for jaxlib is 0.4.38, and neither
+        # publishes a cp314 wheel. If this platform is ever supported
+        # officially, that constraint belongs in requires-python's
+        # documentation, not in a matrix entry that cannot pass.
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      # fetch-depth: 0 so poetry-dynamic-versioning can see tags. Without it
+      # the build is 0.0.0, which is harmless here but makes the version in
+      # the probe's report meaningless.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The toolchain is load-bearing on this platform in a way it is not
+      # elsewhere: exoplanet-core and celerite2 both source-build here, so
+      # when one of them fails to compile the clang version is the first
+      # thing anyone will want. Recorded up front rather than reconstructed
+      # from a build log.
+      - name: Record the platform and toolchain
+        run: |
+          set -x
+          uname -m
+          sw_vers
+          xcode-select -p || true
+          clang --version || true
+          python -c "import platform; print(platform.platform(), platform.machine())"
+
+      # Same Zenodo spectra and astropy ephemeris caches as tests.yml, with
+      # the SAME keys -- cache entries are not scoped per-OS and both
+      # payloads are platform-independent data files, so this job is usually
+      # a hit populated by the Linux matrix. Only the full-suite path reads
+      # them; restoring on the smoke path is a few wasted seconds and keeps
+      # the two paths' setup identical.
+      #
+      # Keep the paths in sync with bc_grid.DEFAULT_MODEL_ROOT by hand --
+      # see the long comment in tests.yml for why that has bitten before.
+      - name: Cache the Zenodo model spectra
+        uses: actions/cache@v6
+        with:
+          path: |
+            src/exozippy/models/NextGen/BCs/NextGen.spectra.csv
+            src/exozippy/models/NextGen/BCs/NextGen.wavelength.csv
+          key: nextgen-spectra-p2-7a2b81333f6a5bfccd4cbc07bdea6648
+
+      - name: Cache the astropy ephemeris kernel
+        uses: actions/cache@v6
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-de430
+
+      # No poetry and no lock, on purpose. poetry.lock was resolved against
+      # pyproject's `jax>=0.5.0`, which has no macOS x86_64 candidate at
+      # all, so `poetry install` cannot even begin here -- reproducing that
+      # is not informative, it is just the bug report.
+      #
+      # intel_mac_deps.py rewrites only the requirements that are capped by
+      # wheel availability on this platform and passes everything else
+      # through verbatim, markers included. See its docstring; it is
+      # temporary scaffolding and gets deleted once the caps move into
+      # pyproject.toml as environment markers.
+      - name: Build the Intel-Mac requirement set
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python .github/scripts/intel_mac_deps.py --extra gui \
+            -o intel-mac-requirements.txt
+          echo "--- intel-mac-requirements.txt ---"
+          cat intel-mac-requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r intel-mac-requirements.txt
+
+      # --no-deps because the dependencies are already installed above at the
+      # versions we want to test; letting pip re-resolve here would reinstate
+      # pyproject's `jax>=0.5.0` and fail.
+      - name: Install exozippy itself
+        run: pip install --no-deps .
+
+      - name: Install the test harness
+        run: pip install pytest pytest-timeout pytest-xdist httpx
+
+      # `pip check` is expected to complain -- exoplanet-core declares
+      # jax>=0.5.0 for its FFI backend and we have deliberately installed
+      # 0.4.38. Whether that declaration is a real requirement or a
+      # conservative floor is precisely what the sampler probe below
+      # measures, so this reports and does not fail.
+      - name: Report dependency consistency
+        continue-on-error: true
+        run: |
+          pip check || echo "(expected: see the sampler probe below)"
+
+      - name: Record the resolved versions
+        run: pip freeze | tee resolved-intel-mac.txt
+
+      - name: Import smoke test
+        run: |
+          python -c "import exozippy; print('exozippy', exozippy.__file__)"
+          python -c "import exozippy.run, exozippy.system, exozippy.config"
+
+      # THE POINT OF THIS WORKFLOW. Everything above is setup.
+      #
+      # Reports a probe x sampler matrix into the job summary and exits 0
+      # even when probes fail, because on this platform a partial failure is
+      # the expected finding and a red step would bury the table that is the
+      # whole output. Pass strict_probe on a manual run once we know what
+      # "working" looks like here and want regressions to be loud.
+      - name: Probe the JAX samplers
+        run: |
+          python scripts/diag_jax_samplers.py --traceback \
+            ${{ inputs.strict_probe && '--strict' || '' }}
+
+      # -n 2 matches tests.yml: this is a 4-CPU runner and each worker peaks
+      # 1-2 GB building a System and compiling graphs.
+      - name: Run the smoke subset
+        if: ${{ !inputs.run_full_suite }}
+        run: |
+          pytest -q -n 2 \
+            tests/test_limbdark.py \
+            tests/test_physics_registry.py \
+            tests/test_config_healing.py \
+            tests/test_known_keys.py \
+            tests/test_negative_jitter.py
+
+      - name: Run the full suite
+        if: ${{ inputs.run_full_suite }}
+        run: pytest -q -n 2
+
+      # Kept regardless of outcome: when the install fails, the requirement
+      # file and whatever pip managed to resolve are the diagnosis.
+      - name: Upload the resolution record
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: intel-mac-${{ matrix.python-version }}
+          path: |
+            intel-mac-requirements.txt
+            resolved-intel-mac.txt
+          if-no-files-found: warn
