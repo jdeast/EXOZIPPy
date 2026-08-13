@@ -200,10 +200,3 @@ RELATIONS = [
     sp.Eq(xalpha, sp.cos(alpha)),
     sp.Eq(yalpha, sp.sin(alpha)),
 ]
-
-
-def get_solver_paths():
-    """
-    Optional: Pre-compiles common inversion formulas for speed.
-    """
-    return RELATIONS

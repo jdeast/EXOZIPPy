@@ -39,10 +39,3 @@ def get_symbol_map(config):
 # shared Instrument parent (see the note there for why registration stays
 # per-child, and why jitter**2 would be wrong).
 RELATIONS = list(JITTER_RELATIONS)
-
-
-def get_solver_paths():
-    """
-    Returns the equations defining the state of an RV Instrument.
-    """
-    return RELATIONS

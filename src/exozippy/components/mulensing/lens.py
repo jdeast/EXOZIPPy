@@ -6,7 +6,6 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.config import RANK_DERIVED_DATA
-from exozippy.constants import KAPPA
 from exozippy.corner_utils import (
     collect_parameter_corner_samples,
     save_corner_plot,

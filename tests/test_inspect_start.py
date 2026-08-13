@@ -113,7 +113,7 @@ def test_inspect_start_never_mutates_initval(mock_logp, system_config):
     before = p.initval.copy()
 
     # ACT
-    inspect_start(model, system, {}, {}, {})
+    inspect_start(model, system, {})
 
     # ASSERT
     assert p.initval.tobytes() == before.tobytes()
@@ -143,7 +143,7 @@ def test_inspect_start_reports_the_start_the_sampler_will_use(
 
     # ACT
     with caplog.at_level(logging.INFO, logger="exozippy.run"):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     row_a = _table_row(caplog, "star.A.mass")
@@ -201,7 +201,7 @@ def test_unset_element_falls_back_to_user_params_either_spelling(
 
     # ACT
     with caplog.at_level(logging.INFO, logger="exozippy.run"):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     row_b = _table_row(caplog, "star.B.mass")
@@ -244,7 +244,7 @@ def test_scalar_initval_is_also_left_alone():
         "exozippy.diagnostics.ModelAuditor.get_aggregated_logps",
         return_value=({}, {}),
     ):
-        inspect_start(model, system, {}, {}, {})
+        inspect_start(model, system, {})
 
     # ASSERT
     assert np.asarray(p.initval).tolist() == [2.0]

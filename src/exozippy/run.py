@@ -13,9 +13,7 @@ import arviz as az
 import matplotlib.pyplot as plt
 import numpy as np
 import pymc as pm
-import yaml
 from matplotlib.backends.backend_pdf import PdfPages
-from pymc.initial_point import make_initial_point_fn
 
 # import pytensor
 # pytensor.config.optimizer_excluding = "local_elemwise_fusion"
@@ -387,15 +385,11 @@ def _run_fit(config, gui, user_params=None):
 
         # 1. Get your starting dictionaries (after the rescale, so the
         # diagnostic table reports the measured scales)
-        nuts_scales, phys_scales, phys_inits, transformed_inits = (
-            system.get_mcmc_init(model)
-        )
+        transformed_inits = system.get_mcmc_init(model)
         inspect_start(
             model,
             system,
             transformed_inits,
-            phys_inits,
-            phys_scales,
             whiten_report=whiten_report,
         )
 
@@ -899,10 +893,11 @@ def inspect_start(
     model,
     system,
     transformed_inits,
-    phys_inits,
-    phys_scales,
     whiten_report=None,
 ):
+    # No physical inits/scales arguments: this reads p.initval / p.init_scale
+    # off the Parameters below, so the two dicts get_mcmc_init used to build
+    # and hand over were never read.
     auditor = ModelAuditor(model, system, transformed_inits)
     param_logps, other_nodes = auditor.get_aggregated_logps()
     unused_yaml = auditor.check_unused_yaml()
