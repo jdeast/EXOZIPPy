@@ -236,7 +236,21 @@ def build_latex_output(
     gets one Value column per mode, a leading mode-weight row, and the weight
     provenance appended to the table comments.  Per-mode macro names carry a
     ``modeone``/``modetwo``/... suffix so every mode can be cited in the same
-    document; the unsuffixed macros keep their combined-posterior meaning.
+    document.
+
+    The unsuffixed value macro is then SUPPRESSED for every parameter that
+    has a posterior: a pooled-across-modes number is a summary of a
+    multimodal distribution and citing it in prose is almost always a
+    mistake, so the macro is not defined at all and a stale ``\\ezstarteff``
+    in a wrapper document fails loudly at compile time rather than printing
+    the mean of two separated peaks.  Two kinds of unsuffixed macro do
+    survive: a FIXED parameter's value (no per-mode variation, so its single
+    def applies to every mode -- and the table spans it with
+    ``\\multicolumn``), and every ``...prior`` macro, which describes the
+    model rather than the draws.  The mode weights get their own macros
+    (``\\ezmodeweightone``, ``\\ezmodeweighterrone``), which carry the bare
+    mode WORD rather than the ``mode``-prefixed suffix -- see the comment at
+    their emission site below.
     """
     multimodal = _multimodal(mode_report)
     # THE cross-reference: these are the names Parameter.to_latex_mode_defs
