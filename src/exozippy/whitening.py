@@ -16,9 +16,19 @@ contour; see probe_scales.  Because one raw unit is one preliminary scale by
 construction, the measured step IS the multiplicative correction to the
 preliminary scale.  apply_measured_whitening() feeds it to
 Parameter.set_whitening(), which updates the pytensor.shared whitening scales
-in place -- no model rebuild, and the posterior is provably unchanged (the
-logit-uniform correction potential cancels the raw N(0,1) prior symbolically
-for any scale; the scale affects conditioning only).
+in place -- no model rebuild, and the posterior is provably unchanged.
+
+That proof covers the LOGIT branch only -- an element with two finite bounds,
+where section C of Parameter.build_pymc cancels the raw N(0,1) prior
+symbolically for any scale, so the scale affects conditioning alone.  It is
+exactly the set set_whitening rescales.  Every NON-logit element (anything
+without two finite bounds) is left untouched, because there the raw N(0,1) IS
+the prior: N(mu, sigma) when a sigma was given, and N(initval, init_scale)
+when the bounds are infinite and no sigma was -- the one place init_scale is
+a posterior term rather than conditioning, and one a data-measured multiplier
+would turn into a data-dependent prior width.  build_pymc warns when it builds
+such an element.  So the invariant holds for the pass as a whole, but only
+because the branch it does not hold for is never rescaled.
 
 After the rescale, every raw direction costs ~0.5 nats per unit step: the
 "curvature = -1" conditioning the retired curvature check used to ask users
