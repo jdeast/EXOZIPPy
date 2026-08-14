@@ -32,9 +32,11 @@ not asserted here on paper.
 Units: everything here is in EXOZIPPy's native internal unit system --
 R_sun, M_sun, day (see constants.py) -- not AU/second like EXOFASTv2 or
 AU/day like exoplanet's own c_light. `a_rel` is the physical semi-major axis
-of the RELATIVE (e.g. star-planet) orbit in R_sun (e.g. orbit.arsun.value,
-already exists); no separate stellar-radius multiply is needed since that
-physical scale is already baked into arsun.
+of the RELATIVE (e.g. star-planet) orbit in R_sun -- orbit.a.value, already
+exists (its internal_unit is solRad; not orbit.arsun, which does not exist
+as a manifest key despite the expression function being named calc_arsun);
+no separate stellar-radius multiply is needed since that physical scale is
+already baked into a.
 
 Barycentric scaling: the event (transit/eclipse/RM: the planet; RV reflex:
 the star) sits at a fixed fraction of the relative-orbit separation from the
@@ -73,8 +75,8 @@ def line_of_sight_kinematics(
     sin_i : tensor
         sin of the orbital inclination.
     a_rel : tensor
-        Physical semi-major axis of the RELATIVE orbit [R_sun] (e.g.
-        orbit.arsun.value).
+        Physical semi-major axis of the RELATIVE orbit [R_sun] (orbit.a.value
+        -- internal_unit solRad; NOT orbit.arsun, which does not exist).
     factor : tensor or float
         Barycentric scaling for the body whose kinematics are wanted --
         m_primary/m_total for the planet's event (transit/eclipse/RM),

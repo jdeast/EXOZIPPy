@@ -13,11 +13,19 @@ from exozippy.components.limbdark import quad_limb_darkened_flux
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
+from .. import ltt
 from . import physics
 
 
 class Transit(Instrument):
     prose_noun = "transit photometry"
+
+    # Light-travel-time (Roemer delay) is on by default for transit (see
+    # components/ltt.py); no config key exists yet (a later phase), so this
+    # is the ONE knob for now. A class attribute rather than a bare literal
+    # inside build_likelihood so tests can flip it (monkeypatch.setattr) to
+    # exercise the OFF code path without needing a config key.
+    _LIGHT_TRAVEL_TIME_ACTIVE = True
 
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
@@ -466,6 +474,27 @@ class Transit(Instrument):
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
 
+        # 2b. Light-travel-time (Roemer delay) inputs. Config-key gating
+        # (light_travel_time: on/off per component) is a later phase; for
+        # now this reads the class-level default (see _LIGHT_TRAVEL_TIME_
+        # ACTIVE) so the OFF code path (below) is exercised deliberately
+        # and stays byte-identical to pre-LTT behavior when it is False.
+        light_travel_time_active = self._LIGHT_TRAVEL_TIME_ACTIVE
+        a_rel = orbits.a.value[planets.orbit_map][
+            None, None, :
+        ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
+        # Barycentric scaling for the planet's own orbit about the system
+        # barycenter (see components/ltt.py docstring, "Barycentric
+        # scaling"): the transiting planet is the implicit companion group
+        # (see class docstring re: hierarchical orbits), so its distance
+        # from the barycenter is a_rel * m_primary/m_total -- mirrors
+        # astrometryinstrument.py's m_companion/m_total for its own
+        # (primary-side) reflex factor.
+        ltt_factor = (
+            orbits.m_primary.value[planets.orbit_map]
+            / orbits.m_total.value[planets.orbit_map]
+        )[None, None, :]
+
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
         # manifest has no u2; the quadratic term is then zero.
@@ -522,9 +551,39 @@ class Transit(Instrument):
         for rows, time_grid_np, weights_np in self._oversample_groups:
             t_grid = pt.constant(time_grid_np)[:, :, None]  # (n_g, k_g, 1)
             w_g = pt.constant(weights_np)  # (k_g,)
-            time_g = t_grid[:, :, 0]  # (n_g, k_g), for calc_reflect_term
 
-            M = (t_grid - tp) * n
+            # Light-travel-time correction: the geometry (transit/eclipse
+            # shape, and via planetvisible the thermal/reflect gating) and
+            # reflection's own time reference both need the per-planet
+            # retarded time -- see components/ltt.py. Structured so LTT OFF
+            # costs nothing extra: t_grid_corrected is just t_grid and only
+            # the ONE Kepler solve below (unchanged from pre-LTT) runs.
+            if light_travel_time_active:
+                t_grid_corrected, _ = ltt.retarded_time(
+                    t_grid,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=ltt_factor,
+                    z0=0.0,
+                )
+            else:
+                t_grid_corrected = t_grid
+            # Broadcast to (n_g, k_g, N_planets) unconditionally (a no-op
+            # when LTT already produced that shape) so the per-planet slice
+            # below is safe regardless of light_travel_time_active or
+            # N_planets: with LTT off, t_grid_corrected's last dim is the
+            # unbroadcast size 1 from t_grid, and t_grid_corrected[:, :, p]
+            # would index-error for any p > 0 without this.
+            time_g_corrected = t_grid_corrected + pt.zeros(
+                (1, 1, planets.n_elements)
+            )
+
+            M = (t_grid_corrected - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
@@ -598,7 +657,7 @@ class Transit(Instrument):
                         net = net - 1e-6 * thermal_g[:, None] * visible
                     if reflect_g is not None:
                         reflect_term_g = physics.calc_reflect_term(
-                            time_g,
+                            time_g_corrected[:, :, p_idx],
                             tc_p[p_idx],
                             period_p[p_idx],
                             reflect_g[:, None],
@@ -764,8 +823,48 @@ class Transit(Instrument):
             cosw = orbits.cosw.value[planets.orbit_map][None, :]
             sinw = orbits.sinw.value[planets.orbit_map][None, :]
             inc = orbits.inc.value[planets.orbit_map][None, :]
+            sin_i = pt.sin(inc)
 
-            M = (t_grid - tp) * n
+            # Light-travel-time correction -- MUST mirror build_likelihood's
+            # group loop exactly (same gate, same ltt.retarded_time call,
+            # same seams corrected/left alone), or this path and the
+            # likelihood's disagree and the plotted curve stops matching
+            # what the fit actually optimized against (see
+            # test_plotted_model_matches_likelihood_model). Only the shape
+            # differs: this path has no sub-exposure axis (smearing is
+            # applied outside, by _smeared_full_lc averaging repeated calls
+            # at shifted t), so it's (N_times, N_planets) here vs
+            # (n_g, k_g, N_planets) there.
+            a_rel = orbits.a.value[planets.orbit_map][None, :]
+            ltt_factor = (
+                orbits.m_primary.value[planets.orbit_map]
+                / orbits.m_total.value[planets.orbit_map]
+            )[None, :]
+            if self._LIGHT_TRAVEL_TIME_ACTIVE:
+                t_grid_corrected, _ = ltt.retarded_time(
+                    t_grid,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=ltt_factor,
+                    z0=0.0,
+                )
+            else:
+                t_grid_corrected = t_grid
+            # Broadcast to (N_times, N_planets) unconditionally, same
+            # reasoning as build_likelihood's time_g_corrected: with LTT
+            # off, t_grid_corrected's last dim is the unbroadcast size 1
+            # from t_grid, and slicing [:, p_idx] for p_idx > 0 below would
+            # index-error without this.
+            time_corrected = t_grid_corrected + pt.zeros(
+                (1, planets.n_elements)
+            )
+
+            M = (t_grid_corrected - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             a_rstar = planets.ar.value[None, :]
@@ -774,7 +873,6 @@ class Transit(Instrument):
 
             sin_wf = sinw * cosf + cosw * sinf
             cos_wf = cosw * cosf - sinw * sinf
-            sin_i = pt.sin(inc)
             cos_i = pt.cos(inc)
 
             b = pt.sqrt(
@@ -830,7 +928,7 @@ class Transit(Instrument):
                     planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
                     if reflect_inst is not None:
                         reflect_term = physics.calc_reflect_term(
-                            t_input,
+                            time_corrected[:, p_idx],
                             tc_this,
                             period_this,
                             reflect_inst,
