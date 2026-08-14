@@ -255,14 +255,13 @@ jobs:
       # -n 2 matches tests.yml: this is a 4-CPU runner and each worker peaks
       # 1-2 GB building a System and compiling graphs.
       #
-      # test_gp.py is NOT in this list, and its absence is a pending
-      # decision rather than an oversight. celerite2's PyMC backend imports
-      # jax eagerly (see the probe step above), so with no jax on this
-      # platform 9 of its tests fail on an unavailable feature rather than
-      # on a defect. Put it back, with skips, once the "no jax at all" vs
-      # "jax 0.4.38 plus an upstream exoplanet-core guard fix" question is
-      # settled -- whichever way that goes, these tests should then either
-      # pass or skip, never fail.
+      # test_gp.py is in the set and is the expensive one, on purpose. Its
+      # 10 kernel-building tests carry @needs_celerite2_pymc and SKIP here
+      # (celerite2's PyMC backend imports jax eagerly -- see the probe step
+      # above), while its ~36 scaffolding tests run for real. Keeping it
+      # listed is what makes those skips visible: if a future celerite2
+      # stops importing jax eagerly, or this platform starts shipping jax,
+      # the same command silently starts exercising the kernels instead.
       - name: Run the smoke subset
         if: ${{ !inputs.run_full_suite }}
         run: |
@@ -271,7 +270,8 @@ jobs:
             tests/test_physics_registry.py \
             tests/test_config_healing.py \
             tests/test_known_keys.py \
-            tests/test_negative_jitter.py
+            tests/test_negative_jitter.py \
+            tests/test_gp.py
 
       - name: Run the full suite
         if: ${{ inputs.run_full_suite }}

@@ -25,6 +25,36 @@ from conftest import _DummyConfigManager
 from exozippy.components import gp as gp_support
 from exozippy.components.instrument import Instrument
 
+# Most of this file tests EXOZIPPy's own GP scaffolding -- spec parsing,
+# parameter registration, pinning, hints -- and needs no kernel at all. The
+# tests that build a real celerite2 kernel are marked below.
+#
+# celerite2/pymc/ops.py does `from pytensor.link.jax.dispatch import
+# jax_funcify` at module scope, so celerite2's PyMC backend requires jax at
+# IMPORT time -- note that is separate from its build-time BUILD_JAX option,
+# which is genuinely optional. On a platform that ships no jax (Intel macOS,
+# where jaxlib's last x86_64 wheel predates the jax.ffi exoplanet-core
+# needs) the GP feature is therefore unavailable, and these tests must SKIP
+# rather than fail: an unavailable feature is not a defect.
+#
+# The condition is celerite2.pymc importing, not jax importing, because that
+# is exactly what gp.py needs -- and it implies jax anyway.
+try:
+    import celerite2.pymc  # noqa: F401
+
+    _CELERITE2_PYMC_IMPORT_ERROR = None
+except ImportError as _exc:  # pragma: no cover - platform dependent
+    _CELERITE2_PYMC_IMPORT_ERROR = _exc
+
+needs_celerite2_pymc = pytest.mark.skipif(
+    _CELERITE2_PYMC_IMPORT_ERROR is not None,
+    reason=(
+        "celerite2's PyMC backend is unimportable here "
+        f"({_CELERITE2_PYMC_IMPORT_ERROR}); it imports jax unconditionally, "
+        "so GP noise is unavailable on platforms that ship no jax"
+    ),
+)
+
 
 class _DummyInstrument(Instrument):
     """Minimal concrete Instrument for unit-testing the shared GP helpers."""
@@ -435,6 +465,7 @@ def test_gp_imposes_no_sampler_constraint():
     assert inst.sampler_requirements() == {}
 
 
+@needs_celerite2_pymc
 def test_celerite_ops_have_a_registered_jax_implementation():
     """
     Given celerite2's PyTensor ops,
@@ -443,14 +474,6 @@ def test_celerite_ops_have_a_registered_jax_implementation():
     decision above rests on. If a celerite2 upgrade drops it, this fails here
     rather than at someone's first numpyro run.
     """
-    # Skipped where jax is absent rather than assumed present: importing
-    # pytensor.link.jax.dispatch imports jax itself, so without this the
-    # test ERRORS on a platform that legitimately ships no jax at all --
-    # which Intel macOS does, since jaxlib's last x86_64 wheel (0.4.38)
-    # predates the jax.ffi that exoplanet-core needs. The claim being
-    # checked is only meaningful where the JAX samplers can run anyway.
-    pytest.importorskip("jax")
-
     from celerite2.pymc.ops import _CeleriteOp
     from pytensor.link.jax.dispatch import jax_funcify
 
@@ -475,6 +498,7 @@ def _celerite_logp(kernel_kind, params, t, y, mu, sigma):
     return float(model.compile_logp()({}))
 
 
+@needs_celerite2_pymc
 def test_vanishing_amplitude_reproduces_the_independent_gaussian_logp():
     """
     Given a GP whose kernel amplitude is driven to ~0,
@@ -513,6 +537,7 @@ def test_vanishing_amplitude_reproduces_the_independent_gaussian_logp():
     assert sho == pytest.approx(expected, rel=1e-8)
 
 
+@needs_celerite2_pymc
 def test_a_real_kernel_prefers_correlated_data_over_white_noise():
     """
     Given data with a genuine smooth correlated component,
@@ -546,6 +571,7 @@ def test_a_real_kernel_prefers_correlated_data_over_white_noise():
     assert gp > white
 
 
+@needs_celerite2_pymc
 def test_build_kernel_sums_the_requested_terms():
     """
     Given a file asking for both terms,
@@ -605,6 +631,7 @@ def test_add_observation_likelihood_without_gp_is_the_plain_normal():
     assert float(model.compile_logp()({})) == pytest.approx(expected)
 
 
+@needs_celerite2_pymc
 def test_mixed_files_split_into_one_normal_plus_one_gp_per_file():
     """
     Given three files where the middle one asked for a GP,
@@ -661,6 +688,7 @@ def test_mixed_files_split_into_one_normal_plus_one_gp_per_file():
     assert float(model.compile_logp()({})) == pytest.approx(expected, rel=1e-8)
 
 
+@needs_celerite2_pymc
 def test_gp_likelihood_is_invariant_to_the_input_ordering():
     """
     Given the same observations presented in time order and shuffled,
@@ -767,6 +795,7 @@ def test_rv_system_without_gp_samples_no_gp_parameters(two_rv_files):
     assert not [v.name for v in model.value_vars if ".gp_" in v.name]
 
 
+@needs_celerite2_pymc
 def test_rv_system_with_gp_on_one_file_samples_only_that_file(two_rv_files):
     """
     Given a two-instrument RV system where only the first file asks for a
@@ -812,6 +841,7 @@ def test_rv_system_with_gp_on_one_file_samples_only_that_file(two_rv_files):
     )
 
 
+@needs_celerite2_pymc
 def test_gp_prediction_is_consistent_between_the_data_and_grid_evaluators(
     two_rv_files,
 ):
@@ -845,6 +875,7 @@ def test_gp_prediction_is_consistent_between_the_data_and_grid_evaluators(
     assert np.all(rv.gp_mean_on_grid(system, point, 1, rv.time[:5]) == 0.0)
 
 
+@needs_celerite2_pymc
 def test_plots_put_the_gp_in_the_unphased_model_and_out_of_the_phased_data(
     two_rv_files,
 ):
@@ -889,6 +920,7 @@ def test_plots_put_the_gp_in_the_unphased_model_and_out_of_the_phased_data(
     assert np.allclose(prep["other_signals"], gp_at_data, rtol=0, atol=1e-12)
 
 
+@needs_celerite2_pymc
 def test_user_can_override_a_gp_hyperparameter_prior(two_rv_files):
     """
     Given a user prior on a GP hyperparameter in the params file, addressed by
