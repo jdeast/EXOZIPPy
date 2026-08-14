@@ -20,9 +20,18 @@ Conventions
   calculated one), via the Filter class.
 * Extinction IS applied along the Av axis:
   tau(lam) = ext(lam)/ext(0.55um) * Av / 1.086 (models/extinction_law.ascii),
-  so BC(Av) = M_bol(unextincted) - M_X(extincted). NOTE: the shipped
-  2MASS/GAIA/WISE tables do NOT vary with Av (extinction appears to be
-  missing there); tables generated here do.
+  so BC(Av) = M_bol(unextincted) - M_X(extincted). The shipped tables
+  carry the same 13-point Av axis (0 to 6 mag) and DO vary along it --
+  an earlier version of this note claimed they did not, and that was
+  wrong. Measured at teff = 5600 K, logg = 2.5, [Fe/H] = 0, the
+  least-squares dBC/dAv is -0.303 (2MASS_J), -0.126 (2MASS_Ks), -0.704
+  (Gaia_G), -0.072 (WISE_W1); no shipped column is flat in Av, in any
+  of 2MASS/GAIA/Generic/Keck/TESS/WISE. The three narrow bands there
+  match -A_lam/Av from models/extinction_law.ascii at the band's
+  effective wavelength (-0.305, -0.125, -0.072) to under 1%, i.e. the
+  shipped Av dependence IS this same extinction law; only Gaia_G
+  departs from its single-wavelength value (-0.865), as a passband
+  that wide must.
 
 Accuracy caveat: the shipped R=150 spectra reproduce the original
 2MASS/GAIA BC tables only to ~0.01-0.04 mag (those were evidently

@@ -466,8 +466,19 @@ def build_bc_grid(
             frames[feh] = df[keep].copy()
         per_facility_frames[fac] = frames
 
-    # 3. Cross-check: all facilities must share the same (teff, logg,
-    # feh, Av) grid. Use the first facility as the canonical grid.
+    # 3. Adopt the first facility's (teff, logg, feh, Av) axes as the
+    # canonical grid. Every facility must be on that same grid -- but
+    # that is an ASSUMPTION here, not a checked precondition: no other
+    # facility's axes are ever compared against these. Step 4 places
+    # every facility's rows into the canonical axes by searchsorted, so
+    # a facility on a different grid is silently mis-binned (its row
+    # lands in the next canonical cell up) rather than rejected, or
+    # raises IndexError if its values run past the canonical maximum.
+    # The only guard is step 5's NaN check, which catches an
+    # UNDER-populated grid (a facility with fewer points leaves cells
+    # unwritten) but not a mis-binned one (a facility with the same
+    # number of points at different values fills every cell). Compare
+    # the axes here if that ever stops being good enough.
     canonical_fac = next(iter(per_facility_frames))
     canonical_frames = per_facility_frames[canonical_fac]
     feh_pts = np.array(sorted(canonical_frames.keys()), dtype=float)
