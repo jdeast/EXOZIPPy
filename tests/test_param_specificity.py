@@ -17,16 +17,19 @@ That is not cosmetic for the two scale channels: ``init_scale`` seeds the
 whitening probe, and for an unbounded element with no sigma it IS the prior
 width, i.e. a posterior term.
 
-Explicitly out of scope, and pinned below so it stays that way: the index and
-name forms name exactly ONE element each and are equally specific, so which of
-those two wins is left exactly as it was (the index form in the first-hit
-lookups, the name form in the apply-every-match loops).
+The index and name forms name exactly ONE element each and are equally
+specific, so "most specific wins" cannot adjudicate between them -- and the
+two traversals disagreed about it (index in the first-hit lookups, name in
+the apply-every-match loops).  The ruling is that such a config is
+ill-formed and RAISES: one element, one spelling.  The tests that used to
+pin which of the two won now pin the raise instead; they were pinning an
+arbitrary winner, and the winner no longer exists.
 """
 
 import numpy as np
 import pytest
 
-from exozippy.config import ConfigManager
+from exozippy.config import ConfigManager, _reject_duplicate_spellings
 
 SYSTEM = {
     "star": [{"name": "A"}, {"name": "B"}],
@@ -255,25 +258,128 @@ def test_user_params_still_beat_a_component_override():
 
 
 # ---------------------------------------------------------------------------
-# Scope guard: the index/name tier is deliberately untouched
+# One element, one spelling: index + name RAISES
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "field,expected_winner",
-    [("unit", "index"), ("initval", "name")],
+    "field,entries",
+    [
+        ("initval", {"initval": 5.0}),
+        ("unit", {"unit": "pc"}),
+    ],
 )
-def test_index_vs_name_order_is_unchanged(field, expected_winner):
+def test_index_and_name_spellings_of_one_element_raise(field, entries):
     """
-    Given BOTH equally specific spellings of element 0 (index and name),
-    When resolve() reads a first-hit field (unit) and an apply-every-match
-      field (initval),
-    Then the index form wins the first, the name form wins the second.
+    Given BOTH equally specific spellings of star 0 (index and name),
+    When a ConfigManager is constructed on them,
+    Then it raises, naming both keys.
 
-    Both spellings name one element, so neither is more specific and the
-    winner is arbitrary either way; the two channels happen to disagree.
-    Changing that would be a second, unasked-for semantic change, so the fix
-    reorders only the broadcast tier and this pins the rest.
+    This replaces two assertions that pinned WHICH spelling won -- the index
+    form for the first-hit fields, the name form for the apply-every-match
+    ones.  Neither is more specific, so both answers were arbitrary and the
+    config could carry a number scaled under one entry and labelled under the
+    other.  Telling the user beats picking for them.  Parameterized over a
+    numeric field and `unit:` because they travel through the two different
+    traversals.
+    """
+    # ARRANGE
+    user_params = {
+        "star.0.distance": dict(entries),
+        "star.A.distance": dict(entries),
+    }
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError) as exc:
+        ConfigManager(user_params, system_config=SYSTEM)
+
+    msg = str(exc.value)
+    assert "star.0.distance" in msg and "star.A.distance" in msg
+    assert "same" in msg.lower()
+
+
+def test_identical_content_still_raises():
+    """
+    Given two spellings of one element carrying byte-identical entries,
+    When a ConfigManager is constructed on them,
+    Then it still raises.
+
+    "They happen to agree" would be a second rule to maintain, and the config
+    is no less confusing to read for it: one element is still addressed
+    twice, and standardize_param_names would still keep only one of the two.
+    No shipped example or params file does this (all 19 checked).
+    """
+    # ARRANGE
+    entry = {"initval": 5.0, "sigma": 0.5, "mu": 5.0}
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="DUPLICATE PARAMETER SPELLING"):
+        ConfigManager(
+            {"star.0.distance": dict(entry), "star.A.distance": dict(entry)},
+            system_config=SYSTEM,
+        )
+
+
+@pytest.mark.parametrize("specific", ["star.0.distance", "star.A.distance"])
+def test_broadcast_plus_specific_never_raises(specific):
+    """
+    Given the broadcast spelling AND one specific spelling of one element,
+    When a ConfigManager is constructed and resolve() runs,
+    Then nothing raises and the specific entry wins that element while the
+      broadcast covers the other.
+
+    The whole point of the boundary: broadcast + specific is well defined
+    ("most specific wins") and is a legitimate, shipped idiom -- SED's
+    add_override channel and seven example params files rely on it.  Breaking
+    it would be a serious regression, so it is pinned for BOTH specific
+    spellings.
+    """
+    # ARRANGE
+    cm = ConfigManager(
+        {"star.distance": {"initval": 100.0}, specific: {"initval": 5.0}},
+        system_config=SYSTEM,
+    )
+
+    # ACT
+    cfg = cm.resolve("star", "distance", shape=(2,), names=["A", "B"])
+
+    # ASSERT
+    assert np.isclose(cfg["initval"][0], 5.0)
+    assert np.isclose(cfg["initval"][1], 100.0)
+
+
+def test_a_name_that_is_the_index_string_is_not_a_duplicate():
+    """
+    Given a component instance literally named "0" at index 0,
+    When the duplicate-spelling check reads a `star.0.teff` entry,
+    Then it does not raise: the two spellings are the SAME string, so there
+      is only one entry and nothing to adjudicate.
+
+    The function is called directly because validate_instance_names refuses
+    an all-digit name at ConfigManager construction, one line earlier -- the
+    degenerate case is unreachable from a real config, and this pins that the
+    check does not depend on that other guard to stay correct.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "0"}]}
+
+    # ACT / ASSERT -- no exception
+    _reject_duplicate_spellings({"star.0.teff": {"initval": 5000.0}}, config)
+
+
+def test_component_supplied_names_also_raise_at_resolve():
+    """
+    Given a component whose per-element `names` are NOT its own config
+      instances' names (the lens's per-source vectors), and a user naming one
+      element by both index and borrowed name,
+    When resolve() runs for that parameter,
+    Then it raises, naming both keys.
+
+    standardize_param_names cannot fold this pair: it only knows config
+    instance names, so `lens.SourceA.t_0` survives verbatim and BOTH keys
+    reach resolve() as live entries.  That is the only path on which the
+    unit-label-vs-scaling desync was ever reachable, so the raise has to
+    cover it or the desync survives.
     """
     # ARRANGE
     cm = _canonical_cm(
@@ -283,18 +389,28 @@ def test_index_vs_name_order_is_unchanged(field, expected_winner):
         }
     )
 
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="DUPLICATE PARAMETER SPELLING"):
+        cm.resolve("star", "distance", shape=(1,), names=["A"])
+
+
+def test_engine_injected_index_entry_is_not_a_second_spelling():
+    """
+    Given a user entry in the borrowed-name form and the index-form entry
+      finalize_user_params injects its solved start value under,
+    When resolve() runs,
+    Then it does not raise and the user's entry still wins.
+
+    The check reads the keys the USER wrote, not the live user_params dict.
+    examples/ob161003 ends every prepare() in exactly this state, so reading
+    the dict would fail the fit at stage 5.
+    """
+    # ARRANGE
+    cm = _canonical_cm({"star.A.distance": {"initval": 9.0}})
+    cm.user_params["star.0.distance"] = {"initval": 7.0, "derived": True}
+
     # ACT
     cfg = cm.resolve("star", "distance", shape=(1,), names=["A"])
 
     # ASSERT
-    if field == "unit":
-        # The SCAN (which scales the defaults) took the index form: 0.001 pc
-        # unscaled.  The reported `unit` string is written by the params loop
-        # instead and so still says km -- the one place the two halves of an
-        # entry disagree, and deliberately left alone.
-        assert np.isclose(cfg["lower"][0], 0.001)
-        assert cfg["unit"] == "km"
-    else:
-        # 9.0 is the number the name-form entry supplied; the point is which
-        # entry supplied it, not its unit.
-        assert np.isclose(cfg["initval"][0], 9.0)
+    assert np.isclose(cfg["initval"][0], 9.0)

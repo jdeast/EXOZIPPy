@@ -294,6 +294,76 @@ def validate_sigma_has_center(user_params, links=None, source=None):
         )
 
 
+def _raise_duplicate_spelling(key_a, key_b, element, source=None):
+    """Refuse a config that names one element under two spellings.
+
+    The message names both keys verbatim, says they are the same element,
+    lists the three legal spellings and says to keep exactly one -- the
+    house style of the other pointed errors in this module.
+    """
+    where = f" in {source}" if source else ""
+    comp = element.split(".")[0]
+    param = element.split(".")[-1]
+    raise ValueError(
+        f"\n!!! DUPLICATE PARAMETER SPELLING !!!\n"
+        f"'{key_a}' and '{key_b}'{where} are two spellings of the SAME "
+        f"parameter element ('{element}').\n"
+        f"An element has three legal spellings: the broadcast "
+        f"'{comp}.{param}' (which covers every element no more specific "
+        f"entry claims), the index form '{element}', and the name form "
+        f"'{comp}.<name>.{param}'.  The last two are equally specific -- "
+        f"each names exactly one element -- so nothing decides which of "
+        f"them wins, and the resolver's own two passes do not agree: the "
+        f"first-hit lookups (a 'unit:', an init_scale) take the index form "
+        f"while the apply-every-match loops (initval, bounds, mu, sigma) "
+        f"take the name form.\n"
+        f"Fix: keep exactly one of the two entries and delete the other, "
+        f"merging any fields you need from both.  (Combining the BROADCAST "
+        f"form with one specific entry is fine and always means 'the most "
+        f"specific wins'.)"
+    )
+
+
+def _reject_duplicate_spellings(user_params, system_config, source=None):
+    """Fatal-error check: one element, one spelling.
+
+    Runs at ConfigManager construction, on the RAW params (before
+    ``standardize_param_names``, so the message shows the user's own
+    spellings) -- and it has to run there, because standardization is where
+    the evidence is destroyed: pass 1 files ``star.A.teff`` and
+    ``star.0.teff`` under the one key ``star.0.teff``, so whichever the YAML
+    listed second silently overwrote the other and nothing downstream could
+    ever tell.  Same argument as ``_reject_renamed_arsun``: an entry that is
+    quietly discarded may carry a value, a bound or a PRIOR.
+
+    Only the two SPECIFIC spellings collide.  Broadcast + specific is a
+    well-defined and useful idiom (set every element, refine one) and is
+    deliberately untouched: pass 2 expands a 2-part key only into the indices
+    no 3-part key claimed, which IS "the most specific wins".
+
+    A name that is also an index string cannot produce a false positive: the
+    two spellings are then the same string and a dict holds one of them.
+    (``validate_instance_names`` bans all-digit names outright, so this
+    cannot arise from a real config at all -- but the check is written not to
+    depend on that.)
+
+    Content is not consulted.  Two entries that happen to agree are still one
+    element addressed twice, and exempting them would be a second rule to
+    maintain for a config that is no less confusing to read.
+    """
+    seen = {}
+    for raw_key in user_params or {}:
+        key = str(raw_key)
+        if len(key.split(".")) != 3:
+            continue
+        canon = canonical_param_key(key, system_config)
+        prev = seen.get(canon)
+        if prev is not None and prev != key:
+            first, second = sorted((prev, key))
+            _raise_duplicate_spelling(first, second, canon, source)
+        seen[canon] = key
+
+
 def canonical_param_key(key, system_config):
     """Canonical (index-form) spelling of a user-facing parameter key.
 
@@ -467,9 +537,20 @@ class ConfigManager:
         # user_params so downstream numeric code never sees them.
         self.links = {}
 
+        # The keys the USER actually wrote, before any standardization and
+        # before the relaxation engine injects its solution back.  Read only
+        # by resolve()'s duplicate-spelling check, which must not mistake an
+        # injected index-form entry for a second user spelling (it is exactly
+        # that on examples/ob161003, by design -- see the note there).
+        self._raw_user_param_keys = {str(k) for k in (user_params or {})}
+
         # If config is provided, validate names then standardize right away
         if system_config is not None:
             validate_instance_names(system_config)
+            # BEFORE standardization: pass 1 folds the name form into the
+            # index form, so a collision is invisible (and one of the two
+            # entries silently gone) by the time it returns.
+            _reject_duplicate_spellings(user_params, system_config)
             self.user_params = self.standardize_param_names(
                 user_params, system_config
             )
@@ -934,13 +1015,41 @@ class ConfigManager:
 
             Only the broadcast/specific tiers are reordered.  The index and
             name forms both name exactly ONE element and are equally specific,
-            so which of those two wins is left exactly as it was (index here,
-            name in the apply-every-match loops); reordering them would be a
-            second, unasked-for semantic change, and a config setting both
-            spellings of one element is ill-formed either way.
+            so nothing can decide which of those two wins -- and a config
+            that sets both spellings of one element now RAISES rather than
+            being adjudicated (see _reject_duplicate_spellings and the check
+            just below).  The two traversals therefore never disagree: at
+            most one of the two specific keys exists.
             """
             keys = _element_keys(i)
             return keys[1:] + keys[:1]
+
+        # ONE ELEMENT, ONE SPELLING -- the residual half of the check that
+        # runs at construction.  That one sees every collision whose name
+        # form is a CONFIG INSTANCE name, because standardize_param_names has
+        # already folded such a key into the index form by the time we get
+        # here.  What only this site can see is the case it cannot: per-
+        # element `names` handed in by a component's manifest that are NOT
+        # its own config instances' names.  `lens` does exactly that
+        # (examples/ob161003), labelling its per-source vectors with the
+        # SOURCE STARS' names, so `lens.SourceA.t_0` survives standardization
+        # verbatim and coexists with `lens.0.t_0` as two live user keys.
+        #
+        # Only keys the user WROTE count.  finalize_user_params injects the
+        # engine's solved start values back under the index form, and on
+        # ob161003 those legitimately sit alongside the user's own name-form
+        # entries -- reading self.user_params here would fail every such fit
+        # at stage 5.
+        if names:
+            raw_keys = getattr(self, "_raw_user_param_keys", set())
+            for i in range(n_elements):
+                keys = _element_keys(i)
+                if len(keys) < 3 or keys[1] == keys[2]:
+                    continue
+                if keys[1] in raw_keys and keys[2] in raw_keys:
+                    _raise_duplicate_spelling(
+                        keys[1], keys[2], keys[1], self.param_file
+                    )
 
         base_unit_str = base.get("unit", "")
 
@@ -952,6 +1061,17 @@ class ConfigManager:
         # uniform prior range) came out 318x too wide and its start value
         # disagreed with what get_conversion_factor, which IS per element,
         # told the relaxation engine.
+        #
+        # This scan sets the SCALING while the user-params loop below rewrites
+        # the reported unit STRING, so the two could in principle read
+        # different entries -- numbers scaled as Kelvin, labelled deg_C in the
+        # table and the CSV.  The duplicate-spelling raise makes that
+        # unreachable, and by exhaustion rather than by luck: at most one
+        # SPECIFIC entry exists per element, so either it carries a `unit:`
+        # and both this scan (specific first, after _lookup_keys' rotation)
+        # and the loop (specific last, apply-every-match) pick it, or it does
+        # not -- in which case it cannot overwrite the label either and both
+        # fall through to the broadcast entry.  Do not add a tie-break here.
         elem_units = []
         elem_scaling = np.ones(n_elements, dtype=float)
         for i in range(n_elements):
