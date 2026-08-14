@@ -534,6 +534,7 @@ class Star(Component):
                     "av": None,
                     "radiussed": None,
                     "teffsed": None,
+                    "loggsed": "default",
                     "luminositysed": "default",
                     "fbolsed": "default",
                 }

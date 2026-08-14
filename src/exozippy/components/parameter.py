@@ -463,12 +463,24 @@ class PriorContribution:
         that support, and the word "Uniform" never appears.  An explicit
         Gaussian ``sigma`` is NOT dropped: a parallax measurement times the
         volume prior is two statements and the table must make both.
+
+    ``support_phrase``
+        How the table NOTE joins the term to the interval, when
+        ``supersedes_bounds`` is set: "<term>, <support_phrase> [lo, hi]".
+        The default says "normalized on", which is exactly right for the
+        volume prior and the IMFs -- they ARE normalized densities over
+        that interval.  It is NOT right for every superseding term: the
+        SED's soft bound on ``star.loggsed`` supersedes the same false
+        "Uniform" but is a barrier at the interval's edges, not a density
+        over it, and a note claiming normalization would be a wrong
+        statement in the place this mechanism exists to make right ones.
     """
 
     latex: str
     text: str
     elements: Optional[frozenset] = None
     supersedes_bounds: bool = False
+    support_phrase: str = "normalized on"
 
 
 # ----------------------------
@@ -2449,6 +2461,7 @@ class Parameter:
         text=None,
         elements=None,
         supersedes_bounds=False,
+        support_phrase="normalized on",
     ):
         """Declare that something outside this Parameter adds a prior term.
 
@@ -2460,7 +2473,9 @@ class Parameter:
         index iterable / boolean mask (the FFP mass function applies per
         star).  ``supersedes_bounds`` says the term REPLACES the implicit
         uniform prior over the element's bounds rather than multiplying an
-        explicit prior of this Parameter's own; see PriorContribution.
+        explicit prior of this Parameter's own; ``support_phrase`` says how
+        the table note joins the term to that interval (the default claims
+        normalization, which a barrier must not).  See PriorContribution.
 
         Idempotent: re-declaring an identical contribution (a second
         ``build_model()`` on the same System, as the GUI does) is a no-op,
@@ -2473,6 +2488,7 @@ class Parameter:
             text=str(text),
             elements=_normalize_prior_elements(elements),
             supersedes_bounds=bool(supersedes_bounds),
+            support_phrase=str(support_phrase),
         )
         if contribution in self.prior_contributions:
             return contribution
@@ -2511,14 +2527,15 @@ class Parameter:
             return None
         return float(self.from_internal(f_val, index=index))
 
-    def _support_str(self, index, latex):
+    def _interval_str(self, index, latex):
         """``[lower, upper]`` for this element, or '' when not both finite.
 
         Used to keep the support in the rendered prior when a component
-        contribution supersedes the bounds-derived uniform: the term is a
-        density over exactly that interval (both the volume prior and the
-        IMF branches normalize over it), and dropping the numbers would make
-        the new text less informative than the "Uniform" it replaces.
+        contribution supersedes the bounds-derived uniform: the term says
+        something about exactly that interval (the volume prior and the IMF
+        branches normalize over it; the SED's grid barrier turns on at its
+        edges), and dropping the numbers would make the new text less
+        informative than the "Uniform" it replaces.
         """
         lo = self._prior_scalar(self.lower, index)
         hi = self._prior_scalar(self.upper, index)
@@ -2526,7 +2543,12 @@ class Parameter:
             return ""
         l_s = _fmt_prior_value(lo, latex)
         h_s = _fmt_prior_value(hi, latex)
-        return rf" on $[{l_s}, {h_s}]$" if latex else f" on [{l_s}, {h_s}]"
+        return rf"$[{l_s}, {h_s}]$" if latex else f"[{l_s}, {h_s}]"
+
+    def _support_str(self, index, latex):
+        """``_interval_str`` prefixed with " on ", or '' when unavailable."""
+        interval = self._interval_str(index, latex)
+        return f" on {interval}" if interval else ""
 
     def get_prior_str(self, index=0, latex=True):
         """The Prior column text for one element.
@@ -2674,12 +2696,15 @@ class Parameter:
         if not contributions or kind == "fixed":
             return own, []
         supersede = any(c.supersedes_bounds for c in contributions)
-        support = self._support_str(index, latex=True)
+        interval = self._interval_str(index, latex=True)
         notes = []
         for c in contributions:
             note = c.latex
-            if c.supersedes_bounds and support:
-                note += ", normalized" + support
+            if c.supersedes_bounds and interval:
+                # The phrase, not a hard-coded "normalized on", says how
+                # this contribution relates to the interval: a normalized
+                # density over it, or a barrier at its edges.
+                note += f", {c.support_phrase} {interval}"
             notes.append(note)
         if supersede and kind == "bounds":
             return "", notes

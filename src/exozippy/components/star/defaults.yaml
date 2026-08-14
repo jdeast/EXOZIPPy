@@ -51,6 +51,32 @@ star:
       default:
         func_name: "calc_logg_from_logmass"
         deps: ["logmass", "radius"]
+  loggsed:
+    # The SED's own surface gravity: the SECOND axis of the bolometric-
+    # correction grid, reconstructed from logmass and radiussed (NOT
+    # radius) exactly as SED._predicted_appmag_node feeds the
+    # interpolator.  It exists as a Parameter -- rather than as an inline
+    # expression inside the SED, which is what it was until 2026-08 --
+    # so that SED._inject_grid_bounds can put the grid's logg extent on
+    # it through the same override channel it uses for teffsed/feh/av.
+    # Bounding logmass and radiussed separately does NOT bound their
+    # combination, and the interpolator EXTRAPOLATES linearly off its
+    # edge cell rather than returning NaN, so without this a fit could
+    # wander off the BC grid and be scored with no restoring force.
+    # No lower/upper here on purpose: the support belongs to whichever
+    # BC grid the .sed file selects, and a fit with no sed: block has no
+    # grid and so no constraint.  Being derived, the bound acts as a
+    # soft barrier whose steepness is measured at startup
+    # (whitening.measure_barrier_scales); pin it with bound_scale.
+    unit: "dex(cm/s2)"
+    internal_unit: "dex(cm/s2)"
+    latex: "\\log{g_*}"
+    description: "Surface Gravity"
+    table_note: "This value ignores the systematic error and is for reference only"
+    expressions:
+      default:
+        func_name: "calc_logg_from_logmass"
+        deps: ["logmass", "radiussed"]
 
   distance:
     lower: 0.001
