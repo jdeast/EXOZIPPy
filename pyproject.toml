@@ -54,6 +54,15 @@ dependencies = [
     "arviz>=1.1.0,<2.0.0",
     "dm-tree>=0.1.8",
     "numpy>=2.0",
+    # The 6.0.0 floor is load-bearing for the `demc` sampler key, not just a
+    # freshness preference. PyMC declared the `scaling`/`lambda` sampler
+    # stats scalar in `stats_dtypes_shapes` while `astep` returned the
+    # `np.atleast_1d` array `Metropolis.__init__` stores, so the trace
+    # backend died with "setting an array element with a sequence" at the end
+    # of a DE run. Fixed for DEMetropolisZ in 5.26.0 and for DEMetropolis in
+    # 6.0.0. Lowering this floor reintroduces that crash -- EXOZIPPy carried
+    # a local coercion for it until 2026-08 and deleted it because of this
+    # pin (see samplers/de_metropolis.py).
     "pymc>=6.0.0,<7.0.0",
     "pyyaml>=6.0.3,<7.0.0",
     "matplotlib>=3.11.1,<4.0.0",
