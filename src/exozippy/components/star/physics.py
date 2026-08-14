@@ -30,11 +30,12 @@ def calc_logg_from_logmass(logmass, radius):
 @register_physics
 def calc_mass(logmass):
     """
-    Calculates surface gravity (logg) from mass and radius.
-    mass: solar masses
-    radius: solar radii
-    returns: cgs (log10)
-    Note: this odd form of logg is designed to simplify the symbolic math and chain rule derivatives
+    Calculates stellar mass from its base-10 logarithm.
+    logmass: log_10 of stellar mass, in solar masses
+    returns: solar masses
+    Note: logmass is the SAMPLED coordinate and mass is derived from it, so
+    logmass's bounds are the real hard support (see star/defaults.yaml);
+    star.mass carries no lower/upper of its own.
     """
     return 10**logmass
 
