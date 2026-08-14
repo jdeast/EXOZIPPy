@@ -123,12 +123,25 @@ class SED(Component):
         # the plot compiler, and the cross-component predict_* API.
         self._m_pred_matrix = None
 
-        # Grid-axis caches, filled by _inject_grid_bounds below. These
-        # are kept on the component so build_likelihood can consult
-        # the (logg_min, logg_max) range when adding a soft potential
-        # on the inline loggsed expression (loggsed isn't a named
-        # star Parameter, so it can't be bounded through the override
-        # channel the way teffsed/feh/av are).
+        # Grid-axis caches, filled by _inject_grid_bounds below.
+        #
+        # NOTHING READS THEM YET. The (logg_min, logg_max) range they
+        # carry was meant to feed a soft potential on the inline loggsed
+        # expression, and that potential was never written:
+        # build_likelihood adds only the teffsed and fbolsed floor
+        # priors. The gap it was meant to close is real. teffsed, feh
+        # and av are held inside the BC grid by _inject_grid_bounds
+        # below, but loggsed is not a named star Parameter -- it is
+        # reconstructed inline from (star.logmass, star.radiussed) in
+        # _predicted_appmag_node -- so there is nothing for the override
+        # channel to bound, and bounding its two inputs separately does
+        # not bound their combination. A draw whose loggsed leaves the
+        # grid (NextGen: 0.0 to 5.0 dex) is therefore linearly
+        # EXTRAPOLATED off the edge cell rather than penalized:
+        # RegularGridInterpolator is built below with fill_value=None,
+        # so it computes out_of_bounds and then discards it. Keep these
+        # caches; add the potential (or a potentials.soft_*_bound on
+        # loggsed) when someone gets to it.
         self.grid_axes = [None]
         self._inject_grid_bounds()
 
@@ -647,8 +660,9 @@ class SED(Component):
         # Bolometric luminosity
         Lbol = calc_luminosity(radiussed, teffsed)
         # Absolute bolometric magnitude from bolometric luminosity.
-        # M_bol = -2.5 log10(L_bol / L_bol_0) with IAU 2015 zero
-        # point (see physics.L_BOL_ZERO_LSUN).
+        # M_bol = -2.5 log10(L_bol / L_0) with the IAU 2015 zero point.
+        # See physics.calc_absbolmag, which adds constants.LOG_L0_CONST
+        # (= 2.5 log10(L_0 / L_sun) = M_bol_sun = 4.7400).
         Mbol_abs = calc_absbolmag(Lbol)  # (nstars,)
 
         # Absolute magnitude per star per filter.
