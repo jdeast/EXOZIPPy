@@ -16,6 +16,45 @@ import re
 
 from exozippy.linking import extract_links
 
+# --- The per-parameter sub-key vocabulary --------------------------------
+#
+# These are THE sub-keys a params.yaml entry may carry, i.e. exactly what
+# ConfigManager.resolve() below absorbs from a user override dict.  They live
+# at module scope because three places need the same answer and used to
+# restate it: resolve() itself, diagnostics.ModelAuditor.check_unused_yaml
+# (which warns that anything else "did not match any model parameter"), and
+# introspect._parameter_entry (which exposes the numeric fields to the GUI).
+# The copies drifted -- diagnostics was missing latex/description/
+# print_to_table/debug_print and so reported four legitimate keys as typos,
+# and introspect was missing bound_scale.  A false "ignored" warning is worse
+# than silence: it teaches users to disbelieve the startup check.  Add a new
+# sub-key here and to the loop in resolve() that consumes it, and every
+# consumer follows.  tests/test_known_keys.py cross-checks the constants
+# against what resolve() really reads, in both directions.
+
+# Preliminary conditioning only, never a posterior term.  init_scale is no
+# longer user-facing (ConfigManager strips it with a warning), but it stays in
+# the vocabulary: resolve() still fills it from defaults/hints, and pre-2026-07
+# mkprior restart files name it, so flagging it as a typo would be wrong.
+TUNING_KEYS = ("initval", "init_scale")
+
+# Keys that change the posterior.  bound_scale is one of them: it sets
+# soft-bound barrier steepness, a real posterior term (unlike init_scale).
+# A user entry touching any of these marks the parameter prior-modified.
+PHYSICS_KEYS = ("lower", "upper", "mu", "sigma", "bound_scale")
+
+# Every field resolve() reads as a number and scales by the element's unit.
+NUMERIC_KEYS = TUNING_KEYS + PHYSICS_KEYS
+
+# Passed through verbatim; per element when the parameter is a vector.
+STRING_KEYS = ("unit", "latex", "description")
+
+# Reporting switches; whole-parameter, not per element.
+BOOL_KEYS = ("print_to_table", "debug_print")
+
+# The union: the complete set of legal sub-keys.
+USER_PARAM_KEYS = NUMERIC_KEYS + STRING_KEYS + BOOL_KEYS
+
 
 class SymbolicTimeout(Exception):
     pass
@@ -995,12 +1034,11 @@ class ConfigManager:
             "debug_print": base.get("debug_print", None),
         }
 
-        tuning_keys = ["initval", "init_scale"]
-        # bound_scale is a physics key: it sets soft-bound barrier steepness,
-        # a real posterior term (unlike init_scale, which is preliminary
-        # conditioning only and not user-facing).
-        physics_keys = ["lower", "upper", "mu", "sigma", "bound_scale"]
-        all_numeric = tuning_keys + physics_keys
+        # The sub-key vocabulary is declared once at module scope (see
+        # USER_PARAM_KEYS); diagnostics.py and introspect.py read the same
+        # constants instead of restating them.
+        physics_keys = PHYSICS_KEYS
+        all_numeric = NUMERIC_KEYS
 
         for key in all_numeric:
             val = base.get(key)
@@ -1151,7 +1189,7 @@ class ConfigManager:
                                     f"{resolved[key][i]:g}."
                                 )
 
-                    for str_key in ["unit", "latex", "description"]:
+                    for str_key in STRING_KEYS:
                         if str_key in ov:
                             if n_elements > 1:
                                 if not isinstance(resolved[str_key], list):
@@ -1162,7 +1200,7 @@ class ConfigManager:
                             else:
                                 resolved[str_key] = ov[str_key]
 
-                    for bool_key in ["print_to_table", "debug_print"]:
+                    for bool_key in BOOL_KEYS:
                         if bool_key in ov:
                             resolved[bool_key] = ov[bool_key]
 

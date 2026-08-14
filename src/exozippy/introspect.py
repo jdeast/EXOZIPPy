@@ -25,17 +25,14 @@ from pathlib import Path
 import yaml
 
 from .components.factory import discover_components
+from .config import NUMERIC_KEYS
 
 # Numeric parameter fields (in defaults.yaml) that a GUI cares about.
-# Order here is the order they are emitted in the schema.
-_NUMERIC_FIELDS = (
-    "initval",
-    "init_scale",
-    "lower",
-    "upper",
-    "sigma",
-    "mu",
-)
+# Exactly the numeric sub-keys ConfigManager.resolve() absorbs -- this used
+# to be a third hand-maintained copy and had already lost ``bound_scale``,
+# so a defaults.yaml that set a barrier width would not have shown it in the
+# schema.  Order here is the order they are emitted in the schema.
+_NUMERIC_FIELDS = NUMERIC_KEYS
 
 # Descriptive (non-numeric) fields we pass through verbatim when present.
 _DESCRIPTIVE_FIELDS = (
