@@ -342,7 +342,7 @@ The stamp also records the code that produced the draws -- `exozippy_version` pl
 
 ### User-defined parameter links (`linking.py`)
 
-Any of the six numeric fields in a `params.yaml` entry may be a string expression referencing other parameters (`star.A.age: {initval: star.B.age, sigma: 0}`, `orbit.b.omega: {initval: "orbit.c.omega + 180", sigma: 0}`, `star.A.av: {lower: star.B.av}`). Semantics:
+Any of the five linkable numeric fields in a `params.yaml` entry (`initval`, `mu`, `sigma`, `lower`, `upper` -- `linking.LINKABLE_FIELDS`) may be a string expression referencing other parameters (`star.A.age: {initval: star.B.age, sigma: 0}`, `orbit.b.omega: {initval: "orbit.c.omega + 180", sigma: 0}`, `star.A.av: {lower: star.B.av}`). Semantics:
 - `initval` link + `sigma: 0` → hard link: the element is never sampled and deterministically tracks the expression.
 - `initval` link + `sigma > 0` (or a `mu` link) → soft link: sampled normally plus a Gaussian `pm.Potential` on the difference.
 - `initval` link, no sigma → initialization seeding only (relaxation-engine snapshot, no runtime tie).

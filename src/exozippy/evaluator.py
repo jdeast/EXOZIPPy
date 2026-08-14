@@ -38,8 +38,11 @@ This module supplies the millisecond half of that loop:
     and data file list -- insensitive to dict key order and to pure
     initval changes.  The GUI compares hashes to decide stale vs live.
 
-Only model-role traces are evaluated; data traces never change with a
-slider.  See exozippy.plotspec for the PlotSpec/Trace contract and
+Model-role traces are always evaluated.  Data traces normally are not --
+raw observations do not move with a slider -- EXCEPT on specs whose meta
+declares ``dynamic_data``, where the plotted data ARE point-dependent
+(phase folds, RV gamma subtraction, mulens flux alignment) and are
+re-shipped too.  See exozippy.plotspec for the PlotSpec/Trace contract and
 Component.plot_data for how a component draws itself at an arbitrary point.
 """
 
@@ -282,9 +285,12 @@ class Evaluator:
     ) -> Dict[str, Dict[str, Dict[str, np.ndarray]]]:
         """Re-render every plot's model traces at ``raw_point``.
 
-        Returns ``{plot_id: {trace_name: {"x": array, "y": array}}}`` (data
-        traces are omitted -- they never change with a slider). Each
-        component's own ``plot_data(system, point)`` is called fresh, so the
+        Returns ``{plot_id: {trace_name: {"x": array, "y": array}}}``.  Data
+        traces are omitted -- raw observations do not move with a slider --
+        unless the spec's meta declares ``dynamic_data``, in which case its
+        data traces (plus ``yerr`` where present) are re-shipped because the
+        plotted data themselves depend on the point (see the loop below).
+        Each component's own ``plot_data(system, point)`` is called fresh, so the
         result is always an exact recompute -- not an approximation -- even
         for phase-folded curves (re-sorted/re-selected from a multi-column
         node) and SED spectra (NumPy spectral-library interpolation), both of
