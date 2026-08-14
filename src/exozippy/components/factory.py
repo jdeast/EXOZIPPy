@@ -38,8 +38,19 @@ def discover_components():
     # 1. Start at the components directory
     components_dir = Path(__file__).parent
 
-    # 2. Use rglob to search recursively through all subfolders
-    for file in components_dir.rglob("*.py"):
+    # 2. Use rglob to search recursively through all subfolders.  Sorted, for
+    # the reason ConfigManager's two walks are (see config.py): rglob yields
+    # filesystem directory order, which is stable on one machine and differs
+    # between machines (ext4's hashed btree vs xfs/NFS), so it survives
+    # PYTHONHASHSEED randomization and looks reproducible until two boxes are
+    # compared.  Lower stakes here than there -- `registry` is keyed by
+    # yaml_key and System instantiates in the user's config key order -- so
+    # what this pins is module IMPORT order: PHYSICS_REGISTRY insertion order
+    # (and which of two colliding names its duplicate error blames),
+    # _IMPORT_FAILURES order, utilities/registry.all_utilities() order, and
+    # the last-wins tie-break if two Component subclasses ever declared the
+    # same yaml_key.  One word of insurance.
+    for file in sorted(components_dir.rglob("*.py")):
         # Skip infrastructure files
         if file.name in [
             "__init__.py",
