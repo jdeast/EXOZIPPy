@@ -1,32 +1,27 @@
 """Half-built features must refuse loudly, not accept-and-ignore.
 
-Two config surfaces were parsed and then silently dropped on the floor
-(code review 2026-08-08, items 5.10 and 5.11):
+The `orbit:` block has a config surface that was parsed and then silently
+dropped on the floor (code review 2026-08-08, item 5.11): `fitvcve: true`
+selects `defaults.yaml` expressions naming undefined physics functions, and
+the `vcve`/`b` parameter blocks are in no manifest at all (`b`'s deps even
+name a nonexistent `orbit.ar`).
 
-* ``star:`` -- ``sedfile:`` is read into ``Star.sedfile`` and read back by
-  nothing; ``mist:``/``parsec:`` are only consulted by an
-  ``in_system("evolutionarymodel")`` branch, and no such component exists.
-* ``orbit:`` -- ``fitvcve: true`` selects ``defaults.yaml`` expressions
-  naming undefined physics functions, and the ``vcve``/``b`` parameter
-  blocks are in no manifest at all (``b``'s deps even name a nonexistent
-  ``orbit.ar``).
+It is not being implemented or deleted here.  What these tests pin is that
+a user who asks for it finds out immediately, from a message that names the
+key they set -- and, just as importantly, that the ordinary configs which
+merely carry its defaults still build.
 
-Neither is being implemented or deleted here.  What these tests pin is that
-a user who asks for one finds out immediately, from a message that names
-the key they set -- and, just as importantly, that the ordinary configs
-which merely carry these keys' defaults still build.
+(The `star:` half of that review item -- `sedfile:`, `mist:`, `parsec:` --
+was reverted: `sedfile` is deleted outright and the evolutionary-model
+switches are ungated, because the star component is now ready for an
+`evolutionarymodel` component to land against unchanged.  See
+tests/test_star_evolutionary_model.py.)
 """
 
 import pytest
 
 from exozippy.components.orbit import Orbit
-from exozippy.components.star import Star
 from exozippy.config import ConfigManager
-
-
-def _star(blocks, user_params=None):
-    """Construct a Star from a list of star config blocks."""
-    return Star(blocks, ConfigManager(dict(user_params or {})))
 
 
 def _orbit(blocks, user_params=None):
@@ -35,80 +30,8 @@ def _orbit(blocks, user_params=None):
 
 
 # ----------------------------------------------------------------------
-# 5.10 -- star sedfile / mist / parsec
-# ----------------------------------------------------------------------
-def test_star_sedfile_raises_not_implemented():
-    """
-    Given a star block carrying `sedfile:`,
-    When the Star component is constructed,
-    Then it raises NotImplementedError naming the key and the star, and
-      points at the `sed:` block that actually works.
-    """
-    # Arrange
-    blocks = [{"name": "A", "sedfile": "kelt4.sed"}]
-
-    # Act
-    with pytest.raises(NotImplementedError) as exc:
-        _star(blocks)
-
-    # Assert
-    msg = str(exc.value)
-    assert "sedfile" in msg
-    assert "star.A" in msg
-    assert "sed:" in msg
-
-
-@pytest.mark.parametrize("key,model", [("mist", "MIST"), ("parsec", "PARSEC")])
-def test_star_evolutionary_model_true_raises_not_implemented(key, model):
-    """
-    Given a star block explicitly asking for an evolutionary model,
-    When the Star component is constructed,
-    Then it raises NotImplementedError naming the key and saying that the
-      evolutionarymodel component it needs does not exist yet.
-    """
-    # Arrange
-    blocks = [{"name": "A", key: True}]
-
-    # Act
-    with pytest.raises(NotImplementedError) as exc:
-        _star(blocks)
-
-    # Assert
-    msg = str(exc.value)
-    assert f"'{key}: true'" in msg
-    assert "star.A" in msg
-    assert "evolutionarymodel" in msg
-    assert model in msg
-
-
-@pytest.mark.parametrize(
-    "blocks",
-    [
-        [{"name": "A"}],
-        [{"name": "A", "mist": False}],
-        [{"name": "A", "parsec": False}],
-        [{"name": "A", "mist": False, "parsec": False}],
-        [{"name": "A", "mist": False}, {"name": "B", "mist": False}],
-    ],
-    ids=["absent", "mist-false", "parsec-false", "both-false", "two-stars"],
-)
-def test_star_defaults_and_opt_outs_do_not_raise(blocks):
-    """
-    Given star blocks that omit the WIP keys or explicitly opt out,
-    When the Star component is constructed,
-    Then nothing raises -- `mist`'s historical default is True and every
-      shipped config either omits the key or spells `mist: False`, so the
-      guard must key on an explicit, meaningful setting and nothing else.
-    """
-    # Arrange / Act
-    star = _star(blocks)
-
-    # Assert
-    assert star.n_elements == len(blocks)
-
-
-# ----------------------------------------------------------------------
 # 5.11 -- orbit fitvcve / vcve / b
+# ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 def test_orbit_fitvcve_raises_and_names_the_missing_physics():
     """

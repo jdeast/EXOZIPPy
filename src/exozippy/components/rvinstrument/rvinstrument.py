@@ -452,8 +452,8 @@ class RVInstrument(Instrument):
         data-only mode (point=None), before any Parameter exists.
         """
         gamma = getattr(self, "gamma", None)
-        if gamma is not None and hasattr(gamma, "_get_conversion_factors"):
-            return gamma._get_conversion_factors()[0]
+        if gamma is not None and hasattr(gamma, "element_factor"):
+            return gamma.element_factor(0)
         return (u.solRad / u.d).to(u.m / u.s)
 
     def _unphased_grid(self):

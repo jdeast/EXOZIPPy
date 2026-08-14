@@ -84,7 +84,7 @@ parameter_file: "gj1214.params.yaml"
 # (maxsteps/nthin/ntemps are DE-MCMC knobs); this block follows EXOZIPPy's
 # HMC best practices instead.
 sampler:
-  method: numpyro      # nuts, numpyro, blackjax, nutpie, ptde, ptde_async
+  method: numpyro   # nuts, numpyro, blackjax, nutpie, ptde, ptde_async, demc, demcz
   tune: 2000
   draws: 4000
   init: adapt_diag
