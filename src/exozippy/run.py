@@ -575,8 +575,7 @@ def _run_fit(config, gui, user_params=None):
                 # Gradient-free differential-evolution MCMC (ter Braak 2006 /
                 # ter Braak & Vrugt 2008) on PyMC's own step methods, started
                 # from the same over-dispersed population PTDE's T=1 rung
-                # uses -- see samplers/de_metropolis.py, which also documents
-                # the (now dormant) PyMC stats-shape patch.  `chains` is read
+                # uses -- see samplers/de_metropolis.py.  `chains` is read
                 # off the raw config rather than the resolved default so an
                 # unset key can mean "size the DE population from the
                 # parameter count" (2 x n_params) instead of silently

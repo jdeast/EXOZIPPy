@@ -4,12 +4,15 @@ Three things are pinned here:
 
 * the two config keys dispatch to the two PyMC differential-evolution step
   methods, and nothing else does;
-* the ``_fix_de_stats`` coercion the module carries is DORMANT on the
-  installed PyMC -- measured by sampling and counting, not asserted from a
-  version number -- and still repairs a step method that regresses to the
-  pre-6.0.0 behavior;
 * a DE fit actually completes and produces finite draws, per the house rule
-  that sampler claims are backed by a completed ``pm.sample``.
+  that sampler claims are backed by a completed ``pm.sample``;
+* the ``scaling``/``lambda`` sampler stats land in the written trace as
+  SCALARS.  That is the precise thing a local ``_fix_de_stats`` coercion
+  used to guarantee, deleted in 2026-08 once the upstream fix was known to
+  sit below this project's ``pymc>=6.0.0`` floor (DEMetropolisZ 5.26.0,
+  DEMetropolis 6.0.0).  Asserting the trace rather than the version number
+  is what makes a future upstream regression, or a lowered floor, fail here
+  instead of at the end of somebody's fit.
 """
 
 import numpy as np
@@ -20,9 +23,6 @@ from exozippy import run
 from exozippy.samplers import de_metropolis
 from exozippy.samplers.de_metropolis import (
     STEP_CLASSES,
-    DEMetropolis,
-    DEMetropolisZ,
-    _fix_de_stats,
     de_metropolis_sample,
 )
 
@@ -71,24 +71,24 @@ def tiny_model():
 # ---------------------------------------------------------------------------
 
 
-def test_the_two_keys_map_to_the_patched_pymc_step_methods():
+def test_the_two_keys_map_to_pymcs_own_step_methods():
     """Given the sampler-key table,
     When it is read,
-    Then 'demc'/'demcz' name the patched subclasses of PyMC's DE steps.
+    Then 'demc'/'demcz' name PyMC's DE step classes themselves -- no local
+    subclass, since the stats-shape patch that needed one is gone.
     """
     # Arrange / Act
     keys = STEP_CLASSES
 
     # Assert
     assert set(keys) == {"demc", "demcz"}
-    assert keys["demc"] is DEMetropolis
-    assert issubclass(DEMetropolis, pm.DEMetropolis)
-    assert keys["demcz"] is DEMetropolisZ
-    assert issubclass(DEMetropolisZ, pm.DEMetropolisZ)
+    assert keys["demc"] is pm.DEMetropolis
+    assert keys["demcz"] is pm.DEMetropolisZ
 
 
 @pytest.mark.parametrize(
-    "variant, expected", [("demc", DEMetropolis), ("demcz", DEMetropolisZ)]
+    "variant, expected",
+    [("demc", pm.DEMetropolis), ("demcz", pm.DEMetropolisZ)],
 )
 def test_each_variant_hands_pm_sample_its_own_step(
     tiny_model, monkeypatch, variant, expected
@@ -246,111 +246,44 @@ def test_maxtime_is_refused_for_demc_and_honored_for_demcz(
 
 
 # ---------------------------------------------------------------------------
-# The PyMC stats-shape patch: dormant here, live on a regression
-# ---------------------------------------------------------------------------
-
-
-def _count_array_stats(step_cls, model):
-    """Sample with ``step_cls`` and count stats whose shape is not scalar."""
-    counts = {"steps": 0, "array": 0}
-    astep = step_cls.astep
-
-    def counting(self, q0):
-        result, stats = astep(self, q0)
-        counts["steps"] += 1
-        for s in stats:
-            for key in ("scaling", "lambda"):
-                if key in s and np.ndim(s[key]) > 0:
-                    counts["array"] += 1
-        return result, stats
-
-    counted = type("Counted", (step_cls,), {"astep": counting})
-    with model:
-        pm.sample(
-            draws=20,
-            tune=20,
-            chains=6,
-            cores=1,
-            step=counted(),
-            progressbar=False,
-            compute_convergence_checks=False,
-        )
-    return counts
-
-
-@pytest.mark.parametrize("step_cls", [pm.DEMetropolis, pm.DEMetropolisZ])
-def test_the_stats_patch_is_dormant_on_the_installed_pymc(
-    tiny_model, step_cls
-):
-    """Given the installed PyMC (floor: >= 6.0.0),
-    When a DE step method really samples,
-    Then no 'scaling'/'lambda' stat is ever array-shaped, i.e. the coercion
-    in _fix_de_stats never fires.
-
-    The bug it was written for was fixed upstream below this project's floor
-    (DEMetropolisZ in 5.26.0, DEMetropolis in 6.0.0). If this test ever fails
-    the patch has become live again -- which is exactly why it is kept.
-    """
-    # Arrange / Act
-    counts = _count_array_stats(step_cls, tiny_model)
-
-    # Assert
-    assert counts["steps"] > 0
-    assert counts["array"] == 0
-
-
-def _sample_with(step_cls, model, **kwargs):
-    with model:
-        return pm.sample(
-            draws=20,
-            tune=20,
-            chains=6,
-            cores=1,
-            step=step_cls(),
-            progressbar=False,
-            compute_convergence_checks=False,
-            **kwargs,
-        )
-
-
-def test_the_stats_patch_still_repairs_a_regressed_step(tiny_model):
-    """Given a step method that regresses to the pre-6.0.0 behavior
-    (returning the raw np.atleast_1d scaling array where the declared stat
-    shape is scalar),
-    When it is sampled with and without the _fix_de_stats wrapper,
-    Then the unwrapped one crashes the trace backend and the wrapped one
-    samples and records a scalar stat.
-
-    This is the failure the patch exists for, reproduced against the
-    installed PyMC. It is what makes the dormancy test above a statement
-    about PyMC rather than about the wrapper being inert code.
-    """
-
-    # Arrange: reproduce the pymc <= 5.25.1 astep return exactly.
-    class Regressed(pm.DEMetropolis):
-        def astep(self, q0):
-            result, stats = pm.DEMetropolis.astep(self, q0)
-            for s in stats:
-                s["scaling"] = np.atleast_1d(s["scaling"]).astype("d")
-                s["lambda"] = np.atleast_1d(s["lambda"]).astype("d")
-            return result, stats
-
-    class Repaired(Regressed):
-        astep = _fix_de_stats(Regressed.astep)
-
-    # Act / Assert
-    with pytest.raises(ValueError, match="array element with a sequence"):
-        _sample_with(Regressed, tiny_model)
-
-    idata = _sample_with(Repaired, tiny_model)
-    scaling = np.asarray(idata.sample_stats["scaling"])
-    assert scaling.shape == (6, 20)
-    assert np.isfinite(scaling).all()
-
-
-# ---------------------------------------------------------------------------
 # Verify by sampling
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("variant", ["demc", "demcz"])
+def test_the_scaling_and_lambda_stats_are_scalar_in_the_trace(
+    tiny_model, variant
+):
+    """Given the installed PyMC (floor: >= 6.0.0),
+    When a DE variant samples through de_metropolis_sample,
+    Then the trace carries a 'scaling' and a 'lambda' sample stat, each one
+    value per (chain, draw) rather than an array per draw.
+
+    This is the failure the deleted _fix_de_stats coercion guarded: PyMC
+    declared these scalar in stats_dtypes_shapes while astep returned the
+    np.atleast_1d array Metropolis.__init__ stores, and the trace backend
+    raised 'setting an array element with a sequence'. Reaching a written
+    trace at all is most of the assertion; the shape check is the rest.
+    """
+    # Arrange / Act
+    idata = de_metropolis_sample(
+        tiny_model,
+        _StubSystem(),
+        draws=20,
+        tune=20,
+        variant=variant,
+        chains=6,
+        cores=1,
+        seed=20260813,
+        progressbar=False,
+    )
+
+    # Assert
+    for key in ("scaling", "lambda"):
+        assert key in idata.sample_stats.data_vars
+        stat = np.asarray(idata.sample_stats[key])
+        assert stat.shape == (6, 20)
+        assert np.isfinite(stat).all()
 
 
 @pytest.mark.parametrize("variant", ["demc", "demcz"])

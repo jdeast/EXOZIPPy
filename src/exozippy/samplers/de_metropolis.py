@@ -26,31 +26,13 @@ default: without it every chain starts at the same relaxation-engine point,
 every difference vector is exactly zero, and a DE population can only crawl
 apart on its ``scaling``-sized jitter (0.001 raw units by default).
 
-The PyMC stats-shape patch (currently dormant)
-----------------------------------------------
-``_fix_de_stats`` coerces the per-step ``scaling``/``lambda`` sampler stats
-back to Python floats.  PyMC declares both as scalars in
-``stats_dtypes_shapes`` while ``Metropolis.__init__`` stores ``scaling`` as
-``np.atleast_1d(...)``, so returning ``self.scaling`` from ``astep`` handed
-the trace backend a 1-D array where it expected shape ``[]``.
-
-That is fixed upstream, and the fix landed BELOW this project's floor:
-
-  * pymc <= 5.25.1 -- both ``DEMetropolis`` and ``DEMetropolisZ`` affected
-  * pymc 5.26.0    -- ``DEMetropolisZ`` fixed
-  * pymc 6.0.0     -- ``DEMetropolis`` fixed too
-
-``pyproject.toml`` requires ``pymc>=6.0.0``, so on every PyMC this project
-can install both step methods already return ``np.mean(self.scaling)`` and
-the coercion below never fires -- verified by sampling and counting the
-stats, not by reading a version number (``tests/test_de_metropolis.py``,
-which also reproduces the crash against a deliberately regressed step so the
-guard itself is covered rather than merely present).  It is
-kept as a self-retiring guard (the ``np.ndim(...) > 0`` test IS the gate, the
-same shape as ``exozippy/compat/blackjax_progressbar.py``): it costs two
-``ndim`` calls per step against a logp evaluation, and it is what makes a
-future upstream regression a no-op instead of a crash hours into a fit.  If
-the floor ever rises past a PyMC that has kept the fix for good, delete it.
+PyMC's own step classes are used directly.  There was a local subclass of
+each carrying a ``scaling``/``lambda`` sampler-stat shape fix; the bug it
+worked around was fixed upstream below this project's ``pymc>=6.0.0`` floor
+(see the comment on that pin in ``pyproject.toml``), so the subclasses are
+gone.  ``tests/test_de_metropolis.py`` samples with both variants and checks
+those stats are scalar in the written trace, which is the thing the fix
+protected.
 """
 
 import logging
@@ -63,34 +45,8 @@ from . import _common
 
 logger = logging.getLogger(__name__)
 
-
-def _fix_de_stats(astep_fn):
-    """Coerce the ``scaling``/``lambda`` sampler stats back to scalars.
-
-    Dormant on pymc >= 6.0.0; see the module docstring.
-    """
-
-    def wrapper(self, q0):
-        result, stats = astep_fn(self, q0)
-        for s in stats:
-            for key in ("scaling", "lambda"):
-                if key in s and np.ndim(s[key]) > 0:
-                    s[key] = float(np.ravel(s[key])[0])
-        return result, stats
-
-    return wrapper
-
-
-class DEMetropolisZ(pm.DEMetropolisZ):
-    astep = _fix_de_stats(pm.DEMetropolisZ.astep)
-
-
-class DEMetropolis(pm.DEMetropolis):
-    astep = _fix_de_stats(pm.DEMetropolis.astep)
-
-
 # The `method:` values this module answers to, mapped to their step class.
-STEP_CLASSES = {"demc": DEMetropolis, "demcz": DEMetropolisZ}
+STEP_CLASSES = {"demc": pm.DEMetropolis, "demcz": pm.DEMetropolisZ}
 
 # Chains for `demcz`, whose difference vectors come from its own history and
 # so impose no population-size requirement. 4 is PyMC's own default and gives
