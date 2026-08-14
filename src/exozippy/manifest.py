@@ -28,6 +28,17 @@ ignores, and planet's ``beam``, whose "off" entry made every orbit-less
 config demand an RV semi-amplitude.  Both were fixed in graph.py by hand;
 this module exists so the vocabulary cannot re-diverge.
 
+An ``expr_key`` naming a block the resolved config does not define is an
+ERROR (:class:`MissingExpressionError`), not a free parameter.  It used to
+build the parameter free, silently: a typo, a renamed block, or a deleted
+``expressions:`` section turned a derived parameter into a sampled one with
+no message anywhere.  Breaking ``mulensinstrument.f_source``'s expr_key on
+``examples/ob08092`` that way put a ``f_source_raw`` in ``model.free_RVs``
+and moved the start logp from +6187.7 to -6.46e9 -- a fit that still runs
+and still reports.  A free parameter has two spellings that say so
+explicitly (``None``, or a dict of options with no ``expr_key``), so
+nothing legitimate needs the silent fallback.
+
 Nothing here imports from the rest of the package, so every consumer can
 import it without a cycle.  It contains no component-specific knowledge --
 it is a parser for a small data format, nothing more.
@@ -35,6 +46,14 @@ it is a parser for a small data format, nothing more.
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+
+class MissingExpressionError(ValueError):
+    """A manifest entry names an ``expressions:`` block that does not exist.
+
+    Deliberately not a ``KeyError``: its ``str()`` would be the repr of the
+    message, escaping the quotes and newlines this one needs.
+    """
 
 
 @dataclass(frozen=True)
@@ -57,8 +76,12 @@ class ManifestEntry:
 
         This is the structural question, answered from the manifest alone:
         it does not check that the named block exists in the component's
-        defaults.yaml.  ``System.derived_params`` asks exactly this, because
-        it runs without a resolved config in hand.
+        defaults.yaml.  It agrees with :meth:`expression_config` by
+        construction, because the one case in which they could differ -- a
+        named block the config does not define -- now raises there instead
+        of answering "free".  Prefer ``expression_config`` wherever a
+        resolved config is in scope, so a broken manifest is reported rather
+        than merely labelled.
         """
         return self.expr_key is not None
 
@@ -83,21 +106,44 @@ class ManifestEntry:
         return self.options.get("names")
 
     def expression_config(
-        self, expressions: Optional[Dict[str, Any]]
+        self,
+        expressions: Optional[Dict[str, Any]],
+        where: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """The ``expressions:`` block this entry selects, or ``None``.
 
-        ``None`` means the parameter is free *as built*: either the entry
-        names no expression, or it names one the resolved config does not
-        define.  This is the question ``add_parameter`` and ``graph.py`` both
-        ask, and they must get the same answer -- an expression graph.py
-        wires an edge for but add_parameter never builds is a spurious edge
-        (or a cycle); one add_parameter builds but graph.py missed is a node
-        built out of order.
+        ``None`` means the entry names no expression: the parameter is free.
+        A named block the resolved config does not define raises
+        :class:`MissingExpressionError` -- see the module docstring for why
+        that is not a free parameter either.  ``where`` is the
+        ``component.parameter`` label the message is raised against.
+
+        This is the question ``add_parameter``, ``graph.py`` and
+        ``System.derived_params`` all ask, and they must get the same answer
+        -- an expression graph.py wires an edge for but add_parameter never
+        builds is a spurious edge (or a cycle); one add_parameter builds but
+        graph.py missed is a node built out of order; and one
+        ``derived_params`` reports but nothing builds is a parameter the
+        reporting layer excuses from every check a sampled parameter gets.
         """
         if self.expr_key is None:
             return None
-        return (expressions or {}).get(self.expr_key)
+        blocks = expressions or {}
+        if self.expr_key not in blocks:
+            available = ", ".join(sorted(blocks)) or "(none)"
+            label = f"[{where}] " if where else ""
+            raise MissingExpressionError(
+                f"{label}the manifest selects the expressions: block "
+                f"'{self.expr_key}', but the resolved config defines no such "
+                f"block (available: {available}). Either add it under "
+                f"expressions: in the component's defaults.yaml, or -- if the "
+                f"parameter is meant to be free -- say so explicitly: a "
+                f"manifest value of None for a free parameter with no "
+                f"options, or a dict of options carrying no 'expr_key' "
+                f"(e.g. {{'shape': ...}}, {{'overrides': ...}}) for one with "
+                f"options."
+            )
+        return blocks[self.expr_key]
 
     def dep_names(
         self, expr_cfg: Optional[Dict[str, Any]] = None

@@ -48,7 +48,9 @@ def determine_pymc_build_order(active_components, config_manager):
             # it could never supply a needed one, since every parameter it
             # applied to is free.
             entry = interpret_manifest_entry(comp.manifest[param_name])
-            expr_cfg = entry.expression_config(cfg.get("expressions", {}))
+            expr_cfg = entry.expression_config(
+                cfg.get("expressions", {}), where=f"{comp.prefix}.{param_name}"
+            )
 
             if expr_cfg is not None:
                 dep_names = entry.dep_names(expr_cfg)
