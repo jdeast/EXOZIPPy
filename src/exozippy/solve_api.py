@@ -21,13 +21,26 @@ workdir).  Data file paths inside a config are relative to workdir, so both
 functions chdir into it for the duration of the solve and restore the previous
 directory afterwards.
 
-Determinism caveat: the relaxation engine has a known cross-build
-nondeterminism -- two identical prepares can pick different derived bounds for
-the same parameter (the lp for one raw point can differ across builds).  A
-SolveResult therefore reports ONE valid solution, not a canonical one; do not
-assume two solve() calls on the same input return byte-identical bounds for
-solved quantities.  This module does not attempt to fix that; it only exposes
-whatever the engine produced.
+Determinism: solve() IS reproducible, and this caveat used to say the
+opposite.  The relaxation engine had a cross-build nondeterminism -- unsorted
+walks of sympy `free_symbols` sets and an unsorted `rglob` of the component
+directories, so ordering followed PYTHONHASHSEED and the filesystem -- and it
+is fixed: every such walk is sorted, and a relation with several roots inside
+the bounds breaks ties by value rather than by sp.solve's arrival order.
+Two solve() calls on the same input return byte-identical values, bounds and
+scales; verified across PYTHONHASHSEED 0/1/7 on ob08092, ob140939, kelt4
+(rv+transit+sed) and DC2018_128, and tests/test_hashseed_determinism.py pins
+the one remaining leak of this kind (MulensModel's set-ordered magnification
+methods, patched in exozippy.compat).
+
+What survives is weaker and is not about determinism: a SolveResult is ONE
+valid solution, not a canonical one.  A system of relations can admit several,
+and the engine picks by a fixed rule (lowest-provenance symbol, then roots
+scored against the other relations) -- reproducible, but not unique.  Note
+this never applied to bounds in the first place: the engine only READS
+lower/upper, to reject roots outside the support.  It never writes them, so
+exported bounds come from defaults.yaml, the component override channel and
+the user's params file exactly as they would with no solve at all.
 
 solve() builds a fresh System (and therefore a fresh ConfigManager) on every
 call, so it is safe to call repeatedly in one process; it does not rely on any

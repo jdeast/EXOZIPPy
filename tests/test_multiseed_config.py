@@ -3,9 +3,9 @@
 
 A `params.yaml` entry of the form `initval: [v0, v1, ...]` asks the relaxation
 engine to solve K complete, mutually-consistent start points inside ONE
-prepare() call (sharing one symbol environment -- see the module docstring
-in config.py's finalize_user_params and the project's known relaxation-engine
-cross-build nondeterminism note). Bounds/scales resolve once, from seed 0.
+prepare() call (sharing one symbol environment and one relation ordering --
+see the comment in config.py's finalize_user_params). Bounds/scales resolve
+once, from seed 0.
 """
 
 import numpy as np

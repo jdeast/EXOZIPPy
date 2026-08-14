@@ -998,13 +998,24 @@ class Parameter:
             sigma sets the whitening scale.
           - Unbounded with sigma > 0: raw ~ N(0,1), val = mu + sigma * raw.
             The raw prior IS the Gaussian; no separate potential needed.
+          - Unbounded with NO sigma: linear, val = initval + init_scale * raw.
+            Nothing cancels the raw N(0,1) here either, so this element's
+            prior IS N(initval, init_scale).  build_pymc warns about it (see
+            implicit_prior_idx below), because it is the one case where
+            init_scale is a modeling statement rather than conditioning.
 
         All raw variables are N(0,1). init_scale is always in physical units;
         for logit params it is converted to logit-space internally via the
-        Jacobian and affects only tuning/conditioning, never the posterior.
-        It is only PRELIMINARY: the whitening scales live in pytensor.shared
-        variables, and set_whitening() replaces them in place with the
-        probe-measured posterior scales before sampling (no rebuild needed).
+        Jacobian and affects only tuning/conditioning, never the posterior --
+        that is section C cancelling the raw N(0,1) for ANY scale, and it is
+        why the startup whitening rescale is provably posterior-preserving
+        THERE.  The claim is scoped to that branch and does not extend to the
+        two linear ones above, where the raw N(0,1) is the prior itself; so
+        on a logit element init_scale is only PRELIMINARY (the whitening
+        scales live in pytensor.shared variables, and set_whitening()
+        replaces them in place with the probe-measured posterior scales
+        before sampling, no rebuild needed), while on a linear element
+        set_whitening deliberately leaves the scale alone.
         """
         import pymc as pm
         import pytensor.tensor as pt

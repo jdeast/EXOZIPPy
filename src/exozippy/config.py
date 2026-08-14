@@ -516,11 +516,15 @@ It makes use of each component's symbolic_physics.py to derive the sampled param
 above, iteratively replacing the lowest ranked parameter with the re-derived value, and updating its weight the 
 average of its constituent weights. 
 
-It repeats the process for init_scale, automatically differentiating the relations in symbolic_physics.py
-to propagate uncertainties.  These scales are only PRELIMINARY (they seed the whitening probe, which
-measures the real per-parameter scales from the data -- see exozippy/whitening.py) and they set the
-soft-bound barrier steepness on derived parameters.  init_scale is NOT user-facing: entries in a user
-params file are stripped with a warning at construction.
+It repeats the process for init_scale, automatically differentiating each relation as it solves it
+(step 6 of _execute_solve) to propagate uncertainties.  These scales are only PRELIMINARY: they seed the
+whitening probe, which measures the real per-parameter scales from the data (see exozippy/whitening.py),
+and they set only the PRELIMINARY soft-bound barrier steepness, which whitening.measure_barrier_scales
+re-measures numerically from the whitened model.  The separate sympy forward and backward Jacobian scale
+PASSES that used to run after the solve loop -- filling derived-parameter scales for good, and
+back-propagating a user scale on a derived parameter to its sampled parents -- are deleted; see the note
+at the end of _execute_solve.  init_scale is NOT user-facing: entries in a user params file are stripped
+with a warning at construction.
 
 3) warns the user if there are conflicting user-specified constraints that cannot be reconciled.
 
@@ -1640,7 +1644,7 @@ class ConfigManager:
         # RANK_DERIVED_DATA; both fall back to the shared base_flat for any
         # path they do not touch), then run the relaxation engine once per
         # seed inside this single prepare() call so every seed shares one symbol
-        # environment (guards against the known cross-build nondeterminism).
+        # environment and one relation ordering.
         # Bounds/scales are taken from seed 0 only -- seeds move the START, never
         # the bounds -- so self.propagated_scales is restored to seed 0's after
         # the loop.
@@ -2008,10 +2012,13 @@ class ConfigManager:
         Reads only in-memory state left behind by finalize_user_params; it does
         NOT build the PyMC model.  Must be called after System.prepare().
 
-        Note: the relaxation engine has a known cross-build nondeterminism (two
-        identical prepares may pick different derived bounds), so the exported
-        bounds/values for solved quantities are one valid solution, not a
-        canonical one.  See the solve_api module docstring.
+        Note: the exported values for solved quantities are one valid
+        solution, not a canonical one -- a system of relations can admit
+        several and the engine picks by a fixed rule.  It is nonetheless
+        REPRODUCIBLE: the cross-build nondeterminism this note used to warn
+        about (unsorted free_symbols / rglob walks) is fixed.  Bounds were
+        never part of it either way; the engine only reads them.  See the
+        solve_api module docstring.
         """
 
         def _clean(x):
@@ -2318,9 +2325,13 @@ class ConfigManager:
 
         # 1.7 LAYER IN USER-SPECIFIED SIGMAS AS SCALES (RANK_USER)
         # A user-supplied Gaussian prior width is also the best available
-        # preliminary scale for that parameter, and the forward Jacobian pass
-        # below propagates it into derived-parameter scales (which set the
-        # soft-bound barrier steepness on derived parameters).  User
+        # preliminary scale for that parameter, and the engine's per-relation
+        # Jacobian propagation (step 6 of _execute_solve) carries it into the
+        # scale of whatever gets solved from it.  The separate forward
+        # Jacobian PASS that used to run after the loop, filling every derived
+        # parameter's scale so it could set that parameter's soft-bound
+        # barrier steepness, is deleted -- those steepnesses are measured
+        # numerically now (whitening.measure_barrier_scales).  User
         # init_scale entries no longer exist at this point -- they are
         # stripped with a warning at construction (whitening scales are
         # measured from the data instead; see exozippy/whitening.py).
@@ -2688,19 +2699,17 @@ class ConfigManager:
 
         # 5. Calculate New Armor
         # Use min(input_ranks) so a chain is only as strong as its weakest link.
-        # Condition A floor is RANK_DEFAULT-1 so an indirectly-derived value
-        # (e.g. ecc from K when secosw/sesinw are unavailable) always yields to
-        # a proper expression-path derivation or a default in Condition B.
-        # Condition B floor is RANK_DEFAULT so conflict resolution never produces
-        # armor weaker than an unseeded default.
         inputs = [s for s in symbols_in_eq if s != target]
         min_input_rank = (
             min(get_rank(s) for s in inputs) if inputs else RANK_DEFAULT
         )
-        # Condition A floor: RANK_DEFAULT-1 so indirect derivations always yield
-        #   to expression-path derivations or defaults in Condition B.
-        # Condition B floor: 0 so low-rank inputs (e.g. pm defaults at rank 10)
-        #   produce low-rank results — preventing them from blocking higher-rank
+        # Condition A floor: RANK_DEFAULT-1 so an indirectly-derived value
+        #   (e.g. ecc from K when secosw/sesinw are unavailable) always yields
+        #   to an expression-path derivation or a default in Condition B.
+        # Condition B floor: 0, NOT RANK_DEFAULT -- a duplicate of this comment
+        #   sat directly above and claimed RANK_DEFAULT, which the line below
+        #   has never done.  0 lets low-rank inputs (e.g. pm defaults at rank
+        #   10) produce low-rank results, so they cannot block higher-rank
         #   derivations from the t_E/theta_E/pi_rel chain.
         rank_floor = RANK_DEFAULT - 1 if len(unknowns) == 1 else 0
         new_rank = max(rank_floor, min(RANK_DERIVED_USER, min_input_rank))
