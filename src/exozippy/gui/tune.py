@@ -15,7 +15,11 @@ The Tune tab implements a hybrid interaction model:
 Because the pytensor compile + eval is CPU-heavy and must not stall the
 FastAPI event loop, the evaluator lives in a DEDICATED WORKER PROCESS -- one
 per open project.  :class:`EvaluatorWorker` owns that subprocess and speaks a
-tiny request/response protocol over two multiprocessing queues.
+tiny request/response protocol over two multiprocessing queues: every request
+carries a uuid the worker echoes on every message it sends back, and each
+caller waits only on its own id, so a slider eval and a Solve can be in flight
+together without stealing each other's replies.  A worker that goes silent past
+a generous deadline is terminated and respawned rather than wedging the tab.
 :class:`TuneSession` drives it from the server side, tracking the
 solving -> compiling -> live phase for the status endpoint.
 
@@ -34,13 +38,48 @@ import queue
 import signal
 import sys
 import threading
+import time
+import uuid
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 # How long the parent waits on the response queue before re-checking that the
-# worker process is still alive (see EvaluatorWorker._next_message).
+# worker process is still alive (see EvaluatorWorker._reader_loop / _take).
 _AWAIT_POLL_S = 0.25
+
+# SILENCE deadlines: how long the parent will wait with NO message at all from
+# the worker before declaring it wedged, terminating it and respawning (see
+# EvaluatorWorker._await).  Each progress message restarts the clock, so these
+# bound one silent stretch, not the whole job.
+#
+# They are deliberately generous, because a false positive is far worse than a
+# late detection: terminating a healthy worker throws away a compile that was
+# about to finish and looks, from the UI, exactly like the bug it is meant to
+# fix.  A legitimate first Solve is silent for as long as pytensor takes to
+# build and compile the model on a cold cache -- tens of seconds routinely, and
+# minutes for a big SED/transit topology -- so SOLVE gets 15 minutes, about an
+# order of magnitude above the worst legitimate silence.  An eval is
+# milliseconds by design, but the first one after a Solve can lazily compile
+# plotters (the GP conditional means, the outlier probabilities), so it gets 2
+# minutes rather than something that looks tight next to a slider drag.
+#
+# Read at call time (never captured at import) so a slow machine -- or a test
+# -- can monkeypatch them.
+SOLVE_TIMEOUT_S = 900.0
+EVAL_TIMEOUT_S = 120.0
+
+
+class WorkerTimeout(RuntimeError):
+    """The worker went silent past its deadline and was terminated.
+
+    A subclass of ``RuntimeError`` so every existing handler (``TuneSession``'s
+    solve wrapper, ``app.py``'s ``/api/tune/eval``) already surfaces it.
+    """
+
+
+class _DeadlineExpired(Exception):
+    """Internal: no message for this request within its silence deadline."""
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +122,9 @@ def _do_solve(state, msg, resp_q):
     Emits a ``{"progress": "compiling", "data_plots": [...]}`` message once
     the relaxation engine (the "solving" half) has finished and the model
     build begins, so the parent can advance its phase indicator and render
-    the data-only plots while the compile runs.
+    the data-only plots while the compile runs.  Like every response, it
+    echoes the request's ``id`` so the parent can route it back to the caller
+    that is waiting for it (see EvaluatorWorker).
     """
     from exozippy.evaluator import compile_evaluator, structural_hash
     from exozippy.system import System
@@ -115,7 +156,11 @@ def _do_solve(state, msg, resp_q):
         # Relaxation done; the seconds-scale compile begins now. Ship the
         # data-only plots along so the GUI has something to draw meanwhile.
         resp_q.put(
-            {"progress": "compiling", "data_plots": _data_only_plots(system)}
+            {
+                "id": msg.get("id"),
+                "progress": "compiling",
+                "data_plots": _data_only_plots(system),
+            }
         )
         model = system.build_model()
         base_raw = system.get_raw_start(model)
@@ -202,26 +247,40 @@ def _install_parent_death_signal():
 
 
 def _worker_main(req_q, resp_q):
-    """Entry point of the evaluator subprocess: a serve loop over the queues."""
+    """Entry point of the evaluator subprocess: a serve loop over the queues.
+
+    EVERY message this loop puts on the response queue echoes the request's
+    ``id``; the parent routes on it, so a response with no id (or a wrong one)
+    is dropped and its caller waits out its deadline.
+    """
     _install_parent_death_signal()
     state: dict = {}
     while True:
         msg = req_q.get()
         op = msg.get("op")
+        rid = msg.get("id")
         if op == "shutdown":
             break
         try:
             if op == "solve":
                 result = _do_solve(state, msg, resp_q)
-                resp_q.put({"ok": True, **result})
+                resp_q.put({"ok": True, "id": rid, **result})
             elif op == "eval":
                 result = _do_eval(state, msg)
-                resp_q.put({"ok": True, **result})
+                resp_q.put({"ok": True, "id": rid, **result})
             else:  # pragma: no cover - defensive
-                resp_q.put({"ok": False, "error": f"unknown op '{op}'"})
+                resp_q.put(
+                    {"ok": False, "id": rid, "error": f"unknown op '{op}'"}
+                )
         except Exception as exc:  # noqa: BLE001 - report, keep the loop alive
             logger.exception("tune worker error")
-            resp_q.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            resp_q.put(
+                {
+                    "ok": False,
+                    "id": rid,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +295,30 @@ class EvaluatorWorker:
     BLAS have initialised in the server process is unsafe, and spawn re-imports
     cleanly at the cost of a slower (seconds) startup that is dwarfed by the
     solve itself.
+
+    **The protocol is request-id addressed.**  Every request carries a fresh
+    uuid; the child echoes it on every message it sends back (progress
+    included); the parent runs ONE reader thread that drains the shared
+    response queue and files each message under the id it echoes, and each
+    caller waits only on its own id.  The queues are shared but the mailboxes
+    are not, which is what makes it safe for a slider eval and a Solve to be in
+    flight at the same time -- the case the server really produces, since a
+    Solve runs on the tune pool while ``/api/tune/eval`` runs on FastAPI's
+    threadpool.  Before ids, whichever thread called ``get()`` first took
+    whatever message arrived: an eval could return the Solve's payload, and the
+    ``_await(None)`` in the eval path silently ATE the Solve's
+    ``{"progress": "compiling", "data_plots": ...}`` message (review 1.5).
+    Both are structurally impossible now -- an eval never sees a message
+    addressed to the Solve, so there is nothing for it to steal or drop.
+
+    A message whose id nobody is waiting on (a superseded request, or an answer
+    that arrived after its caller gave up) is DROPPED at the reader, which is
+    the only place that decision is made.
+
+    Waiting is bounded twice over: a worker that DIES raises immediately, and a
+    worker that hangs while still alive -- a pytensor compile deadlock, native
+    code, an OOM-frozen child -- is terminated and respawned when its silence
+    deadline expires (review 1.4).
     """
 
     def __init__(self):
@@ -243,6 +326,14 @@ class EvaluatorWorker:
         self._req_q = self._ctx.Queue()
         self._resp_q = self._ctx.Queue()
         self._proc = None
+        # Response demultiplexer.  _cv guards all four fields below; its lock
+        # is an RLock so a waiter can stop the reader without releasing it.
+        self._cv = threading.Condition(threading.RLock())
+        self._inbox: dict = {}  # request id -> [messages], oldest first
+        self._pending: dict = {}  # request id -> generation it was sent in
+        self._generation = 0  # bumped by every restart / close
+        self._reader = None
+        self._reader_stop = None
 
     def start(self):
         if self._proc is not None and self._proc.is_alive():
@@ -257,58 +348,207 @@ class EvaluatorWorker:
 
     def solve(self, config, params, workdir, on_progress=None):
         """Run a full solve; block for the result, forwarding progress states."""
+        rid = self._begin_request()
         self._req_q.put(
             {
                 "op": "solve",
+                "id": rid,
                 "config": config,
                 "params": params,
                 "workdir": workdir,
             }
         )
-        return self._await(on_progress)
+        return self._await(rid, on_progress, SOLVE_TIMEOUT_S)
 
     def set_and_eval(self, path, value):
         """Move one parameter and return the updated model traces."""
-        self._req_q.put({"op": "eval", "path": path, "value": value})
-        return self._await(None)
+        rid = self._begin_request()
+        self._req_q.put(
+            {"op": "eval", "id": rid, "path": path, "value": value}
+        )
+        return self._await(rid, None, EVAL_TIMEOUT_S)
 
-    def _next_message(self):
-        """Next queue message, raising if the worker died without answering.
+    # -- request bookkeeping ------------------------------------------------
 
-        Polls rather than blocking forever on ``get()``: a worker that dies --
-        or is closed out from under an in-flight solve, which is what opening a
-        different project does -- never answers, and an unbounded get() would
-        wedge the caller. The server's tune pool has a single slot, so one such
-        stuck thread would block every later solve.
+    def _begin_request(self):
+        """Mint a request id and register it BEFORE the request is sent.
+
+        Registering first is what makes the reader's drop rule safe: an id it
+        does not know is one nobody will ever wait for, never one whose caller
+        has not got around to registering yet.
         """
-        while True:
-            try:
-                return self._resp_q.get(timeout=_AWAIT_POLL_S)
-            except queue.Empty:
-                if self.is_alive():
-                    continue
-                try:
-                    # Last drain: the child may have answered as it exited,
-                    # with the payload still in flight through the pipe.
-                    return self._resp_q.get(timeout=_AWAIT_POLL_S)
-                except queue.Empty:
-                    raise RuntimeError("evaluator worker exited") from None
+        rid = uuid.uuid4().hex
+        with self._cv:
+            self._pending[rid] = self._generation
+        return rid
 
-    def _await(self, on_progress):
-        while True:
-            msg = self._next_message()
-            if "progress" in msg:
-                if on_progress:
-                    # The full message: phase string plus any payload riding
-                    # along (data_plots). TuneSession._progress also accepts a
-                    # bare phase string for simpler worker stubs.
-                    on_progress(msg)
+    def _end_request(self, rid):
+        with self._cv:
+            self._pending.pop(rid, None)
+            self._inbox.pop(rid, None)
+
+    # -- response demultiplexer --------------------------------------------
+
+    def _ensure_reader(self):
+        """Start the reader thread for the CURRENT response queue, if needed."""
+        with self._cv:
+            if self._reader is not None and self._reader.is_alive():
+                return
+            stop = threading.Event()
+            self._reader_stop = stop
+            self._reader = threading.Thread(
+                target=self._reader_loop,
+                args=(self._resp_q, stop),
+                daemon=True,
+                name="exozippy-tune-reader",
+            )
+            self._reader.start()
+
+    def _stop_reader(self):
+        with self._cv:
+            stop, self._reader_stop, self._reader = (
+                self._reader_stop,
+                None,
+                None,
+            )
+        if stop is not None:
+            stop.set()
+
+    def _reader_loop(self, resp_q, stop):
+        """Drain ``resp_q`` and file every message under the id it echoes.
+
+        Bound to the queue it was started with, so a restart's fresh queue gets
+        a fresh reader and this one retires with the process it was reading.
+        """
+        while not stop.is_set():
+            try:
+                msg = resp_q.get(timeout=_AWAIT_POLL_S)
+            except queue.Empty:
                 continue
-            if not msg.get("ok"):
-                raise RuntimeError(msg.get("error", "worker error"))
-            return msg
+            except (OSError, ValueError, EOFError):  # queue closed under us
+                break
+            rid = msg.get("id") if isinstance(msg, dict) else None
+            with self._cv:
+                if rid in self._pending:
+                    self._inbox.setdefault(rid, []).append(msg)
+                    self._cv.notify_all()
+                else:
+                    logger.debug(
+                        "tune: dropping worker message for unclaimed "
+                        "request id %r",
+                        rid,
+                    )
+
+    def _take(self, rid, deadline):
+        """Next message addressed to ``rid``, or raise.
+
+        Raises ``_DeadlineExpired`` on silence, ``RuntimeError`` if the worker
+        died or was restarted out from under this request.
+        """
+        self._ensure_reader()
+        with self._cv:
+            while True:
+                msgs = self._inbox.get(rid)
+                if msgs:
+                    return msgs.pop(0)
+                if (
+                    self._pending.get(rid, self._generation)
+                    != self._generation
+                ):
+                    raise RuntimeError(
+                        "evaluator worker was restarted; this request is void"
+                    )
+                if not self.is_alive():
+                    # Grace: the child may have answered as it exited, with the
+                    # payload still in flight through the pipe and the reader
+                    # yet to file it.
+                    self._cv.wait(_AWAIT_POLL_S)
+                    msgs = self._inbox.get(rid)
+                    if msgs:
+                        return msgs.pop(0)
+                    self._stop_reader()
+                    raise RuntimeError("evaluator worker exited")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _DeadlineExpired
+                self._cv.wait(min(_AWAIT_POLL_S, remaining))
+
+    def _await(self, rid, on_progress, timeout):
+        """Block for ``rid``'s answer, forwarding its progress messages.
+
+        ``timeout`` is a SILENCE budget, not a total: every message addressed
+        to this request restarts it, so a job that keeps reporting is never
+        killed for being long, only for going quiet.
+        """
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                try:
+                    msg = self._take(rid, deadline)
+                except _DeadlineExpired:
+                    self._hard_restart()
+                    raise WorkerTimeout(
+                        f"evaluator worker stopped responding "
+                        f"(no message for {timeout:.0f}s); it was terminated "
+                        f"and respawned -- press Solve again"
+                    ) from None
+                deadline = time.monotonic() + timeout
+                if "progress" in msg:
+                    if on_progress:
+                        # The full message: phase string plus any payload
+                        # riding along (data_plots). TuneSession._progress also
+                        # accepts a bare phase string for simpler worker stubs.
+                        on_progress(msg)
+                    continue
+                if not msg.get("ok"):
+                    raise RuntimeError(msg.get("error", "worker error"))
+                return msg
+        finally:
+            self._end_request(rid)
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def _hard_restart(self):
+        """Kill a wedged worker and spawn a clean one on fresh queues.
+
+        The queues are replaced rather than reused: a process killed mid-write
+        can leave a partial pickle in the pipe, and every later ``get()`` would
+        inherit that. Bumping the generation releases any OTHER request waiting
+        on the dead process immediately, instead of leaving it to burn its own
+        deadline and terminate the fresh worker in turn.
+        """
+        proc, self._proc = self._proc, None
+        self._stop_reader()
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.join(timeout=2.0)
+                if proc.is_alive():  # pragma: no cover - SIGTERM ignored
+                    proc.kill()
+                    proc.join(timeout=2.0)
+            except Exception:  # noqa: BLE001 - best effort; we respawn anyway
+                logger.debug("tune: terminate failed", exc_info=True)
+        for q in (self._req_q, self._resp_q):
+            try:
+                q.cancel_join_thread()
+                q.close()
+            except Exception:  # noqa: BLE001 - best effort
+                logger.debug("tune: queue close failed", exc_info=True)
+        self._req_q = self._ctx.Queue()
+        self._resp_q = self._ctx.Queue()
+        with self._cv:
+            self._generation += 1
+            self._inbox.clear()
+            self._cv.notify_all()
+        logger.warning("tune: evaluator worker was wedged; respawning")
+        self.start()
 
     def close(self):
+        with self._cv:
+            self._generation += 1  # release anyone still waiting
+            self._inbox.clear()
+            self._cv.notify_all()
+        self._stop_reader()
         if self._proc is None:
             return
         try:
@@ -406,11 +646,30 @@ class TuneSession:
         return self.phase
 
     def eval(self, path, value):
-        """Move one parameter (LIVE mode only) and return updated traces."""
-        if self._worker is None or self.phase != "live":
+        """Move one parameter (LIVE mode only) and return updated traces.
+
+        The phase gate is read WITHOUT the lock and the call is made outside
+        it, deliberately.  Taking the lock across either would serialize the
+        slider against a seconds-long Solve (and, with a deadline in play, let
+        one wedged eval hold the lock long enough to block the next Solve's
+        respawn).  Neither needs the lock any more: the worker addresses every
+        response by request id, so an eval that slips through the gate
+        microseconds before a re-Solve starts can only ever receive its OWN
+        answer -- or a clean "worker was restarted" error.  That is the half of
+        review 1.5 the gate could not close.
+        """
+        worker = self._worker
+        if worker is None or self.phase != "live":
             raise RuntimeError("no live evaluator; press Solve first")
-        with self._lock:
-            return self._worker.set_and_eval(path, value)
+        try:
+            return worker.set_and_eval(path, value)
+        except WorkerTimeout as exc:
+            # The worker was terminated and respawned, so it no longer holds
+            # the compiled evaluator: nothing is live until the next Solve, and
+            # the UI has to be told that rather than left on stale sliders.
+            self.error = str(exc)
+            self.phase = "error"
+            raise
 
     def status(self):
         return {
