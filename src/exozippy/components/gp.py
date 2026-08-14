@@ -173,11 +173,31 @@ def _celerite_terms():
     try:
         from celerite2.pymc import terms
     except ImportError as exc:  # pragma: no cover - install-time failure only
+        # Name the module that ACTUALLY failed rather than assuming it was
+        # celerite2. On a platform with no jax -- Intel macOS, where jaxlib's
+        # last x86_64 wheel predates the jax.ffi exoplanet-core needs --
+        # celerite2 is installed and imports fine, but celerite2.pymc.ops
+        # does `from pytensor.link.jax.dispatch import jax_funcify` at module
+        # scope, so this raises ModuleNotFoundError('jax'). Telling that user
+        # to `pip install celerite2` sends them to reinstall a package they
+        # already have.
+        missing = getattr(exc, "name", None) or "celerite2"
+        if missing.split(".")[0] == "celerite2":
+            advice = (
+                "celerite2 is not installed. Install it with "
+                "'poetry install' (it is a declared dependency) or "
+                "'pip install celerite2'."
+            )
+        else:
+            advice = (
+                f"celerite2's PyMC backend needs {missing!r}, which is not "
+                f"installed. Note that celerite2.pymc imports jax "
+                f"unconditionally, so GP noise is unavailable on platforms "
+                f"that ship no jax at all."
+            )
         raise ImportError(
-            "Gaussian-process noise (the 'gp:' key on a data file) requires "
-            "celerite2, which is not installed. Install it with "
-            "'poetry install' (it is a declared dependency) or "
-            "'pip install celerite2'."
+            "Gaussian-process noise (the 'gp:' key on a data file) is "
+            f"unavailable: {advice}"
         ) from exc
     return terms
 

@@ -256,8 +256,24 @@ jobs:
       #
       # Uses the preinstalled gh CLI and the automatic GITHUB_TOKEN, so there
       # is no marketplace action in the supply chain for this.
+      # continue-on-error on both issue steps is load-bearing, not caution.
+      # Issue bookkeeping must never decide this job's verdict -- the suite
+      # does. Without it, a failing `gh issue list` turns a GREEN run RED,
+      # which is the exact inversion of the signal this job exists to give,
+      # and it sends someone hunting an upstream dependency break that never
+      # happened.
+      #
+      # Not hypothetical: the same block, ported to exoplanet-core, did
+      # precisely that on its first real run. GitHub disables Issues on
+      # forks by default, `gh issue list` exited non-zero with "the '<repo>'
+      # repository has disabled issues", `set -euo pipefail` ended the step,
+      # and a clean resolve-and-test run reported failure. Here the repo has
+      # Issues on and the token has issues:write, so the live trigger would
+      # instead be a transient API error -- rarer, and indistinguishable
+      # from a real break when it happens.
       - name: Open or update the tracking issue on failure
         if: failure()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -306,6 +322,7 @@ jobs:
       # while the suite is failing.
       - name: Close the tracking issue when the suite is green again
         if: success()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
