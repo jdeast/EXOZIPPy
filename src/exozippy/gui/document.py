@@ -181,6 +181,17 @@ def _instances_of(config, comp_type):
     return []
 
 
+def _instances_of_raw(config, comp_type):
+    """The component's list block VERBATIM (or []).
+
+    Unlike ``_instances_of`` this filters nothing, so positions here are the
+    element indices ``comp.<i>.param`` means -- dropping a stray non-dict
+    entry would shift every index after it.
+    """
+    block = config.get(comp_type)
+    return block if isinstance(block, list) else []
+
+
 def _find_instance(config, comp_type, name):
     """Return (list, index) of the named instance, or raise KeyError."""
     block = config.get(comp_type)
@@ -223,18 +234,46 @@ def _get_nested(tree, path):
 
 
 def _rename_top_keys(cmap, rename_fn):
-    """Rebuild a CommentedMap with top-level keys renamed, comments preserved."""
+    """Rebuild a CommentedMap with top-level keys renamed, comments preserved.
+
+    ``rename_fn`` returns the new key, or ``None`` to DROP the entry -- so one
+    pass can rename and delete together, which is what retargeting a params
+    file across an instance deletion needs (some keys go, some are respelled,
+    most are left exactly as the user wrote them).
+    """
     new = CommentedMap()
+    dropped = set()
     for key in list(cmap.keys()):
         new_key = rename_fn(key)
+        if new_key is None:
+            dropped.add(key)
+            continue
         new[new_key] = cmap[key]
     # Carry over per-key and block comments where the key survived.
     old_ca = getattr(cmap, "ca", None)
     if old_ca is not None:
         new.ca.comment = old_ca.comment
         for key, comment in old_ca.items.items():
-            new.ca.items[rename_fn(key)] = comment
+            if key in dropped:
+                continue
+            new_key = rename_fn(key)
+            if new_key is not None:
+                new.ca.items[new_key] = comment
     return new
+
+
+def _split_param_key(key, comp_type):
+    """``(instance, param)`` for a 3-part params key of ``comp_type``, else None.
+
+    The 2-part BROADCAST spelling (``star.teff``) deliberately returns None:
+    it is not specific to any instance, so no instance-level edit may touch
+    it -- it covers whatever elements remain, which is exactly what it said
+    before.
+    """
+    parts = str(key).split(".")
+    if len(parts) != 3 or parts[0] != comp_type:
+        return None
+    return parts[1], parts[2]
 
 
 # --- commands -----------------------------------------------------------------
@@ -252,7 +291,16 @@ class Command:
 
     def apply(self, doc):
         self._before = doc._snapshot()
-        self._do(doc)
+        try:
+            self._do(doc)
+        except Exception:
+            # A command that raises PART WAY THROUGH must leave nothing
+            # behind: it is not on the undo stack, so the user would have no
+            # way to take back (say) an appended clone whose params copy then
+            # refused. The snapshot restore we already own makes every
+            # command atomic for free.
+            doc._restore(self._before)
+            raise
         self._after = doc._snapshot()
 
     def revert(self, doc):
@@ -335,9 +383,13 @@ class DeleteInstance(Command):
         self.label = f"delete {comp_type} '{name}'"
 
     def _do(self, doc):
+        # Retarget the params file FIRST. Every decision there needs the
+        # PRE-deletion index of each entry's element, and the ``del`` below
+        # destroys exactly that: afterwards `star.A.teff` resolves to nothing
+        # and `star.0.teff` resolves to whichever star moved up.
+        doc._retarget_params_for_delete(self.comp_type, self.name)
         block, idx = _find_instance(doc.config, self.comp_type, self.name)
         del block[idx]
-        doc._drop_param_keys(self.comp_type, self.name)
 
 
 class RenameInstance(Command):
@@ -572,10 +624,189 @@ class ProjectDocument:
                 return key
         return path
 
-    def _drop_param_keys(self, comp_type, name):
-        prefix = f"{comp_type}.{name}."
-        for key in [k for k in self.params if str(k).startswith(prefix)]:
-            del self.params[key]
+    def _instance_indices(self, comp_type):
+        """``(names_by_index, index_by_name)`` for a list component.
+
+        Only names that can actually be written back into a params key are
+        listed: a non-string or all-digit ``name:`` cannot serve as the NAME
+        spelling (``validate_instance_names`` bans both outright), and an
+        instance with no ``name:`` at all has only its index.
+        """
+        names_by_index = {}
+        index_by_name = {}
+        for i, entry in enumerate(_instances_of_raw(self.config, comp_type)):
+            if not isinstance(entry, dict):
+                continue
+            nm = entry.get("name")
+            if not isinstance(nm, str) or nm.isdigit():
+                continue
+            names_by_index[i] = nm
+            index_by_name.setdefault(nm, i)
+        return names_by_index, index_by_name
+
+    @staticmethod
+    def _element_index(instance, index_by_name, n_inst):
+        """Which instance INDEX an ``<instance>`` path segment addresses.
+
+        Returns ``(index, is_index_form)``, or ``(None, ...)`` when the
+        spelling names no instance this config defines (an orphan entry left
+        over from an earlier edit -- not ours to retarget).
+        """
+        if instance.isdigit():
+            idx = int(instance)
+            return (idx if idx < n_inst else None), True
+        return index_by_name.get(instance), False
+
+    def _retarget_params_for_delete(self, comp_type, name):
+        """Retarget the params file across the deletion of one instance.
+
+        MUST run while the instance is still in the config -- see the comment
+        at the ``DeleteInstance`` call site.
+
+        Three kinds of entry, three answers:
+
+        * **The deleted instance's own entries go, under BOTH specific
+          spellings.** ``star.A.teff`` and ``star.0.teff`` name the same
+          element; a name-prefix scan saw only the first, so every index-form
+          entry survived the delete and then silently applied to whichever
+          star moved up. That is a WRONG-ELEMENT bug, not litter.
+        * **A survivor's index-form entry whose index shifts is rewritten to
+          the NAME form** (``star.1.teff`` -> ``star.B.teff`` when B moves
+          from index 1 to 0). The name form means the same element before and
+          after any list mutation, so this converts a fragile spelling into a
+          stable one exactly where the fragility would otherwise bite.
+          Re-indexing would fix today's delete and leave the same trap set
+          for the next one; refusing the delete would gate an edit the GUI
+          can repair exactly. An UNNAMED instance has no name form, so its
+          keys are re-indexed instead -- the same guarantee by the only means
+          available.
+        * **Everything else is left byte-identical**: a survivor at an index
+          BELOW the deleted one still spells its own element correctly, the
+          name form was never index-dependent, and the 2-part BROADCAST form
+          (``star.teff``) was never specific to the deleted instance.
+
+        Link EXPRESSIONS inside the surviving entries get the same treatment
+        (they are parameter references too, and an index-form one retargets
+        just as silently), with one difference: a reference to the DELETED
+        instance is rewritten to its name form rather than removed, turning a
+        silent mis-address into the loud "no instance named 'A'" the name
+        form has always produced.
+        """
+        block, idx = _find_instance(self.config, comp_type, name)
+        n_inst = len(block)
+        names_by_index, index_by_name = self._instance_indices(comp_type)
+
+        def respelled(i, is_index_form):
+            """New instance segment, or None when the spelling still holds."""
+            if not is_index_form or i < idx:
+                return None
+            nm = names_by_index.get(i)
+            return nm if nm is not None else str(i - 1)
+
+        def rewrite_key(key):
+            split = _split_param_key(key, comp_type)
+            if split is None:
+                return key
+            instance, param = split
+            i, is_index_form = self._element_index(
+                instance, index_by_name, n_inst
+            )
+            if i is None:
+                return key
+            if i == idx:
+                return None  # the deleted instance, under either spelling
+            new_instance = respelled(i, is_index_form)
+            if new_instance is None:
+                return key
+            return f"{comp_type}.{new_instance}.{param}"
+
+        plan = {str(k): rewrite_key(k) for k in self.params}
+        self._reject_colliding_rewrites(plan)
+        self.params = _rename_top_keys(self.params, rewrite_key)
+
+        def rewrite_ref(instance, param):
+            i, is_index_form = self._element_index(
+                instance, index_by_name, n_inst
+            )
+            if i is None:
+                return None
+            if i == idx:
+                # Dangling either way now; spell it so it FAILS rather than
+                # quietly addressing the instance that took this index.
+                return str(name) if is_index_form else None
+            return respelled(i, is_index_form)
+
+        self._rewrite_param_link_paths(comp_type, rewrite_ref)
+
+    def _reject_colliding_rewrites(self, plan):
+        """Refuse a retarget that would leave one element spelled twice.
+
+        Only reachable from a params file that ALREADY names one element
+        under both specific spellings -- which ``ConfigManager`` refuses
+        outright (see CLAUDE.md's "Parameter naming convention"), so the
+        collision is a pre-existing fault this edit would otherwise bury.
+        """
+        landed = {}
+        for src, dst in plan.items():
+            if dst is None:
+                continue
+            prev = landed.get(dst)
+            if prev is not None:
+                raise ValueError(
+                    f"cannot retarget the params file: '{prev}' and '{src}' "
+                    f"would both become '{dst}', i.e. they are two spellings "
+                    f"of one parameter element. Keep exactly one of them "
+                    f"(merging any fields you need from both) and retry."
+                )
+            landed[dst] = src
+
+    def _copy_param_keys(self, comp_type, name, new_name):
+        """Copy one instance's param entries onto its freshly added duplicate.
+
+        The mirror image of the delete case, and it was wrong the same way:
+        a name-prefix scan reads only the NAME spelling, so duplicating an
+        instance whose entries the file spells by INDEX produced a clone with
+        none of its parameters -- silently, since a missing entry is a legal
+        params file.
+
+        Entries are read under both specific spellings and written under the
+        clone's NAME form. Never its index form: that is the fragile spelling
+        ``_retarget_params_for_delete`` exists to remove, correct only until
+        someone deletes an earlier instance. And exactly one spelling per
+        element -- naming one element twice is fatal in ``ConfigManager``.
+        """
+        block, idx = _find_instance(self.config, comp_type, name)
+        _, new_idx = _find_instance(self.config, comp_type, new_name)
+        n_inst = len(block)
+        _, index_by_name = self._instance_indices(comp_type)
+
+        source = {}
+        for key in list(self.params.keys()):
+            split = _split_param_key(key, comp_type)
+            if split is None:
+                continue
+            instance, param = split
+            i, _ = self._element_index(instance, index_by_name, n_inst)
+            if i == idx:
+                if param in source:
+                    raise ValueError(
+                        f"cannot duplicate '{name}': its '{param}' is named "
+                        f"twice in the params file ('{source[param][0]}' and "
+                        f"'{key}' are two spellings of one element). Keep "
+                        f"exactly one of them and retry."
+                    )
+                source[param] = (str(key), self.params[key])
+            elif i == new_idx:
+                raise ValueError(
+                    f"cannot duplicate '{name}' as '{new_name}': the params "
+                    f"file already has '{key}' for the new instance. Remove "
+                    f"or rename that entry and retry."
+                )
+
+        for param, (_, value) in source.items():
+            self.params[f"{comp_type}.{new_name}.{param}"] = copy.deepcopy(
+                value
+            )
 
     def _rename_param_keys(self, comp_type, old, new):
         prefix = f"{comp_type}.{old}."
@@ -589,30 +820,33 @@ class ProjectDocument:
 
         self.params = _rename_top_keys(self.params, rename)
 
-    def _copy_param_keys(self, comp_type, name, new_name):
-        prefix = f"{comp_type}.{name}."
-        new_prefix = f"{comp_type}.{new_name}."
-        additions = []
-        for key in list(self.params.keys()):
-            k = str(key)
-            if k.startswith(prefix):
-                additions.append(
-                    (new_prefix + k[len(prefix) :], self.params[key])
-                )
-        for new_key, value in additions:
-            self.params[new_key] = copy.deepcopy(value)
-
     def _rewrite_param_links(self, comp_type, old, new):
+        # An INDEX-form reference to the renamed instance still addresses it
+        # (a rename moves nothing), so only the name form is rewritten.
+        self._rewrite_param_link_paths(
+            comp_type,
+            lambda instance, param: str(new) if instance == str(old) else None,
+        )
+
+    def _rewrite_param_link_paths(self, comp_type, rewrite_ref):
+        """Rewrite ``comp.<instance>.<param>`` references inside link values.
+
+        ``rewrite_ref(instance, param)`` returns the new instance segment, or
+        None to leave that reference exactly as written. The character
+        classes are ``linking._PATH_3``'s, so this sees precisely the
+        references the link parser will -- index form included.
+        """
         pat = re.compile(
             r"(?<![\w.])"
             + re.escape(comp_type)
-            + r"\."
-            + re.escape(str(old))
-            + r"\.([A-Za-z_]\w*)"
+            + r"\.([A-Za-z0-9_][A-Za-z0-9_\-]*)\.([A-Za-z_]\w*)(?![\w.(])"
         )
 
         def repl(m):
-            return f"{comp_type}.{new}.{m.group(1)}"
+            new_instance = rewrite_ref(m.group(1), m.group(2))
+            if new_instance is None:
+                return m.group(0)
+            return f"{comp_type}.{new_instance}.{m.group(2)}"
 
         for entry in self.params.values():
             if not isinstance(entry, dict):
