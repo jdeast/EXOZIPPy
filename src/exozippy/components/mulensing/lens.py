@@ -1392,8 +1392,16 @@ class Lens(Component):
         obs_pos : (N, 3) Skowron+2011 geocentric deviations in AU --
         the observer's offset from the linear Earth trajectory anchored at
         t0_par (MulensInstrument._abs_to_delta).  The MulensModel Op path
-        consumes the exact same array (fed as satellite_skycoord), so the
-        two paths are interchangeable.  Zero rows mean no parallax.
+        consumes the exact same array (fed as satellite_skycoord), so both
+        paths carry the same parallax, annual and satellite alike, and are
+        interchangeable on this input.  Zero rows mean no parallax.
+
+        The one input they do NOT share is the line of sight: this formula
+        reads the live star.ra/star.dec nodes, while the Op takes a coordinate
+        STRING frozen at the start value (_frozen_op_coords_deg, which warns
+        when they are sampled).  That only separates the two paths in a
+        topology that actually samples ra/dec, and by ~1e-5 per arcsec of
+        coordinate error -- see that method for why the freeze is free.
         """
         source_ndx = self.source_map[index]
         ra = system.star.ra.value[source_ndx]
