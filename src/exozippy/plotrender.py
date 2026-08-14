@@ -21,8 +21,14 @@ Trace ``role`` drives the mark (mirroring plotly-adapter):
 * ``"data"``    -> errorbar markers (alpha 0.6, zorder 1, legend label).
 * ``"model"``   -> line (red by default) when ``kind == "line"``; red point
   markers when ``kind == "scatter"`` (e.g. a model sampled only at the
-  observation epochs).  Model traces from posterior draws after the first
-  are drawn as spaghetti (alpha 0.1).
+  observation epochs).  Model alpha is set ONCE PER FIGURE from the number
+  of posterior draws, not per draw: a single draw is opaque (alpha 0.8),
+  and as soon as there is more than one EVERY model trace is spaghetti
+  (alpha 0.1) -- including the reference draw's, which is otherwise
+  privileged (it supplies the data traces and decorations).  That is
+  deliberate: the reference point is only "first" in the list, not a
+  best-fit, so drawing it darker would advertise a distinction the fit
+  does not make.
 * ``"residual"`` -> gray markers around zero.
 
 Trace ``style`` (all optional): ``series_index`` (fixed categorical color
@@ -167,8 +173,10 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
         One ``plot_data`` result per posterior point.  The FIRST group is the
         reference: it supplies the data traces, labels, and decorations
         (matching the historical convention that data offsets/cleaning use
-        ``points[0]``).  Later groups contribute only their model traces,
-        drawn as low-alpha spaghetti.
+        ``points[0]``).  Later groups contribute only their model traces.
+        The reference group is NOT privileged in the model layer: with more
+        than one group every model trace is drawn at the same spaghetti
+        alpha, the reference's included.
     filename_prefix : str
         Output files are ``{filename_prefix}_{file_tag}.pdf``.
     """
@@ -184,6 +192,8 @@ def render_spec_groups(spec_groups, filename_prefix="debug"):
             if models:
                 extra_models.setdefault(spec.id, []).append(models)
 
+    # One alpha for the whole figure, applied to the reference group's model
+    # traces below as well as to extra_models -- see the module docstring.
     model_alpha = 0.8 if len(spec_groups) == 1 else 0.1
     written = []
     for spec in ref_specs:

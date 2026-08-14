@@ -3,7 +3,7 @@ posterior distribution -> LaTeX/CSV table generation.
 
 This is the block that used to live inline in run.run_fit() right after
 sampling finished. It is now a single function so that run.py (the live
-fitting path) and the exozippy-modes CLI (outputs/cli_modes.py, which
+fitting path) and the exozippy-modes CLI (exozippy/cli_modes.py, which
 reprocesses a previously saved trace file without re-sampling) can never
 drift apart: both call sites import build_mode_reports from this module.
 """
