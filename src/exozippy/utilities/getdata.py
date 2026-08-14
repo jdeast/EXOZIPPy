@@ -29,12 +29,22 @@ import numpy as np
 # exposure time present in EXPTIME_PRIORITY, and among those the first author
 # present in AUTHOR_PRIORITY. Both are ordered best-first and both are read by
 # the same _highest_priority() helper, so the tables are the documentation.
+#
+# AUTHOR_PRIORITY is also the set of authors run() asks MAST for, so the ranked
+# set and the searched set cannot drift apart. Every entry must be readable --
+# in AUTHOR_MISSION -- or listed in UNSUPPORTED_AUTHORS and ranked below every
+# readable one, or the tie-break can hand run() a product it then discards.
+# "TESS" used to head this table and was neither: it is a lightkurve *mission*
+# ("Kepler", "K2", "TESS"), not an author. Official TESS pipeline products are
+# authored "SPOC" (lightkurve's own search_lightcurve docstring), MAST has no
+# observation with provenance_name = "TESS" (author is a synonym for
+# provenance_name), and lightkurve's AUTHOR_LINKS / result-sort tables do not
+# list it either. So it ranked a value that cannot be returned, first.
 
 # Short cadence first (120, 200, 20 s), then the long-cadence FFI products.
 EXPTIME_PRIORITY = (120, 200, 20, 300, 600, 1800)
 
 AUTHOR_PRIORITY = (
-    "TESS",
     "SPOC",
     "TESS-SPOC",
     "QLP",
@@ -42,6 +52,10 @@ AUTHOR_PRIORITY = (
     "K2SFF",
     "EVEREST",
     "K2",
+    # readable authors above this line; the rest are recognized but unreadable
+    # (UNSUPPORTED_AUTHORS) and so must stay last -- they are ranked at all
+    # only so that a sector offering nothing else is skipped with their own
+    # message rather than the ambiguous-tie one.
     "CDIPS",
     "TASOC",
 )
@@ -350,20 +364,10 @@ def run(args):
     t0 = datetime.datetime(2000, 1, 1)
     jd0 = 2451544.5
 
-    search_results = lk.search_lightcurve(
-        args.id,
-        author=(
-            "SPOC",
-            "TESS-SPOC",
-            "QLP",
-            "TASOC",
-            "CDIPS",
-            "Kepler",
-            "K2",
-            "K2SFF",
-            "EVEREST",
-        ),
-    )
+    # The ranked set IS the searched set: asking for an author nothing ranks
+    # would return products the tie-break then drops, and ranking one nothing
+    # asks for is a dead row. lightkurve does not care about the order here.
+    search_results = lk.search_lightcurve(args.id, author=AUTHOR_PRIORITY)
 
     if len(search_results) == 0:
         print(
