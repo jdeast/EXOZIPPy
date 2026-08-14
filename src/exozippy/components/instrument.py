@@ -536,10 +536,13 @@ class Instrument(Component):
 
         Accepted ``mask:`` forms on an instrument's config entry:
 
-        - a path to a whitespace/newline-delimited file with ONE value per
-          data row (0/1, true/false): nonzero/true means EXCLUDE that row.
-          This is the shape a bad-data flag vector (e.g. from MMEXOFAST)
-          saves to naturally.
+        - a path to a whitespace/newline-delimited file with ONE NUMERIC flag
+          per data row: nonzero means EXCLUDE that row.  This is the shape a
+          bad-data flag vector (e.g. from MMEXOFAST) saves to naturally.  The
+          file is read with ``np.loadtxt(dtype=float)``, so ``true``/``false``
+          word literals are NOT accepted there -- write 1/0, or use the
+          boolean-list form below, which is the YAML spelling of the same
+          thing.
         - a list of booleans, one per data row: True means EXCLUDE.
         - a list of integers: 0-based row indices to EXCLUDE.
 
@@ -553,7 +556,22 @@ class Instrument(Component):
         n = len(df)
 
         if isinstance(spec, str):
-            flags = np.loadtxt(spec, dtype=float, comments="#").ravel()
+            try:
+                flags = np.loadtxt(spec, dtype=float, comments="#").ravel()
+            except ValueError as exc:
+                # numpy's own message ("could not convert string 'true' to
+                # float64 at row 0, column 1") names neither the file nor the
+                # instrument nor what the reader wants.  A flag file written
+                # with true/false word literals is the likely case and has a
+                # one-line fix, so say so.
+                raise ValueError(
+                    f"[{label}] mask file '{spec}' is not a numeric flag "
+                    f"file: it must hold one number per data row (nonzero = "
+                    f"exclude).  Word literals such as 'true'/'false' are not "
+                    f"accepted -- write 1/0, or give the mask inline as a "
+                    f"YAML list of booleans or of 0-based row indices.  "
+                    f"({exc})"
+                ) from exc
             if flags.size != n:
                 raise ValueError(
                     f"[{label}] mask file '{spec}' has {flags.size} entries "

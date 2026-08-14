@@ -215,9 +215,11 @@ def parse_link_expression(expr_str, system_config, context=""):
 
 def extract_links(user_params, system_config):
     """
-    Scan standardized user_params for link expressions in the six linkable
-    fields, REMOVE them from the entries (so downstream numeric code never
-    sees strings), and return {target_path: {field: ParamLink}}.
+    Scan standardized user_params for link expressions in the five
+    ``LINKABLE_FIELDS`` (initval, mu, sigma, lower, upper), REMOVE them from
+    the entries (so downstream numeric code never sees strings), and return
+    {target_path: {field: ParamLink}}.  ``init_scale`` is deliberately not
+    among them -- see the module docstring.
 
     Must be called after standardize_param_names, so all list-component keys
     are in index form (comp.idx.param).

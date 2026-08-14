@@ -412,6 +412,47 @@ def test_negative_parallax_is_still_written_as_a_prior(
     assert "NEGATIVE" in notes
 
 
+def test_stromgren_feh_header_note_spells_casagrande_correctly(
+    tmp_path, patched_catalogs
+):
+    """
+    Given a TIC row with no [M/H] and a Paunzen+2015 Stromgren row inside
+      the calibration range of Casagrande+2011 eq. 2,
+    When mkticsed writes the params file,
+    Then a [Fe/H] prior is written AND the emitted header note names
+      "Casagrande" -- the author's actual name.  The header is user-facing
+      output, so a misspelling there ("Cassegrande", until 2026-08) ships to
+      every user of the tool and into every paper written from it.
+    """
+    # Arrange: TIC with a missing [M/H] so the Stromgren pathway is reached.
+    tic = _tic_table()
+    tic["[M/H]"] = [np.nan]
+    patched_catalogs["IV/39/tic82"] = tic
+    patched_catalogs["J/A+A/580/A23/catalog"] = Table(
+        {
+            "RAJ2000": [TARGET_RA],
+            "DEJ2000": [TARGET_DEC],
+            "b-y": [0.40],
+            "e_b-y": [0.005],
+            "m1": [0.20],
+            "e_m1": [0.005],
+            "c1": [0.35],
+            "e_c1": [0.005],
+        }
+    )
+    priorfile = tmp_path / "p.yaml"
+
+    # Act
+    _run(tmp_path, priorfile=str(priorfile))
+    priors = _read_priors(priorfile)
+    notes = " ".join(_prior_notes(priorfile))
+
+    # Assert
+    assert "star.Host.feh" in priors
+    assert "Casagrande+2011" in notes
+    assert "Cassegrande" not in notes
+
+
 def test_dr2_fallback_also_writes_a_parallax_prior(tmp_path, patched_catalogs):
     """
     Given no Gaia DR3 row but a matched Gaia DR2 one,

@@ -934,7 +934,7 @@ def mkticsed(
                     and np.isfinite(c1)
                     and m1 > 0
                 ):
-                    # Cassegrande+2011, eq. 2 (FGK solar neighbourhood)
+                    # Casagrande+2011, eq. 2 (FGK solar neighbourhood)
                     if (
                         0.23 < by < 0.63
                         and 0.05 < m1 <= 0.68
@@ -959,9 +959,9 @@ def mkticsed(
                             "sigma": 0.10,
                         }
                         notes.append(
-                            "[Fe/H] from Paunzen+2015 Stromgren via Cassegrande+2011 eq. 2"
+                            "[Fe/H] from Paunzen+2015 Stromgren via Casagrande+2011 eq. 2"
                         )
-                    # Cassegrande+2011, eq. 3 (cooler range)
+                    # Casagrande+2011, eq. 3 (cooler range)
                     elif (
                         0.43 < by < 0.63
                         and 0.07 < m1 <= 0.68
@@ -986,7 +986,7 @@ def mkticsed(
                             "sigma": 0.12,
                         }
                         notes.append(
-                            "[Fe/H] from Paunzen+2015 Stromgren via Cassegrande+2011 eq. 3"
+                            "[Fe/H] from Paunzen+2015 Stromgren via Casagrande+2011 eq. 3"
                         )
 
     # Last-resort: wide Gaussian [Fe/H] prior

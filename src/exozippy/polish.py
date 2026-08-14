@@ -94,8 +94,13 @@ DEFAULT_POLISH_STEPS = 150
 _LBFGS_FTOL = 1e-12  # effectively off; gtol + maxiter terminate
 _LBFGS_GTOL = 1e-2
 # Non-finite logp guard: L-BFGS line searches handle inf poorly, so a
-# non-finite evaluation returns this plateau plus a quadratic pull back
-# toward the last finite iterate's neighborhood (gradient points home).
+# non-finite evaluation returns this plateau plus |x - x0|^2, whose gradient
+# 2*(x - x0) points back at THE POLISH START x0 -- not at the last finite
+# iterate, which the objective never records.  x0 is the fixed seed the
+# polish was handed (and logp/grad there are checked finite before the
+# L-BFGS path is taken at all), so the pull is always toward a point the
+# logp is known to be defined at; the quadratic is what makes the plateau
+# navigable, since a flat 1e15 gives the line search no direction.
 _NONFINITE_PENALTY = 1e15
 
 # Sentinel: "caller said nothing", so the DE engine's own defaults apply.
