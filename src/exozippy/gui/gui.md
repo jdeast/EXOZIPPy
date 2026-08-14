@@ -97,6 +97,8 @@ push it into one of these contracts instead.
   dedicated **worker process** (spawn context, request/response over
   multiprocessing queues) that holds the System/model/`Evaluator` so pytensor
   compile + eval stay off the API event loop. One session per open project.
+  Its wire protocol is **addressed by request id**, and waiting is **bounded**
+  -- see "The tune worker protocol" below.
 - `runner.py` + `status.py` (G6) -- `start_run(config, cwd) -> RunHandle`
   (launches `python -m exozippy.cli <config>` as a fresh subprocess with
   `EXOZIPPY_GUI_SNAPSHOT=1`), `RunHandle.status()/stop(force=)`,
@@ -277,6 +279,59 @@ freezes the live plots until the next Solve. Slider/bound/prior edits are still
 real G8 `set_param_field` commands (undoable, RANK_USER, saved to params.yaml);
 the Tune toolbar has its own Save button (the shared document's dirty flag)
 so tuned values can be written to disk without leaving the tab.
+
+## The tune worker protocol (`tune.py`)
+
+Two multiprocessing queues carry request dicts one way and response dicts the
+other. Two rules make that safe; both exist because the naive version was
+racy in ways that were invisible until they were not (review 1.4 and 1.5).
+
+**1. Every request carries a uuid, and the worker echoes it on every message it
+sends back** -- the final answer, the error, and the mid-solve
+`{"progress": "compiling", "data_plots": [...]}` alike. The parent runs ONE
+reader thread that drains the response queue and files each message under the
+id it echoes; each caller waits only on its own id, and a message addressed to
+an id nobody is waiting on is dropped at the reader (the only place that
+decision is made).
+
+This is what lets a slider eval and a Solve be in flight at once, which the
+server really does produce: a Solve runs on the single-slot `tune_pool` while
+`POST /api/tune/eval` runs on FastAPI's threadpool. Before ids, whichever
+thread called `get()` first took whatever message arrived -- an eval could
+return the Solve's payload, and the eval's wait silently ATE the Solve's
+progress message, losing the data-only plots. `TuneSession.eval`'s phase gate
+narrowed that window but could not close it: the gate is read **unlocked** and
+`solve()`'s put+await is deliberately **outside** the session lock (taking the
+lock across either would serialize the slider behind a seconds-long Solve).
+The request id, not the lock, is what makes those unlocked reads safe -- do not
+"fix" the lock discipline by widening the lock.
+
+**2. Silence has a deadline, and expiry means terminate + respawn.** A worker
+that dies raises immediately (the response queue is polled, not blocked on). A
+worker that hangs while still ALIVE -- a pytensor compile deadlock, a wedge in
+native code, an OOM-frozen child -- used to wedge every later Solve until the
+server was restarted. Now each request has a silence budget
+(`SOLVE_TIMEOUT_S = 900`, `EVAL_TIMEOUT_S = 120`; every message restarts the
+clock, so a job is only ever killed for going quiet, never for being long).
+On expiry the parent terminates the process, replaces BOTH queues (a process
+killed mid-write can leave a partial pickle in the pipe), spawns a clean
+worker and raises `WorkerTimeout` -- a `RuntimeError`, so `TuneSession.solve`
+surfaces it as the error phase and `/api/tune/eval` as a 409. A restart also
+bumps a generation counter that releases any OTHER in-flight request at once,
+instead of leaving it to burn its own deadline and terminate the fresh worker
+in turn. A timed-out eval sets the session to the error phase, because the
+respawned worker holds no compiled evaluator: the UI has to Solve again.
+
+The deadlines are deliberately generous and are read at call time (never
+captured), so a slow machine can monkeypatch them. A false positive is worse
+than a late detection -- terminating a healthy worker throws away a compile
+that was about to finish and looks, from the UI, exactly like the bug the
+deadline is there to fix.
+
+There is **no cancel endpoint**: nothing lets a user abandon an in-flight Solve
+early. The deadline covers the wedged case; a deliberate cancel is a separate
+feature (it needs a UI affordance and a request-scoped abort, not just
+`worker.close()`).
 
 ## Invariants (do not break these)
 

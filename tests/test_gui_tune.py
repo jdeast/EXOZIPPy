@@ -17,6 +17,7 @@ skipped when the optional 'gui' extra is absent.
 import os
 import queue
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -377,3 +378,243 @@ def test_worker_await_raises_when_the_process_dies(monkeypatch):
 
     with pytest.raises(RuntimeError, match="worker exited"):
         worker.solve({}, {}, None)
+
+
+# ---------------------------------------------------------------------------
+# Worker protocol: request ids and the silence deadline (review 1.4 / 1.5)
+# ---------------------------------------------------------------------------
+
+
+class _FakeChild:
+    """A stand-in for the worker subprocess, driven from a thread.
+
+    Speaks the real queue protocol (reads request dicts, echoes their ``id``)
+    with none of the pytensor cost, and lets a test decide exactly when each
+    reply is sent -- which is what makes the cross-wiring race deterministic
+    instead of a sleep-and-hope.
+    """
+
+    def __init__(self, worker):
+        self.worker = worker
+        self.requests = {}  # op -> request dict
+        self.arrived = threading.Event()
+
+    def collect(self, n, timeout=5.0):
+        """Block until ``n`` requests have been received; return them by op."""
+        deadline = time.time() + timeout
+        while len(self.requests) < n and time.time() < deadline:
+            try:
+                req = self.worker._req_q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            self.requests[req["op"]] = req
+        assert len(self.requests) == n, self.requests
+        return self.requests
+
+    def reply(self, op, payload):
+        self.worker._resp_q.put(
+            {"ok": True, "id": self.requests[op]["id"], **payload}
+        )
+
+    def progress(self, op, payload):
+        self.worker._resp_q.put({"id": self.requests[op]["id"], **payload})
+
+
+def _plain_queue_worker(monkeypatch, alive=True):
+    """An EvaluatorWorker wired to plain queues, with no real subprocess."""
+    from exozippy.gui import tune
+
+    monkeypatch.setattr(tune, "_AWAIT_POLL_S", 0.01)
+    worker = tune.EvaluatorWorker()
+    worker._req_q = queue.Queue()
+    worker._resp_q = queue.Queue()
+    monkeypatch.setattr(type(worker), "is_alive", lambda self: alive)
+    return worker
+
+
+def test_a_response_for_a_superseded_request_is_ignored(monkeypatch):
+    """
+    Given a worker that emits a reply addressed to some OTHER (superseded)
+        request before the reply to the live one,
+    When the caller waits for its own answer,
+    Then it returns its own payload and never the stale one (review 1.5: the
+        shared response queue used to hand back whatever arrived first).
+    """
+    worker = _plain_queue_worker(monkeypatch)
+    child = _FakeChild(worker)
+    got = {}
+
+    def run():
+        got["res"] = worker.set_and_eval("orbit.b.logP", 0.6)
+
+    caller = threading.Thread(target=run, daemon=True)
+    caller.start()
+    child.collect(1)
+
+    # A reply for a request nobody is waiting on any more, then the real one.
+    worker._resp_q.put({"ok": True, "id": "superseded", "plots": "STALE"})
+    child.reply("eval", {"plots": "MINE"})
+
+    caller.join(timeout=5.0)
+    assert not caller.is_alive()
+    assert got["res"]["plots"] == "MINE"
+
+
+def test_a_concurrent_eval_and_solve_do_not_cross_wire(monkeypatch):
+    """
+    Given a solve and a slider eval in flight against one worker at once,
+    When the worker answers the eval first and the solve second,
+    Then each caller gets its own payload and the solve's progress message
+        (with its data_plots) reaches the solve's handler instead of being
+        eaten by the eval's wait -- the whole of review 1.5, race and bonus
+        defect alike.
+    """
+    worker = _plain_queue_worker(monkeypatch)
+    child = _FakeChild(worker)
+    got = {}
+    progress = []
+
+    def run_solve():
+        got["solve"] = worker.solve(
+            {"star": []}, {}, None, on_progress=progress.append
+        )
+
+    def run_eval():
+        got["eval"] = worker.set_and_eval("orbit.b.logP", 0.6)
+
+    threads = [
+        threading.Thread(target=run_solve, daemon=True),
+        threading.Thread(target=run_eval, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    child.collect(2)  # both requests are queued before either is answered
+
+    child.progress("solve", {"progress": "compiling", "data_plots": ["DATA"]})
+    child.reply("eval", {"plots": "EVAL"})
+    child.reply("solve", {"parameters": {}, "plots": ["SOLVE"]})
+
+    for t in threads:
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+    assert got["eval"]["plots"] == "EVAL"
+    assert got["solve"]["plots"] == ["SOLVE"]
+    assert progress == [
+        {
+            "id": child.requests["solve"]["id"],
+            "progress": "compiling",
+            "data_plots": ["DATA"],
+        }
+    ]
+
+
+class _FakeProc:
+    """Records terminate/join instead of owning a real subprocess."""
+
+    def __init__(self):
+        self.terminated = False
+
+    def is_alive(self):
+        return not self.terminated
+
+    def terminate(self):
+        self.terminated = True
+
+    def join(self, timeout=None):
+        pass
+
+
+def test_a_hung_but_alive_worker_is_terminated_and_respawned(monkeypatch):
+    """
+    Given a worker process that is alive but has stopped answering,
+    When a request's silence deadline expires,
+    Then the parent terminates it, respawns, and raises WorkerTimeout -- it
+        does not block forever (review 1.4: a compile deadlock or an
+        OOM-frozen child used to wedge every later Solve until a restart).
+    """
+    from exozippy.gui import tune
+
+    worker = _plain_queue_worker(monkeypatch)
+    monkeypatch.setattr(tune, "EVAL_TIMEOUT_S", 0.2)
+    proc = _FakeProc()
+    worker._proc = proc
+    respawns = []
+    monkeypatch.setattr(
+        type(worker), "start", lambda self: respawns.append(True)
+    )
+
+    started = time.time()
+    with pytest.raises(tune.WorkerTimeout, match="stopped responding"):
+        worker.set_and_eval("orbit.b.logP", 0.6)
+    elapsed = time.time() - started
+
+    assert proc.terminated is True
+    assert respawns == [True]
+    assert elapsed < 3.0, elapsed  # bounded by the deadline, not unbounded
+
+
+def test_a_restart_releases_a_second_in_flight_request(monkeypatch):
+    """
+    Given two requests in flight when one of them times out,
+    When the wedged worker is terminated and respawned,
+    Then the OTHER caller is released with a clear error at once rather than
+        burning its own deadline and terminating the fresh worker in turn.
+    """
+    from exozippy.gui import tune
+
+    worker = _plain_queue_worker(monkeypatch)
+    monkeypatch.setattr(tune, "EVAL_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(tune, "SOLVE_TIMEOUT_S", 60.0)
+    worker._proc = _FakeProc()
+    monkeypatch.setattr(type(worker), "start", lambda self: None)
+    err = {}
+
+    def run_solve():
+        try:
+            worker.solve({"star": []}, {}, None)
+        except RuntimeError as exc:
+            err["solve"] = str(exc)
+
+    solver = threading.Thread(target=run_solve, daemon=True)
+    solver.start()
+    _FakeChild(worker).collect(1)
+
+    with pytest.raises(tune.WorkerTimeout):
+        worker.set_and_eval("orbit.b.logP", 0.6)  # trips the short deadline
+
+    solver.join(timeout=5.0)
+    assert not solver.is_alive()
+    assert "restarted" in err["solve"]
+
+
+def test_a_timed_out_eval_leaves_the_session_needing_a_resolve(monkeypatch):
+    """
+    Given a live session whose worker hangs during a slider eval,
+    When the eval times out,
+    Then the session reports the error phase -- the respawned worker holds no
+        compiled evaluator, so the UI must ask for a Solve, not keep sliding.
+    """
+    from exozippy.gui import tune
+
+    class _HangingWorker:
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def set_and_eval(self, path, value):
+            raise tune.WorkerTimeout("worker stopped responding")
+
+        def close(self):
+            pass
+
+    session = tune.TuneSession(worker_factory=_HangingWorker)
+    session._worker = _HangingWorker()
+    session.phase = "live"
+
+    with pytest.raises(tune.WorkerTimeout):
+        session.eval("orbit.b.logP", 0.6)
+
+    assert session.phase == "error"
+    assert "stopped responding" in session.error
