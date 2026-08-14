@@ -18,6 +18,11 @@ build died with "Dependency Error" -- Band's linear-law u1 (whose Kipping
 expression the manifest deliberately ignores) and planet.beam's "off" entry
 both hit it.
 
+They also agreed on something none of them should have: an expr_key naming
+a block the resolved config does not define built the parameter FREE, in
+silence.  That now raises (MissingExpressionError) -- see section 4, which
+reproduces what the silence cost on a real derived parameter.
+
 These tests pin the interpreter's contract, pin that graph.py reads entries
 through it, and pin the real Band reproduction end to end.
 """
@@ -26,7 +31,7 @@ import numpy as np
 import pytest
 
 from exozippy.graph import determine_pymc_build_order
-from exozippy.manifest import interpret_manifest_entry
+from exozippy.manifest import MissingExpressionError, interpret_manifest_entry
 from exozippy.system import System
 
 # ---------------------------------------------------------------------------
@@ -119,17 +124,53 @@ def test_interpreting_an_entry_does_not_mutate_the_manifest():
     assert raw == {"expr_key": "default", "shape": (3,)}
 
 
-def test_expression_config_is_none_when_the_named_block_is_absent():
+def test_expression_config_raises_when_the_named_block_is_absent():
     """
     Given an entry naming an expression the resolved config does not define,
     When expression_config is asked for it,
-    Then None comes back -- the parameter is free as built.
+    Then MissingExpressionError names the component, the parameter, the
+      missing key and the keys that ARE available, and says how to declare a
+      free parameter instead.
+
+    It used to answer None -- "free as built" -- so a typo, a renamed block
+    or a deleted expressions: section silently turned a derived parameter
+    into a sampled one.
     """
     entry = interpret_manifest_entry("default")
 
-    assert entry.expression_config({}) is None
-    assert entry.expression_config(None) is None
-    assert entry.expression_config({"other": {}}) is None
+    with pytest.raises(MissingExpressionError) as exc:
+        entry.expression_config({"other": {}}, where="compA.f_source")
+
+    msg = str(exc.value)
+    assert "compA.f_source" in msg
+    assert "'default'" in msg
+    assert "other" in msg  # the available keys
+    assert "None" in msg and "expr_key" in msg  # the two free spellings
+
+    with pytest.raises(MissingExpressionError, match=r"available: \(none\)"):
+        entry.expression_config({})
+    with pytest.raises(MissingExpressionError):
+        entry.expression_config(None)
+
+
+def test_expression_config_returns_the_block_it_names():
+    """
+    Given an entry naming an expression the config does define,
+    When expression_config is asked for it,
+    Then that block comes back, and an entry naming nothing still gets None.
+    """
+    block = {"func_name": "calc_x", "deps": ["y"]}
+
+    assert (
+        interpret_manifest_entry("default").expression_config(
+            {"default": block}
+        )
+        is block
+    )
+    assert interpret_manifest_entry(None).expression_config({}) is None
+    assert (
+        interpret_manifest_entry({"shape": (3,)}).expression_config({}) is None
+    )
 
 
 def test_manifest_deps_override_the_expression_block_deps():
@@ -241,6 +282,30 @@ def test_explicit_expr_key_still_produces_the_edge():
     order = determine_pymc_build_order(comps, cm)
 
     assert order.index("compA.q1") < order.index("compA.u1")
+
+
+def test_graph_raises_on_an_expr_key_no_expression_block_defines():
+    """
+    Given a manifest entry naming an expressions: block the resolved config
+      does not define,
+    When the build order is determined,
+    Then MissingExpressionError names the component, the parameter, the
+      missing key and the keys that ARE available.
+
+    graph.py used to skip such an entry and add no edge, in lockstep with
+    add_parameter building the parameter FREE -- consistent, and silently
+    wrong for a parameter meant to be derived.
+    """
+    comps = {"compA": _FakeComp("compA", {"u1": "kipping"})}
+    cm = _FakeConfigManager({"compA.u1": {"default": {"deps": ["q1", "q2"]}}})
+
+    with pytest.raises(MissingExpressionError) as exc:
+        determine_pymc_build_order(comps, cm)
+
+    msg = str(exc.value)
+    assert "compA.u1" in msg
+    assert "'kipping'" in msg
+    assert "default" in msg
 
 
 def test_every_manifest_consumer_reads_through_the_interpreter():
@@ -385,3 +450,105 @@ def test_unread_linear_band_builds_with_u1_free(unread_linear_band_system):
 
     model = system.build_model()
     assert model is not None
+
+
+# ---------------------------------------------------------------------------
+# 4. The cost of the silent fallback: mulensinstrument.f_source.
+#
+# f_source is derived from log_f_total and q_source.  Break its expr_key and
+# the old readers agreed the parameter was FREE: examples/ob08092 grew an
+# f_source_raw in model.free_RVs and its start logp moved from +6187.7 to
+# -6.46e9, with no error and no warning anywhere.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def pspl_system(tmp_path_factory):
+    """Given a point-source point-lens fit with one light curve, when it is
+    prepared, provide the system."""
+    path = tmp_path_factory.mktemp("expr_key") / "lc.dat"
+    t = np.linspace(T0 - 2 * TE, T0 + 2 * TE, 60)
+    u = np.sqrt(U0**2 + ((t - T0) / TE) ** 2)
+    amp = (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+    np.savetxt(
+        path,
+        np.column_stack([t, 18.0 - 2.5 * np.log10(amp), np.full(60, 0.01)]),
+    )
+
+    config = {
+        "star": [{"name": "Lens"}, {"name": "Source"}],
+        "lens": [
+            {
+                "name": "Lens",
+                "lens_ndx": 0,
+                "source_ndx": 1,
+                "t0_par": T0,
+                "use_op": False,
+                "mmexofast": False,
+            }
+        ],
+        "mulensinstrument": [
+            {"name": "OGLE", "file": str(path), "filter": "I"}
+        ],
+    }
+    params = {
+        "lens.Lens.t_0": {"initval": T0},
+        "lens.Lens.u_0": {"initval": U0},
+        "lens.Lens.t_E": {"initval": TE},
+    }
+    for nm in ("Lens", "Source"):
+        params[f"star.{nm}.ra"] = {"initval": 264.0, "sigma": 0}
+        params[f"star.{nm}.dec"] = {"initval": -27.0, "sigma": 0}
+
+    system = System(config, user_params=params)
+    system.prepare()
+    return system
+
+
+def test_f_source_builds_derived_when_its_expr_key_resolves(pspl_system):
+    """
+    Given the intact mulensinstrument manifest,
+    When the system is built,
+    Then f_source is reported derived and is not a sampled variable.
+    """
+    system = pspl_system
+
+    model = system.build_model()
+
+    assert ("mulensinstrument", "f_source") in system.derived_params()
+    assert not [rv for rv in model.free_RVs if "f_source" in rv.name], (
+        "f_source must be derived from log_f_total and q_source"
+    )
+
+
+def test_broken_f_source_expr_key_raises_instead_of_sampling_it(pspl_system):
+    """
+    Given that same system with f_source's expr_key pointed at a block
+      mulensing/defaults.yaml does not define,
+    When the build order is determined, or derived_params is asked,
+    Then MissingExpressionError names mulensinstrument.f_source, the missing
+      key and the available ones -- instead of building a sampled f_source.
+    """
+    system = pspl_system
+    comp = system.active_components["mulensinstrument"]
+    original = comp.manifest["f_source"]
+    comp.manifest["f_source"] = "defualt"  # the realistic failure: a typo
+
+    try:
+        # ACT / ASSERT -- the build path
+        with pytest.raises(MissingExpressionError) as exc:
+            determine_pymc_build_order(
+                system.active_components, system.config_manager
+            )
+        msg = str(exc.value)
+        assert "mulensinstrument.f_source" in msg
+        assert "'defualt'" in msg
+        assert "available: default" in msg
+
+        # ACT / ASSERT -- the reporting path, which never builds a model and
+        # so would otherwise keep answering "derived" for a parameter that
+        # cannot be built at all.
+        with pytest.raises(MissingExpressionError):
+            system.derived_params()
+    finally:
+        comp.manifest["f_source"] = original

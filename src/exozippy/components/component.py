@@ -218,7 +218,9 @@ class Component(ABC):
         )
 
         expressions_dict = cfg.pop("expressions", {})
-        expr_cfg = entry.expression_config(expressions_dict)
+        expr_cfg = entry.expression_config(
+            expressions_dict, where=f"{self.prefix}.{param_name}"
+        )
         expression = None
 
         # --- AGNOSTIC CONDITIONAL WIRE-UP ---

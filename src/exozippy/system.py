@@ -209,15 +209,37 @@ class System(Component):
         `Component.add_parameter` (stage 5) and
         `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
         is a string, or a dict carrying an "expr_key", names an expression; a
-        bare None is a free parameter.  This is the structural question only:
-        it does not check that the named block exists in the component's
-        defaults.yaml (there is no resolved config here).  Valid after
-        stage 2.
+        bare None is a free parameter.  Valid after stage 2.
+
+        The question is asked through `expression_config` against the
+        resolved config, exactly as the two build-time consumers ask it, and
+        NOT through the structural `names_expression`.  The two can only
+        differ when an entry names a block the config does not define, which
+        `expression_config` raises on -- but only the build path would ever
+        reach that raise, and this method's callers (`solve_api`, the GUI's
+        Tune tab) never build a model.  Answering structurally there would
+        keep exactly the silence this raise exists to remove: a parameter
+        reported "derived" is excused from `solve_api._bounds_diagnostics`,
+        so a broken expr_key would go on hiding an out-of-bounds start in
+        the one tool whose job is to find them.  That is not hypothetical --
+        it is what `rvinstrument.gamma` did until 2026-08.
         """
         out = set()
         for comp in self.active_components.values():
             for name, raw in getattr(comp, "manifest", {}).items():
-                if interpret_manifest_entry(raw).names_expression:
+                entry = interpret_manifest_entry(raw)
+                if not entry.names_expression:
+                    continue
+                cfg = self.config_manager.resolve(
+                    comp.prefix, name, shape=(comp.n_elements,)
+                )
+                if (
+                    entry.expression_config(
+                        cfg.get("expressions", {}),
+                        where=f"{comp.prefix}.{name}",
+                    )
+                    is not None
+                ):
                     out.add((comp.prefix, name))
         return out
 

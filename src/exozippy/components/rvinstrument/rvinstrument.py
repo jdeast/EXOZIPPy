@@ -221,7 +221,14 @@ class RVInstrument(Instrument):
             )
             self.config_manager.add_hint(f"{self.prefix}.{i}.gamma", val)
 
-        self.manifest = {"gamma": "default"}
+        # gamma is FREE: it is the sampled per-instrument RV offset, and
+        # rvinstrument/defaults.yaml has carried no expressions: block for it
+        # since cc26d77.  It said "default" until 2026-08 -- harmless only
+        # because there was no block to find, and only until someone added
+        # one, at which point every RV fit would have quietly derived its
+        # offset instead of sampling it.  manifest.expression_config now
+        # raises on that mismatch, so this has to say what it means.
+        self.manifest = {"gamma": None}
         self._register_noise(self.manifest, self.jittervar_lower)
         self._register_gp(self.manifest)
         self._register_robust(self.manifest)
