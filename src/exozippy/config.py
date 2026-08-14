@@ -512,7 +512,12 @@ class ConfigManager:
         self.seed_resolved = None
         self.seed_hint_sets = []
         self.scale_hints = {}  # path -> init_scale in internal units
-        self.propagated_scales = {}  # path -> init_scale (internal) from Jacobian forward pass
+        # path -> init_scale (internal) as the LAST relaxation solve left it:
+        # defaults, component hints, user sigmas and the engine's own
+        # solved-value scale sync, refreshed at the end of _execute_solve.
+        # (It is not "from the Jacobian forward pass" -- the sympy forward and
+        # backward scale passes are deleted; see the note there.)
+        self.propagated_scales = {}
         self.symbolic_blacklist = set()
 
         # Structured diagnostics collected by the relaxation engine (e.g.
@@ -826,8 +831,14 @@ class ConfigManager:
         meaningful scales that differ from the generic stellar defaults (e.g.
         bulge distances need ~500 pc, not 0.1 pc).  Sampled parameters get
         their real scale from the whitening probe at startup regardless; the
-        hint seeds that probe and, via the forward Jacobian pass, sets the
-        soft-bound barrier steepness of derived parameters.
+        hint seeds that probe.  (It no longer sets any derived parameter's
+        soft-bound barrier steepness -- the sympy forward Jacobian pass that
+        did is deleted, and whitening.measure_barrier_scales measures those
+        numerically instead.)
+
+        The most specific spelling wins: a 3-part path here beats a 2-part
+        broadcast one for the element it names, exactly as it does for every
+        other field ``resolve()`` layers.
         """
         translated_path, internal_scale = self._translate_and_scale(
             path, scale
@@ -885,20 +896,17 @@ class ConfigManager:
         def _element_keys(i):
             """The user-facing spellings of element ``i`` of this parameter.
 
-            The three forms ``resolve()`` accepts, in the order every lookup
-            below scans them: the 2-part broadcast form, the index form, and
-            (only when the caller supplied per-element ``names``) the name
-            form -- least specific first.  One list, five call sites, because
-            the ORDER is the precedence rule and five copies of it is five
-            chances to disagree about which spelling of a parameter wins.
+            The three forms ``resolve()`` accepts, in the order the loops that
+            APPLY EVERY MATCH scan them: the 2-part broadcast form, the index
+            form, and (only when the caller supplied per-element ``names``)
+            the name form -- least specific first, so the most specific entry
+            lands last and wins.  One list, five call sites, because the ORDER
+            is the precedence rule and five copies of it is five chances to
+            disagree about which spelling of a parameter wins.
 
-            Note the two scan styles resolve that order oppositely, and this
-            predates the shared helper: the ``break``-on-first-hit lookups
-            (``unit:``, propagated scales, scale hints) take the BROADCAST
-            entry when both exist, while the loops that apply every match in
-            turn (component overrides, user params) let the most specific one
-            land last and win.  Preserved verbatim; if that asymmetry is ever
-            reconciled, this is the one place the order lives.
+            The lookups that pick a single winner (``unit:``, propagated
+            scales, scale hints) go through ``_lookup_keys`` below, which
+            traverses this same list so that the same entry wins there.
             """
             keys = [
                 f"{component_type}.{param_name}",
@@ -907,6 +915,32 @@ class ConfigManager:
             if names and i < len(names):
                 keys.append(f"{component_type}.{names[i]}.{param_name}")
             return keys
+
+        def _lookup_keys(i):
+            """``_element_keys(i)`` with the broadcast spelling demoted to LAST.
+
+            THE MOST SPECIFIC ENTRY WINS, for every field.  The loops that
+            apply every match get that for free by ordering the list
+            least-specific-first; a lookup that stops at the first hit has to
+            be handed the other traversal, so this rotates the 2-part
+            broadcast key to the end.  Same rule, opposite traversal -- and
+            the reason to invert here rather than to keep two lists is that
+            ``_element_keys`` is then still the one place the order lives.
+
+            Until 2026-08 the first-hit lookups scanned the list as written,
+            so a broadcast ``star.teff: {unit: K}`` BEAT a specific
+            ``star.0.teff: {unit: ...}`` for the unit and for an init_scale,
+            while LOSING to it for every numeric field -- in one config.
+
+            Only the broadcast/specific tiers are reordered.  The index and
+            name forms both name exactly ONE element and are equally specific,
+            so which of those two wins is left exactly as it was (index here,
+            name in the apply-every-match loops); reordering them would be a
+            second, unasked-for semantic change, and a config setting both
+            spellings of one element is ill-formed either way.
+            """
+            keys = _element_keys(i)
+            return keys[1:] + keys[:1]
 
         base_unit_str = base.get("unit", "")
 
@@ -923,7 +957,7 @@ class ConfigManager:
         for i in range(n_elements):
             u_str = None
             u_src = None
-            for k in _element_keys(i):
+            for k in _lookup_keys(i):
                 entry = self.user_params.get(k)
                 if isinstance(entry, dict) and "unit" in entry:
                     u_str = entry["unit"]
@@ -1050,11 +1084,11 @@ class ConfigManager:
             self.get_conversion_factor(component_type, param_name) or 1.0
         )
 
-        # Apply Jacobian-propagated scales (lowest priority after defaults,
-        # overridden by scale hints and user params below).
+        # Apply the previous solve's propagated scales (lowest priority after
+        # defaults, overridden by scale hints and user params below).
         if self.propagated_scales:
             for i in range(n_elements):
-                for k in _element_keys(i):
+                for k in _lookup_keys(i):
                     if k in self.propagated_scales:
                         apply_value(
                             "init_scale",
@@ -1068,7 +1102,7 @@ class ConfigManager:
         # (e.g. bulge distances). They override defaults.yaml but yield to the
         # user's explicit init_scale below.
         for i in range(n_elements):
-            for k in _element_keys(i):
+            for k in _lookup_keys(i):
                 if k in self.scale_hints:
                     apply_value(
                         "init_scale",
