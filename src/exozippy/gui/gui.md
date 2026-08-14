@@ -68,6 +68,19 @@ push it into one of these contracts instead.
   survive edits. Edits are reversible `Command` objects (`SetConfigKey`,
   `SetParamField`, `AddComponentInstance`, `DeleteInstance`, `RenameInstance`,
   `DuplicateInstance`, `AssociateDatafile`) with server-side undo/redo stacks.
+  `SetParamField` writes through `ProjectDocument.param_key_for`, which finds
+  the spelling the params file ALREADY uses for that element and edits it in
+  place. The GUI addresses parameters by the NAME form (`star.A.teff`, what
+  `introspect` and `export_solution` display) while a file may equally spell
+  the same element by INDEX (`star.0.teff` -- `examples/kelt4/kelt4.params.yaml`
+  does), and a literal keyed write appended a TWIN rather than updating the
+  entry. Both spellings are equally specific, so nothing downstream could
+  adjudicate: `ConfigManager` refuses such a file outright (see CLAUDE.md's
+  "Parameter naming convention"), and before it did, `standardize_param_names`
+  kept whichever key came last -- the GUI's -- silently discarding the user's
+  whole original entry, `sigma` prior included. Only the two specific
+  spellings are matched; a 2-part broadcast entry is a coarser statement that
+  a specific entry legitimately refines.
   `RenameInstance` rewrites every cross-reference (orbit body groups, `band:`,
   `star_ndx`/`orbit:` keys, and `linking.py` expressions) purely from the
   schema -- no hardcoded component names. Undo uses TEXT snapshots, not

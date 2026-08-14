@@ -34,6 +34,7 @@ from typing import Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
+from ..config import canonical_param_key
 from ..linking import LINKABLE_FIELDS, is_link_expression
 from ..yamlio import check_yaml_booleans
 
@@ -286,14 +287,17 @@ class SetParamField(Command):
         self.label = f"set {path}.{field}"
 
     def _do(self, doc):
-        entry = doc.params.get(self.path)
+        # Update the entry the file already has for this element, under
+        # whatever spelling the user chose -- never append a second one.
+        key = doc.param_key_for(self.path)
+        entry = doc.params.get(key)
         if not isinstance(entry, dict):
             entry = CommentedMap()
-            doc.params[self.path] = entry
+            doc.params[key] = entry
         if self.value is None:
             entry.pop(self.field, None)
             if len(entry) == 0:
-                doc.params.pop(self.path, None)
+                doc.params.pop(key, None)
         else:
             entry[self.field] = doc._wrap(self.value)
 
@@ -534,6 +538,39 @@ class ProjectDocument:
         return value
 
     # -- params key operations ------------------------------------------------
+
+    def param_key_for(self, path):
+        """The spelling THIS params file already uses for ``path``'s element.
+
+        The GUI addresses parameters by the NAME form (`star.A.teff`) because
+        that is what `introspect` and `export_solution` display, while a
+        params file may equally well spell the same element in the INDEX form
+        (`star.0.teff`) -- `examples/kelt4/kelt4.params.yaml`, the GUI test
+        fixture, does exactly that.  A literal `params[path]` write then
+        APPENDS a twin instead of updating the entry, and the two spellings
+        are equally specific, so nothing downstream can adjudicate them:
+        `ConfigManager` now refuses such a file outright, and before it did
+        it silently kept whichever key came LAST -- the GUI's -- discarding
+        the user's entire original entry, `sigma` prior included.
+
+        So resolve to the existing key and edit in place.  Only the two
+        SPECIFIC spellings are matched: a 2-part broadcast entry is a
+        different, coarser statement, and refining one element of it with a
+        specific entry is the legitimate "most specific wins" idiom, not a
+        duplicate.  With no existing entry the caller's own spelling is used,
+        so a params file written by the GUI alone stays in the name form.
+        """
+        if path in self.params:
+            return path
+        if len(str(path).split(".")) != 3:
+            return path
+        canon = canonical_param_key(str(path), self.config)
+        for key in self.params:
+            if len(str(key).split(".")) != 3:
+                continue
+            if canonical_param_key(str(key), self.config) == canon:
+                return key
+        return path
 
     def _drop_param_keys(self, comp_type, name):
         prefix = f"{comp_type}.{name}."

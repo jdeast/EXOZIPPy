@@ -10,7 +10,9 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
+from exozippy.config import ConfigManager
 from exozippy.gui.document import (
     AddComponentInstance,
     DeleteInstance,
@@ -236,6 +238,116 @@ def test_command_from_json_dispatch(project):
     )
     doc.execute(cmd)
     assert doc.params["star.A.teff"]["initval"] == 6100
+
+
+@pytest.fixture
+def indexed_project(tmp_path):
+    """A working copy of the RV-only KELT-4 example.
+
+    Its shipped params file spells star 0 in the INDEX form (`star.0.teff`)
+    while the config names that star "A" -- the combination the GUI writer
+    used to break.  No data files are copied: ProjectDocument only reads the
+    two YAML trees.
+    """
+    for name in ("kelt4_rvonly.yaml", "kelt4.params.yaml"):
+        shutil.copy(EXAMPLE_DIR / name, tmp_path / name)
+    return tmp_path
+
+
+def test_slider_edit_updates_the_users_own_spelling(indexed_project):
+    """
+    Given a params file that spells an element in the index form
+      (`star.0.teff`, carrying a `sigma` prior) while the config names that
+      star "A",
+    When a slider-style edit is committed against the GUI's name-form path
+      `star.A.teff`,
+    Then the existing entry is updated in place -- one spelling only, the
+      user's own, with the rest of their entry intact.
+
+    The GUI addresses parameters by the NAME form because that is what
+    introspect and export_solution display, so a literal params[path] write
+    APPENDED a twin.  Both spellings name the same element and neither is
+    more specific, so nothing downstream could adjudicate them:
+    standardize_param_names kept whichever key came last -- the GUI's, since
+    it appends -- and silently discarded the whole original entry.  Here that
+    is `sigma: 100` on the stellar effective temperature: a real prior, still
+    visible in the saved file, no longer applied to the fit.
+    """
+    # Arrange
+    doc = ProjectDocument.open(indexed_project / "kelt4_rvonly.yaml")
+    assert "star.0.teff" in doc.params  # fixture precondition
+    assert doc.params["star.0.teff"]["sigma"] == 100
+
+    # Act
+    doc.execute(SetParamField("star.A.teff", "initval", 6250))
+    doc.save()
+
+    # Assert -- in the tree...
+    assert "star.A.teff" not in doc.params
+    assert doc.params["star.0.teff"]["initval"] == 6250
+    assert doc.params["star.0.teff"]["sigma"] == 100
+
+    # ...and on disk, where exactly one spelling of the element survives.
+    saved = yaml.safe_load((indexed_project / "kelt4.params.yaml").read_text())
+    assert [k for k in saved if k.endswith(".teff")] == ["star.0.teff"]
+    assert saved["star.0.teff"] == {"initval": 6250, "sigma": 100}
+
+    # ...and the result is a config ConfigManager will accept: naming one
+    # element twice is a fatal error, so an appended twin would fail the very
+    # next fit rather than merely losing the prior.
+    config = yaml.safe_load(
+        (indexed_project / "kelt4_rvonly.yaml").read_text()
+    )
+    ConfigManager(saved, system_config=config)
+
+
+def test_slider_edit_keeps_the_name_form_when_the_file_uses_it(project):
+    """
+    Given a params file that already spells the element in the NAME form,
+    When the same edit is committed,
+    Then that entry is updated in place and no index-form twin appears.
+
+    The other half of "preserve the user's spelling": resolving to an
+    existing key must not canonicalize name-form files into index form.
+    """
+    # Arrange
+    doc = _open(project)
+    assert "star.A.teff" in doc.params  # fixture precondition
+
+    # Act
+    doc.execute(SetParamField("star.A.teff", "initval", 6250))
+
+    # Assert
+    assert doc.params["star.A.teff"]["initval"] == 6250
+    assert "star.0.teff" not in doc.params
+
+
+def test_slider_edit_does_not_consume_a_broadcast_entry(tmp_path):
+    """
+    Given a params file whose only entry for a parameter is the 2-part
+      BROADCAST spelling,
+    When one element is edited by name,
+    Then a new specific entry is created and the broadcast entry is left
+      alone.
+
+    Broadcast + specific is the legitimate "set every element, refine one"
+    idiom, not a duplicate -- so the writer must not treat the broadcast
+    entry as the element's existing key and overwrite everyone else's value.
+    """
+    # Arrange
+    config_path = tmp_path / "sys.yaml"
+    config_path.write_text(
+        "star:\n  - name: A\n  - name: B\nparameter_file: p.params.yaml\n"
+    )
+    (tmp_path / "p.params.yaml").write_text("star.teff:\n  initval: 5800\n")
+    doc = ProjectDocument.open(config_path)
+
+    # Act
+    doc.execute(SetParamField("star.A.teff", "initval", 6250))
+
+    # Assert
+    assert doc.params["star.teff"]["initval"] == 5800
+    assert doc.params["star.A.teff"]["initval"] == 6250
 
 
 def test_to_json_shape(project):
