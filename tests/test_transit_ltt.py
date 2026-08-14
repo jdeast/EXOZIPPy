@@ -6,9 +6,7 @@ orbits.a/m_primary/m_total accessors, real units -- rather than calling
 ltt.py's functions directly with hand-typed values).
 """
 
-import importlib.util
-import subprocess
-import sys
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -22,7 +20,7 @@ from exozippy.components.transit.transit import Transit
 from exozippy.constants import C_LIGHT_RSUN_PER_DAY
 from exozippy.system import System
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 _TC = 2459000.0
 _PERIOD = 365.25  # days; with star.mass ~ 1 Msun this gives a ~ 1 AU
@@ -219,64 +217,39 @@ def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     assert _count_kepler_solves(system_on.transit._model_flux_node) == 2
 
 
-def _load_pre_ltt_transit_class():
-    """Executes the git HEAD (pre-this-PR, confirmed by grep to have no ltt/
-    LIGHT_TRAVEL references) revision of transit.py as a standalone module
-    and returns its Transit class -- an independent, actual-old-code oracle
-    for the value-level OFF-equivalence check below, rather than a hand
-    reimplementation of the (fairly involved) group loop that could itself
-    drift from what the real old code did.
-    """
-    old_source = subprocess.run(
-        ["git", "show", "HEAD:src/exozippy/components/transit/transit.py"],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    mod_name = "exozippy.components.transit._pre_ltt_transit_oracle"
-    spec = importlib.util.spec_from_loader(mod_name, loader=None)
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = "exozippy.components.transit"
-    sys.modules[mod_name] = module
-    exec(compile(old_source, "<git HEAD transit.py>", "exec"), module.__dict__)
-    return module.Transit
-
-
 def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
     """
-    Given the actual git-HEAD (pre-LTT) Transit class, executed standalone
-    as an independent oracle -- not a hand re-derivation of the group loop,
-    which could itself drift from what the old code really did,
-    When the SAME config/params build a model with (a) that old class and
-    (b) the current Transit with _LIGHT_TRAVEL_TIME_ACTIVE monkeypatched to
-    False,
-    Then transit._model_flux_node (the full per-observation model
-    prediction the likelihood is built from) evaluates to the SAME array,
-    to floating-point precision -- the structural "one Kepler solve, ltt
-    never called" check in test_ltt_off_matches_pre_ltt_structure confirms
-    the graph SHAPE didn't grow; this confirms the VALUES didn't move
-    either, catching a stray bug in surrounding code (e.g. an accidental
-    reorder of sin_i/cos_i, a mis-sliced index) that a shape-only check
-    would miss.
+    Given a STORED golden fixture (tests/fixtures/transit_ltt_off_reference.
+    json) of transit._model_flux_node's output from the actual pre-LTT
+    Transit class -- generated once from git commit 3ae5466 (the parent of
+    df96bd9, the transit light-travel-time wiring commit; confirmed via grep
+    at generation time to have no ltt/LIGHT_TRAVEL references), not a hand
+    reimplementation of the (fairly involved) group loop that could itself
+    drift from what the real old code did,
+    When the SAME config/params (_ltt_wiring_config/_ltt_wiring_params)
+    build a model with the CURRENT Transit, _LIGHT_TRAVEL_TIME_ACTIVE
+    monkeypatched to False,
+    Then transit._model_flux_node evaluates to the SAME array the fixture
+    recorded, to floating-point precision -- the structural "one Kepler
+    solve, ltt never called" check in test_ltt_off_matches_pre_ltt_structure
+    confirms the graph SHAPE didn't grow; this confirms the VALUES didn't
+    move either, catching a stray bug in surrounding code (e.g. an
+    accidental reorder of sin_i/cos_i, a mis-sliced index) that a shape-only
+    check would miss.
+
+    Deliberately does NOT read git history (unlike an earlier version of
+    this test, which shelled out to `git show HEAD:...` as its oracle): that
+    self-invalidates the moment the LTT commit lands on HEAD, since HEAD
+    then stops being the pre-LTT answer -- exactly what happened here. A
+    frozen fixture has no such expiry.
     """
     lc = _write_two_row_lc(tmp_path / "lc.dat")
     config = _ltt_wiring_config(lc)
     params = _ltt_wiring_params()
 
-    old_transit_cls = _load_pre_ltt_transit_class()
-    real_module = sys.modules["exozippy.components.transit.transit"]
-    with mock.patch.object(real_module, "Transit", old_transit_cls):
-        system_old = System(config, user_params=params)
-        system_old.prepare()
-        model_old = system_old.build_model()
-        with model_old:
-            point_old = system_old.get_internal_point(
-                model_old, system_old.get_raw_start(model_old)
-            )
-        mu_old = _eval_at_point(
-            system_old.transit._model_flux_node, model_old, point_old
-        )
+    with open(_FIXTURES_DIR / "transit_ltt_off_reference.json") as f:
+        fixture = json.load(f)
+    mu_reference = np.asarray(fixture["model_flux"])
 
     with mock.patch.object(Transit, "_LIGHT_TRAVEL_TIME_ACTIVE", False):
         system_off = System(config, user_params=params)
@@ -290,4 +263,4 @@ def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
             system_off.transit._model_flux_node, model_off, point_off
         )
 
-    np.testing.assert_array_equal(mu_old, mu_off)
+    np.testing.assert_array_equal(mu_reference, mu_off)
