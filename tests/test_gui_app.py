@@ -282,7 +282,12 @@ def test_doc_open_command_undo_save_flow(client, rvonly_project):
     body = resp.json()
     assert body["dirty"] is True
     assert body["undo_depth"] == 1
-    assert body["params"]["star.A.teff"]["initval"] == 6300
+    # The edit is addressed by NAME (what the GUI displays) but this params
+    # file spells that element by INDEX, and the writer updates the entry the
+    # file already has rather than appending a second spelling of one element
+    # -- which ConfigManager rejects outright.  See
+    # test_gui_document.py::test_slider_edit_updates_the_users_own_spelling.
+    assert body["params"]["star.0.teff"]["initval"] == 6300
 
     # undo
     resp = client.post("/api/doc/undo")
@@ -317,7 +322,8 @@ def test_doc_reopen_same_path_keeps_unsaved_edits(client, rvonly_project):
     body = resp.json()
     assert body["dirty"] is True
     assert body["undo_depth"] == 1
-    assert body["params"]["star.A.teff"]["initval"] == 6300
+    # Index form: the writer preserves the spelling the file already uses.
+    assert body["params"]["star.0.teff"]["initval"] == 6300
 
     # After save the doc is clean; a re-open now reloads from disk.
     client.post("/api/doc/save")
@@ -325,7 +331,7 @@ def test_doc_reopen_same_path_keeps_unsaved_edits(client, rvonly_project):
     body = resp.json()
     assert body["dirty"] is False
     assert body["undo_depth"] == 0
-    assert body["params"]["star.A.teff"]["initval"] == 6300
+    assert body["params"]["star.0.teff"]["initval"] == 6300
 
 
 def test_doc_command_bad_op_is_400(client, rvonly_project):

@@ -275,7 +275,12 @@ def test_slider_edit_params_roundtrip_and_prepare(client, rvonly_project):
     params_file = rvonly_project / "kelt4.params.yaml"
     with open(params_file) as fh:
         data = yaml.safe_load(fh)
-    assert data["star.A.teff"]["initval"] == 6250
+    # The slider path is the NAME form (what the GUI displays); this params
+    # file spells that element by INDEX, and the writer updates that entry in
+    # place instead of appending a twin -- one element, one spelling, which is
+    # also what the System() smoke test below now enforces.
+    assert data["star.0.teff"]["initval"] == 6250
+    assert "star.A.teff" not in data
 
     # Smoke: the written params still drive a successful prepare().
     with open(config_path) as fh:
