@@ -30,7 +30,15 @@ internally.  Angles in radians.  Returns the RM anomaly in m/s.
 import numpy as np
 import pytensor.tensor as pt
 
+from . import ltt
 from .limbdark import quad_limb_darkened_flux
+
+# Light-travel-time (Roemer delay) is on by default for RM (see
+# components/ltt.py; the design doc's transit/RM-on, rv/mulens-off default).
+# rm.py is a stateless helper, not an instantiated Component, so this is a
+# module-level constant rather than a class attribute (mirrors Transit.
+# _LIGHT_TRAVEL_TIME_ACTIVE) -- temporary pending a real config key.
+_LIGHT_TRAVEL_TIME_ACTIVE = True
 
 
 # ==========================================================================
@@ -352,7 +360,41 @@ def compute_rm_rv(
     else:
         u2 = pt.zeros_like(u1)
 
-    f = orbit.get_true_anomaly(time)[:, orbit_idx]
+    # Light-travel-time correction on the true-anomaly seam only (the
+    # occultation geometry, x/y/z below) -- NOT get_radial_velocity or any
+    # other RV path, which this function never touches. Gated so OFF costs
+    # nothing beyond get_true_anomaly's own (pre-existing, all-orbits)
+    # Kepler solve: ltt.retarded_time does one MORE, single-orbit solve only
+    # when active. Physical a_rel comes from orbits.a (internal_unit solRad,
+    # via calc_arsun) -- NOT planet.ar (a/Rstar, dimensionless, already
+    # pulled above as `ar` for the sky-plane geometry) -- using ar here would
+    # be a silent factor-of-R* error in the delay (see components/ltt.py).
+    if _LIGHT_TRAVEL_TIME_ACTIVE:
+        tp = orbit.tp.value[orbit_idx]
+        n = orbit.n.value[orbit_idx]
+        sinw = orbit.sinw.value[orbit_idx]
+        cosw = orbit.cosw.value[orbit_idx]
+        sin_i = pt.sin(inc)
+        a_rel = orbit.a.value[orbit_idx]  # physical, R_sun
+        ltt_factor = (
+            orbit.m_primary.value[orbit_idx] / orbit.m_total.value[orbit_idx]
+        )
+        time_corrected, _ = ltt.retarded_time(
+            time,
+            tp,
+            n,
+            ecc,
+            sinw,
+            cosw,
+            sin_i,
+            a_rel,
+            factor=ltt_factor,
+            z0=0.0,
+        )
+    else:
+        time_corrected = time
+
+    f = orbit.get_true_anomaly(time_corrected)[:, orbit_idx]
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)
 
     # Limb-darkened blocked flux at the RV times -- the same shared helper
