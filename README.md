@@ -50,6 +50,26 @@ Every push and pull request runs the full test suite on:
 | Linux (ubuntu-latest) | 3.12, 3.13, 3.14 |
 | macOS (arm64) | 3.12 |
 
+### Intel Macs: supported, with two gaps and an extra install step
+
+**macOS x86_64 works**, on Python **3.12 or 3.13**, and a separate CI job
+(`macos-15-intel`, nightly and on every pull request) keeps it that way. Two
+features are unavailable there, and the install needs one extra command
+before `poetry install`. Both gaps trace to a single upstream fact -- jaxlib's
+last macOS x86_64 wheel is 0.4.38 and jaxlib ships no sdist, so no newer jax
+can be installed on that hardware at all:
+
+* the `gp:` key (Gaussian-process noise) is unavailable, because celerite2's
+  PyMC backend imports jax at module scope;
+* the `numpyro` and `blackjax` samplers are unavailable. Use `nuts`, `ptde`
+  (the default) or `nutpie`, none of which touch jax.
+
+Everything else -- RV, transit, SED, astrometry, microlensing -- works
+normally. The runbook, the reasoning, and the upstream fixes that will remove
+the extra step are in
+[`MACOS_INTEL_INSTALL.md`](MACOS_INTEL_INSTALL.md). Apple Silicon Macs need
+none of this; check with `uname -m`.
+
 ### Windows: supported through WSL2
 
 **Windows is supported, via WSL2** (Windows Subsystem for Linux) -- not natively.

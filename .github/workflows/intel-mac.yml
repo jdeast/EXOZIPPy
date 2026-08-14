@@ -120,24 +120,8 @@ jobs:
           path: ~/.astropy/cache
           key: astropy-cache-de430
 
-      # No poetry and no lock, on purpose. poetry.lock was resolved against
-      # pyproject's `jax>=0.5.0`, which has no macOS x86_64 candidate at
-      # all, so `poetry install` cannot even begin here -- reproducing that
-      # is not informative, it is just the bug report.
-      #
-      # intel_mac_deps.py rewrites only the requirements that are capped by
-      # wheel availability on this platform and passes everything else
-      # through verbatim, markers included. See its docstring; it is
-      # temporary scaffolding and gets deleted once the caps move into
-      # pyproject.toml as environment markers.
-      - name: Build the Intel-Mac requirement set
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python .github/scripts/intel_mac_deps.py --extra gui \
-            -o intel-mac-requirements.txt
-          echo "--- intel-mac-requirements.txt ---"
-          cat intel-mac-requirements.txt
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
 
       # celerite2 has to be built BEFORE the bulk install, and outside pip's
       # build isolation, or nothing else here matters.
@@ -166,16 +150,19 @@ jobs:
       # downgrades numpy under it -- a compiled module running against an
       # older numpy than it was built for, which fails at import in a way
       # that looks nothing like its cause.
-      # setuptools_scm is in this list but NOT in celerite2's
-      # [build-system] requires, which is a second upstream packaging bug
-      # rather than an oversight here: its pyproject sets
-      #     [tool.scikit-build] metadata.version.provider =
-      #         "scikit_build_core.metadata.setuptools_scm"
-      # so the backend imports setuptools_scm to compute the version and
-      # dies with ModuleNotFoundError without it (run 31745147326). An
-      # ISOLATED build hits this too -- run 31742588763 simply never got
-      # that far, dying while resolving jax==0.8.0 first. Both belong in
-      # the same upstream report.
+      # setuptools_scm is in this list, and it is NOT in celerite2's
+      # [build-system] requires -- but that is OUR problem, not an upstream
+      # one, and the distinction cost a nearly-filed bug report.
+      #
+      # celerite2 sets metadata.version.provider =
+      # "scikit_build_core.metadata.setuptools_scm", and that plugin
+      # declares its own requirement dynamically:
+      #     def get_requires_for_dynamic_metadata(...):
+      #         return ["setuptools-scm"]
+      # PEP 517's get_requires_for_build_wheel hook is how an ISOLATED
+      # build learns about it, and pip installs it automatically. Passing
+      # --no-build-isolation skips that hook, so we inherit the job of
+      # supplying it (run 31745147326). Upstream is fine here.
       #
       # No SETUPTOOLS_SCM_PRETEND_VERSION: setuptools_scm reads the version
       # from an sdist's PKG-INFO when there is no .git, which is the
@@ -191,27 +178,27 @@ jobs:
             "celerite2>=0.3.3,<0.4.0"
           python -c "import celerite2; print('celerite2', celerite2.__version__)"
 
-      - name: Install dependencies
-        run: pip install -r intel-mac-requirements.txt
-
-      # --no-deps because the dependencies are already installed above at the
-      # versions we want to test; letting pip re-resolve here would reinstate
-      # pyproject's `jax>=0.5.0` and fail.
-      - name: Install exozippy itself
-        run: pip install --no-deps .
+      # A PLAIN install, which is the point: pyproject's environment markers
+      # now carry the Intel-Mac caps, so this is exactly what a user gets
+      # from `pip install exozippy[gui]` here. It replaced a generated
+      # requirements file (.github/scripts/intel_mac_deps.py, now deleted)
+      # that existed only to test those caps before they were committed --
+      # keeping it would have left a second copy of the pin set to drift.
+      - name: Install exozippy
+        run: pip install ".[gui]"
 
       - name: Install the test harness
         run: pip install pytest pytest-timeout pytest-xdist httpx
 
-      # `pip check` is expected to complain -- exoplanet-core declares
-      # jax>=0.5.0 for its FFI backend and we have deliberately installed
-      # 0.4.38. Whether that declaration is a real requirement or a
-      # conservative floor is precisely what the sampler probe below
-      # measures, so this reports and does not fail.
+      # Reported, not enforced. `pip check` complains here because
+      # exoplanet-core[pymc] declares jax for its optional FFI backend and
+      # this platform deliberately installs none -- which is the supported
+      # configuration, not a defect. Kept visible so a NEW inconsistency is
+      # noticeable in the log.
       - name: Report dependency consistency
         continue-on-error: true
         run: |
-          pip check || echo "(expected: see the sampler probe below)"
+          pip check || echo "(expected: this platform ships no jax)"
 
       - name: Record the resolved versions
         run: pip freeze | tee resolved-intel-mac.txt
@@ -285,6 +272,5 @@ jobs:
         with:
           name: intel-mac-${{ matrix.python-version }}
           path: |
-            intel-mac-requirements.txt
             resolved-intel-mac.txt
           if-no-files-found: warn
