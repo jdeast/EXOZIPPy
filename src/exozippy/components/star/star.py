@@ -88,77 +88,7 @@ class Star(Component):
         self.mist = [c.get("mist", True) for c in self.config]
         self.parsec = [c.get("parsec", False) for c in self.config]
 
-        self._reject_wip_keys()
         self._parse_mass_functions()
-
-        if isinstance(self.config, list):
-            self.sedfile = self.config[0].get("sedfile")
-        else:
-            self.sedfile = self.config.get("sedfile")
-
-    # ------------------------------------------------------------------
-    # WIP keys (review 5.10)
-    # ------------------------------------------------------------------
-    def _reject_wip_keys(self):
-        """Raise on `sedfile:`, `mist: true` and `parsec: true` -- all WIP.
-
-        Three star-block keys are parsed and then go nowhere:
-
-        * ``sedfile:`` is read into ``Star.sedfile`` and read back by
-          nothing.  The implemented broadband-photometry path is the
-          separate ``sed:`` block (``sed: {file: <path>}``), whose own
-          ``SED.sedfile`` is the attribute that is actually consumed.
-        * ``mist:`` / ``parsec:`` are only ever read by the
-          ``in_system("evolutionarymodel")`` branch of
-          ``register_parameters``, and there is no ``evolutionarymodel``
-          component for that branch to detect -- nor an ``initfeh`` entry in
-          star/defaults.yaml for the manifest it would declare.  The branch
-          cannot fire, so the keys select nothing.
-
-        Only an EXPLICIT, meaningful setting raises.  ``mist``'s historical
-        default is ``True`` and every shipped example and test spells the
-        opt-out ``mist: False`` outright, so raising on the effective value
-        (or flipping the default) would reject every config that simply
-        omits the key.  Absent key -> silent; ``mist: false`` /
-        ``parsec: false`` -> silent (the user has opted out of a model that
-        does not exist, which is the state of the world); ``mist: true`` /
-        ``parsec: true`` / any ``sedfile:`` -> raise, because those ask for
-        something and get nothing.
-        """
-        wip = []
-        for i, c in enumerate(self.config):
-            name = f"{self.prefix}.{self.names[i]}"
-
-            if c.get("sedfile") is not None:
-                wip.append(
-                    f"{name}: 'sedfile: {c['sedfile']}' is not implemented.  "
-                    f"The path is stored on Star.sedfile and read by nothing "
-                    f"-- no component consumes it, so the photometry named "
-                    f"here would be silently ignored.  Use the 'sed:' block "
-                    f"instead "
-                    f"(sed: {{file: {c['sedfile']}}}), which is the "
-                    f"implemented path.  A per-star sedfile: is planned."
-                )
-
-            for key, model in (("mist", "MIST"), ("parsec", "PARSEC")):
-                if key in c and c[key]:
-                    wip.append(
-                        f"{name}: '{key}: true' is not implemented.  It asks "
-                        f"for this star to be constrained by the {model} "
-                        f"evolutionary model, which needs an "
-                        f"'evolutionarymodel' component that does not exist "
-                        f"yet: the only reader of star.{key} is the "
-                        f"in_system('evolutionarymodel') branch of "
-                        f"Star.register_parameters, which can never fire, and "
-                        f"the 'initfeh' parameter it would declare has no "
-                        f"entry in star/defaults.yaml.  Setting the key today "
-                        f"does nothing at all.  Drop it, or write "
-                        f"'{key}: false', until the evolutionarymodel "
-                        f"component lands.  {model} support is planned."
-                    )
-
-        if wip:
-            raise NotImplementedError("\n".join(wip))
 
     @property
     def prefix(self):
@@ -200,36 +130,23 @@ class Star(Component):
             {
                 "key": "mist",
                 "kind": "option",
-                "accepts": [False],
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "WIP -- 'mist: true' RAISES NotImplementedError.  It "
-                    "would constrain this star with the MIST evolutionary "
-                    "model, but the evolutionarymodel component that would "
-                    "read it does not exist yet."
+                    "Constrain this star with the MIST evolutionary model "
+                    "(default true).  Only consulted when an "
+                    "evolutionarymodel block exists."
                 ),
             },
             {
                 "key": "parsec",
                 "kind": "option",
-                "accepts": [False],
+                "accepts": [True, False],
                 "required": False,
                 "doc": (
-                    "WIP -- 'parsec: true' RAISES NotImplementedError.  It "
-                    "would constrain this star with the PARSEC evolutionary "
-                    "model, but the evolutionarymodel component that would "
-                    "read it does not exist yet."
-                ),
-            },
-            {
-                "key": "sedfile",
-                "kind": "datafile",
-                "accepts": "*.sed",
-                "required": False,
-                "doc": (
-                    "WIP -- setting this RAISES NotImplementedError.  It "
-                    "would be a per-star broadband photometry file, but "
-                    "nothing reads it; use the 'sed:' block instead."
+                    "Constrain this star with the PARSEC evolutionary model "
+                    "(default false).  Only consulted when an "
+                    "evolutionarymodel block exists."
                 ),
             },
         ]
@@ -622,15 +539,22 @@ class Star(Component):
                 }
             )
 
-        # WIP (review 5.10): there is no evolutionarymodel component, so this
-        # branch cannot fire -- and 'initfeh' has no star/defaults.yaml entry
-        # for it to declare.  _reject_wip_keys raises on an explicit
-        # 'mist: true'/'parsec: true' so nobody selects it silently; the
-        # branch is left standing as the shape the real feature will take.
+        # An evolutionary model indexes a track by (initial metallicity, EEP)
+        # and reads off the present-day age; all three are declared here, per
+        # star, masked to the stars that opted into a model.  No
+        # `evolutionarymodel` component ships yet, so today the branch never
+        # fires and neither `initfeh` nor `eep` is ever materialized -- but
+        # every piece the component needs from the star side (the two
+        # defaults.yaml entries, the per-star mist:/parsec: switches, this
+        # branch) is in place, so landing one requires no edit here.
         if in_system("evolutionarymodel"):
             mask = [m or p for m, p in zip(self.mist, self.parsec)]
             self.manifest.update(
-                {"age": {"mask": mask}, "initfeh": {"mask": mask}}
+                {
+                    "age": {"mask": mask},
+                    "initfeh": {"mask": mask},
+                    "eep": {"mask": mask},
+                }
             )
 
         # The Mann relations key on absolute Ks, so they need the distance
