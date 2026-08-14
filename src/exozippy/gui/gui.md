@@ -81,6 +81,49 @@ push it into one of these contracts instead.
   whole original entry, `sigma` prior included. Only the two specific
   spellings are matched; a 2-part broadcast entry is a coarser statement that
   a specific entry legitimately refines.
+
+  **`DeleteInstance` and `DuplicateInstance` are spelling-aware too, and for a
+  sharper reason: the INDEX form does not survive a change to the instance
+  list.** `star.A.teff` follows its star wherever the list moves it;
+  `star.0.teff` follows the index, so deleting an earlier instance repoints it
+  at a different body. Both commands used to scan for the `comp.<name>.`
+  prefix, so deleting star "A" left every `star.0.*` entry in the file, now
+  silently applying to whichever star became index 0 -- a WRONG-ELEMENT bug,
+  not litter (review 11.10). The decided semantics, implemented in
+  `_retarget_params_for_delete` / `_copy_param_keys`:
+  - **The deleted instance's own entries go under BOTH specific spellings.**
+    `star.A.teff` and `star.0.teff` name one element; honouring only the first
+    leaves a live entry behind.
+  - **A survivor's index-form entry whose index shifts is rewritten to the
+    NAME form** (`star.1.teff` -> `star.B.teff`). The name form means the same
+    element before and after any list mutation, so this converts a fragile
+    spelling into a stable one exactly where the fragility would bite.
+    Re-indexing was rejected because it fixes today's delete and leaves the
+    same trap set for the next one; refusing the delete was rejected because
+    it gates an edit the GUI can repair exactly. An UNNAMED instance has no
+    name form, so its keys are re-indexed instead -- the same guarantee by the
+    only means available.
+  - **Everything else is byte-identical.** A survivor at an index *below* the
+    deleted one still spells its own element correctly, and the 2-part
+    BROADCAST form (`star.teff`) was never specific to the deleted instance --
+    it covers whatever elements remain, which is exactly what it said before.
+  - **Link expressions get the same treatment**, since a reference is a
+    parameter path too (`initval: star.2.teff` retargets just as silently),
+    with one difference: a reference to the DELETED instance is respelled to
+    its *name* rather than removed, turning a silent mis-address into the loud
+    "no instance named 'A'" the name form has always produced.
+  - **`DuplicateInstance` is the mirror case.** It reads the source's entries
+    under both specific spellings (the prefix scan matched none of an
+    index-spelled instance's, so the clone silently arrived with no
+    parameters) and writes them under the clone's NAME form -- never its index
+    form, and exactly one spelling per element.
+  - Either command **raises, atomically**, if the params file already names
+    one element under both specific spellings (which `ConfigManager` refuses
+    anyway): merging them silently would bury a fault carrying a value, a
+    bound or a prior. `Command.apply` restores its own before-snapshot when
+    `_do` raises, since a failed command is not on the undo stack and must
+    leave nothing behind.
+
   `RenameInstance` rewrites every cross-reference (orbit body groups, `band:`,
   `star_ndx`/`orbit:` keys, and `linking.py` expressions) purely from the
   schema -- no hardcoded component names. Undo uses TEXT snapshots, not
