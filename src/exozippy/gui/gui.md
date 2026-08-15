@@ -57,9 +57,9 @@ push it into one of these contracts instead.
 - `app.py` -- the FastAPI app factory (`create_app`) and `main()`. Owns the
   HTTP/WebSocket surface, static-bundle serving (with an SPA/placeholder
   fallback), free-port selection, the uvicorn thread, and the pywebview window.
-  Per-project mutable state (open document, run handle, tune session, preview
-  cache) lives on closures inside `create_app()` so each app instance -- and
-  each per-test app -- is isolated. Blocking work runs off the event loop:
+  Per-project mutable state (open document, open project directory, run
+  handle, tune session) lives on closures inside `create_app()` so each app
+  instance -- and each per-test app -- is isolated. Blocking work runs off the event loop:
   endpoints that call into the backend are plain `def` (FastAPI runs them in a
   threadpool) and the seconds-long jobs use dedicated `ThreadPoolExecutor`s or
   a worker subprocess/process.
@@ -176,7 +176,8 @@ push it into one of these contracts instead.
   `GuiReporter.terminal(error=...)` (the PR #46 mechanism, called from
   `run.run_fit`) -- this is the path for everything that never reaches it.
 - `__init__.py` -- intentionally light (no eager fastapi/numpy imports) so
-  `import exozippy.gui` stays cheap; exports `TERMINAL_PHASES`.
+  `import exozippy.gui` stays cheap; it is the ONE definition of
+  `TERMINAL_PHASES` (`status.py` re-exports it rather than restating it).
 
 ## HTTP / WebSocket API
 
@@ -191,27 +192,60 @@ Core (G7):
 - `GET /api/utilities` -- utility argument schemas (G2 registry).
 - `POST /api/project/open` `{path}` -- classify a dir's yaml/data files, and
   RESET the per-project server state: the Tune session (closed on a detached
-  thread, since its worker may be mid-solve), the preview cache, and the open
-  document when it lives outside the newly opened project (autosaved first if
-  dirty). Each of those describes the project that was open; leaving them made
-  project B show A's solved values and plots, and let an edit typed against them
-  land in B's params file. The frontend mirrors this: `TuneTab` is keyed by
-  `configPath` so a switch remounts it, and its `ensureDoc` re-opens the
-  document whenever the server's open path is not the config it is tuning.
+  thread, since its worker may be mid-solve) and the open document when it
+  lives outside the newly opened project (autosaved first if dirty). It also
+  records the newly opened directory as the server's current project, which is
+  what `/api/files` and the log socket confine to -- that root used to be a
+  closure over the LAUNCH project that nothing ever updated. Each of those
+  describes the project that was open; leaving them made project B show A's
+  solved values and plots, and let an edit typed against them land in B's
+  params file. The frontend mirrors this: `TuneTab` is keyed by `configPath`
+  so a switch remounts it, and its `ensureDoc` re-opens the document whenever
+  the server's open path is not the config it is tuning.
 - `WS  /api/logs?file=...` -- tail a log file (follows rotation/truncation).
+  Two guards, both invariant 5 (see "Invariants"): the handshake's `Origin`,
+  if present, must be loopback (WebSocket handshakes bypass CORS entirely, so
+  any page the user visits could otherwise open this socket against the
+  loopback server), and `file` must lie inside the open project, the open
+  document's directory, or the active run's cwd. **The client read IS the
+  poll sleep**: each idle interval is spent awaiting `websocket.receive()`
+  rather than `asyncio.sleep`, so a disconnect ends the loop on the turn it
+  arrives. Without reading at all, a disconnect was only noticed on the next
+  SEND, so a tail on a QUIET file looped forever holding a handle -- one
+  immortal poller per file switch, since `LogTerminal` opens a fresh socket
+  each time. Watching in a second task fixes that too but needs several turns
+  to wind down, which loses a race against the test harness's portal teardown
+  (seen only on the macOS runner); one task returns directly. The receive
+  future is created once and re-awaited, never cancelled and remade, since
+  cancelling a half-completed receive is where the disconnect frame itself
+  could go missing. Content the seed tail already sent is skipped once; every
+  later reopen (rotation or truncation) streams the new file from its start.
+  Covered by `tests/test_gui_logs.py`.
 
 Config document (G8): `POST /api/doc/open`, `GET /api/doc`,
-`POST /api/doc/{command,undo,redo,save,autosave}`, `POST /api/doc/validate`
+`POST /api/doc/{command,undo,redo,save}`, `POST /api/doc/validate`
 (async: returns a job id) + `GET /api/doc/validate/{job_id}`.
 `doc/open` is edit-preserving: re-opening the path that is already open
 returns the dirty in-memory document unchanged (tabs call open on mount, and
 a naive reload-from-disk silently reverted unsaved edits on tab switches); a
-clean same-path doc IS reloaded so external file edits are picked up.
+clean same-path doc IS reloaded so external file edits are picked up. It also
+returns `recovery`: any autosave sidecar newer than its real file, which
+`ConfigTab` renders as a banner offering the undoable `restore_autosave`
+command. A validation job is retired the first time it is polled in a terminal
+state, and abandoned ones are evicted oldest-first past a cap -- the tab starts
+a fresh validation after every edit burst, and each entry holds a full
+diagnostics list.
 
-Data manager (G9): `GET /api/files` (project-rooted browser),
+Every command goes through `POST /api/doc/command`; bad input answers 400 (that
+includes an `IndexError`/`TypeError` from a path that indexes past a list or
+traverses a scalar -- the command's snapshot restore has already rolled the
+edit back, so the document is intact).
+
+Data manager (G9): `GET /api/files` (browser confined to the CURRENTLY open
+project -- a directory outside it is refused, not merely denied a parent link),
 `GET /api/browse` (unconfined, for the sidebar project picker),
 `POST /api/files/eligible`, `GET /api/files/associations` (both unwired --
-see "Known unwired seams").
+see "Known unwired seams"). An unreadable directory answers 400 on both.
 
 Run controls (G11): `POST /api/run` (one active run per project; copies the
 exact config/params into the output dir as `.used.*` for reproducibility -- the
@@ -223,8 +257,9 @@ and is deliberately blind to initval/mu values),
 plus `run_id`, `stale_status`, `returncode`, `error` and `console_path`, so
 `RunControl` can offer Run again and show WHY a run stopped instead of leaving
 a Stop button on a dead process), `POST /api/run/stop`, `GET /api/run/plots`,
-`GET /api/run/image?path=` (path-restricted to the run tree via
-realpath+commonpath -- the last two are unwired, see "Known unwired seams"),
+`GET /api/run/image?path=` (confined to the run's working directory -- i.e.
+the whole project dir, not just the results dir -- and serving whatever file
+type it finds there; the last two are unwired, see "Known unwired seams"),
 `POST /api/utilities/run`.
 
 Tune (G10): `POST /api/tune/solve` (the tune worker process is spawned by the
@@ -264,13 +299,17 @@ dependency. See `gui/frontend/README.md` for the dev/build loop.
   Config. Tabs stay MOUNTED once visited
   (hidden with `display: none`, and a window resize is dispatched on reveal so
   plotly recomputes sizes) -- unmount-on-switch would discard tab state; the
-  `active` flag tells a tab it is the visible one (ConfigTab resyncs from
-  `GET /api/doc` on reveal so edits from other tabs show up).
+  `active` flag tells a tab it is the visible one, and passing it is not
+  optional bookkeeping: ConfigTab resyncs from `GET /api/doc` on reveal so
+  edits from other tabs show up, and TuneTab re-checks `/api/tune/hash` on
+  reveal so an edit made in ConfigTab actually raises its stale banner.
 - `src/api.ts` -- the single typed client for every endpoint, plus
-  `openLogSocket(file)` and `runImageUrl(path)`. Client methods with no caller
-  are the unwired seams listed at the bottom of this file and say so in a
-  comment; anything else without a caller is dead and should be deleted with
-  its endpoint.
+  `openLogSocket(file)` and `runImageUrl(path)`. Failures throw `ApiError`,
+  which carries the HTTP status: at least one caller has to tell a 409 ("the
+  evaluator is gone -- Solve again") from a transient blip. Client methods
+  with no caller are the unwired seams listed at the bottom of this file and
+  say so in a comment; anything else without a caller is dead and should be
+  deleted with its endpoint.
 - `src/components/PathPicker.tsx` -- the ONE server-side path browser, used
   twice: the sidebar picks a project **directory** (`select="dir"`, unconfined
   `api.browse`, confirmed with a button) and the Config form picks a data
@@ -295,6 +334,15 @@ dependency. See `gui/frontend/README.md` for the dev/build loop.
 - `src/components/` -- shell parts (`TopBar`, `Sidebar`, `LogTerminal`, the
   pinned `RunControl`) and the tab bodies (`ConfigTab`, `TuneTab`,
   `ToolsTab`).
+  **Every field in `ConfigTab` commits `onBlur`, so every one needs a change
+  guard.** `onBlur` fires on a plain click-through, and without the guard
+  (`unchanged()`) tabbing across a row pushed one undo entry per cell, marked
+  the document dirty -- which changes what `RunControl` writes -- and rewrote
+  each untouched value through JSON round-trip + `coerce`, so a typed `1e-3`
+  became `0.001` on disk and a flow-style `CommentedSeq` came back a plain
+  list with its comments gone. `TuneTab.setFieldIfChanged` is the same guard.
+  `ConfigTab` also renders the **autosave-recovery banner** from
+  `doc/open`'s `recovery` list.
 
 ## The signature interaction: Solve, then live sliders (G10)
 
@@ -335,6 +383,22 @@ freezes the live plots until the next Solve. Slider/bound/prior edits are still
 real G8 `set_param_field` commands (undoable, RANK_USER, saved to params.yaml);
 the Tune toolbar has its own Save button (the shared document's dirty flag)
 so tuned values can be written to disk without leaving the tab.
+
+**The banner covers edits made ANYWHERE, not only in the Tune tab.** It used
+not to: `TuneTab` checked `/api/tune/hash` at mount and after its own commands
+only, and tabs stay MOUNTED when hidden, so a bound or prior edited in
+`ConfigTab` left the sliders live and still committing RANK_USER initvals
+against a model the document no longer described. It now takes an `active`
+prop and re-checks the hash on reveal and on a slow timer while visible and
+live. Two independent staleness sources are tracked separately and OR'd --
+the document/evaluator hash mismatch (re-derivable from the server at any
+time) and a verdict the evaluator itself returned (`needs_resolve`, or a 409
+from a worker that died and was respawned). One boolean carried both, so any
+hash re-check silently cleared a `needs_resolve` banner. A 409 from
+`/api/tune/eval` is surfaced through that second channel rather than swallowed
+by a bare catch: the status poll stops once the solve goes live, so a
+timed-out eval was otherwise invisible until the user next pressed Solve.
+Solve and the banner's Re-Solve are both disabled while a solve is in flight.
 
 ## The tune worker protocol (`tune.py`)
 
@@ -384,10 +448,23 @@ than a late detection -- terminating a healthy worker throws away a compile
 that was about to finish and looks, from the UI, exactly like the bug the
 deadline is there to fix.
 
+**3. A healthy worker is reused, but not forever.** Reuse is the main speed
+lever (a spawn re-imports pytensor/pymc/exozippy and cold-starts the compile
+cache), so `_do_solve` rebuilds the System/model/evaluator in place and drops
+the previous one first. What that cannot reclaim is pytensor's compiled C
+modules, which can never be `dlclose`d: a long-lived worker's RSS ratchets up
+with every solve. `TuneSession._should_recycle` closes and respawns it past a
+solve count (`_RECYCLE_AFTER_SOLVES`) or an RSS ceiling (`_RECYCLE_RSS_MB`, via
+psutil when readable). This is a different failure from rule 2's: the silence
+deadline fires only on a WEDGED worker, and one slowly eating the machine
+answers every message promptly right up until it swaps. Both thresholds are
+deliberately generous -- recycling too eagerly would simply undo the reuse.
+
 There is **no cancel endpoint**: nothing lets a user abandon an in-flight Solve
 early. The deadline covers the wedged case; a deliberate cancel is a separate
 feature (it needs a UI affordance and a request-scoped abort, not just
-`worker.close()`).
+`worker.close()`). The UI does disable Solve and Re-Solve while one is running,
+so a second cannot be queued behind the first.
 
 ## Invariants (do not break these)
 
@@ -402,7 +479,13 @@ feature (it needs a UI affordance and a request-scoped abort, not just
    (never threads -- GIL + pytensor compile locks). The tune evaluator runs in
    its own worker process. Never block the event loop.
 5. **Local only.** The server binds 127.0.0.1. File-serving endpoints must stay
-   path-restricted to their intended tree.
+   path-restricted to their intended tree -- really restricted, not merely
+   documented as such: `/api/files` and `WS /api/logs` both REFUSE a path
+   outside their root, and `datafiles.is_within` is the one predicate that
+   answers the question (there were two, with different symlink behavior). A
+   WebSocket endpoint additionally needs its own `Origin` check, since
+   handshakes are not subject to CORS and binding to loopback does not stop a
+   page the user visits from connecting.
 
 ## Testing
 
@@ -413,8 +496,16 @@ exercised by the files below even though no frontend calls them today.
 
 Fast GUI tests (fastapi TestClient, no real compile): `tests/test_gui_app.py`,
 `tests/test_gui_document.py`, `tests/test_gui_data.py`, `tests/test_gui_tune.py`,
-`tests/test_run_endpoints.py`. Real-compile / real-fit paths are marked `slow`.
+`tests/test_gui_logs.py`, `tests/test_run_endpoints.py`. Real-compile /
+real-fit paths are marked `slow`.
 Run the set with `poetry run pytest tests/test_gui_*.py tests/test_run_endpoints.py -m "not slow"`.
+
+The frontend has no test harness, so anything it and the server must agree on
+is pinned SERVER-side by parsing the source: `test_gui_document.py` reads
+`ConfigTab.tsx`'s `PARAM_FIELDS` literal and asserts `set_param_field` accepts
+every column the table renders. That pair had already drifted -- `bound_scale`
+was rendered and 400'd on every blur, because `_PARAM_FIELDS` was defined as
+`set(LINKABLE_FIELDS)` and `bound_scale` is deliberately not linkable.
 
 Note: the repo's pre-commit hook runs the FULL suite, which hangs on a cold
 pytensor cache in a fresh worktree; GUI work is typically committed after

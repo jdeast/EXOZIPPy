@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  ApiError,
   type DocCommand,
   type PlotSpec,
   type TuneEvalTrace,
@@ -50,14 +51,35 @@ function paramName(path: string): string {
   return path.split(".").pop() || path;
 }
 
-export default function TuneTab({ configPath }: { configPath: string | null }) {
+const HASH_STALE_REASON = "Config changed -- re-Solve to refresh.";
+
+// How often the tab re-asks the server whether the open document still matches
+// the live evaluator, while it is visible and live.
+const HASH_POLL_MS = 2000;
+
+export default function TuneTab({
+  configPath,
+  active = true,
+}: {
+  configPath: string | null;
+  active?: boolean;
+}) {
   const [status, setStatus] = useState<TuneStatus | null>(null);
   const [result, setResult] = useState<TuneResult | null>(null);
   const [specs, setSpecs] = useState<PlotSpec[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [stale, setStale] = useState(false);
-  const [staleReason, setStaleReason] = useState<string | null>(null);
+  // Staleness has TWO independent sources and they must not overwrite each
+  // other. `hashStale` is "the document no longer matches the compiled
+  // evaluator", answered by the server and re-answerable at any time.
+  // `evalStale` is "this evaluator cannot serve you", raised by an eval that
+  // came back needs_resolve or by a worker that died -- a fact no hash check
+  // knows about. One boolean carried both, so any hash re-check silently
+  // cleared a needs_resolve banner (and vice versa).
+  const [hashStale, setHashStale] = useState(false);
+  const [evalStale, setEvalStale] = useState<string | null>(null);
+  const stale = hashStale || evalStale !== null;
+  const staleReason = evalStale ?? (hashStale ? HASH_STALE_REASON : null);
   // A transient, NON-blocking complaint about the last eval (an out-of-bounds
   // value). Distinct from `stale`: nothing about the compiled evaluator is
   // invalid, so demanding a re-Solve would be wrong -- moving back inside the
@@ -99,6 +121,32 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   // compiles; this ref stops the 400 ms poll from refetching them.
   const dataPlotsLoaded = useRef(false);
 
+  // Ask the server whether the open document still matches the live
+  // evaluator. Never asserts freshness it has not verified: a failure (no
+  // document open, a transient blip) leaves the banner exactly as it was.
+  const refreshHashStale = useCallback(async () => {
+    try {
+      const h = await api.tuneHash();
+      setHashStale(h.stale);
+    } catch {
+      /* no doc open, or transient -- leave the current verdict alone */
+    }
+  }, []);
+
+  // Load the live solve result AND re-derive staleness from the server's own
+  // hash. The poller and the mount-restore effect used to be two copies of
+  // this with OPPOSITE verdicts -- the poller hard-reset `stale`, restore
+  // consulted the hash -- and the divergence was load-bearing: pressing
+  // Re-Solve from the stale banner while a solve was already in flight let
+  // the poller hydrate the PRE-EDIT result and then clear the very banner
+  // that would have said so.
+  const hydrateResult = useCallback(async () => {
+    const res = await api.tuneResult();
+    setResult(res);
+    setSpecs(res.plots);
+    await refreshHashStale();
+  }, [refreshHashStale]);
+
   // Poll solve status until it leaves the transient phases.
   const startPolling = useCallback(() => {
     if (pollTimer.current) window.clearInterval(pollTimer.current);
@@ -126,21 +174,23 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         if (st.phase === "live" && st.has_result) {
           if (pollTimer.current) window.clearInterval(pollTimer.current);
           pollTimer.current = null;
-          const res = await api.tuneResult();
-          setResult(res);
-          setSpecs(res.plots);
-          setStale(false);
-          setStaleReason(null);
+          await hydrateResult();
         } else if (st.phase === "error") {
           if (pollTimer.current) window.clearInterval(pollTimer.current);
           pollTimer.current = null;
           setError(st.error || "solve failed");
+        } else {
+          // A poll that SUCCEEDS clears whatever the last failed one left
+          // behind. Nothing else did: the catch below set `error` and no
+          // success path ever unset it, so one transient blip pinned a
+          // message on screen until the next manual Solve.
+          setError(null);
         }
       } catch (e) {
         setError(String(e instanceof Error ? e.message : e));
       }
     }, 400);
-  }, []);
+  }, [hydrateResult]);
 
   useEffect(
     () => () => {
@@ -152,9 +202,18 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   const solve = useCallback(async () => {
     setError(null);
     setNotice(null);
+    // A fresh solve supersedes any needs_resolve/dead-worker verdict; the
+    // hash verdict is re-derived from the server when the result lands.
+    setEvalStale(null);
     dataPlotsLoaded.current = false;
-    await ensureDoc();
     try {
+      // ensureDoc INSIDE the try. It was outside, so a docOpen rejection (a
+      // config `check_yaml_booleans` refuses -- `finite_source: no` -- is a
+      // 400) escaped as an unhandled promise rejection from the auto-solve
+      // effect below: no setError, no phase change, "Not solved yet" forever.
+      // Single-config projects land straight here, so the user may never see
+      // ConfigTab's correct rendering of the same error.
+      await ensureDoc();
       const st = await api.tuneSolve();
       setStatus(st);
       startPolling();
@@ -173,45 +232,61 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await ensureDoc();
-      let st: TuneStatus;
+      // The whole body is guarded. `ensureDoc` can reject (a config the YAML
+      // boolean guard refuses), and so can `tuneResult` -- and an unhandled
+      // rejection here left the tab on "Live" with no parameters, no plots
+      // and no error. Anything unexpected falls through to the idle path,
+      // which auto-solves and reports its own failure properly.
       try {
-        st = await api.tuneStatus();
-      } catch {
-        return; // no session -> idle
-      }
-      if (cancelled) return;
-      setStatus(st);
-      if (st.phase === "solving" || st.phase === "compiling") {
-        startPolling(); // keep watching the background solve
-      } else if (st.phase === "live" && st.has_result) {
-        const res = await api.tuneResult();
+        await ensureDoc();
+        const st = await api.tuneStatus();
         if (cancelled) return;
-        setResult(res);
-        setSpecs(res.plots);
-        // A structural edit made elsewhere while we were away may have
-        // invalidated the live evaluator; surface the re-Solve banner.
-        try {
-          const h = await api.tuneHash();
-          if (!cancelled && h.stale) {
-            setStale(true);
-            setStaleReason("Config changed -- re-Solve to refresh.");
-          }
-        } catch {
-          /* no doc open: leave as-is */
+        setStatus(st);
+        if (st.phase === "solving" || st.phase === "compiling") {
+          startPolling(); // keep watching the background solve
+          return;
         }
-      } else if (st.phase === "error") {
-        setError(st.error || "solve failed");
-      } else if (configPath) {
-        // idle + a config to work with: auto-run the first Solve.
-        solve();
+        if (st.phase === "live" && st.has_result) {
+          // hydrateResult consults the hash, so a structural edit made
+          // elsewhere while we were away raises the re-Solve banner.
+          await hydrateResult();
+          return;
+        }
+        if (st.phase === "error") {
+          setError(st.error || "solve failed");
+          return;
+        }
+      } catch (e) {
+        if (cancelled) return;
+        if (!configPath) {
+          setError(String(e instanceof Error ? e.message : e));
+          return;
+        }
+        // fall through to the auto-solve, which surfaces its own errors
       }
+      // idle (or an unreadable session) + a config to work with: auto-Solve.
+      if (!cancelled && configPath) solve();
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ensureDoc, startPolling, solve, configPath]);
+  }, [ensureDoc, startPolling, solve, hydrateResult, configPath]);
+
+  // Structural edits made in OTHER tabs never came through `runCommand` here,
+  // and both tabs stay mounted, so nothing re-checked the hash after a
+  // ConfigTab edit: the sliders stayed live and kept committing RANK_USER
+  // initvals against a model the document no longer described. Re-check on
+  // reveal, and keep checking while visible and live -- an edit can also
+  // arrive without a tab switch (Ctrl+Z, an external write picked up on
+  // re-open).
+  useEffect(() => {
+    const isLive = status?.phase === "live";
+    if (!active || !isLive) return;
+    refreshHashStale();
+    const timer = window.setInterval(refreshHashStale, HASH_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [active, status?.phase, refreshHashStale]);
 
   // Once a solve populates parameters, auto-select the first slider-tunable
   // one so a working slider shows immediately -- otherwise it is not obvious
@@ -235,19 +310,18 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   }, [result, selected]);
 
   // Send a document command (undoable, RANK_USER) then refresh staleness.
-  const runCommand = useCallback(async (cmd: DocCommand, structural: boolean) => {
-    try {
-      const next = await api.docCommand(cmd);
-      setDocDirty(next.dirty);
-      if (structural) {
-        const h = await api.tuneHash();
-        setStale(h.stale);
-        if (h.stale) setStaleReason("Config changed -- re-Solve to refresh.");
+  const runCommand = useCallback(
+    async (cmd: DocCommand, structural: boolean) => {
+      try {
+        const next = await api.docCommand(cmd);
+        setDocDirty(next.dirty);
+        if (structural) await refreshHashStale();
+      } catch (e) {
+        setError(String(e instanceof Error ? e.message : e));
       }
-    } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
-    }
-  }, []);
+    },
+    [refreshHashStale]
+  );
 
   // Live eval: patch the affected traces (both x and y -- a phased curve's
   // x-grid moves too when period/tc is tuned) into the current specs. The
@@ -294,8 +368,7 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         if (seq < appliedSeq.current) return; // a newer response already landed
         appliedSeq.current = seq;
         if (res.needs_resolve) {
-          setStale(true);
-          setStaleReason(res.reason || "This parameter needs a re-Solve.");
+          setEvalStale(res.reason || "This parameter needs a re-Solve.");
           return;
         }
         if (res.out_of_bounds) {
@@ -306,8 +379,21 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
         }
         setNotice(null);
         if (res.plots) applyEval(res.plots);
-      } catch {
-        // transient; sliders stay usable
+      } catch (e) {
+        const message = String(e instanceof Error ? e.message : e);
+        if (e instanceof ApiError && e.status === 409) {
+          // NOT transient. A 409 means the evaluator is gone -- a wedged
+          // worker was terminated and respawned, or the session was reset --
+          // so every further slider move is a no-op until the next Solve.
+          // This used to end in a bare catch, and the status poll had already
+          // been cleared once the solve went live, so a timed-out eval was
+          // invisible until the user happened to press Solve again.
+          setEvalStale(message);
+          return;
+        }
+        // Anything else (a network blip) really is transient: say so once,
+        // and leave the sliders usable.
+        setNotice(message);
       }
     },
     [applyEval]
@@ -315,6 +401,11 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
 
   const parameters = result?.parameters || {};
   const live = status?.phase === "live";
+  // A solve is already running: Solve and the banner's Re-Solve must both be
+  // dead. Leaving Re-Solve armed let a second solve be queued against the
+  // first, and the poller then hydrated whichever finished first.
+  const solving =
+    status?.phase === "solving" || status?.phase === "compiling";
 
   // Group filtered parameters by component instance for the tree.
   const grouped = useMemo(() => {
@@ -359,14 +450,8 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
   return (
     <div className="tune-tab">
       <div className="tune-toolbar">
-        <button
-          className="tune-solve-btn"
-          onClick={solve}
-          disabled={status?.phase === "solving" || status?.phase === "compiling"}
-        >
-          {status?.phase === "solving" || status?.phase === "compiling"
-            ? "Solving..."
-            : "Solve"}
+        <button className="tune-solve-btn" onClick={solve} disabled={solving}>
+          {solving ? "Solving..." : "Solve"}
         </button>
         <span className={`tune-phase phase-${status?.phase || "idle"}`}>
           {phaseText[status?.phase || "idle"]}
@@ -401,8 +486,10 @@ export default function TuneTab({ configPath }: { configPath: string | null }) {
 
       {stale && (
         <div className="tune-stale-banner">
-          {staleReason || "Config changed -- re-Solve to refresh."}
-          <button onClick={solve}>Re-Solve</button>
+          {staleReason || HASH_STALE_REASON}
+          <button onClick={solve} disabled={solving}>
+            {solving ? "Solving..." : "Re-Solve"}
+          </button>
         </div>
       )}
 

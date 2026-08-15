@@ -34,10 +34,14 @@ from pathlib import Path
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 # A GUI status file at rest on any of these phases means the run is over.
-TERMINAL_PHASES = frozenset({"done", "stopped", "error"})
+# Defined once, in the package __init__ (which stays import-light), and
+# re-exported here so `from .status import TERMINAL_PHASES` keeps working: two
+# independent frozensets of the same three strings is exactly the kind of pair
+# that drifts the day a fourth phase is added.
+from . import TERMINAL_PHASES  # noqa: F401  (re-export)
+
+logger = logging.getLogger(__name__)
 
 # Summary keys guaranteed in the state dict handed to progress_callback. Extra
 # keys (stored_raw / stored_lp / raw_var_names) may also be present to feed the

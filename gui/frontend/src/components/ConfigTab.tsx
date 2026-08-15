@@ -58,7 +58,32 @@ type Selection =
   | { kind: "global" }
   | { kind: "instance"; comp: string; name: string };
 
+// The per-parameter fields the table lets you edit. Pinned server-side against
+// `document._PARAM_FIELDS` by tests/test_gui_document.py -- the two drifted
+// once already (`bound_scale` was rendered here and 400'd on every blur).
 const PARAM_FIELDS = ["initval", "lower", "upper", "sigma", "mu", "bound_scale"];
+
+// Whether a form value and the document's current value are the SAME edit.
+//
+// Every field below commits onBlur, and onBlur fires on a plain click-through
+// with nothing typed. Without this guard, tabbing across a row pushed one undo
+// entry per cell, marked the document dirty (which changes what RunControl
+// writes), and rewrote each value through JSON round-trip + `coerce` -- a
+// typed `1e-3` came back `0.001` on disk, and a flow-style CommentedSeq came
+// back a plain list with its style and comments gone. TuneTab's
+// `setFieldIfChanged` carries the same guard for the same reason.
+//
+// Empty string, null and undefined all mean "not set", so blurring an empty
+// box over an absent key is not an edit either.
+function unchanged(next: unknown, current: unknown): boolean {
+  const norm = (v: unknown) =>
+    v === "" || v === null || v === undefined ? null : v;
+  const a = norm(next);
+  const b = norm(current);
+  if (a === null || b === null) return a === b;
+  if (typeof a === "number" && typeof b === "number") return a === b;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 export default function ConfigTab({
   configPath,
@@ -73,6 +98,14 @@ export default function ConfigTab({
   const [selection, setSelection] = useState<Selection>({ kind: "global" });
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [validating, setValidating] = useState(false);
+  // Autosave sidecars newer than their real file, as reported by
+  // /api/doc/open. The server has always sent this (the project-switch path
+  // flushes unsaved edits to sidecars precisely "so re-opening A offers them
+  // back") and nothing rendered it, so those edits were reachable only by
+  // finding hidden dotfiles by hand.
+  const [recovery, setRecovery] = useState<
+    NonNullable<DocState["recovery"]>
+  >([]);
 
   // Load the schema once.
   useEffect(() => {
@@ -91,10 +124,23 @@ export default function ConfigTab({
       .docOpen(configPath)
       .then((d) => {
         setDoc(d);
+        setRecovery(d.recovery || []);
         setError(null);
       })
       .catch((e) => setError(String(e)));
   }, [configPath]);
+
+  // Load the autosaved edits back over the open document (undoable, like every
+  // other command), then drop the banner.
+  const restoreAutosave = useCallback(async () => {
+    try {
+      setDoc(await api.docCommand({ op: "restore_autosave", args: {} }));
+      setRecovery([]);
+      setError(null);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  }, []);
 
   // When the tab is revealed, resync with the server's in-memory document (a
   // GET -- no disk reload) so edits made from other tabs (Tune slider commits)
@@ -213,6 +259,24 @@ export default function ConfigTab({
         </span>
         {error && <span className="config-inline-error">{error}</span>}
       </div>
+
+      {recovery.length > 0 && (
+        <div className="recovery-banner">
+          <span>
+            Unsaved edits were autosaved and are newer than the file on disk:{" "}
+            {recovery.map((r) => r.file.split("/").pop()).join(", ")}.
+          </span>
+          <button
+            onClick={restoreAutosave}
+            title={recovery.map((r) => r.autosave).join("\n")}
+          >
+            Restore them
+          </button>
+          <button className="link-btn" onClick={() => setRecovery([])}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <div className="config-body">
         <div className="config-tree">
@@ -362,12 +426,14 @@ function GlobalForm({
                   ) : (
                     <input
                       defaultValue={String(value ?? "")}
-                      onBlur={(e) =>
+                      onBlur={(e) => {
+                        const next = coerce(e.target.value);
+                        if (unchanged(next, value)) return;
                         run({
                           op: "set_config_key",
-                          args: { path: key, value: coerce(e.target.value) },
-                        })
-                      }
+                          args: { path: key, value: next },
+                        });
+                      }}
                     />
                   )}
                 </td>
@@ -524,6 +590,7 @@ function InstanceForm({
                           onBlur={(e) => {
                             const raw = e.target.value.trim();
                             const value = raw === "" ? null : coerce(raw);
+                            if (unchanged(value, entry[f])) return;
                             run({
                               op: "set_param_field",
                               args: { path: paramPath, field: f, value },
@@ -586,14 +653,14 @@ function ConfigKeyRow({
         <input
           defaultValue={value.join(", ")}
           placeholder={choices.join(", ")}
-          onBlur={(e) =>
-            onSet(
-              e.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean)
-            )
-          }
+          onBlur={(e) => {
+            const next = e.target.value
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (unchanged(next, value)) return;
+            onSet(next);
+          }}
         />
       );
     } else {
@@ -623,7 +690,12 @@ function ConfigKeyRow({
     control = (
       <input
         defaultValue={value ?? ""}
-        onBlur={(e) => onSet(e.target.value === "" ? null : coerce(e.target.value))}
+        onBlur={(e) => {
+          const next =
+            e.target.value === "" ? null : coerce(e.target.value);
+          if (unchanged(next, value)) return;
+          onSet(next);
+        }}
       />
     );
   }

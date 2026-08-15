@@ -89,6 +89,13 @@ class _StubWorker:
     def start(self):
         self.started = True
 
+    def is_alive(self):
+        # Part of the EvaluatorWorker contract TuneSession calls directly.
+        # It used to be missing, and _ensure_worker carried a
+        # `getattr(worker, "is_alive", lambda: True)()` solely to tolerate
+        # that -- production code shaped around a test stub.
+        return getattr(self, "started", False)
+
     def solve(self, config, params, workdir, on_progress=None):
         if on_progress:
             # The real worker forwards the full progress dict (phase +
@@ -623,3 +630,112 @@ def test_a_timed_out_eval_leaves_the_session_needing_a_resolve(monkeypatch):
 
     assert session.phase == "error"
     assert "stopped responding" in session.error
+
+
+# --- worker recycling (review 2.12.8) ----------------------------------------
+
+
+class _CountingWorker:
+    """A live stub that records how many times it was started and closed."""
+
+    instances = []
+
+    def __init__(self):
+        self.alive = False
+        self.closed = False
+        _CountingWorker.instances.append(self)
+
+    def start(self):
+        self.alive = True
+
+    def is_alive(self):
+        return self.alive
+
+    def solve(self, config, params, workdir, on_progress=None):
+        return {
+            "parameters": {},
+            "seeds": None,
+            "plots": [],
+            "structural_hash": "cafe",
+        }
+
+    def close(self):
+        self.closed = True
+        self.alive = False
+
+
+def test_a_warm_worker_is_reused_across_solves(monkeypatch):
+    """
+    Given a healthy worker below the recycle thresholds,
+    When several solves run,
+    Then the same subprocess serves all of them.
+
+    Reuse is the main speed lever (a spawn re-imports pytensor/pymc and
+    cold-starts the compile cache); the recycling below must not undo it.
+    """
+    from exozippy.gui import tune
+
+    _CountingWorker.instances = []
+    monkeypatch.setattr(tune, "_RECYCLE_AFTER_SOLVES", 100)
+    session = tune.TuneSession(worker_factory=_CountingWorker)
+
+    for _ in range(5):
+        assert session.solve({}, {}, None) == "live"
+
+    assert len(_CountingWorker.instances) == 1
+
+
+def test_the_worker_is_recycled_after_enough_solves(monkeypatch):
+    """
+    Given a worker that has served its quota of solves,
+    When the next solve starts,
+    Then it is closed and a fresh one is spawned.
+
+    pytensor's compiled C modules can never be dlclose'd, so a reused worker's
+    RSS ratchets upward with every solve and the per-solve gc.collect cannot
+    reclaim it.  The silence-deadline respawn does not cover this: it fires
+    only on a WEDGED worker, and one slowly eating the machine answers every
+    message promptly right up until it swaps.
+    """
+    from exozippy.gui import tune
+
+    _CountingWorker.instances = []
+    monkeypatch.setattr(tune, "_RECYCLE_AFTER_SOLVES", 2)
+    session = tune.TuneSession(worker_factory=_CountingWorker)
+
+    for _ in range(5):
+        session.solve({}, {}, None)
+
+    assert len(_CountingWorker.instances) == 3  # solves 1-2, 3-4, 5
+    assert [w.closed for w in _CountingWorker.instances] == [True, True, False]
+
+
+def test_the_worker_is_recycled_past_an_rss_ceiling(monkeypatch):
+    """
+    Given a worker whose resident memory has passed the ceiling,
+    When the next solve starts,
+    Then it is recycled even though its solve count is low.
+    """
+    from exozippy.gui import tune
+
+    _CountingWorker.instances = []
+    monkeypatch.setattr(tune, "_RECYCLE_AFTER_SOLVES", 100)
+    monkeypatch.setattr(tune, "_RECYCLE_RSS_MB", 1000.0)
+    monkeypatch.setattr(tune, "_worker_rss_mb", lambda worker: 2500.0)
+    session = tune.TuneSession(worker_factory=_CountingWorker)
+
+    session.solve({}, {}, None)
+    session.solve({}, {}, None)
+
+    assert len(_CountingWorker.instances) == 2
+
+
+def test_rss_is_unreadable_for_a_worker_with_no_process(monkeypatch):
+    """
+    Given a worker stub with no subprocess,
+    When its RSS is read,
+    Then None comes back and the solve-count trigger carries the policy alone.
+    """
+    from exozippy.gui import tune
+
+    assert tune._worker_rss_mb(_CountingWorker()) is None
