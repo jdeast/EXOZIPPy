@@ -215,4 +215,8 @@ def test_rm_ltt_off_reproduces_pre_ltt_output(tmp_path):
     _sys_off, model_off, point_off, calls_off = _build_with_spy(config, params)
     rv_off = _eval_at_point(calls_off[0][1], model_off, point_off)
 
-    np.testing.assert_array_equal(rv_reference, rv_off)
+    # rtol=1e-12/atol=1e-20: tight enough to catch a real discrepancy, loose
+    # enough to absorb last-bit floating-point rounding between platforms
+    # (observed ~2.5e-29 absolute on CI vs. exact equality on macOS -- same
+    # 15-sig-fig agreement, different BLAS/libm rounding, not a code bug).
+    np.testing.assert_allclose(rv_off, rv_reference, rtol=1e-12, atol=1e-20)

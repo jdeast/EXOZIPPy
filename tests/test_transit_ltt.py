@@ -265,7 +265,11 @@ def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
         system_off.transit._model_flux_node, model_off, point_off
     )
 
-    np.testing.assert_array_equal(mu_reference, mu_off)
+    # rtol=1e-12/atol=1e-20: tight enough to catch a real discrepancy, loose
+    # enough to absorb last-bit floating-point rounding between platforms
+    # (see test_rm_ltt.py's analogous fix -- CI hit ~2.5e-29 absolute there
+    # vs. exact equality on macOS, same 15-sig-fig agreement).
+    np.testing.assert_allclose(mu_off, mu_reference, rtol=1e-12, atol=1e-20)
 
 
 def _mixed_group_config(lc0, lc1):
