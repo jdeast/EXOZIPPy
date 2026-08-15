@@ -20,13 +20,6 @@ from . import physics
 class Transit(Instrument):
     prose_noun = "transit photometry"
 
-    # Light-travel-time (Roemer delay) is on by default for transit (see
-    # components/ltt.py); no config key exists yet (a later phase), so this
-    # is the ONE knob for now. A class attribute rather than a bare literal
-    # inside build_likelihood so tests can flip it (monkeypatch.setattr) to
-    # exercise the OFF code path without needing a config key.
-    _LIGHT_TRAVEL_TIME_ACTIVE = True
-
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Transit Parameters"
@@ -46,6 +39,16 @@ class Transit(Instrument):
         # SED depth-dilution node, built once by build_likelihood and
         # reused by compile_plotters.
         self._dilution_node = None
+        # Light-travel-time (Roemer delay) correction, per file (see
+        # components/ltt.py) -- on by default (Jason's decision: transit/rm/
+        # astrometry on, rv/mulens off; matches EXOFASTv2). Per-file, not a
+        # single component-wide flag, for consistency with every other
+        # per-file key (gp:, likelihood:, ninterp:, rm:) -- build_likelihood's
+        # group loop and compile_plotters both handle a group/instrument
+        # mix of on/off files (see the mask logic there).
+        self._light_travel_time_active = np.array(
+            [bool(c.get("light_travel_time", True)) for c in self.config]
+        )
 
     @property
     def prefix(self):
@@ -474,12 +477,8 @@ class Transit(Instrument):
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
 
-        # 2b. Light-travel-time (Roemer delay) inputs. Config-key gating
-        # (light_travel_time: on/off per component) is a later phase; for
-        # now this reads the class-level default (see _LIGHT_TRAVEL_TIME_
-        # ACTIVE) so the OFF code path (below) is exercised deliberately
-        # and stays byte-identical to pre-LTT behavior when it is False.
-        light_travel_time_active = self._LIGHT_TRAVEL_TIME_ACTIVE
+        # 2b. Light-travel-time (Roemer delay) inputs -- per-file gating via
+        # self._light_travel_time_active, resolved per group below.
         a_rel = orbits.a.value[planets.orbit_map][
             None, None, :
         ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
@@ -555,10 +554,18 @@ class Transit(Instrument):
             # Light-travel-time correction: the geometry (transit/eclipse
             # shape, and via planetvisible the thermal/reflect gating) and
             # reflection's own time reference both need the per-planet
-            # retarded time -- see components/ltt.py. Structured so LTT OFF
-            # costs nothing extra: t_grid_corrected is just t_grid and only
-            # the ONE Kepler solve below (unchanged from pre-LTT) runs.
-            if light_travel_time_active:
+            # retarded time -- see components/ltt.py. Per-file gate (this
+            # group's own rows may mix files that want it on and off, since
+            # groups are formed by ninterp value, not by file). Costs
+            # nothing extra when every row in the group is off (no
+            # ltt.retarded_time call, no pt.where); costs one extra Kepler
+            # solve, no pt.where, when every row is on (the default); costs
+            # one extra Kepler solve PLUS one pt.where only for a genuinely
+            # mixed group.
+            lt_active_rows = self._light_travel_time_active[
+                self.inst_map[rows]
+            ]  # (n_g,) bool, numpy -- known at graph-build time
+            if lt_active_rows.any():
                 t_grid_corrected, _ = ltt.retarded_time(
                     t_grid,
                     tp,
@@ -571,19 +578,35 @@ class Transit(Instrument):
                     factor=ltt_factor,
                     z0=0.0,
                 )
+                if lt_active_rows.all():
+                    t_grid_final = t_grid_corrected
+                else:
+                    # Both branches are ordinary, everywhere-finite time
+                    # values (no singularity like solve_delay's az=0
+                    # branch), so this pt.where carries none of the
+                    # where-trap risk that formula guarded against --
+                    # verified directly (not just asserted) by
+                    # tests/test_transit_ltt.py's
+                    # test_mixed_group_ltt_gradient_is_finite.
+                    lt_mask = pt.constant(
+                        lt_active_rows[:, None, None].astype("float64")
+                    )
+                    t_grid_final = pt.where(
+                        lt_mask > 0.5, t_grid_corrected, t_grid
+                    )
             else:
-                t_grid_corrected = t_grid
+                t_grid_final = t_grid
             # Broadcast to (n_g, k_g, N_planets) unconditionally (a no-op
-            # when LTT already produced that shape) so the per-planet slice
-            # below is safe regardless of light_travel_time_active or
-            # N_planets: with LTT off, t_grid_corrected's last dim is the
-            # unbroadcast size 1 from t_grid, and t_grid_corrected[:, :, p]
+            # when t_grid_final already has that shape) so the per-planet
+            # slice below is safe regardless of N_planets: with LTT off (or
+            # a face-value t_grid pass-through), the last dim is the
+            # unbroadcast size 1 from t_grid, and t_grid_final[:, :, p]
             # would index-error for any p > 0 without this.
-            time_g_corrected = t_grid_corrected + pt.zeros(
+            time_g_corrected = t_grid_final + pt.zeros(
                 (1, 1, planets.n_elements)
             )
 
-            M = (t_grid_corrected - tp) * n
+            M = (t_grid_final - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
@@ -840,7 +863,17 @@ class Transit(Instrument):
                 orbits.m_primary.value[planets.orbit_map]
                 / orbits.m_total.value[planets.orbit_map]
             )[None, :]
-            if self._LIGHT_TRAVEL_TIME_ACTIVE:
+            # inst_idx is SYMBOLIC here (this one compiled function is
+            # reused for every instrument), unlike build_likelihood's
+            # `rows`, which is known at graph-build time -- so a genuinely
+            # mixed per-file config can't be resolved with a Python if/else
+            # the way the group loop does; it needs a runtime lookup keyed
+            # on inst_idx. The all-off/all-on cases (including the default,
+            # all-on) still short-circuit in Python and pay no pt.where.
+            lt_active_arr = self._light_travel_time_active
+            if not lt_active_arr.any():
+                t_grid_final = t_grid
+            elif lt_active_arr.all():
                 t_grid_corrected, _ = ltt.retarded_time(
                     t_grid,
                     tp,
@@ -853,18 +886,34 @@ class Transit(Instrument):
                     factor=ltt_factor,
                     z0=0.0,
                 )
+                t_grid_final = t_grid_corrected
             else:
-                t_grid_corrected = t_grid
+                t_grid_corrected, _ = ltt.retarded_time(
+                    t_grid,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=ltt_factor,
+                    z0=0.0,
+                )
+                lt_active_scalar = pt.constant(
+                    lt_active_arr.astype("float64")
+                )[inst_idx]
+                t_grid_final = pt.where(
+                    lt_active_scalar > 0.5, t_grid_corrected, t_grid
+                )
             # Broadcast to (N_times, N_planets) unconditionally, same
-            # reasoning as build_likelihood's time_g_corrected: with LTT
-            # off, t_grid_corrected's last dim is the unbroadcast size 1
-            # from t_grid, and slicing [:, p_idx] for p_idx > 0 below would
-            # index-error without this.
-            time_corrected = t_grid_corrected + pt.zeros(
-                (1, planets.n_elements)
-            )
+            # reasoning as build_likelihood's time_g_corrected: t_grid_final's
+            # last dim may still be the unbroadcast size 1 from t_grid (the
+            # all-off case, or N_planets==1), and slicing [:, p_idx] for
+            # p_idx > 0 below would index-error without this.
+            time_corrected = t_grid_final + pt.zeros((1, planets.n_elements))
 
-            M = (t_grid_corrected - tp) * n
+            M = (t_grid_final - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             a_rstar = planets.ar.value[None, :]

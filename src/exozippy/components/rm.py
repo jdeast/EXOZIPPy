@@ -33,13 +33,6 @@ import pytensor.tensor as pt
 from . import ltt
 from .limbdark import quad_limb_darkened_flux
 
-# Light-travel-time (Roemer delay) is on by default for RM (see
-# components/ltt.py; the design doc's transit/RM-on, rv/mulens-off default).
-# rm.py is a stateless helper, not an instantiated Component, so this is a
-# module-level constant rather than a class attribute (mirrors Transit.
-# _LIGHT_TRAVEL_TIME_ACTIVE) -- temporary pending a real config key.
-_LIGHT_TRAVEL_TIME_ACTIVE = True
-
 
 # ==========================================================================
 # Differentiable Bessel J0  (Dong capsule; Numerical Recipes bessj0).
@@ -321,6 +314,7 @@ def compute_rm_rv(
     band_idx,
     n_sigma=201,
     model="hirano2011",
+    light_travel_time_active=True,
 ):
     """Assemble the RM RV distortion [m/s] for one orbit at ``time``.
 
@@ -335,6 +329,11 @@ def compute_rm_rv(
     ``model`` selects the kernel: ``hirano2011`` (default; the disk integral,
     rm_delta_v_core) or ``hirano2010`` (the fast closed-form series, uses only
     vsini + vbeta).  Both share the geometry (x, flux) computed here.
+
+    ``light_travel_time_active`` gates the Roemer-delay correction on the
+    true-anomaly seam only (see below) -- caller-supplied (from the
+    per-file ``rvinstrument`` ``light_travel_time:`` key, default True) since
+    this module has no per-instance state of its own.
     """
     orbit, star, planet, band = (
         system.orbit,
@@ -369,7 +368,7 @@ def compute_rm_rv(
     # via calc_arsun) -- NOT planet.ar (a/Rstar, dimensionless, already
     # pulled above as `ar` for the sky-plane geometry) -- using ar here would
     # be a silent factor-of-R* error in the delay (see components/ltt.py).
-    if _LIGHT_TRAVEL_TIME_ACTIVE:
+    if light_travel_time_active:
         tp = orbit.tp.value[orbit_idx]
         n = orbit.n.value[orbit_idx]
         sinw = orbit.sinw.value[orbit_idx]

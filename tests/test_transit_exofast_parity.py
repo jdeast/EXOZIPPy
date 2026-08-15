@@ -21,13 +21,11 @@ margin, still ~1e5x below the 1e-3 data errors of a typical light curve).
 
 import json
 import os
-from unittest import mock
 
 import numpy as np
 import pytensor
 import pytest
 
-from exozippy.components.transit.transit import Transit
 from exozippy.system import System
 
 _FIXTURE_PATH = os.path.join(
@@ -64,7 +62,7 @@ def _initial_point_fn(model, tensors):
     )
 
 
-def _build_parity(tmp_path_factory):
+def _build_parity(tmp_path_factory, light_travel_time=None):
     with open(_FIXTURE_PATH) as f:
         fix = json.load(f)
 
@@ -76,6 +74,9 @@ def _build_parity(tmp_path_factory):
     config["transit"][1]["file"] = _write_lc(
         d / "lc30min.dat", np.array(fix["smeared"]["time"])
     )
+    if light_travel_time is not None:
+        for entry in config["transit"]:
+            entry["light_travel_time"] = light_travel_time
 
     system = System(config, user_params=fix["user_params"])
     system.prepare()
@@ -103,8 +104,8 @@ def parity_no_ltt(tmp_path_factory):
     which shows up as an ingress/egress-weighted few-1e-4 relative
     discrepancy that is real physics, not a bug (confirmed: the shift
     matches this system's own a/c, and vanishes here). Disabling LTT here
-    (the same Transit._LIGHT_TRAVEL_TIME_ACTIVE monkeypatch the OFF-
-    equivalence test in test_transit_ltt.py uses) restores the
+    (light_travel_time: False set on both transit entries -- the real,
+    per-file config key, not a monkeypatched flag) restores the
     apples-to-apples EXOFASTv2-parity check on the SHARED transit physics
     (Kepler solve, limb darkening, geometry) that this fixture exists to
     pin. LTT's own correctness (the 499s/AU amplitude, the 2a/c secondary
@@ -113,8 +114,7 @@ def parity_no_ltt(tmp_path_factory):
     never meant to validate LTT, only the physics EXOFASTv2 and EXOZIPPy
     both implement.
     """
-    with mock.patch.object(Transit, "_LIGHT_TRAVEL_TIME_ACTIVE", False):
-        return _build_parity(tmp_path_factory)
+    return _build_parity(tmp_path_factory, light_travel_time=False)
 
 
 def test_derived_inputs_match_reference(parity):

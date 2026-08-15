@@ -37,15 +37,16 @@ def _write_two_row_rv(path):
     return str(path)
 
 
-def _rm_wiring_config(rv_file):
+def _rm_wiring_config(rv_file, light_travel_time=None):
+    entry = {"name": "TRES", "file": rv_file, "rm": "b", "rm_band": "TESS"}
+    if light_travel_time is not None:
+        entry["light_travel_time"] = light_travel_time
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b", "primary": ["A"], "companion": ["b"]}],
         "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
-        "rvinstrument": [
-            {"name": "TRES", "file": rv_file, "rm": "b", "rm_band": "TESS"}
-        ],
+        "rvinstrument": [entry],
     }
 
 
@@ -184,15 +185,17 @@ def test_rm_ltt_off_reproduces_pre_ltt_output(tmp_path):
     still uncommitted at that point; confirmed via grep at generation time
     to have no ltt/LIGHT_TRAVEL references), not a hand re-derivation of the
     geometry that could itself drift from what the real old code did,
-    When the SAME config/params (_rm_wiring_config/_rm_wiring_params) build
-    a model with the CURRENT compute_rm_rv, rm._LIGHT_TRAVEL_TIME_ACTIVE
-    monkeypatched to False,
+    When the SAME config/params (_rm_wiring_config/_rm_wiring_params, with
+    light_travel_time: False set on the rvinstrument file -- the real,
+    per-file config-key OFF path, not a monkeypatched flag) build a model
+    with the CURRENT compute_rm_rv,
     Then compute_rm_rv's own returned RM-anomaly tensor evaluates to the
     SAME array the fixture recorded, to floating-point precision --
     confirming the OFF branch is algebraically the pre-LTT computation (raw
     time straight into get_true_anomaly), not a second Kepler solve that
     happens to cancel out, and that no other line in compute_rm_rv shifted
-    underneath it.
+    underneath it. This is the backward-compat guard: with LTT off, the
+    model is byte-for-byte the pre-LTT one, config key or not.
 
     Deliberately does NOT read git history (unlike an earlier version of
     this test, which shelled out to `git show HEAD:...`): that pattern
@@ -202,17 +205,14 @@ def test_rm_ltt_off_reproduces_pre_ltt_output(tmp_path):
     fixture has no such expiry.
     """
     rv_file = _write_two_row_rv(tmp_path / "rv.dat")
-    config = _rm_wiring_config(rv_file)
+    config = _rm_wiring_config(rv_file, light_travel_time=False)
     params = _rm_wiring_params()
 
     with open(_FIXTURES_DIR / "rm_ltt_off_reference.json") as f:
         fixture = json.load(f)
     rv_reference = np.asarray(fixture["rm_rv"])
 
-    with mock.patch.object(rm, "_LIGHT_TRAVEL_TIME_ACTIVE", False):
-        _sys_off, model_off, point_off, calls_off = _build_with_spy(
-            config, params
-        )
+    _sys_off, model_off, point_off, calls_off = _build_with_spy(config, params)
     rv_off = _eval_at_point(calls_off[0][1], model_off, point_off)
 
     np.testing.assert_array_equal(rv_reference, rv_off)

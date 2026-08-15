@@ -11,12 +11,12 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pymc as pm
 import pytensor
 import pytest
 from exoplanet_core.pymc.ops import Kepler
 
 from exozippy.components import ltt
-from exozippy.components.transit.transit import Transit
 from exozippy.constants import C_LIGHT_RSUN_PER_DAY
 from exozippy.system import System
 
@@ -38,13 +38,16 @@ def _write_two_row_lc(path):
     return str(path)
 
 
-def _ltt_wiring_config(lc_file):
+def _ltt_wiring_config(lc_file, light_travel_time=None):
+    entry = {"name": "inst0", "file": lc_file, "band": "TESS"}
+    if light_travel_time is not None:
+        entry["light_travel_time"] = light_travel_time
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}],
         "orbit": [{"name": "b"}],
         "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
-        "transit": [{"name": "inst0", "file": lc_file, "band": "TESS"}],
+        "transit": [entry],
     }
 
 
@@ -179,29 +182,27 @@ def test_wired_ltt_delay_matches_a_over_c_through_real_accessors(tmp_path):
 
 def test_ltt_off_matches_pre_ltt_structure(tmp_path):
     """
-    Given the same system, but with Transit._LIGHT_TRAVEL_TIME_ACTIVE
-    monkeypatched to False (the OFF branch; no config key exists yet to
-    reach it through normal configuration),
+    Given the same system, but with light_travel_time: False set on the
+    transit file (the OFF branch, reached the real way now -- a per-file
+    config key, not a monkeypatched flag),
     When the model is built,
     Then ltt.retarded_time is never called and the transit flux node's
     graph contains exactly ONE Kepler-solve Apply node -- i.e. the OFF
     branch is algebraically the pre-LTT computation (M = (t_grid - tp) * n
     fed straight to the group loop's own, sole, Kepler solve), not a
     second solve that happens to cancel out. The same system built with
-    LTT ON is confirmed to contain exactly TWO (the delay solve plus the
-    corrected-time geometry solve), so this is a real structural
-    difference, not a vacuous count.
+    LTT ON (the default -- light_travel_time left unset) is confirmed to
+    contain exactly TWO (the delay solve plus the corrected-time geometry
+    solve), so this is a real structural difference, not a vacuous count.
     """
     lc = _write_two_row_lc(tmp_path / "lc.dat")
 
-    with (
-        mock.patch.object(Transit, "_LIGHT_TRAVEL_TIME_ACTIVE", False),
-        mock.patch(
-            "exozippy.components.transit.transit.ltt.retarded_time"
-        ) as off_spy,
-    ):
+    with mock.patch(
+        "exozippy.components.transit.transit.ltt.retarded_time"
+    ) as off_spy:
         system_off = System(
-            _ltt_wiring_config(lc), user_params=_ltt_wiring_params()
+            _ltt_wiring_config(lc, light_travel_time=False),
+            user_params=_ltt_wiring_params(),
         )
         system_off.prepare()
         system_off.build_model()
@@ -226,16 +227,18 @@ def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
     at generation time to have no ltt/LIGHT_TRAVEL references), not a hand
     reimplementation of the (fairly involved) group loop that could itself
     drift from what the real old code did,
-    When the SAME config/params (_ltt_wiring_config/_ltt_wiring_params)
-    build a model with the CURRENT Transit, _LIGHT_TRAVEL_TIME_ACTIVE
-    monkeypatched to False,
+    When the SAME config/params (_ltt_wiring_config/_ltt_wiring_params, with
+    light_travel_time: False set on the transit file -- the real, per-file
+    config-key OFF path, not a monkeypatched flag) build a model with the
+    CURRENT Transit,
     Then transit._model_flux_node evaluates to the SAME array the fixture
     recorded, to floating-point precision -- the structural "one Kepler
     solve, ltt never called" check in test_ltt_off_matches_pre_ltt_structure
     confirms the graph SHAPE didn't grow; this confirms the VALUES didn't
     move either, catching a stray bug in surrounding code (e.g. an
     accidental reorder of sin_i/cos_i, a mis-sliced index) that a shape-only
-    check would miss.
+    check would miss. This is the backward-compat guard: with LTT off, the
+    model is byte-for-byte the pre-LTT one, config key or not.
 
     Deliberately does NOT read git history (unlike an earlier version of
     this test, which shelled out to `git show HEAD:...` as its oracle): that
@@ -244,23 +247,115 @@ def test_ltt_off_build_likelihood_reproduces_pre_ltt_model_values(tmp_path):
     frozen fixture has no such expiry.
     """
     lc = _write_two_row_lc(tmp_path / "lc.dat")
-    config = _ltt_wiring_config(lc)
+    config = _ltt_wiring_config(lc, light_travel_time=False)
     params = _ltt_wiring_params()
 
     with open(_FIXTURES_DIR / "transit_ltt_off_reference.json") as f:
         fixture = json.load(f)
     mu_reference = np.asarray(fixture["model_flux"])
 
-    with mock.patch.object(Transit, "_LIGHT_TRAVEL_TIME_ACTIVE", False):
-        system_off = System(config, user_params=params)
-        system_off.prepare()
-        model_off = system_off.build_model()
-        with model_off:
-            point_off = system_off.get_internal_point(
-                model_off, system_off.get_raw_start(model_off)
-            )
-        mu_off = _eval_at_point(
-            system_off.transit._model_flux_node, model_off, point_off
+    system_off = System(config, user_params=params)
+    system_off.prepare()
+    model_off = system_off.build_model()
+    with model_off:
+        point_off = system_off.get_internal_point(
+            model_off, system_off.get_raw_start(model_off)
         )
+    mu_off = _eval_at_point(
+        system_off.transit._model_flux_node, model_off, point_off
+    )
 
     np.testing.assert_array_equal(mu_reference, mu_off)
+
+
+def _mixed_group_config(lc0, lc1):
+    """Two transit files sharing a band/orbit/planet, both default ninterp=1
+    (so _oversample_groups puts their rows in the SAME group) -- inst0 left
+    at the light_travel_time default (True), inst1 explicitly False. This is
+    the genuinely-mixed case the group loop's pt.where branch exists for.
+    """
+    return {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "band": [{"name": "TESS", "filter": "TESS", "ld_law": "quadratic"}],
+        "transit": [
+            {"name": "inst0", "file": lc0, "band": "TESS"},
+            {
+                "name": "inst1",
+                "file": lc1,
+                "band": "TESS",
+                "light_travel_time": False,
+            },
+        ],
+    }
+
+
+def test_mixed_group_ltt_gradient_is_finite(tmp_path):
+    """
+    Given two transit files in the SAME oversample group (both ninterp=1,
+    the default) but DIFFERENT light_travel_time settings -- inst0 on,
+    inst1 off -- so the group loop must take its pt.where(lt_mask, ...)
+    branch (test_ltt_off_matches_pre_ltt_structure's all-on/all-off cases
+    never exercise this line at all),
+    When the model's logp and its gradient are evaluated at the initial
+    point, and a short NUTS chain is sampled with nuts_sampler="numpyro",
+    Then both are finite throughout.
+
+    This is a real check, not an assumption: the where-trap risk this
+    pt.where COULD carry is that pytensor differentiates BOTH branches even
+    where only one is selected, so if either branch had a singularity (like
+    solve_delay's az=0 quadratic branch, which needed az_safe specifically
+    because of this), the discarded branch's bad gradient can poison the
+    selected one. Here both branches are just t_grid_corrected and t_grid --
+    ordinary, everywhere-finite time arrays with no division, sqrt, or log
+    anywhere near them -- so there is no candidate singularity for either
+    branch to carry. This test confirms that holds in practice rather than
+    asserting it from the formula alone.
+    """
+    lc0 = _write_two_row_lc(tmp_path / "lc0.dat")
+    lc1 = _write_two_row_lc(tmp_path / "lc1.dat")
+    config = _mixed_group_config(lc0, lc1)
+    params = _ltt_wiring_params()
+
+    with mock.patch(
+        "exozippy.components.transit.transit.ltt.retarded_time",
+        side_effect=ltt.retarded_time,
+    ) as spy:
+        system = System(config, user_params=params)
+        system.prepare()
+        model = system.build_model()
+        # One call for the (single, shared) oversample group in
+        # build_likelihood, one for compile_plotters -- confirms the mixed
+        # group actually took the "any() but not all()" branch and called
+        # ltt.retarded_time at all (a bug that skipped the correction
+        # entirely for a mixed group would also show 0 calls here).
+        assert spy.call_count == 2
+
+    assert _count_kepler_solves(system.transit._model_flux_node) == 2
+
+    with model:
+        point = model.initial_point()
+        logp_val = model.compile_logp()(point)
+        grad_val = model.compile_dlogp()(point)
+
+    assert np.isfinite(logp_val), f"non-finite logp: {logp_val}"
+    assert np.all(np.isfinite(grad_val)), (
+        f"non-finite gradient in mixed-group pt.where: {grad_val}"
+    )
+
+    with model:
+        idata = pm.sample(
+            draws=25,
+            tune=25,
+            chains=1,
+            cores=1,
+            nuts_sampler="numpyro",
+            progressbar=False,
+            random_seed=0,
+        )
+
+    for var in idata.posterior.data_vars:
+        assert np.all(np.isfinite(idata.posterior[var].values)), (
+            f"non-finite draws for {var}"
+        )
