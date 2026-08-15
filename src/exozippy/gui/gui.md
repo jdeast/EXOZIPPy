@@ -207,12 +207,20 @@ Core (G7):
   if present, must be loopback (WebSocket handshakes bypass CORS entirely, so
   any page the user visits could otherwise open this socket against the
   loopback server), and `file` must lie inside the open project, the open
-  document's directory, or the active run's cwd. The handler races its poll
-  loop against `websocket.receive()`, so a tail on a QUIET file ends when the
-  client goes away instead of looping forever on an open handle. Content the
-  seed tail already sent is skipped once; every later reopen (rotation or
-  truncation) streams the new file from its start. Covered by
-  `tests/test_gui_logs.py`.
+  document's directory, or the active run's cwd. **The client read IS the
+  poll sleep**: each idle interval is spent awaiting `websocket.receive()`
+  rather than `asyncio.sleep`, so a disconnect ends the loop on the turn it
+  arrives. Without reading at all, a disconnect was only noticed on the next
+  SEND, so a tail on a QUIET file looped forever holding a handle -- one
+  immortal poller per file switch, since `LogTerminal` opens a fresh socket
+  each time. Watching in a second task fixes that too but needs several turns
+  to wind down, which loses a race against the test harness's portal teardown
+  (seen only on the macOS runner); one task returns directly. The receive
+  future is created once and re-awaited, never cancelled and remade, since
+  cancelling a half-completed receive is where the disconnect frame itself
+  could go missing. Content the seed tail already sent is skipped once; every
+  later reopen (rotation or truncation) streams the new file from its start.
+  Covered by `tests/test_gui_logs.py`.
 
 Config document (G8): `POST /api/doc/open`, `GET /api/doc`,
 `POST /api/doc/{command,undo,redo,save}`, `POST /api/doc/validate`

@@ -303,23 +303,37 @@ def _origin_is_local(origin):
     return host in ("127.0.0.1", "localhost", "::1")
 
 
-async def _await_disconnect(websocket):
-    """Return when the client goes away (the only reason we read at all).
+async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
+    """Stream a growing log file over a WebSocket, following rotation.
 
-    Without this the tail loop below only notices a disconnect when it next
-    tries to SEND, so a tail on a quiet file -- a finished run's log, a file
-    that never appears -- looped stat+sleep forever holding an open file
-    handle. ``LogTerminal`` opens a fresh socket per file switch, so those
-    accumulate one immortal poller per switch for the life of the server.
+    Sends the last ``from_lines`` lines on connect, then polls for appended
+    content. If the file shrinks (truncation) or its inode changes (rotation),
+    reopens and streams the new file from its start. Runs until the client
+    disconnects.
+
+    **The client read is the sleep.** The poll interval is spent waiting on
+    ``websocket.receive()`` rather than on ``asyncio.sleep``, so a disconnect
+    ends the loop on the turn it arrives. Two failure modes hang on that
+    detail:
+
+    * Without reading at all, a disconnect is only discovered on the next
+      SEND, so a tail on a QUIET file -- a finished run's log, a file that
+      never appears -- looped stat+sleep forever holding an open file handle.
+      ``LogTerminal`` opens a fresh socket per file switch, so those
+      accumulate one immortal poller per switch for the life of the server.
+    * Watching for the disconnect in a SECOND task works too, but then the
+      handler needs several event-loop turns to wind down (cancel the sibling,
+      gather it, return). That is enough to lose a race against a test
+      harness's portal teardown -- observed only on the slower macOS runner.
+      One task, and the loop returns directly.
+
+    The receive future is created once and re-awaited across iterations rather
+    than being cancelled and remade each poll: cancelling a half-completed
+    receive is where a frame -- including the disconnect itself -- could go
+    missing.
     """
-    while True:
-        message = await websocket.receive()
-        if message.get("type") == "websocket.disconnect":
-            return
+    path = Path(file_path)
 
-
-async def _tail_loop(websocket, path, from_lines, poll_s):
-    """Send the tail, then stream appended content, following rotation."""
     # Seed with the tail so the user sees recent history immediately. Whether
     # the file existed AT THAT MOMENT decides where the first open starts.
     seeded = path.exists()
@@ -329,6 +343,7 @@ async def _tail_loop(websocket, path, from_lines, poll_s):
     fh = None
     inode = None
     skip_seeded_tail = seeded
+    recv = asyncio.ensure_future(websocket.receive())
     try:
         while True:
             try:
@@ -361,45 +376,22 @@ async def _tail_loop(websocket, path, from_lines, poll_s):
                 # File not created yet (or mid-rotation); wait and retry.
                 fh = None
                 inode = None
-            await asyncio.sleep(poll_s)
+            # No new data: spend the poll interval waiting on the client.
+            done, _pending = await asyncio.wait({recv}, timeout=poll_s)
+            if not done:
+                continue
+            try:
+                message = recv.result()
+            except Exception:  # noqa: BLE001 - a dead socket ends the tail
+                return
+            if message.get("type") == "websocket.disconnect":
+                return
+            # Client chatter (this endpoint has no commands): keep listening.
+            recv = asyncio.ensure_future(websocket.receive())
     finally:
+        recv.cancel()
         if fh is not None:
             fh.close()
-
-
-async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
-    """Stream a growing log file over a WebSocket, following rotation.
-
-    Sends the last ``from_lines`` lines on connect, then polls for appended
-    content. Runs until the client disconnects -- which is watched for
-    concurrently rather than discovered on the next send, so a quiet file does
-    not leave an immortal poller behind.
-    """
-    from fastapi import WebSocketDisconnect
-
-    path = Path(file_path)
-    tail = asyncio.ensure_future(
-        _tail_loop(websocket, path, from_lines, poll_s)
-    )
-    watch = asyncio.ensure_future(_await_disconnect(websocket))
-    try:
-        done, pending = await asyncio.wait(
-            {tail, watch}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            exc = task.exception()
-            # A disconnect is the expected end of both halves, not an error.
-            if exc is not None and not isinstance(
-                exc, (WebSocketDisconnect, RuntimeError)
-            ):
-                raise exc
-    finally:
-        for task in (tail, watch):
-            if not task.done():
-                task.cancel()
 
 
 # --- run controls (G11) -------------------------------------------------------

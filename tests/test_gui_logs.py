@@ -14,6 +14,7 @@ precisely what the disconnect fix is about.
 """
 
 import asyncio
+import contextlib
 import time
 
 import pytest
@@ -206,6 +207,29 @@ def project_client(tmp_path):
     return client
 
 
+@contextlib.contextmanager
+def _open_tail(client, url, **kwargs):
+    """Open the log socket and tolerate the TestClient's teardown race.
+
+    ``WebSocketTestSession.__exit__`` sends the close frame and then STOPS THE
+    PORTAL, cancelling the app task if it has not yet processed the
+    disconnect, and re-raises that cancellation at exit. That is a property of
+    the harness's teardown, not of the endpoint -- a real server simply waits
+    for the handler to return -- and it is timing-dependent: it showed up only
+    on the slower macOS CI runner. Every assertion runs before teardown, so
+    suppressing it there hides nothing. The handler's own "does it stop when
+    the client goes away" contract is pinned by the fake-socket tests above,
+    which assert the coroutine RETURNS.
+    """
+    session = client.websocket_connect(url, **kwargs)
+    socket = session.__enter__()
+    try:
+        yield socket
+    finally:
+        with contextlib.suppress(BaseException):
+            session.__exit__(None, None, None)
+
+
 def test_logs_socket_streams_a_file_inside_the_project(
     project_client, tmp_path
 ):
@@ -217,7 +241,7 @@ def test_logs_socket_streams_a_file_inside_the_project(
     log = tmp_path / "fit.log"
     log.write_text("hello\n")
 
-    with project_client.websocket_connect(f"/api/logs?file={log}") as socket:
+    with _open_tail(project_client, f"/api/logs?file={log}") as socket:
         assert socket.receive_text() == "hello"
 
 
@@ -236,9 +260,7 @@ def test_logs_socket_refuses_a_file_outside_the_project(
     outside = tmp_path.parent / "outside-the-project.txt"
     outside.write_text("secret\n")
     try:
-        with project_client.websocket_connect(
-            f"/api/logs?file={outside}"
-        ) as socket:
+        with _open_tail(project_client, f"/api/logs?file={outside}") as socket:
             message = socket.receive_text()
         assert "refusing" in message
         assert "secret" not in message
@@ -276,7 +298,8 @@ def test_logs_socket_allows_a_localhost_origin(project_client, tmp_path):
     log = tmp_path / "fit.log"
     log.write_text("hello\n")
 
-    with project_client.websocket_connect(
+    with _open_tail(
+        project_client,
         f"/api/logs?file={log}",
         headers={"origin": "http://127.0.0.1:8931"},
     ) as socket:
