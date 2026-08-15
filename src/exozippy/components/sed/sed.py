@@ -17,6 +17,7 @@ from matplotlib.lines import Line2D
 from exozippy.components.component import Component
 from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
+from exozippy.outputs.prose import get_collector
 
 from ..star.physics import calc_logg_from_logmass, calc_luminosity
 
@@ -123,25 +124,27 @@ class SED(Component):
         # the plot compiler, and the cross-component predict_* API.
         self._m_pred_matrix = None
 
-        # Grid-axis caches, filled by _inject_grid_bounds below.
+        # Grid-axis caches, filled by _inject_grid_bounds below, which
+        # puts ALL FOUR of the BC grid's axes onto star Parameters
+        # through the override channel: teffsed, feh and av are sampled,
+        # so their grid extents are hard bounds the logit transform
+        # cannot leave, and loggsed is derived, so its grid extent is a
+        # soft barrier (steepness measured by
+        # whitening.measure_barrier_scales; pinnable with bound_scale).
         #
-        # NOTHING READS THEM YET. The (logg_min, logg_max) range they
-        # carry was meant to feed a soft potential on the inline loggsed
-        # expression, and that potential was never written:
-        # build_likelihood adds only the teffsed and fbolsed floor
-        # priors. The gap it was meant to close is real. teffsed, feh
-        # and av are held inside the BC grid by _inject_grid_bounds
-        # below, but loggsed is not a named star Parameter -- it is
-        # reconstructed inline from (star.logmass, star.radiussed) in
-        # _predicted_appmag_node -- so there is nothing for the override
-        # channel to bound, and bounding its two inputs separately does
-        # not bound their combination. A draw whose loggsed leaves the
-        # grid (NextGen: 0.0 to 5.0 dex) is therefore linearly
-        # EXTRAPOLATED off the edge cell rather than penalized:
-        # RegularGridInterpolator is built below with fill_value=None,
-        # so it computes out_of_bounds and then discards it. Keep these
-        # caches; add the potential (or a potentials.soft_*_bound on
-        # loggsed) when someone gets to it.
+        # The loggsed half is why star.loggsed exists as a Parameter at
+        # all. It used to be reconstructed inline from (star.logmass,
+        # star.radiussed) inside _predicted_appmag_node, so there was
+        # nothing for the override channel to bound -- and bounding its
+        # two inputs separately does NOT bound their combination, which
+        # is what loggsed is. A draw whose loggsed left the grid
+        # (NextGen: 0.0 to 5.0 dex) was therefore linearly EXTRAPOLATED
+        # off the edge cell rather than penalized, because
+        # RegularGridInterpolator is built below with fill_value=None
+        # and so computes out_of_bounds and then discards it. The
+        # extrapolation is still what the interpolator returns -- the
+        # barrier supplies the restoring force that keeps the sampler
+        # from living out there, which a NaN or a -inf wall could not.
         self.grid_axes = [None]
         self._inject_grid_bounds()
 
@@ -185,6 +188,18 @@ class SED(Component):
     #   The third line is what the old `setdefault` could never do -- it saw
     #   the user's key, left it alone, and never applied the grid bound at
     #   all -- so this comment was wrong from the day it was written.
+    #
+    # Why loggsed is here too, and why it behaves differently:
+    #   teffsed, feh and av are SAMPLED, so two finite bounds put them on
+    #   the logit transform and the grid extent is their exact support --
+    #   they cannot leave the grid at all.  loggsed is DERIVED
+    #   (calc_logg_from_logmass on logmass and radiussed), so the same
+    #   bound becomes a soft barrier: ~0 well inside the grid, growing
+    #   linearly outside, with the steepness measured at startup
+    #   (whitening.measure_barrier_scales) rather than hand-tuned.  That
+    #   is the right shape for it -- the interpolator does not go NaN off
+    #   its edge, it extrapolates off the edge cell, so what was missing
+    #   was never a wall but a restoring force.
     # ------------------------------------------------------------------
     def _inject_grid_bounds(self):
 
@@ -210,6 +225,8 @@ class SED(Component):
 
         teff_lo = float(axes["teff_pts"].min())
         teff_hi = float(axes["teff_pts"].max())
+        logg_lo = float(axes["logg_pts"].min())
+        logg_hi = float(axes["logg_pts"].max())
         feh_lo = float(axes["feh_pts"].min())
         feh_hi = float(axes["feh_pts"].max())
         av_lo = float(axes["av_pts"].min())
@@ -217,6 +234,7 @@ class SED(Component):
 
         overrides = {
             "star.teffsed": {"lower": teff_lo, "upper": teff_hi},
+            "star.loggsed": {"lower": logg_lo, "upper": logg_hi},
             "star.feh": {"lower": feh_lo, "upper": feh_hi},
             "star.av": {"lower": av_lo, "upper": av_hi},
         }
@@ -614,6 +632,7 @@ class SED(Component):
         "teffsed",
         "radiussed",
         "logmass",
+        "loggsed",
         "feh",
         "av",
         "distance",
@@ -645,13 +664,17 @@ class SED(Component):
         star = system.star
         teffsed = star.teffsed.value  # K,        (nstars,)
         radiussed = star.radiussed.value  # R_sun,    (nstars,)
-        logmass = star.logmass.value  # dex(M_sun)
         feh = star.feh.value  # dex
         av = star.av.value  # mag
         distance = star.distance.value  # pc
 
-        # Reconstruct loggsed from logmass + radiussed (NOT radius).
-        loggsed = calc_logg_from_logmass(logmass, radiussed)
+        # loggsed is derived from logmass + radiussed (NOT radius) by the
+        # star component.  Read the Parameter rather than recomputing the
+        # expression here: the grid's logg extent is a soft bound ON THAT
+        # PARAMETER (_inject_grid_bounds), so the quantity the barrier
+        # restrains and the quantity the interpolator is handed have to be
+        # the same node.
+        loggsed = star.loggsed.value  # dex(cm/s2)
 
         # RegularGridInterpolator.evaluate expects shape (ntest, ndim).
         coords = pt.stack([teffsed, loggsed, feh, av], axis=-1)  # (nstars, 4)
@@ -785,6 +808,150 @@ class SED(Component):
             ),
         )
 
+        self._declare_grid_support(system)
+
+    # ------------------------------------------------------------------
+    # The BC grid's support, as the reports see it.
+    #
+    # Three of the four grid axes are sampled star Parameters whose grid
+    # extent IS their support (the logit transform), so "U(lo, hi)" is a
+    # true statement about them and nothing needs declaring.  loggsed is
+    # derived, so its grid extent is a soft barrier that
+    # Parameter.build_pymc adds generically -- and _own_prior_str reports
+    # a derived parameter carrying two finite bounds as "U(lo, hi)",
+    # which is exactly the prior a barrier is NOT.  The barrier is added
+    # by parameter.py rather than here, but the reason it exists is this
+    # component's, so this component declares it (see CLAUDE.md,
+    # "Reporting component-added priors").
+    #
+    # The same pass is where an off-grid START is reported.  It has to be
+    # a warning and not a raise: the interpolator extrapolates rather
+    # than failing there, so such a fit HAS been running -- refusing it
+    # now would break configs that produced published numbers, and the
+    # barrier will pull the chain back on-grid by itself.  The message
+    # names the star, the value, the grid and the two real remedies,
+    # because "your star is off the grid" is a statement about the model
+    # grid's coverage, not about a typo in the params file.
+    # ------------------------------------------------------------------
+    def _declare_grid_support(self, system):
+        from ...outputs.texutils import latex_escape
+
+        axes = self.grid_axes
+        if not isinstance(axes, dict) or "logg_pts" not in axes:
+            return
+        star = getattr(system, "star", None)
+        loggsed = getattr(star, "loggsed", None)
+        if not isinstance(loggsed, Parameter):
+            return
+
+        lo = float(axes["logg_pts"].min())
+        hi = float(axes["logg_pts"].max())
+
+        loggsed.add_prior_contribution(
+            latex=(
+                rf"soft bound to the {latex_escape(self.sedmodel)} "
+                rf"bolometric-correction grid"
+            ),
+            text=f"soft bound to the {self.sedmodel} BC grid",
+            supersedes_bounds=True,
+            # NOT the default "normalized on": this is a barrier at the
+            # interval's edges, not a density over it.
+            support_phrase="whose logg support is",
+        )
+        get_collector(system).add(
+            r"The bolometric corrections are interpolated on a regular "
+            r"grid in effective temperature, surface gravity, metallicity "
+            r"and extinction; each star is held inside that grid's "
+            r"support, the first, third and fourth as hard bounds on the "
+            r"sampled parameters and the surface gravity -- which is "
+            r"derived from the mass and radius, so that bounding its "
+            r"inputs would not bound it -- as a soft barrier at the grid "
+            r"edge.",
+            section="priors",
+            key=f"{self.prefix}.bc_grid_support",
+            rank=20,
+        )
+
+        # loggsed is DERIVED, so it has no initval of its own -- its start
+        # is its expression evaluated at its inputs' starts.  Evaluate the
+        # registered physics function on those (in internal units, which
+        # for both inputs are their user units) rather than open-coding
+        # LOGG_CONST + logmass - 2*log10(radiussed) a second time.
+        try:
+            start = np.atleast_1d(
+                calc_logg_from_logmass(
+                    np.asarray(star.logmass.initval, dtype=float),
+                    np.asarray(star.radiussed.initval, dtype=float),
+                ).eval()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"SED: could not evaluate the loggsed start: {exc}")
+            return
+        names = list(getattr(star, "names", []) or [])
+        scales = np.atleast_1d(
+            np.asarray(
+                loggsed.bound_scale
+                if loggsed.bound_scale is not None
+                else np.nan,
+                dtype=float,
+            )
+        )
+        for i, val in enumerate(start):
+            if not np.isfinite(val) or lo <= val <= hi:
+                continue
+            label = names[i] if i < len(names) else str(i)
+            scale = scales[i] if i < scales.size else scales[0]
+            logger.warning(
+                f"SED: star '{label}' starts at loggsed = {val:.4f} "
+                f"dex(cm/s2), OUTSIDE the {self.sedmodel} bolometric-"
+                f"correction grid's logg axis [{lo:g}, {hi:g}]. The "
+                f"interpolator EXTRAPOLATES off its edge cell there, so "
+                f"this star's bolometric corrections are NOT measured "
+                f"quantities -- they are the edge cell's slope carried "
+                f"outward. " + self._barrier_advice(label, val, lo, hi, scale)
+            )
+
+    # The second half of the off-grid warning: what the barrier will do
+    # about it.  Split out because the two cases say opposite things and
+    # BOTH have to be true statements -- a message that still described a
+    # measured, effectively-clamping barrier after the user had softened
+    # it with bound_scale would be exactly the kind of stale advice that
+    # teaches people to stop reading warnings.  Note the notice itself is
+    # NOT conditional on the barrier: it keys on the VALUE being off the
+    # grid, so softening the barrier can never silence it.
+    @staticmethod
+    def _barrier_advice(label, val, lo, hi, scale):
+        edge = hi if val > hi else lo
+        if np.isfinite(scale) and scale > 0:
+            # potentials.soft_*_bound: steepness = 4.4 / (scale * softness),
+            # softness = 0.01, and the penalty is log(sigmoid(arg)).
+            steep = 4.4 / (scale * 0.01)
+            arg = -abs(val - edge) * steep
+            penalty = arg - np.log1p(np.exp(arg)) if arg < 0 else -np.log(2.0)
+            return (
+                f"The soft bound on star.{label}.loggsed has been "
+                f"DELIBERATELY WIDENED (bound_scale = {scale:g} dex -> "
+                f"transition width {0.01 * scale:g} dex, slope {steep:g} "
+                f"nats per dex), so this start is admitted at a cost of "
+                f"{-penalty:.2f} nats rather than pulled back to the edge. "
+                f"That is a choice to accept an extrapolated bolometric "
+                f"correction; the restoring force still grows with the "
+                f"excursion. Treat the resulting corrections accordingly."
+            )
+        return (
+            f"The soft bound on star.{label}.loggsed will pull the chain "
+            f"back onto the grid, and its steepness is measured "
+            f"(transition width 1% of loggsed's own posterior width), so a "
+            f"start this far out is effectively clamped to the edge. If "
+            f"the star genuinely lives off this grid, either use a BC "
+            f"model whose logg axis covers it (the .sed file's 'model:' "
+            f"key) or widen the barrier in your params file -- "
+            f"star.{label}.loggsed: {{bound_scale: X}} in dex, which sets "
+            f"the transition width to 0.01*X and the slope to 4.4/(0.01*X) "
+            f"nats per dex -- and treat the resulting bolometric "
+            f"corrections as extrapolated."
+        )
+
     # ------------------------------------------------------------------
     # 6) compile_plotters — stash the compiled pytensor functions we
     #    need to evaluate the model at arbitrary MCMC draws. For SED
@@ -804,9 +971,7 @@ class SED(Component):
         #   _compiled_combined_mag   : (nfilters,) blended/diff row mags
         #   _compiled_logg_calc      : (nstars,) loggsed
         m_star_node = self._predicted_appmag_node(system)[:, : self.nfilters]
-        loggsed_node = calc_logg_from_logmass(
-            star.logmass.value, star.radiussed.value
-        )
+        loggsed_node = star.loggsed.value
 
         # Retain a symbolic model node so plot_data can derive param_deps
         # (graph walk) and hand G5 the tensors behind the model traces.
