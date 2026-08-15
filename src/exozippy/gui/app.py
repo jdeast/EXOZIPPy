@@ -54,9 +54,9 @@ import sys
 import threading
 import uuid
 import webbrowser
-from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -101,7 +101,9 @@ def _require_fastapi():
 # --- project directory listing ------------------------------------------------
 
 
-@lru_cache(maxsize=1)
+_CONFIG_TOP_KEYS = None
+
+
 def _config_top_keys():
     """Top-level YAML keys that mark a file as a system config.
 
@@ -111,7 +113,15 @@ def _config_top_keys():
     no component name is hardcoded; discovery imports the component stack, so it
     is cached and done at most once per process. The literal fallbacks cover the
     case where introspection is unavailable in a lightweight context.
+
+    The cache is written only on SUCCESS, deliberately: an ``@lru_cache`` here
+    froze the four-key literal fallback for the whole process lifetime after
+    one transient import failure, and every config in the project then
+    classified as "other" with no way to recover short of a restart.
     """
+    global _CONFIG_TOP_KEYS
+    if _CONFIG_TOP_KEYS is not None:
+        return _CONFIG_TOP_KEYS
     keys = {"run", "prefix", "logger_level", "sampler", "parameter_file"}
     try:
         from ..introspect import _global_schema, list_components
@@ -119,11 +129,27 @@ def _config_top_keys():
         keys.update(list_components().keys())
         keys.update(_global_schema().keys())
     except Exception:  # pragma: no cover - defensive; fall back to literals
-        pass
+        return keys  # degraded answer: usable now, never remembered
+    _CONFIG_TOP_KEYS = keys
     return keys
 
 
-def _classify_yaml(path):
+# Above this size a .yaml file is not a config or a params file by any
+# plausible reading, and parsing it would stall the project listing (which
+# classifies every YAML in the directory). Fall back to the naming convention.
+_YAML_PARSE_MAX_BYTES = 4 * 1024 * 1024
+
+# (path, mtime_ns, size) -> classification. Project open re-reads every YAML in
+# the directory on every switch; the identity triple invalidates itself the
+# moment a file is edited, so a memo is safe and the repeat opens are free.
+_CLASSIFY_CACHE = {}
+_CLASSIFY_CACHE_MAX = 512
+
+# Ceiling on retained background-validation jobs (see doc_validate).
+_MAX_VALIDATE_JOBS = 32
+
+
+def _classify_yaml_uncached(path, size):
     """Classify a YAML file by its content: 'params', 'config', or 'other'.
 
     Filename conventions alone are unreliable (kelt4.params.3.yaml is a params
@@ -138,15 +164,24 @@ def _classify_yaml(path):
       * anything else (a component's own input file like kelt4.sed.yaml, or
         arbitrary YAML)  -> 'other'
 
-    Unreadable/invalid YAML falls back to the suffix convention so a broken file
-    still lands somewhere sensible.
+    A file with NO content to read falls back to the suffix convention:
+    unreadable/invalid YAML, one past the parse size cap, and -- the case that
+    used to be wrong -- an empty or comment-only file, which parses cleanly to
+    ``None`` and so had no keys to match. That landed a freshly created
+    template in "other", where the config picker cannot see it at all, which is
+    exactly when a user needs to select it.
     """
     name = path.name.lower()
+    by_suffix = "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+    if size is not None and size > _YAML_PARSE_MAX_BYTES:
+        return by_suffix
     try:
         with open(path, "r") as fh:
             data = yaml.safe_load(fh)
     except Exception:
-        return "params" if name.endswith(_PARAMS_SUFFIXES) else "config"
+        return by_suffix
+    if data is None:
+        return by_suffix
 
     keys = (
         [k for k in data if isinstance(k, str)]
@@ -160,6 +195,26 @@ def _classify_yaml(path):
     if _config_top_keys().intersection(keys):
         return "config"
     return "other"
+
+
+def _classify_yaml(path):
+    """``_classify_yaml_uncached`` memoized on (path, mtime, size)."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        size = st.st_size
+    except OSError:
+        key, size = None, None
+    if key is not None:
+        cached = _CLASSIFY_CACHE.get(key)
+        if cached is not None:
+            return cached
+    kind = _classify_yaml_uncached(path, size)
+    if key is not None:
+        if len(_CLASSIFY_CACHE) >= _CLASSIFY_CACHE_MAX:
+            _CLASSIFY_CACHE.clear()
+        _CLASSIFY_CACHE[key] = kind
+    return kind
 
 
 def open_project(path):
@@ -196,9 +251,12 @@ def open_project(path):
         if suffix in (".yaml", ".yml"):
             kind = _classify_yaml(child)
             entry["kind"] = kind
-            {"params": params, "config": configs}.get(kind, other).append(
-                entry
-            )
+            if kind == "params":
+                params.append(entry)
+            elif kind == "config":
+                configs.append(entry)
+            else:
+                other.append(entry)
         elif suffix in _DATA_EXTS:
             entry["kind"] = "data"
             data_files.append(entry)
@@ -227,23 +285,50 @@ def _read_last_lines(path, n):
         return []
 
 
-async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
-    """Stream a growing log file over a WebSocket, following rotation.
+def _origin_is_local(origin):
+    """Whether a WebSocket handshake ``Origin`` may open a log tail.
 
-    Sends the last ``from_lines`` lines on connect, then polls for appended
-    content. If the file shrinks (truncation) or its inode changes (rotation),
-    reopens from the start. Runs until the client disconnects.
+    WebSocket handshakes are NOT subject to CORS, so without this any web page
+    the user happens to visit could open ``ws://127.0.0.1:<port>/api/logs`` and
+    read back whatever it streams. A missing Origin is allowed: browsers always
+    send one on a WS handshake, so an absent header means a non-browser client
+    (curl, the test client, a script), which was never the threat.
     """
-    from fastapi import WebSocketDisconnect
+    if not origin:
+        return True
+    try:
+        host = urlsplit(origin).hostname
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
 
-    path = Path(file_path)
 
-    # Seed with the tail so the user sees recent history immediately.
+async def _await_disconnect(websocket):
+    """Return when the client goes away (the only reason we read at all).
+
+    Without this the tail loop below only notices a disconnect when it next
+    tries to SEND, so a tail on a quiet file -- a finished run's log, a file
+    that never appears -- looped stat+sleep forever holding an open file
+    handle. ``LogTerminal`` opens a fresh socket per file switch, so those
+    accumulate one immortal poller per switch for the life of the server.
+    """
+    while True:
+        message = await websocket.receive()
+        if message.get("type") == "websocket.disconnect":
+            return
+
+
+async def _tail_loop(websocket, path, from_lines, poll_s):
+    """Send the tail, then stream appended content, following rotation."""
+    # Seed with the tail so the user sees recent history immediately. Whether
+    # the file existed AT THAT MOMENT decides where the first open starts.
+    seeded = path.exists()
     for line in _read_last_lines(path, from_lines):
         await websocket.send_text(line.rstrip("\n"))
 
     fh = None
     inode = None
+    skip_seeded_tail = seeded
     try:
         while True:
             try:
@@ -257,9 +342,17 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
                         fh.close()
                     fh = open(path, "r", errors="replace")
                     inode = st.st_ino
-                    # On a fresh open after seeding, jump to the end so we do
-                    # not resend the tail we already sent.
-                    fh.seek(0, os.SEEK_END)
+                    if skip_seeded_tail:
+                        # The only open whose content we have already sent.
+                        fh.seek(0, os.SEEK_END)
+                        skip_seeded_tail = False
+                    # Every LATER (re)open is a rotation or a truncation: the
+                    # file under us is a different or restarted one, so its
+                    # content is new and streams from the start -- which is
+                    # what "follows rotation" has always claimed and what
+                    # an unconditional seek-to-end quietly did not do. Same
+                    # for a file that did not exist at connect time: its first
+                    # lines are content, not history we already sent.
                 line = fh.readline()
                 if line:
                     await websocket.send_text(line.rstrip("\n"))
@@ -268,13 +361,45 @@ async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
                 # File not created yet (or mid-rotation); wait and retry.
                 fh = None
                 inode = None
-            # No new data -- yield, and let a client disconnect surface.
             await asyncio.sleep(poll_s)
-    except WebSocketDisconnect:
-        pass
     finally:
         if fh is not None:
             fh.close()
+
+
+async def _tail_log(websocket, file_path, from_lines=200, poll_s=0.5):
+    """Stream a growing log file over a WebSocket, following rotation.
+
+    Sends the last ``from_lines`` lines on connect, then polls for appended
+    content. Runs until the client disconnects -- which is watched for
+    concurrently rather than discovered on the next send, so a quiet file does
+    not leave an immortal poller behind.
+    """
+    from fastapi import WebSocketDisconnect
+
+    path = Path(file_path)
+    tail = asyncio.ensure_future(
+        _tail_loop(websocket, path, from_lines, poll_s)
+    )
+    watch = asyncio.ensure_future(_await_disconnect(websocket))
+    try:
+        done, pending = await asyncio.wait(
+            {tail, watch}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            # A disconnect is the expected end of both halves, not an error.
+            if exc is not None and not isinstance(
+                exc, (WebSocketDisconnect, RuntimeError)
+            ):
+                raise exc
+    finally:
+        for task in (tail, watch):
+            if not task.done():
+                task.cancel()
 
 
 # --- run controls (G11) -------------------------------------------------------
@@ -474,7 +599,12 @@ def create_app(project_dir=None, initial_config=None):
     # The single document the GUI is editing. Held in server state so undo/redo
     # stacks survive across requests. A worker pool runs the (seconds-long)
     # relaxation-engine validation off the event loop.
-    state = {"doc": None}
+    #
+    # ``project_dir`` is the CURRENTLY open project, not the launch one:
+    # /api/files' sandbox root and the log tail's confinement both follow it,
+    # and a root frozen at ``initial_project`` meant the file browser could not
+    # navigate above the config dir of any project opened later.
+    state = {"doc": None, "project_dir": initial_project}
     validate_jobs = {}
     validate_pool = ThreadPoolExecutor(max_workers=1)
 
@@ -574,16 +704,25 @@ def create_app(project_dir=None, initial_config=None):
         if session is not None:
             threading.Thread(target=session.close, daemon=True).start()
 
-    def _is_inside(directory, path):
-        """True if ``path`` lies inside ``directory`` (both realpath'd)."""
-        if path is None:
-            return False
-        try:
-            root = os.path.realpath(str(directory))
-            target = os.path.realpath(str(path))
-            return os.path.commonpath([root, target]) == root
-        except ValueError:  # different drives / unrelated roots
-            return False
+    def _file_roots():
+        """Directories whose files this server may read back to the client.
+
+        The open project, the open document's directory (a config opened from
+        elsewhere), and the active run's working directory -- the three trees
+        every file the GUI legitimately shows comes from. Used by the log-tail
+        socket; ``/api/files`` uses the project root alone, since its job is to
+        browse the project.
+        """
+        roots = []
+        if state.get("project_dir"):
+            roots.append(state["project_dir"])
+        doc = state.get("doc")
+        if doc is not None and doc.config_path is not None:
+            roots.append(str(doc.config_path.parent))
+        handle = run_state.get("handle")
+        if handle is not None:
+            roots.append(handle.cwd)
+        return roots
 
     @app.post("/api/project/open")
     def project_open(req: OpenProjectRequest):
@@ -598,9 +737,14 @@ def create_app(project_dir=None, initial_config=None):
         # until a re-Solve -- and an edit made against those stale values was
         # committed into B's params file (review 2.11.1).
         _reset_tune_session()
+        state["project_dir"] = listing["dir"]
+
+        from . import datafiles
 
         doc = state["doc"]
-        if doc is not None and not _is_inside(listing["dir"], doc.config_path):
+        if doc is not None and not datafiles.is_within(
+            doc.config_path, listing["dir"]
+        ):
             # A document from another project can no longer be what the GUI is
             # editing: /api/doc, every doc command, and the Solve fallback all
             # read this one slot, so keeping it would mean B's screen editing
@@ -659,10 +803,25 @@ def create_app(project_dir=None, initial_config=None):
             doc = _require_doc()
             command = command_from_json({"op": req.op, "args": req.args})
             doc.execute(command)
-        except ValueError as exc:
+        except (ValueError, KeyError) as exc:
+            # These carry hand-written, user-facing prose; pass it through.
             return JSONResponse({"error": str(exc)}, status_code=400)
-        except KeyError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+        # IndexError and TypeError are BAD INPUT here, not server faults: a
+        # path segment indexing a list the client's view is one delete stale
+        # about, or one traversing a scalar, reaches _set_nested and raises
+        # them. They 500'd, so the user saw a generic failure for an edit the
+        # command's snapshot restore had already cleanly rolled back. Their
+        # messages ("list index out of range") need the type for context.
+        except (IndexError, TypeError) as exc:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"{req.op}: {type(exc).__name__}: {exc} -- the edit "
+                        f"was rejected and the document is unchanged."
+                    )
+                },
+                status_code=400,
+            )
         return JSONResponse(doc.to_json())
 
     @app.post("/api/doc/undo")
@@ -691,15 +850,6 @@ def create_app(project_dir=None, initial_config=None):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse(doc.to_json())
-
-    @app.post("/api/doc/autosave")
-    def doc_autosave():
-        try:
-            doc = _require_doc()
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
-        written = doc.autosave()
-        return JSONResponse({"written": [str(p) for p in written]})
 
     def _run_validation(job_id, config, user_params, workdir):
         from ..solve_api import validate
@@ -742,6 +892,13 @@ def create_app(project_dir=None, initial_config=None):
         user_params = _jsonable(doc.params)
         workdir = str(doc.config_path.parent) if doc.config_path else None
         job_id = uuid.uuid4().hex
+        # Pop-on-terminal-read (below) retires every job the frontend follows
+        # to completion; this bounds the ABANDONED ones -- a validation whose
+        # tab unmounted, or whose poll loop hit its own deadline first -- which
+        # nothing else would ever remove. Oldest first: dicts keep insertion
+        # order, and the oldest running job is the one least likely to be read.
+        while len(validate_jobs) >= _MAX_VALIDATE_JOBS:
+            validate_jobs.pop(next(iter(validate_jobs)), None)
         validate_jobs[job_id] = {"status": "running", "diagnostics": []}
         validate_pool.submit(
             _run_validation, job_id, config, user_params, workdir
@@ -753,6 +910,13 @@ def create_app(project_dir=None, initial_config=None):
         job = validate_jobs.get(job_id)
         if job is None:
             return JSONResponse({"error": "no such job"}, status_code=404)
+        # A finished job is read exactly once -- ConfigTab polls until it stops
+        # saying "running" and then drops the id. Retiring it here is what
+        # keeps the dict from growing one entry per edit for the life of the
+        # server (the tab starts a fresh validation 1.2 s after every keystroke
+        # burst), and every entry holds a full diagnostics list.
+        if job.get("status") != "running":
+            validate_jobs.pop(job_id, None)
         return JSONResponse({"job_id": job_id, **job})
 
     # --- data file manager (G9) ---------------------------------------------
@@ -763,16 +927,26 @@ def create_app(project_dir=None, initial_config=None):
 
     @app.get("/api/files")
     def files_list(dir: Optional[str] = None):
-        """List a directory for the Data tab file browser (rooted at project)."""
+        """List a directory for the file browser, sandboxed to the project.
+
+        The root follows the CURRENTLY open project (``state["project_dir"]``),
+        not the one the server was launched with -- and ``list_directory`` now
+        REFUSES a directory outside it rather than merely withholding the
+        parent link.
+        """
         from . import datafiles
 
-        root = initial_project
+        doc = state["doc"]
+        doc_dir = (
+            str(doc.config_path.parent)
+            if doc is not None and doc.config_path
+            else None
+        )
+        # With no project opened (a bare create_app(), i.e. only the tests),
+        # the open document's own directory is the tightest honest root.
+        root = state.get("project_dir") or doc_dir
         if dir is None:
-            dir = (
-                str(state["doc"].config_path.parent)
-                if state["doc"] is not None and state["doc"].config_path
-                else (root or os.getcwd())
-            )
+            dir = doc_dir or root or os.getcwd()
         try:
             return JSONResponse(datafiles.list_directory(dir, root=root))
         except ValueError as exc:
@@ -782,16 +956,17 @@ def create_app(project_dir=None, initial_config=None):
     def browse_dirs(dir: Optional[str] = None):
         """List a directory for the sidebar project picker (no root confine).
 
-        Unlike /api/files (which is sandboxed to the open project so the Data
-        tab cannot wander off), this powers the "Browse..." dialog whose whole
-        job is to reach a *different* project, so it navigates up freely. It
-        starts at the current project's parent, or the user's home.
+        Unlike /api/files (which is sandboxed to the open project so the file
+        browser cannot wander off), this powers the "Browse..." dialog whose
+        whole job is to reach a *different* project, so it navigates up freely.
+        It starts at the current project's parent, or the user's home.
         """
         from . import datafiles
 
         if dir is None:
-            if initial_project:
-                dir = str(Path(initial_project).expanduser().resolve().parent)
+            project = state.get("project_dir")
+            if project:
+                dir = str(Path(project).expanduser().resolve().parent)
             else:
                 dir = os.path.expanduser("~")
         try:
@@ -799,29 +974,37 @@ def create_app(project_dir=None, initial_config=None):
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+    def _schema():
+        """The component schema, built at most once per process.
+
+        ``full_schema()`` imports and walks the entire component stack, and
+        these two endpoints called it fresh on every request. ``document``
+        already memoizes exactly this; share that one cache rather than adding
+        a second.
+        """
+        from .document import _default_schema
+
+        return _default_schema()
+
     @app.post("/api/files/eligible")
     def files_eligible(req: EligibleRequest):
         """Schema-driven association menu: instance/key pairs for a filename."""
-        from ..introspect import full_schema
         from . import datafiles
 
         config = state["doc"].config if state["doc"] is not None else {}
         eligible = datafiles.eligible_associations(
-            req.filename, config, full_schema()
+            req.filename, config, _schema()
         )
         return JSONResponse({"eligible": eligible})
 
     @app.get("/api/files/associations")
     def files_associations():
         """Current file -> instance associations (chips), from the open doc."""
-        from ..introspect import full_schema
         from . import datafiles
 
         if state["doc"] is None:
             return JSONResponse({"associations": {}})
-        assoc = datafiles.current_associations(
-            state["doc"].config, full_schema()
-        )
+        assoc = datafiles.current_associations(state["doc"].config, _schema())
         return JSONResponse({"associations": assoc})
 
     # --- run controls (G11) -------------------------------------------------
@@ -886,16 +1069,15 @@ def create_app(project_dir=None, initial_config=None):
     def run_image(path: str):
         # Serve a plot image, but only from inside the run's own tree -- never an
         # arbitrary path the query string asks for.
+        from . import datafiles
+
         handle = run_state.get("handle")
         if handle is None:
             return JSONResponse({"error": "No active run."}, status_code=400)
         resolved = os.path.realpath(path)
-        root = os.path.realpath(handle.cwd)
-        try:
-            inside = os.path.commonpath([resolved, root]) == root
-        except ValueError:
-            inside = False
-        if not inside or not os.path.isfile(resolved):
+        if not datafiles.is_within(resolved, handle.cwd) or not os.path.isfile(
+            resolved
+        ):
             return JSONResponse({"error": "forbidden"}, status_code=403)
         return FileResponse(resolved)
 
@@ -1028,11 +1210,32 @@ def create_app(project_dir=None, initial_config=None):
 
     @app.websocket("/api/logs")
     async def logs(websocket: WebSocket):
+        # Refuse a cross-origin handshake BEFORE accepting it. WebSocket
+        # handshakes bypass CORS entirely, so without this check any page the
+        # user visits could open this socket against the loopback server and
+        # read whatever it streams (the OS-random port is the only other
+        # mitigation, and --port removes even that).
+        if not _origin_is_local(websocket.headers.get("origin")):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         file_path = websocket.query_params.get("file")
         if not file_path:
             await websocket.send_text("[error] no ?file= given")
             await websocket.close()
+            return
+        # gui.md invariant 5: file-serving endpoints stay confined to their
+        # intended tree. The path arrives verbatim in the query string, so
+        # without this the socket streamed ANY readable file on the machine.
+        from . import datafiles
+
+        roots = _file_roots()
+        if not any(datafiles.is_within(file_path, root) for root in roots):
+            await websocket.send_text(
+                "[error] refusing to tail a file outside the open project "
+                "or the active run's directory"
+            )
+            await websocket.close(code=1008)
             return
         await _tail_log(websocket, file_path)
 

@@ -45,8 +45,16 @@ const TABS: Tab[] = [
     // plots, selected row, slider value -- describes one specific model, and
     // carrying it into another project showed the old project's numbers under
     // the new project's name until a re-Solve finished (review 2.11.1).
+    // `active` is not decoration: tabs stay MOUNTED when hidden, so the Tune
+    // tab has to know when it is revealed in order to re-check whether the
+    // document still matches its live evaluator (a bound/prior edit made in
+    // the Config tab does not go through TuneTab's own command path).
     render: (ctx) => (
-      <TuneTab key={ctx.configPath ?? "none"} configPath={ctx.configPath} />
+      <TuneTab
+        key={ctx.configPath ?? "none"}
+        configPath={ctx.configPath}
+        active={ctx.active}
+      />
     ),
   },
   {

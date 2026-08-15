@@ -649,3 +649,216 @@ def test_structural_edit_refuses_a_pre_existing_duplicate_spelling(tmp_path):
         doc.execute(DeleteInstance("star", "A"))
     assert doc.params_text() == before
     assert [e["name"] for e in doc.config["star"]] == ["A", "B", "C"]
+
+
+# --- emptying the params tree (review 1.12.1) --------------------------------
+
+
+def _blank_every_override(doc):
+    """Delete every params entry the way the UI does: one blanked field at a
+    time, through the same command the form's onBlur issues."""
+    for key in list(doc.params.keys()):
+        for field in list(doc.params[key].keys()):
+            doc.execute(SetParamField(key, field, None))
+
+
+def test_saving_an_emptied_params_tree_rewrites_the_file(project):
+    """
+    Given a params file whose every override is deleted through the GUI,
+    When the document is saved,
+    Then the file on disk no longer carries them.
+
+    The write used to be gated on ``len(self.params) > 0``, so removing the
+    LAST override -- "Reset to solved" on the only tuned parameter, or blanking
+    its fields -- left the deleted entry, ``sigma`` prior included, sitting on
+    disk while the GUI reported the document clean.  RunControl then saved and
+    launched, and the fit read exactly the entry the user had just removed,
+    with no cue anywhere.
+    """
+    # Arrange
+    doc = _open(project)
+    params_path = project / PARAMS_NAME
+    assert yaml.safe_load(params_path.read_text())  # non-empty to begin with
+
+    # Act
+    _blank_every_override(doc)
+    assert len(doc.params) == 0
+    doc.save()
+
+    # Assert
+    assert not (yaml.safe_load(params_path.read_text()) or {})
+    assert doc.dirty is False
+
+
+def test_saving_an_empty_tree_does_not_create_a_params_file(tmp_path):
+    """
+    Given a document whose params file has never existed,
+    When it is saved with an empty params tree,
+    Then no params file is created.
+
+    The complement of the fix above: "write the empty tree" must mean "keep the
+    on-disk file honest", not "materialize a file nobody asked for".
+    """
+    config_path = tmp_path / "sys.yaml"
+    config_path.write_text("prefix: out\nparameter_file: sys.params.yaml\n")
+
+    doc = ProjectDocument.open(config_path)
+    doc.save()
+
+    assert not (tmp_path / "sys.params.yaml").exists()
+
+
+def test_autosave_of_an_emptied_params_tree_rewrites_the_sidecar(project):
+    """
+    Given a document whose params overrides were all deleted,
+    When it autosaves,
+    Then the sidecar reflects the emptied tree rather than being skipped.
+    """
+    doc = _open(project)
+    _blank_every_override(doc)
+
+    written = doc.autosave()
+
+    params_sidecars = [p for p in written if "params" in p.name]
+    assert params_sidecars
+    for path in params_sidecars:
+        assert not (yaml.safe_load(path.read_text()) or {})
+
+
+# --- settable param fields (review 1.12.3) -----------------------------------
+
+
+def _frontend_param_fields():
+    """The field list ConfigTab.tsx renders a column for.
+
+    Parsed out of the frontend source because the frontend has no test harness
+    of its own; a server-side assertion that ``set_param_field`` accepts every
+    advertised field is what stops the two drifting.
+    """
+    import re
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "gui"
+        / "frontend"
+        / "src"
+        / "components"
+        / "ConfigTab.tsx"
+    ).read_text()
+    match = re.search(r"const PARAM_FIELDS = \[(.*?)\];", source, re.S)
+    assert match, "ConfigTab.tsx no longer declares a PARAM_FIELDS literal"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_every_field_the_config_tab_offers_is_settable(project):
+    """
+    Given the parameter columns ConfigTab renders,
+    When each is set through the document command,
+    Then none is rejected.
+
+    ``bound_scale`` was rendered and rejected: ``_PARAM_FIELDS`` was defined as
+    ``set(LINKABLE_FIELDS)``, and ``bound_scale`` is deliberately NOT linkable,
+    so every blur in that column 400'd and the one user-facing scale knob could
+    not be set from the GUI at all.
+    """
+    doc = _open(project)
+    fields = _frontend_param_fields()
+    assert "bound_scale" in fields  # the column that regressed
+
+    for field in fields:
+        doc.execute(SetParamField("star.A.radius", field, 1.25))
+
+    assert set(fields) <= set(doc.params["star.A.radius"].keys())
+
+
+def test_bound_scale_is_settable_but_not_linkable():
+    """
+    Given the two field sets,
+    When they are compared,
+    Then bound_scale is settable and NOT linkable -- they are decoupled.
+    """
+    from exozippy.gui.document import _PARAM_FIELDS
+    from exozippy.linking import LINKABLE_FIELDS
+
+    assert "bound_scale" in _PARAM_FIELDS
+    assert "bound_scale" not in LINKABLE_FIELDS
+    assert set(LINKABLE_FIELDS) < _PARAM_FIELDS
+
+
+# --- instance names (review 2.12.7) ------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["0", "12", "", "  ", "a.b", "has space"])
+def test_rename_refuses_a_name_that_breaks_path_parsing(bad):
+    """
+    Given an instance rename to a name the fit would reject,
+    When the command is built,
+    Then it raises instead of writing an unusable config.
+
+    The all-digit case is the dangerous one: renaming star "A" to "0" rewrote
+    ``star.A.teff`` into ``star.0.teff``, which every later command -- and the
+    fit -- reads as the INDEX form, potentially addressing a different star.
+    """
+    with pytest.raises(ValueError):
+        RenameInstance("star", "A", bad)
+
+
+@pytest.mark.parametrize("bad", ["0", "", "a.b"])
+def test_add_and_duplicate_refuse_the_same_names(bad):
+    """
+    Given an add or duplicate under a name that breaks path parsing,
+    When the command is built,
+    Then it raises -- all three creation paths agree.
+    """
+    with pytest.raises(ValueError):
+        AddComponentInstance("star", bad)
+    with pytest.raises(ValueError):
+        DuplicateInstance("star", "A", bad)
+
+
+def test_valid_names_are_still_accepted(project):
+    """Given ordinary names, When used, Then nothing is refused."""
+    doc = _open(project)
+    doc.execute(AddComponentInstance("star", "Companion-2"))
+    doc.execute(RenameInstance("star", "Companion-2", "star_2"))
+
+    assert "star_2" in [e["name"] for e in doc.config["star"]]
+
+
+# --- autosave recovery (review 1.12.10) --------------------------------------
+
+
+def test_restore_autosave_loads_the_sidecar_back_and_is_undoable(project):
+    """
+    Given a document with an autosave sidecar holding unsaved edits,
+    When the restore_autosave command runs,
+    Then the edits are back in the document -- and undo takes them away again.
+
+    The server has always REPORTED recoverable sidecars; nothing could act on
+    them, so the edits were reachable only by finding hidden dotfiles by hand.
+    """
+    # Arrange: make an edit, flush it to the sidecar, then throw the document
+    # away (what a project switch does) and re-open from disk.
+    doc = _open(project)
+    doc.execute(SetParamField("star.A.radius", "initval", 1.999))
+    doc.autosave()
+    reopened = _open(project)
+    assert reopened.autosave_recovery()
+    assert float(reopened.params["star.A.radius"]["initval"]) != 1.999
+
+    # Act
+    reopened.execute(command_from_json({"op": "restore_autosave", "args": {}}))
+
+    # Assert
+    assert float(reopened.params["star.A.radius"]["initval"]) == 1.999
+    reopened.undo()
+    assert float(reopened.params["star.A.radius"]["initval"]) != 1.999
+
+
+def test_restore_autosave_without_a_sidecar_raises(project):
+    """Given no sidecar, When restore runs, Then it says so rather than
+    silently doing nothing."""
+    doc = _open(project)
+
+    with pytest.raises(ValueError, match="no autosaved edits"):
+        doc.execute(command_from_json({"op": "restore_autosave", "args": {}}))

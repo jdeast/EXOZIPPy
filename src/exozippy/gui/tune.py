@@ -69,6 +69,33 @@ _AWAIT_POLL_S = 0.25
 SOLVE_TIMEOUT_S = 900.0
 EVAL_TIMEOUT_S = 120.0
 
+# Worker RECYCLING thresholds (see TuneSession._should_recycle). A respawn
+# costs ~10 s of re-imports plus a cold pytensor compile cache, so these are
+# set well above ordinary tuning: the point is to bound an unbounded ratchet,
+# not to trim megabytes. Read at call time so a test can monkeypatch them.
+_RECYCLE_AFTER_SOLVES = 25
+_RECYCLE_RSS_MB = 6000.0
+
+
+def _worker_rss_mb(worker):
+    """Resident memory of the worker subprocess in MB, or None if unknown.
+
+    ``psutil`` is already a dependency, but this stays best-effort: the pid may
+    be absent (a test stub), the process may have exited between the check and
+    the read, and on a platform where psutil cannot see it the solve-count
+    trigger still applies.
+    """
+    proc = getattr(worker, "_proc", None)
+    pid = getattr(proc, "pid", None)
+    if pid is None:
+        return None
+    try:
+        import psutil
+
+        return psutil.Process(pid).memory_info().rss / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001 - best effort; fall back to the counter
+        return None
+
 
 class WorkerTimeout(RuntimeError):
     """The worker went silent past its deadline and was terminated.
@@ -577,6 +604,7 @@ class TuneSession:
     def __init__(self, worker_factory: Optional[Callable[[], object]] = None):
         self._worker_factory = worker_factory
         self._worker = None
+        self._solves = 0  # solves run by the CURRENT worker (recycle counter)
         self._lock = threading.Lock()
         self.phase = "idle"  # idle|solving|compiling|live|error
         self.error: Optional[str] = None
@@ -585,6 +613,34 @@ class TuneSession:
         # Data-only PlotSpec JSON, available from the "compiling" phase on so
         # the GUI can draw the observations before the evaluator is live.
         self.data_plots: Optional[list] = None
+
+    def _should_recycle(self, worker):
+        """Whether this worker has earned a clean restart before the next solve.
+
+        Reuse is the speed lever (see ``_ensure_worker``), but it is not free:
+        pytensor's compiled C modules can never be ``dlclose``d, so every solve
+        leaves a little resident memory behind that ``gc.collect`` cannot
+        reclaim, and the RSS of a long-lived worker ratchets upward without
+        bound. The silence-deadline respawn does not cover this at all -- it
+        fires only on a WEDGED worker, and a worker slowly eating the machine
+        answers every message promptly right up until it swaps.
+
+        Two triggers, whichever comes first: a solve count (cheap, always
+        available) and, when ``psutil`` is importable, an RSS ceiling. Both are
+        deliberately generous -- a respawn costs ~10 s of re-imports and a cold
+        compile cache, so recycling too eagerly would undo the reuse.
+        """
+        if self._solves >= _RECYCLE_AFTER_SOLVES:
+            logger.info(
+                "tune: recycling evaluator worker after %d solves",
+                self._solves,
+            )
+            return True
+        rss = _worker_rss_mb(worker)
+        if rss is not None and rss >= _RECYCLE_RSS_MB:
+            logger.info("tune: recycling evaluator worker at %.0f MB RSS", rss)
+            return True
+        return False
 
     def _ensure_worker(self):
         """Return a live worker subprocess, (re)spawning only if needed.
@@ -595,11 +651,16 @@ class TuneSession:
         repeated tuning dramatically faster. ``_do_solve`` rebuilds the System /
         model / evaluator from scratch each call, so a reused worker holds no
         stale state, and the child's serve loop survives a solve error, so an
-        errored worker is still safe to reuse.
+        errored worker is still safe to reuse -- up to the recycle thresholds
+        in ``_should_recycle``.
         """
         factory = self._worker_factory or EvaluatorWorker
         worker = self._worker
-        if worker is None or not getattr(worker, "is_alive", lambda: True)():
+        if (
+            worker is None
+            or not worker.is_alive()
+            or self._should_recycle(worker)
+        ):
             if worker is not None:
                 try:
                     worker.close()
@@ -608,6 +669,7 @@ class TuneSession:
             worker = factory()
             worker.start()
             self._worker = worker
+            self._solves = 0
         return worker
 
     def solve(self, config, params, workdir):
@@ -632,6 +694,7 @@ class TuneSession:
                     self.phase = update
 
             res = worker.solve(config, params, workdir, on_progress=_progress)
+            self._solves += 1
             self.result = {
                 "parameters": res["parameters"],
                 "seeds": res.get("seeds"),

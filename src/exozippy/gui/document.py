@@ -27,16 +27,16 @@ from __future__ import annotations
 import copy
 import io
 import re
-import time
 from pathlib import Path
 from typing import Optional
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-from ..config import canonical_param_key
+from ..config import _VALID_INSTANCE_NAME, canonical_param_key
 from ..linking import LINKABLE_FIELDS, is_link_expression
 from ..yamlio import check_yaml_booleans
+from .datafiles import named_instances
 
 # --- YAML round-trip machinery ------------------------------------------------
 
@@ -172,13 +172,14 @@ def _ref_keys_for(comp_type, schema):
 
 
 def _instances_of(config, comp_type):
-    """Return the list of instance dicts for a component block (or [])."""
-    block = config.get(comp_type)
-    if isinstance(block, list):
-        return [e for e in block if isinstance(e, dict)]
-    if isinstance(block, dict):
-        return [block]
-    return []
+    """Return the list of instance dicts for a component block (or []).
+
+    One implementation of "what are this component's instances", shared with
+    the data-file helpers via :func:`datafiles.named_instances` -- the two used
+    to be separate copies that answered the same question with subtly
+    different semantics.
+    """
+    return [inst for _name, inst in named_instances(config, comp_type)]
 
 
 def _instances_of_raw(config, comp_type):
@@ -223,16 +224,6 @@ def _set_nested(tree, path, value):
         node[last] = value
 
 
-def _get_nested(tree, path):
-    node = tree
-    for seg in path.split("."):
-        if isinstance(node, list):
-            node = node[int(seg)]
-        else:
-            node = node[seg]
-    return node
-
-
 def _rename_top_keys(cmap, rename_fn):
     """Rebuild a CommentedMap with top-level keys renamed, comments preserved.
 
@@ -260,6 +251,40 @@ def _rename_top_keys(cmap, rename_fn):
             if new_key is not None:
                 new.ca.items[new_key] = comment
     return new
+
+
+def _validate_instance_name(comp_type, name):
+    """Refuse an instance name the fit -- or this module -- would misread.
+
+    The same rule ``config.validate_instance_names`` enforces on a config file,
+    applied at the point the GUI CREATES a name, because every name-form params
+    key and every ``_element_index`` lookup here assumes it. An ALL-DIGIT name
+    is the dangerous one: ``_instance_indices`` skips it (it cannot serve as the
+    name spelling), so renaming star "A" to "0" rewrote ``star.A.teff`` to
+    ``star.0.teff`` -- which every later command, and the fit itself, reads as
+    the INDEX form and may resolve to a different star entirely. A dotted name
+    breaks path splitting outright, and an empty one addresses nothing.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"Invalid name {name!r} for a {comp_type} instance: names must be "
+            f"non-empty strings."
+        )
+    if not _VALID_INSTANCE_NAME.match(name):
+        raise ValueError(
+            f"Invalid name '{name}' for a {comp_type} instance: names may only "
+            f"contain letters, digits, underscores, and hyphens. Characters "
+            f"like '.' or spaces would break parameter-path parsing "
+            f"(e.g. '{comp_type}.{name}.param')."
+        )
+    if name.isdigit():
+        raise ValueError(
+            f"Invalid name '{name}' for a {comp_type} instance: purely numeric "
+            f"names collide with the internal index notation "
+            f"({comp_type}.0, {comp_type}.1, ...). Add a non-digit character "
+            f"(e.g. '{comp_type}_{name}')."
+        )
+    return name
 
 
 def _split_param_key(key, comp_type):
@@ -353,7 +378,7 @@ class SetParamField(Command):
 class AddComponentInstance(Command):
     def __init__(self, comp_type, name, fields=None):
         self.comp_type = comp_type
-        self.name = name
+        self.name = _validate_instance_name(comp_type, name)
         self.fields = fields or {}
         self.label = f"add {comp_type} '{name}'"
 
@@ -396,7 +421,7 @@ class RenameInstance(Command):
     def __init__(self, comp_type, old_name, new_name):
         self.comp_type = comp_type
         self.old_name = old_name
-        self.new_name = new_name
+        self.new_name = _validate_instance_name(comp_type, new_name)
         self.label = f"rename {comp_type} '{old_name}' -> '{new_name}'"
 
     def _do(self, doc):
@@ -424,7 +449,7 @@ class DuplicateInstance(Command):
     def __init__(self, comp_type, name, new_name):
         self.comp_type = comp_type
         self.name = name
-        self.new_name = new_name
+        self.new_name = _validate_instance_name(comp_type, new_name)
         self.label = f"duplicate {comp_type} '{name}' -> '{new_name}'"
 
     def _do(self, doc):
@@ -455,7 +480,46 @@ class AssociateDatafile(Command):
         block[idx][self.key] = self.path
 
 
-_PARAM_FIELDS = set(LINKABLE_FIELDS)
+class RestoreAutosave(Command):
+    """Load the autosave sidecars back over the in-memory trees.
+
+    The server has always REPORTED recoverable sidecars (``/api/doc/open``'s
+    ``recovery`` list, written whenever a project switch flushes a dirty
+    document), but nothing could act on them: the edits were reachable only by
+    finding hidden dotfiles by hand. This is the action half.
+
+    It is an ordinary undoable command rather than a bespoke endpoint, and
+    deliberately so: recovery overwrites a document the user may have
+    knowingly let go of, and the snapshot machinery every other command uses
+    makes taking it back free.
+    """
+
+    label = "restore autosaved edits"
+
+    def _do(self, doc):
+        restored = []
+        for attr in ("config", "params"):
+            path = getattr(doc, f"{attr}_path")
+            if path is None:
+                continue
+            sidecar = doc._autosave_path(path)
+            if not sidecar.exists():
+                continue
+            setattr(doc, attr, _load_user_yaml(sidecar))
+            restored.append(str(sidecar))
+        if not restored:
+            raise ValueError("no autosaved edits to restore")
+
+
+# Every per-parameter field a params.yaml entry may carry, i.e. everything the
+# GUI's parameter table is allowed to write. DELIBERATELY not the same set as
+# ``linking.LINKABLE_FIELDS``, which it used to be defined as: `bound_scale`
+# (the soft-bound barrier width -- the one user-facing scale knob left, see
+# CLAUDE.md's "Whitening") is a settable field that is deliberately NOT
+# linkable, so equating the two sets made ConfigTab's `bound_scale` column 400
+# on every blur. Keep them decoupled: adding a field here must not make it a
+# link target, and vice versa.
+_PARAM_FIELDS = set(LINKABLE_FIELDS) | {"bound_scale"}
 
 _COMMANDS = {
     "set_config_key": lambda a: SetConfigKey(a["path"], a["value"]),
@@ -475,6 +539,7 @@ _COMMANDS = {
     "associate_datafile": lambda a: AssociateDatafile(
         a["comp_type"], a["name"], a["key"], a["path"]
     ),
+    "restore_autosave": lambda a: RestoreAutosave(),
 }
 
 
@@ -937,6 +1002,23 @@ class ProjectDocument:
         path = Path(path)
         return path.parent / f".{path.stem}.autosave.yaml"
 
+    def _should_write_params(self, ppath):
+        """Whether ``ppath`` must be (re)written for the current params tree.
+
+        A NON-EMPTY tree always is. An EMPTY one is written too whenever the
+        file already exists, and that is the whole point: the write used to be
+        gated on ``len(self.params) > 0``, so deleting the last override --
+        "Reset to solved" on the only tuned parameter, or blanking its fields
+        -- left the deleted entry, ``sigma`` prior included, sitting on disk
+        while the GUI reported the document clean. RunControl then saved and
+        launched, and the fit read the entry the user had just removed, with
+        no cue anywhere. Only a params file that never existed is skipped, so
+        an empty edit session still creates nothing.
+        """
+        if ppath is None:
+            return False
+        return len(self.params) > 0 or Path(ppath).exists()
+
     def save(self, config_path=None, params_path=None):
         """Write both files, preserving comments/order, and clear autosaves."""
         cpath = Path(config_path) if config_path else self.config_path
@@ -946,7 +1028,7 @@ class ProjectDocument:
         self.config_path = cpath
 
         ppath = Path(params_path) if params_path else self.params_path
-        if ppath is not None and len(self.params) > 0:
+        if self._should_write_params(ppath):
             ppath.write_text(self.params_text())
             self.params_path = ppath
 
@@ -966,7 +1048,7 @@ class ProjectDocument:
             sp = self._autosave_path(self.config_path)
             sp.write_text(self.config_text())
             written.append(sp)
-        if self.params_path is not None and len(self.params) > 0:
+        if self._should_write_params(self.params_path):
             sp = self._autosave_path(self.params_path)
             sp.write_text(self.params_text())
             written.append(sp)
@@ -979,13 +1061,6 @@ class ProjectDocument:
             sp = self._autosave_path(path)
             if sp.exists():
                 sp.unlink()
-
-    def autosave_paths(self):
-        out = []
-        for path in (self.config_path, self.params_path):
-            if path is not None:
-                out.append(self._autosave_path(path))
-        return out
 
     def autosave_recovery(self):
         """Report any autosave sidecar newer than its real file.
@@ -1013,8 +1088,3 @@ class ProjectDocument:
                     }
                 )
         return recoverable
-
-
-def now():
-    """Wall-clock seconds (indirection makes autosave timing testable)."""
-    return time.time()

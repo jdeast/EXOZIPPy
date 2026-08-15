@@ -479,6 +479,36 @@ button.save-btn:disabled {
 .danger {
   color: var(--danger);
 }
+/* Autosave-recovery banner: unsaved edits flushed to a sidecar on a project
+   switch, offered back on re-open. Styled like the Tune tab's stale banner --
+   the same "something needs your attention before you carry on" register. */
+.recovery-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #3a2d10;
+  color: #f2c777;
+  border-bottom: 1px solid #6b5418;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.recovery-banner button {
+  background: #f2a65a;
+  color: #1a1206;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.recovery-banner button.link-btn {
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+  font-weight: 400;
+  padding: 3px 4px;
+}
+
 .problems-strip {
   border-top: 1px solid var(--border);
   background: var(--bg-2);
