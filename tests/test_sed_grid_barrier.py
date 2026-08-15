@@ -145,14 +145,25 @@ def _fake_system(loggsed, logmass_init, radiussed_init, star_names=("A",)):
     return SimpleNamespace(star=star, prose=None)
 
 
-def _loggsed_parameter():
+def _loggsed_parameter(bound_scale=None):
     return Parameter(
         label="star.loggsed",
         unit="dex(cm/s2)",
         internal_unit="dex(cm/s2)",
         lower=[0.0],
         upper=[5.0],
+        bound_scale=bound_scale,
     )
+
+
+def _expected_penalty(val, scale, edge=5.0):
+    """The log-sigmoid barrier's penalty at ``val``, computed independently.
+
+    ``potentials.soft_upper_bound`` with softness 0.01: the penalty is
+    log(sigmoid((edge - val) * 4.4 / (scale * 0.01))).
+    """
+    arg = (edge - val) * 4.4 / (scale * 0.01)
+    return -np.logaddexp(0.0, -arg)
 
 
 # ---------------------------------------------------------------------------
@@ -442,3 +453,108 @@ def test_on_grid_start_is_silent(tmp_path, caplog):
 
     # ASSERT
     assert not [r for r in caplog.records if "OUTSIDE" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# Section 5 -- deliberately softening the barrier (examples/gj1214)
+# ---------------------------------------------------------------------------
+
+
+def test_softening_the_barrier_does_not_silence_the_warning(tmp_path, caplog):
+    """
+    Given an off-grid star whose loggsed barrier the user has widened with
+    bound_scale,
+    When _declare_grid_support runs,
+    Then the warning still fires, and its text describes the WIDENED
+    barrier rather than the measured one.
+
+    The notice keys on the VALUE being off the grid, never on the bound
+    being active -- it is the "as long as we know the caveats" half of
+    shipping an extrapolated fit, and softening the barrier is exactly the
+    moment it must not go quiet.  A message still claiming the start is
+    "effectively clamped to the edge" would be the stale advice that
+    teaches people to stop reading warnings.
+    """
+    # ARRANGE
+    sed, _ = _minimal_sed(tmp_path)
+    loggsed = _loggsed_parameter(bound_scale=25.0)
+    system = _fake_system(loggsed, np.log10(0.178), 0.215)
+
+    # ACT
+    with caplog.at_level(logging.WARNING):
+        sed._declare_grid_support(system)
+
+    # ASSERT
+    hits = [
+        r.getMessage()
+        for r in caplog.records
+        if "loggsed" in r.getMessage() and "OUTSIDE" in r.getMessage()
+    ]
+    assert len(hits) == 1, [r.getMessage() for r in caplog.records]
+    assert "WIDENED" in hits[0]
+    assert "bound_scale = 25" in hits[0]
+    assert "0.25 dex" in hits[0]  # transition width = 0.01 * bound_scale
+    assert "17.6 nats per dex" in hits[0]
+    assert "clamped to the edge" not in hits[0]
+
+
+@pytest.mark.parametrize(
+    "logg,scale",
+    [(5.0223, 25.0), (5.25, 25.0), (5.5, 25.0), (5.0223, 50.0)],
+)
+def test_reported_penalty_matches_the_barrier_formula(logg, scale):
+    """
+    Given an off-grid loggsed and a bound_scale,
+    When the warning's penalty figure is built,
+    Then it equals log(sigmoid(...)) computed independently.
+
+    The number is the whole point of the message -- it is what tells a user
+    whether their softening admits the star cheaply or has effectively
+    switched the barrier off -- so it must not be a hand-maintained
+    approximation of the potential actually added.
+    """
+    # ARRANGE
+    from exozippy.components.sed.sed import SED
+
+    expected = -_expected_penalty(logg, scale)
+
+    # ACT
+    message = SED._barrier_advice("A", logg, 0.0, 5.0, scale)
+
+    # ASSERT
+    assert f"{expected:.2f} nats" in message
+
+
+def test_gj1214_example_ships_the_softened_barrier():
+    """
+    Given the shipped gj1214 example, whose M dwarf starts at loggsed =
+    5.022 -- past NextGen's 5.0 logg ceiling,
+    Then its params file widens the loggsed barrier and says why.
+
+    Not a style check: with no M-dwarf-capable BC grid shipping, the
+    measured barrier would clamp this fit to the grid edge at a cost of
+    ~434 nats, and the repo owner's ruling is that a modestly extrapolated
+    bolometric correction beats refusing to fit -- provided the caveat is
+    written where the person running the example will see it.
+    """
+    # ARRANGE
+    params_file = (
+        Path(__file__).parent.parent
+        / "examples"
+        / "gj1214"
+        / "gj1214.params.yaml"
+    )
+    if not params_file.is_file():
+        pytest.skip("examples/gj1214 not present")
+    text = params_file.read_text()
+
+    # ACT
+    params = yaml.safe_load(text)
+
+    # ASSERT -- the softening itself
+    entry = params.get("star.A.loggsed")
+    assert entry is not None, "gj1214 no longer softens the loggsed barrier"
+    assert entry.get("bound_scale") == 25.0
+    # ...and the caveat, in the file, in the words that matter
+    assert "EXTRAPOLATED" in text
+    assert "NextGen" in text

@@ -80,10 +80,18 @@ def _apply_existing_constraints(entry, existing_entry):
     """
     if not isinstance(existing_entry, dict):
         return entry
-    # Not "prior" keys: mu/sigma are a prior, lower/upper are hard bounds.
-    # Both are constraints the user stated and neither is a start value,
-    # which is the only property that matters here.
-    for constraint_key in ("mu", "sigma", "lower", "upper"):
+    # Not "prior" keys: mu/sigma are a prior, lower/upper are hard bounds,
+    # bound_scale is a soft bound's transition width.  All three are
+    # constraints the user stated, all three change the posterior
+    # (config.PHYSICS_KEYS is exactly this list plus initval's absence),
+    # and none is a start value -- which is the only property that matters
+    # here.  bound_scale earns its place for the same reason lower/upper
+    # do: dropping it silently re-stiffens a barrier the user deliberately
+    # widened.  NOTE this only reaches parameters mkparam emits at all; a
+    # DERIVED parameter (star.loggsed, the one place bound_scale is
+    # load-bearing today) gets no entry, so a bound_scale on one is still
+    # lost on the round trip.  See examples/gj1214/gj1214.params.yaml.
+    for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
     existing_sigma = existing_entry.get("sigma")

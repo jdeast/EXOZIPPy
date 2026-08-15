@@ -888,28 +888,69 @@ class SED(Component):
             logger.debug(f"SED: could not evaluate the loggsed start: {exc}")
             return
         names = list(getattr(star, "names", []) or [])
+        scales = np.atleast_1d(
+            np.asarray(
+                loggsed.bound_scale
+                if loggsed.bound_scale is not None
+                else np.nan,
+                dtype=float,
+            )
+        )
         for i, val in enumerate(start):
             if not np.isfinite(val) or lo <= val <= hi:
                 continue
             label = names[i] if i < len(names) else str(i)
+            scale = scales[i] if i < scales.size else scales[0]
             logger.warning(
                 f"SED: star '{label}' starts at loggsed = {val:.4f} "
                 f"dex(cm/s2), OUTSIDE the {self.sedmodel} bolometric-"
                 f"correction grid's logg axis [{lo:g}, {hi:g}]. The "
                 f"interpolator EXTRAPOLATES off its edge cell there, so "
-                f"this star's bolometric corrections are not measured "
-                f"quantities. The soft bound on star.{label}.loggsed will "
-                f"pull the chain back onto the grid, and its steepness is "
-                f"measured (transition width 1% of loggsed's own posterior "
-                f"width), so a start this far out is effectively clamped "
-                f"to the edge. If the star genuinely lives off this grid, "
-                f"either use a BC model whose logg axis covers it (the "
-                f".sed file's 'model:' key) or widen the barrier in your "
-                f"params file -- star.{label}.loggsed: {{bound_scale: X}} "
-                f"in dex, which sets the transition width to 0.01*X and "
-                f"the slope to 4.4/(0.01*X) nats per dex -- and treat the "
-                f"resulting bolometric corrections as extrapolated."
+                f"this star's bolometric corrections are NOT measured "
+                f"quantities -- they are the edge cell's slope carried "
+                f"outward. " + self._barrier_advice(label, val, lo, hi, scale)
             )
+
+    # The second half of the off-grid warning: what the barrier will do
+    # about it.  Split out because the two cases say opposite things and
+    # BOTH have to be true statements -- a message that still described a
+    # measured, effectively-clamping barrier after the user had softened
+    # it with bound_scale would be exactly the kind of stale advice that
+    # teaches people to stop reading warnings.  Note the notice itself is
+    # NOT conditional on the barrier: it keys on the VALUE being off the
+    # grid, so softening the barrier can never silence it.
+    @staticmethod
+    def _barrier_advice(label, val, lo, hi, scale):
+        edge = hi if val > hi else lo
+        if np.isfinite(scale) and scale > 0:
+            # potentials.soft_*_bound: steepness = 4.4 / (scale * softness),
+            # softness = 0.01, and the penalty is log(sigmoid(arg)).
+            steep = 4.4 / (scale * 0.01)
+            arg = -abs(val - edge) * steep
+            penalty = arg - np.log1p(np.exp(arg)) if arg < 0 else -np.log(2.0)
+            return (
+                f"The soft bound on star.{label}.loggsed has been "
+                f"DELIBERATELY WIDENED (bound_scale = {scale:g} dex -> "
+                f"transition width {0.01 * scale:g} dex, slope {steep:g} "
+                f"nats per dex), so this start is admitted at a cost of "
+                f"{-penalty:.2f} nats rather than pulled back to the edge. "
+                f"That is a choice to accept an extrapolated bolometric "
+                f"correction; the restoring force still grows with the "
+                f"excursion. Treat the resulting corrections accordingly."
+            )
+        return (
+            f"The soft bound on star.{label}.loggsed will pull the chain "
+            f"back onto the grid, and its steepness is measured "
+            f"(transition width 1% of loggsed's own posterior width), so a "
+            f"start this far out is effectively clamped to the edge. If "
+            f"the star genuinely lives off this grid, either use a BC "
+            f"model whose logg axis covers it (the .sed file's 'model:' "
+            f"key) or widen the barrier in your params file -- "
+            f"star.{label}.loggsed: {{bound_scale: X}} in dex, which sets "
+            f"the transition width to 0.01*X and the slope to 4.4/(0.01*X) "
+            f"nats per dex -- and treat the resulting bolometric "
+            f"corrections as extrapolated."
+        )
 
     # ------------------------------------------------------------------
     # 6) compile_plotters — stash the compiled pytensor functions we
