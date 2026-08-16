@@ -115,24 +115,81 @@ def _gather_files(obj: Any) -> List[str]:
     return found
 
 
+#: Per-instance config keys that do NOT affect the model, and so are the only
+#: things dropped from the structural hash.
+#:
+#: This is a DENYLIST, and the direction matters.  Nearly every key inside a
+#: component instance selects part of the model -- `light_travel_time`, `gp`,
+#: `likelihood`, `mask`, `ld_law`, `data_format`, `rm`, `exptime`, `ninterp`,
+#: `band`, `star_ndx`, the SED's `mag`/`err` photometry, all of it -- so an
+#: allowlist is a list of everything, maintained by hand, and one forgotten
+#: entry is a SILENT failure: the trace reloads under a model it was never
+#: sampled from (via `recompute_trace: false`, `exozippy-modes` or
+#: `mkparam.write_param_file`).  `light_travel_time` was exactly that, and it
+#: defaulted to ON.  A denylist fails the other way: forget an entry here and
+#: a cosmetic edit merely forces an honest re-run.
+#:
+#: Adopting it invalidated every trace on disk once, deliberately -- the
+#: payload shape changed for every config.  That is a one-time cost paid for
+#: never silently reusing foreign draws again.
+#:
+#: `file`/`files` are dropped only because `structural_payload` already hashes
+#: them under its own "files" key; `path` is NOT (nothing else captures it).
+_NON_STRUCTURAL_INSTANCE_KEYS = frozenset(
+    {
+        "plot",  # per-instrument plot styling (color/marker)
+        "label",  # display-only
+        "file",  # already hashed under payload["files"]
+        "files",
+    }
+)
+
+
+def _canon_leaf(value: Any) -> Any:
+    """Canonicalize any config leaf -- scalar, list or nested dict -- into
+    something json.dumps(sort_keys=True) renders stably."""
+    if isinstance(value, dict):
+        return {str(k): _canon_leaf(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_canon_leaf(v) for v in value]
+    return _canon(value)
+
+
+def _instance_skeleton(item: dict, index: int) -> Dict[str, Any]:
+    """Structural view of one instance dict: its name plus every key that is
+    not explicitly cosmetic (see _NON_STRUCTURAL_INSTANCE_KEYS)."""
+    return {
+        "name": str(item.get("name", index)),
+        "cfg": {
+            str(k): _canon_leaf(v)
+            for k, v in sorted(item.items())
+            if k not in _NON_STRUCTURAL_INSTANCE_KEYS and k != "name"
+        },
+    }
+
+
 def _component_skeleton(config: dict) -> dict:
     """Structural view of the component set: top-level keys and, for
-    list-valued component blocks, the sorted instance names.  Numeric or
-    initval-like leaves are deliberately excluded."""
+    list-valued component blocks, the sorted instances with their
+    model-affecting config.  Only explicitly cosmetic keys are dropped."""
     skel: Dict[str, Any] = {}
     for key, block in config.items():
         if key in _NON_STRUCTURAL_CONFIG_KEYS:
             continue
         if isinstance(block, list):
-            names = sorted(
-                str(item.get("name", i))
-                for i, item in enumerate(block)
-                if isinstance(item, dict)
+            entries = sorted(
+                (
+                    _instance_skeleton(item, i)
+                    for i, item in enumerate(block)
+                    if isinstance(item, dict)
+                ),
+                key=lambda e: e["name"],
             )
-            skel[key] = names if names else len(block)
+            skel[key] = entries if entries else len(block)
         elif isinstance(block, dict):
-            # single-instance component (e.g. sed): presence is structural
-            skel[key] = True
+            # single-instance component (e.g. sed): presence is structural,
+            # and so is everything non-cosmetic it sets.
+            skel[key] = _instance_skeleton(block, 0)["cfg"] or True
         else:
             skel[key] = True
     return skel

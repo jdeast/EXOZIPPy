@@ -749,3 +749,105 @@ def test_run_fit_reuse_path_never_overwrites_the_whitening_file(tmp_path):
     assert type(error).__name__ == "StaleWhiteningError", error
     assert dropped in str(error)
     assert "recompute_trace: true" in str(error)
+
+
+# --------------------------------------------------------------------------
+# Model-selecting per-instance keys must reach the hash. These flip WHICH
+# likelihood is built while leaving the component set, the file list and
+# every parameter's structure untouched, so before 2026-08-15 they were
+# invisible: a trace sampled with one setting reloaded silently under the
+# other. `light_travel_time` is the sharpest case because it defaults to ON.
+# --------------------------------------------------------------------------
+
+_LTT_BASE = {
+    "transit": [{"name": "T1", "file": "a.dat", "band": "B"}],
+    "star": [{"name": "A"}],
+}
+
+
+def _with_transit_key(**kw):
+    cfg = copy.deepcopy(_LTT_BASE)
+    cfg["transit"][0].update(kw)
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("light_travel_time", False),
+        ("gp", "rotation"),
+        ("likelihood", "hogg"),
+        ("mask", [3, 4]),
+    ],
+    ids=["light_travel_time", "gp", "likelihood", "mask"],
+)
+def test_model_selecting_file_keys_change_the_structural_hash(key, value):
+    """
+    Given a config that sets a per-file key selecting a different model,
+    When its structural hash is compared with the config that omits it,
+    Then the two differ, so a trace sampled under one setting cannot be
+    silently reloaded under the other.
+    """
+    assert structural_hash(
+        _with_transit_key(**{key: value})
+    ) != structural_hash(_LTT_BASE)
+
+
+def test_a_cosmetic_file_key_does_not_change_the_hash():
+    """
+    Given a purely cosmetic per-file key (plot styling),
+    When the hash is compared against the config without it,
+    Then it is unchanged -- the denylist in
+    _NON_STRUCTURAL_INSTANCE_KEYS is the ONLY thing dropped.
+    """
+    assert structural_hash(
+        _with_transit_key(plot={"color": "#123456"})
+    ) == structural_hash(_LTT_BASE)
+
+
+def test_a_model_affecting_numeric_key_now_changes_the_hash():
+    """
+    Given exptime, which sets the exposure-smearing window and so changes
+    the model,
+    When the hash is compared against the config without it,
+    Then it differs.
+
+    Under the old allowlist this was invisible, along with every other key
+    nobody had thought to enumerate. The denylist inverts the failure
+    mode: a forgotten cosmetic key costs an honest re-run, where a
+    forgotten model key cost silently-reused foreign draws.
+    """
+    assert structural_hash(_with_transit_key(exptime=30.0)) != structural_hash(
+        _LTT_BASE
+    )
+
+
+def test_instance_config_reaches_the_payload_so_a_mismatch_can_name_it():
+    """
+    Given two configs differing only in light_travel_time,
+    When their structural payloads are compared,
+    Then the difference is visible in the payload (not just in the hash),
+    so trace_meta can tell the user WHAT changed.
+    """
+    on = structural_payload(_LTT_BASE)["components"]["transit"]
+    off = structural_payload(_with_transit_key(light_travel_time=False))[
+        "components"
+    ]["transit"]
+
+    assert on[0]["cfg"].get("light_travel_time") is None
+    assert off[0]["cfg"]["light_travel_time"] is False
+    assert on[0]["name"] == off[0]["name"] == "T1"
+
+
+def test_file_paths_are_not_double_hashed_in_the_instance_config():
+    """
+    Given an instance whose data file is named by `file`,
+    When its skeleton entry is inspected,
+    Then `file` is absent from the per-instance config -- it is already
+    hashed under the payload's own "files" key, and hashing it twice would
+    be redundant rather than wrong.
+    """
+    entry = structural_payload(_LTT_BASE)["components"]["transit"][0]
+
+    assert "file" not in entry["cfg"]
+    assert "a.dat" in structural_payload(_LTT_BASE)["files"]

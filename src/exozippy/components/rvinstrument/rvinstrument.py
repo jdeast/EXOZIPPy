@@ -43,6 +43,14 @@ class RVInstrument(Instrument):
                     f"[{self.prefix}] unknown rm_model {m!r}; expected one of "
                     f"{sorted(_valid_rm)}."
                 )
+        # Light-travel-time (Roemer delay) correction on the RM occultation
+        # geometry (see components/rm.py, components/ltt.py) -- on by
+        # default (Jason's decision: transit/rm/astrometry on, rv/mulens
+        # off; matches EXOFASTv2). Only meaningful on a file that also sets
+        # `rm:`; harmless (unread) otherwise, same as rm_band/rm_model.
+        self.light_travel_time = [
+            bool(c.get("light_travel_time", True)) for c in self.config
+        ]
         self.total_detrend_cols = 0
 
     @property
@@ -329,6 +337,7 @@ class RVInstrument(Instrument):
                     pidx,
                     bidx,
                     model=self.rm_model[i],
+                    light_travel_time_active=self.light_travel_time[i],
                 )  # (len(rows),) m/s
                 rv_model = pt.inc_subtensor(
                     rv_model[rows], rm_ms / rv_ms_per_internal
@@ -413,6 +422,7 @@ class RVInstrument(Instrument):
                             pidx,
                             bidx,
                             model=self.rm_model[i],
+                            light_travel_time_active=self.light_travel_time[i],
                         )
                         / rv_ms_per_internal
                     )

@@ -13,6 +13,7 @@ from exozippy.components.limbdark import quad_limb_darkened_flux
 from exozippy.outputs.prose import get_collector
 from exozippy.outputs.texutils import latex_escape
 
+from .. import ltt
 from . import physics
 
 
@@ -38,6 +39,38 @@ class Transit(Instrument):
         # SED depth-dilution node, built once by build_likelihood and
         # reused by compile_plotters.
         self._dilution_node = None
+        # Light-travel-time (Roemer delay) correction, per file (see
+        # components/ltt.py) -- on by default (Jason's decision: transit/rm/
+        # astrometry on, rv/mulens off; matches EXOFASTv2). Per-file, not a
+        # single component-wide flag, for consistency with every other
+        # per-file key (gp:, likelihood:, ninterp:, rm:) -- build_likelihood's
+        # group loop and compile_plotters both handle a group/instrument
+        # mix of on/off files (see the mask logic there).
+        self._light_travel_time_active = np.array(
+            [bool(c.get("light_travel_time", True)) for c in self.config]
+        )
+
+    def _ltt_active(self, orbits):
+        """Per-file light-travel-time flags, forced off when the orbit
+        cannot supply the parameters the correction needs.
+
+        `Orbit.register_parameters` declares a/m_primary/m_companion/m_total
+        only when its bodies resolve, so a geometry-only orbit has none of
+        them. Since `light_travel_time` defaults to ON, reading them
+        unguarded would turn any such config -- which built fine before the
+        correction existed -- into an AttributeError at build time.
+        """
+        if ltt.orbit_supports_ltt(orbits):
+            return self._light_travel_time_active
+        if self._light_travel_time_active.any():
+            logger.warning(
+                "transit: light-travel-time correction disabled -- the orbit "
+                "does not define %s (its bodies did not resolve; see the "
+                "orbit component's own warning). Set light_travel_time: "
+                "false on the affected transit file(s) to silence this.",
+                ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+            )
+        return np.zeros_like(self._light_travel_time_active)
 
     @property
     def prefix(self):
@@ -466,6 +499,47 @@ class Transit(Instrument):
         sin_i = pt.sin(inc)
         cos_i = pt.cos(inc)
 
+        # 2b. Light-travel-time (Roemer delay) inputs -- per-file gating via
+        # ltt_active (self._light_travel_time_active, forced off when the
+        # orbit cannot supply these parameters), resolved per group below.
+        # Three roles, three factors -- see ltt.py's `factor` docs. The
+        # occultation seam takes the mass DIFFERENCE; light EMITTED by the
+        # planet (reflection) takes the planet's own barycentric fraction;
+        # light emitted by the STAR (beaming, ellipsoidal) takes the
+        # star's. One corrected time array cannot serve all three, and
+        # using the geometry's for everything (or leaving the stellar
+        # terms uncorrected, as here until 2026-08-15) mixes time
+        # references differing by ~a/c within a single phase curve.
+        ltt_active = self._ltt_active(orbits)
+        a_rel = ltt_factor = ltt_reflect_factor = ltt_star_factor = None
+        if ltt_active.any():
+            a_rel = orbits.a.value[planets.orbit_map][
+                None, None, :
+            ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
+            # Barycentric scaling for an OCCULTATION seam: the mass
+            # DIFFERENCE, not the planet's own barycentric fraction. A
+            # transit is not an emission event -- the planet blocks light
+            # the STAR emitted -- so both bodies enter at their own
+            # retarded times and the star's delay partially cancels the
+            # planet's. See ltt.py's `factor` docs for the derivation, and
+            # for why m_primary/m_total (used here until 2026-08-15, and by
+            # EXOFASTv2's target2bjd.pro) agrees to O(q) for a planet but
+            # predicts a spurious a/c offset for a comparable-mass pair
+            # whose true offset is exactly zero.
+            m_primary = orbits.m_primary.value[planets.orbit_map]
+            m_companion = orbits.m_companion.value[planets.orbit_map]
+            m_total = orbits.m_total.value[planets.orbit_map]
+            ltt_factor = ((m_primary - m_companion) / m_total)[None, None, :]
+            # Reflected light comes off the planet's disk, so it rides the
+            # planet's own delay about the barycenter.
+            ltt_reflect_factor = (m_primary / m_total)[None, None, :]
+            # Doppler beaming and ellipsoidal variation are the STAR's own
+            # flux (its radial motion and its tidal shape), so they ride
+            # the star's delay -- a factor ~q, not ~1. Flat (N_planets,):
+            # these terms are evaluated per observation, not on the
+            # sub-exposure grid.
+            ltt_star_factor = m_companion / m_total
+
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
         # manifest has no u2; the quadratic term is then zero.
@@ -522,9 +596,84 @@ class Transit(Instrument):
         for rows, time_grid_np, weights_np in self._oversample_groups:
             t_grid = pt.constant(time_grid_np)[:, :, None]  # (n_g, k_g, 1)
             w_g = pt.constant(weights_np)  # (k_g,)
-            time_g = t_grid[:, :, 0]  # (n_g, k_g), for calc_reflect_term
 
-            M = (t_grid - tp) * n
+            # Light-travel-time correction. The factor depends on WHICH
+            # observable is being retarded, not on the timestamps, so one
+            # corrected time array cannot serve the whole model (see
+            # ltt.py's `factor` docs). This group needs two of them:
+            #
+            #   geometry (transit/eclipse shape, and via planetvisible the
+            #     thermal gating) -- the occultation seam, ltt_factor;
+            #   reflected light -- emitted by the PLANET, so its own
+            #     barycentric fraction m_primary/m_total.
+            #
+            # Beaming and ellipsoidal are stellar and un-smeared; they are
+            # corrected after this loop with the primary's factor.
+            #
+            # Per-file gate (this group's own rows may mix files that want
+            # it on and off, since groups are formed by ninterp value, not
+            # by file). Costs nothing extra when every row in the group is
+            # off (no ltt.retarded_time call, no pt.where); costs one extra
+            # Kepler solve per role in use, no pt.where, when every row is
+            # on (the default); costs one extra Kepler solve PLUS one
+            # pt.where only for a genuinely mixed group.
+            lt_active_rows = ltt_active[
+                self.inst_map[rows]
+            ]  # (n_g,) bool, numpy -- known at graph-build time
+
+            def _retard_grid(role_factor):
+                """t_grid retarded with `role_factor`, honoring the
+                per-row gate. Returns t_grid untouched when no row in this
+                group wants the correction."""
+                if not lt_active_rows.any():
+                    return t_grid
+                corrected, _ = ltt.retarded_time(
+                    t_grid,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=role_factor,
+                    z0=0.0,
+                )
+                if lt_active_rows.all():
+                    return corrected
+                # Both branches are ordinary, everywhere-finite time
+                # values (no singularity like solve_delay's az=0
+                # branch), so this pt.where carries none of the
+                # where-trap risk that formula guarded against --
+                # verified directly (not just asserted) by
+                # tests/test_transit_ltt.py's
+                # test_mixed_group_ltt_gradient_is_finite.
+                lt_mask = pt.constant(
+                    lt_active_rows[:, None, None].astype("float64")
+                )
+                return pt.where(lt_mask > 0.5, corrected, t_grid)
+
+            t_grid_final = _retard_grid(ltt_factor)
+            # Broadcast to (n_g, k_g, N_planets) unconditionally (a no-op
+            # when t_grid_final already has that shape) so the per-planet
+            # slice below is safe regardless of N_planets: with LTT off (or
+            # a face-value t_grid pass-through), the last dim is the
+            # unbroadcast size 1 from t_grid, and t_grid_final[:, :, p]
+            # would index-error for any p > 0 without this.
+            time_g_corrected = t_grid_final + pt.zeros(
+                (1, 1, planets.n_elements)
+            )
+
+            # Reflected light is emitted by the PLANET, so its phase runs
+            # on the planet's own retarded time, not the occultation
+            # seam's. Only built when reflection is actually on.
+            time_g_reflect = None
+            if reflect_active and ltt_reflect_factor is not None:
+                time_g_reflect = _retard_grid(ltt_reflect_factor) + pt.zeros(
+                    (1, 1, planets.n_elements)
+                )
+
+            M = (t_grid_final - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             r_norm = a_rstar * (1.0 - pt.sqr(ecc)) / (1.0 + ecc * cosf)
@@ -597,8 +746,13 @@ class Transit(Instrument):
                     if thermal_g is not None:
                         net = net - 1e-6 * thermal_g[:, None] * visible
                     if reflect_g is not None:
+                        t_ref = (
+                            time_g_reflect
+                            if time_g_reflect is not None
+                            else time_g_corrected
+                        )
                         reflect_term_g = physics.calc_reflect_term(
-                            time_g,
+                            t_ref[:, :, p_idx],
                             tc_p[p_idx],
                             period_p[p_idx],
                             reflect_g[:, None],
@@ -634,6 +788,45 @@ class Transit(Instrument):
             tc_this = tc_p[p_idx]  # scalar, this planet's time of conjunction
             period_this = period_p[p_idx]
 
+            # Beaming and ellipsoidal are the STAR's own flux, so they are
+            # evaluated at the star's retarded time -- a different time
+            # base from the occultation geometry above (see ltt.py's
+            # `factor` docs). Until 2026-08-15 they used the uncorrected
+            # time while reflection used the geometry's, so a phase curve
+            # mixed three time references differing by ~a/c. Un-smeared,
+            # so this is a flat (N_times,) correction, and it costs one
+            # Kepler solve per planet only when a stellar term is on.
+            time_star = time
+            need_stellar = beam_active or ellip_mapped is not None
+            if (
+                need_stellar
+                and ltt_star_factor is not None
+                and ltt_active.any()
+            ):
+                # The orbital elements above are shaped (1, 1, N_planets)
+                # for the sub-exposure grid; this term is un-smeared and
+                # per planet, so it needs the FLAT scalars -- indexing the
+                # 3-D versions with [p_idx] would slice axis 0 (size 1).
+                star_corrected, _ = ltt.retarded_time(
+                    time,
+                    tp[0, 0, p_idx],
+                    n[0, 0, p_idx],
+                    ecc[0, 0, p_idx],
+                    sinw[0, 0, p_idx],
+                    cosw[0, 0, p_idx],
+                    sin_i[0, 0, p_idx],
+                    orbits.a.value[planets.orbit_map][p_idx],
+                    factor=ltt_star_factor[p_idx],
+                    z0=0.0,
+                )
+                if ltt_active.all():
+                    time_star = star_corrected
+                else:
+                    star_mask = pt.constant(
+                        ltt_active[self.inst_map].astype("float64")
+                    )
+                    time_star = pt.where(star_mask > 0.5, star_corrected, time)
+
             # Beaming is diluted the same way thermal/reflect are above --
             # EXOFASTv2 parity: exofast_chi2v2.pro:1517/1556 pass both beam
             # and dilute into exofast_tran, which adds beam at
@@ -652,7 +845,7 @@ class Transit(Instrument):
             if beam_active:
                 beam_p = planets.beam.value[p_idx]  # scalar, ppm
                 beam_term = physics.calc_beam_term(
-                    time, tc_this, period_this, beam_p
+                    time_star, tc_this, period_this, beam_p
                 )
                 if dil_obs_flat is not None:
                     beam_term = beam_term * dil_obs_flat
@@ -671,7 +864,7 @@ class Transit(Instrument):
             if ellip_mapped is not None:
                 ellip_dev = (
                     physics.calc_ellipsoidal_factor(
-                        time, tc_this, period_this, ellip_mapped
+                        time_star, tc_this, period_this, ellip_mapped
                     )
                     - 1.0
                 )
@@ -764,8 +957,91 @@ class Transit(Instrument):
             cosw = orbits.cosw.value[planets.orbit_map][None, :]
             sinw = orbits.sinw.value[planets.orbit_map][None, :]
             inc = orbits.inc.value[planets.orbit_map][None, :]
+            sin_i = pt.sin(inc)
 
-            M = (t_grid - tp) * n
+            # Light-travel-time correction -- MUST mirror build_likelihood's
+            # group loop exactly (same gate, same ltt.retarded_time call,
+            # same seams corrected/left alone), or this path and the
+            # likelihood's disagree and the plotted curve stops matching
+            # what the fit actually optimized against (see
+            # test_plotted_model_matches_likelihood_model). Only the shape
+            # differs: this path has no sub-exposure axis (smearing is
+            # applied outside, by _smeared_full_lc averaging repeated calls
+            # at shifted t), so it's (N_times, N_planets) here vs
+            # (n_g, k_g, N_planets) there.
+            lt_active_arr = self._ltt_active(orbits)
+            a_rel = None
+            ltt_factor = ltt_reflect_factor = ltt_star_factor = None
+            if lt_active_arr.any():
+                a_rel = orbits.a.value[planets.orbit_map][None, :]
+                m_primary = orbits.m_primary.value[planets.orbit_map]
+                m_companion = orbits.m_companion.value[planets.orbit_map]
+                m_total = orbits.m_total.value[planets.orbit_map]
+                # Same three roles as build_likelihood: occultation seam
+                # (mass difference), planet-emitted reflection, and
+                # star-emitted beaming/ellipsoidal. See ltt.py's `factor`.
+                ltt_factor = ((m_primary - m_companion) / m_total)[None, :]
+                ltt_reflect_factor = (m_primary / m_total)[None, :]
+                ltt_star_factor = m_companion / m_total
+
+            # inst_idx is SYMBOLIC here (this one compiled function is
+            # reused for every instrument), unlike build_likelihood's
+            # `rows`, which is known at graph-build time -- so a genuinely
+            # mixed per-file config can't be resolved with a Python if/else
+            # the way the group loop does; it needs a runtime lookup keyed
+            # on inst_idx. The all-off/all-on cases (including the default,
+            # all-on) still short-circuit in Python and pay no pt.where.
+            def _retard(t_in, role_factor):
+                if not lt_active_arr.any():
+                    return t_in
+                corrected, _ = ltt.retarded_time(
+                    t_in,
+                    tp,
+                    n,
+                    ecc,
+                    sinw,
+                    cosw,
+                    sin_i,
+                    a_rel,
+                    factor=role_factor,
+                    z0=0.0,
+                )
+                if lt_active_arr.all():
+                    return corrected
+                lt_active_scalar = pt.constant(
+                    lt_active_arr.astype("float64")
+                )[inst_idx]
+                return pt.where(lt_active_scalar > 0.5, corrected, t_in)
+
+            t_grid_final = _retard(t_grid, ltt_factor)
+            # Broadcast to (N_times, N_planets) unconditionally, same
+            # reasoning as build_likelihood's time_g_corrected: t_grid_final's
+            # last dim may still be the unbroadcast size 1 from t_grid (the
+            # all-off case, or N_planets==1), and slicing [:, p_idx] for
+            # p_idx > 0 below would index-error without this.
+            time_corrected = t_grid_final + pt.zeros((1, planets.n_elements))
+
+            # Reflection rides the planet's own delay; beaming and
+            # ellipsoidal ride the star's. Both mirror build_likelihood.
+            time_reflect = time_corrected
+            if (
+                system.band.reflect_may_be_nonzero()
+                and ltt_reflect_factor is not None
+            ):
+                time_reflect = _retard(t_grid, ltt_reflect_factor) + pt.zeros(
+                    (1, planets.n_elements)
+                )
+            time_star_all = None
+            need_stellar = (
+                "beam" in planets.manifest
+                or system.band.ellipsoidal_may_be_nonzero()
+            )
+            if need_stellar and ltt_star_factor is not None:
+                time_star_all = _retard(
+                    t_grid, ltt_star_factor[None, :]
+                ) + pt.zeros((1, planets.n_elements))
+
+            M = (t_grid_final - tp) * n
             sinf, cosf = ops.kepler(M, ecc + pt.zeros_like(M))
 
             a_rstar = planets.ar.value[None, :]
@@ -774,7 +1050,6 @@ class Transit(Instrument):
 
             sin_wf = sinw * cosf + cosw * sinf
             cos_wf = cosw * cosf - sinw * sinf
-            sin_i = pt.sin(inc)
             cos_i = pt.cos(inc)
 
             b = pt.sqrt(
@@ -830,7 +1105,7 @@ class Transit(Instrument):
                     planetvisible = physics.calc_planet_visible(b_p, Z_p, r_p)
                     if reflect_inst is not None:
                         reflect_term = physics.calc_reflect_term(
-                            t_input,
+                            time_reflect[:, p_idx],
                             tc_this,
                             period_this,
                             reflect_inst,
@@ -851,8 +1126,13 @@ class Transit(Instrument):
                 beam_term = pt.zeros_like(b_p)
                 if beam_active:
                     beam_p = planets.beam.value[p_idx]
+                    t_star_p = (
+                        time_star_all[:, p_idx]
+                        if time_star_all is not None
+                        else t_input
+                    )
                     beam_term = physics.calc_beam_term(
-                        t_input, tc_this, period_this, beam_p
+                        t_star_p, tc_this, period_this, beam_p
                     )
                     if dil_node is not None:
                         beam_term = beam_term * dil_node[inst_idx]
@@ -875,7 +1155,12 @@ class Transit(Instrument):
                 if ellip_inst is not None:
                     ellip_dev = (
                         physics.calc_ellipsoidal_factor(
-                            t_input, tc_this, period_this, ellip_inst
+                            time_star_all[:, p_idx]
+                            if time_star_all is not None
+                            else t_input,
+                            tc_this,
+                            period_this,
+                            ellip_inst,
                         )
                         - 1.0
                     )

@@ -27,9 +27,12 @@ Units: velocities in m/s at the interface (allesfast convention), km/s
 internally.  Angles in radians.  Returns the RM anomaly in m/s.
 """
 
+import logging
+
 import numpy as np
 import pytensor.tensor as pt
 
+from . import ltt
 from .limbdark import quad_limb_darkened_flux
 
 
@@ -313,6 +316,7 @@ def compute_rm_rv(
     band_idx,
     n_sigma=201,
     model="hirano2011",
+    light_travel_time_active=True,
 ):
     """Assemble the RM RV distortion [m/s] for one orbit at ``time``.
 
@@ -327,6 +331,11 @@ def compute_rm_rv(
     ``model`` selects the kernel: ``hirano2011`` (default; the disk integral,
     rm_delta_v_core) or ``hirano2010`` (the fast closed-form series, uses only
     vsini + vbeta).  Both share the geometry (x, flux) computed here.
+
+    ``light_travel_time_active`` gates the Roemer-delay correction on the
+    true-anomaly seam only (see below) -- caller-supplied (from the
+    per-file ``rvinstrument`` ``light_travel_time:`` key, default True) since
+    this module has no per-instance state of its own.
     """
     orbit, star, planet, band = (
         system.orbit,
@@ -352,7 +361,58 @@ def compute_rm_rv(
     else:
         u2 = pt.zeros_like(u1)
 
-    f = orbit.get_true_anomaly(time)[:, orbit_idx]
+    # Light-travel-time correction on the true-anomaly seam only (the
+    # occultation geometry, x/y/z below) -- NOT get_radial_velocity or any
+    # other RV path, which this function never touches. Gated so OFF costs
+    # nothing beyond get_true_anomaly's own (pre-existing, all-orbits)
+    # Kepler solve: ltt.retarded_time does one MORE, single-orbit solve only
+    # when active. Physical a_rel comes from orbits.a (internal_unit solRad,
+    # via calc_arsun) -- NOT planet.ar (a/Rstar, dimensionless, already
+    # pulled above as `ar` for the sky-plane geometry) -- using ar here would
+    # be a silent factor-of-R* error in the delay (see components/ltt.py).
+    # An orbit whose bodies did not resolve has no a/m_* parameters at all
+    # (see ltt.orbit_supports_ltt); since the key defaults to on, reading
+    # them unguarded would crash a config that built fine before this
+    # existed.
+    if light_travel_time_active and not ltt.orbit_supports_ltt(orbit):
+        logging.warning(
+            "rm: light-travel-time correction disabled -- the orbit does "
+            "not define %s (its bodies did not resolve). Set "
+            "light_travel_time: false on the RV file to silence this.",
+            ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+        )
+        light_travel_time_active = False
+
+    if light_travel_time_active:
+        tp = orbit.tp.value[orbit_idx]
+        n = orbit.n.value[orbit_idx]
+        sinw = orbit.sinw.value[orbit_idx]
+        cosw = orbit.cosw.value[orbit_idx]
+        sin_i = pt.sin(inc)
+        a_rel = orbit.a.value[orbit_idx]  # physical, R_sun
+        # RM is the same occultation seam as the transit (the planet
+        # blocking light emitted by the stellar photosphere), so it takes
+        # the same mass DIFFERENCE factor -- see ltt.py's `factor` docs.
+        ltt_factor = (
+            orbit.m_primary.value[orbit_idx]
+            - orbit.m_companion.value[orbit_idx]
+        ) / orbit.m_total.value[orbit_idx]
+        time_corrected, _ = ltt.retarded_time(
+            time,
+            tp,
+            n,
+            ecc,
+            sinw,
+            cosw,
+            sin_i,
+            a_rel,
+            factor=ltt_factor,
+            z0=0.0,
+        )
+    else:
+        time_corrected = time
+
+    f = orbit.get_true_anomaly(time_corrected)[:, orbit_idx]
     x, y, z = rm_planet_xyz(f, ecc, omega, ar, inc, lam)
 
     # Limb-darkened blocked flux at the RV times -- the same shared helper
