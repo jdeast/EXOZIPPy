@@ -271,3 +271,208 @@ def test_retarded_time_gradient_is_finite_at_az_zero_via_numpyro():
 
     tp_samples = idata.posterior["tp"].values
     assert np.all(np.isfinite(tp_samples))
+
+
+# ==========================================================================
+# Regression tests for the two 2026-08-15 fixes. Both bugs survived the
+# spot-checks above because every one of those evaluates the delay where
+# vz == 0 exactly (a conjunction of a circular omega=0 orbit, or a face-on
+# orbit where z/vz/az are all identically zero), and at a mass ratio where
+# the occultation factor and the planet's own barycentric fraction agree.
+# ==========================================================================
+
+
+def _kinematics_numpy(t, tp, n, ecc, omega, sin_i, a_rel, factor=1.0):
+    """line_of_sight_kinematics in plain numpy -- an independent
+    transcription of the same two-body calculus, so comparing against it
+    checks solve_delay rather than re-using the code under test.
+    """
+    M = (t - tp) * n
+    E = M
+    for _ in range(80):
+        E = E - (E - ecc * np.sin(E) - M) / (1.0 - ecc * np.cos(E))
+    f = 2.0 * np.arctan2(
+        np.sqrt(1.0 + ecc) * np.sin(E / 2.0),
+        np.sqrt(1.0 - ecc) * np.cos(E / 2.0),
+    )
+    r_over_a = (1.0 - ecc**2) / (1.0 + ecc * np.cos(f))
+    z = a_rel * r_over_a * np.sin(f + omega) * sin_i
+    vz = (
+        (n * a_rel / np.sqrt(1.0 - ecc**2))
+        * sin_i
+        * (ecc * np.cos(omega) + np.cos(f + omega))
+    )
+    az = -(n**2) * (1.0 / r_over_a) ** 3 * z
+    return z * factor, vz * factor, az * factor
+
+
+def _exact_delay(t, **kw):
+    """Brentq solve of the retardation condition c*delay = z0 - z(t - delay)
+    itself -- no Taylor expansion, so this is a genuine external oracle for
+    solve_delay's closed form.
+    """
+    from scipy.optimize import brentq
+
+    def residual(d):
+        z, _, _ = _kinematics_numpy(t - d, **kw)
+        return C_LIGHT_RSUN_PER_DAY * d + z
+
+    return brentq(residual, -0.05, 0.05, xtol=1e-16, rtol=8.9e-16)
+
+
+def test_delay_matches_exact_retardation_condition_away_from_conjunction():
+    """
+    Given an eccentric, inclined orbit sampled at nine phases spread over a
+    full period -- so vz is large and of both signs, unlike every earlier
+    spot-check, which sits at vz == 0 exactly,
+    When solve_delay's closed form is compared against a brentq solve of
+    the retardation condition c*delay = z0 - z(t - delay),
+    Then they agree to well under a microsecond.
+
+    This is the test that pins vz's SIGN. Until 2026-08-15 solve_delay
+    transcribed exoplanet's expression, whose `vz` is -dZ/dt for its own Z
+    (its _rotate_vector carries a minus that its vz does not), so feeding
+    it this module's genuinely self-consistent (z, dz/dt, d2z/dt2) entered
+    vz with the wrong sign: a 14 ms error here, ~1e6 times the tolerance
+    below, and entirely invisible at vz == 0.
+    """
+    kw = dict(
+        tp=0.0,
+        n=2.0 * np.pi / 3.0,
+        ecc=0.3,
+        omega=0.7,
+        sin_i=np.sin(np.radians(89.0)),
+        a_rel=0.05 / RSUN_TO_AU,  # 0.05 AU in R_sun
+    )
+
+    for t_val in np.linspace(0.01, 2.99, 9):
+        z_np, vz_np, az_np = _kinematics_numpy(t_val, **kw)
+        got = _eval(
+            lambda z, vz, az: ltt.solve_delay(z, vz, az, z0=0.0),
+            z=z_np,
+            vz=vz_np,
+            az=az_np,
+        )
+        want = _exact_delay(t_val, **kw)
+
+        assert abs(got - want) * _SECONDS_PER_DAY < 1e-6, (
+            f"t={t_val}: closed form {got * _SECONDS_PER_DAY:.6f} s vs "
+            f"exact {want * _SECONDS_PER_DAY:.6f} s"
+        )
+
+
+def test_delay_is_sensitive_to_the_sign_of_vz():
+    """
+    Given the same eccentric orbit at a phase where vz is far from zero,
+    When solve_delay is evaluated with vz and with -vz,
+    Then the two answers differ by more than a millisecond.
+
+    Guards the guard: if a future refactor made the delay insensitive to
+    vz's sign, the test above would keep passing for the wrong reason. The
+    measured separation here is what makes it a real constraint.
+    """
+    kw = dict(
+        tp=0.0,
+        n=2.0 * np.pi / 3.0,
+        ecc=0.3,
+        omega=0.7,
+        sin_i=np.sin(np.radians(89.0)),
+        a_rel=0.05 / RSUN_TO_AU,
+    )
+    z_np, vz_np, az_np = _kinematics_numpy(1.873, **kw)
+
+    right = _eval(
+        lambda z, vz, az: ltt.solve_delay(z, vz, az, z0=0.0),
+        z=z_np,
+        vz=vz_np,
+        az=az_np,
+    )
+    flipped = _eval(
+        lambda z, vz, az: ltt.solve_delay(z, vz, az, z0=0.0),
+        z=z_np,
+        vz=-vz_np,
+        az=az_np,
+    )
+
+    assert abs(right - flipped) * _SECONDS_PER_DAY > 1e-3
+
+
+def _exact_occultation_time(guess, f_primary, a_rel, period, c):
+    """Time of minimum projected separation for a circular edge-on orbit,
+    with EACH body evaluated at its OWN retarded time -- the actual
+    two-body occultation condition, built from first principles here so it
+    is independent of ltt.py entirely.
+
+    f_primary = m_primary/m_total, so the planet sits at f_primary*r_rel
+    and the star at -(1 - f_primary)*r_rel from the barycenter.
+    """
+    from scipy.optimize import minimize_scalar
+
+    n = 2.0 * np.pi / period
+    f_star = 1.0 - f_primary
+
+    def rel(t):
+        return a_rel * np.cos(n * t), a_rel * np.sin(n * t)  # (X, z)
+
+    def separation(t_obs):
+        tp_ = ts_ = t_obs
+        for _ in range(60):
+            tp_ = t_obs - f_primary * rel(tp_)[1] / c
+            ts_ = t_obs + f_star * rel(ts_)[1] / c
+        return abs(rel(tp_)[0] * f_primary + rel(ts_)[0] * f_star)
+
+    return minimize_scalar(
+        separation,
+        bracket=(guess - 0.02, guess, guess + 0.02),
+        method="brent",
+        tol=1e-14,
+    ).x
+
+
+@pytest.mark.parametrize(
+    "mass_ratio", [1e-3, 0.1, 1.0], ids=["planet", "tenth", "equal_mass"]
+)
+def test_occultation_factor_is_the_mass_difference(mass_ratio):
+    """
+    Given a circular edge-on two-body orbit at mass ratios from planetary
+    to equal-mass,
+    When the primary-to-secondary interval is computed from the true
+    two-body occultation condition (each body at its own retarded time),
+    Then it matches 2*a/c*(m_primary - m_companion)/m_total -- and NOT
+    2*a/c*m_primary/m_total, the factor this module used until 2026-08-15
+    (and that EXOFASTv2's target2bjd.pro still uses).
+
+    An occultation is not an emission event: the planet blocks light the
+    star emitted, so the star's own Roemer delay partially cancels the
+    planet's. At equal masses the true offset is EXACTLY zero -- the bodies
+    are always diametrically opposite, so the secondary configuration is
+    the mirror of the primary -- which is the standard eclipsing-binary
+    result (Kaplan 2010, Fabrycky 2010) used to measure mass ratios. The
+    old factor predicts a/c there, a 25 s error for this orbit.
+    """
+    period = 3.0
+    a_rel = 0.05 / RSUN_TO_AU  # 0.05 AU in R_sun
+    c = C_LIGHT_RSUN_PER_DAY
+    f_primary = 1.0 / (1.0 + mass_ratio)  # m_primary/m_total
+
+    t_transit = _exact_occultation_time(
+        -period / 4.0, f_primary, a_rel, period, c
+    )
+    t_eclipse = _exact_occultation_time(
+        +period / 4.0, f_primary, a_rel, period, c
+    )
+    measured = (t_eclipse - t_transit) - period / 2.0
+
+    difference_factor = (1.0 - mass_ratio) / (1.0 + mass_ratio)
+    predicted = 2.0 * a_rel / c * difference_factor
+    old_factor_prediction = 2.0 * a_rel / c * f_primary
+
+    assert measured * _SECONDS_PER_DAY == pytest.approx(
+        predicted * _SECONDS_PER_DAY, abs=1e-3
+    )
+
+    if mass_ratio == 1.0:
+        # The decisive case: exactly zero by symmetry, while the old
+        # factor predicts a/c ~ 25 s.
+        assert abs(measured) * _SECONDS_PER_DAY < 1e-3
+        assert old_factor_prediction * _SECONDS_PER_DAY > 20.0

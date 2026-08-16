@@ -24,10 +24,18 @@ convention -- transit.py's Z = r_norm*sin_wf*sin_i, "+ = toward the
 observer" (in front of the star during primary transit). This is
 deliberately NOT exoplanet's own convention: exoplanet's _rotate_vector
 computes Z = -r*sin(f+omega)*sin(i) (verified by reading its source), the
-opposite sign. The overall sign of the correction (t - delay vs t + delay)
-is pinned empirically by tests/test_ltt.py's analytic spot-checks against
-known physics (the 2a/c secondary-eclipse offset, the a/c delay amplitude),
-not asserted here on paper.
+opposite sign. Because the conventions differ, solve_delay's quadratic is
+solved here from scratch too -- see its docstring; transcribing exoplanet's
+expression entered vz with the wrong sign (14 ms, fixed 2026-08-15). Signs
+are pinned by tests/test_ltt.py against a brentq solve of the retardation
+condition itself, sampled AWAY from conjunction: the original spot-checks
+(the 2a/c secondary-eclipse offset, the a/c amplitude, the face-on case)
+all sit where vz == 0 exactly and so constrain nothing about its sign.
+
+Barycentric factor: see `retarded_time`'s `factor` argument. For an
+OCCULTATION it is (m_primary - m_companion)/m_total, NOT either body's own
+barycentric fraction -- a transit is a two-body seam, not an emission
+event.
 
 Units: everything here is in EXOZIPPy's native internal unit system --
 R_sun, M_sun, day (see constants.py) -- not AU/second like EXOFASTv2 or
@@ -38,13 +46,16 @@ as a manifest key despite the expression function being named calc_arsun);
 no separate stellar-radius multiply is needed since that physical scale is
 already baked into a.
 
-Barycentric scaling: the event (transit/eclipse/RM: the planet; RV reflex:
-the star) sits at a fixed fraction of the relative-orbit separation from the
-system barycenter -- m_primary/m_total for the planet, m_companion/m_total
-for the star (EXOFASTv2's target2bjd.pro factor = q/(1+q), q = M1/M2, is the
-same relation). Since (a_body/r_body(t)) = (a_rel/r_rel(t)) exactly (the
-factor cancels in that ratio), only z/vz/az themselves need the factor
-multiply, not the (a/r)^3 term inside az.
+Barycentric scaling: an EMISSION event (RV reflex: the star; thermal or
+reflected light: the planet) sits at a fixed fraction of the relative-orbit
+separation from the system barycenter -- m_companion/m_total for the star,
+m_primary/m_total for the planet (EXOFASTv2's target2bjd.pro factor =
+q/(1+q), q = M1/M2, is the same relation). An OCCULTATION (transit,
+secondary eclipse, RM) is NOT an emission event and takes the mass
+DIFFERENCE instead; `retarded_time`'s `factor` argument documents why.
+Since (a_body/r_body(t)) = (a_rel/r_rel(t)) exactly (the factor cancels in
+that ratio), only z/vz/az themselves need the factor multiply, not the
+(a/r)^3 term inside az.
 """
 
 import pytensor.tensor as pt
@@ -78,10 +89,62 @@ def line_of_sight_kinematics(
         Physical semi-major axis of the RELATIVE orbit [R_sun] (orbit.a.value
         -- internal_unit solRad; NOT orbit.arsun, which does not exist).
     factor : tensor or float
-        Barycentric scaling for the body whose kinematics are wanted --
-        m_primary/m_total for the planet's event (transit/eclipse/RM),
-        m_companion/m_total for the star's (RV reflex). Default 1.0 (the
-        un-scaled relative orbit, EXOFASTv2's infinite-mass-ratio limit).
+        Scaling applied to z/vz/az. Which value is correct depends on what
+        KIND of observable is being retarded, not on which body it is
+        "about":
+
+        - OCCULTATION seam (transit, secondary eclipse, RM): use
+          ``(m_primary - m_companion)/m_total``. A transit is not an
+          emission event -- the planet emits nothing, it blocks light the
+          STAR emitted -- so the observed separation needs BOTH bodies at
+          their own retarded times, ``rho_p(t - z_p/c) - rho_s(t - z_s/c)``.
+          Expanding both leaves the relative orbit evaluated at
+          ``t - [(m_primary - m_companion)/m_total]*z_rel/c``: the star's
+          own delay partially CANCELS the planet's. Using m_primary/m_total
+          (EXOFASTv2's target2bjd.pro; this module until 2026-08-15) puts
+          the star at the barycenter and so drops z_s/c entirely; using 1.0
+          (exoplanet's get_relative_position) drops it and the planet's
+          barycentric fraction too. All three agree to O(q) for a planet
+          (~tens of ms), but for comparable masses only this one is right:
+          at m_primary == m_companion the true primary-to-secondary offset
+          is EXACTLY zero by symmetry (the bodies are always diametrically
+          opposite), the standard eclipsing-binary result used to measure
+          mass ratios (Kaplan 2010, Fabrycky 2010), while m_primary/m_total
+          predicts a/c and 1.0 predicts 2a/c.
+        - Light EMITTED by one body (RV reflex, Doppler beaming,
+          ellipsoidal -- all from the star): that body's own barycentric
+          fraction, ``m_companion/m_total`` for the primary.
+        - Light emitted by the SECONDARY (thermal emission, reflected-light
+          phase): ``m_primary/m_total``.
+
+        Default 1.0 (the un-scaled relative orbit, the infinite-mass-ratio
+        limit).
+
+        MULTIPLE COMPANIONS. Everything above is the two-body result, and
+        this module is called per orbit, so it cannot see the rest of the
+        system. With N companions the star's reflex is
+        ``z_star = -sum_i (M_i/M_tot) z_rel,i`` and planet b's occultation
+        picks up three things a per-orbit call misses:
+
+        1. its own factor becomes ``(M_star - M_b + sum_{i!=b} M_i)/M_tot``
+           over the WHOLE system mass -- an O(q) correction to an O(q)
+           correction, 0.05 ms for a two-Jupiter system, ignorable;
+        2. a time shift ``+ sum_{i!=b} (M_i/M_tot) z_rel,i/c`` from the
+           other companions moving the star along the line of sight. This
+           is the classic light-time (LITE / LTT) eclipse-timing signal
+           used to DETECT outer companions -- 2.5 SECONDS in amplitude for
+           a Jupiter at 5 AU, varying on the OUTER period, so it reads as
+           TTV rather than as an offset. Not modeled here or anywhere else
+           in EXOZIPPy; it needs the full system state, not one orbit;
+        3. a transverse displacement ``(z_rel,b/c)*sum_{i!=b}
+           (M_i/M_tot)*d(rho_rel,i)/dt`` -- the star moves ACROSS the sky
+           between the two retarded times. ~2 ms equivalent, and notably
+           NOT expressible as a shift of any time axis, which is the point
+           at which "just retard the timestamps" stops being the right
+           mental model at all.
+
+        (2) is the one that matters and is the one worth implementing if
+        anyone needs it; (1) and (3) are sub-millisecond.
 
     Returns
     -------
@@ -118,9 +181,30 @@ def line_of_sight_kinematics(
 
 def solve_delay(z, vz, az, z0=0.0, c=C_LIGHT_RSUN_PER_DAY):
     """Closed-form light-travel-time delay from a 2nd-order Taylor
-    expansion of z(t) about the uncorrected time (exoplanet's
-    KeplerianOrbit._get_retarded_position; derivation credited there to
-    Luger/Agol in starry issue #66).
+    expansion of z(t) about the uncorrected time (the approach of
+    exoplanet's KeplerianOrbit._get_retarded_position; derivation credited
+    there to Luger/Agol in starry issue #66).
+
+    The quadratic is solved here from scratch rather than transcribed,
+    because exoplanet's variables are NOT the ones this module builds and
+    its expression is NOT the root of this quadratic. Two separate points:
+
+    1. exoplanet's ``vz`` is ``-dZ/dt`` for its own ``Z`` -- its
+       ``_rotate_vector`` returns ``Z = -r*sin(f+omega)*sin(i)`` (minus)
+       while its ``vz`` carries a plus -- so its ``(c + vz)`` is really
+       ``(c - dZ/dt)``. ``line_of_sight_kinematics`` above returns a
+       genuinely self-consistent ``(z, dz/dt, d2z/dt2)``, so transcribing
+       ``(c + vz)`` here would enter vz with the WRONG SIGN. It did until
+       2026-08-15: a 14 ms error (a=0.05 AU, P=3 d, e=0.3, i=89), ~1000x
+       the truncation error this expansion is supposed to have.
+    2. exoplanet's expression is ``(c/az)*(A - sqrt(A^2 - B))`` in the
+       variables below, which is ``-root(-B)``: the small root of the same
+       quadratic with ``az -> -az``. It agrees with the true root in the
+       part odd in B (the whole leading term) and flips the even part, so
+       it is correct to first order in the acceleration and wrong at
+       second, by ``(c/az)*B^2/(4*A^3)`` -- 9 us for that orbit, vs the 4 ns
+       genuine third-order truncation of the correct root used here.
+       Negligible for exoplanet's purposes; free to not inherit.
 
     Parameters
     ----------
@@ -137,10 +221,12 @@ def solve_delay(z, vz, az, z0=0.0, c=C_LIGHT_RSUN_PER_DAY):
     Returns
     -------
     delay : tensor
-        Light-travel-time delay [days], same shape as z. See the module
-        docstring: the sign here is whatever falls out of this formula --
-        tests/test_ltt.py is what confirms t - delay is the right
-        direction, not this docstring.
+        Light-travel-time delay [days], same shape as z, satisfying
+        ``c*delay = z0 - z(t - delay)`` -- so consumers evaluate at
+        ``t - delay``. Every sign here is derived from that condition (see
+        above); tests/test_ltt.py checks it against a brentq solve of the
+        condition itself AT PHASES WHERE vz != 0, which is what the old
+        conjunction-and-face-on spot-checks could not do.
 
     Notes
     -----
@@ -171,14 +257,15 @@ def solve_delay(z, vz, az, z0=0.0, c=C_LIGHT_RSUN_PER_DAY):
     for any az != 0 are unchanged.
     """
     az_safe = pt.where(pt.eq(az, 0.0), 1.0, az)
+    # A = 1 - vz/c and B = 2*az*(z0 - z)/c**2, so the quadratic
+    # 0.5*az*d^2 + (c - vz)*d + (z - z0) = 0 has small root
+    # (c/az)*(sqrt(A^2 + B) - A), whose az -> 0 limit is (z0 - z)/(c - vz).
+    a_term = 1.0 - vz / c
+    b_term = 2.0 * az_safe * (z0 - z) / c**2
     return pt.switch(
         pt.lt(pt.abs(az), 1.0e-10),
-        (z0 - z) / (c + vz),
-        (c / az_safe)
-        * (
-            (1.0 + vz / c)
-            - pt.sqrt((1.0 + vz / c) ** 2 - 2.0 * az_safe * (z0 - z) / c**2)
-        ),
+        (z0 - z) / (c - vz),
+        (c / az_safe) * (pt.sqrt(a_term**2 + b_term) - a_term),
     )
 
 
@@ -220,3 +307,24 @@ def retarded_time(
     )
     delay = solve_delay(z, vz, az, z0, c)
     return t - delay, delay
+
+
+#: Orbit parameters `retarded_time` callers need. `Orbit.register_parameters`
+#: only declares these when `Orbit._validate_bodies` passes (it warns
+#: "mass/scale parameters (m_total, a, K) are disabled" otherwise), and only
+#: manifest entries get an attribute -- so a geometry-only orbit has none of
+#: them and reading `orbit.a.value` raises AttributeError.
+REQUIRED_ORBIT_PARAMS = ("a", "m_primary", "m_companion", "m_total")
+
+
+def orbit_supports_ltt(orbit_component):
+    """Whether `orbit_component` carries the parameters the Roemer-delay
+    correction needs.
+
+    False for an orbit whose bodies did not resolve. Callers must treat
+    that as "light travel time off for this orbit" rather than letting the
+    AttributeError escape: `light_travel_time` defaults to ON, so an
+    unguarded read turns a previously-working geometry-only fit into a
+    crash at build_model() time.
+    """
+    return all(hasattr(orbit_component, p) for p in REQUIRED_ORBIT_PARAMS)

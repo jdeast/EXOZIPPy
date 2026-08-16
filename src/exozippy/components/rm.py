@@ -27,6 +27,8 @@ Units: velocities in m/s at the interface (allesfast convention), km/s
 internally.  Angles in radians.  Returns the RM anomaly in m/s.
 """
 
+import logging
+
 import numpy as np
 import pytensor.tensor as pt
 
@@ -368,6 +370,19 @@ def compute_rm_rv(
     # via calc_arsun) -- NOT planet.ar (a/Rstar, dimensionless, already
     # pulled above as `ar` for the sky-plane geometry) -- using ar here would
     # be a silent factor-of-R* error in the delay (see components/ltt.py).
+    # An orbit whose bodies did not resolve has no a/m_* parameters at all
+    # (see ltt.orbit_supports_ltt); since the key defaults to on, reading
+    # them unguarded would crash a config that built fine before this
+    # existed.
+    if light_travel_time_active and not ltt.orbit_supports_ltt(orbit):
+        logging.warning(
+            "rm: light-travel-time correction disabled -- the orbit does "
+            "not define %s (its bodies did not resolve). Set "
+            "light_travel_time: false on the RV file to silence this.",
+            ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+        )
+        light_travel_time_active = False
+
     if light_travel_time_active:
         tp = orbit.tp.value[orbit_idx]
         n = orbit.n.value[orbit_idx]
@@ -375,9 +390,13 @@ def compute_rm_rv(
         cosw = orbit.cosw.value[orbit_idx]
         sin_i = pt.sin(inc)
         a_rel = orbit.a.value[orbit_idx]  # physical, R_sun
+        # RM is the same occultation seam as the transit (the planet
+        # blocking light emitted by the stellar photosphere), so it takes
+        # the same mass DIFFERENCE factor -- see ltt.py's `factor` docs.
         ltt_factor = (
-            orbit.m_primary.value[orbit_idx] / orbit.m_total.value[orbit_idx]
-        )
+            orbit.m_primary.value[orbit_idx]
+            - orbit.m_companion.value[orbit_idx]
+        ) / orbit.m_total.value[orbit_idx]
         time_corrected, _ = ltt.retarded_time(
             time,
             tp,

@@ -50,6 +50,28 @@ class Transit(Instrument):
             [bool(c.get("light_travel_time", True)) for c in self.config]
         )
 
+    def _ltt_active(self, orbits):
+        """Per-file light-travel-time flags, forced off when the orbit
+        cannot supply the parameters the correction needs.
+
+        `Orbit.register_parameters` declares a/m_primary/m_companion/m_total
+        only when its bodies resolve, so a geometry-only orbit has none of
+        them. Since `light_travel_time` defaults to ON, reading them
+        unguarded would turn any such config -- which built fine before the
+        correction existed -- into an AttributeError at build time.
+        """
+        if ltt.orbit_supports_ltt(orbits):
+            return self._light_travel_time_active
+        if self._light_travel_time_active.any():
+            logging.warning(
+                "transit: light-travel-time correction disabled -- the orbit "
+                "does not define %s (its bodies did not resolve; see the "
+                "orbit component's own warning). Set light_travel_time: "
+                "false on the affected transit file(s) to silence this.",
+                ", ".join(ltt.REQUIRED_ORBIT_PARAMS),
+            )
+        return np.zeros_like(self._light_travel_time_active)
+
     @property
     def prefix(self):
         return "transit"
@@ -478,21 +500,31 @@ class Transit(Instrument):
         cos_i = pt.cos(inc)
 
         # 2b. Light-travel-time (Roemer delay) inputs -- per-file gating via
-        # self._light_travel_time_active, resolved per group below.
-        a_rel = orbits.a.value[planets.orbit_map][
-            None, None, :
-        ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
-        # Barycentric scaling for the planet's own orbit about the system
-        # barycenter (see components/ltt.py docstring, "Barycentric
-        # scaling"): the transiting planet is the implicit companion group
-        # (see class docstring re: hierarchical orbits), so its distance
-        # from the barycenter is a_rel * m_primary/m_total -- mirrors
-        # astrometryinstrument.py's m_companion/m_total for its own
-        # (primary-side) reflex factor.
-        ltt_factor = (
-            orbits.m_primary.value[planets.orbit_map]
-            / orbits.m_total.value[planets.orbit_map]
-        )[None, None, :]
+        # ltt_active (self._light_travel_time_active, forced off when the
+        # orbit cannot supply these parameters), resolved per group below.
+        ltt_active = self._ltt_active(orbits)
+        a_rel = ltt_factor = None
+        if ltt_active.any():
+            a_rel = orbits.a.value[planets.orbit_map][
+                None, None, :
+            ]  # (1, 1, N_planets), physical semi-major axis [R_sun]
+            # Barycentric scaling for an OCCULTATION seam: the mass
+            # DIFFERENCE, not the planet's own barycentric fraction. A
+            # transit is not an emission event -- the planet blocks light
+            # the STAR emitted -- so both bodies enter at their own
+            # retarded times and the star's delay partially cancels the
+            # planet's. See ltt.py's `factor` docs for the derivation, and
+            # for why m_primary/m_total (used here until 2026-08-15, and by
+            # EXOFASTv2's target2bjd.pro) agrees to O(q) for a planet but
+            # predicts a spurious a/c offset for a comparable-mass pair
+            # whose true offset is exactly zero.
+            ltt_factor = (
+                (
+                    orbits.m_primary.value[planets.orbit_map]
+                    - orbits.m_companion.value[planets.orbit_map]
+                )
+                / orbits.m_total.value[planets.orbit_map]
+            )[None, None, :]
 
         # 3. Limb Darkening Setup (per observation, mapped from each
         # instrument's Band). When every band uses the linear law, Band's
@@ -562,7 +594,7 @@ class Transit(Instrument):
             # solve, no pt.where, when every row is on (the default); costs
             # one extra Kepler solve PLUS one pt.where only for a genuinely
             # mixed group.
-            lt_active_rows = self._light_travel_time_active[
+            lt_active_rows = ltt_active[
                 self.inst_map[rows]
             ]  # (n_g,) bool, numpy -- known at graph-build time
             if lt_active_rows.any():
@@ -858,11 +890,20 @@ class Transit(Instrument):
             # applied outside, by _smeared_full_lc averaging repeated calls
             # at shifted t), so it's (N_times, N_planets) here vs
             # (n_g, k_g, N_planets) there.
-            a_rel = orbits.a.value[planets.orbit_map][None, :]
-            ltt_factor = (
-                orbits.m_primary.value[planets.orbit_map]
-                / orbits.m_total.value[planets.orbit_map]
-            )[None, :]
+            lt_active_arr = self._ltt_active(orbits)
+            a_rel = ltt_factor = None
+            if lt_active_arr.any():
+                a_rel = orbits.a.value[planets.orbit_map][None, :]
+                # Occultation seam -- the mass DIFFERENCE; must match the
+                # likelihood path above exactly (see ltt.py's `factor`
+                # docs).
+                ltt_factor = (
+                    (
+                        orbits.m_primary.value[planets.orbit_map]
+                        - orbits.m_companion.value[planets.orbit_map]
+                    )
+                    / orbits.m_total.value[planets.orbit_map]
+                )[None, :]
             # inst_idx is SYMBOLIC here (this one compiled function is
             # reused for every instrument), unlike build_likelihood's
             # `rows`, which is known at graph-build time -- so a genuinely
@@ -870,7 +911,6 @@ class Transit(Instrument):
             # the way the group loop does; it needs a runtime lookup keyed
             # on inst_idx. The all-off/all-on cases (including the default,
             # all-on) still short-circuit in Python and pay no pt.where.
-            lt_active_arr = self._light_travel_time_active
             if not lt_active_arr.any():
                 t_grid_final = t_grid
             elif lt_active_arr.all():
