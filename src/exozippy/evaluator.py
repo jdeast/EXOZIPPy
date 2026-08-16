@@ -112,24 +112,85 @@ def _gather_files(obj: Any) -> List[str]:
     return found
 
 
+#: Per-instance config keys that SELECT A MODEL rather than a number, and so
+#: must reach the structural hash: toggling one changes the likelihood while
+#: leaving the component set, the file list and every parameter's structure
+#: untouched.  Without them a trace reloaded via ``recompute_trace: false``,
+#: ``exozippy-modes`` or ``mkparam.write_param_file`` is silently reused under
+#: a model it was never sampled from -- the failure this list exists to make
+#: impossible.
+#:
+#: This is an ALLOWLIST, and that is a deliberate tradeoff, not an oversight.
+#: A denylist ("hash every scalar leaf except these") would need no
+#: maintenance and would catch a key nobody remembered to add here, but it
+#: would also change the payload for EVERY config and so invalidate every
+#: trace on disk.  The cost of the allowlist is that a NEW model-affecting
+#: per-file key must be added here in the same commit that introduces it --
+#: `light_travel_time` was not, which is how it shipped defaulting to on and
+#: outside the hash.  A key recorded only when PRESENT, so adding entries here
+#: leaves the hash of configs that never set them unchanged.
+_STRUCTURAL_INSTANCE_KEYS = (
+    "light_travel_time",  # transit/rvinstrument: Roemer delay on/off
+    "gp",  # instrument: celerite2 kernel choice
+    "likelihood",  # instrument: hogg/studentt vs plain Normal
+    "mask",  # instrument: which rows are excluded
+    "mass_parameterization",  # planet: linear vs log_q
+    "ld_law",  # band: quadratic vs linear limb darkening
+    "chen",  # planet: Chen & Kipping relation on/off
+    "rm",  # rvinstrument: Rossiter-McLaughlin orbit
+    "data_format",  # mulensinstrument: flux vs magnitude file
+    "mass_function",  # star: imf vs ffp
+)
+
+
+def _instance_skeleton(item: dict, index: int) -> Any:
+    """Structural view of one instance dict: its name, plus any
+    model-selecting key it actually sets (see _STRUCTURAL_INSTANCE_KEYS).
+
+    Returns the bare name when the instance sets none of them, so configs
+    that predate this stay byte-identical in the payload.
+    """
+    name = str(item.get("name", index))
+    selected = {
+        k: _canon(item[k])
+        if not isinstance(item[k], (dict, list))
+        else str(item[k])
+        for k in _STRUCTURAL_INSTANCE_KEYS
+        if k in item
+    }
+    if not selected:
+        return name
+    return {"name": name, "model": selected}
+
+
 def _component_skeleton(config: dict) -> dict:
     """Structural view of the component set: top-level keys and, for
-    list-valued component blocks, the sorted instance names.  Numeric or
-    initval-like leaves are deliberately excluded."""
+    list-valued component blocks, the sorted instance names plus any
+    model-selecting per-instance keys.  Numeric or initval-like leaves are
+    deliberately excluded."""
     skel: Dict[str, Any] = {}
     for key, block in config.items():
         if key in _NON_STRUCTURAL_CONFIG_KEYS:
             continue
         if isinstance(block, list):
-            names = sorted(
-                str(item.get("name", i))
-                for i, item in enumerate(block)
-                if isinstance(item, dict)
+            entries = sorted(
+                (
+                    _instance_skeleton(item, i)
+                    for i, item in enumerate(block)
+                    if isinstance(item, dict)
+                ),
+                key=lambda e: e if isinstance(e, str) else e["name"],
             )
-            skel[key] = names if names else len(block)
+            skel[key] = entries if entries else len(block)
         elif isinstance(block, dict):
-            # single-instance component (e.g. sed): presence is structural
-            skel[key] = True
+            # single-instance component (e.g. sed): presence is structural,
+            # plus any model-selecting key it sets.
+            selected = {
+                k: _canon(block[k])
+                for k in _STRUCTURAL_INSTANCE_KEYS
+                if k in block and not isinstance(block[k], (dict, list))
+            }
+            skel[key] = {"model": selected} if selected else True
         else:
             skel[key] = True
     return skel

@@ -476,3 +476,65 @@ def test_occultation_factor_is_the_mass_difference(mass_ratio):
         # factor predicts a/c ~ 25 s.
         assert abs(measured) * _SECONDS_PER_DAY < 1e-3
         assert old_factor_prediction * _SECONDS_PER_DAY > 20.0
+
+
+def test_the_three_roles_give_three_different_delays():
+    """
+    Given one orbit and the three observable roles the light-travel
+    correction distinguishes -- occultation seam, light emitted by the
+    secondary, light emitted by the primary,
+    When each role's factor is applied,
+    Then the three delays are all different, and ordered
+    |primary| < |occultation| < |secondary|.
+
+    Pins the claim that one corrected time array cannot serve a whole
+    phase curve. Until 2026-08-15 transit.py used the occultation time for
+    reflection and the UNCORRECTED time for beaming and ellipsoidal, so a
+    phase curve mixed three time references differing by ~a/c. The star's
+    factor is ~q rather than ~1, so leaving those terms uncorrected was
+    much closer to right than correcting them with the planet's factor --
+    but they are still ~q*a/c off, and inconsistent with the geometry.
+    """
+    m_primary, m_companion = 1.0, 1.0e-3
+    m_total = m_primary + m_companion
+    factors = {
+        "occultation": (m_primary - m_companion) / m_total,
+        "secondary": m_primary / m_total,
+        "primary": m_companion / m_total,
+    }
+
+    kw = dict(
+        tp=0.0,
+        n=2.0 * np.pi / 3.0,
+        ecc=0.0,
+        omega=0.0,
+        sin_i=1.0,
+        a_rel=0.05 / RSUN_TO_AU,
+    )
+    delays = {}
+    for role, f in factors.items():
+        z_np, vz_np, az_np = _kinematics_numpy(0.75, factor=f, **kw)
+        delays[role] = (
+            _eval(
+                lambda z, vz, az: ltt.solve_delay(z, vz, az, z0=0.0),
+                z=z_np,
+                vz=vz_np,
+                az=az_np,
+            )
+            * _SECONDS_PER_DAY
+        )
+
+    assert (
+        abs(delays["primary"])
+        < abs(delays["occultation"])
+        < abs(delays["secondary"])
+    )
+    # The occultation and secondary roles differ by the star's own delay,
+    # which is what the occultation factor subtracts off. True only to
+    # FIRST order: solve_delay is not exactly linear in `factor` (vz and
+    # az scale with it too), so the residual is O(v/c) ~ 7e-5 here, not
+    # machine precision. rel=1e-3 keeps the structural claim while
+    # admitting that nonlinearity.
+    assert abs(delays["secondary"] - delays["occultation"]) == pytest.approx(
+        abs(delays["primary"]), rel=1e-3
+    )

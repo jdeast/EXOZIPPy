@@ -749,3 +749,89 @@ def test_run_fit_reuse_path_never_overwrites_the_whitening_file(tmp_path):
     assert type(error).__name__ == "StaleWhiteningError", error
     assert dropped in str(error)
     assert "recompute_trace: true" in str(error)
+
+
+# --------------------------------------------------------------------------
+# Model-selecting per-instance keys must reach the hash. These flip WHICH
+# likelihood is built while leaving the component set, the file list and
+# every parameter's structure untouched, so before 2026-08-15 they were
+# invisible: a trace sampled with one setting reloaded silently under the
+# other. `light_travel_time` is the sharpest case because it defaults to ON.
+# --------------------------------------------------------------------------
+
+_LTT_BASE = {
+    "transit": [{"name": "T1", "file": "a.dat", "band": "B"}],
+    "star": [{"name": "A"}],
+}
+
+
+def _with_transit_key(**kw):
+    cfg = copy.deepcopy(_LTT_BASE)
+    cfg["transit"][0].update(kw)
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("light_travel_time", False),
+        ("gp", "rotation"),
+        ("likelihood", "hogg"),
+        ("mask", [3, 4]),
+    ],
+    ids=["light_travel_time", "gp", "likelihood", "mask"],
+)
+def test_model_selecting_file_keys_change_the_structural_hash(key, value):
+    """
+    Given a config that sets a per-file key selecting a different model,
+    When its structural hash is compared with the config that omits it,
+    Then the two differ, so a trace sampled under one setting cannot be
+    silently reloaded under the other.
+    """
+    assert structural_hash(
+        _with_transit_key(**{key: value})
+    ) != structural_hash(_LTT_BASE)
+
+
+def test_a_non_model_file_key_still_does_not_change_the_hash():
+    """
+    Given a per-file key that does not select a model (exptime, a number
+    the smearing grid uses),
+    When the hash is compared against the config without it,
+    Then it is unchanged -- the fix widened the hash deliberately and
+    narrowly, not to every leaf. Widening it to every leaf would
+    invalidate every trace on disk; see _STRUCTURAL_INSTANCE_KEYS.
+    """
+    assert structural_hash(_with_transit_key(exptime=30.0)) == structural_hash(
+        _LTT_BASE
+    )
+
+
+def test_configs_that_set_no_model_key_keep_their_old_payload_shape():
+    """
+    Given a config that sets none of the model-selecting keys,
+    When its structural payload is inspected,
+    Then the component skeleton is still the plain sorted name list it was
+    before the fix -- so adding entries to _STRUCTURAL_INSTANCE_KEYS never
+    stales a trace whose config does not use them.
+    """
+    payload = structural_payload(_LTT_BASE)
+
+    assert payload["components"]["transit"] == ["T1"]
+    assert payload["components"]["star"] == ["A"]
+
+
+def test_the_hash_names_the_changed_key_on_a_mismatch():
+    """
+    Given two configs differing only in light_travel_time,
+    When their structural payloads are compared,
+    Then the difference is visible in the payload (not just in the hash),
+    so trace_meta can tell the user WHAT changed.
+    """
+    on = structural_payload(_LTT_BASE)["components"]["transit"]
+    off = structural_payload(_with_transit_key(light_travel_time=False))[
+        "components"
+    ]["transit"]
+
+    assert on == ["T1"]
+    assert off == [{"name": "T1", "model": {"light_travel_time": False}}]
