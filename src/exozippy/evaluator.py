@@ -112,62 +112,63 @@ def _gather_files(obj: Any) -> List[str]:
     return found
 
 
-#: Per-instance config keys that SELECT A MODEL rather than a number, and so
-#: must reach the structural hash: toggling one changes the likelihood while
-#: leaving the component set, the file list and every parameter's structure
-#: untouched.  Without them a trace reloaded via ``recompute_trace: false``,
-#: ``exozippy-modes`` or ``mkparam.write_param_file`` is silently reused under
-#: a model it was never sampled from -- the failure this list exists to make
-#: impossible.
+#: Per-instance config keys that do NOT affect the model, and so are the only
+#: things dropped from the structural hash.
 #:
-#: This is an ALLOWLIST, and that is a deliberate tradeoff, not an oversight.
-#: A denylist ("hash every scalar leaf except these") would need no
-#: maintenance and would catch a key nobody remembered to add here, but it
-#: would also change the payload for EVERY config and so invalidate every
-#: trace on disk.  The cost of the allowlist is that a NEW model-affecting
-#: per-file key must be added here in the same commit that introduces it --
-#: `light_travel_time` was not, which is how it shipped defaulting to on and
-#: outside the hash.  A key recorded only when PRESENT, so adding entries here
-#: leaves the hash of configs that never set them unchanged.
-_STRUCTURAL_INSTANCE_KEYS = (
-    "light_travel_time",  # transit/rvinstrument: Roemer delay on/off
-    "gp",  # instrument: celerite2 kernel choice
-    "likelihood",  # instrument: hogg/studentt vs plain Normal
-    "mask",  # instrument: which rows are excluded
-    "mass_parameterization",  # planet: linear vs log_q
-    "ld_law",  # band: quadratic vs linear limb darkening
-    "chen",  # planet: Chen & Kipping relation on/off
-    "rm",  # rvinstrument: Rossiter-McLaughlin orbit
-    "data_format",  # mulensinstrument: flux vs magnitude file
-    "mass_function",  # star: imf vs ffp
+#: This is a DENYLIST, and the direction matters.  Nearly every key inside a
+#: component instance selects part of the model -- `light_travel_time`, `gp`,
+#: `likelihood`, `mask`, `ld_law`, `data_format`, `rm`, `exptime`, `ninterp`,
+#: `band`, `star_ndx`, the SED's `mag`/`err` photometry, all of it -- so an
+#: allowlist is a list of everything, maintained by hand, and one forgotten
+#: entry is a SILENT failure: the trace reloads under a model it was never
+#: sampled from (via `recompute_trace: false`, `exozippy-modes` or
+#: `mkparam.write_param_file`).  `light_travel_time` was exactly that, and it
+#: defaulted to ON.  A denylist fails the other way: forget an entry here and
+#: a cosmetic edit merely forces an honest re-run.
+#:
+#: Adopting it invalidated every trace on disk once, deliberately -- the
+#: payload shape changed for every config.  That is a one-time cost paid for
+#: never silently reusing foreign draws again.
+#:
+#: `file`/`files` are dropped only because `structural_payload` already hashes
+#: them under its own "files" key; `path` is NOT (nothing else captures it).
+_NON_STRUCTURAL_INSTANCE_KEYS = frozenset(
+    {
+        "plot",  # per-instrument plot styling (color/marker)
+        "label",  # display-only
+        "file",  # already hashed under payload["files"]
+        "files",
+    }
 )
 
 
-def _instance_skeleton(item: dict, index: int) -> Any:
-    """Structural view of one instance dict: its name, plus any
-    model-selecting key it actually sets (see _STRUCTURAL_INSTANCE_KEYS).
+def _canon_leaf(value: Any) -> Any:
+    """Canonicalize any config leaf -- scalar, list or nested dict -- into
+    something json.dumps(sort_keys=True) renders stably."""
+    if isinstance(value, dict):
+        return {str(k): _canon_leaf(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_canon_leaf(v) for v in value]
+    return _canon(value)
 
-    Returns the bare name when the instance sets none of them, so configs
-    that predate this stay byte-identical in the payload.
-    """
-    name = str(item.get("name", index))
-    selected = {
-        k: _canon(item[k])
-        if not isinstance(item[k], (dict, list))
-        else str(item[k])
-        for k in _STRUCTURAL_INSTANCE_KEYS
-        if k in item
+
+def _instance_skeleton(item: dict, index: int) -> Dict[str, Any]:
+    """Structural view of one instance dict: its name plus every key that is
+    not explicitly cosmetic (see _NON_STRUCTURAL_INSTANCE_KEYS)."""
+    return {
+        "name": str(item.get("name", index)),
+        "cfg": {
+            str(k): _canon_leaf(v)
+            for k, v in sorted(item.items())
+            if k not in _NON_STRUCTURAL_INSTANCE_KEYS and k != "name"
+        },
     }
-    if not selected:
-        return name
-    return {"name": name, "model": selected}
 
 
 def _component_skeleton(config: dict) -> dict:
     """Structural view of the component set: top-level keys and, for
-    list-valued component blocks, the sorted instance names plus any
-    model-selecting per-instance keys.  Numeric or initval-like leaves are
-    deliberately excluded."""
+    list-valued component blocks, the sorted instances with their
+    model-affecting config.  Only explicitly cosmetic keys are dropped."""
     skel: Dict[str, Any] = {}
     for key, block in config.items():
         if key in _NON_STRUCTURAL_CONFIG_KEYS:
@@ -179,18 +180,13 @@ def _component_skeleton(config: dict) -> dict:
                     for i, item in enumerate(block)
                     if isinstance(item, dict)
                 ),
-                key=lambda e: e if isinstance(e, str) else e["name"],
+                key=lambda e: e["name"],
             )
             skel[key] = entries if entries else len(block)
         elif isinstance(block, dict):
             # single-instance component (e.g. sed): presence is structural,
-            # plus any model-selecting key it sets.
-            selected = {
-                k: _canon(block[k])
-                for k in _STRUCTURAL_INSTANCE_KEYS
-                if k in block and not isinstance(block[k], (dict, list))
-            }
-            skel[key] = {"model": selected} if selected else True
+            # and so is everything non-cosmetic it sets.
+            skel[key] = _instance_skeleton(block, 0)["cfg"] or True
         else:
             skel[key] = True
     return skel

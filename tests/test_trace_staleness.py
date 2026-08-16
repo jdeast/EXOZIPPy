@@ -793,35 +793,36 @@ def test_model_selecting_file_keys_change_the_structural_hash(key, value):
     ) != structural_hash(_LTT_BASE)
 
 
-def test_a_non_model_file_key_still_does_not_change_the_hash():
+def test_a_cosmetic_file_key_does_not_change_the_hash():
     """
-    Given a per-file key that does not select a model (exptime, a number
-    the smearing grid uses),
+    Given a purely cosmetic per-file key (plot styling),
     When the hash is compared against the config without it,
-    Then it is unchanged -- the fix widened the hash deliberately and
-    narrowly, not to every leaf. Widening it to every leaf would
-    invalidate every trace on disk; see _STRUCTURAL_INSTANCE_KEYS.
+    Then it is unchanged -- the denylist in
+    _NON_STRUCTURAL_INSTANCE_KEYS is the ONLY thing dropped.
     """
-    assert structural_hash(_with_transit_key(exptime=30.0)) == structural_hash(
+    assert structural_hash(
+        _with_transit_key(plot={"color": "#123456"})
+    ) == structural_hash(_LTT_BASE)
+
+
+def test_a_model_affecting_numeric_key_now_changes_the_hash():
+    """
+    Given exptime, which sets the exposure-smearing window and so changes
+    the model,
+    When the hash is compared against the config without it,
+    Then it differs.
+
+    Under the old allowlist this was invisible, along with every other key
+    nobody had thought to enumerate. The denylist inverts the failure
+    mode: a forgotten cosmetic key costs an honest re-run, where a
+    forgotten model key cost silently-reused foreign draws.
+    """
+    assert structural_hash(_with_transit_key(exptime=30.0)) != structural_hash(
         _LTT_BASE
     )
 
 
-def test_configs_that_set_no_model_key_keep_their_old_payload_shape():
-    """
-    Given a config that sets none of the model-selecting keys,
-    When its structural payload is inspected,
-    Then the component skeleton is still the plain sorted name list it was
-    before the fix -- so adding entries to _STRUCTURAL_INSTANCE_KEYS never
-    stales a trace whose config does not use them.
-    """
-    payload = structural_payload(_LTT_BASE)
-
-    assert payload["components"]["transit"] == ["T1"]
-    assert payload["components"]["star"] == ["A"]
-
-
-def test_the_hash_names_the_changed_key_on_a_mismatch():
+def test_instance_config_reaches_the_payload_so_a_mismatch_can_name_it():
     """
     Given two configs differing only in light_travel_time,
     When their structural payloads are compared,
@@ -833,5 +834,20 @@ def test_the_hash_names_the_changed_key_on_a_mismatch():
         "components"
     ]["transit"]
 
-    assert on == ["T1"]
-    assert off == [{"name": "T1", "model": {"light_travel_time": False}}]
+    assert on[0]["cfg"].get("light_travel_time") is None
+    assert off[0]["cfg"]["light_travel_time"] is False
+    assert on[0]["name"] == off[0]["name"] == "T1"
+
+
+def test_file_paths_are_not_double_hashed_in_the_instance_config():
+    """
+    Given an instance whose data file is named by `file`,
+    When its skeleton entry is inspected,
+    Then `file` is absent from the per-instance config -- it is already
+    hashed under the payload's own "files" key, and hashing it twice would
+    be redundant rather than wrong.
+    """
+    entry = structural_payload(_LTT_BASE)["components"]["transit"][0]
+
+    assert "file" not in entry["cfg"]
+    assert "a.dat" in structural_payload(_LTT_BASE)["files"]
