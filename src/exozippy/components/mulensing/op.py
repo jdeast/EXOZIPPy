@@ -10,6 +10,7 @@ from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
 from exozippy.compat import patch_mulensmodel_method_order
+from exozippy.skyframe import parallax_factors
 
 from .physics import (
     _MM_NAN_ADVICE,
@@ -366,17 +367,16 @@ class VBMDirectMagOp(Op):
     ):
         # coords: "<ra>d <dec>d" string — same format the MulensModel Ops take.
         ra_deg, dec_deg = [float(v.rstrip("d")) for v in str(coords).split()]
-        ra = np.radians(ra_deg)
-        dec = np.radians(dec_deg)
-        # Sky-plane projections, mirroring MulensModel Coordinates:
-        # east = normalize(z x direction), north = direction x east.
-        direction = np.array(
-            [np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)]
-        )
-        east = np.cross([0.0, 0.0, 1.0], direction)
-        east /= np.linalg.norm(east)
-        self._east = east
-        self._north = np.cross(direction, east)
+        self._ra = np.radians(ra_deg)
+        self._dec = np.radians(dec_deg)
+        # One sky basis for the whole codebase (exozippy.skyframe).  This
+        # used to be built here as MulensModel Coordinates builds it --
+        # east = normalize(z x direction), north = direction x east -- which
+        # is the same basis to within 1 ulp (pinned in
+        # tests/test_skyframe.py::test_cross_product_construction_agrees).
+        # Sharing the definition is what makes "the Op path and the symbolic
+        # path see one line of sight" true by construction rather than by two
+        # copies happening to agree.
 
         self.n_companions = int(n_companions)
         self.use_rho = use_rho
@@ -435,7 +435,11 @@ class VBMDirectMagOp(Op):
         dev = np.atleast_2d(obs_pos_np)
         key = (dev.shape, hash(dev.tobytes()))
         if key not in self._delta_cache:
-            self._delta_cache[key] = (-dev @ self._north, -dev @ self._east)
+            # MulensModel's delta convention is the NEGATED observer offset,
+            # i.e. exactly parallax_factors (see exozippy.skyframe: the same
+            # sign relation astrometryinstrument's P_E/P_N carry).
+            p_e, p_n = parallax_factors(dev, self._ra, self._dec)
+            self._delta_cache[key] = (p_n, p_e)
         return self._delta_cache[key]
 
     def _magnify(self, companions, x, y, rho, u1):

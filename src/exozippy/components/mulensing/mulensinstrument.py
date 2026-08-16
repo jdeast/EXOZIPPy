@@ -14,6 +14,7 @@ from exozippy.components.instrument import Instrument
 from exozippy.config import RANK_DERIVED_DATA
 from exozippy.ephemeris import get_observer_position
 from exozippy.outputs.prose import get_collector
+from exozippy.skyframe import observer_sky_offset
 
 from . import mmexofast_support
 from .physics import (
@@ -605,13 +606,7 @@ class MulensInstrument(Instrument):
         pi_E_N = _get("lens.0.pi_E_N", 0.0)
         pi_E_E = _get("lens.0.pi_E_E", 0.0)
 
-        x, y, z = xyz_delta[:, 0], xyz_delta[:, 1], xyz_delta[:, 2]
-        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (
-            -x * np.cos(ra_rad) * np.sin(dec_rad)
-            - y * np.sin(ra_rad) * np.sin(dec_rad)
-            + z * np.cos(dec_rad)
-        )
+        delta_e, delta_n = observer_sky_offset(xyz_delta, ra_rad, dec_rad)
         A_traj = self._pspl_magnification(
             t, delta_e, delta_n, t0, u0, tE, pi_E_N, pi_E_E
         )
@@ -833,13 +828,7 @@ class MulensInstrument(Instrument):
         if t0 is None or u0 is None:
             return self._baseline_flux_fallback(f_obs), 0.95, q_flux_fallback
 
-        x, y, z = xyz_au[:, 0], xyz_au[:, 1], xyz_au[:, 2]
-        delta_e = -x * np.sin(ra_rad) + y * np.cos(ra_rad)
-        delta_n = (
-            -x * np.cos(ra_rad) * np.sin(dec_rad)
-            - y * np.sin(ra_rad) * np.sin(dec_rad)
-            + z * np.cos(dec_rad)
-        )
+        delta_e, delta_n = observer_sky_offset(xyz_au, ra_rad, dec_rad)
 
         # One magnification column per source trajectory.  Prefer the full
         # binary-lens model (breaks the NNLS degeneracy between overlapping

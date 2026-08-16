@@ -87,6 +87,7 @@ import pytensor.tensor as pt
 from exozippy.components.instrument import Instrument
 from exozippy.components.orbit.bodies import component_instance_names
 from exozippy.ephemeris import get_observer_position
+from exozippy.skyframe import parallax_factors
 
 RAD2MAS = (1.0 * u.rad).to(u.mas).value  # 2.06264806e8
 RSUN_AU = (1.0 * u.solRad).to(u.AU).value  # 4.6505e-3
@@ -416,14 +417,8 @@ class AstrometryInstrument(Instrument):
                 xyz = get_observer_position(
                     t, observer_location=self.observers[i]
                 )
-                X, Y, Z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
                 # Apparent displacement of the source = parallax * (P_E, P_N)
-                d["P_E"] = X * np.sin(ra_ref) - Y * np.cos(ra_ref)
-                d["P_N"] = (
-                    X * np.cos(ra_ref) * np.sin(dec_ref)
-                    + Y * np.sin(ra_ref) * np.sin(dec_ref)
-                    - Z * np.cos(dec_ref)
-                )
+                d["P_E"], d["P_N"] = parallax_factors(xyz, ra_ref, dec_ref)
 
             self.jittervar_lower[i] = self._jitter_floor([min_err])
             self.n_total_obs += len(t)
@@ -1310,12 +1305,7 @@ class AstrometryInstrument(Instrument):
         xyz = get_observer_position(
             t_dense, observer_location=self.observers[i]
         )
-        P_E = xyz[:, 0] * np.sin(d["ra_ref"]) - xyz[:, 1] * np.cos(d["ra_ref"])
-        P_N = (
-            xyz[:, 0] * np.cos(d["ra_ref"]) * np.sin(d["dec_ref"])
-            + xyz[:, 1] * np.sin(d["ra_ref"]) * np.sin(d["dec_ref"])
-            - xyz[:, 2] * np.cos(d["dec_ref"])
-        )
+        P_E, P_N = parallax_factors(xyz, d["ra_ref"], d["dec_ref"])
         d_dense = dict(d, P_E=P_E, P_N=P_N)
         dE_lin, dN_lin = self._linear_terms(d_dense, t_dense, point, system)
         dE_orb, dN_orb = self._eval_photo(i, t_dense, vals)
