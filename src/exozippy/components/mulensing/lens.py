@@ -12,6 +12,7 @@ from exozippy.corner_utils import (
 )
 from exozippy.outputs.prose import get_collector
 from exozippy.potentials import soft_lower_bound
+from exozippy.skyframe import observer_sky_offset, sky_basis
 
 from ..galacticmodel.physics import expected_proper_motion
 from . import mmexofast_support
@@ -1080,14 +1081,9 @@ class Lens(Component):
             return 0.0, 0.0
         v = np.asarray(vel, dtype=float) * 365.25  # AU/day -> AU/yr
         ra, dec = radec
-        e_hat = np.array([-np.sin(ra), np.cos(ra), 0.0])
-        n_hat = np.array(
-            [
-                -np.cos(ra) * np.sin(dec),
-                -np.sin(ra) * np.sin(dec),
-                np.cos(dec),
-            ]
-        )
+        # The basis itself, not observer_sky_offset: what is projected here
+        # is the Earth's VELOCITY, not its position.
+        e_hat, n_hat = sky_basis(ra, dec)
         return float(v @ e_hat), float(v @ n_hat)
 
     def _validate_q_start(self):
@@ -1407,13 +1403,7 @@ class Lens(Component):
         ra = system.star.ra.value[source_ndx]
         dec = system.star.dec.value[source_ndx]
 
-        x, y, z = obs_pos[:, 0], obs_pos[:, 1], obs_pos[:, 2]
-        delta_e = -x * pt.sin(ra) + y * pt.cos(ra)
-        delta_n = (
-            -x * pt.cos(ra) * pt.sin(dec)
-            - y * pt.sin(ra) * pt.sin(dec)
-            + z * pt.cos(dec)
-        )
+        delta_e, delta_n = observer_sky_offset(obs_pos, ra, dec, xp=pt)
 
         p = self._get_safe_mm_params(index)
         # MulensModel convention: delta_tau = -delta_N*pi_E_N - delta_E*pi_E_E
