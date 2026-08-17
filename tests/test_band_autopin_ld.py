@@ -360,6 +360,17 @@ def test_two_transits_may_use_different_limb_darkening_laws(
     assert np.isfinite(logp)
     assert np.all(np.isfinite(dlogp))
 
+    # The roles reach a trace, so mkparam -- which has no System -- writes a
+    # start value for the LINEAR band's u1 and none for the quadratic band's
+    # (whose value is an expression).  Checked here rather than in a test of
+    # its own because the model this needs is already built.
+    from exozippy.trace_meta import element_roles
+
+    roles = element_roles(system)
+    assert roles["band.u1"]["sampled"] == [False, True]
+    assert roles["band.u1"]["derived"] == [True, False]
+    assert roles["band.u2"]["active"] == [True, False]
+
 
 # --------------------------------------------------------------------------
 # 6. The predicate itself, on stub topologies: the cases a full System build
