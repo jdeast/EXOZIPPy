@@ -52,9 +52,16 @@ class ModelAuditor:
         param_logps = {}
         other_nodes = {}
 
-        # ONLY group logps for parameters that are actively being sampled
+        # ONLY group logps for parameters that are actively being sampled.
+        # Read per element (a vector whose instances chose different
+        # parameterizations is derived on some elements and sampled on others,
+        # and it does have a _raw node), from the build's own role masks rather
+        # than from `expression is None` -- a fully derived vector declared per
+        # element leaves that field None.
         sampled_labels = [
-            p.label for p in self.all_params if p.expression is None
+            p.label
+            for p in self.all_params
+            if not bool(np.all(np.atleast_1d(p.is_derived)))
         ]
 
         for node_name, lp in raw_logps.items():

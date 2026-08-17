@@ -27,6 +27,7 @@ import pytensor.tensor as pt
 from astropy import units as u
 
 from exozippy.constants import SIGMA_1_HIGH, SIGMA_1_LOW
+from exozippy.manifest import normalize_selector
 from exozippy.outputs.texutils import (
     DIGIT_WORDS,
     idx_to_words,
@@ -483,6 +484,38 @@ class PriorContribution:
     support_phrase: str = "normalized on"
 
 
+@dataclass(frozen=True)
+class ElementExpression:
+    """One expression and the ELEMENTS of a parameter vector it supplies.
+
+    The per-element generalization of ``Parameter.expression``: a component
+    hands ``build_pymc`` a list of these when different instances take their
+    value from different physics (``ecc`` from sqrt(e)cos/sin(omega) on one
+    orbit and from V_c/V_e on the next; ``mass`` derived from ``log_q`` for
+    some planets and sampled linearly for others).  Elements no entry claims
+    keep their own sampled coordinate.
+
+    ``mask`` is a boolean array over the parameter's elements.  ``expr`` is a
+    callable (or node) exactly as ``Parameter.expression`` is, evaluated over
+    the elements the mask selects.  ``output_only`` marks a REPORTED element
+    (manifest role 3): derived, consumed by nothing, and therefore given NO
+    potential -- a prior or barrier on a quantity nothing reads would be a
+    logp term with no data behind it.
+    """
+
+    mask: Any
+    expr: Any
+    output_only: bool = False
+    # True when the component already SLICED the expression's dependencies to
+    # this mask, so the result has one entry per selected element rather than
+    # one per element of the parameter.  Slicing is how an unused instance's
+    # inputs are kept out of the expression entirely (no 0*NaN from a domain
+    # the other parameterization never promised); see
+    # Component._element_expression, which proves the alignment before it
+    # slices and verifies the sliced result numerically.
+    sliced: bool = False
+
+
 # ----------------------------
 # Parameter
 # ----------------------------
@@ -523,11 +556,28 @@ class Parameter:
     bound_scale: Optional[Number] = None
     force_node: bool = False
     names: Optional[Sequence[str]] = None
+    # ACTIVITY selector (manifest `mask`): which elements are parameters of
+    # their instance's parameterization at all.  Elements outside it are
+    # INACTIVE (manifest role 4) -- a non-MIST star's EEP, a linear-law band's
+    # u2: held at `inactive_value` (or their resolved initval) purely so the
+    # vector has a number, never sampled, given no potential, and suppressed
+    # from every report, because a value nothing reads is at best meaningless
+    # and at worst read as a result.  None (the default, and every parameter
+    # that predates the vocabulary) means every element is active.
     mask: Any = None
+    # The value inactive elements are held at.  None = whatever the element
+    # resolved to; set it where the other parameterization DEFINES the value
+    # (u2 == 0 exactly under a linear limb-darkening law).
+    inactive_value: Optional[Number] = None
 
     # If expression is provided, parameter becomes deterministic (pm.Deterministic).
     # You can pass expression at build time too.
     expression: Any = None
+    # Per-ELEMENT expressions: a list of ElementExpression, for a vector whose
+    # instances take their values from different physics.  Mutually exclusive
+    # with `expression` (which is the whole-vector case and keeps its own,
+    # byte-for-byte unchanged, build path).
+    element_expressions: Optional[Sequence[ElementExpression]] = None
     shape: tuple = ()
 
     # User-defined per-element links (see linking.py), wired up by
@@ -548,8 +598,13 @@ class Parameter:
     debug_print: Optional[bool] = None
     user_modified: bool = False
     user_prior_modified: bool = False
-    is_derived: bool = False
-    is_sampled: bool = False
+    # Per-element role masks, written by build_pymc (see element_is_sampled,
+    # element_is_derived, element_is_active).  They start as scalar False so a
+    # Parameter that was never built answers conservatively.
+    is_derived: Any = False
+    is_sampled: Any = False
+    is_reported: Any = False
+    is_active: Any = True
     # Raw-space starting values for the sampled elements (set in build_pymc):
     # 0 for logit elements, (initval - mu)/sigma for Gaussian-path elements.
     raw_initval: Optional[np.ndarray] = None
@@ -708,12 +763,70 @@ class Parameter:
         Callable only after the model has been built (stage 5 onwards); before
         that the mask does not exist and this conservatively returns False.
         """
-        mask = getattr(self, "is_sampled", None)
+        return self._element_role("is_sampled", index, default=False)
+
+    def element_is_derived(self, index=0):
+        """True if element ``index``'s value comes from an expression.
+
+        The per-element form of ``expression is not None``, which is a
+        WHOLE-VECTOR question and the wrong one for a vector whose instances
+        chose different parameterizations.  REPORTED elements (role 3) count as
+        derived here -- their value is an expression -- and are told apart by
+        ``element_is_reported`` where the difference matters (they carry no
+        potential).
+
+        Callable only after the model has been built; before that the mask does
+        not exist and this falls back to the whole-vector answer.
+        """
+        if not self._built_roles():
+            return self.expression is not None or bool(
+                self.element_expressions
+            )
+        return self._element_role("is_derived", index, default=False)
+
+    def element_is_reported(self, index=0):
+        """True if element ``index`` is derived but consumed by nothing."""
+        return self._element_role("is_reported", index, default=False)
+
+    def element_is_active(self, index=0):
+        """False if element ``index`` is not a parameter of its instance.
+
+        INACTIVE elements (manifest role 4) are held at a bookkeeping value and
+        must be suppressed from every report; see the ``mask`` field.  Answered
+        from the ``mask`` field before the build and from the build's own array
+        after it, so the reporting layer gets the same answer either way.
+        """
+        if not self._built_roles():
+            if self.mask is None:
+                return True
+            n = self._n_elements()
+            return bool(normalize_selector(self.mask, n, self.label)[index])
+        return self._element_role("is_active", index, default=True)
+
+    def _n_elements(self):
+        """Element count from ``shape`` (1 for a scalar), as build_pymc reads it."""
+        actual_shape = (
+            self.shape if isinstance(self.shape, tuple) else (self.shape,)
+        )
+        return int(np.prod(actual_shape)) if actual_shape != () else 1
+
+    def _built_roles(self):
+        """Has build_pymc written the per-element role masks yet?
+
+        Keyed on the TYPE, not on the size: the dataclass defaults are scalar
+        bools (so an unbuilt Parameter answers conservatively) and build_pymc
+        replaces them with arrays.
+        """
+        return isinstance(getattr(self, "is_sampled", None), np.ndarray)
+
+    def _element_role(self, attr, index, default):
+        """One element's entry in a role mask, with the pre-build fallback."""
+        mask = getattr(self, attr, None)
         if mask is None:
-            return False
+            return default
         mask = np.atleast_1d(mask)
         if mask.size == 0:
-            return False
+            return default
         return bool(mask[index] if mask.size > index else mask[0])
 
     def element_start(self, index=0):
@@ -826,6 +939,41 @@ class Parameter:
             "bound."
         ),
     }
+
+    def _user_constraint_fields(self, i):
+        """Constraint fields the USER wrote for element ``i``, as a sorted list.
+
+        Only ``mu``/``sigma``/``lower``/``upper`` -- the fields that state a
+        posterior term or a support, as opposed to ``initval``, which is a
+        start value and cannot move a posterior.  Read from the params file
+        entries the ConfigManager forwarded (``user_params``), never from the
+        resolved vectors: every parameter has bounds and many have a sigma from
+        defaults.yaml, so a resolved value says nothing about who asked for it.
+
+        All three spellings ConfigManager.resolve accepts are checked (index,
+        instance name, and the 2-part broadcast), because a user may write any
+        of them and the specific ones win.  Metadata for a warning only: any
+        lookup fault degrades to "the user wrote nothing".
+        """
+        params = self.user_params or {}
+        if not params:
+            return []
+        try:
+            comp, pname = self.label.split(".", 1)
+        except ValueError:
+            return []
+        keys = [f"{comp}.{int(i)}.{pname}", f"{comp}.{pname}"]
+        names = self.names
+        if names is not None and len(np.atleast_1d(names)) > i:
+            keys.insert(1, f"{comp}.{np.atleast_1d(names)[i]}.{pname}")
+        found = set()
+        for key in keys:
+            entry = params.get(key)
+            if isinstance(entry, Mapping):
+                found |= {
+                    f for f in ("mu", "sigma", "lower", "upper") if f in entry
+                }
+        return sorted(found)
 
     def _element_initval_source(self, i):
         """Classify where element ``i``'s start came from.
@@ -996,6 +1144,82 @@ class Parameter:
             "refuses.\n" + advice
         )
 
+    def _element_expression_specs(self, expr_raw, n_elements):
+        """``(per-element specs, whole-vector expression)`` for this build.
+
+        Exactly one of the two is populated.  A single expression covering
+        EVERY element -- whether it arrived as ``expression`` or as one
+        all-True ``ElementExpression`` -- is returned as the whole-vector case,
+        so it keeps ``build_pymc``'s original code path and produces a
+        bit-identical graph; anything genuinely mixed comes back as specs.
+        """
+        specs = list(self.element_expressions or ())
+        if expr_raw is not None and specs:
+            raise ValueError(
+                f"Parameter '{self.label}': both a whole-vector 'expression' "
+                f"and per-element 'element_expressions' were supplied. An "
+                f"element takes its value from exactly one of them; declare "
+                f"the whole-vector case as a single ElementExpression if the "
+                f"parameter needs both spellings."
+            )
+        if not specs:
+            return [], expr_raw
+
+        out = []
+        for spec in specs:
+            mask = normalize_selector(spec.mask, n_elements, self.label)
+            if not mask.any():
+                continue  # a mode nothing selected: nothing to build
+            out.append(
+                (mask, spec.expr, bool(spec.output_only), bool(spec.sliced))
+            )
+        if (
+            len(out) == 1
+            and not out[0][2]
+            and not out[0][3]
+            and bool(out[0][0].all())
+            and not self._inactive_mask(n_elements).any()
+        ):
+            return [], out[0][1]
+        return out, None
+
+    def _patch_elements(self, phys_val, mask, expr, sliced):
+        """Overwrite ``mask``'s elements of ``phys_val`` with ``expr``'s value.
+
+        ``sliced`` says the expression was evaluated on dependencies already
+        cut down to these elements, so its result has one entry per selected
+        element; otherwise it spans the whole vector and is indexed here.  A
+        scalar result broadcasts (a one-element mask, or physics that returns a
+        scalar for a whole group).
+        """
+        val = expr() if callable(expr) else expr
+        if hasattr(val, "value") and hasattr(val, "unit"):
+            val = (
+                val.value
+            )  # strip astropy units, as the whole-vector path does
+        if isinstance(val, (list, tuple)):
+            val = pt.stack(list(val))
+        elif isinstance(val, np.ndarray) and val.dtype == object:
+            val = pt.stack(val.tolist())
+        val = pt.as_tensor_variable(val)
+
+        idx = np.nonzero(mask)[0]
+        if val.ndim == 0:
+            piece = (
+                pt.tile(val, idx.size) if idx.size > 1 else val.reshape((1,))
+            )
+        elif sliced:
+            piece = val
+        else:
+            piece = val[idx]
+        return pt.set_subtensor(phys_val[idx], piece)
+
+    def _inactive_mask(self, n_elements):
+        """Boolean mask of the INACTIVE elements (the ``mask`` complement)."""
+        if self.mask is None:
+            return np.zeros(int(n_elements), dtype=bool)
+        return ~normalize_selector(self.mask, n_elements, self.label)
+
     def build_pymc(self, ndx=0, expression=None):
         """
         Materializes the Parameter in the PyMC graph.
@@ -1028,11 +1252,22 @@ class Parameter:
         replaces them in place with the probe-measured posterior scales
         before sampling, no rebuild needed), while on a linear element
         set_whitening deliberately leaves the scale alone.
+
+        ROLES ARE PER ELEMENT.  Every case above is chosen element by element,
+        and so is whether an element is sampled at all: an expression may
+        supply SOME elements of the vector (``element_expressions``) and the
+        ``mask`` may declare others to be no parameter of their instance at
+        all.  The whole-vector paths are preserved exactly -- all elements
+        derived by one expression, or none derived -- so a build that does not
+        use the per-element vocabulary produces a bit-identical graph.
         """
         import pymc as pm
         import pytensor.tensor as pt
 
         expr_raw = self.expression if expression is None else expression
+        expr_specs, expr_raw = self._element_expression_specs(
+            expr_raw, self._n_elements()
+        )
 
         # 1. SETUP SHAPES
         actual_shape = (
@@ -1047,14 +1282,48 @@ class Parameter:
         lowers = to_vec(self.lower, n_elements, fill=-np.inf)
         uppers = to_vec(self.upper, n_elements, fill=np.inf)
 
-        # 2. IDENTIFY ROLES
+        # 2. IDENTIFY ROLES, PER ELEMENT
+        #
+        # `is_derived` covers every element whose value comes from an
+        # expression, whether the whole vector shares one (the historical case)
+        # or each instance names its own; `is_reported` is the subset of those
+        # that nothing consumes (manifest role 3), which differ only in taking
+        # no potential.  `is_inactive` is the `mask` complement: not a
+        # parameter of that instance's parameterization at all (role 4), held
+        # at a bookkeeping value and reported nowhere.
         is_derived = np.full(n_elements, expr_raw is not None, dtype=bool)
-        # sigma == 0 is the ONE way to pin an element.  A tiny init_scale used
-        # to pin one too (`scales <= 1e-12`), which contradicted the premise
-        # that init_scale never affects the posterior -- it is a preliminary
-        # whitening scale the startup probe supersedes, not a modeling
-        # statement -- and gave pinning a second, undocumented spelling.
-        is_fixed = (sigmas == 0) & ~is_derived
+        is_reported = np.zeros(n_elements, dtype=bool)
+        for mask, _expr, output_only, _sliced in expr_specs:
+            is_derived |= mask
+            if output_only:
+                is_reported |= mask
+        is_inactive = self._inactive_mask(n_elements)
+        if np.any(is_inactive & is_derived):
+            clash = np.nonzero(is_inactive & is_derived)[0].tolist()
+            raise ValueError(
+                f"Parameter '{self.label}': element(s) {clash} are masked out "
+                f"as inactive AND claimed by an expression. An element is "
+                f"either not a parameter of its instance or it has a value; "
+                f"fix the component's mask or its expression selector."
+            )
+        # An inactive element is pinned at a value nothing reads.  Where the
+        # other parameterization DEFINES that value (u2 == 0 under a linear
+        # limb-darkening law) the component says so and it lands here, ahead of
+        # every check below -- including the pin-must-say-what-it-pins-to one,
+        # which such a pin now satisfies by construction.
+        if np.any(is_inactive) and self.inactive_value is not None:
+            fill = to_vec(self.inactive_value, n_elements, fill=np.nan)
+            take = is_inactive & np.isfinite(fill)
+            inits = np.where(take, fill, inits)
+        # sigma == 0 is the ONE way for a USER to pin an element.  A tiny
+        # init_scale used to pin one too (`scales <= 1e-12`), which contradicted
+        # the premise that init_scale never affects the posterior -- it is a
+        # preliminary whitening scale the startup probe supersedes, not a
+        # modeling statement -- and gave pinning a second, undocumented
+        # spelling.  An inactive element is fixed regardless of its sigma: the
+        # component has said it is not a parameter here, and honoring a
+        # leftover sigma would sample a dimension no likelihood term reads.
+        is_fixed = ((sigmas == 0) | is_inactive) & ~is_derived
         is_sampled = ~(is_fixed | is_derived)
 
         # A PIN MUST SAY WHAT IT PINS TO.  `sigma: 0` is the one way to fix an
@@ -1081,17 +1350,24 @@ class Parameter:
         # this stage; a check at ConfigManager construction or at stage 3
         # would have to guess about them and would fire falsely.
         #
-        # Two exemptions, both because the value comes from somewhere other
-        # than initval:
+        # Three exemptions, all because the value comes from somewhere other
+        # than initval, or because nothing reads it:
         #   - DERIVED elements: their value is the expression.  `sigma: 0`
         #     there is a no-op, already warned about below -- a different
         #     mistake with a different fix, so it keeps its own message.
         #   - HARD-LINKED elements: the link expression IS the value.
+        #   - INACTIVE elements: the pin is bookkeeping for a parameter that
+        #     does not exist on that instance.  The error's whole argument is
+        #     that a pinned value is a modeling statement nobody made -- but
+        #     here nothing reads the value, nothing reports it, and the user
+        #     never asked for the pin, so there is no statement to get wrong
+        #     and no fix to advise.  (Where the value IS defined, the component
+        #     supplies `inactive_value` and the exemption never applies.)
         has_value = self._initval_present(n_elements)
         hard_linked = set((self.element_links or {}).get("hard", {}))
         pinned_no_value = [
             i
-            for i in np.where(is_fixed & ~has_value)[0]
+            for i in np.where(is_fixed & ~has_value & ~is_inactive)[0]
             if i not in hard_linked
         ]
         if pinned_no_value:
@@ -1181,7 +1457,32 @@ class Parameter:
                 f"Parameter '{self.label}': sigma=0 has no effect on a derived parameter "
                 f"To hold it constant, you must fix the corresponding sampled parameter(s)."
             )
+        # A CONSTRAINT ON AN INACTIVE ELEMENT IS DROPPED, so say so.  This is
+        # the one genuinely lossy case in a parameterization switch: a prior or
+        # a bound on an element that flipped to DERIVED still applies (section
+        # A's Gaussian, section B's barrier), and a start value still feeds the
+        # relaxation engine -- but an element that is no longer a parameter at
+        # all has nothing to carry the constraint, so the user has to know.
+        # Deliberately not an error: the point of per-element roles is that one
+        # params file can be carried across a parameterization toggle.
+        for i in np.nonzero(is_inactive)[0]:
+            fields = self._user_constraint_fields(int(i))
+            if not fields:
+                continue
+            where = f" ({self.source_file})" if self.source_file else ""
+            logger.warning(
+                f"Parameter '{self.get_display_label(int(i))}': your "
+                f"{'/'.join(fields)}{where} is DROPPED -- this element is not "
+                f"a parameter of its instance's parameterization, so it is "
+                f"held at a bookkeeping value, given no prior, and reported "
+                f"nowhere. Put the constraint on the quantity this instance "
+                f"actually samples, or change the instance's parameterization "
+                f"if you meant to fit it."
+            )
         self.is_sampled = is_sampled
+        self.is_derived = is_derived
+        self.is_reported = is_reported
+        self.is_active = ~is_inactive
 
         if np.any(is_sampled):
             if self.lower is None or self.upper is None:
@@ -1496,6 +1797,24 @@ class Parameter:
                     pt.as_tensor_variable(use_logit), phys_logit, phys_linear
                 )
 
+            # 5a. PER-ELEMENT EXPRESSIONS.  The transform above already
+            # supplied every element (a derived element's raw is the constant
+            # 0, so its slot holds a harmless finite number); each expression
+            # now overwrites the elements it supplies.
+            #
+            # pt.set_subtensor, never pt.where over the two VALUE vectors: an
+            # expression evaluated at an unused element's bookkeeping pin may
+            # legitimately be NaN (sqrt of a negative eccentricity the other
+            # parameterization never promised), and where's VJP multiplies the
+            # unselected branch by zero -- 0*NaN poisons the gradient of the
+            # whole vector on every backend.  set_subtensor keeps the unused
+            # entries out of the output entirely, and the component's own
+            # dependency slicing (Component._element_expression) keeps them out
+            # of the expression in the first place wherever it can prove the
+            # alignment.
+            for mask, expr, _output_only, sliced in expr_specs:
+                phys_val = self._patch_elements(phys_val, mask, expr, sliced)
+
         # Strip Astropy units
         if hasattr(phys_val, "value") and hasattr(phys_val, "unit"):
             phys_val = phys_val.value
@@ -1606,8 +1925,15 @@ class Parameter:
         #      = truncated normal.
         #    Unbounded sampled Gaussian params encode their prior in raw ~
         #    N(0,1); no double-count.
+        #    REPORTED elements (role 3) are excluded even though they are
+        #    derived: nothing consumes them, so a prior there would be a logp
+        #    term on a quantity the model never uses -- and the same statement
+        #    is already being made on the coordinate that instance samples.
         gaussian_prior_mask = (
-            (is_derived | (is_sampled & use_logit & has_sigma_prior))
+            (
+                (is_derived & ~is_reported)
+                | (is_sampled & use_logit & has_sigma_prior)
+            )
             & ~np.isnan(sigmas)
             & (sigmas > 0)
         )
@@ -1655,7 +1981,10 @@ class Parameter:
         #    not apply). Fully-bounded sampled params: sigmoid is a hard
         #    constraint — no barrier needed.
         #    Fixed params: constant, so barrier adds only a harmless constant — skip.
-        needs_barrier = (is_derived | (is_sampled & ~use_logit)) & ~is_fixed
+        #    REPORTED elements get none, for the reason section A gives.
+        needs_barrier = (
+            (is_derived & ~is_reported) | (is_sampled & ~use_logit)
+        ) & ~is_fixed
         has_lower = ~np.isinf(lowers) & needs_barrier
         has_upper = ~np.isinf(uppers) & needs_barrier
         if np.any(has_lower | has_upper):
@@ -2360,7 +2689,16 @@ class Parameter:
         if self.posterior is None:
             if self.initval is not None:
                 physical_inits = self.from_internal(self.initval)
-                inits = np.atleast_1d(physical_inits)
+                # Sized from the SHAPE, not from the initval: a vector whose
+                # initval is a broadcast scalar (a manifest-options value on a
+                # fully pinned vector) used to emit ONE unsuffixed macro while
+                # the table body cites a suffixed one per element -- an
+                # "Undefined control sequence" at compile, by construction.
+                # The \nodata branch below already sized itself this way.
+                n = self._n_elements()
+                inits = np.broadcast_to(
+                    np.atleast_1d(physical_inits), (n,)
+                ).copy()
 
                 if len(inits) > 1:
                     lines = []
@@ -2605,8 +2943,19 @@ class Parameter:
         # creep back into half the branches.
         _fmt = _fmt_prior_value
 
+        # Per element, deliberately: a vector whose instances chose different
+        # parameterizations is derived on some elements and sampled on others,
+        # so a whole-vector `self.expression is not None` would report one
+        # instance's parameterization for all of them.
+        derived_here = self.element_is_derived(index)
+
         sig = _scalar(self.sigma)
         if sig == 0:
+            # Unchanged, INCLUDING for a derived element: `sigma: 0` there is a
+            # no-op the build already warns about, and examples/ob08092 ships
+            # one (star.mass), so "Fixed" is what its table has always said.
+            # Correcting that is a reporting change of its own, not a side
+            # effect of making the column per element.
             return "Fixed", "fixed"
 
         lo = _scalar(self.lower)
@@ -2617,7 +2966,7 @@ class Parameter:
         has_bounds = lo is not None or hi is not None
 
         # Derived parameters with no custom constraint have no prior to display.
-        if self.expression is not None and not (has_prior or has_bounds):
+        if derived_here and not (has_prior or has_bounds):
             return "", "none"
 
         mu = _scalar(self.mu)
@@ -2649,7 +2998,7 @@ class Parameter:
                 if h_s:
                     return f"< {h_s}", "bounds"
 
-            if self.expression is not None:
+            if derived_here:
                 return "", "none"
 
         # --- LaTeX Formatting Block ---

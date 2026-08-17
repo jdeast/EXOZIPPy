@@ -16,6 +16,7 @@ bounds, and are named as such.
 """
 
 import copy
+import json
 import logging
 import re
 from pathlib import Path
@@ -32,7 +33,7 @@ from exozippy.outputs.modes import (
     NoValidDrawsError,
 )
 from exozippy.samplers import convergence
-from exozippy.trace_meta import check_trace_freshness
+from exozippy.trace_meta import ROLES_ATTR, check_trace_freshness
 from exozippy.yamlio import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,30 @@ logger = logging.getLogger(__name__)
 
 def _load_yaml(path):
     return load_yaml(path) or {}
+
+
+def _trace_element_roles(idata):
+    """Per-element role masks stamped on the trace, or ``{}``.
+
+    Written by ``trace_meta.element_roles`` for the parameters whose vectors are
+    not uniform in a role.  A missing or unreadable attr means "every element of
+    a sampled variable is sampled", which is what every trace written before
+    per-element parameterizations meant -- so a fault here degrades to the
+    historical behavior rather than dropping entries.
+    """
+    attrs = getattr(idata, "attrs", None) or {}
+    blob = attrs.get(ROLES_ATTR)
+    if not blob:
+        return {}
+    try:
+        roles = json.loads(blob)
+    except (TypeError, ValueError):
+        logger.warning(
+            "mkparam: the trace's element-role metadata is unreadable; "
+            "treating every element of every sampled parameter as sampled."
+        )
+        return {}
+    return roles if isinstance(roles, dict) else {}
 
 
 def _get_instance_names(config, comp_key):
@@ -652,6 +677,16 @@ def write_param_file(
     # -> angle pass below can look the angle's existing entry up the same way.
     key_context = {}
 
+    # Per-element roles of the vectors that are not uniform in one (a component
+    # whose instances chose different parameterizations).  The raw variable's
+    # length says how MANY elements are sampled, never which, so without this
+    # a partially derived vector would get a start value written for an element
+    # whose value is an expression -- the redundant constraint the
+    # "physically sampled variables" filter above exists to prevent.  Absent on
+    # traces that predate the roles, and on every uniform model: then every
+    # element of a sampled var is sampled, exactly as before.
+    element_roles = _trace_element_roles(idata)
+
     for var_name in sampled_vars:
         comp_key, param = var_name.rsplit(".", 1)
         da = posterior[var_name]
@@ -662,8 +697,14 @@ def write_param_file(
         n_elements = seed_vals.shape[1]
 
         instance_names = _get_instance_names(config, comp_key)
+        roles = element_roles.get(var_name, {})
+        writable = roles.get("sampled")
 
         for i in range(n_elements):
+            if writable is not None and not (
+                i < len(writable) and writable[i]
+            ):
+                continue
             mv_list = [float(np.round(seed_vals[k, i], 8)) for k in range(K)]
             mv = mv_list[0]
             if instance_names:

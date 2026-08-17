@@ -188,7 +188,8 @@ def solve(config, user_params=None, workdir=None):
     start = time.time()
     system, warnings = _prepare_system(config, user_params, workdir)
     export = system.config_manager.export_solution(
-        derived_params=system.derived_params()
+        derived_params=system.derived_elements(),
+        active_elements=system.active_elements(),
     )
     elapsed = time.time() - start
 
@@ -226,7 +227,8 @@ def validate(config, user_params=None, workdir=None):
         ]
 
     export = system.config_manager.export_solution(
-        derived_params=system.derived_params()
+        derived_params=system.derived_elements(),
+        active_elements=system.active_elements(),
     )
     diagnostics = list(system.config_manager.diagnostics)
     diagnostics.extend(_bounds_diagnostics(export.get("parameters", {})))
