@@ -109,6 +109,10 @@ class System(Component):
         # each checkpoint.  add() is idempotent, so a second build_model()
         # on one System (the GUI) cannot accumulate copies.
         self.prose = ProseCollector()
+        # Sliced per-element expressions awaiting their start-point check
+        # (see register_element_slice_check / verify_element_slices).  Rebuilt
+        # per build_model, so a second build on one System cannot accumulate.
+        self._element_slice_checks = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
         # happens to name but System never opened.
@@ -224,23 +228,86 @@ class System(Component):
         the one tool whose job is to find them.  That is not hypothetical --
         it is what `rvinstrument.gamma` did until 2026-08.
         """
-        out = set()
+        return {
+            key
+            for key, mask in self.derived_elements().items()
+            if bool(np.all(mask))
+        }
+
+    def derived_elements(self):
+        """``(component_prefix, param_name) -> boolean mask`` of derived elements.
+
+        The per-element form of :meth:`derived_params`, and the one every
+        reporting consumer should ask: a vector whose instances chose different
+        parameterizations is derived for SOME elements and sampled for others,
+        and answering per parameter forces a choice between excusing a sampled
+        element from the checks a sampled element needs (``derived_params``'s
+        consumers skip derived parameters) and subjecting a derived one to them.
+
+        ``derived_params`` keeps its historical meaning -- every element derived
+        -- so a partially derived vector no longer counts as derived there.
+        That is the conservative direction: its consumers treat "derived" as
+        "exempt", and a mixed vector has sampled elements that must not be
+        exempt.  Valid after stage 2.
+        """
+        out = {}
         for comp in self.active_components.values():
             for name, raw in getattr(comp, "manifest", {}).items():
                 entry = interpret_manifest_entry(raw)
                 if not entry.names_expression:
                     continue
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
                 cfg = self.config_manager.resolve(
                     comp.prefix, name, shape=(comp.n_elements,)
                 )
-                if (
-                    entry.expression_config(
-                        cfg.get("expressions", {}),
-                        where=f"{comp.prefix}.{name}",
-                    )
-                    is not None
+                mask = np.zeros(n_elements, dtype=bool)
+                for sel in entry.expression_configs(
+                    cfg.get("expressions", {}),
+                    n_elements=n_elements,
+                    where=f"{comp.prefix}.{name}",
                 ):
-                    out.add((comp.prefix, name))
+                    mask |= (
+                        np.ones(n_elements, dtype=bool)
+                        if sel.mask is None
+                        else sel.mask
+                    )
+                if mask.any():
+                    out[(comp.prefix, name)] = mask
+        return out
+
+    def active_elements(self):
+        """``(component_prefix, param_name) -> boolean mask`` of ACTIVE elements.
+
+        The complement is manifest role 4: elements that are not parameters of
+        their instance's parameterization (a non-MIST star's EEP).  Only entries
+        that actually mask something appear, so a caller can treat a missing key
+        as "every element active".  Valid after stage 2, and the reporting
+        layer's authority for what to leave out of a table.
+        """
+        out = {}
+        for comp in self.active_components.values():
+            for name, raw in getattr(comp, "manifest", {}).items():
+                entry = interpret_manifest_entry(raw)
+                if entry.options.get("mask") is None:
+                    continue
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                out[(comp.prefix, name)] = entry.activity_mask(
+                    n_elements, where=f"{comp.prefix}.{name}"
+                )
         return out
 
     def build_likelihood(self, model, system):
@@ -253,8 +320,97 @@ class System(Component):
     def register_parameters(self, system):
         pass
 
+    def register_element_slice_check(
+        self, where, func_name, idx, sliced_expr, full_expr
+    ):
+        """Record a sliced per-element expression for start-point verification.
+
+        Called by ``Component._element_expression`` when an expression supplies
+        a SUBSET of a parameter's elements and its dependencies were therefore
+        sliced.  Slicing is only sound if the physics is elementwise in those
+        deps; the alignment of the deps themselves is proven statically, but
+        "elementwise" is a property of the function, and a function that sums or
+        contracts over the element axis would return something else entirely
+        from sliced inputs.  So both graphs are kept and compared numerically at
+        the start point (``verify_element_slices``), where real values exist --
+        dummy inputs could agree by accident, and evaluating a random variable
+        would draw from its prior instead of reading the start.
+        """
+        self._element_slice_checks.append(
+            {
+                "where": where,
+                "func_name": func_name,
+                "idx": np.asarray(idx, dtype=int),
+                "sliced": sliced_expr,
+                "full": full_expr,
+            }
+        )
+
+    def verify_element_slices(self, model, rtol=1e-9, atol=1e-12):
+        """Check every sliced per-element expression against the full one.
+
+        One compiled function over all the checks, evaluated at the start point.
+        A mismatch RAISES, naming the parameter and the physics function: it
+        means the function is not elementwise in its dependencies, so the
+        elements one instance's parameterization computed were derived from
+        another instance's numbers -- wrong values with no other symptom.
+
+        NaN is treated as agreement ONLY when both sides are NaN at the same
+        entry; a NaN that appears in just one of them is a real disagreement.
+        """
+        checks = self._element_slice_checks
+        if not checks:
+            return 0
+        outputs = []
+        for chk in checks:
+            full = pt.as_tensor_variable(chk["full"]())
+            sliced = pt.as_tensor_variable(chk["sliced"]())
+            take = pt.as_tensor_variable(chk["idx"].astype("int32"))
+            outputs.append(full[take] if full.ndim else full)
+            outputs.append(sliced if sliced.ndim else sliced)
+        # The expressions were built against the model's random variables, but
+        # a point maps the VALUE variables; without this substitution the
+        # compiled function asks for an unnamed RV input the point cannot fill.
+        outputs = model.replace_rvs_by_values(outputs)
+        # inputs=model.value_vars, not the default (whatever the outputs need):
+        # a point carries EVERY value variable, and a function compiled for a
+        # subset rejects the rest ("Too many parameter passed").
+        fn = model.compile_fn(
+            outputs,
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )
+        values = fn(self.get_raw_start(model))
+        for k, chk in enumerate(checks):
+            a = np.atleast_1d(np.asarray(values[2 * k], dtype=float))
+            b = np.atleast_1d(np.asarray(values[2 * k + 1], dtype=float))
+            both_nan = np.isnan(a) & np.isnan(b)
+            if a.shape != b.shape or not np.allclose(
+                np.where(both_nan, 0.0, a),
+                np.where(both_nan, 0.0, b),
+                rtol=rtol,
+                atol=atol,
+                equal_nan=False,
+            ):
+                raise ValueError(
+                    f"[{chk['where']}] the physics function "
+                    f"'{chk['func_name']}' is not elementwise in its "
+                    f"dependencies: evaluated on the dependencies sliced to "
+                    f"element(s) {chk['idx'].tolist()} it gives {b.tolist()}, "
+                    f"but evaluated on the full vectors and then indexed it "
+                    f"gives {a.tolist()}. A per-element parameterization "
+                    f"switch slices the dependencies so an instance that did "
+                    f"not choose this parameterization cannot poison the "
+                    f"result, which is only valid for an elementwise "
+                    f"function. Give the expression a form that treats each "
+                    f"element independently."
+                )
+        return len(checks)
+
     def build_model(self):
         """Constructs the PyMC probabilistic model for the entire system."""
+        self._element_slice_checks = []
         with pm.Model() as model:
             # Stage 4a: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
@@ -294,6 +450,11 @@ class System(Component):
             for comp in self.active_components.values():
                 if hasattr(comp, "build_likelihood"):
                     comp.build_likelihood(model, system=self)
+
+        # Mixed-parameterization vectors only: verify that each sliced
+        # expression agrees with the unsliced one on the elements it supplies,
+        # at the start point.  No-op (and no compile) for a model without one.
+        self.verify_element_slices(model)
 
         self.compile_plotter_functions(model)
         return model
@@ -795,7 +956,19 @@ class System(Component):
         then tells each component to compile its own plotters.
         """
         all_params = self.get_all_parameters()
-        self.plot_params = [p for p in all_params if p.expression is None]
+        # The compiled plotters take the NON-derived parameters as inputs.  A
+        # vector whose instances chose different parameterizations is derived on
+        # only some elements, and it belongs here: its sampled elements have no
+        # other input, and its derived ones are read from the point (which
+        # carries the whole Deterministic vector) rather than recomputed.
+        # (Read from the build's own role masks, not from `expression is None`:
+        # a fully derived vector may be declared per element too, and then its
+        # `expression` field is None while every element is derived.)
+        self.plot_params = [
+            p
+            for p in all_params
+            if not bool(np.all(np.atleast_1d(p.is_derived)))
+        ]
 
         # Delegate the actual compilation to the components
         for comp in self.active_components.values():

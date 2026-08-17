@@ -351,8 +351,9 @@ def compute_rm_rv(
     ar = planet.ar.value[planet_idx]  # a / Rstar
     rprs = planet.p.value[planet_idx]  # Rp / Rstar
     u1 = band.u1.value[band_idx]
-    # With ld_law: linear the Band manifest has no u2 at all (same guard
-    # transit.py uses). The quadratic term is then exactly zero, which the
+    # With ld_law: linear on EVERY band the Band manifest has no u2 at all
+    # (same guard transit.py uses); where only some bands are linear it exists
+    # and is exactly 0 on theirs.  Either way the quadratic term is zero, which
     # Green's-basis coefficients in quad_limb_darkened_flux handle natively
     # (c2 = 0, c1 = u1, c0 = 1 - u1), as does the _m_kernel broadening
     # profile below -- neither needs a separate linear formula.

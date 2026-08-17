@@ -1030,6 +1030,13 @@ def inspect_start(
         user_flag = "*" if getattr(p, "user_prior_modified", False) else ""
 
         for i in range(len(v_phys)):
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP, a linear-law band's u2):
+            # it is held at a bookkeeping value nothing reads, so a row for it
+            # would report a start value the fit does not have.
+            if not p.element_is_active(i):
+                continue
+
             row_label = p.get_display_label(i)
 
             # Parameter.initval is the AUTHORITATIVE start: it is what

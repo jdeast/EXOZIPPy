@@ -1,4 +1,5 @@
 import graphlib
+import math
 
 from .manifest import interpret_manifest_entry
 
@@ -6,6 +7,22 @@ from .manifest import interpret_manifest_entry
 This builds a graph of the model and returns a topologically sorted list of parameters, ensuring that dependencies are built prior to things that depend on them.
 This must contain no component-specific logic.
 """
+
+
+def _entry_n_elements(entry, comp):
+    """How many elements the parameter this entry describes has.
+
+    One per component config instance, unless the manifest overrides the shape
+    (lens's per-source vectors).  Only per-element selectors need it, and a mask
+    sized from the wrong count is exactly review 1.1.1's hazard, so it is read
+    from the same option ``add_parameter`` reads it from.
+    """
+    shape = entry.shape
+    if not shape:
+        return comp.n_elements
+    if isinstance(shape, tuple):
+        return int(math.prod(shape)) if shape else 1
+    return int(shape)
 
 
 def determine_pymc_build_order(active_components, config_manager):
@@ -48,12 +65,29 @@ def determine_pymc_build_order(active_components, config_manager):
             # it could never supply a needed one, since every parameter it
             # applied to is free.
             entry = interpret_manifest_entry(comp.manifest[param_name])
-            expr_cfg = entry.expression_config(
-                cfg.get("expressions", {}), where=f"{comp.prefix}.{param_name}"
+            # A parameter whose instances chose different parameterizations
+            # takes its value from several expressions, one per group of
+            # elements; the build order needs the UNION of their dependencies,
+            # since add_parameter builds the whole vector at once and every
+            # expression must be wireable when it does.
+            #
+            # REPORTED selections (output_expr_key) contribute NO edge, and that
+            # is the point of the role: they are the reverse direction of a flip
+            # (report sqrt(e)cos(omega) for an orbit that sampled V_c/V_e), so
+            # their dep is a parameter that depends on this one on OTHER
+            # elements.  As an edge it would be a cycle here even though the
+            # value graph is perfectly acyclic per element; they are excluded
+            # because nothing consumes them, and the deferred build pass
+            # (add_parameter names it) is what materializes them.
+            selections = entry.expression_configs(
+                cfg.get("expressions", {}),
+                n_elements=_entry_n_elements(entry, comp),
+                where=f"{comp.prefix}.{param_name}",
             )
-
-            if expr_cfg is not None:
-                dep_names = entry.dep_names(expr_cfg)
+            for sel in selections:
+                if sel.output_only:
+                    continue
+                dep_names = entry.dep_names(sel.config)
                 # Deps a component declares in context_dep_names are
                 # satisfied by context-node injection in its add_parameter
                 # override (constants, not manifest parameters) -- they are
@@ -116,4 +150,10 @@ def determine_pymc_build_order(active_components, config_manager):
     except graphlib.CycleError as e:
         raise ValueError(
             f"Circular reference detected in forward defaults.yaml graph: {e}"
+            f"\n\nIf the two parameters in the cycle are the two spellings of "
+            f"one parameterization (each derivable from the other, with "
+            f"different instances choosing different ones), the reverse "
+            f"direction is a REPORTED quantity, not a dependency: declare it "
+            f"with a manifest 'output_expr_key' instead of 'expr_key' so it "
+            f"contributes no build-order edge. Nothing may consume it."
         )

@@ -56,6 +56,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from ._version import __version__
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,12 @@ VERSION_ATTR = "exozippy_version"
 COMMIT_ATTR = "exozippy_git_commit"
 DESCRIBE_ATTR = "exozippy_git_describe"
 DIRTY_ATTR = "exozippy_git_dirty"
+# Per-element role masks of the parameters whose vectors are NOT uniform in a
+# role (see element_roles).  Read by mkparam, which has no System; absent on
+# every trace written before per-element roles existed, and on every model whose
+# vectors are uniform -- so a reader must treat "missing" as "all sampled",
+# which is what it always meant.
+ROLES_ATTR = "exozippy_element_roles"
 
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
@@ -220,6 +228,43 @@ def describe_trace_provenance(attrs: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def element_roles(system) -> Dict[str, Dict[str, List[bool]]]:
+    """Per-element role masks of every built Parameter, as plain JSON types.
+
+    ``{label: {"sampled": [...], "derived": [...], "active": [...]}}``, and only
+    for parameters whose vector is not uniform in a role -- a fully sampled
+    vector says nothing a reader cannot infer.
+
+    This exists for ``mkparam``, which writes the next params.yaml from a trace
+    plus a config and deliberately never builds a System (see its module
+    docstring).  Without the roles it cannot tell WHICH elements of a partially
+    derived vector are sampled: the raw variable's length says how many, not
+    which, so it would emit a start value for an element whose value is an
+    expression -- a redundant constraint on the next fit, which is exactly what
+    its "only include physically sampled variables" filter exists to prevent.
+    """
+    out: Dict[str, Dict[str, List[bool]]] = {}
+    get_params = getattr(system, "get_all_parameters", None)
+    if not callable(get_params):
+        return out
+    for p in get_params():
+        roles = {}
+        for key, attr, default in (
+            ("sampled", "is_sampled", True),
+            ("derived", "is_derived", False),
+            ("active", "is_active", True),
+        ):
+            mask = np.atleast_1d(getattr(p, attr, default))
+            if mask.dtype != bool or mask.size <= 1:
+                continue
+            if bool(np.all(mask)) or not bool(np.any(mask)):
+                continue  # uniform: nothing a reader needs told
+            roles[key] = [bool(b) for b in mask]
+        if roles:
+            out[p.label] = roles
+    return out
+
+
 def stamp_structural_metadata(idata, source) -> None:
     """Record the structural fingerprint + code provenance in root attrs.
 
@@ -230,6 +275,11 @@ def stamp_structural_metadata(idata, source) -> None:
     fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     attrs[HASH_ATTR] = fingerprint
+    roles = element_roles(source)
+    if roles:
+        attrs[ROLES_ATTR] = json.dumps(roles, sort_keys=True)
+    else:
+        attrs.pop(ROLES_ATTR, None)
     blob = json.dumps(payload, sort_keys=True, default=str)
     if len(blob) <= _MAX_PAYLOAD_CHARS:
         attrs[PAYLOAD_ATTR] = blob

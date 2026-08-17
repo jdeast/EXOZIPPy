@@ -188,11 +188,17 @@ def build_csv_output(
                     else:
                         rows.append((name, val, "", ""))
 
+            # An INACTIVE element is not a parameter of its instance's
+            # parameterization (a non-MIST star's EEP), only a bookkeeping
+            # value in the vector -- so it gets no row here, in the LaTeX
+            # table, or in the startup table.
             if n_instances == 1:
-                emit(p.label, 0)
+                if p.element_is_active(0):
+                    emit(p.label, 0)
             else:
                 for i in range(n_instances):
-                    emit(p.get_display_label(i), i)
+                    if p.element_is_active(i):
+                        emit(p.get_display_label(i), i)
 
     columns = CSV_COLUMNS_MODE if mode_cols else CSV_COLUMNS_PLAIN
     with open(csv_filename, "w", newline="") as f:
@@ -343,6 +349,8 @@ def build_latex_output(
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
             for p in printable:
+                if not p.element_is_active(0):
+                    continue
                 all_table_lines.append(
                     p.to_table_line(
                         note_mark=_mark_for(p), mode_suffixes=mode_suffixes
@@ -355,12 +363,15 @@ def build_latex_output(
             for i in range(n_instances):
                 name = _instance_name(printable, i) or chr(ord("A") + i)
                 n_cols = 4 if not multimodal else 3 + mode_report.n_modes
-                all_table_lines.append(_instance_subhead(name, n_cols=n_cols))
 
+                instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    # Inactive elements carry no row (see build_csv_output).
+                    if not p.element_is_active(i if p_n > 1 else 0):
+                        continue
                     if p_n > 1:
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line_at(
                                 i,
                                 note_mark=_mark_for(p),
@@ -369,12 +380,22 @@ def build_latex_output(
                         )
                     elif i == 0:
                         # Scalar param shared across instances: show once
-                        all_table_lines.append(
+                        instance_lines.append(
                             p.to_table_line(
                                 note_mark=_mark_for(p),
                                 mode_suffixes=mode_suffixes,
                             )
                         )
+
+                # The sub-head only earns its line if the instance has rows:
+                # every parameter of an instance can now be inactive (a star
+                # with no evolutionary model in a system where another star has
+                # one), and a heading over nothing reads as a missing table.
+                if instance_lines:
+                    all_table_lines.append(
+                        _instance_subhead(name, n_cols=n_cols)
+                    )
+                    all_table_lines.extend(instance_lines)
 
     if multimodal:
         # Mode weights are citable macros too, and lead the table as a row.

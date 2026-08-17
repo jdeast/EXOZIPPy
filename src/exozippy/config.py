@@ -560,6 +560,39 @@ def _meaningful_change(
     return False
 
 
+def _element_flag(table, key, element, fallback, absent):
+    """One element's boolean from a per-element mask table, a set, or nothing.
+
+    `export_solution`'s two role tables come in three shapes and all three have
+    to answer for a single exported path:
+
+      * ``None``            -- no table: use `fallback` (the pre-table guess).
+      * a set of keys       -- whole-parameter answer (`System.derived_params`).
+      * ``{key: mask}``     -- per element (`System.derived_elements`), which is
+        the shape to prefer; `element` is the index, or ``None`` for a 2-part
+        broadcast path that stands for the whole vector.  A broadcast path is
+        reported True only when EVERY element agrees, because its consumers read
+        the flag as "this applies to all of it".
+
+    `absent` is the answer when the table exists but does not mention the key at
+    all -- False for derived (a parameter no manifest derives) and True for
+    active (a parameter nothing masked).
+    """
+    if table is None:
+        return fallback
+    if not hasattr(table, "get"):
+        return key in table
+    mask = table.get(key)
+    if mask is None:
+        return absent
+    arr = np.atleast_1d(mask)
+    if element is None:
+        return bool(np.all(arr))
+    if element < arr.size:
+        return bool(arr[element])
+    return bool(np.all(arr))
+
+
 class ConfigManager:
     def __init__(self, user_params, system_config=None):
         self.custom_solvers = {}
@@ -1990,22 +2023,36 @@ class ConfigManager:
                 return "user"
         return "default"
 
-    def export_solution(self, derived_params=None):
+    def export_solution(self, derived_params=None, active_elements=None):
         """Export the resolved parameter solution as JSON-friendly dicts.
 
-        `derived_params`, when given, is the set of `(component_prefix,
-        param_name)` pairs the built manifests actually derive
-        (`System.derived_params()`).  Pass it whenever a System is in scope:
-        the fallback -- "this parameter has an expressions: block in its
-        defaults.yaml" -- is only an approximation, since a component may
-        declare the same parameter free in one topology and derived in
-        another (see planet.mass's linear vs log_q coordinate).
+        `derived_params`, when given, says which parameters the built manifests
+        actually derive.  Pass it whenever a System is in scope: the fallback --
+        "this parameter has an expressions: block in its defaults.yaml" -- is
+        only an approximation, since a component may declare the same parameter
+        free in one topology and derived in another (see planet.mass's linear vs
+        log_q coordinate).  Two spellings are accepted:
+
+          * `System.derived_elements()` -- `{(prefix, param): boolean mask}`,
+            the PER-ELEMENT answer, and the one to prefer: a component whose
+            instances chose different parameterizations derives only some
+            elements, and reporting the whole vector either way mislabels the
+            rest.  Consumers act on the label (`_bounds_diagnostics` skips
+            derived parameters entirely), so a mislabelled element is a check
+            that silently does not run.
+          * `System.derived_params()` -- a set of `(prefix, param)` pairs, kept
+            for callers that have no element context.
+
+        `active_elements` (`System.active_elements()`) marks elements that are
+        not parameters of their instance's parameterization at all; they export
+        with `"active": False` so a reporting consumer can leave them out, as
+        the tables do.
 
         Returns a dict with:
           - "parameters": {user_path: {value, unit, internal_unit, lower,
-            upper, init_scale, sigma, mu, fixed, derived, provenance}} where
-            provenance is {rank, label, relation}.  All numeric fields are in
-            the parameter's user unit (as reported by resolve()).
+            upper, init_scale, sigma, mu, fixed, derived, active, provenance}}
+            where provenance is {rank, label, relation}.  All numeric fields
+            are in the parameter's user unit (as reported by resolve()).
           - "seeds": a list of {user_path: value} start points, present only
             when multi-seed sampling produced more than one seed.
 
@@ -2092,14 +2139,29 @@ class ConfigManager:
                 value = _clean(self._last_resolved[internal_path] / factor)
             else:
                 value = _first("initval")
-            if derived_params is None:
-                derived = bool(cfg.get("expressions"))
-            else:
-                derived = (c_type, p_name) in derived_params
+            derived = _element_flag(
+                derived_params,
+                (c_type, p_name),
+                el,
+                fallback=bool(cfg.get("expressions")),
+                absent=False,
+            )
+            active = _element_flag(
+                active_elements,
+                (c_type, p_name),
+                el,
+                fallback=True,
+                absent=True,
+            )
             # A parameter is fixed when it has a hardcoded value or sigma == 0.
             fixed = (cfg.get("value") is not None) or (
                 sigma is not None and sigma == 0
             )
+            # An INACTIVE element is held at a bookkeeping value whatever its
+            # resolved sigma says (the pin is the role, not a `sigma: 0` in the
+            # config), so it must not be reported as free: a consumer that draws
+            # a slider per free parameter would offer a knob that moves nothing.
+            fixed = fixed or not active
 
             rank = self._last_provenance.get(internal_path)
             relation = self._last_solved_by.get(internal_path)
@@ -2116,6 +2178,7 @@ class ConfigManager:
                 "mu": _first("mu"),
                 "fixed": bool(fixed),
                 "derived": derived,
+                "active": active,
                 "provenance": {
                     "rank": rank,
                     "label": label,

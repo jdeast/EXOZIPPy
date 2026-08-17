@@ -97,6 +97,76 @@ def test_track_parameters_get_the_same_mask_as_age():
     assert manifest["eep"]["mask"] == manifest["age"]["mask"]
 
 
+def test_a_star_with_no_track_has_no_track_coordinates():
+    """
+    Given two stars, only one of which opted into an evolutionary model,
+    When the model is built,
+    Then the opted-in star's initfeh/eep are sampled and the other star's are
+      not parameters at all: inactive, so nothing samples them and nothing
+      reports them.
+
+    The mask was declared and never read until per-element roles landed, so the
+    star that opted OUT used to get two free, likelihood-free dimensions -- and
+    a table row for each, reporting a quantity that describes a track it has
+    none of.
+    """
+    # Arrange
+    system = _prepared([{"name": "A"}, {"name": "B", "mist": False}])
+
+    # Act
+    model = system.build_model()
+
+    # Assert
+    for name in ("initfeh", "eep", "age"):
+        param = getattr(system.star, name)
+        assert param.is_active.tolist() == [True, False], name
+        assert param.is_sampled.tolist() == [True, False], name
+        assert param.element_is_active(0) and not param.element_is_active(1)
+    # One raw element each (star A only), not two.
+    raw = {v.name: v for v in model.free_RVs}
+    assert raw["star.initfeh_raw"].type.shape == (1,)
+    assert raw["star.eep_raw"].type.shape == (1,)
+
+
+def test_no_star_opting_in_declares_no_track_coordinates():
+    """
+    Given an evolutionarymodel topology in which NO star opted in,
+    When the star component registers its parameters,
+    Then the three track coordinates are not declared at all.
+
+    A wholly inactive vector would be a Parameter nothing samples, nothing
+    reads and nothing reports -- so it should not exist, exactly as it does not
+    when the block is absent.
+    """
+    stars = [{"name": "A", "mist": False}, {"name": "B", "mist": False}]
+
+    manifest = _prepared(stars).star.manifest
+
+    assert not {"age", "initfeh", "eep"} & set(manifest)
+
+
+def test_a_premature_block_warns_that_nothing_reads_the_track(caplog):
+    """
+    Given an evolutionarymodel block that no component backs,
+    When the star component registers its parameters,
+    Then it warns, naming the opted-in stars.
+
+    Review 3.8.2: the branch is driven by the config KEY, so it fires for a
+    premature block, and its coordinates are then sampled with nothing reading
+    them.  The unrecognized-key warning System already emits does not say that.
+    """
+    with caplog.at_level("WARNING", logger="exozippy"):
+        _prepared([{"name": "A"}, {"name": "B", "mist": False}])
+
+    hits = [
+        r.getMessage()
+        for r in caplog.records
+        if "no such component is registered" in r.getMessage()
+    ]
+    assert len(hits) == 1
+    assert "A" in hits[0] and "eep" in hits[0]
+
+
 @pytest.mark.parametrize("name", sorted(TRACK_DEFAULTS))
 def test_track_parameters_resolve_to_their_defaults(name):
     """

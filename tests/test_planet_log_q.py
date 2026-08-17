@@ -69,6 +69,13 @@ def _mode(planet_cfg, user_params=None, **comps):
     return comp.mass_parameterization
 
 
+def _modes(planet_cfg, user_params=None, **comps):
+    """The PER-PLANET coordinates (the whole-component answer is _mode)."""
+    comp = Planet(planet_cfg, config_manager=_FakeConfigManager(user_params))
+    comp._resolve_mass_parameterization(_FakeSystem(**comps))
+    return comp.mass_parameterizations
+
+
 def test_rv_planet_defaults_to_linear():
     """
     Given RV data measuring the planet's orbit,
@@ -145,38 +152,52 @@ _TWO_PLANET_ORBITS = _FakeOrbit(
 )
 
 
-def test_mixed_topology_falls_back_to_linear(caplog):
+def test_a_mixed_topology_gives_each_planet_its_own_coordinate(caplog):
     """
     Given one RV-measured planet and one that is not,
     When the mass coordinate is resolved,
-    Then both fall back to linear (one mode per component) and the reason is
-    logged, rather than a build failing later.
+    Then the RV-measured planet samples a linear (signed) mass and the other
+      samples the mass ratio, and the choice is logged.
+
+    This used to fall back to all-linear with an INFO saying mixing was "not
+    yet supported", which quietly gave the unconstrained planet a uniform prior
+    over a huge mass range instead of the ratio coordinate its topology asks
+    for.  Roles are per element now, so nothing has to be given up.
     """
     with caplog.at_level(logging.INFO):
-        mode = _mode(
+        modes = _modes(
             [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
             rvinstrument=_FakeRV([0]),
             orbit=_TWO_PLANET_ORBITS,
         )
 
-    assert mode == "linear"
-    assert "not yet supported" in caplog.text
+    assert modes == ["linear", "log_q"]
+    assert "not yet supported" not in caplog.text
+    assert "'c' -> log_q" in caplog.text
 
 
-def test_explicit_mixed_override_raises():
-    """An explicit per-planet disagreement is a user error, not a fallback."""
-    with pytest.raises(ValueError, match="must share one"):
-        _mode(
-            [
-                {"name": "b", "mass_parameterization": "linear"},
-                {
-                    "name": "c",
-                    "orbit_ndx": 1,
-                    "mass_parameterization": "log_q",
-                },
-            ],
-            orbit=_TWO_PLANET_ORBITS,
-        )
+def test_an_explicit_per_planet_mix_is_honored():
+    """
+    Given two planets whose config asks for different mass coordinates,
+    When they are resolved,
+    Then each gets what it asked for.
+
+    An explicit disagreement used to RAISE ("All planets must share one
+    'mass_parameterization'"), for the structural reason that is now gone.
+    """
+    modes = _modes(
+        [
+            {"name": "b", "mass_parameterization": "linear"},
+            {
+                "name": "c",
+                "orbit_ndx": 1,
+                "mass_parameterization": "log_q",
+            },
+        ],
+        orbit=_TWO_PLANET_ORBITS,
+    )
+
+    assert modes == ["linear", "log_q"]
 
 
 def test_fixed_mass_translates_to_log_q():
@@ -276,6 +297,45 @@ def lens_system():
     return _build()
 
 
+def test_two_planets_may_use_different_mass_coordinates():
+    """
+    Given a binary lens whose companion planet must use the ratio coordinate,
+      plus a second planet that explicitly asks for a linear mass,
+    When the model is built,
+    Then both coordinates are sampled -- one element each -- the lens planet's
+      mass is derived while the other's is sampled, log_q is not a parameter of
+      the linear planet, and the start's logp and gradient are finite.
+
+    This configuration used to RAISE ("All planets must share one
+    'mass_parameterization'").  The lens body cannot take a linear mass at all
+    (the magnification clips q to [1e-9, 100], so q <= 0 is meaningless), so
+    before per-element roles the only way to have both planets was to give the
+    second one a coordinate its own topology argues against.
+    """
+    config = _binary_config()
+    config["planet"] = [
+        {"name": "b"},
+        {"name": "c", "mass_parameterization": "linear"},
+    ]
+    system = System(config, user_params=_binary_params())
+    system.prepare()
+    model = system.build_model()
+
+    assert system.planet.mass_parameterizations == ["log_q", "linear"]
+    assert system.planet.mass.is_derived.tolist() == [True, False]
+    assert system.planet.mass.is_sampled.tolist() == [False, True]
+    assert system.planet.log_q.is_sampled.tolist() == [True, False]
+    assert system.planet.log_q.is_active.tolist() == [True, False]
+
+    free = {v.name for v in model.free_RVs}
+    assert {"planet.log_q_raw", "planet.mass_raw"} <= free
+
+    with model:
+        point = model.initial_point()
+        assert np.isfinite(model.compile_logp()(point))
+        assert np.all(np.isfinite(model.compile_dlogp()(point)))
+
+
 def test_lens_planet_samples_log_q_and_derives_mass(lens_system):
     """
     Given a binary lens whose companion is a planet,
@@ -295,6 +355,61 @@ def test_lens_planet_samples_log_q_and_derives_mass(lens_system):
     # force_node keeps the mass in the trace, as it is when sampled -- tables
     # and plots read it from there.
     assert "planet.mass" in {d.name for d in model.deterministics}
+
+
+def test_a_mass_seed_reaches_whichever_coordinate_each_planet_samples():
+    """
+    Given a mixed system in which BOTH planets are seeded by mass,
+    When the relaxation engine resolves the start values,
+    Then the log_q planet's seed arrives as a log_q start (log10 of the mass
+      ratio) while the linear planet's mass is used as written.
+
+    Measured rather than assumed.  The engine's relations are instantiated per
+    indexed path, so it is per element already, but RANK is per parameter
+    (`log_q` carries rank 5 and `mass` rank 10 in defaults.yaml, which is what
+    makes log_q absorb the relation) -- so whether a per-element mix of
+    coordinates still routes a seed correctly is a question about the engine,
+    not about the manifest.  It does; if that ever changes, the symptom is a
+    fit silently starting at the defaults.yaml log_q instead of the mass the
+    user asked for.
+    """
+    # A plain star + two planets: no lens, so no lens.q seed competes with the
+    # mass seeds for the same relation (that contradiction is a different test's
+    # subject, and the engine resolves it by rank).
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [
+            {"name": "b", "mass_parameterization": "log_q"},
+            {"name": "c", "mass_parameterization": "linear"},
+        ],
+    }
+    system = System(
+        config,
+        user_params={
+            "planet.b.mass": {"initval": 2.5},
+            "planet.c.mass": {"initval": 4.0},
+        },
+    )
+    system.prepare()
+    system.build_model()
+
+    host = float(np.atleast_1d(system.star.mass.initval)[0])
+    log_q = np.atleast_1d(system.planet.log_q.initval)
+    mass = np.atleast_1d(system.planet.mass.initval)
+
+    # planet b: the seed arrived as the ratio coordinate it samples, rather
+    # than leaving log_q at its defaults.yaml start.
+    assert log_q[0] == pytest.approx(np.log10(mass[0] / host), rel=1e-9)
+    # -3.0 is log_q's defaults.yaml start, i.e. what a seed that failed to
+    # route would have left behind; 2.5 Mjup around this host is not that.
+    assert log_q[0] != pytest.approx(-3.0, abs=1e-3)
+    assert mass[0] == pytest.approx(
+        system.planet.mass.to_internal(2.5, index=0), rel=1e-9
+    )
+    # planet c samples its mass directly, so the seed is simply used.
+    assert mass[1] == pytest.approx(
+        system.planet.mass.to_internal(4.0, index=1), rel=1e-9
+    )
 
 
 def test_derived_mass_matches_the_relation(lens_system):

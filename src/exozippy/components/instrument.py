@@ -71,6 +71,7 @@ from ..physics_registry import register_physics
 from . import gp as gp_support
 from . import likelihood as robust_support
 from .component import Component
+from .parameterization import pin_unselected
 
 logger = logging.getLogger(__name__)
 
@@ -1315,12 +1316,7 @@ class Instrument(Component):
             on = set(self._gp_elements(kind))
             if not on:
                 continue
-            off = [i for i in range(self.n_elements) if i not in on]
-            entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                entry["overrides"] = {"sigma": pin.tolist()}
+            entry = pin_unselected(self.n_elements, on)
             for param in gp_support.GP_TERM_PARAMS[kind]:
                 manifest[param] = dict(entry)
         return manifest
@@ -1768,12 +1764,7 @@ class Instrument(Component):
             on = set(self._robust_elements(kind))
             if not on:
                 continue
-            off = [i for i in range(self.n_elements) if i not in on]
-            entry = {}
-            if off:
-                pin = np.full(self.n_elements, np.nan)
-                pin[off] = 0.0
-                entry["overrides"] = {"sigma": pin.tolist()}
+            entry = pin_unselected(self.n_elements, on)
             for param in robust_support.LIKELIHOOD_PARAMS[kind]:
                 manifest[param] = dict(entry)
         return manifest

@@ -5,6 +5,7 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.parameterization import mode_manifest
 from exozippy.constants import KEPLER_CONST, MSUN_TO_MEARTH, RSUN_TO_REARTH
 from exozippy.outputs.prose import get_collector, join_names
 from exozippy.outputs.texutils import latex_escape
@@ -16,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 class Planet(Component):
+    # The two mass coordinates, as a parameterization mode table (see
+    # components/parameterization.py).  `linear` samples planet.mass itself over
+    # a range including negatives -- RV and astrometric amplitudes flip phase
+    # through zero, so crossing zero is what avoids the Lucy-Sweeney bias on a
+    # marginal detection -- while `log_q` samples log10(m_p / m_host) and derives
+    # the mass from it.  Planets may differ: log_q is not a parameter of a linear
+    # planet at all, and vice versa.
+    MASS_MODE_TABLE = {
+        "linear": {"mass": None},
+        "log_q": {
+            "mass": {"expr_key": "default", "force_node": True},
+            "log_q": None,
+        },
+    }
+
     def __init__(self, config, config_manager):
         super().__init__(config, config_manager)
         self.label = "Planet Parameters"
@@ -118,21 +134,32 @@ class Planet(Component):
 
         self._resolve_mass_parameterization(system)
 
-        if self.mass_parameterization == "log_q":
-            mass_entry = {"expr_key": "default", "force_node": True}
-        else:
-            mass_entry = None
+        # The mass coordinate, per planet: a `log_q` planet derives its mass
+        # from log10(m_p/m_host) and a `linear` one samples the (signed) mass
+        # itself, and `log_q` is not a parameter of a linear planet at all.  A
+        # system where every planet agrees expands to exactly the manifest this
+        # used to write by hand.
+        mass_entries = mode_manifest(
+            self.mass_parameterizations,
+            self.MASS_MODE_TABLE,
+            n_elements=self.n_elements,
+            where=f"{self.prefix}.mass_parameterization",
+        )
 
+        # Insertion order is load-bearing, so it is preserved exactly: graph.py
+        # registers the build-order nodes in manifest order, and that order is
+        # the order the PyMC nodes -- and so the terms of the summed logp -- get
+        # created in.  `mass` first, `log_q` (when any planet uses it) after
+        # `m_total`, as the hand-written manifest had them.
         self.manifest = {
-            "mass": mass_entry,
+            "mass": mass_entries["mass"],
             "radius": None,
             "density": "default",
             "logg": "default",
             "m_total": "default",
         }
-
-        if self.mass_parameterization == "log_q":
-            self.manifest["log_q"] = None
+        if "log_q" in mass_entries:
+            self.manifest["log_q"] = mass_entries["log_q"]
 
         if has_orbit:
             self.manifest.update(
@@ -265,40 +292,29 @@ class Planet(Component):
                 modes.append("log_q")
                 reasons.append("no signed observable constrains its mass")
 
-        # One mode per component: Parameter.build_pymc derives a whole vector
-        # or none of it (is_derived is set from `expression is not None`), so
-        # a mixed system cannot be built.  Explicit overrides that disagree
-        # are a user error; a mixed *default* silently falls back to linear,
-        # which is the historical behavior.
+        # Per planet, and mixing is fine: roles are per element (see the
+        # manifest vocabulary), so one planet can derive its mass from log_q
+        # while another samples a signed linear mass.  This used to be a hard
+        # error for an explicit disagreement and a silent fall back to
+        # all-linear for an implicit one, because Parameter.build_pymc derived a
+        # whole vector or none of it.
         detail = ", ".join(
             f"'{nm}' -> {m} ({r})"
             for nm, m, r in zip(self.names, modes, reasons)
         )
-        if len(set(modes)) > 1:
-            explicit = any(
-                c.get("mass_parameterization") is not None for c in self.config
-            )
-            if explicit:
-                raise ValueError(
-                    "All planets must share one 'mass_parameterization' "
-                    f"(got {detail}). Mixing linear and log_q planets in one "
-                    "system is not yet supported; set the same value on "
-                    "every planet."
-                )
+        if any(m == "log_q" for m in modes):
             logger.info(
-                f"planets disagree on the mass coordinate ({detail}); "
-                "falling back to 'linear' for all of them, since mixing is "
-                "not yet supported. Set 'mass_parameterization: log_q' on "
-                "every planet to sample the mass ratio instead."
-            )
-            modes = ["linear"] * len(modes)
-        elif modes and modes[0] == "log_q":
-            logger.info(
-                f"sampling log10(m_planet/m_host): {detail} "
-                "(override with 'mass_parameterization: linear')."
+                f"sampling log10(m_planet/m_host) where it applies: {detail} "
+                "(override per planet with 'mass_parameterization: linear')."
             )
 
-        self.mass_parameterization = modes[0] if modes else "linear"
+        self.mass_parameterizations = modes
+        # The whole-component answer, kept for the readers that only need to
+        # know whether ANY planet uses the ratio coordinate; per-planet callers
+        # read `mass_parameterizations`.
+        self.mass_parameterization = (
+            "log_q" if modes and all(m == "log_q" for m in modes) else "linear"
+        )
         self._reconcile_mass_user_params()
 
     def _reconcile_mass_user_params(self):
@@ -317,7 +333,9 @@ class Planet(Component):
         for i in range(self.n_elements):
             mass_key, log_q_key = f"planet.{i}.mass", f"planet.{i}.log_q"
 
-            if self.mass_parameterization == "linear":
+            # Per planet, because the coordinate is: a stale log_q entry is
+            # only stale for the planets that sample a linear mass.
+            if self.mass_parameterizations[i] == "linear":
                 if log_q_key in up:
                     raise ValueError(
                         f"'{log_q_key}' is set but planet '{self.names[i]}' "
@@ -325,7 +343,7 @@ class Planet(Component):
                         "file written by mkparam for a log_q fit is being "
                         "reused after the data topology changed. Remove the "
                         "entry, or set 'mass_parameterization: log_q' on "
-                        "every planet."
+                        "that planet."
                     )
                 continue
 

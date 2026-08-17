@@ -5,6 +5,11 @@ import pymc as pm
 import pytensor.tensor as pt
 
 from exozippy.components.component import Component
+from exozippy.components.parameterization import (
+    merge_overrides,
+    mode_manifest,
+    pin_unselected,
+)
 from exozippy.components.sed.bc_grid import (
     AMBIGUOUS_FILTER_ALIASES,
     _load_alias_table,
@@ -39,6 +44,29 @@ class Band(Component):
     # the same bug class as `IMF: Salpeter` (PR #82), and here it would also
     # silently change the sampled parameter set (q1/q2 instead of u1).
     LD_LAWS = ("quadratic", "linear")
+
+    # What each law's parameters ARE, as a parameterization mode table (see
+    # components/parameterization.py): the quadratic law samples the Kipping
+    # pair and derives (u1, u2) from it; the linear law samples u1 itself and
+    # has no Kipping coordinates and no second coefficient at all.  Bands may
+    # differ -- q1/q2 and u2 are then INACTIVE on the linear bands (not
+    # parameters of theirs: pinned for bookkeeping, no potential, no table row)
+    # and u1 is derived on the quadratic ones and sampled on the linear ones.
+    LD_MODE_TABLE = {
+        "quadratic": {
+            "q1": None,
+            "q2": None,
+            "u1": "default",
+            "u2": "default",
+        },
+        "linear": {"u1": None},
+    }
+
+    # The coordinate each law actually SAMPLES.  Read by the unread-band autopin
+    # (a sigma on a derived element is a silent no-op, so pinning u1 on a
+    # quadratic band would pin nothing) and by anything else that needs to know
+    # which knob a band's limb darkening turns.
+    LD_SAMPLED_PARAMS = {"quadratic": ("q1", "q2"), "linear": ("u1",)}
 
     @property
     def prefix(self):
@@ -76,10 +104,9 @@ class Band(Component):
                 "doc": (
                     "Limb-darkening law. Default 'quadratic' (Kipping "
                     "q1/q2, deriving u1/u2); 'linear' samples u1 directly. "
-                    "Every band must declare the same law -- the "
-                    "limb-darkening manifest is shared by the whole band "
-                    "vector. An unrecognized value, or a mix of laws, "
-                    "raises."
+                    "Bands may declare different laws: a linear band has no "
+                    "Kipping coordinates and no u2 (its second coefficient "
+                    "is exactly 0). An unrecognized value raises."
                 ),
             },
             {
@@ -187,23 +214,21 @@ class Band(Component):
                 )
 
     def _parse_ld_laws(self):
-        """Per-band ``ld_law:``, validated, and required to be uniform.
+        """Per-band ``ld_law:``, validated.  Bands may differ.
 
-        Two things are deliberately hard errors here rather than defaults:
+        An unrecognized law is a hard error rather than a default:
+        ``ld_law: quadratik`` used to satisfy ``law != "linear"`` and be
+        modelled as quadratic -- a typo silently selecting a different sampled
+        parameter set.
 
-        * **An unrecognized law.** ``ld_law: quadratik`` used to satisfy
-          ``law != "linear"`` and be modelled as quadratic -- a typo silently
-          selecting a different sampled parameter set.
-        * **A mix of laws across bands.** The manifest is per *parameter*, not
-          per element: ``Parameter.build_pymc`` derives ``is_derived`` from
-          ``expression is not None`` for the whole vector, so one Band cannot
-          hold a derived ``u1`` (Kipping, quadratic) for some elements and a
-          sampled ``u1`` for others. The old ``any(law != "linear")`` picked
-          the quadratic manifest for everyone, which handed every band a free
-          ``u2`` -- silently modelling a user's declared-linear band as
-          quadratic. Per-element derivation would need the manifest ``mask``
-          field (declared in ``Parameter``, not yet consumed); until that
-          exists, raising is the only non-silent option.
+        A MIX of laws across bands used to be an error too, because
+        ``Parameter.build_pymc`` derived ``is_derived`` for a whole vector, so
+        one Band could not hold a Kipping-derived ``u1`` for some elements and a
+        sampled ``u1`` for others; the workaround was quadratic everywhere with
+        the linear bands' ``q2`` pinned at 0.5 (``u2 = sqrt(q1)(1 - 2 q2) = 0``),
+        at the cost of a prior uniform in ``q1`` rather than in ``u1``.  Roles
+        are per element now (see the manifest vocabulary), so ``register_
+        parameters`` expresses the mix directly and this only validates.
         """
         laws = []
         for i, c in enumerate(self.config):
@@ -217,23 +242,6 @@ class Band(Component):
                     f"sample u1 directly)."
                 )
             laws.append(norm)
-
-        if len(set(laws)) > 1:
-            detail = ", ".join(
-                f"{name}: {law}" for name, law in zip(self.names, laws)
-            )
-            raise ValueError(
-                f"[{self.prefix}] all bands must use the same ld_law; got "
-                f"{detail}. A mixed-law system is not supported: the "
-                f"limb-darkening manifest is shared by every band element, so "
-                f"one law has to be chosen for the whole vector, and the "
-                f"quadratic choice would give the 'linear' bands a free u2 "
-                f"(silently modelling them as quadratic). Use one law "
-                f"everywhere -- 'quadratic' with the linear bands' q2 pinned "
-                f"at 0.5 in the params file reproduces a linear law exactly "
-                f"(u2 = sqrt(q1)*(1 - 2*q2) = 0), at the cost of a prior "
-                f"uniform in q1 rather than in u1."
-            )
         return laws
 
     def build_maps(self):
@@ -301,7 +309,7 @@ class Band(Component):
 
         return consumers
 
-    def _pin_unread_limb_darkening(self, system, ld_params, consumers=None):
+    def _pin_unread_limb_darkening(self, system, consumers=None):
         """Pin the LD parameters of the bands nothing in the topology reads.
 
         Only reached when SOME band is consumed: with no consumer at all
@@ -310,6 +318,13 @@ class Band(Component):
         no table rows.  This pin covers the mixed case -- the manifest is
         per parameter, so one consumed band forces the whole vector to
         exist, and the unread elements are fixed here.
+
+        Which coordinate gets pinned is PER BAND, because which coordinate a
+        band samples is: a quadratic band samples the Kipping pair (its u1/u2
+        are derived from it, and a sigma on a derived element is a silent
+        no-op), while a linear band samples u1 itself.  A single pin list would
+        therefore either miss a linear band's only free parameter or write a
+        no-op onto a quadratic band's derived one.
 
         The pin goes through the manifest "overrides" channel, which layers
         UNDER the params file (`sigma` takes apply_value's last-writer-wins
@@ -323,25 +338,39 @@ class Band(Component):
         if not unread:
             return
 
-        pin = np.full(self.n_elements, np.nan)
-        pin[unread] = 0.0
-        for param_name in ld_params:
-            entry = self.manifest.get(param_name)
-            entry = dict(entry) if isinstance(entry, dict) else {}
-            overrides = dict(entry.get("overrides", {}))
-            overrides["sigma"] = pin.tolist()
-            entry["overrides"] = overrides
-            self.manifest[param_name] = entry
+        # Per parameter, the elements that BOTH sample it and are unread; the
+        # same opt-in pin the BEER terms and Instrument's GP/robust
+        # registrations use (components/parameterization.py), merged into
+        # whatever options the entry already carries.
+        for param_name in ("q1", "q2", "u1", "u2"):
+            if param_name not in self.manifest:
+                continue
+            samplers = [
+                i
+                for i in range(self.n_elements)
+                if param_name in self.LD_SAMPLED_PARAMS[self.ld_laws[i]]
+            ]
+            keep = [i for i in samplers if i in consumers]
+            if len(keep) == len(samplers):
+                continue  # every band that samples this one is read
+            pin = pin_unselected(self.n_elements, keep)
+            # merge_overrides reads the entry through the manifest interpreter,
+            # so adding an option cannot drop a bare-string expr_key and turn a
+            # derived parameter into a sampled one (review 4.5.3).
+            self.manifest[param_name] = merge_overrides(
+                self.manifest.get(param_name), pin.get("overrides", {})
+            )
 
-        joined = "/".join(ld_params)
         for i in unread:
+            joined = "/".join(self.LD_SAMPLED_PARAMS[self.ld_laws[i]])
+            first = self.LD_SAMPLED_PARAMS[self.ld_laws[i]][0]
             logger.info(
                 f"[{self.prefix}] pinning {self.prefix}.{self.names[i]}."
                 f"{joined} (sigma=0): nothing in this topology reads this "
                 f"band's limb darkening. Only a transit, a finite-source "
                 f"microlensing light curve, or an rvinstrument 'rm:' block "
                 f"does; astrometry's 'band:' uses the filter identity only. "
-                f"Give {self.prefix}.{self.names[i]}.{ld_params[0]} an entry "
+                f"Give {self.prefix}.{self.names[i]}.{first} an entry "
                 f"in the params file to sample it anyway."
             )
 
@@ -358,27 +387,24 @@ class Band(Component):
         # _pin_unread_limb_darkening.
         consumers = self._ld_consumer_indices(system)
         if consumers:
-            # Uniform by construction (_parse_ld_laws raises on a mix), so
-            # the first element's law is the system's law.
-            if self.ld_laws and self.ld_laws[0] == "linear":
-                self.manifest["u1"] = None
-                ld_params = ["u1"]
-            else:
-                self.manifest.update(
-                    {
-                        "q1": None,
-                        "q2": None,
-                        "u1": "default",
-                        "u2": "default",
-                    }
+            # Per band: a quadratic band samples the Kipping pair and derives
+            # (u1, u2) from it; a linear band samples u1 directly and has no
+            # Kipping coordinates and no u2 at all.  mode_manifest turns the
+            # per-band laws into the masks that says so -- and for a system
+            # that made ONE choice it returns exactly the manifest this code
+            # used to write by hand, so those systems build an identical graph.
+            self.manifest.update(
+                mode_manifest(
+                    self.ld_laws,
+                    self.LD_MODE_TABLE,
+                    n_elements=self.n_elements,
+                    # A linear law's second coefficient is exactly zero, not
+                    # "whatever the quadratic default was".
+                    options={"u2": {"inactive_value": 0.0}},
+                    where=f"{self.prefix}.ld_law",
                 )
-                # Pin the SAMPLED coordinates; u1/u2 are Kipping-derived
-                # from them and a sigma on a derived parameter is a silent
-                # no-op.
-                ld_params = ["q1", "q2"]
-            self._pin_unread_limb_darkening(
-                system, ld_params, consumers=consumers
             )
+            self._pin_unread_limb_darkening(system, consumers=consumers)
         else:
             logger.info(
                 f"[{self.prefix}] no limb-darkening parameters: nothing in "
@@ -402,22 +428,16 @@ class Band(Component):
             ("ellipsoidal", self.fitellip),
         ):
             if any(flags):
-                self.manifest[name] = self._pinned_manifest_entry(flags)
-
-    def _pinned_manifest_entry(self, opt_in_flags):
-        """A manifest entry that's free where opt_in_flags is True, and
-        pinned to sigma=0 (fixed at its default initval, 0) elsewhere.
-        Shared by thermal/reflect/ellipsoidal's identical opt-in gating
-        (only reached when some flag is True -- an all-False parameter is
-        omitted from the manifest entirely).
-        """
-        off = [i for i in range(self.n_elements) if not opt_in_flags[i]]
-        entry = {}
-        if off:
-            pin = np.full(self.n_elements, np.nan)
-            pin[off] = 0.0
-            entry["overrides"] = {"sigma": pin.tolist()}
-        return entry
+                # pin_unselected is the ONE opt-in pin (see
+                # components/parameterization.py); Instrument's GP and robust
+                # registrations are the other two callers, and this was the
+                # third line-for-line copy of it.  Routing through it also
+                # retires the hand-written manifest read this used to do as a
+                # WRITER (review 4.5.3): only reached when some band opts in,
+                # so the entry it replaces is always a plain options dict.
+                self.manifest[name] = pin_unselected(
+                    self.n_elements, [i for i, on in enumerate(flags) if on]
+                )
 
     def _may_be_nonzero(self, name):
         """True unless every element of parameter ``name`` is pinned

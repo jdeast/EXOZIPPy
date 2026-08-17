@@ -542,21 +542,41 @@ class Star(Component):
 
         # An evolutionary model indexes a track by (initial metallicity, EEP)
         # and reads off the present-day age; all three are declared here, per
-        # star, masked to the stars that opted into a model.  No
-        # `evolutionarymodel` component ships yet, so today the branch never
-        # fires and neither `initfeh` nor `eep` is ever materialized -- but
-        # every piece the component needs from the star side (the two
-        # defaults.yaml entries, the per-star mist:/parsec: switches, this
-        # branch) is in place, so landing one requires no edit here.
+        # star, masked to the stars that opted into a model.  The mask is a
+        # real per-element role now (a star with no track has no EEP: it is
+        # held at a bookkeeping value, sampled by nothing, and reported
+        # nowhere), so every piece the component needs from the star side is in
+        # place and landing one requires no edit here.
+        #
+        # The branch is driven by the CONFIG KEY, so it also fires for a
+        # premature `evolutionarymodel:` block that no component backs -- which
+        # is why the claim this comment used to make ("today the branch never
+        # fires") was false (review 3.8.2).  With no component to read them the
+        # track coordinates of an opted-in star are sampled with nothing
+        # constraining them, so say so rather than leaving it to be noticed in
+        # a posterior.
         if in_system("evolutionarymodel"):
             mask = [m or p for m, p in zip(self.mist, self.parsec)]
-            self.manifest.update(
-                {
-                    "age": {"mask": mask},
-                    "initfeh": {"mask": mask},
-                    "eep": {"mask": mask},
-                }
-            )
+            if any(mask):
+                self.manifest.update(
+                    {
+                        "age": {"mask": mask},
+                        "initfeh": {"mask": mask},
+                        "eep": {"mask": mask},
+                    }
+                )
+                if not hasattr(system, "evolutionarymodel"):
+                    opted = [nm for nm, on in zip(self.names, mask) if on]
+                    logger.warning(
+                        f"[{self.prefix}] the config names an "
+                        f"'evolutionarymodel' block but no such component is "
+                        f"registered, so the track coordinates of "
+                        f"{', '.join(opted)} (initfeh, eep) and the age they "
+                        f"index are sampled with NOTHING reading them -- "
+                        f"likelihood-free dimensions that only widen the "
+                        f"posterior. Remove the block, or set 'mist: False' on "
+                        f"those stars, until the component exists."
+                    )
 
         # The Mann relations key on absolute Ks, so they need the distance
         # modulus. The apparent/absolute Ks themselves live on the mann

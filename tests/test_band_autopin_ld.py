@@ -296,6 +296,82 @@ def test_transit_band_ld_stays_free_and_an_unused_band_is_pinned(
         assert sigma[1] == 0.0
 
 
+def test_two_transits_may_use_different_limb_darkening_laws(
+    tmp_path_factory,
+):
+    """
+    Given two transits in two bands, one declaring the quadratic law and the
+      other the linear one,
+    When the model is built,
+    Then the quadratic band samples the Kipping pair while the linear band
+      samples u1 itself, u1 is derived on the quadratic band only, u2 is
+      exactly 0 on the linear band, and the start's logp and gradient are
+      finite.
+
+    This configuration used to RAISE ("all bands must use the same ld_law"),
+    because Parameter.build_pymc derived a whole vector or none of it; the
+    documented workaround was quadratic everywhere with the linear band's q2
+    pinned at 0.5, which reproduces u2 = 0 but samples uniformly in q1 rather
+    than in u1.  The per-element roles express it directly.
+    """
+    d = tmp_path_factory.mktemp("band_mixed_laws")
+    lc0 = _write_transit_lc(d / "lc0.dat")
+    lc1 = _write_transit_lc(d / "lc1.dat")
+    config = {
+        "star": [{"name": "A", "mist": False}],
+        "planet": [{"name": "b"}],
+        "orbit": [{"name": "b"}],
+        "band": [
+            {"name": "TESS", "filter": "TESS", "ld_law": "quadratic"},
+            {"name": "V", "filter": "V", "ld_law": "linear"},
+        ],
+        "transit": [
+            {"name": "inst0", "file": lc0, "band": "TESS"},
+            {"name": "inst1", "file": lc1, "band": "V"},
+        ],
+    }
+    system, model = _build(config, _transit_params())
+
+    # Both coordinate sets are sampled, each on its own band.
+    assert _band_rv_names(model) == [
+        "band.q1_raw",
+        "band.q2_raw",
+        "band.u1_raw",
+    ]
+    assert system.band.q1.is_sampled.tolist() == [True, False]
+    assert system.band.u1.is_sampled.tolist() == [False, True]
+    assert system.band.u1.is_derived.tolist() == [True, False]
+    # The Kipping coordinates and u2 are not parameters of the linear band.
+    assert system.band.q1.is_active.tolist() == [True, False]
+    assert system.band.u2.is_active.tolist() == [True, False]
+
+    with model:
+        point = model.initial_point()
+        u2 = model.compile_fn(
+            model.replace_rvs_by_values([system.band.u2.value]),
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )(point)[0]
+        logp = model.compile_logp()(point)
+        dlogp = model.compile_dlogp()(point)
+
+    assert float(np.atleast_1d(u2)[1]) == 0.0
+    assert np.isfinite(logp)
+    assert np.all(np.isfinite(dlogp))
+
+    # The roles reach a trace, so mkparam -- which has no System -- writes a
+    # start value for the LINEAR band's u1 and none for the quadratic band's
+    # (whose value is an expression).  Checked here rather than in a test of
+    # its own because the model this needs is already built.
+    from exozippy.trace_meta import element_roles
+
+    roles = element_roles(system)
+    assert roles["band.u1"]["sampled"] == [False, True]
+    assert roles["band.u1"]["derived"] == [True, False]
+    assert roles["band.u2"]["active"] == [True, False]
+
+
 # --------------------------------------------------------------------------
 # 6. The predicate itself, on stub topologies: the cases a full System build
 #    would be far too expensive to cover (RM, astrometry).

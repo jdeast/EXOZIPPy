@@ -5,7 +5,7 @@ import pytensor.tensor as pt
 
 from ..manifest import interpret_manifest_entry
 from ..physics_registry import PHYSICS_REGISTRY
-from .parameter import Parameter
+from .parameter import ElementExpression, Parameter
 
 
 class Component(ABC):
@@ -39,6 +39,17 @@ class Component(ABC):
     # component-agnostic by design, and a future component with degenerate
     # solutions must be able to opt in without anyone editing the sampler.
     expects_suppressed_modes = False
+
+    # Which of this component's injected context deps (see `context_dep_names`)
+    # carry ONE ENTRY PER ELEMENT of the parameter they feed.  Only consulted
+    # when an expression supplies a subset of a vector's elements and its deps
+    # must therefore be sliced (see `_element_expression`): a context node is an
+    # arbitrary tensor the component built, so nothing outside the component can
+    # prove its alignment, and guessing wrong pairs the wrong instances
+    # silently.  Declaring one here is a promise, so declare only what is true:
+    # `orbit`'s per-orbit group masses are aligned; a per-observation vector is
+    # not.
+    aligned_context_deps = frozenset()
 
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
@@ -218,91 +229,53 @@ class Component(ABC):
         )
 
         expressions_dict = cfg.pop("expressions", {})
-        expr_cfg = entry.expression_config(
-            expressions_dict, where=f"{self.prefix}.{param_name}"
+        where = f"{self.prefix}.{param_name}"
+        n_elements = int(np.prod(shape)) if shape else 1
+        selections = entry.expression_configs(
+            expressions_dict, n_elements=n_elements, where=where
         )
         expression = None
+        element_expressions = None
 
         # --- AGNOSTIC CONDITIONAL WIRE-UP ---
-        # Only parse dependencies if an expression block actively exists for this parameter role
-        if expr_cfg is not None:
-            func_name = expr_cfg.get("func_name")
-
-            if func_name not in PHYSICS_REGISTRY:
-                raise NotImplementedError(
-                    f"[{self.prefix}.{param_name}] Function '{func_name}' not in PHYSICS_REGISTRY."
-                )
-
-            func = PHYSICS_REGISTRY[func_name]
+        # Only parse dependencies if an expression block actively exists for
+        # this parameter role.  One selection covering every element is the
+        # historical whole-vector case and keeps its own path; several
+        # selections (or one covering a subset) mean the instances chose
+        # different parameterizations, and each gets its own closure.
+        if selections:
             options.pop("deps", None)
-            dep_names = entry.dep_names(expr_cfg)
-            dep_nodes = []
-
-            for d in dep_names:
-                if d in context_nodes:
-                    dep_nodes.append(context_nodes[d])
-                elif "." in d:
-                    # Parse universal cross-component strings: "star.density[star_map]"
-                    custom_slice = None
-                    if "[" in d and d.endswith("]"):
-                        path_part, slice_part = d.split("[", 1)
-                        custom_slice = slice_part.rstrip("]")
-                        d_lookup = path_part
-                    else:
-                        d_lookup = d
-
-                    ext_comp_name, ext_param_name = d_lookup.split(".", 1)
-                    ext_comp = getattr(system, ext_comp_name, None)
-                    if not ext_comp:
-                        raise ValueError(
-                            f"[{self.prefix}.{param_name}] Component '{ext_comp_name}' is not active."
-                        )
-
-                    # Ensure the dependency node is built lazily on demand
-                    if not hasattr(ext_comp, ext_param_name):
-                        ext_comp.add_parameter(
-                            model, ext_param_name, system, context_nodes
-                        )
-
-                    ext_param = getattr(ext_comp, ext_param_name)
-
-                    # Dynamically slice via requested map name or component fallback name
-                    map_attr = (
-                        f"{custom_slice}_tensor"
-                        if custom_slice
-                        else f"{ext_comp_name}_map_tensor"
+            uniform = (
+                len(selections) == 1
+                and selections[0].mask is None
+                and not selections[0].output_only
+            )
+            built = []
+            for sel in selections:
+                if sel.output_only:
+                    raise NotImplementedError(
+                        f"[{where}] REPORTED elements (a manifest "
+                        f"'output_expr_key') are declared but not built yet. "
+                        f"They are derived from quantities that are themselves "
+                        f"derived from them on OTHER elements, so the "
+                        f"per-parameter build order graph.py sorts has a cycle "
+                        f"even though the value graph does not; building them "
+                        f"needs the deferred pass (build the sampled/consumed "
+                        f"half at this parameter's topological position, patch "
+                        f"the reported elements once every parameter exists, "
+                        f"and only then create the Deterministic). That lands "
+                        f"with its first consumer, the V_c/V_e "
+                        f"parameterization."
                     )
-                    if hasattr(self, map_attr):
-                        map_tensor = getattr(self, map_attr)
-                        dep_nodes.append(ext_param.value[map_tensor])
-                    elif custom_slice:
-                        # A dep that NAMES its map ("star.mass[lens_map]")
-                        # asked for specific elements.  Falling back to the
-                        # unsliced vector does not mean "no slice" -- where
-                        # the lengths happen to match it broadcasts silently
-                        # and pairs the wrong bodies (a different star's mass
-                        # into a lens's theta_E).  The unnamed
-                        # "{comp}_map_tensor" convenience path keeps its
-                        # fallback.
-                        raise AttributeError(
-                            f"[{self.prefix}.{param_name}] dependency '{d}' "
-                            f"names the index map '{custom_slice}', but "
-                            f"{self.prefix} has no '{map_attr}'.  Build it in "
-                            f"build_maps() (build_tensor_maps converts "
-                            f"'{custom_slice}' automatically) or drop the "
-                            f"[...] from the dep."
-                        )
-                    else:
-                        dep_nodes.append(ext_param.value)
-                else:
-                    # Local tracking recursive lookup
-                    if not hasattr(self, d) or not isinstance(
-                        getattr(self, d), Parameter
-                    ):
-                        self.add_parameter(model, d, system, context_nodes)
-                    dep_nodes.append(getattr(self, d).value)
-
-            expression = lambda: func(*dep_nodes)
+                built.append(
+                    self._element_expression(
+                        model, system, context_nodes, entry, sel, where
+                    )
+                )
+            if uniform:
+                expression = built[0].expr
+            else:
+                element_expressions = built
 
         # 2b. Wire up user-defined parameter links (initval/mu/lower/upper
         # expressions from the params file referencing other parameters).
@@ -316,6 +289,7 @@ class Component(ABC):
             label=f"{self.prefix}.{param_name}",
             names=names,
             expression=expression,
+            element_expressions=element_expressions,
             element_links=element_links,
             user_params=self.config_manager.user_params,
             source_file=getattr(self.config_manager, "param_file", None),
@@ -330,6 +304,185 @@ class Component(ABC):
 
         setattr(self, param_name, param_obj)
         return param_obj.build_pymc()
+
+    def _element_expression(
+        self, model, system, context_nodes, entry, sel, where
+    ):
+        """Wire ONE ``expressions:`` block into an :class:`ElementExpression`.
+
+        The whole-vector case (``sel.mask is None``, or a mask covering every
+        element) builds exactly the closure this method's predecessor built:
+        ``lambda: func(*dep_nodes)`` over the full dependency vectors.
+
+        A mask covering a SUBSET slices the dependencies down to those elements
+        first, so the instances that did not choose this parameterization never
+        enter the expression at all.  That is not an optimization: their values
+        are bookkeeping pins that the other parameterization's physics makes no
+        promise about, and an expression evaluated there can legitimately be
+        NaN (sqrt of a negative eccentricity).  Keeping them out is the only way
+        the mixed vector's gradient is guaranteed clean, since a NaN sitting in
+        a discarded slot still reaches the input's gradient as 0*NaN.
+
+        Slicing is only safe where the dependency is element-ALIGNED, so an
+        unproven alignment raises rather than guessing -- see
+        ``_resolve_dep_node``.  Whether the sliced expression really equals the
+        full one on those elements (i.e. whether the physics is elementwise at
+        all) is verified numerically at the start point, once the model exists:
+        ``System.verify_element_slices``.
+        """
+        func_name = sel.config.get("func_name")
+        if func_name not in PHYSICS_REGISTRY:
+            raise NotImplementedError(
+                f"[{where}] Function '{func_name}' not in PHYSICS_REGISTRY."
+            )
+        func = PHYSICS_REGISTRY[func_name]
+
+        n_elements = np.size(sel.mask) if sel.mask is not None else None
+        deps = [
+            self._resolve_dep_node(
+                model, system, context_nodes, d, where, n_elements
+            )
+            for d in entry.dep_names(sel.config)
+        ]
+        nodes = [node for _d, node, _aligned in deps]
+
+        def full_expr(nodes=nodes):
+            return func(*nodes)
+
+        if sel.mask is None or bool(np.all(sel.mask)):
+            return ElementExpression(
+                mask=True if sel.mask is None else sel.mask,
+                expr=full_expr,
+                output_only=sel.output_only,
+            )
+
+        idx = np.nonzero(sel.mask)[0]
+        sliced = []
+        for d, node, aligned in deps:
+            if getattr(node, "ndim", 0) == 0:
+                sliced.append(node)  # a scalar applies to every element
+                continue
+            if not aligned:
+                raise ValueError(
+                    f"[{where}] the expression '{func_name}' supplies only "
+                    f"element(s) {idx.tolist()} of this parameter, so its "
+                    f"dependencies are sliced to those elements -- but "
+                    f"dependency '{d}' cannot be PROVEN to be element-aligned, "
+                    f"and slicing a vector that is indexed by something else "
+                    f"pairs the wrong instances silently (a different star's "
+                    f"mass into this orbit's Kepler relation). Fix: give the "
+                    f"dep an explicit index map ('{d}[<map_name>]', built in "
+                    f"build_maps with one entry per element of this "
+                    f"parameter), or -- for a dep injected as a context node "
+                    f"-- name it in the component's 'aligned_context_deps' to "
+                    f"declare that it already has one entry per element."
+                )
+            sliced.append(node[pt.as_tensor_variable(idx.astype("int32"))])
+
+        def sliced_expr(sliced=sliced):
+            return func(*sliced)
+
+        register = getattr(system, "register_element_slice_check", None)
+        if callable(register):
+            register(where, func_name, idx, sliced_expr, full_expr)
+        return ElementExpression(
+            mask=sel.mask,
+            expr=sliced_expr,
+            output_only=sel.output_only,
+            sliced=True,
+        )
+
+    def _resolve_dep_node(
+        self, model, system, context_nodes, d, where, n_elements=None
+    ):
+        """``(dep name, node, is_element_aligned)`` for one dependency string.
+
+        The dependency vocabulary is unchanged: a context node injected by the
+        component, a cross-component path with an optional index map
+        (``star.mass[lens_map]``), or a bare local parameter name.
+
+        ``is_element_aligned`` answers "does entry i of this node belong to
+        element i of the parameter being built?" and is only ever True when the
+        answer can be PROVEN from how the dep resolved -- a local parameter of
+        the same length, a map with one entry per element, or a context node the
+        component declared aligned.  It is False for a bare cross-component
+        vector, whose entries are indexed by the OTHER component's elements and
+        line up only by coincidence.  Only the per-element slicing path consults
+        it; the whole-vector path never slices and so never cares.
+        """
+        if d in context_nodes:
+            return (
+                d,
+                context_nodes[d],
+                d in getattr(self, "aligned_context_deps", frozenset()),
+            )
+
+        if "." not in d:
+            # Local tracking recursive lookup
+            if not hasattr(self, d) or not isinstance(
+                getattr(self, d), Parameter
+            ):
+                self.add_parameter(model, d, system, context_nodes)
+            local = getattr(self, d)
+            aligned = n_elements is not None and local._n_elements() == int(
+                n_elements
+            )
+            return d, local.value, aligned
+
+        # Parse universal cross-component strings: "star.density[star_map]"
+        custom_slice = None
+        if "[" in d and d.endswith("]"):
+            path_part, slice_part = d.split("[", 1)
+            custom_slice = slice_part.rstrip("]")
+            d_lookup = path_part
+        else:
+            d_lookup = d
+
+        ext_comp_name, ext_param_name = d_lookup.split(".", 1)
+        ext_comp = getattr(system, ext_comp_name, None)
+        if not ext_comp:
+            raise ValueError(
+                f"[{where}] Component '{ext_comp_name}' is not active."
+            )
+
+        # Ensure the dependency node is built lazily on demand
+        if not hasattr(ext_comp, ext_param_name):
+            ext_comp.add_parameter(
+                model, ext_param_name, system, context_nodes
+            )
+
+        ext_param = getattr(ext_comp, ext_param_name)
+
+        # Dynamically slice via requested map name or component fallback name
+        map_name = custom_slice or f"{ext_comp_name}_map"
+        map_attr = f"{map_name}_tensor"
+        if hasattr(self, map_attr):
+            map_tensor = getattr(self, map_attr)
+            raw_map = getattr(self, map_name, None)
+            aligned = (
+                n_elements is not None
+                and raw_map is not None
+                and np.size(raw_map) == int(n_elements)
+            )
+            return d, ext_param.value[map_tensor], aligned
+        if custom_slice:
+            # A dep that NAMES its map ("star.mass[lens_map]")
+            # asked for specific elements.  Falling back to the
+            # unsliced vector does not mean "no slice" -- where
+            # the lengths happen to match it broadcasts silently
+            # and pairs the wrong bodies (a different star's mass
+            # into a lens's theta_E).  The unnamed
+            # "{comp}_map_tensor" convenience path keeps its
+            # fallback.
+            raise AttributeError(
+                f"[{where}] dependency '{d}' "
+                f"names the index map '{custom_slice}', but "
+                f"{self.prefix} has no '{map_attr}'.  Build it in "
+                f"build_maps() (build_tensor_maps converts "
+                f"'{custom_slice}' automatically) or drop the "
+                f"[...] from the dep."
+            )
+        return d, ext_param.value, False
 
     def _wire_user_links(self, model, param_name, system, cfg, expression):
         """
