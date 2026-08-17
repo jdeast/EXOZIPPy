@@ -5,6 +5,7 @@ import pytest
 
 from conftest import _DummyConfigManager
 from exozippy.components.band.band import Band
+from exozippy.manifest import interpret_manifest_entry
 
 
 def _make_band(config):
@@ -152,17 +153,21 @@ def test_known_ld_law_is_accepted_and_normalized(law):
     assert band.ld_laws == [law.strip().lower()]
 
 
-def test_mixed_ld_laws_raise_instead_of_promoting_linear_bands():
+def test_mixed_ld_laws_are_expressed_per_band():
     """
-    Given two bands declaring different limb-darkening laws,
-    When load_data is called,
-    Then it raises, naming each band and its law.
+    Given two bands declaring DIFFERENT limb-darkening laws,
+    When load_data and register_parameters run,
+    Then each band gets the law it declared: the linear band samples u1 while
+      the quadratic band derives it, and the Kipping pair and u2 exist only on
+      the quadratic band.
 
-    Pre-fix this configuration was accepted and `any(law != "linear")` chose
-    the quadratic manifest for the whole vector, so the band the user declared
-    linear silently got a free u2 and was modelled as quadratic (review
-    2.4.4). Per-element derivation is not expressible in the manifest, so the
-    honest behavior is a hard error.
+    History, in two steps.  Originally `any(law != "linear")` chose the
+    quadratic manifest for the whole vector, so a band the user declared linear
+    silently got a free u2 and was modelled as quadratic (review 2.4.4).  That
+    was replaced by a hard error, because `Parameter.build_pymc` derived a whole
+    vector or none of it and there was no honest third option.  Roles are per
+    element now, so the configuration is simply expressed -- and the error, and
+    its quadratic-everywhere-with-q2-pinned-at-0.5 workaround, are gone.
     """
     band = _make_band(
         [
@@ -170,13 +175,18 @@ def test_mixed_ld_laws_raise_instead_of_promoting_linear_bands():
             {"name": "Sloani", "ld_law": "quadratic"},
         ]
     )
-    with pytest.raises(ValueError) as excinfo:
-        band.load_data(system=None)
-    msg = str(excinfo.value)
-    assert "ld_law" in msg
-    assert "V" in msg and "Sloani" in msg, (
-        f"error does not name the conflicting bands: {msg}"
+    band.load_data(system=None)
+    band.register_parameters(system=_ConsumingSystem(band))
+
+    entry = interpret_manifest_entry(band.manifest["u1"])
+    sels = entry.expression_configs(
+        {"default": {"func_name": "calc_u1"}}, n_elements=2, where="band.u1"
     )
+    assert [s.mask.tolist() for s in sels] == [[False, True]]
+    for name in ("q1", "q2", "u2"):
+        assert interpret_manifest_entry(band.manifest[name]).activity_mask(
+            2
+        ).tolist() == [False, True]
 
 
 def test_uniform_ld_law_across_several_bands_is_allowed():
