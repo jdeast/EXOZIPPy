@@ -372,7 +372,15 @@ class System(Component):
         # a point maps the VALUE variables; without this substitution the
         # compiled function asks for an unnamed RV input the point cannot fill.
         outputs = model.replace_rvs_by_values(outputs)
-        fn = model.compile_fn(outputs, point_fn=True, on_unused_input="ignore")
+        # inputs=model.value_vars, not the default (whatever the outputs need):
+        # a point carries EVERY value variable, and a function compiled for a
+        # subset rejects the rest ("Too many parameter passed").
+        fn = model.compile_fn(
+            outputs,
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )
         values = fn(self.get_raw_start(model))
         for k, chk in enumerate(checks):
             a = np.atleast_1d(np.asarray(values[2 * k], dtype=float))

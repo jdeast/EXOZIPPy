@@ -1183,6 +1183,10 @@ class Parameter:
             return [], out[0][1]
         return out, None
 
+    # (verify_element_slices lives on System; see it for why both graphs are
+    # kept.  Nothing about the patching below depends on that check passing --
+    # it is a claim about the physics, not about the assembly.)
+
     def _patch_elements(self, phys_val, mask, expr, sliced):
         """Overwrite ``mask``'s elements of ``phys_val`` with ``expr``'s value.
 
