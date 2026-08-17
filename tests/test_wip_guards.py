@@ -38,8 +38,15 @@ def test_orbit_fitvcve_raises_and_names_the_missing_physics():
     Given an orbit block asking for the V_c/V_e parameterization,
     When the Orbit component is constructed,
     Then it raises NotImplementedError naming the key, the two undefined
-      physics functions the from_vcve expressions call, and the manifest
-      `mask` field that is the real blocker.
+      physics functions the from_vcve expressions call, and what is left of the
+      blocker.
+
+    The message used to name the unconsumed manifest `mask` field as the real
+    blocker, ahead of the missing physics.  That half is done -- roles are per
+    element, so a per-orbit switch is expressible -- so the message must no
+    longer claim it, and must instead point at the two things that remain: the
+    physics, and the deferred build pass a role-3 (REPORTED) reverse flip needs
+    so flipping the switch does not drop a user's prior on secosw/sesinw.
     """
     # Arrange
     blocks = [{"name": "b", "fitvcve": True}]
@@ -54,7 +61,8 @@ def test_orbit_fitvcve_raises_and_names_the_missing_physics():
     assert "orbit.b" in msg
     assert "calc_ecc_from_vcve" in msg
     assert "calc_omega_from_vcve" in msg
-    assert "mask" in msg
+    assert "output_expr_key" in msg
+    assert "roles are per element" in msg
 
 
 def test_orbit_fitvcve_still_raises_if_set_after_construction():

@@ -90,18 +90,22 @@ class Orbit(Component):
     def _reject_wip_parameterizations(self):
         """Raise on `fitvcve: true` and on user params naming a WIP parameter.
 
-        Both halves of the V_c/V_e branch are unbuilt.  The runtime half is
-        `orbit/defaults.yaml`'s `from_vcve` expressions, which name
-        `calc_ecc_from_vcve` / `calc_omega_from_vcve`: no definition exists
-        anywhere, so `PHYSICS_REGISTRY` has no entry and the lookup in
-        `Component.add_parameter` would fail.  The structural half is the
-        manifest `mask` field -- `fitvcve` is per orbit, but
-        `Parameter.build_pymc` derives `is_derived` for a WHOLE vector, so
-        one orbit cannot sample `vcve` while another samples
-        `secosw`/`sesinw`; `mask` is declared for exactly that and is not
-        consumed yet.  That, not the missing physics, is the real blocker
-        (the same one that keeps `ld_law` and `mass_parameterization`
-        one-mode-per-component).
+        The V_c/V_e branch has no physics: `orbit/defaults.yaml`'s `from_vcve`
+        expressions name `calc_ecc_from_vcve` / `calc_omega_from_vcve`, for
+        which no definition exists anywhere, so `PHYSICS_REGISTRY` has no entry
+        and the lookup in `Component.add_parameter` would fail.
+
+        The STRUCTURAL half of the blocker this guard used to name is gone.
+        Roles are per element now, so `fitvcve` being per orbit is expressible:
+        the `mask` entries below are consumed, and one orbit sampling `vcve`
+        while another samples `secosw`/`sesinw` is an ordinary mode table (see
+        `components/parameterization.py`, and `Band.LD_MODE_TABLE` for the same
+        shape in use).  Two pieces of work remain, and they belong to the
+        feature rather than to the primitive: the physics above, and the
+        deferred build pass a role-3 `output_expr_key` needs so a vcve orbit
+        can still REPORT sqrt(e)cos(omega) -- without it a user's prior on that
+        pair would be dropped when they flip the switch, which is the opposite
+        of the point.  Until both land, the guard is the feature.
 
         `cosi`'s `from_b` expression and the orbit-level `b` entry are the
         same kind of stub: `calc_cosi_from_b` does not exist, and `b`'s deps
@@ -130,14 +134,17 @@ class Orbit(Component):
                 f"ecc and omega from a sampled 'vcve' through the "
                 f"'from_vcve' expressions in orbit/defaults.yaml, whose "
                 f"physics functions are undefined: {missing}.  Nothing "
-                f"registers them, so no node could be built.  It is also "
-                f"blocked on the manifest 'mask' field: fitvcve is a per-"
-                f"orbit switch, but Parameter.build_pymc derives a whole "
-                f"vector at once, so 'mask' is declared and not consumed and "
-                f"one orbit cannot use vcve while another uses "
-                f"secosw/sesinw.  Drop the key (or write 'fitvcve: false') "
-                f"to sample the sqrt(e)cos(omega)/sqrt(e)sin(omega) pair.  "
-                f"V_c/V_e support is planned."
+                f"registers them, so no node could be built.  The structural "
+                f"half of the blocker is GONE: roles are per element now, so "
+                f"one orbit using vcve while another uses secosw/sesinw is "
+                f"expressible (the 'mask' this message used to name is "
+                f"consumed).  What remains is the physics above, plus the "
+                f"deferred build pass that would let a vcve orbit still "
+                f"REPORT sqrt(e)cos(omega) (a role-3 'output_expr_key', whose "
+                f"vocabulary ships and whose build does not).  Drop the key "
+                f"(or write 'fitvcve: false') to sample the "
+                f"sqrt(e)cos(omega)/sqrt(e)sin(omega) pair.  V_c/V_e support "
+                f"is planned."
             )
 
         user_params = getattr(self.config_manager, "user_params", None) or {}
@@ -209,8 +216,9 @@ class Orbit(Component):
                     "WIP -- 'fitvcve: true' RAISES NotImplementedError.  It "
                     "would parametrize eccentricity via V_c/V_e instead of "
                     "sqrt(e)cos(omega)/sqrt(e)sin(omega), but the from_vcve "
-                    "physics functions are undefined and the per-orbit "
-                    "switch needs the unconsumed manifest 'mask' field."
+                    "physics functions are undefined.  The per-orbit switch "
+                    "itself is no longer a blocker: element roles are per "
+                    "instance now."
                 ),
             },
         ]

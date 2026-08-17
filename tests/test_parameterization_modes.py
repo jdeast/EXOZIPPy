@@ -61,7 +61,7 @@ def test_a_single_mode_system_produces_a_plain_manifest():
         options={"u2": {"inactive_value": 0.0}},
     )
 
-    assert manifest["q1"] == {}
+    assert manifest["q1"] is None
     # A bare string, exactly as a hand-written manifest spells it -- and the
     # inactive_value is dropped, because with nothing masked out it could not
     # do anything.
@@ -106,7 +106,7 @@ def test_a_parameter_no_instance_uses_is_left_out_entirely():
     manifest = mode_manifest(["linear", "linear"], _LD_TABLE)
 
     assert set(manifest) == {"u1"}
-    assert manifest["u1"] == {}
+    assert manifest["u1"] is None
 
 
 def test_the_expanded_entries_parse_as_manifest_entries():

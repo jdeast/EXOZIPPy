@@ -2157,6 +2157,11 @@ class ConfigManager:
             fixed = (cfg.get("value") is not None) or (
                 sigma is not None and sigma == 0
             )
+            # An INACTIVE element is held at a bookkeeping value whatever its
+            # resolved sigma says (the pin is the role, not a `sigma: 0` in the
+            # config), so it must not be reported as free: a consumer that draws
+            # a slider per free parameter would offer a knob that moves nothing.
+            fixed = fixed or not active
 
             rank = self._last_provenance.get(internal_path)
             relation = self._last_solved_by.get(internal_path)

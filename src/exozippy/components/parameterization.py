@@ -205,11 +205,16 @@ def mode_manifest(modes, table, n_elements=None, options=None, where=""):
             # a single-mode expansion identical to the manifest a component
             # would have hand-written, rather than carrying an inert key.
             entry.pop("inactive_value", None)
-        # A derived parameter carrying nothing else is spelled as the bare
-        # string a hand-written manifest uses.  Identical to the interpreter
-        # either way; this keeps the expansion diff-free against the manifests
-        # it replaces, which is how a reviewer can see that nothing moved.
-        if list(entry) == ["expr_key"] and isinstance(entry["expr_key"], str):
+        # Spell the two plain cases the way a hand-written manifest spells them:
+        # `None` for a free parameter with no options, and the bare block name
+        # for a wholly derived one.  Identical to the interpreter either way;
+        # this keeps the expansion diff-free against the manifests it replaces,
+        # which is how a reviewer can see that nothing moved.
+        if not entry:
+            out[param] = None
+        elif list(entry) == ["expr_key"] and isinstance(
+            entry["expr_key"], str
+        ):
             out[param] = entry["expr_key"]
         else:
             out[param] = entry
