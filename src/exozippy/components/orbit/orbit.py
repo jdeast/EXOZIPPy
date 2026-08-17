@@ -11,7 +11,9 @@ from exoplanet_core.pymc import ops as ops
 
 from exozippy.components.component import Component
 from exozippy.components.parameter import Parameter
-from exozippy.potentials import soft_upper_bound
+from exozippy.components.parameterization import merge_options, mode_manifest
+from exozippy.outputs.prose import get_collector, join_names
+from exozippy.potentials import soft_lower_bound, soft_upper_bound
 
 # this import is required even though it's not used explicitly
 # it registers all the mathematical relations
@@ -41,9 +43,74 @@ class Orbit(Component):
             self.config, getattr(config_manager, "system_config", None)
         )
         self.i180 = [c.get("i180", False) for c in self.config]
-        self.fitvcve = [c.get("fitvcve", False) for c in self.config]
+        self._parse_ecc_parameterization()
 
         self._reject_wip_parameterizations()
+
+    # The two eccentricity parameterizations, as a mode table (see
+    # components/parameterization.py).  `hk` samples the sqrt(e)cos/sin(omega)
+    # pair and derives (ecc, omega) from it; `vcve` samples V_c/V_e and an omega
+    # direction vector, derives (ecc, omega) from those, and REPORTS the
+    # sqrt(e)cos/sin pair (role 3) so both parameterizations produce the same
+    # table rows and a user's prior on either survives the switch.  V_c/V_e
+    # itself is reported on an `hk` orbit, for the same reason.  Orbits may
+    # differ: element roles are per instance.
+    ECC_MODE_TABLE = {
+        "hk": {
+            "secosw": None,
+            "sesinw": None,
+            "ecc": "default",
+            "omega": "default",
+            "tp": "default",
+            "esinw": "default",
+            "ecosw": "default",
+            "vcve": {"output_expr_key": "from_ecc"},
+        },
+        "vcve": {
+            "vcve": None,
+            "xomega": None,
+            "yomega": None,
+            "ecc": {"expr_key": "from_vcve", "force_node": True},
+            "omega": {"expr_key": "from_xy", "force_node": True},
+            # tp must come from (e, omega) here: this orbit does not sample the
+            # sqrt(e) pair, it REPORTS it, and a reported element is consumed by
+            # nothing -- reading it would read its pre-patch placeholder.
+            "tp": "from_ecc",
+            # ...and for the same reason: these reach e sin/cos(omega) through
+            # the sqrt(e) pair, which this orbit reports rather than samples.
+            "esinw": "from_ecc",
+            "ecosw": "from_ecc",
+            "secosw": {"output_expr_key": "from_ecc"},
+            "sesinw": {"output_expr_key": "from_ecc"},
+        },
+    }
+
+    def _parse_ecc_parameterization(self):
+        """Read `fitvcve:`/`fitchord:` into per-orbit mode lists.
+
+        Both default to false today.  The paper's method is the PAIR (V_c/V_e
+        for the eccentricity, the transit chord for the geometry), and its
+        transit-only default -- an orbit constrained by transits alone should
+        use both -- flips on when the chord half lands, so that the combination
+        the paper validated turns on together and the shipped transit-only
+        examples move exactly once.
+
+        The coupling rule is the user's: `fitvcve: false` forces
+        `fitchord: false` unless fitchord was asked for explicitly.  It is
+        recorded here rather than acted on, because the chord half is not built
+        yet -- an explicit `fitchord: true` raises in
+        _reject_wip_parameterizations.
+        """
+        self.fitvcve = [bool(c.get("fitvcve", False)) for c in self.config]
+        self.fitchord = []
+        for i, c in enumerate(self.config):
+            asked = c.get("fitchord")
+            if asked is None:
+                # Follows fitvcve, which is what "unless separately set" means.
+                self.fitchord.append(self.fitvcve[i])
+            else:
+                self.fitchord.append(bool(asked))
+        self.ecc_modes = ["vcve" if on else "hk" for on in self.fitvcve]
 
     # ------------------------------------------------------------------
     # WIP parameterizations (review 5.11)
@@ -53,21 +120,13 @@ class Orbit(Component):
     # PHYSICS_REGISTRY has no entry to look up and selecting one of these
     # expression keys cannot build a node at all.
     WIP_PHYSICS = {
-        "ecc.from_vcve": "calc_ecc_from_vcve",
-        "omega.from_vcve": "calc_omega_from_vcve",
         "cosi.from_b": "calc_cosi_from_b",
     }
 
     # Orbit parameters that exist in defaults.yaml and in nothing else, as
     # {param: (the WIP_PHYSICS keys that consume it, why it is inert)}.
+    # `vcve` graduated: it is a real parameter now (see ECC_MODE_TABLE).
     WIP_PARAMS = {
-        "vcve": (
-            ("ecc.from_vcve", "omega.from_vcve"),
-            "It is the sampled coordinate of the V_c/V_e eccentricity "
-            "parameterization, selected by the orbit block's 'fitvcve:' key "
-            "-- which raises for the same reason.  No orbit manifest "
-            "declares vcve, so the entry would be silently ignored.",
-        ),
         "b": (
             ("cosi.from_b",),
             "The orbit-level impact parameter is a dead duplicate of the "
@@ -88,63 +147,44 @@ class Orbit(Component):
         )
 
     def _reject_wip_parameterizations(self):
-        """Raise on `fitvcve: true` and on user params naming a WIP parameter.
+        """Raise on the CHORD half and on user params naming a WIP parameter.
 
-        The V_c/V_e branch has no physics: `orbit/defaults.yaml`'s `from_vcve`
-        expressions name `calc_ecc_from_vcve` / `calc_omega_from_vcve`, for
-        which no definition exists anywhere, so `PHYSICS_REGISTRY` has no entry
-        and the lookup in `Component.add_parameter` would fail.
+        The V_c/V_e half is built (see `ECC_MODE_TABLE`); what is left is the
+        transit-chord half the paper pairs it with, and it is a stub in the same
+        two ways it always was: `cosi`'s `from_b` expression names
+        `calc_cosi_from_b`, which no module defines, so `PHYSICS_REGISTRY` has
+        no entry to look up; and the orbit-level `b` entry's deps name an
+        `orbit.ar` that does not exist -- the orbit's semi-major axis is `a` in
+        AU, while the SCALED a/R* lives on the planet, where `planet.b` is
+        already the live impact parameter.
 
-        The STRUCTURAL half of the blocker this guard used to name is gone.
-        Roles are per element now, so `fitvcve` being per orbit is expressible:
-        the `mask` entries below are consumed, and one orbit sampling `vcve`
-        while another samples `secosw`/`sesinw` is an ordinary mode table (see
-        `components/parameterization.py`, and `Band.LD_MODE_TABLE` for the same
-        shape in use).  Two pieces of work remain, and they belong to the
-        feature rather than to the primitive: the physics above, and the
-        deferred build pass a role-3 `output_expr_key` needs so a vcve orbit
-        can still REPORT sqrt(e)cos(omega) -- without it a user's prior on that
-        pair would be dropped when they flip the switch, which is the opposite
-        of the point.  Until both land, the guard is the feature.
+        Landing it needs its own `|d(chord)/d(cos i)|` Jacobian (the paper's
+        eq 6 is the joint determinant of both halves, applied here as two
+        independent factors), and it is what flips the transit-only DEFAULT on
+        for both halves together.
 
-        `cosi`'s `from_b` expression and the orbit-level `b` entry are the
-        same kind of stub: `calc_cosi_from_b` does not exist, and `b`'s deps
-        name an `orbit.ar` that does not exist either.
-
-        A user reaches these three ways, and all three now raise here rather
-        than being accepted and dropped: `fitvcve: true` on the orbit block,
-        or a params-file entry on `orbit.<name>.vcve` or `orbit.<name>.b`
-        (an unknown parameter path is otherwise silently ignored, the
-        failure mode `config._reject_renamed_arsun` exists to prevent).
+        Two spellings reach it, and both raise rather than being dropped: an
+        explicit `fitchord: true` on the orbit block, or a params-file entry
+        naming `orbit.<name>.b` (an unknown parameter path is otherwise
+        silently ignored -- the failure mode `config._reject_renamed_arsun`
+        exists to prevent).  A `fitchord` that merely FOLLOWS `fitvcve` does not
+        raise: it was not asked for.
         """
         wip = []
 
-        # Read the parsed attribute, not the raw config: register_parameters
-        # builds hk_mask from self.fitvcve, so that is the value that has to
-        # be false for the manifest below it to be the one we ship.
-        flags = np.atleast_1d(getattr(self, "fitvcve", False)).astype(bool)
-        for i, flag in enumerate(flags):
-            if not flag:
+        for i, c in enumerate(self.config):
+            if not bool(c.get("fitchord", False)):
                 continue
-            missing = self._missing_physics(self.WIP_PARAMS["vcve"][0])
             name = self.names[i] if i < len(self.names) else i
             wip.append(
-                f"{self.prefix}.{name}: 'fitvcve: true' is not "
-                f"implemented.  The V_c/V_e parameterization would derive "
-                f"ecc and omega from a sampled 'vcve' through the "
-                f"'from_vcve' expressions in orbit/defaults.yaml, whose "
-                f"physics functions are undefined: {missing}.  Nothing "
-                f"registers them, so no node could be built.  The structural "
-                f"half of the blocker is GONE: roles are per element now, so "
-                f"one orbit using vcve while another uses secosw/sesinw is "
-                f"expressible (the 'mask' this message used to name is "
-                f"consumed).  What remains is the physics above, plus the "
-                f"deferred build pass that would let a vcve orbit still "
-                f"REPORT sqrt(e)cos(omega) (a role-3 'output_expr_key', whose "
-                f"vocabulary ships and whose build does not).  Drop the key "
-                f"(or write 'fitvcve: false') to sample the "
-                f"sqrt(e)cos(omega)/sqrt(e)sin(omega) pair.  V_c/V_e support "
-                f"is planned."
+                f"{self.prefix}.{name}: 'fitchord: true' is not implemented "
+                f"yet.  It would sample the transit chord and derive cos i "
+                f"from it, through the 'from_b' expression in "
+                f"orbit/defaults.yaml, whose physics function is undefined: "
+                f"{self._missing_physics(('cosi.from_b',))}.  The V_c/V_e half "
+                f"of the same method IS implemented -- use 'fitvcve: true' "
+                f"alone for now.  The chord half, and the transit-only default "
+                f"that turns both on together, are planned."
             )
 
         user_params = getattr(self.config_manager, "user_params", None) or {}
@@ -345,33 +385,49 @@ class Orbit(Component):
             },
         }
 
-        fitvcve_mask = np.atleast_1d(getattr(self, "fitvcve", False)).astype(
-            bool
-        )
-        hk_mask = ~fitvcve_mask
-
-        # __init__ already refused fitvcve: true (see
-        # _reject_wip_parameterizations), so hk_mask is all-True here.  The
-        # call is repeated because self.fitvcve is a plain attribute anyone
-        # could set between construction and stage 2, and a silently masked-
-        # out secosw/sesinw/cosi is exactly what the guard exists to prevent.
+        # Re-read the switches: `fitvcve` is a plain attribute anyone could set
+        # between construction and stage 2, and the guard below is what stands
+        # between an unimplemented chord half and a silently mis-parameterized
+        # orbit.
+        self._parse_ecc_parameterization()
         self._reject_wip_parameterizations()
+
+        # The eccentricity parameterization, per orbit (see ECC_MODE_TABLE).
+        # An all-`hk` system -- every shipped example -- gets exactly the
+        # entries this used to write by hand, plus the `vcve` it now REPORTS.
+        ecc_entries = mode_manifest(
+            self.ecc_modes,
+            self.ECC_MODE_TABLE,
+            n_elements=self.n_elements,
+            where=f"{self.prefix}.fitvcve",
+        )
+
+        # Insertion order is load-bearing and preserved exactly: graph.py
+        # registers its build-order nodes in manifest order, and that order is
+        # the order the PyMC nodes -- and so the terms of the summed logp -- get
+        # created in.  The historical keys keep their historical positions
+        # (`cosi` between the sqrt(e) pair and `ecc`, where it has always been,
+        # even though the i180 block below replaces its entry), and the new ones
+        # are appended.
+        for key in ("secosw", "sesinw"):
+            if key in ecc_entries:
+                self.manifest[key] = ecc_entries[key]
+        self.manifest["cosi"] = None
+        for key in ("ecc", "omega"):
+            self.manifest[key] = ecc_entries[key]
         self.manifest.update(
             {
-                "secosw": {"mask": hk_mask},
-                "sesinw": {"mask": hk_mask},
-                "cosi": {"mask": hk_mask},
-                "ecc": "default",
-                "omega": "default",
                 "inc": "default",
                 "sini": "default",
                 "sinw": "default",
                 "cosw": "default",
-                "esinw": "default",
-                "ecosw": "default",
-                "tp": "default",
             }
         )
+        for key in ("esinw", "ecosw", "tp"):
+            self.manifest[key] = ecc_entries[key]
+        for key in ("vcve", "xomega", "yomega"):
+            if key in ecc_entries:
+                self.manifest[key] = ecc_entries[key]
 
         # Physical scale of every orbit, from the member bodies' masses
         # (see class docstring).  Group-mass deps name the mass vectors of
@@ -531,21 +587,24 @@ class Orbit(Component):
             ss_init = np.where(flip, -ss0, ss0)
             tc_init = np.where(flip, tc_new, tc0)
 
-            self.manifest["secosw"] = {
-                **self.manifest["secosw"],
-                "initval": sc_init,
-            }
-            self.manifest["sesinw"] = {
-                **self.manifest["sesinw"],
-                "initval": ss_init,
-            }
+            # merge_options, not `{**entry, ...}`: a manifest entry may be None
+            # (a free parameter, which is how mode_manifest spells the
+            # sqrt(e) pair) or a bare string naming an expression, and both
+            # spellings break a splat -- the first with a TypeError, the second
+            # by silently dropping the expr_key (review 4.5.3).
+            self.manifest["secosw"] = merge_options(
+                self.manifest.get("secosw"), initval=sc_init
+            )
+            self.manifest["sesinw"] = merge_options(
+                self.manifest.get("sesinw"), initval=ss_init
+            )
             half_period = period / 2.0
-            self.manifest["tc"] = {
-                **self.manifest["tc"],
-                "initval": tc_init,
-                "lower": tc_init - half_period,
-                "upper": tc_init + half_period,
-            }
+            self.manifest["tc"] = merge_options(
+                self.manifest.get("tc"),
+                initval=tc_init,
+                lower=tc_init - half_period,
+                upper=tc_init + half_period,
+            )
 
         # Keep seeded boundary values (bigomega exactly 0 or 180) strictly
         # inside the ybigomega >= 0 bound.
@@ -654,6 +713,139 @@ class Orbit(Component):
 
     def build_likelihood(self, model, system):
         self._add_eccentricity_bound(system)
+        self._add_vcve_terms(system)
+
+    def _vcve_indices(self):
+        """Indices of the orbits sampling V_c/V_e (empty for every hk system)."""
+        modes = list(getattr(self, "ecc_modes", []))
+        return [i for i, m in enumerate(modes) if m == "vcve"]
+
+    def _add_vcve_terms(self, system):
+        """The two terms a V_c/V_e orbit owes: the Jacobian and the shield.
+
+        THE JACOBIAN keeps the prior uniform in eccentricity.  A uniform step
+        in V_c/V_e "imposes a non-physical prior that strongly biases e toward
+        high eccentricities" (Eastman 2024, section 3), so the likelihood
+        carries `log|de/d(V_c/V_e)|` -- MINUS what `physics.vcve_log_jacobian`
+        returns; see the sign comment below, which is the difference between
+        removing that bias and doubling it.  Applied per orbit, from the
+        `ecc`/`omega` NODES, which is what makes the branch mixture replicate it
+        per branch automatically: each root then carries its own weight, and
+        that is exactly right, because the Jacobian differs between the two
+        roots.
+
+        THE SHIELD is the soft half of the pair that keeps an imaginary
+        eccentricity from being a wall.  `_vcve_quadratic` floors the
+        discriminant at zero (the hard half, so no NaN can ever be built), which
+        leaves that whole region flat -- so the penalty here is applied to the
+        UNFLOORED discriminant, where it has a gradient pointing back into the
+        region where a real eccentricity exists.  Same argument, and the same
+        `soft_lower_bound` helper, as the eccentricity bound above.
+
+        The chord half's own independent Jacobian (`|d(chord)/d(cos i)|`) lands
+        with the chord half; the paper's eq 6 is the joint determinant of the
+        two, and JDE's design applies them independently so either half can be
+        switched on alone.
+        """
+        idx = self._vcve_indices()
+        if not idx:
+            return
+        if not (
+            isinstance(getattr(self, "vcve", None), Parameter)
+            and isinstance(getattr(self, "ecc", None), Parameter)
+            and isinstance(getattr(self, "omega", None), Parameter)
+        ):
+            return
+
+        take = np.asarray(idx, dtype="int32")
+        ecc = self.ecc.value[take]
+        omega = self.omega.value[take]
+        vcve = self.vcve.value[take]
+
+        # MINUS the derivative, and the sign is the term.  V_c/V_e is the
+        # sampled coordinate, so the eccentricity it derives inherits the
+        # density p(e) ~ |d(V_c/V_e)/de|, which diverges as e -> 1 -- the bias
+        # the paper reports.  Flattening it means adding log|de/d(V_c/V_e)|,
+        # i.e. subtracting what vcve_log_jacobian returns.  Adding it would
+        # double the bias, and no check of the derivative's MAGNITUDE can tell
+        # the two apart, so the direction is pinned by measuring the implied
+        # prior on e for flatness (tests/test_vcve.py).
+        pm.Potential(
+            f"{self.prefix}.vcve_jacobian",
+            -pt.sum(physics.vcve_log_jacobian(ecc, omega)),
+        )
+        # Declare the OTHER root, so the likelihood is marginalized over both
+        # instead of one being chosen (System.register_branch_alternative).  One
+        # declaration per V_c/V_e orbit: two orbits are four combinations, which
+        # is why the mixture warns past two.  Substituting BOTH the clipped
+        # `ecc` node and the unclipped one the collision barrier reads is what
+        # makes that barrier a per-branch weight rather than a term evaluated
+        # only at the primary root.
+        register = getattr(system, "register_branch_alternative", None)
+        if callable(register):
+            unclipped = getattr(self, "_vcve_unclipped_nodes", {})
+            for i in idx:
+                alt_ecc = pt.set_subtensor(
+                    self.ecc.value[i],
+                    physics.calc_ecc_from_vcve_lo(
+                        self.vcve.value[i], self.omega.value[i]
+                    ),
+                )
+                replacements = {self.ecc.value: alt_ecc}
+                node = unclipped.get(i)
+                if node is not None:
+                    alt_unclipped = pt.set_subtensor(
+                        node[i],
+                        physics.ecc_from_vcve_unclipped(
+                            self.vcve.value[i],
+                            self.omega.value[i],
+                            upper=False,
+                        ),
+                    )
+                    replacements[node] = alt_unclipped
+                name = self.names[i] if i < len(self.names) else str(i)
+                register(
+                    f"{self.prefix}.{name}: lower V_c/V_e root",
+                    replacements,
+                )
+        # scale = 1.0 because the discriminant 1 - (V_c/V_e)^2 cos^2 omega is
+        # dimensionless and at most 1 by construction, so the default 1%
+        # softness is a 0.01-wide transition: ~440 nats per unit, the same
+        # order of steepness as the collision bound's 500 (see
+        # _add_eccentricity_bound), and 4.4 nats one transition width past the
+        # fold.
+        pm.Potential(
+            f"{self.prefix}.vcve_real_root",
+            soft_lower_bound(
+                physics.vcve_discriminant(vcve, omega), 0.0, scale=1.0
+            ),
+        )
+
+        # The Jacobian is not a prior the parameters state themselves, and it
+        # REPLACES what the sampled bounds imply, so the tables must say so
+        # rather than reporting "Uniform" on vcve (see "Reporting
+        # component-added priors").
+        names = [self.names[i] if i < len(self.names) else str(i) for i in idx]
+        self.vcve.add_prior_contribution(
+            latex=r"$\propto |\partial e / \partial (V_c/V_e)|$",
+            text="uniform in e (Jacobian applied)",
+            elements=idx,
+            supersedes_bounds=True,
+            support_phrase="whose V_c/V_e support is",
+        )
+        collector = get_collector(system)
+        if collector is not None:
+            collector.add(
+                "The eccentricity and argument of periastron of "
+                f"{join_names(names)} were parametrized by "
+                r"$V_c/V_e$ and the direction of $\omega_*$ "
+                r"\citep{Eastman:2024}, with the likelihood marginalized over "
+                r"both roots of the $V_c/V_e$ inversion and multiplied by "
+                r"$|\partial e / \partial (V_c/V_e)|$ so that the prior on the "
+                r"eccentricity remains uniform.",
+                section="orbits",
+                key="orbit.vcve",
+            )
 
     def _add_eccentricity_bound(self, system):
         """Soft upper bound on every orbit's eccentricity.
@@ -703,24 +895,65 @@ class Orbit(Component):
         )
 
     def _unclipped_ecc(self):
-        """secosw^2 + sesinw^2, or None when that pair is not sampled.
+        """The unclipped eccentricity of every orbit, or None if unavailable.
 
-        Every current parameterization samples the pair (the vcve branch
-        raises NotImplementedError in register_parameters), so this is a
-        guard, not a code path: an eccentricity built some other way has no
-        unclipped node to bound and is left to its own parameter bounds.
+        What a soft bound must see: `calc_ecc` (and `calc_ecc_from_vcve`) clip
+        at MAX_ECC, and a flat penalty has no gradient for NUTS to follow.
+        Per orbit, because the coordinate the eccentricity is built from is per
+        orbit: `secosw^2 + sesinw^2` on a sqrt(e)cos/sin orbit, the unclipped
+        V_c/V_e root on a V_c/V_e one.  A vector of both is assembled here, so
+        the collision bound above stays one potential over all orbits whatever
+        each of them samples.
         """
+        vcve_mask = np.atleast_1d(
+            np.asarray(getattr(self, "ecc_modes", []), dtype=object) == "vcve"
+        )
+        if vcve_mask.size != self.n_elements:
+            vcve_mask = np.zeros(self.n_elements, dtype=bool)
+
+        hk = None
         secosw = getattr(self, "secosw", None)
         sesinw = getattr(self, "sesinw", None)
-        if not (
-            isinstance(secosw, Parameter) and isinstance(sesinw, Parameter)
-        ):
+        if isinstance(secosw, Parameter) and isinstance(sesinw, Parameter):
+            hk = physics.ecc_from_sqrte(secosw.value, sesinw.value)
+
+        vcve = getattr(self, "vcve", None)
+        omega = getattr(self, "omega", None)
+        vc = None
+        if isinstance(vcve, Parameter) and isinstance(omega, Parameter):
+            vc = physics.ecc_from_vcve_unclipped(vcve.value, omega.value)
+
+        if not vcve_mask.any():
+            if hk is None:
+                logger.debug(
+                    "[orbit] secosw/sesinw are not built; skipping the "
+                    "eccentricity bound."
+                )
+            return hk
+        if vc is None:
             logger.debug(
-                "[orbit] secosw/sesinw are not built; skipping the "
-                "eccentricity bound."
+                "[orbit] vcve/omega are not built; skipping the eccentricity "
+                "bound."
             )
             return None
-        return physics.ecc_from_sqrte(secosw.value, sesinw.value)
+        if hk is None or bool(vcve_mask.all()):
+            self._vcve_unclipped_nodes = {
+                int(i): vc for i in np.nonzero(vcve_mask)[0]
+            }
+            return vc
+        # The elements this REPLACES are exactly the ones whose secosw/sesinw
+        # are reported, i.e. whose `hk` entries are phase-1 placeholders at this
+        # point (build_likelihood runs before finalize_reported).  So the
+        # substitution is not a preference between two live values -- it is what
+        # keeps a placeholder out of the bound.  set_subtensor and not a
+        # pt.where over the two vectors for the house reason as well: a
+        # discarded branch's value never enters the graph, since where's VJP
+        # multiplies it by zero and 0*NaN poisons the whole vector's gradient
+        # (see Parameter._patch_elements).
+        idx = np.nonzero(vcve_mask)[0].astype("int32")
+        mixed = pt.set_subtensor(hk[idx], vc[idx])
+        self._vcve_unclipped_nodes = {int(i): mixed for i in idx}
+        return mixed
 
     def get_true_anomaly(self, t):
         """Returns the true anomaly f for all planets at all times."""

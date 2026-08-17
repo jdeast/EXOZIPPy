@@ -11,13 +11,21 @@ import pymc as pm
 import pytensor
 import pytensor.tensor as pt
 
+try:
+    # Moved from pytensor.graph.basic in newer pytensor releases (the old
+    # location warns and is scheduled for removal).  Same fallback as
+    # Component._model_trace_param_deps.
+    from pytensor.graph.traversal import ancestors
+except ImportError:  # pragma: no cover - older pytensor
+    from pytensor.graph.basic import ancestors
+
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components, import_failures
 from exozippy.components.parameter import Parameter, SeedBoundViolation, to_vec
 from exozippy.config import ConfigManager
 from exozippy.evaluator import structural_hash, structural_payload
 from exozippy.graph import determine_pymc_build_order
-from exozippy.manifest import interpret_manifest_entry
+from exozippy.manifest import interpret_manifest_entry, normalize_selector
 from exozippy.outputs.prose import ProseCollector
 from exozippy.yamlio import load_yaml
 
@@ -113,6 +121,11 @@ class System(Component):
         # (see register_element_slice_check / verify_element_slices).  Rebuilt
         # per build_model, so a second build on one System cannot accumulate.
         self._element_slice_checks = []
+        # Many-to-one parameterizations' alternative branches, declared during
+        # stage 6 and marginalized over at the end of it (see
+        # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
+        # build_model for the same reason.
+        self._branch_alternatives = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
         # happens to name but System never opened.
@@ -199,8 +212,119 @@ class System(Component):
             if hasattr(comp, "register_parameters"):
                 comp.register_parameters(self)
 
+        # Stage 2b: the REPORTED-element invariant, checked before anything is
+        # built (see _validate_reported_not_consumed).
+        self._validate_reported_not_consumed()
+
         # Stage 3: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
+
+    def _validate_reported_not_consumed(self):
+        """Refuse a manifest where something CONSUMES a reported element.
+
+        Manifest role 3 rests on one property: a reported element is consumed by
+        nothing.  That is what lets its expression be applied in a second phase
+        (Parameter.finalize_deferred) after the parameter it reads has been
+        built, and what makes the per-parameter cycle such a pair would
+        otherwise form dissolve.  Break it, and the consumer silently reads the
+        PRE-PATCH placeholder: a plausible number that is not the quantity it
+        claims to be, with no error anywhere.
+
+        That is not hypothetical -- it is how ``orbit.tp`` behaved the first
+        time the V_c/V_e parameterization was wired, because `calc_tp` consumes
+        `secosw`/`sesinw`, which a V_c/V_e orbit reports rather than samples.
+        The fix was to give `tp` its own (e, omega) expression on those orbits;
+        the check is here so the next such pairing is a startup error rather
+        than a wrong posterior.
+
+        Checked per ELEMENT, because that is the real condition: in a system
+        with one orbit of each kind, `ecc`'s sqrt(e)cos/sin expression legally
+        reads `secosw` for the hk orbit's elements, which are exactly the
+        elements the other orbit does not report.  Only an overlap is an error.
+        """
+        reported = {}
+        selections = {}
+        for comp in self.active_components.values():
+            manifest = getattr(comp, "manifest", {}) or {}
+            for name, raw in manifest.items():
+                entry = interpret_manifest_entry(raw)
+                n_elements = comp.n_elements
+                if entry.shape:
+                    shape = entry.shape
+                    n_elements = int(
+                        np.prod(shape)
+                        if isinstance(shape, tuple)
+                        else int(shape)
+                    )
+                out_sel = entry.output_expr_selectors or {}
+                if entry.output_expr_key is not None:
+                    out_sel = {entry.output_expr_key: None}
+                if out_sel:
+                    mask = np.zeros(n_elements, dtype=bool)
+                    for sel in out_sel.values():
+                        mask |= normalize_selector(sel, n_elements)
+                    reported[(comp.prefix, name)] = mask
+                selections[(comp.prefix, name)] = (comp, entry, n_elements)
+
+        if not reported:
+            return
+
+        for (prefix, name), (comp, entry, n_elements) in selections.items():
+            cfg = self.config_manager.resolve(
+                comp.prefix, name, shape=(comp.n_elements,)
+            )
+            try:
+                sels = entry.expression_configs(
+                    cfg.get("expressions", {}),
+                    n_elements=n_elements,
+                    where=f"{prefix}.{name}",
+                )
+            except Exception:  # a broken manifest is another check's error
+                continue
+            for sel in sels:
+                if sel.output_only:
+                    continue
+                consumer_mask = (
+                    np.ones(n_elements, dtype=bool)
+                    if sel.mask is None
+                    else sel.mask
+                )
+                for dep in entry.dep_names(sel.config):
+                    dep_key = self._dep_parameter_key(comp, dep)
+                    if dep_key is None or dep_key not in reported:
+                        continue
+                    dep_mask = reported[dep_key]
+                    # Element-for-element only where the two vectors are the
+                    # same length; a mapped dep (a different length) is
+                    # compared conservatively, as any overlap at all.
+                    if dep_mask.size == consumer_mask.size:
+                        clash = np.nonzero(dep_mask & consumer_mask)[0]
+                    else:
+                        clash = np.nonzero(dep_mask)[0]
+                    if clash.size:
+                        raise ValueError(
+                            f"[{prefix}.{name}] its '{sel.key}' expression "
+                            f"consumes '{dep}', whose element(s) "
+                            f"{clash.tolist()} are REPORTED "
+                            f"({dep_key[0]}.{dep_key[1]}, manifest role 3). A "
+                            f"reported element is applied in a second build "
+                            f"phase, after every parameter exists, so a "
+                            f"consumer would read its pre-patch placeholder -- "
+                            f"a number that looks fine and is not the quantity "
+                            f"it names. Give this parameter an expression in "
+                            f"coordinates the instance actually has (as "
+                            f"orbit.tp does with its 'from_ecc' block), or stop "
+                            f"reporting that element."
+                        )
+
+    @staticmethod
+    def _dep_parameter_key(comp, dep):
+        """``(prefix, param)`` a dependency string names, or None."""
+        name = dep.split("[", 1)[0]
+        if "." not in name:
+            return (comp.prefix, name)
+        parts = name.split(".")
+        return (parts[0], parts[-1])
 
     def derived_params(self):
         """`(component_prefix, param_name)` pairs the manifests actually derive.
@@ -408,9 +532,165 @@ class System(Component):
                 )
         return len(checks)
 
+    def register_branch_alternative(self, label, replacements, weight=0.5):
+        """Declare one alternative value of a many-to-one parameterization.
+
+        A component calls this when the coordinate it samples does not determine
+        its physical quantity uniquely -- today only the V_c/V_e eccentricity,
+        whose inversion is a quadratic with two roots (Eastman 2024 eq 5).
+        ``replacements`` maps the node the model was BUILT with to the node the
+        alternative branch would have used; ``label`` names the branch for logs.
+
+        Two branches may name the SAME node -- two V_c/V_e orbits are two
+        elements of one ``ecc`` vector, so they do -- and the mixture then has to
+        apply both at once.  That works only if each replacement is written
+        RELATIVE to the node it replaces (``set_subtensor(ecc[i], ...)``, not a
+        node built from scratch), which is what lets ``_add_branch_mixtures``
+        compose them by substituting one after the other.  It checks, because
+        the failure is silent: merging the two into one dict, as the first
+        version did, kept whichever was declared last and quietly marginalized
+        over 3 of the 4 combinations.
+
+        ``_add_branch_mixtures`` then marginalizes the likelihood over the
+        branches instead of letting the component choose one.  That is the whole
+        point: the paper picks a root with a discrete sign parameter, which for a
+        gradient sampler means a piecewise-constant coordinate and a logp that
+        jumps -- and picking the "physical" root instead means a choice that
+        depends on the current parameters, i.e. the same discontinuity wearing a
+        different hat.  Marginalizing is smooth, and it is also the honest
+        statement: the data do not say which root is real.
+        """
+        replacements = dict(replacements)
+        claimed = {
+            key
+            for branch in self._branch_alternatives
+            for key in branch["replacements"]
+        }
+        for key, value in replacements.items():
+            if key in claimed and key not in ancestors([value]):
+                raise ValueError(
+                    f"[system] branch '{label}' replaces node "
+                    f"'{key.name or key}', which another branch also replaces, "
+                    f"with an expression that does not read it. Two branches "
+                    f"can only be applied together when each is written "
+                    f"relative to the node it replaces (e.g. "
+                    f"set_subtensor(node[i], ...)); as written, one of the two "
+                    f"substitutions would be lost and the mixture would cover "
+                    f"fewer than 2^k combinations."
+                )
+        self._branch_alternatives.append(
+            {
+                "label": label,
+                "replacements": replacements,
+                "weight": weight,
+            }
+        )
+
+    def _add_branch_mixtures(self, model):
+        """Marginalize the likelihood over every declared branch alternative.
+
+        For k declared branches this adds ONE potential covering all 2^k
+        combinations::
+
+            total = logsumexp_over_combinations(log w_c + L_c)
+
+        where ``L_c`` is the sum of every model term with that combination's
+        nodes substituted, and ``w_c`` the product of the branch weights.  It is
+        built as ``logsumexp(...) - L_ref``, because PyMC has already added
+        ``L_ref`` (the as-built terms): the difference cancels it exactly, so no
+        component has to know this is happening and no term is counted twice.
+
+        Two properties fall out of substituting into the WHOLE term sum, and
+        both are wanted:
+
+        * Any term that does not depend on the substituted nodes appears in
+          every branch identically and factors straight out of the logsumexp --
+          so the mixture is over exactly the terms that care.
+        * Any PRIOR term that does depend on them (the V_c/V_e Jacobian, the
+          eccentricity collision bound, and a future orbit-crossing penalty
+          coupling two orbits) is replicated per branch, which makes each
+          branch's weight ``log w + log|J| + barriers`` -- the form review 8.4.4
+          specifies for folded likelihoods, for free.
+
+        Cost is 2^k evaluations of the whole logp, so it is logged, and a
+        warning names the multiplier past two branches.
+        """
+        from pytensor.graph.replace import graph_replace
+
+        branches = list(self._branch_alternatives)
+        if not branches:
+            return 0
+
+        # RV-level terms, deliberately not model.logp(): that graph has already
+        # had the random variables rewritten into value variables, so the nodes
+        # a component handed us are no longer in it and graph_replace would find
+        # nothing to replace.  Potentials and observed logps are stored
+        # RV-level, and PyMC converts them consistently at logp time.
+        terms = [
+            pm.logp(rv, model.rvs_to_values[rv]).sum()
+            for rv in model.observed_RVs
+        ]
+        terms += [pt.sum(p) for p in model.potentials]
+        if not terms:
+            logger.warning(
+                "[system] branch alternatives were declared (%s) but the model "
+                "has no likelihood terms to marginalize; skipping the mixture.",
+                ", ".join(b["label"] for b in branches),
+            )
+            return 0
+        l_ref = terms[0] if len(terms) == 1 else pt.add(*terms)
+
+        n_comb = 2 ** len(branches)
+        labels = ", ".join(b["label"] for b in branches)
+        if len(branches) > 2:
+            logger.warning(
+                "[system] %d branch alternatives (%s) means the likelihood is "
+                "evaluated %d times per step (2^%d) -- every combination of "
+                "roots. Set 'fitvcve: false' on the orbits that do not need it "
+                "to bring that down.",
+                len(branches),
+                labels,
+                n_comb,
+                len(branches),
+            )
+        else:
+            logger.info(
+                "[system] marginalizing the likelihood over %d branch "
+                "combination(s) (%s).",
+                n_comb,
+                labels,
+            )
+
+        pieces = []
+        for combo in range(n_comb):
+            term = l_ref
+            log_w = 0.0
+            for bit, branch in enumerate(branches):
+                if combo & (1 << bit):
+                    # One substitution at a time, NOT one merged dict: two
+                    # branches routinely name the same node (two V_c/V_e orbits
+                    # are two elements of one `ecc` vector), and merging kept
+                    # only the last, silently marginalizing over 3 of the 4
+                    # combinations.  Applied in sequence, the second pass
+                    # rewrites the first's `set_subtensor` base too, so both
+                    # elements land -- which is why register_branch_alternative
+                    # requires a replacement to read the node it replaces.
+                    term = graph_replace(term, branch["replacements"])
+                    log_w += float(np.log(branch["weight"]))
+                else:
+                    log_w += float(np.log1p(-branch["weight"]))
+            pieces.append(term + log_w)
+
+        total = pieces[0]
+        for piece in pieces[1:]:
+            total = pt.logaddexp(total, piece)
+        pm.Potential("branch_mixture", total - l_ref)
+        return n_comb
+
     def build_model(self):
         """Constructs the PyMC probabilistic model for the entire system."""
         self._element_slice_checks = []
+        self._branch_alternatives = []
         with pm.Model() as model:
             # Stage 4a: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
@@ -450,6 +730,24 @@ class System(Component):
             for comp in self.active_components.values():
                 if hasattr(comp, "build_likelihood"):
                     comp.build_likelihood(model, system=self)
+
+            # Stage 6b: REPORTED elements (manifest role 3).  Deliberately
+            # after stage 6: a reported element is consumed by nothing, so
+            # every consumer in stages 5-6 has already read the phase-1 tensor
+            # -- which is what makes the per-parameter cycle these expressions
+            # would otherwise create dissolve.  See
+            # Component.finalize_reported and Parameter.finalize_deferred.
+            for comp in self.active_components.values():
+                finalize = getattr(comp, "finalize_reported", None)
+                if callable(finalize):
+                    finalize(model, system=self)
+
+            # Stage 6c: BRANCH MIXTURES.  A component whose parameterization is
+            # many-to-one (today: the V_c/V_e eccentricity, whose inversion is
+            # quadratic) declares its alternative nodes and the likelihood is
+            # marginalized over them here.  Must come last: it snapshots every
+            # term the model has, so every term has to exist first.
+            self._add_branch_mixtures(model)
 
         # Mixed-parameterization vectors only: verify that each sliced
         # expression agrees with the unsliced one on the elements it supplies,

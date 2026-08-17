@@ -20,6 +20,7 @@ m_total = sp.symbols(
 bigomega, xbigomega, ybigomega = sp.symbols(
     "bigomega xbigomega ybigomega", real=True
 )
+vcve, xomega, yomega = sp.symbols("vcve xomega yomega", real=True)
 
 comp_key = "orbit"
 
@@ -45,6 +46,12 @@ def get_symbol_map(config):
         "bigomega": "bigomega",
         "xbigomega": "xbigomega",
         "ybigomega": "ybigomega",
+        # Mapped for the same reason every symbol here is: an unmapped symbol
+        # is ONE bare symbol shared by every orbit, so a two-orbit fit would
+        # equate their eccentricity parameterizations.
+        "vcve": "vcve",
+        "xomega": "xomega",
+        "yomega": "yomega",
         # Kepler's-third-law symbols.  These MUST be mapped: an unmapped
         # symbol instantiates as one bare symbol shared by every orbit,
         # letting the relaxation engine equate different orbits' physics
@@ -78,6 +85,17 @@ RELATIONS = [
     # ybigomega have N(0,1) priors, giving a uniform marginal on bigomega.
     sp.Eq(xbigomega, sp.cos(bigomega)),
     sp.Eq(ybigomega, sp.sin(bigomega)),
+    # V_c/V_e (Eastman 2024 eq 4) and its omega direction vector.  The bridge
+    # is what lets ONE params file drive either parameterization: a user's
+    # ecc/omega seeds give a V_c/V_e start (and the direction vector), and a
+    # V_c/V_e seed back-solves an eccentricity.  Written in the forward
+    # direction because that one is single-valued; the inverse has two roots
+    # (physics.calc_ecc_from_vcve and its _lo twin), and sympy is free to pick
+    # either when it solves this for ecc -- which is exactly as good as the
+    # engine needs, since a start value only has to be a valid solution.
+    sp.Eq(vcve * (1 + ecc * sp.sin(omega)), sp.sqrt(1 - ecc**2)),
+    sp.Eq(xomega, sp.cos(omega)),
+    sp.Eq(yomega, sp.sin(omega)),
     # (m_total has no closed-form relation here -- it is the sum of the
     # orbit's member-body masses, whose count varies per orbit; the custom
     # solver registered below computes it during relaxation.)

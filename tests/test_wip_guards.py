@@ -1,15 +1,19 @@
 """Half-built features must refuse loudly, not accept-and-ignore.
 
-The `orbit:` block has a config surface that was parsed and then silently
+The `orbit:` block had a config surface that was parsed and then silently
 dropped on the floor (code review 2026-08-08, item 5.11): `fitvcve: true`
-selects `defaults.yaml` expressions naming undefined physics functions, and
-the `vcve`/`b` parameter blocks are in no manifest at all (`b`'s deps even
+selected `defaults.yaml` expressions naming undefined physics functions, and
+the `vcve`/`b` parameter blocks were in no manifest at all (`b`'s deps even
 name a nonexistent `orbit.ar`).
 
-It is not being implemented or deleted here.  What these tests pin is that
-a user who asks for it finds out immediately, from a message that names the
-key they set -- and, just as importantly, that the ordinary configs which
-merely carry its defaults still build.
+Half of it is implemented now.  `fitvcve` works (review 8.8.3: the V_c/V_e
+parameterization, with the likelihood marginalized over both roots of its
+quadratic inversion), so what these tests pin about it is the opposite of what
+they used to: that it does NOT raise and that a params entry naming `vcve` is
+honored.  The CHORD half -- `fitchord`, `cosi`'s `from_b`, the orbit-level `b`
+-- is still unbuilt, and what the guard now covers is that a user who asks for
+THAT finds out immediately, from a message naming the key they set, while the
+ordinary configs which merely carry its defaults still build.
 
 (The `star:` half of that review item -- `sedfile:`, `mist:`, `parsec:` --
 was reverted: `sedfile` is deleted outright and the evolutionary-model
@@ -18,6 +22,7 @@ switches are ungated, because the star component is now ready for an
 tests/test_star_evolutionary_model.py.)
 """
 
+import numpy as np
 import pytest
 
 from exozippy.components.orbit import Orbit
@@ -33,80 +38,82 @@ def _orbit(blocks, user_params=None):
 # 5.11 -- orbit fitvcve / vcve / b
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-def test_orbit_fitvcve_raises_and_names_the_missing_physics():
+def test_orbit_fitvcve_is_implemented_and_no_longer_guarded():
     """
     Given an orbit block asking for the V_c/V_e parameterization,
     When the Orbit component is constructed,
-    Then it raises NotImplementedError naming the key, the two undefined
-      physics functions the from_vcve expressions call, and what is left of the
-      blocker.
+    Then it does NOT raise, and the orbit records the V_c/V_e mode.
 
-    The message used to name the unconsumed manifest `mask` field as the real
-    blocker, ahead of the missing physics.  That half is done -- roles are per
-    element, so a per-orbit switch is expressible -- so the message must no
-    longer claim it, and must instead point at the two things that remain: the
-    physics, and the deferred build pass a role-3 (REPORTED) reverse flip needs
-    so flipping the switch does not drop a user's prior on secosw/sesinw.
+    History: this guard raised for two reasons, and both are gone.  The
+    structural one -- `fitvcve` is per orbit but `Parameter.build_pymc` derived
+    a whole vector -- was fixed by the per-element roles; the physics one
+    (calc_ecc_from_vcve / calc_omega_from_vcve undefined) by implementing them,
+    with the discrete root choice the paper uses replaced by a marginalization
+    over both roots.  What is left guarded is the CHORD half; see below.
     """
-    # Arrange
-    blocks = [{"name": "b", "fitvcve": True}]
+    orbit = _orbit([{"name": "b", "fitvcve": True}])
 
-    # Act
-    with pytest.raises(NotImplementedError) as exc:
-        _orbit(blocks)
-
-    # Assert
-    msg = str(exc.value)
-    assert "'fitvcve: true'" in msg
-    assert "orbit.b" in msg
-    assert "calc_ecc_from_vcve" in msg
-    assert "calc_omega_from_vcve" in msg
-    assert "output_expr_key" in msg
-    assert "roles are per element" in msg
+    assert orbit.fitvcve == [True]
+    assert orbit.ecc_modes == ["vcve"]
 
 
-def test_orbit_fitvcve_still_raises_if_set_after_construction():
+def test_orbit_fitchord_raises_and_names_the_missing_physics():
     """
-    Given an orbit whose fitvcve flag is flipped after __init__,
-    When it registers its parameters,
-    Then stage 2 raises too -- otherwise secosw/sesinw/cosi would be
-      silently masked out of the manifest with nothing put in their place.
-    """
-    # Arrange
-    orbit = _orbit([{"name": "b"}], {"orbit.0.tc": {"initval": 2460000.0}})
-    orbit.fitvcve = [True]
-
-    # Act / Assert
-    with pytest.raises(NotImplementedError, match="fitvcve"):
-        orbit.register_parameters(system=None)
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["orbit.b.vcve", "orbit.0.vcve", "orbit.vcve"],
-    ids=["by-name", "by-index", "broadcast"],
-)
-def test_orbit_vcve_user_param_raises(path):
-    """
-    Given a params-file entry naming the orbit's vcve, in any of the three
-      accepted spellings,
+    Given an orbit block asking for the transit-chord parameterization,
     When the Orbit component is constructed,
-    Then it raises NotImplementedError naming the entry -- an unknown
-      parameter path is otherwise silently ignored.
+    Then it raises NotImplementedError naming the undefined physics function,
+      and points at the V_c/V_e half that does work.
+
+    The paper pairs V_c/V_e with fitting the chord; only the eccentricity half
+    is implemented, and the guard is the feature until the other lands.
     """
-    # Arrange
-    blocks = [{"name": "b"}]
-
-    # Act
     with pytest.raises(NotImplementedError) as exc:
-        _orbit(blocks, {path: {"initval": 0.5}})
+        _orbit([{"name": "b", "fitchord": True}])
 
-    # Assert
     msg = str(exc.value)
-    assert "vcve" in msg
+    assert "fitchord" in msg
+    assert "orbit.b" in msg
+    assert "calc_cosi_from_b" in msg
     assert "fitvcve" in msg
-    assert "calc_ecc_from_vcve" in msg
-    assert "calc_omega_from_vcve" in msg
+
+
+def test_fitchord_following_fitvcve_does_not_raise():
+    """
+    Given `fitvcve: true` and no explicit `fitchord`,
+    When the component is constructed,
+    Then it does not raise, and fitchord merely FOLLOWS fitvcve.
+
+    JDE's coupling rule: `fitvcve: false` forces `fitchord: false` unless
+    fitchord is set separately.  A followed value was not asked for, so it must
+    not trip the guard on the unimplemented half -- otherwise turning on the
+    eccentricity parameterization would be impossible until the chord lands.
+    """
+    orbit = _orbit([{"name": "b", "fitvcve": True}])
+
+    assert orbit.fitchord == [True]
+
+
+def test_a_vcve_params_entry_is_honored_not_rejected():
+    """
+    Given a params-file entry naming the orbit's V_c/V_e, in each accepted
+      spelling,
+    When the component is constructed and the entry resolved,
+    Then it is used -- the parameter exists now, so the entry is a start value
+      rather than a silently ignored key.
+    """
+    blocks = [{"name": "b", "fitvcve": True}]
+    for path in ("orbit.b.vcve", "orbit.0.vcve", "orbit.vcve"):
+        # A system_config, unlike the bare _orbit helper: the NAME spelling is
+        # standardized to an index by ConfigManager, which needs to know the
+        # instance names to do it.
+        cm = ConfigManager(
+            {path: {"initval": 0.8}}, system_config={"orbit": blocks}
+        )
+        orbit = Orbit(blocks, cm)
+        resolved = orbit.config_manager.resolve("orbit", "vcve", shape=(1,))
+        assert float(np.atleast_1d(resolved["initval"])[0]) == pytest.approx(
+            0.8
+        ), path
 
 
 def test_orbit_b_user_param_raises_and_points_at_planet_b():

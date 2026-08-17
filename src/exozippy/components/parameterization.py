@@ -60,17 +60,33 @@ def pin_unselected(n_elements, selected):
     return {"overrides": {"sigma": pin.tolist()}}
 
 
-def merge_overrides(entry, overrides):
-    """``entry`` with ``overrides`` merged in, whatever shape it arrived in.
+def merge_options(entry, **options):
+    """``entry`` with ``options`` merged in, whatever shape it arrived in.
 
     A manifest entry may be ``None``, a bare string naming an expressions:
-    block, or a dict of options -- so a caller that ADDS an option to an
-    existing entry has to read the vocabulary as a writer, and the obvious
+    block, or a dict of options.  So a caller that ADDS an option to an existing
+    entry has to read the vocabulary as a writer, and the two obvious spellings
+    both fail: ``{**entry, ...}`` raises on ``None`` (a free parameter), and
     ``dict(entry) if isinstance(entry, dict) else {}`` silently DROPS a
     bare-string ``expr_key``, turning a derived parameter into a sampled one
     (review 4.5.3).  Reading through ``interpret_manifest_entry`` -- the one
-    reader -- makes that unrepresentable.
+    reader -- makes both unrepresentable.
     """
+    return _entry_as_dict(entry, options)
+
+
+def merge_overrides(entry, overrides):
+    """``entry`` with ``overrides`` merged into its ``"overrides"`` dict.
+
+    The ``"overrides"``-channel sibling of :func:`merge_options`: the new keys
+    are merged INTO the existing overrides rather than replacing them, since
+    that channel is per field.
+    """
+    return _entry_as_dict(entry, None, overrides)
+
+
+def _entry_as_dict(entry, options=None, overrides=None):
+    """One manifest entry, read through the interpreter, as a mutable dict."""
     parsed = interpret_manifest_entry(entry)
     out = dict(parsed.options)
     if parsed.expr_selectors:
@@ -85,6 +101,7 @@ def merge_overrides(entry, overrides):
     merged.update(overrides or {})
     if merged:
         out["overrides"] = merged
+    out.update(options or {})
     return out
 
 
@@ -145,17 +162,20 @@ def mode_manifest(modes, table, n_elements=None, options=None, where=""):
     for param in params:
         active = np.zeros(n, dtype=bool)
         selectors = {}
+        reported = {}
         extra = {}
         for i, mode in enumerate(modes):
             spec = table[mode].get(param, _ABSENT)
             if spec is _ABSENT:
                 continue  # inactive on this element
             active[i] = True
-            expr_key, opts = _split_spec(spec, param, mode, where)
+            expr_key, out_key, opts = _split_spec(spec, param, mode, where)
             if expr_key is not None:
                 selectors.setdefault(expr_key, np.zeros(n, dtype=bool))[i] = (
                     True
                 )
+            if out_key is not None:
+                reported.setdefault(out_key, np.zeros(n, dtype=bool))[i] = True
             for key, value in opts.items():
                 if key in extra and extra[key] != value:
                     raise ValueError(
@@ -197,6 +217,16 @@ def mode_manifest(modes, table, n_elements=None, options=None, where=""):
                 )
             else:
                 entry["expr_key"] = {k: m.copy() for k, m in selectors.items()}
+        if reported:
+            # REPORTED elements always keep their selector, even when one block
+            # covers every element of the vector: the bare-string spelling means
+            # "the whole vector, consumed", and these are the opposite of
+            # consumed.  (A parameter reported on EVERY element -- V_c/V_e in a
+            # system where every orbit samples the sqrt(e) pair -- is still one
+            # selector, with an all-True mask.)
+            entry["output_expr_key"] = {
+                k: m.copy() for k, m in reported.items()
+            }
         if not bool(np.all(active)):
             entry["mask"] = active
         else:
@@ -233,12 +263,15 @@ _ABSENT = _Absent()
 
 
 def _split_spec(spec, param, mode, where):
-    """``(expr_key, options)`` for one table cell.
+    """``(expr_key, output_expr_key, options)`` for one table cell.
 
-    Accepts the same three shapes a manifest entry does, and for the same
-    reason: a component author writing a mode table should not have to learn a
-    second vocabulary.  ``interpret_manifest_entry`` does the parsing, so the
-    two cannot drift.
+    Accepts the same shapes a manifest entry does, and for the same reason: a
+    component author writing a mode table should not have to learn a second
+    vocabulary.  ``interpret_manifest_entry`` does the parsing, so the two
+    cannot drift.  A cell may name a consumed expression (``expr_key``), a
+    REPORTED one (``output_expr_key`` -- "this mode does not sample it, but the
+    tables should still show it"), or neither, in which case the mode samples
+    it.
     """
     if spec is None or isinstance(spec, str):
         entry = interpret_manifest_entry(spec)
@@ -251,14 +284,14 @@ def _split_spec(spec, param, mode, where):
             f"(the mode samples it), a string naming an expressions: block, or "
             f"a dict of manifest options."
         )
-    if entry.expr_selectors or entry.has_output_expression:
+    if entry.expr_selectors or entry.output_expr_selectors:
         raise ValueError(
             f"[{where or 'mode_manifest'}] mode '{mode}' gives parameter "
             f"'{param}' a per-element expr_key. The mode table IS the "
             f"per-element statement -- name one expressions: block per mode "
             f"and let the modes select the elements."
         )
-    return entry.expr_key, dict(entry.options)
+    return entry.expr_key, entry.output_expr_key, dict(entry.options)
 
 
 def _selected_mask(selected, n_elements):
