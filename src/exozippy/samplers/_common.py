@@ -458,6 +458,16 @@ def resolve_store_hot_chains(
     ``1 == True`` collision cost `seed_polish` a whole value
     (notes/code_review_20260808.txt 2.9.1), so the guard is now explicit
     rather than incidental.
+
+    An int <= 0 is OFF, the same as ``false``, and not the ``max(1, ...)``
+    it used to take -- which resolved ``store_hot_chains: 0`` to thin=1,
+    i.e. MAXIMUM retention (every hot iteration of every hot rung), the
+    exact opposite of what the summary line above promises and of what
+    anyone writing a zero means (review 1.4.2).  A negative factor has no
+    other reading either, so it takes the same branch rather than raising:
+    the vocabulary already spells off three ways and a fourth spelling of
+    it costs nothing, while a raise would fail a fit at the sampler for a
+    key that changes only what is STORED.
     """
     auto = False
     if isinstance(spec, bool):
@@ -480,7 +490,7 @@ def resolve_store_hot_chains(
                 f"thinning factor."
             )
     else:
-        hot_thin = max(1, int(spec))
+        hot_thin = max(0, int(spec))
 
     named = sorted(
         name
