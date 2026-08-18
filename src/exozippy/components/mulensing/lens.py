@@ -1104,16 +1104,44 @@ class Lens(Component):
         makes) is a warning: the fit will silently begin at the clipped q
         rather than at the seeded one, which is exactly the sort of "the number
         I typed is not the number being fitted" that goes unnoticed for months.
+
+        **NaN is fatal only where it MEANS something**, which is companion
+        slot 0 (review 1.6.5).  The split is not about q being derived -- it
+        always is -- but about which elements the relaxation engine can
+        actually solve: ``symbolic_physics.get_symbol_map`` maps a SINGLE
+        companion, so for slot 0 a NaN really does say the solve failed, i.e.
+        one of the lens body masses is already non-finite, and the advice
+        below is the right advice.  Slots 1 and up are never solved by the
+        engine at all: `register_parameters` seeds them from USER body-mass
+        entries only, skips the hint when there are none (see 2.6.6), and
+        `resolve()` then leaves them NaN because q has no defaults.yaml
+        initval.  That NaN is bookkeeping, not a start -- the graph recomputes
+        q from the mass nodes, which carry finite defaults -- and raising on it
+        killed a 3+ body fit that would have run perfectly well.  Exactly the
+        false-positive class :meth:`_validate_pspl_start`'s docstring warns
+        about for the derived t_E/theta_E/pi_E (the ob161003 theta_E lesson).
+
+        A q that genuinely reaches the magnification backend as NaN is still
+        caught at runtime by ``clip_q_value``, which names the parameter.  The
+        derived-ness test is kept for the skipped slots so that a future
+        parameterization which SAMPLES one of them gets the raise back: for a
+        sampled element the initval IS the start.
         """
         if self.n_companions < 1 or self.q.initval is None:
             return
         q0 = np.atleast_1d(np.asarray(self.q.initval, dtype=float)).ravel()
-        if np.any(np.isnan(q0)):
+        nan = np.isnan(q0)
+        fatal = [
+            i
+            for i in np.flatnonzero(nan)
+            if i == 0 or not self.q.element_is_derived(int(i))
+        ]
+        if fatal:
             raise ValueError(
                 f"{self.prefix}.q starts at {q0.tolist()}, which is not a "
                 f"number.  {_Q_NAN_ADVICE}"
             )
-        out = (q0 < Q_MIN) | (q0 > Q_MAX)
+        out = ~nan & ((q0 < Q_MIN) | (q0 > Q_MAX))
         if np.any(out):
             logger.warning(
                 f"{self.prefix}.q starts at {q0[out].tolist()}, outside the "
