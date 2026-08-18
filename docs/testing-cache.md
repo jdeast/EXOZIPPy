@@ -207,3 +207,18 @@ That is handled on the pytest side: the conftest prune sweeps stale sibling
 `compiledir_*` trees. This is the same class of bug as the Zenodo cache path
 that went stale in July 2026 and kept reporting "cache hit" while restoring
 132 MB into a directory nothing opened.
+
+## A source change can invalidate the whole cache
+
+A change to the *structure* of a commonly built graph misses every cached
+entry, not a few.  Measured 2026-08-18: turning `_RAW_CANCELLATION_CLIP` into a
+`pytensor.shared` (review 1.2.1) altered the graph of every logit-transformed
+element, so the first suite run after it took **14:40 instead of 8:26**, almost
+all of it in `cc1plus`.
+
+This is a one-time cost per such change, and it is expected -- but it looks
+exactly like "the compile cache stopped working", including on CI, where every
+matrix job pays it on the first run after the merge.  Before diagnosing a slow
+run as a cache regression, check whether the diff touched a graph that
+everything builds; the tell is `pgrep cc1plus` during the run, and an entry
+count that climbs rather than holding steady.
