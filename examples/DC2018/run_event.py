@@ -212,7 +212,7 @@ def build_config(name, files, prefix, mmx_json, args):
     return config
 
 
-def build_user_params(ra, dec):
+def build_user_params(ra, dec, fix_u1=False, bands_for_u1=()):
     """Fixed-parameter overrides, mirroring examples/DC2018_128.
 
     Coordinates come from event_info.txt. The Lens's radius/teff/feh fixes
@@ -231,6 +231,23 @@ def build_user_params(ra, dec):
         "star.Lens.radius": {"sigma": 0.0},
         "planet.Companion.radius": {"sigma": 0},
     }
+    if fix_u1:
+        # The DC2018 light curves were simulated with gamma = 0 -- NO limb
+        # darkening -- in all 44 events (the master file's `gamma` column,
+        # and why run_mmexofast_step passes
+        # limb_darkening_coeffs_gamma = 0 to MMEXOFAST).  band.u1 is the
+        # linear u (op.py applies it via set_limb_coeff_u; gamma = 2u/(3-u),
+        # so gamma = 0 <=> u = 0 exactly).
+        #
+        # Left free it does not merely waste a parameter, it corrupts rho:
+        # limb darkening and source size both shape the finite-source peak
+        # and trade against each other.  Measured across five event-128 runs,
+        # u1(W149) ran 0.14 -> 1.87 (two of them physically impossible) and
+        # rho tracked it monotonically, 0.0050 -> 0.0111 against a truth of
+        # 0.00607.  For REAL data a prior is the right answer; for a dataset
+        # generated with zero limb darkening, zero is.
+        for b in bands_for_u1:
+            params[f"band.{b}.u1"] = {"initval": 0.0, "sigma": 0}
     return params
 
 
@@ -282,6 +299,13 @@ def main(argv=None):
         help="PT temperature rungs: an integer or 'auto' "
         "(max(8, ceil(sqrt(D/2)*ln(T_max))); use when the ladder-health "
         "warning reports a communication-limited ladder)",
+    )
+    ap.add_argument(
+        "--fix-u1",
+        action="store_true",
+        help="Pin every band's linear limb-darkening u1 at 0. Correct for "
+        "DC2018, whose 44 events were all simulated with gamma = 0; leaving "
+        "u1 free lets it trade against rho through the finite-source profile",
     )
     ap.add_argument(
         "--adapt-ladder",
@@ -393,7 +417,9 @@ def main(argv=None):
         mmx_json = event_dir / f"{name}_mmexofast.json"
 
     config = build_config(name, files, prefix, mmx_json, args)
-    user_params = build_user_params(ra, dec)
+    user_params = build_user_params(
+        ra, dec, fix_u1=args.fix_u1, bands_for_u1=bands
+    )
 
     # Reproducibility dump: `cd <event_dir> && exozippy DC2018_NNN.yaml`
     params_yaml = event_dir / f"{name}.params.yaml"
