@@ -1,4 +1,5 @@
 import csv
+import logging
 
 import numpy as np
 
@@ -9,6 +10,8 @@ from .texutils import (
     mode_suffix,
     mode_word,
 )
+
+logger = logging.getLogger(__name__)
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -36,6 +39,40 @@ def _instance_name(params, index):
         if p.names and index < len(p.names):
             return str(p.names[index])
     return None
+
+
+def _warn_mixed_lengths(comp_label, printable, n_instances):
+    """Name the printable vectors that are shorter than the instance loop.
+
+    The instance loop below runs to the LONGEST printable vector in the
+    component, on the assumption that every vector in a component has one
+    element per instance of it.  Nothing enforces that, and when it is false
+    the short vector is asked for a row at an index it has no element for --
+    which emitted a table row citing ``\\ez<var><idx>``, a macro
+    ``to_latex_def`` never defined, i.e. an "Undefined control sequence" at
+    the end of a long fit.  (With a list-valued ``summary`` and
+    ``print_to_table`` off, the same index is an outright IndexError.)
+
+    Those rows are skipped rather than raising -- a table is written at
+    wrap-up, and losing it wholesale over a layout mismatch is worse than
+    losing the rows -- but the mismatch is a component bug, so it is named
+    here rather than papered over silently.
+    """
+    short = [
+        (p.label, _instance_count(p))
+        for p in printable
+        if 1 < _instance_count(p) < n_instances
+    ]
+    if not short:
+        return
+    longest = [p.label for p in printable if _instance_count(p) == n_instances]
+    detail = ", ".join(f"{label} ({n})" for label, n in short)
+    logger.warning(
+        f"LaTeX table ({comp_label}): printable vectors of mixed length -- "
+        f"{detail} against {n_instances} instances (e.g. {longest[0]}). "
+        "Every vector in a component is expected to carry one element per "
+        "instance; the missing rows are omitted from the table."
+    )
 
 
 def _instance_subhead(name, n_cols=4):
@@ -345,6 +382,7 @@ def build_latex_output(
                 all_defs.append(p.to_latex_mode_defs())
 
         n_instances = max(_instance_count(p) for p in printable)
+        _warn_mixed_lengths(comp_label, printable, n_instances)
 
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
@@ -367,6 +405,12 @@ def build_latex_output(
                 instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    # This loop runs to the LONGEST printable vector in the
+                    # component, so a shorter one simply has no element here
+                    # -- and asking it for one produced a row citing a macro
+                    # to_latex_def never emitted.  See _warn_mixed_lengths.
+                    if 1 < p_n <= i:
+                        continue
                     # Inactive elements carry no row (see build_csv_output).
                     if not p.element_is_active(i if p_n > 1 else 0):
                         continue
