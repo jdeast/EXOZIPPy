@@ -168,12 +168,12 @@ def _normalize_key(key, config):
     return key
 
 
-def _next_versioned_path(param_path):
+def _bump_version(param_path):
     """Return the path with its version suffix incremented by one.
 
-    foo.params.yaml      → foo.params.2.yaml
-    foo.params.2.yaml    → foo.params.3.yaml
-    foo.params.12.yaml   → foo.params.13.yaml
+    foo.params.yaml      -> foo.params.2.yaml
+    foo.params.2.yaml    -> foo.params.3.yaml
+    foo.params.12.yaml   -> foo.params.13.yaml
     """
     p = Path(param_path)
     suffix = p.suffix  # ".yaml"
@@ -187,6 +187,30 @@ def _next_versioned_path(param_path):
     else:
         base, n = stem, 1
     return p.parent / f"{base}.{n + 1}{suffix}"
+
+
+def _next_versioned_path(param_path):
+    """The first UNUSED version of ``param_path``.
+
+    Auto-versioning is what makes the input file safe -- it is never written
+    over, which is why there is no backup step.  But bumping the version
+    ONCE only protects the input: two fits started from the same
+    ``foo.params.yaml`` both resolve to ``foo.params.2.yaml``, and the second
+    silently destroys the first's restart file.  That happened in practice
+    (2026-08).  The old ``backup_params`` this replaced looped; keep looping.
+
+    The loop is bounded by the filesystem rather than a counter on purpose:
+    the exit condition is "nothing is there", so a directory holding
+    versions 2..40 lands on 41 rather than refusing at some arbitrary cap.
+    It is not atomic against a second process claiming the same name between
+    the check and the write, and deliberately is not -- the realistic
+    collision is sequential runs, and a lock file would be a heavier promise
+    than the guarantee here (never destroy an existing restart file) needs.
+    """
+    candidate = _bump_version(param_path)
+    while candidate.exists():
+        candidate = _bump_version(candidate)
+    return candidate
 
 
 def _mode_seed_quotas(weights, n):
@@ -626,7 +650,13 @@ def write_param_file(
         if param_file:
             output_path = _next_versioned_path(base_dir / param_file)
         else:
-            output_path = base_dir / f"{run_name}.params.2.yaml"
+            # Same versioning, from the name the file WOULD have had.  A
+            # config with no parameter_file (legal since 8.3.1: a blind fit
+            # can seed itself) is exactly the case where several runs share
+            # one directory, so it needs the collision loop most.
+            output_path = _next_versioned_path(
+                base_dir / f"{run_name}.params.yaml"
+            )
 
     param_file = config.get("parameter_file")
     existing_params = {}

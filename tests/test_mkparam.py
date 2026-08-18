@@ -373,7 +373,7 @@ def test_output_filename_increments(tmp_path):
     """
     Given parameter_file = "kelt4.params.2.yaml",
     When mkparam runs,
-    Then the output is kelt4.params.3.yaml (existing 3.yaml would be overwritten).
+    Then the output is kelt4.params.3.yaml.
     """
     import yaml
 
@@ -855,3 +855,79 @@ def test_a_linked_sigma_on_a_non_sampled_entry_is_passed_through(tmp_path):
     entry = yaml.safe_load(open(out))["star.Host.av"]
     assert entry["sigma"] == "star.Other.av_err"
     assert "mu" not in entry
+
+
+# --- 1.3.3: auto-versioning must never destroy an existing restart file -----
+
+
+def test_output_version_skips_a_name_already_on_disk(tmp_path):
+    """
+    Given kelt4.params.yaml AND an existing kelt4.params.2.yaml,
+    When mkparam runs a second time from the same input,
+    Then it writes kelt4.params.3.yaml and leaves the 2 file untouched.
+
+    Bumping the version once protects only the INPUT; two fits started from
+    the same params file both resolved to .2.yaml and the second destroyed
+    the first's restart file.  Bit us in practice (2026-08).
+    """
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    already_there = tmp_path / "kelt4.params.2.yaml"
+    already_there.write_text("# an earlier run's restart file\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.3.yaml"
+    assert already_there.read_text() == "# an earlier run's restart file\n"
+
+
+def test_output_version_skips_a_run_of_existing_versions(tmp_path):
+    """
+    Given versions 2 through 5 already on disk,
+    When mkparam runs,
+    Then it lands on 6 -- the loop is bounded by the filesystem, not a cap.
+    """
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    for n in range(2, 6):
+        (tmp_path / f"kelt4.params.{n}.yaml").write_text("{}\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.6.yaml"
+
+
+def test_output_version_loops_when_the_config_names_no_parameter_file(
+    tmp_path,
+):
+    """
+    Given a config with no parameter_file (legal: a blind fit seeds itself)
+      and an existing <runname>.params.2.yaml,
+    When mkparam runs,
+    Then it writes .3.yaml instead of overwriting.
+
+    That branch used to hardcode ".params.2.yaml", which is exactly the case
+    where several runs share one directory.
+    """
+    already_there = tmp_path / "kelt4.params.2.yaml"
+    already_there.write_text("# an earlier run's restart file\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {"prefix": "fitresults/kelt4", "star": [{"name": "Host"}]}
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.3.yaml"
+    assert already_there.read_text() == "# an earlier run's restart file\n"
