@@ -347,7 +347,16 @@ addopts = "-n 6 --dist loadfile"
 markers = [
     "slow: tests that build a full System + compile PyTensor graphs (~30s+ each); skip with -m 'not slow'",
 ]
-timeout = 300
+# 600, not 300.  A COLD compile cache (a fresh checkout, a new worktree, or
+# CI before its cache is populated) makes a single test's gcc invocation take
+# minutes, and pytest-timeout's signal method CANNOT interrupt a process
+# blocked in a gcc subprocess -- so at 300 the cap was already unenforced for
+# exactly the tests that exceeded it.  Measured on one cold run: four tests
+# overran 300 s and passed (365, 337, 328, 316) while a fifth was killed at
+# the cap, i.e. whether a cold run went red was a coin flip rather than a
+# signal.  600 removes the flake without weakening a rail that was holding
+# nothing; see docs/testing-cache.md.
+timeout = 600
 # "signal" (SIGALRM), NOT "thread".  pytest-timeout's thread method ends in
 # os._exit(1): the xdist worker vanishes without sending workerfinished, so the
 # controller reports only "[gwN] node down: Not properly terminated".  Worse,

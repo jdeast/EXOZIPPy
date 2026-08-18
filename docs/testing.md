@@ -6,20 +6,19 @@ Do not start the full suite with a timeout. Start it and poll.
 
 Testing note: build relation inputs with `pt.dscalar`, **not** `pt.as_tensor_variable(<python float>)` -- pytensor autocasts a bare Python float to the smallest dtype that represents it (5778.0 -> float32), and a unary op like `pt.log10` on it then computes in float32, silently losing ~1e-7. The model always feeds float64. `tests/test_torres.py` pins the port against real IDL output from `massradius_torres.pro`.
 
-## Suite runtime and the pytensor compile cache (PLACEHOLDER -- owned by another branch)
+## Suite runtime and the pytensor compile cache
 
-The runbook for the pytensor compile cache, and the suite's real wall-clock cost, are being
-rewritten by the work that fixes the underlying cache bug; that text will be merged in here
-as `docs/testing-cache.md`. Do not invent a policy in the meantime.
+The suite runs in **~8 minutes warm** and **~25 minutes cold** (`-n 6`, 2473 tests). A cold
+run happens once per fresh checkout or worktree, and on CI until its compiledir cache is
+populated. The runbook -- what the cache is, how it is bounded, how to reclaim space, and
+how to measure a run honestly -- is in `docs/testing-cache.md`. Read that before changing
+anything about the compile cache or the suite's timing.
 
 Two claims that used to live in `CLAUDE.md` are wrong and are recorded here only so nobody
 reintroduces them:
 
-- "The test suite takes ~10 minutes." Measured ~9:39 warm, but the compile-cache pathology
-  makes it much worse in practice, so the number is not a useful expectation.
-- "pytest Timeout inside pytensor cmodule.py, blaming an innocent test: the compile cache
-  grew until refresh(), which opens every entry, neared the 300s cap. Its tmp*/ dirs ARE
-  the cached modules -- prune by age, never rm them. `poetry run pytensor-cache cleanup`."
-  The diagnosis of the Timeout is right; the remedy is not. `pytensor-cache cleanup` only
-  deletes entries older than 31 days and provably does nothing here (measured 4035 -> 4034
-  entries, 4.1 G -> 4.1 G).
+- "The test suite takes ~10 minutes." Superseded by the measured numbers above.
+- "`poetry run pytensor-cache cleanup`" as the remedy for a compile-cache-induced pytest
+  Timeout. The diagnosis of the Timeout is right; the remedy is not. `pytensor-cache
+  cleanup` only deletes entries older than 31 days and provably does nothing here
+  (measured 4035 -> 4034 entries, 4.1 G -> 4.1 G).
