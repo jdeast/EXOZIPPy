@@ -1972,6 +1972,15 @@ class Instrument(Component):
         take ``inst_map`` as an argument precisely so they can be driven
         standalone.  Two spellings of one selection, both correct; not a
         migration left half-done.
+
+        ONE trap when the array being indexed is a TENSOR rather than numpy:
+        a ``pm.Data``'s length is symbolic to pytensor, so a slice's shape is
+        ``min(stop, len) - start`` -- symbolic too -- and the JAX backend
+        cannot trace it ("Shapes must be 1D sequences of concrete values of
+        integer type").  Materialize it there, ``np.arange(sl.start,
+        sl.stop)``: an advanced index of constants has a statically known
+        length.  rvinstrument's Rossiter-McLaughlin subtensor is the live
+        case and says so at the call site.
         """
         if not self.row_ranges:
             raise ValueError(

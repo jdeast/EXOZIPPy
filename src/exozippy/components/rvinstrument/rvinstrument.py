@@ -462,10 +462,18 @@ class RVInstrument(Instrument):
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
-                # The published contiguous range (Instrument.rows), not a
-                # scan: inc_subtensor over a slice stays a plain subtensor.
-                rows = self.rows(i)
-                if rows.stop == rows.start:
+                # The published contiguous range (Instrument.rows), not an
+                # inst_map scan -- but MATERIALIZED as a concrete index
+                # array, not left as the slice.  Do not "simplify" that
+                # away: `time` is a pm.Data whose length pytensor treats as
+                # symbolic, so a slice's shape is min(stop, len) - start,
+                # i.e. symbolic too, and the JAX backend then fails to trace
+                # the RM subtensor ("Shapes must be 1D sequences of concrete
+                # values of integer type").  An advanced index of constants
+                # has a statically known length and traces fine.
+                sl = self.rows(i)
+                rows = np.arange(sl.start, sl.stop)
+                if rows.size == 0:
                     continue
                 oidx, pidx, bidx = resolve_rm_indices(
                     system, oname, self.rm_band[i]
@@ -478,7 +486,7 @@ class RVInstrument(Instrument):
                     bidx,
                     model=self.rm_model[i],
                     light_travel_time_active=self.light_travel_time[i],
-                )  # (rows.stop - rows.start,) m/s
+                )  # (len(rows),) m/s
                 rv_model = pt.inc_subtensor(
                     rv_model[rows], rm_ms / rv_ms_per_internal
                 )
