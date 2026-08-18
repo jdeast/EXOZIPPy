@@ -53,6 +53,7 @@ from exozippy.outputs.evidence import (
     EV_RE2,
     EV_UNSUPPORTED,
     EvidenceResult,
+    _build_layout,
     _mode_draw_index,
     _segments,
     apply_evidence_weighting,
@@ -1047,3 +1048,131 @@ def _fake_one_mode_report(idata):
     )
     rep.attach(idata)
     return rep
+
+
+# ----------------------------------------------------------------------
+# a free RV missing from the posterior is a LAYOUT mismatch, not bad draws
+# ----------------------------------------------------------------------
+
+
+def _model_with_an_extra_free_rv():
+    """A 1-D model carrying a second free RV a trace might not have.
+
+    Real shapes that produce one: a trace written before a model change, a
+    reload whose structural hash was not checked, a Deterministic that
+    became free.
+    """
+    with pm.Model() as model:
+        x = pm.Flat("x_raw")
+        pm.Flat("y_raw")
+        pm.Potential("target", -0.5 * x**2)
+    return model
+
+
+def test_build_layout_names_the_free_rvs_it_could_not_lay_out():
+    """
+    Given a model with two free RVs but a posterior carrying only one,
+    When _build_layout builds the bridge column layout,
+    Then the absent RV is reported back by name rather than being dropped in
+      silence -- the model's logp still needs a value for it, so every draw
+      re-evaluates to a non-finite logp and the refusal that follows indicts
+      the draws instead of the layout.
+    """
+    # ARRANGE
+    model = _model_with_an_extra_free_rv()
+    idata = az.from_dict({"posterior": {"x_raw": np.zeros((2, 50))}})
+
+    # ACT
+    layout, dim, skipped = _build_layout(model, idata)
+
+    # ASSERT
+    assert [entry[0] for entry in layout] == ["x_raw"]
+    assert dim == 1
+    assert skipped == ["y_raw"]
+
+
+def test_build_layout_skips_nothing_when_the_trace_matches():
+    """
+    Given a model whose every free RV is in the posterior,
+    When _build_layout runs,
+    Then it reports no skipped variables -- the diagnostic must be silent on
+      every healthy fit.
+    """
+    # ARRANGE
+    model = _model_with_an_extra_free_rv()
+    idata = az.from_dict(
+        {
+            "posterior": {
+                "x_raw": np.zeros((2, 50)),
+                "y_raw": np.zeros((2, 50)),
+            }
+        }
+    )
+
+    # ACT
+    layout, dim, skipped = _build_layout(model, idata)
+
+    # ASSERT
+    assert sorted(entry[0] for entry in layout) == ["x_raw", "y_raw"]
+    assert dim == 2
+    assert skipped == []
+
+
+@requires_fork
+def test_a_missing_free_rv_is_named_in_the_refusal_and_the_status(caplog):
+    """
+    Given a mode whose evidence is estimated against a model carrying a free
+      RV the trace does not have,
+    When estimate_mode_evidences runs,
+    Then the mode is still refused, but the reason and the status dict both
+      name the absent variable -- previously the refusal read only "a draw
+      the sampler produced cannot have zero target density", pointing the
+      user at the sampler when the real cause is the trace.
+    """
+    # ARRANGE
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=(2, 400))
+    idata = az.from_dict(
+        {
+            "posterior": {"x_raw": x},
+            "sample_stats": {"lp": -0.5 * x**2},
+        }
+    )
+    report = ModeReport(
+        labels=np.zeros((2, 400), dtype=int),
+        modes=[
+            ModeInfo(
+                index=0,
+                weight=1.0,
+                n_draws=800,
+                lp_med=0.0,
+                lp_max=0.0,
+                delta_lp_max=0.0,
+                per_chain_weight=np.array([0.5, 0.5]),
+            )
+        ],
+        n_valid=800,
+        n_invalid=0,
+        n_unassigned=0,
+        provenance="occupancy",
+        weights_reliable=True,
+        n_transitions=0,
+        feature_vars=["x_raw"],
+    )
+
+    # ACT
+    with caplog.at_level("WARNING", logger="exozippy.outputs.evidence"):
+        results = estimate_mode_evidences(
+            _model_with_an_extra_free_rv(),
+            idata,
+            report,
+            max_posterior_draws=200,
+            n_proposal=200,
+        )
+
+    # ASSERT
+    assert results[0].refused
+    assert "y_raw" in results[0].reason
+    assert results[0].status["skipped_rvs"] == ["y_raw"]
+    assert results[0].status["n_skipped_rvs"] == 1
+    assert "y_raw" in " ".join(r.getMessage() for r in caplog.records)
