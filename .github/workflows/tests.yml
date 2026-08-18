@@ -167,6 +167,60 @@ jobs:
           path: ~/.astropy/cache
           key: astropy-cache-de430
 
+      # PyTensor compiles a C module for essentially every distinct graph the
+      # suite builds and caches it in its compiledir. A CI job starts with an
+      # empty one, so EVERY graph is compiled from scratch, and that dominates
+      # the runtime here: locally, one full suite run against an empty
+      # compiledir takes ~53 minutes against ~9 warm, on six workers. The
+      # 34-45 minute jobs this workflow currently reports are very largely
+      # gcc.
+      #
+      # RESTORE HERE, SAVE ONLY ON MASTER (the save step is at the end of the
+      # job). Two reasons, and the second is the one that bites:
+      #
+      #   * A cache saved on the default branch is readable from every branch,
+      #     while one saved on a topic branch is visible only to that branch
+      #     and its PR. Saving from master is therefore the only way one entry
+      #     serves every pull request.
+      #   * The repository-wide cache budget is 10 GB and GitHub evicts
+      #     least-recently-ACCESSED to stay under it. A compiledir is a few
+      #     hundred MB per matrix combination, so saving one on every PR run
+      #     would churn several GB a day and put the Zenodo spectra (132 MB)
+      #     and the ephemeris kernel (115 MB) above at risk of eviction --
+      #     trading a 5-minute cache for a 250 MB download. Restricting writes
+      #     to master pushes caps the churn at one set per merge.
+      #
+      # The key carries github.run_id so each master push writes a NEW entry
+      # rather than hitting an existing one and skipping the save (a cache key
+      # is immutable once written -- that is the trap that freezes a cache at
+      # whatever the first run produced). The restore-keys prefix is what
+      # makes that usable: it matches the most recent entry for this os +
+      # python + lockfile, falling back to any entry for this os + python when
+      # the lock moves. A partial hit is worth having -- most graphs are
+      # unaffected by a dependency bump, and those that are simply recompile.
+      #
+      # poetry.lock stands in for the pytensor version: PyTensor's cache keys
+      # already embed its own version, the compiler version and the graph, so
+      # a stale entry is a miss and never a wrong answer.
+      #
+      # The KERNEL VERSION is the footgun to know about here, and it is
+      # handled on the pytest side rather than in the key. PyTensor names the
+      # compiledir after the platform string, which includes the kernel
+      # release, so a runner image bump silently strands the entire restored
+      # tree -- nothing reads it, and nothing would ever delete it either, so
+      # it would ride along in the cache forever making the download bigger
+      # for no benefit. The root conftest's prune sweeps sibling compiledir_*
+      # trees for exactly this case.
+      - name: Restore the PyTensor compile cache
+        id: compiledir-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.pytensor-pytest
+          key: pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}-
+            pytensor-compiledir-p1-${{ matrix.os }}-${{ matrix.python-version }}-
+
       # -n 2 overrides the -n 6 in pyproject's addopts. Six workers suit a
       # workstation but oversubscribe a GitHub runner: each peaks ~1-2 GB
       # building a System and compiling PyTensor graphs. The symptom was never
@@ -174,8 +228,35 @@ jobs:
       # heavy test drew the short straw -- it moved between
       # test_integration_kelt4, test_gp and test_sed_plot_data across runs,
       # and vanished entirely on others. That is a memory ceiling, not a bug.
+      #
+      # The compiledir budget is tighter than the local default (3000). A
+      # developer's cache wants room for several branches' worth of divergent
+      # graphs; a CI job runs one commit, so anything beyond roughly one
+      # suite's ~1150 entries is dead weight that only inflates the artifact
+      # this job uploads.
       - name: Run test suite
+        env:
+          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1500"
         run: poetry run pytest -q -n 2
+
+      # The conftest prunes at session START, so at this point the directory
+      # holds the budget plus everything this run compiled. Trim it again so
+      # the uploaded artifact is a bounded, deterministic size rather than
+      # growing by one run's worth on every merge.
+      - name: Prune the compile cache before saving it
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
+          poetry run python scripts/pytensor_cache_budget.py \
+            --max-entries 1500 --sweep-other-platforms
+
+      # See the long comment on the restore step for why this is master-only.
+      - name: Save the PyTensor compile cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.pytensor-pytest
+          key: ${{ steps.compiledir-cache.outputs.cache-primary-key }}
 
   # Installs WITHOUT poetry.lock, resolving dependencies fresh the way a user's
   # `pip install exozippy` does.
@@ -252,6 +333,14 @@ jobs:
         with:
           path: ~/.astropy/cache
           key: astropy-cache-de430
+
+      # DELIBERATELY NO PyTensor compiledir cache here, unlike the matrix job.
+      # That cache is keyed on poetry.lock as a proxy for the pytensor version,
+      # and this job's whole purpose is to install without the lock -- so the
+      # key would claim a resolution it did not get. PyTensor embeds its own
+      # version in every cache key, so the entries would simply all miss; the
+      # cost would be the download, paid for nothing. This job is nightly and
+      # not on the merge path, so its runtime is the cheapest thing here.
 
       # Saved to a file, not just echoed: the failure report below quotes it,
       # and "which versions did it actually pick" is the first question anyone
