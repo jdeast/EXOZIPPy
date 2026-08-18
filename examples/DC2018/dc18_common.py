@@ -94,12 +94,14 @@ def event_coords(data_dir, event):
     return float(info["ra"][idx[0]]), float(info["dec"][idx[0]])
 
 
-def load_truth(data_dir, event):
-    """Simulation truth for one event, with t_0 in full BJD.
+def load_master_row(data_dir, event):
+    """The raw master_file.txt row for one event, plus its class label.
 
-    Returns (params_dict, class_label): params has the PARAMS keys, class is
-    the challenge's event class scraped from the master-file row ('cassan'
-    for the 2L1S planet sample, 'cv' for cataclysmic variables, ...).
+    Exposed separately from load_truth because the row carries far more than
+    the seven lensing parameters -- lens/source distances, masses, radii and
+    galactic-frame proper motions -- which the physics-chain and
+    alpha-convention checks (scripts/dc18_alpha_convention.py,
+    examples/DC2018/dc128_truth_forward.py) need.  Returns (row, class).
     """
     ans = Path(data_dir) / "Answers"
     cols = np.genfromtxt(
@@ -124,7 +126,20 @@ def load_truth(data_dir, event):
     row = df.iloc[event - 1]
     with open(master) as f:
         line = f.readlines()[event]  # +1 for the header line
-    class_label = line.split(" ")[-2].split("_")[0]
+    return row, line.split(" ")[-2].split("_")[0]
+
+
+def load_truth(data_dir, event):
+    """Simulation truth for one event, with t_0 in full BJD.
+
+    Returns (params_dict, class_label): params has the PARAMS keys, class is
+    the challenge's event class scraped from the master-file row ('cassan'
+    for the 2L1S planet sample, 'cv' for cataclysmic variables, ...).
+
+    NOTE the alpha returned here is the master file's own value, which is
+    NOT convertible to the fitted convention -- see ALPHA_IS_UNMAPPABLE.
+    """
+    row, class_label = load_master_row(data_dir, event)
     truth = {
         "t_0": float(row["t0"]) + DC18_TIME_ORIGIN,
         "u_0": float(row["u0"]),
