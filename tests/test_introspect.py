@@ -291,3 +291,51 @@ def test_star_mass_declares_no_bounds_but_logmass_does():
     assert params["logmass"]["lower"] == -9.0
     assert params["logmass"]["upper"] == 2.5
     assert params["logmass"]["sampled"] is True
+
+
+def test_global_schema_covers_every_reserved_config_key():
+    """
+    Given the top-level config vocabulary System validates against,
+    When _global_schema describes the global keys,
+    Then every one of them is present.
+
+    The vocabulary lived in three drifting copies: system.RESERVED_CONFIG_KEYS
+    (the tested source of truth, ten keys), _global_schema (three of the ten,
+    while claiming to describe run.py's keys) and the GUI's own literal
+    fallback.  The GUI's config-file DETECTION reads _global_schema().keys(),
+    so the drift was not cosmetic -- a project file whose only non-component
+    keys were, say, `modes:` and `mkparam:` classified as "other".
+    _global_schema is now derived from the frozenset; only the per-key doc and
+    kind are stated here.
+    """
+    # ARRANGE
+    from exozippy.system import RESERVED_CONFIG_KEYS
+
+    # ACT
+    schema = introspect._global_schema()
+
+    # ASSERT
+    assert set(schema) == set(RESERVED_CONFIG_KEYS)
+    for key, entry in schema.items():
+        assert entry["key"] == key
+        assert entry["kind"] in ("option", "block")
+        assert entry["doc"]
+
+
+def test_global_schema_keeps_the_sampler_keys_from_run():
+    """
+    Given the derived global schema,
+    When the sampler block is described,
+    Then its `accepts` is still run.KNOWN_SAMPLER_KEYS.
+
+    Deriving the key SET from RESERVED_CONFIG_KEYS must not cost the one
+    place that was already derived rather than restated.
+    """
+    # ARRANGE
+    from exozippy.run import KNOWN_SAMPLER_KEYS
+
+    # ACT
+    schema = introspect._global_schema()
+
+    # ASSERT
+    assert schema["sampler"]["accepts"] == sorted(KNOWN_SAMPLER_KEYS)

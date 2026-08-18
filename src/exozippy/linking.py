@@ -68,6 +68,42 @@ _PATH_2 = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?![\w.(])")
 
 _SYMPY_LOCALS_BASE = {"pi": sp.pi, "E": sp.E}
 
+# The functions a link expression may call: sympy head -> the pytensor.tensor
+# name that builds it.  ONE table, two consumers -- parse_link_expression
+# rejects everything not in it (below) and sympy_to_pytensor builds from it --
+# because the two must agree by construction.  They did not: the parser
+# validated only free SYMBOLS, so an unknown head (a typo like sqr(), or
+# log10(), which sympy does not define) sailed through as an AppliedUndef and
+# only sympy_to_pytensor's "Unsupported operation" complained -- and only on
+# the two link kinds that build a graph.  A seed-only initval link and a mu
+# link never do: they are consumed by _apply_directed_links, whose
+# float(expr.evalf()) can never evaluate an undefined function, and whose
+# failure is caught as "not evaluable yet" at DEBUG.  The seed simply never
+# applied, silently, forever.
+# Pow (x**y, sqrt) and the arithmetic heads are structural in sympy, not
+# Function subclasses, so they are handled directly by _eval and are
+# deliberately absent here.
+_SUPPORTED_FUNCS = {
+    sp.sin: "sin",
+    sp.cos: "cos",
+    sp.tan: "tan",
+    sp.asin: "arcsin",
+    sp.acos: "arccos",
+    sp.atan: "arctan",
+    sp.atan2: "arctan2",
+    sp.sinh: "sinh",
+    sp.cosh: "cosh",
+    sp.tanh: "tanh",
+    sp.exp: "exp",
+    sp.log: "log",
+    sp.Abs: "abs",
+    sp.sign: "sign",
+    sp.floor: "floor",
+    sp.ceiling: "ceil",
+    sp.Min: "minimum",
+    sp.Max: "maximum",
+}
+
 
 @dataclass
 class ParamLink:
@@ -194,6 +230,29 @@ def parse_link_expression(expr_str, system_config, context=""):
             f"Link expression '{expr_str}'{context} could not be parsed: {e}"
         ) from e
 
+    # A FUNCTION CALL THE BUILDER CANNOT BUILD IS A PARSE ERROR, HERE.
+    # sympify happily turns any unknown name into an AppliedUndef, so `sqr(x)`
+    # (a typo) and `log10(x)` (not a sympy name) parse cleanly.  Deferring the
+    # complaint to sympy_to_pytensor only covers the hard/soft link kinds; the
+    # seed-only and mu links never reach it and silently never applied.  See
+    # _SUPPORTED_FUNCS.
+    bad_funcs = sorted(
+        {
+            str(a.func)
+            for a in expr.atoms(sp.Function)
+            if a.func not in _SUPPORTED_FUNCS
+        }
+    )
+    if bad_funcs:
+        supported = ", ".join(sorted(f.__name__ for f in _SUPPORTED_FUNCS))
+        raise ValueError(
+            f"Link expression '{expr_str}'{context} calls "
+            f"{', '.join(repr(f) for f in bad_funcs)}, which is not a "
+            f"function link expressions support. Supported: {supported}, "
+            f"plus sqrt/** and the arithmetic operators. "
+            f"(For a base-10 logarithm write log(x)/log(10).)"
+        )
+
     dep_paths = sorted(str(f) for f in expr.free_symbols)
     allowed = set(placeholders.values())
     unknown = [d for d in dep_paths if d not in allowed]
@@ -293,25 +352,12 @@ def sympy_to_pytensor(expr, sym_values):
     """
     import pytensor.tensor as pt
 
+    # Built from the one table the parser validates against, so the set of
+    # functions a link may CONTAIN and the set it can be BUILT from cannot
+    # drift apart (they had, in the direction that fails silently -- see
+    # _SUPPORTED_FUNCS).
     _FUNC_MAP = {
-        sp.sin: pt.sin,
-        sp.cos: pt.cos,
-        sp.tan: pt.tan,
-        sp.asin: pt.arcsin,
-        sp.acos: pt.arccos,
-        sp.atan: pt.arctan,
-        sp.atan2: pt.arctan2,
-        sp.sinh: pt.sinh,
-        sp.cosh: pt.cosh,
-        sp.tanh: pt.tanh,
-        sp.exp: pt.exp,
-        sp.log: pt.log,
-        sp.Abs: pt.abs,
-        sp.sign: pt.sign,
-        sp.floor: pt.floor,
-        sp.ceiling: pt.ceil,
-        sp.Min: pt.minimum,
-        sp.Max: pt.maximum,
+        head: getattr(pt, attr) for head, attr in _SUPPORTED_FUNCS.items()
     }
 
     def _eval(node):

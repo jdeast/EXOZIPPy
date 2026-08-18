@@ -128,14 +128,24 @@ def test_no_root_level_default_key_has_two_owners():
     )
 
 
-def test_rank_upgrade_tie_break_is_alphabetical():
+def test_rank_upgrade_tie_break_is_alphabetical(monkeypatch):
     """
-    Given two symbols in one relation that tie on provenance rank,
-    When _attempt_rank_upgrade picks its target,
-    Then it takes the alphabetically first, not the first iterated.
+    Given two symbols of one VIOLATED relation that tie on provenance rank,
+    When _relax_equation picks the symbol to rewrite (Condition B),
+    Then it rewrites the alphabetically first, not the first iterated.
 
-    A bare min() returns the first minimum it encounters, so on a tie the
-    winner would follow set-iteration order (PYTHONHASHSEED-randomized).
+    Sorting by (rank, name) is what makes that choice reproducible: the
+    candidate list comes from `eq.free_symbols`, a set of Symbols whose hashes
+    include the PYTHONHASHSEED-randomized name string, so on a rank tie an
+    unsorted selection would follow set-iteration order and two processes
+    running identical code would rewrite different parameters.
+
+    This used to be pinned on _attempt_rank_upgrade, which was a dead
+    alternative solve path (deleted 2026-08-18 with the rest of review 5.1.1).
+    The rule is retargeted here, on the live engine, and asserted on the
+    OUTCOME -- which symbol actually moved -- rather than by spying on min().
+    `free_symbols` is monkeypatched to a deliberately non-alphabetical tuple
+    so an unsorted implementation fails every run instead of by luck.
     """
     # Arrange
     import sympy as sp
@@ -149,43 +159,20 @@ def test_rank_upgrade_tie_break_is_alphabetical():
     a, b = sp.Symbol(a_name), sp.Symbol(b_name)
     cm.master_symbol_map.setdefault(a_name, a)
     cm.master_symbol_map.setdefault(b_name, b)
+
+    # Both known, both at the same rank, and the relation is violated: that is
+    # Condition B, whose whole job is to pick the weakest symbol and rewrite it.
+    resolved = {a_name: 1.0, b_name: 2.0}
     provenance = {a_name: RANK_DEFAULT, b_name: RANK_DEFAULT}
-
-    class _StubEq:
-        """free_symbols in deliberately non-alphabetical order.
-
-        A real Eq hands back a set, whose order is randomized per process --
-        which would make this test pass or fail by luck.  Pinning the order
-        makes the unsorted implementation fail every time.
-        """
-
-        free_symbols = (b, a)
-
-    # The method bails at its dependency check (nothing is resolved), but only
-    # after choosing a target, so spy on the selection.
-    real_min = min
-    seen = []
-
-    def spy_min(iterable, **kwargs):
-        items = list(iterable)
-        result = real_min(items, **kwargs)
-        seen.append((items, result))
-        return result
-
-    import builtins
-
-    orig = builtins.min
-    builtins.min = spy_min
-    try:
-        # Act
-        cm._attempt_rank_upgrade(_StubEq(), {}, provenance, {}, {})
-    finally:
-        builtins.min = orig
-
-    # Assert
-    assert seen, "expected _attempt_rank_upgrade to select a target"
-    candidates, target = seen[0]
-    assert candidates == sorted(candidates), (
-        f"symbols were not sorted before selection: {candidates}"
+    eq = sp.Eq(a, b)
+    monkeypatch.setattr(
+        sp.Eq, "free_symbols", property(lambda self: (b, a)), raising=False
     )
-    assert target == min(a_name, b_name)
+
+    # Act
+    changed = cm._relax_equation(eq, resolved, provenance, {}, {}, 1e-6)
+
+    # Assert -- pi_E_E sorts first, so it is the one that moves.
+    assert changed
+    assert resolved[a_name] == 2.0
+    assert resolved[b_name] == 2.0

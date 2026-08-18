@@ -250,7 +250,12 @@ def test_probe_derivable_rolls_back_a_solver_timeout_blacklist(monkeypatch):
     import exozippy.config as cfgmod
 
     def _always_times_out(*args, **kwargs):
-        raise TimeoutError("Symbolic solver timed out!")
+        # The engine's own timeout exception: _execute_solve guards the solve
+        # with the shared _sympy_time_limit context manager (which restores
+        # the previous SIGALRM handler -- review 2.1.3), and that raises
+        # SymbolicTimeout, not the bare TimeoutError the hand-armed alarm it
+        # replaced used to raise.
+        raise cfgmod.SymbolicTimeout("Symbolic solver timed out!")
 
     cm = _cm(_full_pspl_params(), _BINARY_CONFIG)
     monkeypatch.setattr(cfgmod.sp, "solve", _always_times_out)

@@ -21,6 +21,7 @@ import pytest
 
 from exozippy.components.star.star import Star
 from exozippy.config import ConfigManager
+from exozippy.linking import _SUPPORTED_FUNCS, parse_link_expression
 
 DEG2RAD = np.pi / 180.0
 
@@ -523,3 +524,103 @@ def test_solve_does_not_inject_results_into_callers_params_dict():
 
     # ASSERT
     assert user_params == before
+
+
+# ---------------------------------------------------------------------------
+# An unknown function is a PARSE error  (review 1.1.2 / 7.1.1c)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", ["sqr(star.B.age)", "log10(star.B.age)"])
+def test_an_unknown_function_raises_at_parse_time(call):
+    """
+    Given a link expression calling a function nothing can build -- a typo
+      (`sqr`) or a name sympy does not define (`log10`),
+    When the ConfigManager parses the params entry,
+    Then it raises, naming the function and the supported set.
+
+    sympify turns any unknown name into an AppliedUndef, and the parser used
+    to validate only free SYMBOLS, so these sailed through.  Hard and soft
+    links then failed loudly in sympy_to_pytensor -- but a seed-only initval
+    link and a mu link never build a graph: they are consumed by
+    _apply_directed_links, whose float(expr.evalf()) can never evaluate an
+    undefined function and whose failure is logged as "not evaluable yet" at
+    DEBUG.  The seed silently never applied.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a function link expressions"):
+        ConfigManager({"star.A.age": {"initval": call}}, system_config=config)
+
+
+def test_a_seed_only_link_is_covered_too():
+    """
+    Given the seed-only spelling (an initval link with NO sigma) carrying an
+      unknown function,
+    When the ConfigManager parses it,
+    Then it raises.
+
+    This is the spelling the old behavior failed silently on -- it is the
+    reason the check moved to parse time rather than being left to the
+    graph builder, so it is pinned separately from the hard/soft links.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT / ASSERT
+    with pytest.raises(ValueError, match="not a function link expressions"):
+        ConfigManager(
+            {"star.A.age": {"initval": "sqr(star.B.age)"}},
+            system_config=config,
+        )
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "sqrt(star.B.age)",
+        "log(star.B.age)/log(10)",
+        "exp(star.B.age) + max(star.A.age, star.B.age)",
+    ],
+)
+def test_supported_functions_still_parse(expr):
+    """
+    Given expressions using the supported vocabulary (including sqrt, which
+      is a Pow rather than a Function, and the log(x)/log(10) spelling the
+      error message recommends),
+    When parse_link_expression runs,
+    Then it returns an expression naming the referenced parameters.
+
+    The new check rejects by absence from one table, so the assertion that
+    matters is that the table is not too small.
+    """
+    # ARRANGE
+    config = {"star": [{"name": "A"}, {"name": "B"}]}
+
+    # ACT
+    parsed, deps = parse_link_expression(expr, config)
+
+    # ASSERT
+    assert parsed is not None
+    assert deps and all(d.startswith("star.") for d in deps)
+
+
+def test_every_supported_function_can_be_built():
+    """
+    Given the table the parser validates against,
+    When sympy_to_pytensor builds each head,
+    Then every one of them resolves to a pytensor op.
+
+    The two used to be independent literals, and the drift they permitted
+    only ever failed silently (a function the parser accepted and the
+    builder could not build).  The builder now derives its map from the
+    parser's table; this pins that every name in it is real.
+    """
+    # ARRANGE
+    import pytensor.tensor as pt
+
+    # ACT / ASSERT
+    for head, attr in _SUPPORTED_FUNCS.items():
+        assert hasattr(pt, attr), f"{head} -> pt.{attr}"

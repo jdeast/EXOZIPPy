@@ -180,6 +180,7 @@ def _do_solve(state, msg, resp_q):
         export = system.config_manager.export_solution(
             derived_params=system.derived_elements(),
             active_elements=system.active_elements(),
+            manifest_overrides=system.manifest_overrides(),
         )
         # Relaxation done; the seconds-scale compile begins now. Ship the
         # data-only plots along so the GUI has something to draw meanwhile.
