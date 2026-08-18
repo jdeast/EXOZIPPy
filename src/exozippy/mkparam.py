@@ -326,6 +326,75 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     )
 
 
+def _map_draw_from_lp(lp_values, mode_report):
+    """Pick the best VALID draw by lp, as ``(chain, draw, lp)`` or None.
+
+    Two filters, both of which ``np.argmax`` got wrong in the direction that
+    silently writes a bad restart seed:
+
+    * **NaN is not a maximum.**  ``np.argmax`` returns the index of the first
+      NaN it sees, so a single non-finite lp anywhere in the trace made that
+      draw the "MAP".  ``np.nanargmax`` ranks the finite ones instead.
+    * **A finite lp is not proof the draw is usable.**  The runaway-lp failure
+      mode produces draws whose lp is finite and enormous -- ``outputs.modes``
+      labels them -1 (numerically invalid) precisely because they win any
+      ranking by construction.  So the mode pass's own per-draw labels mask
+      the ranking here, exactly as ``_sample_seed_draws``' stratified path
+      already excludes label -1.  The MAP path was the last leak.
+
+    The all-invalid trace is refused upstream (``_refuse_invalid_seed_draws``)
+    and so cannot normally reach this; under ``mkparam: {force: true}`` it can,
+    and then there is nothing left to rank -- returning None hands the caller
+    the same honest "no rankable lp" fallback a trace with no lp at all gets,
+    rather than ``argmax``'s silent index 0.
+
+    ``mode_report`` may be None (the mode pass failed, which must never break
+    seed emission) and its labels are only trusted when their shape matches
+    lp's: a mismatch would mask the wrong draws, which is worse than not
+    masking at all.
+    """
+    ranked = np.asarray(lp_values, dtype=float)
+    labels = getattr(mode_report, "labels", None)
+    if labels is not None:
+        labels = np.asarray(labels)
+        if labels.shape == ranked.shape:
+            masked = np.where(labels < 0, np.nan, ranked)
+            n_dropped = int(
+                np.isfinite(ranked).sum() - np.isfinite(masked).sum()
+            )
+            if np.isfinite(masked).any():
+                if n_dropped:
+                    logger.info(
+                        "mkparam: excluded %d numerically invalid draw(s) from "
+                        "the MAP ranking.",
+                        n_dropped,
+                    )
+                ranked = masked
+            elif n_dropped:
+                # Every finite lp belongs to an invalid draw.  Say so and rank
+                # the finite ones anyway: the alternative is no MAP at all, and
+                # the caller's fallback (last draw of chain 0) is not obviously
+                # better than the best of a known-bad set.  Only reachable
+                # under `mkparam: {force: true}`, which already accepted that.
+                logger.warning(
+                    "mkparam: every draw with a finite lp was labelled "
+                    "numerically invalid; ranking them anyway."
+                )
+        else:
+            logger.debug(
+                "mkparam: mode labels %s do not match lp %s -- not masking "
+                "the MAP ranking.",
+                labels.shape,
+                ranked.shape,
+            )
+    if not np.isfinite(ranked).any():
+        return None
+    flat = ranked.flatten()
+    map_idx = int(np.nanargmax(flat))
+    n_draws = ranked.shape[-1] if ranked.ndim > 1 else ranked.size
+    return map_idx // n_draws, map_idx % n_draws, float(flat[map_idx])
+
+
 def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
 
@@ -474,9 +543,9 @@ def write_param_file(
     validity filter -- see ``_refuse_invalid_seed_draws`` for why that is a
     refusal rather than a warning, and for the ``mkparam: {force: true}``
     escape hatch.  This check covers the DEFAULT single-seed path too, and
-    has to: seed 0 is the MAP draw, and with an all-NaN lp ``np.argmax``
-    returns index 0, so the emitted "MAP" is silently the first draw of
-    chain 0.
+    has to: seed 0 is the MAP draw.  A PARTIALLY invalid trace passes that
+    gate, and seed 0 is chosen from the valid draws only -- see
+    ``_map_draw_from_lp``.
 
     Parameters
     ----------
@@ -615,23 +684,24 @@ def write_param_file(
     # posterior median for old Metropolis trace files without lp.
     ss = idata.get("sample_stats")
     has_lp = ss is not None and "lp" in ss.data_vars
+    map_pick = None
     if has_lp:
-        lp = ss["lp"]
-        flat_lp = lp.values.flatten()
-        map_idx = int(np.argmax(flat_lp))
-        n_draws = lp.sizes["draw"]
-        map_chain = map_idx // n_draws
-        map_draw = map_idx % n_draws
-        map_lp = float(flat_lp[map_idx])
+        map_pick = _map_draw_from_lp(ss["lp"].values, mode_report)
+    if map_pick is not None:
+        map_chain, map_draw, map_lp = map_pick
         logger.info(
             f"mkparam: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
         )
     else:
-        # No lp → use last draw of chain 0 as a self-consistent fallback.
-        # Per-parameter medians would be inconsistent (the joint point may not
-        # exist in the posterior); any real draw is always self-consistent.
+        # No lp, or no draw with a rankable one -> use the last draw of chain 0
+        # as a self-consistent fallback.  Per-parameter medians would be
+        # inconsistent (the joint point may not exist in the posterior); any
+        # real draw is always self-consistent.
         logger.warning(
-            "mkparam: lp not in trace -- using last draw of chain 0 as fallback"
+            "mkparam: %s -- using last draw of chain 0 as fallback",
+            "lp not in trace"
+            if not has_lp
+            else "no draw in the trace has a finite, valid lp",
         )
         map_chain, map_draw, map_lp = (
             0,
