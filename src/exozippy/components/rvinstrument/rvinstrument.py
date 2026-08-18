@@ -841,7 +841,7 @@ class RVInstrument(Instrument):
                     "caption": (
                         "Radial velocities with the best-fit model "
                         "(red); posterior draws are overplotted with "
-                        "low opacity."
+                        "low opacity." + self.detrend_caption()
                     ),
                 },
             )
@@ -922,6 +922,7 @@ class RVInstrument(Instrument):
                                 + latex_escape(oname)
                                 + ", with the other orbits' "
                                 "contributions removed."
+                                + self.detrend_caption()
                             ),
                             "hline_y": 0.0,
                             "dynamic_data": True,

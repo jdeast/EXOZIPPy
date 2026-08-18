@@ -1631,6 +1631,7 @@ class Transit(Instrument):
                             "Transit photometry from "
                             + latex_escape(self.names[i])
                             + " with the best-fit model (red)."
+                            + self.detrend_caption()
                         ),
                     },
                 )
@@ -1694,6 +1695,7 @@ class Transit(Instrument):
                             + " in "
                             + latex_escape(self.names[i])
                             + ", baseline and other planets removed."
+                            + self.detrend_caption()
                         ),
                         # The phased DATA re-folds with tc/P and its cleaning
                         # subtracts the baseline, other planets and any GP --

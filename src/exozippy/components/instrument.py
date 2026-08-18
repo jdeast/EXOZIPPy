@@ -2046,6 +2046,25 @@ class Instrument(Component):
         coeffs = self._point_value(point, self.detrend_coeffs)
         return np.asarray(self.detrend_matrix @ coeffs, dtype=float)
 
+    def detrend_caption(self):
+        """The sentence a detrending fit's figure captions owe the reader.
+
+        Empty without detrend columns, so no shipped caption changes unless
+        the fit really does subtract a trend from the plotted points -- which
+        the reader has to be told, since those are then not the raw data
+        (see ``detrend_at_data`` for why the correction goes on the data
+        rather than on the model curve).  It is `meta["caption"]` LaTeX,
+        which is verbatim, so it carries no escaping.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return ""
+        return (
+            " The fitted linear trend against the data file's detrend "
+            "columns has been subtracted from the plotted points; the model "
+            "curve is evaluated on a smooth time grid and so cannot carry a "
+            "per-observation term."
+        )
+
     def detrend_dep_labels(self):
         """``param_deps`` entry for the detrend coefficients, or ``[]``.
 

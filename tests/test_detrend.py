@@ -371,3 +371,40 @@ def test_phased_transit_data_are_detrend_corrected(detrended_transit):
     np.testing.assert_allclose(
         np.sort(data_trace.y), np.sort(expected), atol=1e-9
     )
+
+
+def test_a_detrending_fits_captions_say_the_data_were_corrected(
+    detrended_rv, detrended_transit
+):
+    """
+    Given a fit with active detrend columns,
+    When plot_data builds its specs,
+    Then every caption says the fitted trend was subtracted from the
+    plotted points -- the reader is looking at corrected data, not the raw
+    file, and the figure has to say so.
+    """
+    rv_system, rv_point = detrended_rv[0], detrended_rv[1]
+    lc_system, lc_point = detrended_transit[0], detrended_transit[1]
+    for comp, system, point in (
+        (rv_system.rvinstrument, rv_system, rv_point),
+        (lc_system.transit, lc_system, lc_point),
+    ):
+        specs = comp.plot_data(system, point)
+        assert specs
+        for spec in specs:
+            assert "detrend columns" in spec.meta["caption"]
+
+
+def test_a_fit_without_detrend_columns_says_nothing_extra(detrended_rv):
+    """
+    Given an instrument with no detrend columns,
+    When the shared caption sentence is asked for,
+    Then it is empty, so no shipped example's caption changes.
+    """
+    comp = detrended_rv[0].rvinstrument
+    saved = comp.total_detrend_cols
+    try:
+        comp.total_detrend_cols = 0
+        assert comp.detrend_caption() == ""
+    finally:
+        comp.total_detrend_cols = saved
