@@ -931,6 +931,56 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
     )
 
 
+def test_the_wrap_up_barrier_measures_the_draw_phase_only(monkeypatch):
+    """
+    Given a run with BOTH adaptations off, so nothing inside the log-window
+      branch ever reset the counters,
+    When the wrap-up ladder health report runs,
+    Then the swap counters it is handed cover exactly the draw phase.
+
+    The comment claimed "window resets stop when tuning ends", but the only
+    resets lived inside the adapt branch at log_every boundaries: with both
+    adaptations off the report measured tune+draws, and with either on it
+    measured whatever fell after the last boundary.  Either way it was not
+    the FINAL ladder's barrier, which is the only thing the report's
+    n_temps recommendation is about (review 3.4.2).  The random schedule
+    proposes exactly one swap per adjacent pair per step, so the expected
+    count is the draw count itself.
+    """
+    # ARRANGE
+    seen = {}
+
+    def _spy(temperatures, n_swap_accept, n_swap_propose):
+        seen["propose"] = np.array(n_swap_propose, dtype=float)
+        seen["accept"] = np.array(n_swap_accept, dtype=float)
+
+    monkeypatch.setattr("exozippy.samplers.ptde.ladder_health_report", _spy)
+
+    # ACT
+    ptde_sample(
+        _simple_model(),
+        _MinimalSystem(),
+        draws=17,
+        tune=23,
+        n_temps=2,
+        T_max=4.0,
+        n_chains=4,
+        cores=1,
+        seed=3,
+        log_interval=5,
+        swap_schedule="random",
+        swap_interval=1,
+        adapt_gamma=False,
+        adapt_ladder=False,
+        min_ess=None,
+        max_rhat=None,
+    )
+
+    # ASSERT
+    assert seen["propose"].tolist() == [17.0]
+    assert seen["accept"][0] <= 17.0
+
+
 # ---------------------------------------------------------------------------
 # Seed polish and exact-start overdispersion cap
 # ---------------------------------------------------------------------------

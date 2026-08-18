@@ -1105,6 +1105,23 @@ def ptde_sample(
             draw_idx = step - tune
             _t0 = time.time()
 
+            # Acceptance/swap counters restart at the tune -> draw boundary,
+            # UNCONDITIONALLY.  They are diagnostics -- nothing statistical
+            # reads them outside the tune-gated gamma and ladder adaptations
+            # below -- and the wrap-up ladder_health_report is a statement
+            # about the FINAL ladder, which is only true if the window it
+            # measures begins where adaptation ends.  The old rule reset
+            # them inside the adapt branch, at log_every boundaries, so the
+            # measured window carried however much of tune fell after the
+            # last boundary, and with BOTH adaptations off it carried the
+            # whole of tune (review 3.4.2).  ptde_async never resets and
+            # says so where it reports.
+            if step == tune:
+                n_accept[:] = 0
+                n_propose[:] = 0
+                n_swap_accept[:] = 0
+                n_swap_propose[:] = 0
+
             # 1. build DE proposals for every chain at every ACTIVE temperature
             #    (rung thinning skips hot rungs on most steps; see _active_rungs)
             props_flat = []
@@ -1281,7 +1298,9 @@ def ptde_sample(
                         temperatures = new_T
 
                 # Reset window counters during tune so each adaptation period
-                # is a fresh measurement (only matters while adapting).
+                # is a fresh measurement (only matters while adapting; the
+                # tune -> draw boundary reset at the top of the loop is
+                # unconditional and is what the wrap-up report relies on).
                 if phase == "tune" and (adapt_gamma or adapt_ladder):
                     n_accept[:] = 0
                     n_propose[:] = 0
@@ -1426,8 +1445,9 @@ def ptde_sample(
             else ""
         )
     )
-    # Post-tune swap counters (window resets stop when tuning ends), so this
-    # measures the FINAL ladder's communication barrier.
+    # Post-tune swap counters (they are zeroed at the tune -> draw boundary;
+    # see the step loop), so this measures the FINAL ladder's communication
+    # barrier and not the ladders that preceded it.
     ladder_health_report(temperatures, n_swap_accept, n_swap_propose)
 
     if collect_rung_timing:
