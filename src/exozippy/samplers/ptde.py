@@ -976,10 +976,10 @@ def ptde_sample(
     )
 
     # Early-stop state: mutable list so the closure can write back to us.
-    stop_requested = [False]
+    stop_requested = False
     actual_draws = 0
     start_time = time.time()
-    n_eval_timeouts = [0]  # mutable box, incremented by _eval_logps_safe
+    n_eval_timeouts = 0  # incremented by _eval_logps_safe (nonlocal)
     rung_times = [
         [] for _ in range(n_temps)
     ]  # per-rung wall times (collect_rung_timing only)
@@ -1002,7 +1002,7 @@ def ptde_sample(
             length/order as `proposals`. When collect_rung_timing is set,
             per-call wall times are attributed to these rungs.
         """
-        nonlocal pool
+        nonlocal pool, n_eval_timeouts
         if eval_timeout is None:
             raw = _map_logp(pool, proposals)
             if collect_rung_timing:
@@ -1015,7 +1015,7 @@ def ptde_sample(
 
         lps, timed_out = _map_logp_timeout(pool, proposals, eval_timeout)
         if timed_out:
-            n_eval_timeouts[0] += len(timed_out)
+            n_eval_timeouts += len(timed_out)
             for idx in timed_out:
                 phys_params, raw_params = _common.describe_proposal(
                     proposals[idx], raw_to_phys, raw_var_names, out_var_names
@@ -1049,12 +1049,13 @@ def ptde_sample(
         min_ess is not None or max_rhat is not None
     ) and n_chains >= 2
     _check_gen = _convergence_check_schedule() if _do_convergence else None
-    _next_check = [next(_check_gen)] if _check_gen else [None]
+    _next_check = next(_check_gen) if _check_gen else None
 
     def _stop_handler(sig, frame):
-        if stop_requested[0]:
+        nonlocal stop_requested
+        if stop_requested:
             raise KeyboardInterrupt  # second signal: abort immediately
-        stop_requested[0] = True
+        stop_requested = True
         logger.info(
             f"PTDE: stop requested ({signal.Signals(sig).name}) — finishing "
             "current step (send the signal again to abort immediately)"
@@ -1332,7 +1333,7 @@ def ptde_sample(
                 )
 
             # 7. early-stop checks
-            if stop_requested[0]:
+            if stop_requested:
                 if actual_draws == 0:
                     logger.warning(
                         "PTDE: stop requested during tune — no draws to save"
@@ -1357,8 +1358,8 @@ def ptde_sample(
 
             if (
                 phase == "draw"
-                and _next_check[0] is not None
-                and actual_draws >= _next_check[0]
+                and _next_check is not None
+                and actual_draws >= _next_check
             ):
                 converged, rhat_val, ess_val = _check_convergence(
                     stored_raw, actual_draws, min_ess, max_rhat, stored_lp
@@ -1384,7 +1385,7 @@ def ptde_sample(
                         "raw_var_names": model_keys,
                     },
                 )
-                _next_check[0] = next(_check_gen, None)
+                _next_check = next(_check_gen, None)
                 if converged:
                     logger.info("PTDE: convergence criterion met, wrapping up")
                     break
@@ -1449,11 +1450,7 @@ def ptde_sample(
             if n_temps > 1
             else ""
         )
-        + (
-            f"  eval_timeouts={n_eval_timeouts[0]}"
-            if n_eval_timeouts[0]
-            else ""
-        )
+        + (f"  eval_timeouts={n_eval_timeouts}" if n_eval_timeouts else "")
     )
     # Post-tune swap counters (they are zeroed at the tune -> draw boundary;
     # see the step loop), so this measures the FINAL ladder's communication
