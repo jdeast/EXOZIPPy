@@ -1,0 +1,57 @@
+# Components: structure, manifest, build order
+
+What a component is, how the factory finds it, the manifest vocabulary and its single
+interpreter, the physics registry, the topological build order, and how to declare a
+per-instance parameterization.
+
+Read this before adding a component, before touching the manifest vocabulary
+(`src/exozippy/manifest.py`), the build graph (`src/exozippy/graph.py`) or the physics
+registry (`src/exozippy/physics_registry.py`). Related: the four element roles a manifest
+entry can declare are in `src/exozippy/components/parameter.md`; the shared data-component
+scaffolding is `src/exozippy/components/instrument.md`.
+
+## Component structure
+
+Each component lives in `src/exozippy/components/<name>/` and contains:
+- `<name>.py` — class inheriting `Component`; implements the 6-stage methods
+- `defaults.yaml` — default values, bounds, units, and expression wiring for every parameter
+- `symbolic_physics.py` — SymPy `RELATIONS` (equations) and `get_symbol_map()` (maps abstract symbols → indexed YAML paths); must set `comp_key = "<yaml_key>"` to match the YAML block name
+- `physics.py` — PyTensor/numpy implementations decorated with `@register_physics`; function name must match `func_name` in `defaults.yaml`
+
+The **factory** (`factory.py`) auto-discovers all `Component` subclasses by scanning subdirectories; the YAML key used to instantiate a component is the lowercase class name (or `yaml_key` class attribute if set). No registration step is required for new components. Abstract intermediate bases are skipped (`inspect.isabstract`), so a shared base can leave `Component`'s abstract methods unimplemented and never be instantiated.
+
+## Physics registry
+
+`@register_physics` (in `physics_registry.py`) populates `PHYSICS_REGISTRY` at import time. The `add_parameter` method in `Component` looks up `func_name` from `defaults.yaml` in this registry to wire up PyTensor expression lambdas. Any new physics function must use this decorator.
+
+The registry is a **flat namespace keyed by bare function name** -- there is no component scoping, so two components registering the same name would shadow each other, last import wins. `register_physics` now raises on a duplicate rather than allowing that. If two components need the same physics, give it one owner and import it (see `components/planet/physics.py`'s `calc_density`). Name functions after what they *take* when the same quantity has several forms: `calc_logg_from_logmass` (star) vs `calc_logg_from_mass` (planet). These two used to collide as `calc_logg`, and planet's won -- so `star.logg` was silently computed as `LOGG_CONST + log10(logmass) - 2*log10(radius)`: wrong for every star, NaN below 1 solMass. It went unnoticed because nothing consumed `star.logg` (the SED built its own `loggsed` inline via a direct import, which is why fits were unaffected -- `loggsed` is a derived Parameter now, and reaches the same function through `func_name:`, i.e. through the registry) until `components/torres` needed it. Cover: `tests/test_physics_registry.py`. Note a direct `from ..star.physics import x` binds the function object and bypasses the registry entirely -- only `func_name:` lookups go through it.
+
+## Graph and build order
+
+`graph.py:determine_pymc_build_order()` reads every manifest entry's `expressions.deps` list and performs a topological sort. Dependencies referencing other components use the `"comp.param[map_name]"` syntax (e.g., `"star.mass[lens_map]"`); the brackets name the integer map attribute on the requesting component that provides the index slice.
+
+**The manifest vocabulary has exactly one interpreter, `manifest.py` (`interpret_manifest_entry` -> `ManifestEntry`), and all three of its consumers go through it**: `graph.determine_pymc_build_order` (stage 4), `Component.add_parameter` (stage 5) and `System.derived_params`. It answers three questions -- does this entry name an expression (`names_expression`), which `expressions:` block does it select given a resolved config (`expression_config`), and what deps does that expression take (`dep_names`, where a manifest `deps` list beats the block's) -- and hands back everything else as `options`. It imports nothing from the package, so any consumer can use it without a cycle, and it holds no component-specific knowledge.
+
+**An `expr_key` the resolved config does not define RAISES** (`MissingExpressionError`, naming the component, the parameter, the missing key, the keys that are available, and the two legal spellings of a free parameter). It used to answer "free", in all three readers at once -- consistent, and silently wrong: a typo, a renamed block or a deleted `expressions:` section demoted a derived parameter to a sampled one with no message anywhere. Breaking `mulensinstrument.f_source`'s expr_key on `examples/ob08092` that way put an `f_source_raw` in `model.free_RVs` and moved the start logp from +6187.7 to -6.46e9, and the fit still ran and still reported. There is nothing legitimate to lose, because a free parameter has two explicit spellings (`None`, or an options-only dict) and neither is affected. Instrumenting the resolution across every shipped config found exactly one entry relying on the fallback -- `rvinstrument`'s `"gamma": "default"`, whose `expressions:` block was deleted in June 2026 -- and it is now `None`.
+
+That raise is also what keeps the structural `names_expression` and the config-aware `expression_config` from disagreeing: the one state in which they could differ now raises instead of answering. `System.derived_params` asks through `expression_config` (resolving each entry, exactly as graph.py does) rather than structurally, because only the *build* path would ever reach that raise and `derived_params`' callers -- `solve_api`, the GUI's Tune tab -- never build a model. A structural answer there is precisely the silence this raise removes: `solve_api._bounds_diagnostics` skips parameters reported derived, so mislabelled `gamma` meant no RV offset was ever bounds-checked in the GUI, out-of-bounds start and all.
+
+A manifest entry is derived **only** when it is a string or a dict carrying `expr_key` -- a dict holding just options (an `"overrides"` pin, a `shape`, a `table_note`) is a free parameter. That rule was `add_parameter`'s all along; the other two readers were hand-written copies of it and drifted. graph.py fell back to the `default` expression for *any* dict entry, which was inert only while no pinned free parameter had an **unused** `expressions:` block in its defaults.yaml, and became a hard "Dependency Error" the moment one did (Band's linear-law `u1`, whose Kipping expression the manifest deliberately ignores; planet's `beam` "off" entry, which made every orbit-less config demand an RV semi-amplitude). The fallback could only ever add edges `add_parameter` does not use, never supply a needed one -- the parameters it applied to are free by definition -- so adopting the shared reader strictly removes spurious edges. Verified: byte-identical build order and `derived_params()` on all 19 shipped example configs that build. Do not re-derive the rule at a call site; add the question to `ManifestEntry`. Tests: `tests/test_manifest_interpreter.py` (contract, the graph-level regression, and the real Band `u1` reproduction end to end).
+
+## Declaring a parameterization
+
+The per-element roles these tables expand into are documented in
+`src/exozippy/components/parameter.md`.
+
+**Declaring a parameterization is a TABLE, not a hand-built mask** (`components/parameterization.py`). A component holds a per-instance choice read from its own config and a statement of what each choice uses; `mode_manifest(modes, table, options=...)` turns that into manifest entries, so the four consumers share one expansion instead of four hand-rolled ones. A parameter a mode does not name is inactive on that mode's elements -- that is how `linear` says it has no `q2`. Two properties make it safe to adopt: a single-mode system expands to **exactly** the manifest the component used to hand-write (bare-string `expr_key`, no `mask`, and an inert `inactive_value` dropped), and a parameter **no** instance uses is omitted entirely rather than declared wholly inactive (an all-linear band set has no `u2`, which is what its consumers' `"u2" in band.manifest` guard reads).
+
+The sibling helper `pin_unselected(n_elements, selected)` is the **opt-in** pin, and the difference from an inactive element is the reason both exist: it pins through `"overrides"`, which layers *under* the params file, for a parameter that exists for every instance but is only wanted on some (a GP hyperparameter on the files that asked for one, an LD coefficient on the bands something reads, the BEER terms on the bands that fit them) -- so a user who explicitly wants one back still wins. An inactive element's pin is structural and unreported, because freeing it would add a dimension no likelihood term reads. `Instrument._register_gp`, `Instrument._register_robust` and `Band` (BEER terms + the unread-LD autopin) had that loop written out line for line; it is one function now (review 4.5.2, 4.5.3).
+
+## Adding a new component
+
+1. Create `src/exozippy/components/<name>/` with the four standard files.
+2. Set `comp_key` in `symbolic_physics.py` and `prefix` property in the class to match the YAML key.
+3. Declare `self.manifest` in `register_parameters()`. Manifest values: `None` (free parameter, no expression), `"default"` (use `expressions.default` from `defaults.yaml`), or a dict with `"expr_key"` and optional overrides. A dict with no `"expr_key"` is a free parameter carrying options; an `"expr_key"` naming a block the defaults.yaml does not define raises.
+4. Every sampled (non-derived, non-fixed) parameter **must** have `lower` and `upper` in `defaults.yaml`. `init_scale` is recommended but optional (it seeds the whitening probe; missing values fall back to a fraction of the span).
+5. Add the YAML key to example configs to test.
+
