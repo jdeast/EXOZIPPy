@@ -61,6 +61,7 @@ orbital frame there is no way to reach a sky angle without Omega.  Matt
 Penny (who generated the simulations) has been asked.
 """
 
+import argparse
 import json
 import multiprocessing as mp
 import os
@@ -223,13 +224,58 @@ def one_event(event):
         return dict(event=event, status=f"failed: {type(exc).__name__}: {exc}")
 
 
-def main():
-    events = [
-        int(x)
-        for x in open(REPO_ROOT / "examples" / "DC2018" / "events.txt")
-        if x.strip()
-    ]
-    ncpu = int(os.environ.get("NSLOTS", 0)) or max(1, mp.cpu_count() // 2)
+def _parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "--events",
+        default=None,
+        help="comma-separated event numbers (default: every line of "
+        "examples/DC2018/events.txt)",
+    )
+    ap.add_argument(
+        "--data-dir",
+        default=None,
+        help="2018DataChallenge tree (default $DC18_DATA, else the "
+        "MMEXOFAST source checkout)",
+    )
+    ap.add_argument(
+        "--ncpu",
+        type=int,
+        default=int(os.environ.get("NSLOTS", 0)) or None,
+        help="worker processes (default $NSLOTS, else half the machine)",
+    )
+    ap.add_argument(
+        "--contrast-cuts",
+        default="0,1000",
+        help="comma-separated minimum chi2 contrast for an event to vote in "
+        "the hypothesis tests: a weak anomaly leaves alpha unconstrained and "
+        "its best-fit value is noise (default 0,1000)",
+    )
+    ap.add_argument(
+        "--out",
+        default=str(REPO_ROOT / "dc18_alpha_convention.json"),
+        help="where to write the per-event JSON",
+    )
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = _parse_args(argv)
+    global DATA
+    if args.data_dir:
+        DATA = Path(args.data_dir)
+    if args.events:
+        events = [int(x) for x in args.events.split(",") if x.strip()]
+    else:
+        events = [
+            int(x)
+            for x in open(REPO_ROOT / "examples" / "DC2018" / "events.txt")
+            if x.strip()
+        ]
+    ncpu = args.ncpu or max(1, mp.cpu_count() // 2)
     print(
         f"scanning alpha for {len(events)} events on {ncpu} workers\n",
         flush=True,
@@ -265,7 +311,7 @@ def main():
             f"scatter {scat:7.2f}  R={R:.4f}{flag}"
         )
 
-    for cut in (0.0, 1000.0):
+    for cut in [float(c) for c in args.contrast_cuts.split(",")]:
         sub = [r for r in ok if r["contrast"] >= cut]
         print("\n" + "=" * 74)
         print(
@@ -293,7 +339,7 @@ def main():
     print("  Nothing concentrates, at any contrast cut -- which is why")
     print("  dc18_common reports alpha with no truth and no pull.")
 
-    out = REPO_ROOT / "dc18_alpha_convention.json"
+    out = Path(args.out)
     json.dump(rows, open(out, "w"), indent=2)
     print(f"\nwrote {out}")
 
