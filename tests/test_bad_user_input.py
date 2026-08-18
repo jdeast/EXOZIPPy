@@ -1392,18 +1392,69 @@ def test_a_list_initval_is_still_legal():
     assert cm.user_params["star.0.teff"]["initval"] == [5800.0, 5900.0]
 
 
+def test_a_bare_link_string_is_refused_with_the_dict_spelling():
+    """
+    Given the bare-scalar link spelling `star.A.teff: star.B.teff`,
+    When the ConfigManager is constructed,
+    Then it raises and shows the dict spellings of the three link kinds.
+
+    extract_links inspects dict entries only, so the bare form was never
+    recognized as a link and reached finalize_user_params' float(val) as a
+    ValueError naming no parameter and no file.  It is refused rather than
+    rewritten: the bare form cannot say whether the user meant a hard link,
+    a soft one or a seed, and guessing would pick a model for them.
+    """
+    # ARRANGE / ACT
+    with pytest.raises(ValueError) as excinfo:
+        ConfigManager(
+            {"star.A.teff": "star.B.teff"}, system_config=_LIST_FIELD_SYSTEM
+        )
+
+    # ASSERT
+    msg = str(excinfo.value)
+    assert "NON-NUMERIC PARAMETER VALUE" in msg
+    assert "sigma: 0}" in msg
+
+
+def test_a_bare_non_numeric_string_is_refused():
+    """
+    Given a bare string that is not a link either,
+    When the ConfigManager is constructed,
+    Then it raises, naming the parameter and quoting the value.
+    """
+    # ARRANGE / ACT / ASSERT
+    with pytest.raises(ValueError, match="NON-NUMERIC PARAMETER VALUE"):
+        ConfigManager({"star.A.teff": "hot"}, system_config=_LIST_FIELD_SYSTEM)
+
+
+def test_a_quoted_number_is_not_a_string_error():
+    """
+    Given a bare value YAML happened to quote (`"5800"`),
+    When the ConfigManager is constructed,
+    Then it is accepted: it is a number, spelled inconveniently.
+    """
+    # ARRANGE / ACT
+    cm = ConfigManager(
+        {"star.A.teff": "5800"}, system_config=_LIST_FIELD_SYSTEM
+    )
+
+    # ASSERT
+    assert cm.user_params["star.0.teff"] == "5800"
+
+
 def test_a_bad_entry_dies_at_construction_not_in_finalize():
     """
-    Given the malformed spelling,
+    Given the two malformed spellings,
     When a full finalize_user_params() solve is attempted,
     Then the error has already been raised at construction.
 
-    The crash site was deep inside the engine (float(list) in apply_value),
-    which is why the message named nothing.  Pinning WHERE it is caught is
-    the point of the fix.
+    Both crash sites were deep inside the engine (float(val) in the leaf
+    registration, float(list) in apply_value), which is why the messages
+    named nothing.  Pinning WHERE they are caught is the point of the fix.
     """
     # ARRANGE / ACT / ASSERT
     for bad in (
+        {"star.A.teff": "star.B.teff"},
         {"star.A.teff": {"mu": 5800.0, "sigma": [10.0, 20.0]}},
     ):
         with pytest.raises(ValueError):

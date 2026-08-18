@@ -308,6 +308,55 @@ def _reject_list_valued_fields(user_params, source=None):
                 )
 
 
+def _reject_bare_string_values(user_params, source=None):
+    """Raise on a bare (non-dict) parameter value that is not a number.
+
+    A params entry may be a dict of fields, a number, or a list of numbers
+    (per-seed starts).  A bare STRING is none of those, and the two ways to
+    write one both used to crash without saying where:
+
+        star.A.teff: star.B.teff      # a link in the bare spelling
+        star.A.teff: "hot"            # any other typo
+
+    ``extract_links`` inspects dict entries only, so neither is recognized as
+    a link and both reach ``finalize_user_params``' bare ``float(val)`` --
+    a ValueError naming no parameter and no file.
+
+    A bare link is REFUSED rather than rewritten to ``{initval: ...}``, per
+    the house rule: we do not add special cases to rescue arbitrary user
+    syntax.  The bare spelling is also genuinely ambiguous about the thing
+    that matters most about a link -- with ``sigma: 0`` it is a hard link,
+    with a sigma a soft one, with neither a seed -- so guessing would pick a
+    model for the user.  The error names the dict spelling instead.
+    """
+    where = f" in {source}" if source else ""
+    for key, val in (user_params or {}).items():
+        if "." not in str(key) or not isinstance(val, str):
+            continue
+        try:
+            float(val)
+        except ValueError:
+            pass
+        else:
+            continue  # "5800" is a number that happens to be quoted
+        link_like = bool(re.search(r"[A-Za-z_]\w*\.[A-Za-z_]", val))
+        advice = (
+            f"To LINK it, write the field explicitly, and say which kind of "
+            f"link you mean:\n"
+            f"  {key}: {{initval: {val}, sigma: 0}}   # hard link (derived)\n"
+            f"  {key}: {{initval: {val}, sigma: 0.5}} # soft link (penalty)\n"
+            f"  {key}: {{initval: {val}}}             # seed only"
+            if link_like
+            else "A parameter entry is a number, a list of per-seed numbers, "
+            "or a dict of fields (initval, mu, sigma, lower, upper, unit)."
+        )
+        raise ValueError(
+            f"\n!!! NON-NUMERIC PARAMETER VALUE !!!\n"
+            f"'{key}'{where} is set to the bare string '{val}', which is not "
+            f"a number.\n{advice}"
+        )
+
+
 def validate_sigma_has_center(user_params, links=None, source=None):
     """Fatal-error check: a Gaussian prior must have an explicit center.
 
@@ -643,6 +692,7 @@ class ConfigManager:
 
         _reject_renamed_arsun(user_params)
         _reject_list_valued_fields(user_params)
+        _reject_bare_string_values(user_params)
 
         # Path of the params FILE these entries were read from, set by System
         # only when it actually read one -- it stays None when the caller
