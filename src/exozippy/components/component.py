@@ -51,10 +51,21 @@ class Component(ABC):
     # not.
     aligned_context_deps = frozenset()
 
+    # Human-readable heading for this component's block of the results table
+    # (outputs/latex.py's \sidehead).  DECLARED here, rather than only being
+    # assigned in ten component __init__s, so a generic consumer can read
+    # `comp.label` without a getattr guard -- that guard was the tell that
+    # the attribute was not part of the contract (review 4.2.3).  A component
+    # that sets none gets its class name, filled in by __init__ below;
+    # setting it as a CLASS attribute also works and is not overwritten.
+    label = None
+
     def __init__(self, component_config, config_manager):
         """Standardized constructor for ALL components."""
         self.config = component_config
         self.config_manager = config_manager
+        if type(self).label is None:
+            self.label = type(self).__name__
 
         # Determine how many of this thing we are building
         self.n_elements = len(self.config)

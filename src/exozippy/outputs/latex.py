@@ -326,10 +326,9 @@ def build_latex_output(
             continue
 
         # A section title, i.e. prose -- escaped like every other non-LaTeX
-        # string that reaches the table.
-        comp_label = latex_escape(
-            getattr(comp, "label", comp.__class__.__name__)
-        )
+        # string that reaches the table.  `label` is declared on Component
+        # (and defaulted to the class name there), so no getattr guard.
+        comp_label = latex_escape(comp.label)
 
         # All \newcommand defs span every index — emit them once per parameter.
         # When multimodal, the unsuffixed def is the pooled-across-modes
