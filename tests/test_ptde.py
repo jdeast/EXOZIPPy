@@ -648,6 +648,125 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
 
 
 # ---------------------------------------------------------------------------
+# Sync early-stop paths (review 7.4.1): every one of these was uncovered,
+# while the async sampler's maxtime path was not.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_stops_early_when_the_convergence_criterion_is_met(caplog):
+    """
+    Given loose min_ess/max_rhat thresholds and far more draws than needed,
+    When ptde_sample reaches its first geometric convergence check,
+    Then it stops there, says so, and returns the draws it has -- the
+      min_ess/max_rhat branch and _check_convergence with it, neither of
+      which any test had ever invoked.
+    """
+    # ARRANGE / ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=5000,
+            tune=10,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=2,
+            log_interval=10**6,
+            min_ess=1.0,
+            max_rhat=100.0,
+        )
+
+    # ASSERT: the first check sits at 100 draws (see
+    # _convergence_check_schedule), so it stops there, not at 5000
+    assert idata.posterior.sizes["draw"] == 100
+    assert "convergence criterion met" in caplog.text
+    assert "PTDE convergence @ 100 draws" in caplog.text
+    assert "early stop" in caplog.text
+
+
+def test_sync_stops_on_maxtime_and_keeps_the_draws_it_has(caplog):
+    """
+    Given a wall-clock budget that expires during the DRAW phase,
+    When ptde_sample runs,
+    Then it stops, logs the limit, and returns the draws collected so far.
+    """
+    # ARRANGE / ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=10**6,
+            tune=1,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=6,
+            log_interval=10**6,
+            maxtime=0.5,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert 1 <= idata.posterior.sizes["draw"] < 10**6
+    assert "wall-clock limit" in caplog.text
+    assert "early stop" in caplog.text
+
+
+def test_sync_maxtime_during_tune_aborts_rather_than_saving_nothing(caplog):
+    """
+    Given a budget so small it expires during TUNE, before any draw exists,
+    When ptde_sample runs,
+    Then it raises KeyboardInterrupt -- there is nothing to save, and
+      returning an empty InferenceData would look like a completed fit.
+    """
+    with caplog.at_level(logging.WARNING, logger="exozippy.samplers.ptde"):
+        with pytest.raises(KeyboardInterrupt):
+            ptde_sample(
+                _simple_model(),
+                _MinimalSystem(),
+                draws=10,
+                tune=10**6,
+                n_temps=2,
+                T_max=2.0,
+                n_chains=4,
+                cores=1,
+                seed=6,
+                log_interval=10**6,
+                maxtime=0.3,
+                min_ess=None,
+                max_rhat=None,
+            )
+    assert "no draws to save" in caplog.text
+
+
+def test_sync_raises_when_the_run_collects_no_draws_at_all():
+    """
+    Given draws=0,
+    When ptde_sample finishes its tune steps,
+    Then it raises RuntimeError rather than handing back an empty trace.
+    """
+    with pytest.raises(RuntimeError, match="no draws were collected"):
+        ptde_sample(
+            _simple_model(),
+            _MinimalSystem(),
+            draws=0,
+            tune=2,
+            n_temps=2,
+            T_max=2.0,
+            n_chains=4,
+            cores=1,
+            seed=1,
+            log_interval=10**6,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Chunked draw storage (review 6.4.5)
 # ---------------------------------------------------------------------------
 
