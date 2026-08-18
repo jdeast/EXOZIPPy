@@ -857,6 +857,119 @@ def test_a_linked_sigma_on_a_non_sampled_entry_is_passed_through(tmp_path):
     assert "mu" not in entry
 
 
+# --- 7.3.1: the config-as-path branch (only the CLI exercises it) ----------
+
+
+def test_config_given_as_a_path_anchors_base_dir_at_its_parent(tmp_path):
+    """
+    Given a config passed as a PATH rather than a dict,
+    When mkparam runs with no base_dir,
+    Then base_dir is the config's own directory -- so the params file, the
+      trace and the output all resolve next to the config.
+
+    Every other test in this file passes a dict; only `scripts/mkparam.py`
+    takes this branch, and base_dir is what anchors the params read and the
+    output path, so getting it wrong writes the restart file into the CWD
+    and silently drops the previous file's priors.
+    """
+    import yaml
+
+    workdir = tmp_path / "fit"
+    workdir.mkdir()
+    (workdir / "kelt4.params.yaml").write_text(
+        yaml.safe_dump({"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}})
+    )
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=workdir)
+    config_path = workdir / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    # The CWD is deliberately NOT the config's directory: that is the whole
+    # thing base_dir has to get right.
+    out = write_param_file(str(config_path), trace_path=trace)
+
+    assert out.parent == workdir
+    assert out.name == "kelt4.params.2.yaml"
+    entry = yaml.safe_load(out.read_text())["star.Host.teff"]
+    # The previous file's prior was found and carried across verbatim...
+    assert entry["mu"] == pytest.approx(5800.0, abs=1e-6)
+    assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
+    # ...while the start value moved to the MAP.
+    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6)
+
+
+def test_config_given_as_a_Path_object_works_too(tmp_path):
+    """
+    Given the same config passed as a pathlib.Path,
+    When mkparam runs,
+    Then it behaves identically -- the branch tests (str, Path), and the CLI
+      may hand over either.
+    """
+    import yaml
+
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config_path = tmp_path / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    out = write_param_file(config_path, trace_path=trace)
+
+    assert out == tmp_path / "kelt4.params.2.yaml"
+    assert "star.Host.mass" in yaml.safe_load(out.read_text())
+
+
+def test_a_config_path_beats_an_explicit_base_dir(tmp_path):
+    """
+    Given a config path AND a base_dir argument,
+    When mkparam runs,
+    Then the config's own directory wins.
+
+    Pins the precedence rather than assuming it: the branch overwrites
+    base_dir unconditionally, and a reader could reasonably expect the
+    explicit argument to win.  Passing both is a caller error either way;
+    what matters is that the behavior is stated somewhere.
+    """
+    import yaml
+
+    workdir = tmp_path / "fit"
+    workdir.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (workdir / "kelt4.params.yaml").write_text("{}\n")
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=workdir)
+    config_path = workdir / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    out = write_param_file(
+        str(config_path), base_dir=elsewhere, trace_path=trace
+    )
+
+    assert out.parent == workdir
+
+
 # --- 1.3.3: auto-versioning must never destroy an existing restart file -----
 
 
