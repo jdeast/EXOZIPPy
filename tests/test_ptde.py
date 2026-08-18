@@ -736,8 +736,16 @@ def test_ladder_health_report_warns_only_when_communication_limited(caplog):
         assert any(
             "communication-limited" in r.message for r in caplog.records
         )
-        # recommendation is ceil(2*Lambda)+1
-        assert any("~13" in r.message for r in caplog.records)
+        # The warning must NAME the recommended rung count,
+        # ceil(2*Lambda)+1 = 13.  Asserted on the number rather than on a
+        # surrounding phrase: the remediation text was reworded once the
+        # measurements showed `n_temps: auto` cannot satisfy this criterion
+        # (it is self-consistent only at 0.50 swap acceptance), and a test
+        # pinned to the old wording fails on a message that is more correct.
+        assert any(
+            "13" in r.message and "n_temps" in r.message
+            for r in caplog.records
+        )
 
     assert ladder_health_report(temps, np.zeros(7), np.zeros(7)) is None
     assert (

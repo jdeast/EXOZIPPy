@@ -16,12 +16,12 @@ master-file t0 is relative to it, the light curves are full BJD.
 Alpha conventions: the master file's alpha is NOT in EXOZIPPy's convention
 (EXOZIPPy measures alpha from the binary axis with the center of mass at the
 origin; the identity mapping holds between MMEXOFAST and EXOZIPPy, but not
-between either and the challenge's truth table). Comparisons therefore run
-alpha through a convention search (sign flips and +-180/360 offsets, keep
-the candidate closest to the fitted value) and flag the choice in the output
--- treat alpha pulls as indicative, not exact. u_0 is compared in absolute
-value for the same reason (the truth table's u_0 carries a trajectory-side
-sign the fits do not).
+between either and the challenge's truth table). No mapping between them
+exists either -- see ALPHA_IS_UNMAPPABLE below for the measurement -- so
+alpha is reported WITHOUT a truth value and without a pull. u_0 is compared
+in absolute value for a related reason (the truth table's u_0 carries a
+trajectory-side sign the fits do not, and with parallax negligible the sign
+is degenerate with alpha's anyway).
 """
 
 import csv
@@ -257,23 +257,42 @@ def read_mmexofast_solutions(json_path):
 # ---------------------------------------------------------------------------
 
 
-def match_alpha_convention(alpha_truth, alpha_fit):
-    """Map the truth alpha onto the fit's convention.
-
-    Tries sign in {+1,-1} x offset in {-360,-180,0,180,360} degrees and
-    keeps the candidate closest to the fitted alpha (same search as the
-    group's param_error comparison scripts). Returns (mapped_value, label).
-    """
-    best = None
-    for sign in (1, -1):
-        for off in (-360, -180, 0, 180, 360):
-            cand = sign * alpha_truth + off
-            diff = abs(cand - alpha_fit)
-            if best is None or diff < best[0]:
-                core = "alpha" if sign == 1 else "-alpha"
-                label = f"{core}{off:+d}" if off else core
-                best = (diff, cand, label)
-    return best[1], best[2]
+# The master file's alpha has NO GLOBAL MAPPING onto the fitted convention.
+# Measured, not assumed (examples/DC2018/dc18_alpha_convention.py): for each
+# of the 44 events, alpha was scanned in MulensModel's convention at the
+# truth values of t_0, u_0, t_E, rho, s and q with the fluxes fit linearly,
+# giving the alpha the light curve itself prefers.  Against that reference
+# every candidate transformation scatters like noise --
+#
+#   hypothesis                              circular R (1.0 = it IS the rule)
+#   fit - alpha_DC                                    0.09
+#   fit + alpha_DC  (reflection)                      0.10
+#   either, with the galactic->equatorial PA removed  0.11 - 0.19
+#   either, with PA(mu_rel) removed (a sky position   0.03 - 0.19
+#     angle, which is how BAGLE defines its alpha)
+#
+# -- and restricting to the twelve events where the anomaly pins alpha
+# hardest does not help (R = 0.22 / 0.41, against ~0.29 expected from 12
+# random angles).  So this is a property of the answer key, not of a weak
+# constraint or of the wrong sign branch.
+#
+# The old sign/+-180 search is therefore DELETED rather than improved.  It
+# could not fail visibly: it always returned its closest candidate, so an
+# unmappable truth came back as a confident number, and the resulting pull
+# was reported alongside real ones.  On event 128 it printed a 2034-sigma
+# alpha pull while EXOZIPPy's fitted alpha (307.686) sat 0.3 deg from the
+# light curve's own optimum (308.0) -- a fabricated failure on a parameter
+# that was right.
+#
+# Note the two conventions really are only determined up to a reflection
+# here: with pi_E ~ 0.02 these events have negligible parallax, and without
+# it (u_0, alpha) -> (-u_0, -alpha) is an exact mirror symmetry of the
+# light curve.  Event 128 shows it exactly -- (+0.1418, 308.15) and
+# (-0.1418, 51.85) give identical chi2 to every digit.
+ALPHA_IS_UNMAPPABLE = (
+    "no global mapping from the master file's alpha convention exists "
+    "(measured over all 44 events); reported for the record, not compared"
+)
 
 
 def sigma_pull(truth_val, fit_val, err_hi, err_lo):
@@ -291,9 +310,9 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
     """Build the per-event truth/MMEXOFAST/EXOZIPPy comparison table.
 
     Returns a list of row dicts (one per parameter) and writes them as CSV
-    when out_csv is given. Convention handling: u_0 compared as |u_0|, alpha
-    truth mapped through match_alpha_convention against the EXOZIPPy value
-    (noted in the alpha row's 'note' field).
+    when out_csv is given. Convention handling: u_0 is compared as |u_0|;
+    alpha carries no truth and no pull at all (see ALPHA_IS_UNMAPPABLE) --
+    its fitted value is still reported so the row is not silently missing.
     """
     truth, class_label = load_truth(data_dir, event)
     exo, err_scales = read_results_csv(results_csv)
@@ -306,13 +325,10 @@ def compare_event(event, data_dir, results_csv, mmx_json=None, out_csv=None):
     truth = dict(truth)
     notes = {p: "" for p in PARAMS}
     truth["u_0"] = abs(truth["u_0"])
-    if "alpha" in exo and exo["alpha"][0] is not None:
-        mapped, label = match_alpha_convention(truth["alpha"], exo["alpha"][0])
-        resid = abs(mapped - exo["alpha"][0])
-        truth["alpha"] = mapped
-        notes["alpha"] = f"truth mapped as {label}; convention approximate" + (
-            f" (still {resid:.1f} deg off)" if resid > 10 else ""
-        )
+    # Keep the master file's raw alpha out of the truth column entirely: a
+    # number there is a claim that it is comparable, and it is not.
+    notes["alpha"] = ALPHA_IS_UNMAPPABLE
+    truth["alpha"] = None
 
     rows = []
     for p in PARAMS:
