@@ -482,6 +482,64 @@ def test_no_false_still_unresolved_warning_after_escalation(caplog):
     assert "still unresolved" not in caplog.text
 
 
+def test_barrier_correction_round_refreshes_the_probe_diagnostics(monkeypatch):
+    """Given a barrier update that moves the start's logp, so the whitening
+    is re-measured against the final barriers,
+    When measure_and_whiten returns,
+    Then the report's probe_diagnostics come from the SECOND probe.
+
+    Review 3.2.1: only multipliers/raw_scales/map_lp were folded in, so the
+    flat/gradient lists shown to the user described the pre-barrier surface
+    -- stale in exactly the case that triggers the correction round.
+    """
+    from exozippy import whitening
+
+    # Arrange: two canned probes, and a logp that moves when the barriers do.
+    reports = [
+        {
+            "map_lp": 1.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([1.0])},
+            "probe_diagnostics": {"flat": ["a_raw[0]"], "gradient_nats": {}},
+        },
+        {
+            "map_lp": 2.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([2.0])},
+            "probe_diagnostics": {
+                "flat": [],
+                "gradient_nats": {"a_raw[0]": 7.0},
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        whitening,
+        "apply_measured_whitening",
+        lambda *a, **k: reports.pop(0),
+    )
+    monkeypatch.setattr(
+        whitening, "measure_barrier_scales", lambda *a, **k: {}
+    )
+    lps = iter([0.0, 5.0, 5.0, 5.0])
+
+    class _NoRefetchSystem(_StubSystem):
+        """The start is already the canonical one (no polish moved it)."""
+
+        get_raw_start = None
+
+    system = _NoRefetchSystem([])
+
+    # Act
+    report = whitening.measure_and_whiten(
+        system, None, {"a_raw": np.zeros(1)}, logp_fn=lambda pt_: next(lps)
+    )
+
+    # Assert
+    assert report["probe_diagnostics"]["flat"] == []
+    assert report["probe_diagnostics"]["gradient_nats"] == {"a_raw[0]": 7.0}
+    assert report["map_lp"] == 2.0
+
+
 def _barrier_model():
     """x, y sampled; d = x + y derived with finite bounds -> soft barriers."""
     import pytensor.tensor as pt

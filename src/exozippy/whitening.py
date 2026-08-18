@@ -767,6 +767,12 @@ def measure_and_whiten(system, model, raw_start=None, logp_fn=None):
                 m1[keep] = m1[keep] * m2[keep]
         report["raw_scales"] = report2["raw_scales"]
         report["map_lp"] = report2["map_lp"]
+        # ...and the diagnostics, which describe the SURFACE and so are the
+        # part most affected by the barrier update (review 3.2.1).  Keeping
+        # round 1's flat/linear/gradient lists here showed the user the
+        # pre-barrier surface in exactly the case where a soft bound is
+        # active at the start, i.e. exactly when they differ.
+        report["probe_diagnostics"] = report2["probe_diagnostics"]
         measure_barrier_scales(system, model, raw_start)
 
     return report
