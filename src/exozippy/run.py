@@ -90,7 +90,23 @@ def sigterm_as_interrupt():
     instead of Python's default SIGTERM action (immediate termination with no
     partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
     raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
-    work. Used by every branch that calls ``pm.sample`` directly.
+    work.
+
+    Used by every branch that calls ``pm.sample`` directly: PyMC NUTS, the
+    DE-Metropolis variants, and **nutpie**, which was missed until 2026-08
+    and is the one that most needed saying out loud -- it reaches
+    ``pm.sample`` through an EXTERNAL sampler, so whether the interrupt
+    survives is nutpie's decision rather than PyMC's. It does:
+    ``nutpie.sample`` catches ``KeyboardInterrupt`` and returns
+    ``background_sampler.abort()``, i.e. the draws taken so far (verified
+    against nutpie 0.16.11).
+
+    The numpyro/blackjax branch is deliberately NOT wrapped, and that is not
+    an oversight of the same kind: it goes through ``sample_jax_nuts``, whose
+    chain runs inside one jitted scan with no Python frame to raise in --
+    the same reason ``maxtime`` cannot be honored there (see
+    ``warn_maxtime_unsupported``). The PTDE and async-PTDE samplers manage
+    their own signal handling in ``samplers/_common.py``.
     """
     old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
@@ -656,16 +672,23 @@ def _run_fit(config, gui, user_params=None):
                         for v in model.free_RVs
                     ]
                 )
-                idata = pm.sample(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    nuts_sampler="nutpie",
-                    target_accept=target_accept,
-                    nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
-                    cores=cores,
-                    return_inferencedata=True,
-                )
+                # Wrapped like the other two pm.sample branches, and it pays
+                # off here: nutpie.sample catches a KeyboardInterrupt and
+                # returns `background_sampler.abort()`, i.e. the draws taken
+                # so far (verified against nutpie 0.16.11).  So a scheduler
+                # SIGTERM buys a partial trace instead of an immediate kill,
+                # which is exactly what this context manager is for.
+                with sigterm_as_interrupt():
+                    idata = pm.sample(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        nuts_sampler="nutpie",
+                        target_accept=target_accept,
+                        nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
+                        cores=cores,
+                        return_inferencedata=True,
+                    )
             elif method in de_metropolis.STEP_CLASSES:
                 # Gradient-free differential-evolution MCMC (ter Braak 2006 /
                 # ter Braak & Vrugt 2008) on PyMC's own step methods, started

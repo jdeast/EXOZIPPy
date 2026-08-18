@@ -1,4 +1,15 @@
-"""Wrap-up steps must not be able to kill a finished fit (review 2.3.1).
+"""run.py's two "do not lose the fit" guards, and the calls each must cover.
+
+* ``sigterm_as_interrupt`` (review 3.3.1) around every direct ``pm.sample``,
+  so a scheduler SIGTERM keeps a partial trace.
+* ``nonfatal_wrapup`` (review 2.3.1) around every wrap-up plot, below.
+
+Both are pinned by locating the calls in the source rather than by running a
+fit: reproducing either failure for real means a full sample-plus-wrap-up,
+minutes per case, and what the items are about is purely which calls sit
+inside the guard.
+
+Wrap-up steps must not be able to kill a finished fit (review 2.3.1).
 
 Everything after ``pm.sample`` returns is a REPORT on a fit that already
 finished.  The plotting block between the tables and ``write_param_file`` was
@@ -107,6 +118,57 @@ def _wrapup_call_guard_states(func_name):
 
     walk(func, False)
     return found
+
+
+def test_every_pm_sample_call_is_sigterm_wrapped():
+    """
+    Given _run_fit's sampler dispatch (review 3.3.1),
+    When each direct pm.sample call is located,
+    Then all of them sit inside `with sigterm_as_interrupt()`.
+
+    The docstring claimed coverage of "every branch that calls pm.sample
+    directly" while nutpie's was bare, so a scheduler SIGTERM there was an
+    immediate kill with no partial trace.  nutpie is the branch that most
+    needed it: it reaches pm.sample through an EXTERNAL sampler, and
+    nutpie.sample really does catch the interrupt and return the draws
+    taken so far.
+    """
+    tree = ast.parse(Path(inspect.getfile(run_module)).read_text())
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_fit"
+    )
+
+    found = []
+
+    def walk(node, inside):
+        if isinstance(node, ast.With):
+            inside = inside or any(
+                isinstance(item.context_expr, ast.Call)
+                and getattr(item.context_expr.func, "id", None)
+                == "sigterm_as_interrupt"
+                for item in node.items
+            )
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (
+                isinstance(f, ast.Attribute)
+                and f.attr == "sample"
+                and getattr(f.value, "id", None) == "pm"
+            ):
+                found.append(inside)
+        for child in ast.iter_child_nodes(node):
+            walk(child, inside)
+
+    walk(func, False)
+
+    assert found, "no pm.sample call found in _run_fit"
+    assert all(found), (
+        f"{found.count(False)} of {len(found)} pm.sample calls in _run_fit "
+        "are not wrapped in sigterm_as_interrupt -- a scheduler SIGTERM "
+        "there kills the fit with no partial trace"
+    )
 
 
 def test_every_named_wrapup_call_is_guarded():
