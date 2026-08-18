@@ -768,6 +768,9 @@ class ConfigManager:
         # backward scale passes are deleted; see the note there.)
         self.propagated_scales = {}
         self.symbolic_blacklist = set()
+        # (equation, target symbol) -> the solutions sp.solve returned.  See
+        # the memo in _execute_solve for why this exists and why it is safe.
+        self._symbolic_solve_cache = {}
 
         # Structured diagnostics collected by the relaxation engine (e.g.
         # over-constrained contradictions).  Each entry is a dict
@@ -3095,31 +3098,40 @@ class ConfigManager:
         logger.debug(f"Attempting to solve: {eq} for target: {target_str}")
 
         # Print the equation with substituted numerical values ---
-        try:
-            # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
-            eq_str = f"{eq.lhs} = {eq.rhs}"
+        #
+        # GATED, and the gate wraps the whole block deliberately: it walks
+        # every free symbol and runs a re.sub per resolved one, then handed
+        # the string to logger.debug, which discarded it at every level
+        # anybody runs a fit at.  KEEP THE SORT inside -- it is load-bearing
+        # for determinism (see its own comment), which is also why the gate
+        # goes here rather than being pushed down into the loop.
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                # Format as "lhs = rhs" instead of "Eq(lhs, rhs)"
+                eq_str = f"{eq.lhs} = {eq.rhs}"
 
-            # Replace only the known symbols so the math structure is
-            # preserved.  Sorted for the same reason as _execute_solve's walk
-            # (free_symbols is a set of Symbols whose hashes include the
-            # string hash): successive re.sub calls are not commutative when
-            # one symbol's name is a substring of another's, so an unsorted
-            # walk could render this line differently in two processes.  It
-            # is only a debug string today -- but a diagnostic that varies
-            # run to run is the one thing a diagnostic must not do.
-            for s in sorted(eq.free_symbols, key=str):
-                s_str = str(s)
-                if s_str in resolved:
-                    # Format to 5 sig figs (handles scientific notation automatically)
-                    val_str = f"{float(resolved[s_str]):.5g}"
-                    # Use regex with word boundaries to replace exact variable names
-                    eq_str = re.sub(
-                        rf"\b{re.escape(s_str)}\b", val_str, eq_str
-                    )
+                # Replace only the known symbols so the math structure is
+                # preserved.  Sorted for the same reason as _execute_solve's
+                # walk (free_symbols is a set of Symbols whose hashes include
+                # the string hash): successive re.sub calls are not
+                # commutative when one symbol's name is a substring of
+                # another's, so an unsorted walk could render this line
+                # differently in two processes.  It is only a debug string
+                # today -- but a diagnostic that varies run to run is the one
+                # thing a diagnostic must not do.
+                for s in sorted(eq.free_symbols, key=str):
+                    s_str = str(s)
+                    if s_str in resolved:
+                        # Format to 5 sig figs (handles scientific notation)
+                        val_str = f"{float(resolved[s_str]):.5g}"
+                        # Word boundaries: replace exact variable names only
+                        eq_str = re.sub(
+                            rf"\b{re.escape(s_str)}\b", val_str, eq_str
+                        )
 
-            logger.debug(f"  Substituted: {eq_str}")
-        except Exception as e:
-            pass
+                logger.debug(f"  Substituted: {eq_str}")
+            except Exception:
+                pass
 
         start_time = time.time()
 
@@ -3148,14 +3160,34 @@ class ConfigManager:
             # the code already does its own root validation. simplify only
             # changes the expression's form (identical numeric value); check
             # only pre-filters roots the numeric bounds/scoring pass re-filters.
-            with _sympy_time_limit(2):  # 2-second hard limit (POSIX only)
-                solutions = sp.solve(
-                    eq, target_sym, dict=False, simplify=False, check=False
+            # MEMOIZED.  sp.solve is a pure function of (equation, target)
+            # -- it knows nothing about the resolved values -- but the engine
+            # relaxes to a fixed point, and does so once per seed and again
+            # inside every probe_derivable snapshot, so the SAME inversion was
+            # recomputed dozens of times per prepare().  The only reuse before
+            # this was the timeout blacklist, i.e. we remembered the failures
+            # and forgot the successes.  Cached per ConfigManager (one per
+            # System), so nothing leaks between fits.  An empty result is
+            # cached too: "no closed form" is just as reproducible, and it is
+            # the case that costs the most to rediscover.
+            cache_key = (eq, target_sym)
+            if cache_key in self._symbolic_solve_cache:
+                solutions = list(self._symbolic_solve_cache[cache_key])
+                logger.debug(f"sp.solve cache hit for {target_str}")
+            else:
+                with _sympy_time_limit(2):  # 2-second limit (POSIX only)
+                    solutions = sp.solve(
+                        eq,
+                        target_sym,
+                        dict=False,
+                        simplify=False,
+                        check=False,
+                    )
+                self._symbolic_solve_cache[cache_key] = list(solutions)
+                elapsed = time.time() - start_time
+                logger.debug(
+                    f"sp.solve finished in {elapsed:.4f}s for {target_str}"
                 )
-            elapsed = time.time() - start_time
-            logger.debug(
-                f"sp.solve finished in {elapsed:.4f}s for {target_str}"
-            )
         except SymbolicTimeout:
             logger.debug(
                 f"sp.solve timed out for {target_str} -- blacklisting."
