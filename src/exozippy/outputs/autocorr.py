@@ -160,12 +160,3 @@ def iact(chains):
     if not np.isfinite(tau):
         return 1.0
     return float(min(max(tau, 1.0), float(n_total)))
-
-
-def ess(chains):
-    """Effective sample size of the mean: total draws divided by ``iact``."""
-    segs = [c for c in _as_chains(chains) if c.size > 0]
-    n_total = sum(c.size for c in segs)
-    if n_total == 0:
-        return 0.0
-    return n_total / iact(segs)

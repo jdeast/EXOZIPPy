@@ -105,8 +105,37 @@ def collect_parameter_corner_samples(param_specs):
     return _flatten_arrays(items)
 
 
+# corner's own default bin count.  It is named here, and passed explicitly to
+# corner.corner() below, because _drop_undrawable has to reason about the bin
+# GRID corner will build -- so the two must not be allowed to drift.
+CORNER_BINS = 20
+
+
 def _label_at(labels, j):
     return labels[j] if j < len(labels) else f"column {j}"
+
+
+def _bin_grid_degenerate(lo, hi, n_bins):
+    """True when a ``n_bins``-bin linspace grid over [lo, hi] collapses.
+
+    corner builds every panel from ``np.linspace(lo, hi, n_bins + 1)`` and
+    hands the resulting EDGE ARRAY to np.histogram / np.histogram2d.  When the
+    whole range spans fewer than ``n_bins`` float64 steps that grid cannot
+    produce n_bins + 1 distinct edges, so most bins are empty by construction
+    and the panel is a full-width spike -- which reads as a measured posterior
+    of width ``hi - lo`` rather than as a parameter that never moved.
+
+    Note the test is on REPRESENTABILITY, not on smallness: a well-measured
+    parameter with a 1e-12 posterior width has billions of float64 steps
+    across it and is drawn normally.
+
+    run.py's ``_dist_degeneracy`` applies the same monotonicity test to the
+    arviz KDE grid, whose length is 512 rather than corner's 20; there the
+    consequence is harsher, because arviz asks np.histogram for a bin COUNT
+    plus a range and numpy rejects that outright, while an edge ARRAY with
+    repeated entries is accepted.
+    """
+    return bool(np.any(np.diff(np.linspace(lo, hi, n_bins + 1)) <= 0))
 
 
 def _drop_undrawable(samples, labels, filename):
@@ -128,7 +157,9 @@ def _drop_undrawable(samples, labels, filename):
          every row;
       2. rows (draws) still carrying a non-finite value -- such a draw
          cannot be placed in any 2-D panel involving that column anyway;
-      3. columns that are constant over the surviving rows.
+      3. columns whose surviving range cannot carry corner's bin grid --
+         exactly constant, or spanning fewer float64 steps than there are
+         bins (see _bin_grid_degenerate).
 
     Dropping beats passing an artificial ``range``: corner's ``range``
     argument also sets ``force_range``, which changes the axis limits of the
@@ -163,11 +194,18 @@ def _drop_undrawable(samples, labels, filename):
     keep = []
     for j in range(samples.shape[1]):
         col = samples[:, j]
-        if col.min() == col.max():
+        lo, hi = float(col.min()), float(col.max())
+        if lo == hi:
             logger.warning(
                 f"corner plot ({filename}): omitting {labels[j]} (constant "
-                f"at {float(col.min()):.10g}); the remaining parameters are "
-                "still plotted"
+                f"at {lo:.10g}); the remaining parameters are still plotted"
+            )
+        elif _bin_grid_degenerate(lo, hi, CORNER_BINS):
+            logger.warning(
+                f"corner plot ({filename}): omitting {labels[j]} (range "
+                f"{hi - lo:.3g} around {lo:.10g} spans fewer than "
+                f"{CORNER_BINS} float64 steps, so it cannot be binned); the "
+                "remaining parameters are still plotted"
             )
         else:
             keep.append(j)
@@ -210,6 +248,7 @@ def save_corner_plot(samples, labels, filename, max_samples=1000):
         fig = corner.corner(
             samples,
             labels=labels,
+            bins=CORNER_BINS,
             quantiles=[minrank, 0.5, maxrank],
             show_titles=True,
             title_kwargs={"fontsize": 12},
