@@ -49,6 +49,16 @@ The multi-seed path already agreed with all of this: `raw_from_initval` raises `
 
 Tests: `tests/test_bad_user_input.py`.
 
+### A dynamic (linked) bound plus a sigma is a TRUNCATED normal, and it is normalized
+
+Sections A/A2 of `build_pymc` add an **unnormalized** Gaussian on top of the reparameterization's exact `U(lower, upper)`, which for STATIC bounds is fine -- the truncated mass is then a constant. With a **linked** `lower`/`upper` (`linking.py`; see `src/exozippy/config.md`) it is not: the conditional prior's mass `Z = Phi(beta) - Phi(alpha)` moves with the bound-source parameter, and an unaccounted conditional mass reweights that parameter's own posterior. Section **A3** therefore adds one `trunc_norm.<label>.<i>` potential per such element (review 1.2.4; no shipped example combines the two, so this is dark today).
+
+- **The term is `+log(span) - log(Z)`, not `-log(Z)` alone.** Derivation: with `lq = c + s*raw`, the built density is `exp(-0.5 z^2) / (span * s * sqrt(2 pi))`, which integrates over `[lo, up]` to `sigma*Z/(span*s)`; dividing by that leaves the normalized truncated normal. The `+log(span)` is **not** the `-log(span)` double-count review 1.5 removed -- opposite sign, and it belongs to the Gaussian rather than to the uniform. The `sigma -> infinity` limit is the check: there `Z -> span/(sigma*sqrt(2 pi))`, the whole correction collapses to a constant and the pure-uniform case is recovered exactly. Adding `-log(Z)` alone would leave a `-log(span)` behind in that limit, i.e. reintroduce precisely the bias review 1.5 removed.
+- **`Z` is built by `_log_normal_mass` from erf/erfc with a per-side branch**, never as a difference of `Phi` CDFs -- two bounds on the same tail are `1 - eps` and `1 - eps'`, and the subtraction discards nearly every digit (the same trap `galacticmodel`'s truncated-lognormal bracket documents). Both branches are evaluated, which is safe because erf/erfc are finite everywhere, so the unselected branch cannot poison the gradient. The mass is floored at the smallest normal double before the log: such an interval already costs ~700 nats, and a floor is preferable to a `-inf` with no gradient to follow.
+- The test that matters is the property, not the formula: `test_dynamic_bound_plus_sigma_leaves_the_bound_source_unbiased` marginalizes the bounded element out by quadrature and asserts the bound source's implied marginal is flat, exactly as the sigma-free sibling test does for review 1.5.
+
+Tests: `tests/test_linked_params.py`.
+
 ## Reporting component-added priors (`parameter.py`, `PriorContribution`)
 
 `get_prior_str` can only see a Parameter's **own** fields (`sigma`, `mu`, `lower`/`upper`), so a `pm.Potential` a *component* adds at stage 6 was invisible to it and the parameter was reported as whatever those fields implied -- "Uniform" for a bounded element with no sigma, which is exactly the prior such a potential replaces. `star.distance` (volume prior / galactic model), `star.logmass` (Chabrier or Salpeter IMF) and the FFP mass function were all misreported that way.

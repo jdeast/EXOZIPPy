@@ -163,6 +163,36 @@ _INITVAL_SOURCES = frozenset({"user", "data", "solved", "default"})
 # ----------------------------
 
 
+def _log_normal_mass(alpha, beta):
+    """log(Phi(beta) - Phi(alpha)) for standardized bounds, symbolically.
+
+    Built from erf/erfc with a branch selected per side, never as a plain
+    difference of Phi CDFs: when both bounds sit on the same tail, Phi is
+    1 - eps on both and the subtraction throws away nearly every significant
+    digit (the same trap galacticmodel's truncated-lognormal bracket
+    documents).  Phi(x) = 0.5*erfc(-x/sqrt(2)), so on the upper tail the mass
+    is a difference of two SMALL erfc values and on the lower tail the
+    mirror; only a straddling interval is safe with erf.
+
+    Both branches are evaluated (erf/erfc are finite everywhere, so the
+    unselected branch cannot poison the gradient with a NaN) and the mass is
+    floored at the smallest normal double before the log: an interval that
+    far out is already a ~700-nat penalty, and the floor keeps the potential
+    finite rather than inserting a -inf with no gradient to follow.
+    """
+    root2 = math.sqrt(2.0)
+    a, b = alpha / root2, beta / root2
+    upper_tail = 0.5 * (pt.erfc(a) - pt.erfc(b))  # 0 <= alpha
+    lower_tail = 0.5 * (pt.erfc(-b) - pt.erfc(-a))  # beta <= 0
+    straddling = 0.5 * (pt.erf(b) - pt.erf(a))
+    mass = pt.switch(
+        pt.ge(alpha, 0.0),
+        upper_tail,
+        pt.switch(pt.le(beta, 0.0), lower_tail, straddling),
+    )
+    return pt.log(pt.maximum(mass, np.finfo(float).tiny))
+
+
 def _tighten_bounds(
     lower: Optional[Number],
     upper: Optional[Number],
@@ -1894,6 +1924,7 @@ class Parameter:
 
         # 5b. USER-DEFINED ELEMENT LINKS (dynamic bounds + hard links)
         links = self.element_links or {}
+        dyn_bounds = {}  # element index -> (lo_t, up_t, span_t) tensors
         if links:
             if expr_raw is not None and any(
                 k in links for k in ("hard", "lower", "upper")
@@ -1931,6 +1962,9 @@ class Parameter:
                     pt.clip(lq[i], -_LOGIT_SATURATION_LQ, _LOGIT_SATURATION_LQ)
                 )
                 phys_val = pt.set_subtensor(phys_val[i], lo_t + span_t * q_i)
+                # Kept for section A3: with a sigma the conditional prior is a
+                # TRUNCATED normal, whose mass depends on these tensors.
+                dyn_bounds[i] = (lo_t, up_t, span_t)
                 # NO -log(span) normalization term here, deliberately.  The
                 # reparameterization already supplies it: with lq = c + s*raw
                 # and section C cancelling the raw N(0,1), the raw-space
@@ -2034,8 +2068,8 @@ class Parameter:
         mu_links = links.get("mu", {}) if links else {}
         for i in mu_links:
             gaussian_prior_mask[i] = False
+        prior_mus = np.where(~np.isnan(mus), mus, inits)
         if np.any(gaussian_prior_mask):
-            prior_mus = np.where(~np.isnan(mus), mus, inits)
             mask = pt.as_tensor_variable(gaussian_prior_mask)
             penalty = (
                 -0.5
@@ -2065,6 +2099,47 @@ class Parameter:
             pm.Potential(
                 f"link_mu.{self.label}.{i}",
                 -0.5 * ((val_flat[i] - mu_t) / sig_i) ** 2,
+            )
+
+        # A3. TRUNCATION NORMALIZATION for a DYNAMIC (linked) bound combined
+        #     with a Gaussian prior.  Sections A/A2 add an UNNORMALIZED
+        #     Gaussian on top of the reparameterization's exact U(lo, up), so
+        #     the conditional prior on this element is a truncated normal
+        #     whose mass depends on the bound-source parameter b -- and an
+        #     unaccounted conditional mass reweights b's own posterior.
+        #
+        #     The correction is +log(span) - log(Phi(beta) - Phi(alpha)).
+        #     Derivation: with lq = c + s*raw, p(val | b) as built is
+        #     exp(-0.5 z^2) / (span * s * sqrt(2 pi)) (see the dynamic-bound
+        #     block above for the U(lo, up) half), which integrates over
+        #     [lo, up] to sigma*Z/(span*s), Z = Phi(beta) - Phi(alpha).
+        #     Dividing by that leaves the normalized truncated normal, so the
+        #     added term is log(span) - log(Z) up to a constant.
+        #
+        #     The +log(span) is NOT the -log(span) double-count review 1.5
+        #     removed -- it has the opposite sign and it belongs to the
+        #     Gaussian, not to the uniform.  The sigma -> infinity limit is
+        #     the check: there Z -> span/(sigma*sqrt(2 pi)), the whole
+        #     correction collapses to a CONSTANT, and the pure-uniform case
+        #     is recovered exactly.  Adding -log(Z) alone would leave
+        #     -log(span) behind in that limit, i.e. reintroduce precisely the
+        #     bias review 1.5 removed (it rewards the bound source for
+        #     shrinking the interval).
+        #
+        #     Static bounds need none of this: Z is then a constant.
+        for i, (lo_t, up_t, span_t) in dyn_bounds.items():
+            if i in mu_links:
+                mu_i = mu_links[i]["fn"](val_flat)
+            elif gaussian_prior_mask[i]:
+                mu_i = pt.as_tensor_variable(float(prior_mus[i]))
+            else:
+                continue  # no Gaussian on this element: U(lo, up) already
+            sig_i = float(sigmas[i])
+            alpha = (lo_t - mu_i) / sig_i
+            beta = (up_t - mu_i) / sig_i
+            pm.Potential(
+                f"trunc_norm.{self.label}.{i}",
+                pt.log(span_t) - _log_normal_mass(alpha, beta),
             )
 
         # B. Soft bounds for derived params (and the rare half-bounded sampled

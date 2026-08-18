@@ -17,6 +17,7 @@ import copy
 
 import numpy as np
 import pymc as pm
+import pytensor.tensor as pt
 import pytest
 
 from exozippy.components.star.star import Star
@@ -251,6 +252,117 @@ def test_dynamic_bound_link_leaves_the_bound_source_prior_unbiased():
         f"marginal p(av_B) varies with the span: "
         f"{dict(zip([100.0 * q for q in q_bs], p_avb))}"
     )
+
+
+def test_log_normal_mass_matches_scipy_on_both_tails():
+    """
+    Given standardized truncation bounds on the upper tail, the lower tail
+    and straddling zero,
+    When _log_normal_mass evaluates log(Phi(beta) - Phi(alpha)),
+    Then it matches scipy to full double precision -- including the tails,
+    where a plain difference of Phi CDFs cancels away every digit.
+    """
+    # ARRANGE
+    import pytensor
+    from scipy.stats import norm
+
+    from exozippy.components.parameter import _log_normal_mass
+
+    a_t, b_t = pt.dscalar("a"), pt.dscalar("b")
+    fn = pytensor.function([a_t, b_t], _log_normal_mass(a_t, b_t))
+
+    cases = [
+        (-1.0, 2.0),  # straddling
+        (0.5, 3.0),  # upper tail
+        (-3.0, -0.5),  # lower tail
+        (6.0, 9.0),  # deep upper tail: Phi difference is 1e-9 of ~1
+        (-9.0, -6.0),  # deep lower tail
+    ]
+
+    # ACT / ASSERT.  The reference itself has to pick its tail: sf on the
+    # upper side, cdf on the lower.  (norm.sf(-9) - norm.sf(-6) is the naive
+    # spelling and is wrong in its 9th digit, which is the whole point of the
+    # branch selection under test.)
+    for a, b in cases:
+        expected = (
+            np.log(norm.sf(a) - norm.sf(b))
+            if a >= 0.0
+            else np.log(norm.cdf(b) - norm.cdf(a))
+        )
+        assert fn(a, b) == pytest.approx(expected, rel=1e-12), (a, b)
+
+
+def test_dynamic_bound_plus_sigma_leaves_the_bound_source_unbiased():
+    """
+    Given star.A.av = {lower: star.B.av} AND a Gaussian prior on av_A, so the
+    conditional prior on av_A is a TRUNCATED normal whose mass depends on
+    av_B,
+    When av_A is marginalized out by quadrature,
+    Then the implied marginal density of av_B is still flat.
+
+    Review 1.2.4: sections A/A2 add an unnormalized Gaussian on top of the
+    reparameterization's exact U(lo, up), so without the A3 correction the
+    marginal picks up the truncated mass Z(av_B)/span(av_B) -- a factor of
+    ~2.7 across the av_B values probed here, all of it spurious.
+    """
+    # ARRANGE
+    from scipy.stats import norm
+
+    mu, sigma = 1.0, 1.0
+    user_params = {
+        "star.A.av": {
+            "initval": 1.0,
+            "lower": "star.B.av",
+            "mu": mu,
+            "sigma": sigma,
+        },
+        "star.B.av": {"initval": 0.05},
+    }
+    cm, star, model = _build_star_param(user_params, ["av"])
+    assert any(
+        p.name.startswith("trunc_norm.star.av") for p in model.potentials
+    )
+    logp_c = model.compile_logp()
+    point = model.initial_point()
+    tf = star.av._raw_transform
+    c_a, s_a = tf["logit_q_inits"][0], tf["init_scale_logits"][0]
+
+    # Integrate av_A out on a grid in av_A itself: the Gaussian is 1 mag wide
+    # inside a ~100 mag span, so a uniform grid in q would barely resolve it.
+    # The measure is draw_a = dav_a / (span * s_a * q * (1 - q)).
+    av_bs = (0.05, 0.5, 1.0, 1.5)
+    p_avb = []
+    zs_over_span = []
+    for av_b in av_bs:
+        q_b = av_b / 100.0
+        raw_b = _raw_from_q(star.av, 1, q_b)
+        span = 100.0 - av_b
+        av_a = np.linspace(av_b + 1e-9, mu + 10.0 * sigma, 4001)
+        q_a = (av_a - av_b) / span
+        raw_a = (np.log(q_a / (1.0 - q_a)) - c_a) / s_a
+
+        def _logp(ra):
+            point["star.av_raw"] = np.array([ra, raw_b])
+            return float(logp_c(point))
+
+        dens = np.exp(np.array([_logp(ra) for ra in raw_a]))
+        marginal = np.trapezoid(dens / (span * s_a * q_a * (1.0 - q_a)), av_a)
+        p_avb.append(marginal / (q_b * (1.0 - q_b)))
+        zs_over_span.append(
+            (norm.sf((av_b - mu) / sigma) - norm.sf((100.0 - mu) / sigma))
+            / span
+        )
+
+    # ASSERT: flat in av_B ...
+    p_avb = np.array(p_avb)
+    assert np.allclose(p_avb, p_avb[0], rtol=1e-4), (
+        f"marginal p(av_B) varies with the truncated mass: "
+        f"{dict(zip(av_bs, p_avb))}"
+    )
+    # ... and the bias it would have carried is far larger than that
+    # tolerance, so this test really does discriminate.
+    zs_over_span = np.array(zs_over_span)
+    assert zs_over_span.max() / zs_over_span.min() > 2.0
 
 
 # ----------------------------------------------------------------------
