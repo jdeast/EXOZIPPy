@@ -84,6 +84,7 @@ Each line names when to read the doc. Read it first; do not reconstruct its reas
 - Before changing the run flow, the restart-file writer (`mkparam.py`) or trace reuse (`trace_meta.py`), read `src/exozippy/run.md`.
 - Before touching how data files are read (columns, masks, time systems), detrending, the noise model, Gaussian-process noise or robust likelihoods, read `src/exozippy/components/instrument.md`.
 - Before touching the microlensing likelihood, MMEXOFAST seeding, or the lens/source body maps, read `src/exozippy/components/mulensing/mulensing.md`.
+- Before comparing a microlensing parameter to a published one, converting to or from another modelling code, or "fixing" a microlensing sign, read `src/exozippy/components/mulensing/conventions.md` -- the origins, the parallax signs, `alpha`, `q > 1`, and the mappings onto the other common literature conventions. Its paper-facing twin, carrying the same numbered claims, is `src/exozippy/latex/convention.tex`.
 - Before changing a stellar prior (IMF, the FFP mass function, distance), an empirical stellar or planetary relation, or the planet mass coordinate, read `src/exozippy/components/star/star.md`.
 - Before changing orbit topology, the `tc` window, or the eccentricity/inclination coordinates (`fitvcve`, `fitchord`), read `src/exozippy/components/orbit/orbit.md`.
 - Before touching limb darkening, filter identity, the bolometric-correction grid or an SED flux hook, read `src/exozippy/components/sed/sed.md`.

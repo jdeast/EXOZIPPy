@@ -577,6 +577,34 @@ RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
 
+# The two ranks BETWEEN default and derived-mixed, both microlensing distance
+# seeds and both load-bearing at exactly these values.  They lived as bare 25
+# and 30 literals in lens.py, documented only in config.md, so nothing tied
+# the two sites that must stay ordered to the sentence explaining why.  Name
+# them; do NOT change them.
+#
+# A microlensing lens sits at a few kpc, not at the 10 pc defaults.yaml
+# backstop, so the seed must beat RANK_DEFAULT.  It must also LOSE to the
+# source-distance seed, because that is what breaks the d_L <-> parallax
+# cycle: pi_rel drives d_L to RANK_MULENS_SOURCE_DISTANCE through the engine's
+# Condition B, and the parallax is then corrected as the weaker symbol.  Both
+# yield to anything the user writes.
+RANK_MULENS_LENS_DISTANCE = 25  # ~4 kpc lens seed; beats the 10 pc default
+RANK_MULENS_SOURCE_DISTANCE = 30  # ~8 kpc bulge source; beats the lens seed
+
+# Which ranks mean "a component pushed this from the DATA", as opposed to
+# "the relaxation engine derived it".  A SET and not a numeric band, because
+# the two data ranks do not bracket a contiguous range: RANK_DERIVED_MIXED
+# (40) sits between them and RANK_DERIVED_USER (80) sits above them, and both
+# are solver ranks.  So the obvious `>= 30 and < RANK_USER` test would report
+# every engine-derived value as data-derived -- the mirror of the bug this
+# replaces, which hardcoded the two literals and so reported any NEW data
+# rank as "solved".  Add a rank here in the same commit that introduces it.
+# RANK_MULENS_LENS_DISTANCE (25) is deliberately NOT here: that is the
+# historical behavior, and whether those seeds should report as data at all
+# is review item 3.14.6, which also has to weigh their PRECEDENCE.
+DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_MULENS_SOURCE_DISTANCE})
+
 
 """ 
 This class is the reconciliation engine to determine the sole source of truth 
@@ -2160,9 +2188,12 @@ class ConfigManager:
             return "default"
         if rank >= RANK_USER:
             return "user"
-        # Microlensing distance hint (rank 30) and data-derived estimates
-        # (RANK_DERIVED_DATA = 60) both come from the data channel.
-        if rank == RANK_DERIVED_DATA or rank == 30:
+        # Every rank a component pushes a hint at -- see DATA_RANKS for why
+        # membership and not a numeric band.  Hardcoding the two literals
+        # here meant any NEW intermediate data rank silently reported
+        # "solved", which is a wrong provenance in the startup table, in
+        # export_solution and in the GUI.
+        if rank in DATA_RANKS:
             return "data"
         if rank > RANK_DEFAULT:
             return "solved"

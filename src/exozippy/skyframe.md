@@ -7,6 +7,11 @@ Read this before writing anything that projects a 3-D position onto the sky, bef
 "fixing" a sign in orbit, astrometry or microlensing geometry, and before assuming two
 call sites disagree about a convention.
 
+For the *microlensing* consequences of this frame -- the trajectory and parallax signs
+written out, `alpha`'s frame, `q > 1`, and the mappings onto other codes' and papers'
+conventions -- see `src/exozippy/components/mulensing/conventions.md`, whose paper-facing
+twin is `src/exozippy/latex/convention.tex`.
+
 ## The sky-plane frame (`skyframe.py`)
 
 EXOZIPPy uses the century-old **left-handed** astrometric frame everywhere: **+X = North** (plotted up), **+Y = East** (plotted left), **+Z = distance** (growing away from the observer). It is left-handed as a set of physical directions (`X x Y = -Z`), and that is the point, not an oversight to tidy up. It is what simultaneously satisfies the textbook definitions of the Keplerian elements *while* preserving the standard Euler application `Rz(bigomega) Rx(inc) Rz(omega)`: `bigomega` comes out as the position angle of the ascending node measured **East of North** (at `omega + f = 0` the body sits at `PA = bigomega` exactly), `omega` is the argument of periastron of the orbit it names (here the **primary's**, `omega_*`), and `dZ/dt` is the RV with the right sign (positive = receding = redshift) because `+Z` is distance. Any right-handed relabelling breaks one of the three; this is the convention repeatedly mangled in the exoplanet literature. `Orbit.get_sky_position` / `Orbit.get_radial_velocity` implement it directly, and the primary-transit anomaly `f = pi/2 - omega_*` (`calc_tp`, `calc_b`) puts the **star** at `Z > 0`, i.e. the planet in front -- which is what fixes the primary/secondary sense.

@@ -373,7 +373,7 @@ def test_output_filename_increments(tmp_path):
     """
     Given parameter_file = "kelt4.params.2.yaml",
     When mkparam runs,
-    Then the output is kelt4.params.3.yaml (existing 3.yaml would be overwritten).
+    Then the output is kelt4.params.3.yaml.
     """
     import yaml
 
@@ -773,3 +773,395 @@ def test_in_memory_user_params_still_validated(tmp_path):
 
     assert "star.Host.teff" in str(exc.value)
     assert "in-memory" in str(exc.value)
+
+
+# --- 1.3.2: a linked sigma is legal and must not crash the writer -----------
+
+
+def test_a_linked_sigma_is_copied_across_without_crashing(tmp_path):
+    """
+    Given a params entry whose sigma is a LINK expression (legal --
+      linking.LINKABLE_FIELDS includes sigma),
+    When mkparam runs,
+    Then the entry is written with its sigma verbatim and no mu promotion.
+
+    float() on the link string used to raise ValueError, which under run_fit
+    silently skipped the restart file at the end of a multi-day fit and under
+    the standalone CLI died raw.  There is nothing here that could evaluate
+    the link to decide whether it is zero, so the promotion is skipped -- the
+    stated constraint itself still survives the round trip.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": {"initval": 6207.0, "sigma": "star.Host.teff_err"}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["sigma"] == "star.Host.teff_err"
+    assert entry["initval"] == pytest.approx(6193.0, abs=1e-6)
+    assert "mu" not in entry
+
+
+def test_a_linked_sigma_on_a_non_sampled_entry_is_passed_through(tmp_path):
+    """
+    Given the same linked sigma on a parameter the trace never sampled,
+    When mkparam runs,
+    Then the pass-through loop copies it instead of raising.
+
+    The second, independent float(sigma) call -- the one in the
+    passthrough loop -- had the same crash.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.av": {"initval": 0.1, "sigma": "star.Other.av_err"}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.av"]
+    assert entry["sigma"] == "star.Other.av_err"
+    assert "mu" not in entry
+
+
+# --- 7.3.1: the config-as-path branch (only the CLI exercises it) ----------
+
+
+def test_config_given_as_a_path_anchors_base_dir_at_its_parent(tmp_path):
+    """
+    Given a config passed as a PATH rather than a dict,
+    When mkparam runs with no base_dir,
+    Then base_dir is the config's own directory -- so the params file, the
+      trace and the output all resolve next to the config.
+
+    Every other test in this file passes a dict; only `scripts/mkparam.py`
+    takes this branch, and base_dir is what anchors the params read and the
+    output path, so getting it wrong writes the restart file into the CWD
+    and silently drops the previous file's priors.
+    """
+    import yaml
+
+    workdir = tmp_path / "fit"
+    workdir.mkdir()
+    (workdir / "kelt4.params.yaml").write_text(
+        yaml.safe_dump({"star.Host.teff": {"mu": 5800.0, "sigma": 100.0}})
+    )
+    trace = _make_idata({"star.teff": 5750.0}, tmpdir=workdir)
+    config_path = workdir / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    # The CWD is deliberately NOT the config's directory: that is the whole
+    # thing base_dir has to get right.
+    out = write_param_file(str(config_path), trace_path=trace)
+
+    assert out.parent == workdir
+    assert out.name == "kelt4.params.2.yaml"
+    entry = yaml.safe_load(out.read_text())["star.Host.teff"]
+    # The previous file's prior was found and carried across verbatim...
+    assert entry["mu"] == pytest.approx(5800.0, abs=1e-6)
+    assert entry["sigma"] == pytest.approx(100.0, abs=1e-6)
+    # ...while the start value moved to the MAP.
+    assert entry["initval"] == pytest.approx(5750.0, abs=1e-6)
+
+
+def test_config_given_as_a_Path_object_works_too(tmp_path):
+    """
+    Given the same config passed as a pathlib.Path,
+    When mkparam runs,
+    Then it behaves identically -- the branch tests (str, Path), and the CLI
+      may hand over either.
+    """
+    import yaml
+
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config_path = tmp_path / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    out = write_param_file(config_path, trace_path=trace)
+
+    assert out == tmp_path / "kelt4.params.2.yaml"
+    assert "star.Host.mass" in yaml.safe_load(out.read_text())
+
+
+def test_a_config_path_beats_an_explicit_base_dir(tmp_path):
+    """
+    Given a config path AND a base_dir argument,
+    When mkparam runs,
+    Then the config's own directory wins.
+
+    Pins the precedence rather than assuming it: the branch overwrites
+    base_dir unconditionally, and a reader could reasonably expect the
+    explicit argument to win.  Passing both is a caller error either way;
+    what matters is that the behavior is stated somewhere.
+    """
+    import yaml
+
+    workdir = tmp_path / "fit"
+    workdir.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (workdir / "kelt4.params.yaml").write_text("{}\n")
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=workdir)
+    config_path = workdir / "kelt4.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "prefix": "fitresults/kelt4",
+                "parameter_file": "kelt4.params.yaml",
+                "star": [{"name": "Host"}],
+            }
+        )
+    )
+
+    out = write_param_file(
+        str(config_path), base_dir=elsewhere, trace_path=trace
+    )
+
+    assert out.parent == workdir
+
+
+# --- 1.3.3: auto-versioning must never destroy an existing restart file -----
+
+
+def test_output_version_skips_a_name_already_on_disk(tmp_path):
+    """
+    Given kelt4.params.yaml AND an existing kelt4.params.2.yaml,
+    When mkparam runs a second time from the same input,
+    Then it writes kelt4.params.3.yaml and leaves the 2 file untouched.
+
+    Bumping the version once protects only the INPUT; two fits started from
+    the same params file both resolved to .2.yaml and the second destroyed
+    the first's restart file.  Bit us in practice (2026-08).
+    """
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    already_there = tmp_path / "kelt4.params.2.yaml"
+    already_there.write_text("# an earlier run's restart file\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.3.yaml"
+    assert already_there.read_text() == "# an earlier run's restart file\n"
+
+
+def test_bare_scalar_entries_are_discarded_like_initval_only_dicts(tmp_path):
+    """
+    Given a non-sampled entry written bare (`star.teff: 5800`) and its dict
+      equivalent (`{initval: 5800}`),
+    When mkparam runs,
+    Then BOTH are discarded -- the "initval-only entries are stale guesses"
+      policy is about content, not spelling.
+
+    The bare form is not a dict, so it fell through both branches of the
+    passthrough guard and was re-emitted into every successive restart file
+    forever.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": 5800.0,
+        "star.Host.av": [0.1, 0.2],  # bare list = per-seed starts
+        "star.Host.feh": {"initval": 0.0},
+        "star.Host.distance": {"initval": 100.0, "sigma": 5.0},
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    assert "star.Host.teff" not in result
+    assert "star.Host.av" not in result
+    assert "star.Host.feh" not in result
+    # ...and the one that really does state a constraint still survives.
+    assert result["star.Host.distance"]["sigma"] == pytest.approx(5.0)
+
+
+def test_mu_promotion_takes_seed_0_of_a_multi_seed_initval(tmp_path):
+    """
+    Given a previous restart file's length-K initval list with a hand-added
+      sigma and no mu,
+    When mkparam promotes the implicit prior center,
+    Then mu is seed 0, not the whole list.
+
+    A prior center is one number.  The list is a set of PER-SEED STARTS, so
+    promoting it wholesale hands the next fit a Gaussian potential with a
+    vector center nobody wrote.  Seed 0 is canonical everywhere else --
+    run._user_initval reads a list initval as v[0], and this writer's own
+    bounds already come from seed 0.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": {"initval": [6207.0, 6180.0, 6230.0], "sigma": 100.0}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["mu"] == pytest.approx(6207.0, abs=1e-6)
+    assert not isinstance(entry["mu"], list)
+
+
+def test_mu_promotion_of_a_multi_seed_initval_on_a_non_sampled_entry(tmp_path):
+    """
+    Given the same multi-seed entry on a parameter the trace never sampled,
+    When mkparam runs,
+    Then the passthrough loop promotes seed 0 too -- the second, independent
+      copy of the promotion had the same bug.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.distance": {"initval": [100.0, 102.0], "sigma": 5.0}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.distance"]
+    assert entry["mu"] == pytest.approx(100.0, abs=1e-6)
+
+
+def test_output_version_skips_a_run_of_existing_versions(tmp_path):
+    """
+    Given versions 2 through 5 already on disk,
+    When mkparam runs,
+    Then it lands on 6 -- the loop is bounded by the filesystem, not a cap.
+    """
+    (tmp_path / "kelt4.params.yaml").write_text("{}\n")
+    for n in range(2, 6):
+        (tmp_path / f"kelt4.params.{n}.yaml").write_text("{}\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/kelt4",
+        "parameter_file": "kelt4.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.6.yaml"
+
+
+def test_output_version_loops_when_the_config_names_no_parameter_file(
+    tmp_path,
+):
+    """
+    Given a config with no parameter_file (legal: a blind fit seeds itself)
+      and an existing <runname>.params.2.yaml,
+    When mkparam runs,
+    Then it writes .3.yaml instead of overwriting.
+
+    That branch used to hardcode ".params.2.yaml", which is exactly the case
+    where several runs share one directory.
+    """
+    already_there = tmp_path / "kelt4.params.2.yaml"
+    already_there.write_text("# an earlier run's restart file\n")
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {"prefix": "fitresults/kelt4", "star": [{"name": "Host"}]}
+
+    out = write_param_file(config, base_dir=tmp_path, trace_path=trace)
+
+    assert out.name == "kelt4.params.3.yaml"
+    assert already_there.read_text() == "# an earlier run's restart file\n"

@@ -480,3 +480,102 @@ def test_a_partially_invalid_trace_is_left_alone(tmp_path):
     )
     params = yaml.safe_load(out.read_text())
     assert len(params["lens.L.t_0"]["initval"]) == 4
+
+
+# --- 1.3.1: seed 0 is the best VALID draw, not np.argmax's -------------------
+
+
+def _write_trace(tmp_path, t0_raw, lp, name="run_trace.nc"):
+    """One-parameter trace built from explicit raw values and lp."""
+    post = {"lens.t_0": 2000.0 + t0_raw, "lens.t_0_raw": t0_raw}
+    trace_path = tmp_path / name
+    az.from_dict({"posterior": post, "sample_stats": {"lp": lp}}).to_netcdf(
+        str(trace_path)
+    )
+    return trace_path
+
+
+def _seed0_t0(tmp_path, trace_path, n_seeds=1):
+    out = tmp_path / "out.params.yaml"
+    write_param_file(
+        {"prefix": "run", "lens": [{"name": "L"}]},
+        base_dir=tmp_path,
+        trace_path=trace_path,
+        output_path=out,
+        n_seeds=n_seeds,
+    )
+    initval = yaml.safe_load(out.read_text())["lens.L.t_0"]["initval"]
+    return initval[0] if isinstance(initval, list) else initval
+
+
+def test_map_seed_skips_a_nan_lp_draw(tmp_path):
+    """
+    Given a trace with one NaN lp among otherwise finite ones,
+    When mkparam picks seed 0,
+    Then it is the best FINITE-lp draw, not the NaN one.
+
+    np.argmax reports the index of the first NaN it sees, so a single
+    non-finite lp anywhere in the trace made that draw the "MAP".
+    """
+    rng = np.random.default_rng(0)
+    t0_raw = rng.standard_normal((4, 400))
+    lp = -0.5 * t0_raw**2
+    lp[2, 17] = np.nan
+    best = np.unravel_index(np.nanargmax(lp), lp.shape)
+    expected = 2000.0 + t0_raw[best]
+
+    seed0 = _seed0_t0(tmp_path, _write_trace(tmp_path, t0_raw, lp))
+
+    assert seed0 == pytest.approx(expected, abs=1e-6)
+    assert seed0 != pytest.approx(2000.0 + t0_raw[2, 17], abs=1e-6)
+
+
+def test_map_seed_skips_a_finite_but_invalid_runaway_draw(tmp_path):
+    """
+    Given a draw whose lp is finite but past the lp-ceiling (outputs.modes
+      labels it -1, numerically invalid),
+    When mkparam picks seed 0,
+    Then it is the best VALID draw instead.
+
+    A finite lp is not proof a draw is usable: the runaway-lp failure mode
+    produces enormous finite values that win any ranking by construction,
+    which is exactly why identify_modes rejects them.
+    """
+    rng = np.random.default_rng(1)
+    t0_raw = rng.standard_normal((4, 400))
+    lp = -0.5 * t0_raw**2
+    lp[1, 3] = 1e13  # past DEFAULT_LP_ABS_MAX, and finite
+    ranked = np.where(lp > 1e12, np.nan, lp)
+    valid = np.unravel_index(np.nanargmax(ranked), lp.shape)
+    expected = 2000.0 + t0_raw[valid]
+
+    seed0 = _seed0_t0(tmp_path, _write_trace(tmp_path, t0_raw, lp))
+
+    assert seed0 == pytest.approx(expected, abs=1e-6)
+    assert seed0 != pytest.approx(2000.0 + t0_raw[1, 3], abs=1e-6)
+
+
+def test_map_ranking_ignores_labels_whose_shape_disagrees_with_lp():
+    """
+    Given a mode report whose labels do not match lp's shape,
+    When the MAP is picked,
+    Then the labels are ignored rather than masking the wrong draws.
+    """
+    from exozippy.mkparam import _map_draw_from_lp
+
+    lp = np.array([[1.0, 5.0], [2.0, 3.0]])
+    report = type("R", (), {"labels": np.array([-1, -1, -1])})()
+
+    assert _map_draw_from_lp(lp, report) == (0, 1, 5.0)
+
+
+def test_map_ranking_returns_none_when_nothing_is_rankable():
+    """
+    Given an lp array with no finite entry,
+    When the MAP is picked,
+    Then None is returned so the caller can fall back honestly, instead of
+      np.argmax's silent index 0.
+    """
+    from exozippy.mkparam import _map_draw_from_lp
+
+    assert _map_draw_from_lp(np.full((2, 3), np.nan), None) is None

@@ -94,11 +94,18 @@ After the jobs finish:
 ## Caveats
 
 - **alpha**: the answer key's alpha convention differs from
-  EXOZIPPy/MMEXOFAST's (center-of-mass origin). The comparison maps truth
-  through a sign/offset search against the fitted value and records the
-  choice in the `note` column -- treat alpha pulls as indicative.
+  EXOZIPPy/MMEXOFAST's (center-of-mass origin), and **no global mapping
+  between them exists** -- measured over all 44 events, see
+  `ALPHA_IS_UNMAPPABLE` in `dc18_common.py` and claim C22 of
+  `src/exozippy/components/mulensing/conventions.md`. The comparison
+  therefore reports the fitted alpha with NO truth value and NO pull. (The
+  old sign/offset search was deleted: it always returned its closest
+  candidate, so an unmappable truth came back as a confident number -- on
+  event 128 a 2034-sigma pull on an alpha that sat 0.3 deg from the light
+  curve's own optimum.)
 - **u_0** is compared in absolute value (the truth carries a
-  trajectory-side sign the fits do not).
+  trajectory-side sign the fits do not, and with parallax negligible that
+  sign is degenerate with alpha's anyway).
 - Event 1 is a cataclysmic variable, not a lensing event; expect the 2L1S
   fit to fail or diverge on it (the collector will show it as such).
 - Each event directory gets a dumped `DC2018_<NNN>.yaml` +

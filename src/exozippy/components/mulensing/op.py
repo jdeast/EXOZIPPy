@@ -6,7 +6,6 @@ import numpy as np
 import pytensor.tensor as pt
 import VBMicrolensing
 from astropy.coordinates import SkyCoord
-from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
 from exozippy.compat import patch_mulensmodel_method_order
@@ -57,7 +56,13 @@ def _dev_skycoord(obs_pos_np, cache):
     exactly matching Lens.get_magnification.
     """
     obs_pos_2d = np.atleast_2d(obs_pos_np)
-    key = (obs_pos_2d.shape, hash(obs_pos_2d.tobytes()))
+    # Keyed on the BYTES, not on hash(bytes): a 64-bit siphash can collide,
+    # and this cache's whole reason to exist is telling apart two deviation
+    # arrays of the SAME shape (ground and satellite over one plot grid), so a
+    # collision would hand the second observer the first one's parallax
+    # deltas.  Astronomically unlikely, and free to rule out (review 2.6.4);
+    # the dict hashes the bytes for us and then compares them on a hit.
+    key = (obs_pos_2d.shape, obs_pos_2d.tobytes())
     if key not in cache:
         cache[key] = SkyCoord(
             x=obs_pos_2d[:, 0] * u.au,
@@ -266,20 +271,29 @@ class _MagOpBase(Op):
         outputs[0][0] = np.asarray(A)
 
     def pullback(self, inputs, outputs, cotangents):
-        p, times, obs_pos = inputs
-        g = cotangents[0]
-        grad_op = _MagGradOp(
-            type(self)._builder,
-            self.coords,
-            self.mag_method,
-            self.use_rho,
-            self.bandpass,
+        # Deliberately loud, and deliberately the SAME refusal
+        # VBMDirectMagOp.pullback makes (review 2.6.5).  This Op used to hand
+        # back a _MagGradOp instead, which silently wired N_params+1 full
+        # MulensModel light curves per gradient evaluation -- a forward
+        # difference, so a NUTS step paid that cost for a gradient carrying
+        # O(eps) error, and nothing anywhere said so.  We do not support
+        # gradient-based samplers through the Op path (Lens.sampler_requirements
+        # already declares that), so an attempt to build one is a
+        # configuration error, not something to serve slowly and inaccurately.
+        #
+        # This is the MulensModel A/B reference backend, so the stakes are
+        # lower than VBMDirectMagOp's -- but the failure mode is worse
+        # precisely because it "works": the fit runs, burns the CPU, and
+        # returns a posterior nobody has reason to distrust.  The symbolic
+        # PSPL path (Lens.get_magnification) is separate and STAYS
+        # differentiable; that is what NUTS-compatible microlensing means
+        # here.  _MagGradOp is kept as the recipe if this is ever revisited.
+        raise NotImplementedError(
+            f"{type(self).__name__} has no gradient; use the PTDE (or another "
+            "gradient-free) sampler for binary/finite-source microlensing. "
+            "Point-source PSPL takes the symbolic path, which is "
+            "differentiable."
         )
-        return [
-            grad_op(p, times, obs_pos, g),
-            DisconnectedType()(),
-            DisconnectedType()(),
-        ]
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
@@ -389,9 +403,16 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
-        # Warn-once flag for the non-finite guard in _compute, mirroring
-        # _MagOpBase._warned.
+        # Warn-once flags, mirroring _MagOpBase._warned.  TWO of them, because
+        # the two failure modes have different fixes and must not silence each
+        # other: `_warned` covers a non-finite parameter vector reaching
+        # _compute (the model is exploring/misconfigured upstream), while
+        # `_warned_backend` covers VBMicrolensing itself raising (a
+        # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+        # wheel).  One shared flag would let a burst of NaN proposals early on
+        # permanently suppress the report that the backend is broken.
         self._warned = False
+        self._warned_backend = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
@@ -433,7 +454,8 @@ class VBMDirectMagOp(Op):
         reused for every proposal.
         """
         dev = np.atleast_2d(obs_pos_np)
-        key = (dev.shape, hash(dev.tobytes()))
+        # Bytes, not hash(bytes) -- see _dev_skycoord (review 2.6.4).
+        key = (dev.shape, dev.tobytes())
         if key not in self._delta_cache:
             # MulensModel's delta convention is the NEGATED observer offset,
             # i.e. exactly parallax_factors (see exozippy.skyframe: the same
@@ -515,7 +537,29 @@ class VBMDirectMagOp(Op):
         p, times_np, obs_pos_np = inputs
         try:
             A = self._compute(p, times_np, obs_pos_np)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
+            # Invalid parameter combination -> NaN magnifications -> logp =
+            # -inf -> the proposal is rejected.  That is the intended handling
+            # of a bad proposal, and it is ALSO what a broken backend looks
+            # like, which is why this cannot be silent: a VBM-level error (a
+            # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+            # wheel) rejects every proposal forever, and the default-backend
+            # binary fit then runs to a garbage posterior with no message
+            # anywhere.  This is exactly how the point-source-binary "VBBL"
+            # bug stayed hidden, and it is what _MagOpBase.perform already
+            # guards against -- mirror it here rather than trusting that this
+            # Op's inputs are pre-validated.
+            if not self._warned_backend:
+                self._warned_backend = True
+                warnings.warn(
+                    f"{type(self).__name__}: VBMicrolensing raised "
+                    f"{type(exc).__name__}: {exc} -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal. "
+                    "If this repeats for every proposal the backend is "
+                    "misconfigured, not merely exploring bad parameters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 
@@ -687,16 +731,45 @@ class _MagGradOp(Op):
         outputs[0][0] = out
 
     def pullback(self, inputs, outputs, cotangents):
-        return [
-            DisconnectedType()(),
-            DisconnectedType()(),
-            DisconnectedType()(),
-            cotangents[0],
-        ]
+        # This Op has no second derivative, and says so rather than inventing
+        # one (review 1.6.3).  What it used to return was wrong twice over:
+        # `cotangents[0]` for the incoming-cotangent input g is n_params long
+        # while the true VJP there is TIMES-shaped (this Op computes
+        # out[i] = sum_t g[t] * D[i,t], so d out / d g is D itself), and the
+        # params input was handed a DisconnectedType while connection_pattern
+        # declared it connected.
+        #
+        # RAISE, not DisconnectedType, and the distinction matters.
+        # DisconnectedType asserts that the output does not depend on that
+        # input, and for g that assertion is FALSE -- the output is exactly
+        # linear in g.  Declaring it disconnected would return a silently
+        # ABSENT gradient where a real one exists, which is the same class of
+        # bug this comment is about, only quieter.
+        #
+        # Nothing is lost by refusing.  A second derivative built on top of a
+        # FIRST-ORDER FINITE DIFFERENCE carries O(eps) error on a quantity
+        # that is itself only O(eps) accurate, so the Hessian would be
+        # numerically meaningless even if it were implemented correctly.
+        # There is no future in which second-order support is added inside
+        # this Op rather than by rewriting the magnification in pytensor or
+        # porting a differentiable library.
+        raise NotImplementedError(
+            "_MagGradOp has no second derivative: its own output is a "
+            "forward-difference approximation, so any Hessian built on it "
+            "would be numerically meaningless.  Use a gradient-free sampler "
+            "(PTDE) for binary/finite-source microlensing."
+        )
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
+        # Honest, and honest is what makes the raise above reachable.  Both
+        # the parameter vector and the incoming cotangent g genuinely feed the
+        # output, so both are connected; declaring g disconnected -- the
+        # obvious way to "fix" the wrong VJP it used to return -- would let
+        # pytensor skip pullback entirely and hand back an absent gradient
+        # instead of the error.  times/obs_pos stay False, matching
+        # _MagOpBase: they are data, never differentiated against.
         return [[True], [False], [False], [True]]

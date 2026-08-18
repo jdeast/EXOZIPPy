@@ -1,4 +1,5 @@
 import csv
+import logging
 
 import numpy as np
 
@@ -9,6 +10,8 @@ from .texutils import (
     mode_suffix,
     mode_word,
 )
+
+logger = logging.getLogger(__name__)
 
 # The two column layouts of <prefix>_results.csv.  MODE_COLUMNS is used
 # whenever ANY row in the file needs a mode key -- a multimodal posterior,
@@ -36,6 +39,62 @@ def _instance_name(params, index):
         if p.names and index < len(p.names):
             return str(p.names[index])
     return None
+
+
+def _note_mark(n):
+    """The n'th (0-based) tablenotemark label: a, b, ... z, aa, ab, ...
+
+    Distinct note texts scale with the number of parameters -- every
+    per-element support interval a component declares through
+    ``add_prior_contribution`` is its own text -- so a big table really can
+    run past 26.  The old ``chr(ord("a") + n)`` produced "{" at n = 26, which
+    closes ``\\tablenotemark{`` early and leaves the document brace-mismatched:
+    an unreadable TeX error at the end of a long fit, from a table that is
+    otherwise entirely correct.
+
+    Bijective base 26, so the first 26 labels are unchanged and no existing
+    table is renumbered.
+    """
+    label = ""
+    n += 1
+    while n:
+        n, rem = divmod(n - 1, 26)
+        label = chr(ord("a") + rem) + label
+    return label
+
+
+def _warn_mixed_lengths(comp_label, printable, n_instances):
+    """Name the printable vectors that are shorter than the instance loop.
+
+    The instance loop below runs to the LONGEST printable vector in the
+    component, on the assumption that every vector in a component has one
+    element per instance of it.  Nothing enforces that, and when it is false
+    the short vector is asked for a row at an index it has no element for --
+    which emitted a table row citing ``\\ez<var><idx>``, a macro
+    ``to_latex_def`` never defined, i.e. an "Undefined control sequence" at
+    the end of a long fit.  (With a list-valued ``summary`` and
+    ``print_to_table`` off, the same index is an outright IndexError.)
+
+    Those rows are skipped rather than raising -- a table is written at
+    wrap-up, and losing it wholesale over a layout mismatch is worse than
+    losing the rows -- but the mismatch is a component bug, so it is named
+    here rather than papered over silently.
+    """
+    short = [
+        (p.label, _instance_count(p))
+        for p in printable
+        if 1 < _instance_count(p) < n_instances
+    ]
+    if not short:
+        return
+    longest = [p.label for p in printable if _instance_count(p) == n_instances]
+    detail = ", ".join(f"{label} ({n})" for label, n in short)
+    logger.warning(
+        f"LaTeX table ({comp_label}): printable vectors of mixed length -- "
+        f"{detail} against {n_instances} instances (e.g. {longest[0]}). "
+        "Every vector in a component is expected to carry one element per "
+        "instance; the missing rows are omitted from the table."
+    )
 
 
 def _instance_subhead(name, n_cols=4):
@@ -96,8 +155,27 @@ def _mixing_sentence(mode_report):
 
 
 def _ensure_mode_summaries(system, p, mode_report):
-    """Compute per-mode summaries for a sampled parameter if missing."""
-    if p.posterior is None or p.mode_summaries is not None:
+    """Compute per-mode summaries for a sampled parameter if missing or stale.
+
+    ``mode_summaries`` is one entry per mode, and it is cached on the
+    Parameter -- which outlives the report.  Both the GUI and
+    ``exozippy-modes`` re-report a live System, and ``distribute_posterior``
+    overwrites ``posterior`` without clearing the summaries derived from it,
+    so a second report with a DIFFERENT mode count met a list sized for the
+    first one.  Too few entries and the table cites a per-mode macro
+    ``to_latex_mode_defs`` never defined; too many and it silently reports
+    the previous report's splits under the new run's labels, which is the
+    worse half because nothing anywhere says so.
+
+    Recomputing on a length mismatch is the whole guard: the count is the
+    one property of the cache that the new report can check.
+    """
+    if p.posterior is None:
+        return
+    if (
+        p.mode_summaries is not None
+        and len(p.mode_summaries) == mode_report.n_modes
+    ):
         return
     labels = getattr(system, "mode_labels", None)
     if labels is None:
@@ -279,7 +357,7 @@ def build_latex_output(
 
     def _mark_for_text(text):
         if text not in note_marks:
-            note_marks[text] = chr(ord("a") + len(note_marks))
+            note_marks[text] = _note_mark(len(note_marks))
         return note_marks[text]
 
     def _mark_for(p):
@@ -344,6 +422,7 @@ def build_latex_output(
                 all_defs.append(p.to_latex_mode_defs())
 
         n_instances = max(_instance_count(p) for p in printable)
+        _warn_mixed_lengths(comp_label, printable, n_instances)
 
         if n_instances == 1:
             all_table_lines.append(rf"\sidehead{{{comp_label}:}}" + "\n")
@@ -366,6 +445,12 @@ def build_latex_output(
                 instance_lines = []
                 for p in printable:
                     p_n = _instance_count(p)
+                    # This loop runs to the LONGEST printable vector in the
+                    # component, so a shorter one simply has no element here
+                    # -- and asking it for one produced a row citing a macro
+                    # to_latex_def never emitted.  See _warn_mixed_lengths.
+                    if 1 < p_n <= i:
+                        continue
                     # Inactive elements carry no row (see build_csv_output).
                     if not p.element_is_active(i if p_n > 1 else 0):
                         continue

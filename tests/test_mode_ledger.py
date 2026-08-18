@@ -11,6 +11,7 @@ import pytest
 from exozippy.components.parameter import Parameter
 from exozippy.outputs.latex import build_csv_output
 from exozippy.outputs.ledger import (
+    _delta_lp_cell,
     append_ledger_csv,
     build_seed_ledger,
     ledger_to_text,
@@ -369,3 +370,57 @@ def test_ledger_refuses_to_append_to_a_plain_layout_csv(tmp_path):
     with pytest.raises(ValueError, match="mode_columns=True"):
         append_ledger_csv(ledger, str(csv_path))
     assert csv_path.read_text() == before  # untouched, still rectangular
+
+
+# ----------------------------------------------------------------------
+# the rejected-modes table's delta is a log-POSTERIOR (review 3.11.1)
+# ----------------------------------------------------------------------
+
+
+def test_rejected_table_does_not_call_the_posterior_a_likelihood(tmp_path):
+    """
+    Given a ledger with one rejected seed,
+    When the rejected-solutions LaTeX table is written,
+    Then its delta column is labelled as a log-POSTERIOR difference and the
+      caption says so.  lp comes from model.compile_logp(), so it carries the
+      priors, the component potentials and the reparameterization Jacobians
+      -- this very file's own test measures the +0.272 logit-Jacobian term
+      inside delta_lp -- and labelling it a Delta ln L propagated a
+      likelihood-ratio claim into papers.  ledger_to_text has always said
+      "lp at optimum".
+    """
+    # ARRANGE
+    model, p = _two_basin_model()
+    raw0 = np.asarray(p.raw_from_initval(np.array([2.0])))
+    raw1 = np.asarray(p.raw_from_initval(np.array([7.0])))
+    ledger = build_seed_ledger(
+        _StubSystem([p]),
+        model,
+        [{"toy.x_raw": raw0}, {"toy.x_raw": raw1}],
+        [0, 1],
+    )
+    match_ledger_to_modes(ledger, _fake_report([float(raw0[0])], "toy.x_raw"))
+    tex_path = tmp_path / "rejected.tex"
+
+    # ACT
+    write_rejected_latex(ledger, str(tex_path))
+
+    # ASSERT
+    tex = tex_path.read_text()
+    assert r"\Delta \ln \mathcal{P}" in tex
+    assert r"\mathcal{L}" not in tex
+    assert "log-POSTERIOR" in tex
+
+
+def test_a_zero_delta_prints_unsigned():
+    """
+    Given a seed whose delta against the best is zero (the best seed itself,
+      or any seed within rounding of it),
+    When its table cell is formatted,
+    Then it prints an unsigned zero, not "-0.0" -- a signed zero reads as a
+      real, if tiny, difference from the best solution.
+    """
+    # ARRANGE / ACT / ASSERT
+    assert _delta_lp_cell(0.0) == "$0.0$"
+    assert _delta_lp_cell(0.01) == "$0.0$"
+    assert _delta_lp_cell(5.72) == "$-5.7$"
