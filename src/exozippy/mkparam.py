@@ -18,6 +18,7 @@ bounds, and are named as such.
 import copy
 import json
 import logging
+import numbers
 import re
 from pathlib import Path
 
@@ -85,6 +86,53 @@ def _find_existing(existing_params, comp_key, idx, name, param):
     return None, None
 
 
+def _sigma_is_nonzero_number(sigma):
+    """True when ``sigma`` is a number other than zero -- i.e. a live prior.
+
+    The mu promotion below only makes sense for a NUMERIC sigma, and the
+    reason this is a predicate rather than ``float(sigma) != 0`` is that a
+    sigma need not be a number at all: ``linking.LINKABLE_FIELDS`` includes
+    it, so ``{sigma: "star.B.av_sigma"}`` is a legal params entry and
+    ``float()`` on it raises ValueError.  Under ``run_fit`` the broad catch
+    around the mkparam call turned that into a silently missing restart file
+    at the end of a multi-day fit; the standalone CLI died raw.
+
+    A linked sigma answers False and so skips the promotion, which is the
+    right answer and not merely the safe one: the link is resolved against a
+    live model, and there is nothing here that could evaluate it to decide
+    whether it is zero.  The entry itself is still copied across verbatim by
+    the constraint loop, exactly as any other stated constraint is.  ``None``
+    (no sigma) and a bool both answer False -- a bool is an int in Python,
+    but ``sigma: true`` is not a width.
+    """
+    if isinstance(sigma, bool) or not isinstance(sigma, numbers.Real):
+        return False
+    return float(sigma) != 0
+
+
+def _promoted_prior_center(initval):
+    """The mu an implicit prior center is promoted to, from ``initval``.
+
+    A prior center is one number.  A list-valued ``initval`` is a length-K
+    set of PER-SEED STARTS (P4 multi-seed), which is a statement about where
+    K chains begin and not about a prior width's center -- promoting the
+    whole list would install a list as ``mu`` and hand the next fit a
+    Gaussian potential with a vector center nobody wrote.  Take seed 0,
+    which is the canonical element everywhere else: ``run._user_initval``
+    reads a list-valued initval as ``v[0]``, and this writer's own bounds
+    already come from seed 0.
+
+    The list can only be there because a previous mkparam run emitted one
+    and the user then hand-added a sigma to that entry -- the very round
+    trip ``_apply_existing_constraints`` exists to keep honest.  An empty
+    list has no seed 0 and so nothing to promote; return None and let the
+    caller skip, rather than inventing a center.
+    """
+    if isinstance(initval, (list, tuple)):
+        return initval[0] if len(initval) else None
+    return initval
+
+
 def _apply_existing_constraints(entry, existing_entry):
     """Layer an existing params entry's constraint fields onto a fresh entry.
 
@@ -95,11 +143,12 @@ def _apply_existing_constraints(entry, existing_entry):
     point, so it must never drift toward the MAP.  That asymmetry is the
     whole job of this function.
 
-    If the original carried a Gaussian prior (sigma > 0) but no explicit mu,
-    its initval WAS the prior center (``Parameter.build_pymc`` centers the
-    potential on initval whenever mu is absent, for sampled and derived
-    parameters alike), so promote it to mu. Without the promotion the prior
-    would silently follow the MAP on every successive mkparam run.
+    If the original carried a Gaussian prior (numeric sigma > 0) but no
+    explicit mu, its initval WAS the prior center (``Parameter.build_pymc``
+    centers the potential on initval whenever mu is absent, for sampled and
+    derived parameters alike), so promote it to mu -- seed 0 of it if it is a
+    multi-seed list, see ``_promoted_prior_center``. Without the promotion
+    the prior would silently follow the MAP on every successive mkparam run.
 
     Returns ``entry`` (mutated in place) for convenience.
     """
@@ -119,14 +168,14 @@ def _apply_existing_constraints(entry, existing_entry):
     for constraint_key in ("mu", "sigma", "lower", "upper", "bound_scale"):
         if constraint_key in existing_entry:
             entry[constraint_key] = existing_entry[constraint_key]
-    existing_sigma = existing_entry.get("sigma")
     if (
-        existing_sigma is not None
-        and float(existing_sigma) != 0
+        _sigma_is_nonzero_number(existing_entry.get("sigma"))
         and "mu" not in existing_entry
         and "initval" in existing_entry
     ):
-        entry["mu"] = existing_entry["initval"]
+        center = _promoted_prior_center(existing_entry["initval"])
+        if center is not None:
+            entry["mu"] = center
     return entry
 
 
@@ -145,12 +194,12 @@ def _normalize_key(key, config):
     return key
 
 
-def _next_versioned_path(param_path):
+def _bump_version(param_path):
     """Return the path with its version suffix incremented by one.
 
-    foo.params.yaml      → foo.params.2.yaml
-    foo.params.2.yaml    → foo.params.3.yaml
-    foo.params.12.yaml   → foo.params.13.yaml
+    foo.params.yaml      -> foo.params.2.yaml
+    foo.params.2.yaml    -> foo.params.3.yaml
+    foo.params.12.yaml   -> foo.params.13.yaml
     """
     p = Path(param_path)
     suffix = p.suffix  # ".yaml"
@@ -164,6 +213,30 @@ def _next_versioned_path(param_path):
     else:
         base, n = stem, 1
     return p.parent / f"{base}.{n + 1}{suffix}"
+
+
+def _next_versioned_path(param_path):
+    """The first UNUSED version of ``param_path``.
+
+    Auto-versioning is what makes the input file safe -- it is never written
+    over, which is why there is no backup step.  But bumping the version
+    ONCE only protects the input: two fits started from the same
+    ``foo.params.yaml`` both resolve to ``foo.params.2.yaml``, and the second
+    silently destroys the first's restart file.  That happened in practice
+    (2026-08).  The old ``backup_params`` this replaced looped; keep looping.
+
+    The loop is bounded by the filesystem rather than a counter on purpose:
+    the exit condition is "nothing is there", so a directory holding
+    versions 2..40 lands on 41 rather than refusing at some arbitrary cap.
+    It is not atomic against a second process claiming the same name between
+    the check and the write, and deliberately is not -- the realistic
+    collision is sequential runs, and a lock file would be a heavier promise
+    than the guarantee here (never destroy an existing restart file) needs.
+    """
+    candidate = _bump_version(param_path)
+    while candidate.exists():
+        candidate = _bump_version(candidate)
+    return candidate
 
 
 def _mode_seed_quotas(weights, n):
@@ -326,6 +399,75 @@ def _refuse_invalid_seed_draws(mode_status, trace_path, force=False):
     )
 
 
+def _map_draw_from_lp(lp_values, mode_report):
+    """Pick the best VALID draw by lp, as ``(chain, draw, lp)`` or None.
+
+    Two filters, both of which ``np.argmax`` got wrong in the direction that
+    silently writes a bad restart seed:
+
+    * **NaN is not a maximum.**  ``np.argmax`` returns the index of the first
+      NaN it sees, so a single non-finite lp anywhere in the trace made that
+      draw the "MAP".  ``np.nanargmax`` ranks the finite ones instead.
+    * **A finite lp is not proof the draw is usable.**  The runaway-lp failure
+      mode produces draws whose lp is finite and enormous -- ``outputs.modes``
+      labels them -1 (numerically invalid) precisely because they win any
+      ranking by construction.  So the mode pass's own per-draw labels mask
+      the ranking here, exactly as ``_sample_seed_draws``' stratified path
+      already excludes label -1.  The MAP path was the last leak.
+
+    The all-invalid trace is refused upstream (``_refuse_invalid_seed_draws``)
+    and so cannot normally reach this; under ``mkparam: {force: true}`` it can,
+    and then there is nothing left to rank -- returning None hands the caller
+    the same honest "no rankable lp" fallback a trace with no lp at all gets,
+    rather than ``argmax``'s silent index 0.
+
+    ``mode_report`` may be None (the mode pass failed, which must never break
+    seed emission) and its labels are only trusted when their shape matches
+    lp's: a mismatch would mask the wrong draws, which is worse than not
+    masking at all.
+    """
+    ranked = np.asarray(lp_values, dtype=float)
+    labels = getattr(mode_report, "labels", None)
+    if labels is not None:
+        labels = np.asarray(labels)
+        if labels.shape == ranked.shape:
+            masked = np.where(labels < 0, np.nan, ranked)
+            n_dropped = int(
+                np.isfinite(ranked).sum() - np.isfinite(masked).sum()
+            )
+            if np.isfinite(masked).any():
+                if n_dropped:
+                    logger.info(
+                        "mkparam: excluded %d numerically invalid draw(s) from "
+                        "the MAP ranking.",
+                        n_dropped,
+                    )
+                ranked = masked
+            elif n_dropped:
+                # Every finite lp belongs to an invalid draw.  Say so and rank
+                # the finite ones anyway: the alternative is no MAP at all, and
+                # the caller's fallback (last draw of chain 0) is not obviously
+                # better than the best of a known-bad set.  Only reachable
+                # under `mkparam: {force: true}`, which already accepted that.
+                logger.warning(
+                    "mkparam: every draw with a finite lp was labelled "
+                    "numerically invalid; ranking them anyway."
+                )
+        else:
+            logger.debug(
+                "mkparam: mode labels %s do not match lp %s -- not masking "
+                "the MAP ranking.",
+                labels.shape,
+                ranked.shape,
+            )
+    if not np.isfinite(ranked).any():
+        return None
+    flat = ranked.flatten()
+    map_idx = int(np.nanargmax(flat))
+    n_draws = ranked.shape[-1] if ranked.ndim > 1 else ranked.size
+    return map_idx // n_draws, map_idx % n_draws, float(flat[map_idx])
+
+
 def _sample_seed_draws(idata, n, exclude, rng_seed=0, mode_report=_UNSET):
     """Pick ``n`` random JOINT (chain, draw) index pairs for multi-seed starts.
 
@@ -474,9 +616,9 @@ def write_param_file(
     validity filter -- see ``_refuse_invalid_seed_draws`` for why that is a
     refusal rather than a warning, and for the ``mkparam: {force: true}``
     escape hatch.  This check covers the DEFAULT single-seed path too, and
-    has to: seed 0 is the MAP draw, and with an all-NaN lp ``np.argmax``
-    returns index 0, so the emitted "MAP" is silently the first draw of
-    chain 0.
+    has to: seed 0 is the MAP draw.  A PARTIALLY invalid trace passes that
+    gate, and seed 0 is chosen from the valid draws only -- see
+    ``_map_draw_from_lp``.
 
     Parameters
     ----------
@@ -534,7 +676,13 @@ def write_param_file(
         if param_file:
             output_path = _next_versioned_path(base_dir / param_file)
         else:
-            output_path = base_dir / f"{run_name}.params.2.yaml"
+            # Same versioning, from the name the file WOULD have had.  A
+            # config with no parameter_file (legal since 8.3.1: a blind fit
+            # can seed itself) is exactly the case where several runs share
+            # one directory, so it needs the collision loop most.
+            output_path = _next_versioned_path(
+                base_dir / f"{run_name}.params.yaml"
+            )
 
     param_file = config.get("parameter_file")
     existing_params = {}
@@ -615,23 +763,24 @@ def write_param_file(
     # posterior median for old Metropolis trace files without lp.
     ss = idata.get("sample_stats")
     has_lp = ss is not None and "lp" in ss.data_vars
+    map_pick = None
     if has_lp:
-        lp = ss["lp"]
-        flat_lp = lp.values.flatten()
-        map_idx = int(np.argmax(flat_lp))
-        n_draws = lp.sizes["draw"]
-        map_chain = map_idx // n_draws
-        map_draw = map_idx % n_draws
-        map_lp = float(flat_lp[map_idx])
+        map_pick = _map_draw_from_lp(ss["lp"].values, mode_report)
+    if map_pick is not None:
+        map_chain, map_draw, map_lp = map_pick
         logger.info(
             f"mkparam: MAP chain={map_chain} draw={map_draw} lp={map_lp:.4f}"
         )
     else:
-        # No lp → use last draw of chain 0 as a self-consistent fallback.
-        # Per-parameter medians would be inconsistent (the joint point may not
-        # exist in the posterior); any real draw is always self-consistent.
+        # No lp, or no draw with a rankable one -> use the last draw of chain 0
+        # as a self-consistent fallback.  Per-parameter medians would be
+        # inconsistent (the joint point may not exist in the posterior); any
+        # real draw is always self-consistent.
         logger.warning(
-            "mkparam: lp not in trace -- using last draw of chain 0 as fallback"
+            "mkparam: %s -- using last draw of chain 0 as fallback",
+            "lp not in trace"
+            if not has_lp
+            else "no draw in the trace has a finite, valid lp",
         )
         map_chain, map_draw, map_lp = (
             0,
@@ -805,22 +954,30 @@ def write_param_file(
     # existing file expressed them (star.0.param or star.param).
     for key, val in existing_params.items():
         if key not in consumed_existing:
-            if isinstance(val, dict) and not (_CONSTRAINT_FIELDS & val.keys()):
+            if not isinstance(val, dict):
+                # A BARE value is an initval and nothing else: `star.teff:
+                # 5800` (or a list of per-seed starts) states no constraint,
+                # so the discard policy above applies to it exactly as it
+                # does to `{initval: 5800}`.  Guarding the whole check with
+                # `isinstance(val, dict)` made the policy spelling-dependent
+                # -- the bare form fell through both branches and was
+                # re-emitted into every successive restart file forever.
+                continue
+            if not (_CONSTRAINT_FIELDS & val.keys()):
                 continue
             # For non-sampled constraint parameters (e.g. a Gaia parallax prior
-            # applied as a potential on distance), promote initval→mu so the
+            # applied as a potential on distance), promote initval->mu so the
             # prior center is explicit and cannot accidentally drift if initval
             # is ever edited.  Same logic as for sampled parameters above.
-            if isinstance(val, dict):
-                sigma = val.get("sigma")
-                if (
-                    sigma is not None
-                    and float(sigma) != 0
-                    and "mu" not in val
-                    and "initval" in val
-                ):
+            if (
+                _sigma_is_nonzero_number(val.get("sigma"))
+                and "mu" not in val
+                and "initval" in val
+            ):
+                center = _promoted_prior_center(val["initval"])
+                if center is not None:
                     val = dict(val)
-                    val["mu"] = val["initval"]
+                    val["mu"] = center
             output[_normalize_key(key, config)] = val
 
     output_path = Path(output_path)

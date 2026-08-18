@@ -35,12 +35,6 @@ from .whitening import prepare_whitening
 
 logger = logging.getLogger(__name__)
 
-# debugging knobs
-# pytensor.config.optimizer_excluding = "local_elemwise_fusion"
-# pytensor.config.allow_gc = True
-# pytensor.config.linker = "py"
-# import ipdb
-
 # Every key `_run_fit` reads off the `sampler:` block. Anything else is
 # warned about and ignored, so this set must stay a superset of the keys the
 # code actually consumes: a key missing here produces a warning saying it will
@@ -90,13 +84,92 @@ def sigterm_as_interrupt():
     instead of Python's default SIGTERM action (immediate termination with no
     partial trace saved). ``pm.sample`` already handles a KeyboardInterrupt
     raised mid-sampling gracefully -- that's exactly how the maxtime cutoffs
-    work. Used by every branch that calls ``pm.sample`` directly.
+    work.
+
+    Used by every branch that calls ``pm.sample`` directly: PyMC NUTS, the
+    DE-Metropolis variants, and **nutpie**, which was missed until 2026-08
+    and is the one that most needed saying out loud -- it reaches
+    ``pm.sample`` through an EXTERNAL sampler, so whether the interrupt
+    survives is nutpie's decision rather than PyMC's. It does:
+    ``nutpie.sample`` catches ``KeyboardInterrupt`` and returns
+    ``background_sampler.abort()``, i.e. the draws taken so far (verified
+    against nutpie 0.16.11).
+
+    The numpyro/blackjax branch is deliberately NOT wrapped, and that is not
+    an oversight of the same kind: it goes through ``sample_jax_nuts``, whose
+    chain runs inside one jitted scan with no Python frame to raise in --
+    the same reason ``maxtime`` cannot be honored there (see
+    ``warn_maxtime_unsupported``). The PTDE and async-PTDE samplers manage
+    their own signal handling in ``samplers/_common.py``.
     """
     old_sigterm = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         yield
     finally:
         signal.signal(signal.SIGTERM, old_sigterm)
+
+
+@contextlib.contextmanager
+def nonfatal_wrapup(what):
+    """Run one wrap-up step; a crash inside it warns instead of aborting.
+
+    Everything after ``pm.sample`` returns is a REPORT on a fit that already
+    finished, and the fit's irreplaceable artifacts -- the trace, the mode
+    report, the restart file -- are cheap to lose and expensive to recreate.
+    The plotting block between the tables and ``write_param_file`` was the
+    one stretch of bare calls in an otherwise wrapped wrap-up, so a
+    degenerate-KDE crash inside ``save_multipage_trace`` (which any short or
+    stopped run can provoke) skipped the restart file and the final
+    paper.tex regeneration of a multi-day fit.
+
+    Deliberately a broad ``except``: the point is that no diagnostic, from
+    any component, may kill a finished fit, and enumerating the exception
+    types a third-party plotting stack can raise is exactly the list that
+    goes stale.  ``exc_info=True`` keeps the traceback in the log (and so in
+    the GUI's status.json) rather than reducing the failure to one line --
+    the alternative, and the reason this is warn-and-continue rather than
+    swallow, is a wrap-up that silently produces fewer files than it should.
+
+    KeyboardInterrupt and SystemExit are NOT caught (they are not
+    ``Exception``): a user interrupting wrap-up wants it to stop.
+    """
+    try:
+        yield
+    except Exception:
+        logger.warning("%s failed (non-fatal)", what, exc_info=True)
+
+
+# Samplers that cannot honor `maxtime`, and why.  The three external NUTS
+# backends run their whole chain outside Python's per-draw loop -- the JAX
+# ones inside one jitted scan, nutpie inside Rust -- so there is no point at
+# which a wall-clock check could raise the KeyboardInterrupt that the maxtime
+# mechanism turns into a graceful stop.  PyMC agrees and says so out loud:
+# pm.sample RAISES for a `callback` with any `nuts_sampler` but its own.
+MAXTIME_UNSUPPORTED_METHODS = ("numpyro", "blackjax", "nutpie")
+
+
+def warn_maxtime_unsupported(method, maxtime):
+    """Say so when `maxtime:` cannot be honored by the selected sampler.
+
+    A key that is silently ignored is worse than one that is refused: the
+    whole point of `maxtime` is that a scheduler-bound job stops itself
+    before the queue kills it, so a user who sets it and gets nothing has no
+    partial trace AND no idea why.  demc already warns for exactly this
+    reason (PyMC's population path discards per-draw callbacks); these three
+    were the remaining silent ones.
+
+    Returns True when a warning was emitted, so the check is exercisable
+    without running a fit -- same shape as ``warn_unknown_sampler_keys``.
+    """
+    if maxtime is None or method not in MAXTIME_UNSUPPORTED_METHODS:
+        return False
+    logger.warning(
+        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- external NUTS "
+        f"samplers run the chain outside Python's per-draw loop and invoke no "
+        f"callback, so there is nothing to interrupt. Use method: nuts, "
+        f"ptde_async or demcz for a wall-clock cap."
+    )
+    return True
 
 
 def warn_unknown_sampler_keys(sampler_cfg):
@@ -211,7 +284,9 @@ def _run_fit(config, gui, user_params=None):
     # Data-driven whitening: probe each raw element's true local scale from
     # the start and rescale the model's whitening in place before sampling.
     # On by default; 'measure_scales: false' keeps the preliminary scales
-    # (defaults.yaml init_scale or the span-fraction fallback).
+    # (defaults.yaml init_scale or the span-fraction fallback).  It gates the
+    # MEASUREMENT only -- reusing a trace still restores the whitening that
+    # trace was sampled under, whatever this says.
     measure_scales = sampler_cfg.get("measure_scales", True)
     profile = sampler_cfg.get("profile", False)
     _min_ess_raw = sampler_cfg.get("min_ess", 1000)
@@ -365,14 +440,25 @@ def _run_fit(config, gui, user_params=None):
                 raw_start = system.get_raw_start(model)
 
         whiten_report = None
-        if measure_scales:
-            # Fresh run -> measure + persist.  Reuse -> restore only: the
-            # whitening is a property of the draws being decoded, so it is
-            # never re-measured and never rewritten there (a mismatch
-            # raises StaleWhiteningError, a missing file warns and keeps
-            # the preliminary scales).  The old code fell back to
-            # measure + save on BOTH, silently re-coordinating the trace it
-            # was reusing and overwriting the only record of how to read it.
+        # Fresh run -> measure + persist.  Reuse -> restore only: the
+        # whitening is a property of the draws being decoded, so it is
+        # never re-measured and never rewritten there (a mismatch
+        # raises StaleWhiteningError, a missing file warns and keeps
+        # the preliminary scales).  The old code fell back to
+        # measure + save on BOTH, silently re-coordinating the trace it
+        # was reusing and overwriting the only record of how to read it.
+        #
+        # `measure_scales: false` gates only the MEASUREMENT, and cannot gate
+        # the restore: it asks "do not probe this run's start", which is a
+        # statement about a run that is about to sample.  A trace sampled
+        # under measured scales and reloaded with the key off would otherwise
+        # decode its raw draws under preliminary scales, silently and with no
+        # message -- the exact failure restore_whitening_for_trace exists to
+        # prevent.  The reuse path's honest answer when the trace really was
+        # sampled without measurement is already built in: no whitening file
+        # exists, so the restore warns and keeps the preliminary scales, which
+        # for that trace ARE the sampled coordinates.
+        if reusing_trace or measure_scales:
             whiten_report = prepare_whitening(
                 system,
                 model,
@@ -441,13 +527,9 @@ def _run_fit(config, gui, user_params=None):
                 filename_prefix=str(prefix) + "_start",
             )
 
-        #### profiling ####
         if profile:
             func = model.logp_dlogp_function(profile=True)
             func.profile.summary()
-            # ipdb.set_trace()
-        ###################
-        # ipdb.set_trace()
 
         if reusing_trace:
             # if we've already done the sampling and don't want to redo it, load it
@@ -471,6 +553,12 @@ def _run_fit(config, gui, user_params=None):
                         f"Install with: poetry install --extras jax"
                     )
                     method = "nuts"
+
+            # Placed AFTER the import fallback above, so a config asking for
+            # numpyro on a box without it -- which lands on PyMC NUTS, where
+            # maxtime IS honored -- is not warned about a limit that will be
+            # applied.
+            warn_maxtime_unsupported(method, maxtime)
 
             if method == "ptde":
                 idata = ptde_sample(
@@ -574,16 +662,23 @@ def _run_fit(config, gui, user_params=None):
                         for v in model.free_RVs
                     ]
                 )
-                idata = pm.sample(
-                    draws=draws,
-                    tune=tune,
-                    chains=chains,
-                    nuts_sampler="nutpie",
-                    target_accept=target_accept,
-                    nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
-                    cores=cores,
-                    return_inferencedata=True,
-                )
+                # Wrapped like the other two pm.sample branches, and it pays
+                # off here: nutpie.sample catches a KeyboardInterrupt and
+                # returns `background_sampler.abort()`, i.e. the draws taken
+                # so far (verified against nutpie 0.16.11).  So a scheduler
+                # SIGTERM buys a partial trace instead of an immediate kill,
+                # which is exactly what this context manager is for.
+                with sigterm_as_interrupt():
+                    idata = pm.sample(
+                        draws=draws,
+                        tune=tune,
+                        chains=chains,
+                        nuts_sampler="nutpie",
+                        target_accept=target_accept,
+                        nuts_sampler_kwargs={"init_mean": nutpie_init_mean},
+                        cores=cores,
+                        return_inferencedata=True,
+                    )
             elif method in de_metropolis.STEP_CLASSES:
                 # Gradient-free differential-evolution MCMC (ter Braak 2006 /
                 # ter Braak & Vrugt 2008) on PyMC's own step methods, started
@@ -644,25 +739,10 @@ def _run_fit(config, gui, user_params=None):
             # must be told rather than left to assume 1 (see
             # ModeReport.thin_factor / thin_known).
             idata.posterior.attrs["nthin"] = int(nthin)
-            # Ensure lp is in sample_stats; compute and persist if missing.
-            ss_vars = (
-                list(idata.sample_stats.data_vars)
-                if hasattr(idata, "sample_stats")
-                else []
-            )
-            if "lp" not in ss_vars:
-                import xarray as xr
-
-                lp_vals = _compute_lp_from_model(model, idata)
-                if lp_vals is not None:
-                    idata.sample_stats["lp"] = xr.DataArray(
-                        lp_vals,
-                        dims=["chain", "draw"],
-                        coords={
-                            "chain": idata.posterior.chain,
-                            "draw": idata.posterior.draw,
-                        },
-                    )
+            # Ensure lp is in sample_stats; compute and persist if missing,
+            # so the archived trace carries it and no later reader (modes,
+            # mkparam, the plotters) has to recompute it.
+            _ensure_lp(idata, model)
             # Convert sampled variables to user-facing units before archiving.
             # This makes the trace file, trace plots, ArviZ summary, and
             # mkparam output all use the same units the user specified.
@@ -674,9 +754,6 @@ def _run_fit(config, gui, user_params=None):
             # produced these draws, so any later reload can verify it.
             stamp_structural_metadata(idata, system)
             idata.to_netcdf(trace_path)
-
-        # compute the loglikelihoods (super slow? I can't believe this can't be stored/recalled...
-        # loglike = pm.compute_log_likelihood(idata)
 
     # Sampling is done; the rest is post-processing + report/plot output.
     gui.phase("writing")
@@ -745,21 +822,29 @@ def _run_fit(config, gui, user_params=None):
         _format_summary(idata, burn_diag), encoding="utf-8"
     )
 
+    # Every plot below is wrapped, and per COMPONENT rather than per loop, so
+    # one component's broken diagnostic costs its own figure and nothing else
+    # -- neither its siblings' figures nor, further down, the restart file.
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
-    make_corner(model, idata, str(prefix) + "_corner.png")
+    with nonfatal_wrapup("corner plot"):
+        make_corner(model, idata, str(prefix) + "_corner.png")
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
     # runs here, once, when the full posterior (idata) actually exists.
     for comp in system.active_components.values():
-        comp.plot_corner(idata, filename_prefix=str(prefix))
+        with nonfatal_wrapup(f"corner plot for {comp.label}"):
+            comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
-    all_params = system.get_all_parameters()
-    plot_vars = [p.label for p in all_params if p.label in idata["posterior"]]
-    save_multipage_trace(
-        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
-    )
+    with nonfatal_wrapup("detailed trace plot"):
+        all_params = system.get_all_parameters()
+        plot_vars = [
+            p.label for p in all_params if p.label in idata["posterior"]
+        ]
+        save_multipage_trace(
+            idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+        )
 
     # Pick the suspected troublemakers
     # List every tracked parameter in the posterior
@@ -778,10 +863,16 @@ def _run_fit(config, gui, user_params=None):
     # )
     # plt.show()
 
-    # Generate final plots
-    draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
+    # Generate final plots.  `draws` outlives this block -- the modeling
+    # draft reads draws[0] for its model-bearing figures -- so it is seeded
+    # empty first: a get_draws failure must degrade the draft to its
+    # data-only specs, not NameError past the wrap.
+    draws = []
+    with nonfatal_wrapup("posterior draw extraction"):
+        draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
-        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+        with nonfatal_wrapup(f"posterior plots for {comp.label}"):
+            comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution -- see
@@ -1447,6 +1538,53 @@ def _lp_eval_chain(args):
     return chain_idx, lp_chain
 
 
+def _ensure_lp(idata, model=None):
+    """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
+
+    NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
+    is computed from the model and persisted -- once, right after sampling,
+    so the saved trace carries it and no reader has to recompute it.  The
+    fallback also serves old trace files written before that was done.
+
+    One function for two call sites that had drifted, and the merge turned up
+    that BOTH were broken for a trace carrying no ``sample_stats`` group at
+    all -- just differently.  The save path checked
+    ``hasattr(idata, "sample_stats")`` and then assigned into
+    ``idata.sample_stats`` regardless, so the assignment raised; the plotting
+    path guarded it with ``idata.add_groups(...)``, which is arviz 0.x API
+    that no supported arviz has (``pyproject.toml`` floors it at 1.1.0, where
+    ``InferenceData`` IS an ``xarray.DataTree``), so it raised too. Adding a
+    group on a DataTree is ``idata["sample_stats"] = xr.Dataset()``.
+
+    ``model=None`` means "report, do not compute": the plotting path can be
+    handed a trace with no model, and there is nothing to fall back to.
+    """
+    ss = getattr(idata, "sample_stats", None)
+    if ss is not None and "lp" in ss.data_vars:
+        return True
+    if model is None:
+        return False
+
+    logger.info("lp is not in the trace -- computing it from the model")
+    lp_vals = _compute_lp_from_model(model, idata)
+    if lp_vals is None:
+        return False
+
+    import xarray as xr
+
+    if getattr(idata, "sample_stats", None) is None:
+        idata["sample_stats"] = xr.Dataset()
+    idata.sample_stats["lp"] = xr.DataArray(
+        lp_vals,
+        dims=["chain", "draw"],
+        coords={
+            "chain": idata.posterior.chain,
+            "draw": idata.posterior.draw,
+        },
+    )
+    return True
+
+
 def _compute_lp_from_model(model, idata):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
@@ -1791,38 +1929,12 @@ def save_multipage_trace(
         thin_factor = max(1, n_draws // draws_per_chain)
         idata = idata.isel(draw=slice(None, None, thin_factor))
 
-    # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
-    # the fix that computes and persists it right after pm.sample().
-    # Fall back to computing it for old trace files.
-    ss_vars = (
-        list(idata.sample_stats.data_vars)
-        if hasattr(idata, "sample_stats")
-        else []
-    )
-    if "lp" in ss_vars:
+    # lp is in sample_stats for NUTS traces and for every trace saved after
+    # the fix that computes and persists it right after pm.sample().  Fall
+    # back to computing it for old trace files; a trace with no model to
+    # fall back to simply gets no lp page.
+    if _ensure_lp(idata, model):
         lp_idata, lp_var = idata, "lp"
-    elif model is not None:
-        logger.info("lp not in trace — computing from model (old trace file)")
-        import xarray as xr
-
-        lp_vals = _compute_lp_from_model(model, idata)
-        if lp_vals is not None:
-            if (
-                not hasattr(idata, "sample_stats")
-                or idata.sample_stats is None
-            ):
-                idata.add_groups({"sample_stats": xr.Dataset()})
-            idata.sample_stats["lp"] = xr.DataArray(
-                lp_vals,
-                dims=["chain", "draw"],
-                coords={
-                    "chain": idata.posterior.chain,
-                    "draw": idata.posterior.draw,
-                },
-            )
-            lp_idata, lp_var = idata, "lp"
-        else:
-            lp_idata, lp_var = None, None
     else:
         lp_idata, lp_var = None, None
 

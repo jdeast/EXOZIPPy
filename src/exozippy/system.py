@@ -1,4 +1,3 @@
-# import ipdb
 import logging
 import os
 
@@ -92,20 +91,41 @@ class System(Component):
         else:
             user_params_file = self.config.get("parameter_file", None)
             if user_params_file is None:
-                raise ValueError(
-                    "No 'parameter_file' key found in your config YAML. "
-                    "Add a line like:\n"
-                    "  parameter_file: myfit.params.yaml\n"
-                    "and create that file (or copy an example from the examples/ directory)."
+                # An OMITTED key is legal, and says "I have no overrides".
+                # A params file may already be EMPTY -- defaults.yaml, the
+                # component hints and the relaxation engine between them can
+                # start a fit on their own, and since the global search
+                # (8.3.1) a blind fit seeds its own period and epoch from
+                # BLS/Lomb-Scargle -- so requiring the KEY while the FILE it
+                # names may be empty is a distinction with no content, and
+                # exactly the friction a blind fit should not have to pay.
+                # An INFO line, not a warning: this is a supported way to
+                # write a config, not a mistake to apologize for.  A key that
+                # IS present still has to name a file that exists, which is
+                # the real typo (below) and stays fatal.
+                logger.info(
+                    "No 'parameter_file' in the config; proceeding with no "
+                    "user parameter overrides. Start values come from each "
+                    "component's defaults.yaml, its data-derived hints and "
+                    "the relaxation engine. Add "
+                    "'parameter_file: myfit.params.yaml' to override any of "
+                    "them."
                 )
-            if not os.path.exists(user_params_file):
-                raise FileNotFoundError(
-                    f"parameter_file '{user_params_file}' not found. "
-                    f"This path is resolved relative to the directory from which you "
-                    f"run exozippy (currently: {os.getcwd()}). "
-                    f"Check that the file exists and the path in your config YAML is correct."
-                )
-            self.user_params = load_yaml(str(user_params_file))
+                self.user_params = {}
+            else:
+                if not os.path.exists(user_params_file):
+                    raise FileNotFoundError(
+                        f"parameter_file '{user_params_file}' not found. "
+                        f"This path is resolved relative to the directory from which you "
+                        f"run exozippy (currently: {os.getcwd()}). "
+                        f"Check that the file exists and the path in your config YAML is correct."
+                    )
+                # `or {}`: yaml.safe_load returns None for an EMPTY file, and
+                # an empty params file has to mean exactly what an omitted
+                # key does -- "no overrides" -- rather than a third state
+                # every consumer has to spell `user_params or {}` for.
+                # mkparam's own loader has always normalized it this way.
+                self.user_params = load_yaml(str(user_params_file)) or {}
 
         self.config_manager = ConfigManager(
             self.user_params, system_config=self.config
@@ -128,8 +148,10 @@ class System(Component):
         self._branch_alternatives = []
         # Record the params file ONLY when one was really read: an in-memory
         # user_params dict must not be blamed on a parameter_file the config
-        # happens to name but System never opened.
-        if user_params is None:
+        # happens to name but System never opened -- and neither must a config
+        # that names none at all, whose (empty) overrides come from nowhere on
+        # disk and so have no file for an error message to point at.
+        if user_params is None and user_params_file is not None:
             self.config_manager.param_file = str(user_params_file)
         self.registry = discover_components()
         self.active_components = {}
@@ -1085,31 +1107,6 @@ class System(Component):
         return {
             var.name: val for var, val in zip(output_vars, physical_values)
         }
-
-    def get_physical_point(self, model, raw_point):
-        output_vars = model.free_RVs + model.deterministics
-
-        eval_fn = pytensor.function(
-            inputs=model.free_RVs,
-            outputs=output_vars,
-            on_unused_input="ignore",
-        )
-
-        # Pull the values in the exact order the function expects them
-        input_values = [raw_point[v.name] for v in model.free_RVs]
-
-        physical_values = eval_fn(*input_values)
-        param_lookup = self.get_parameter_lookup()
-
-        results = {}
-        for var, val in zip(output_vars, physical_values):
-            if var.name in param_lookup:
-                # Standardize: Always use from_internal to ensure we return User Units
-                results[var.name] = param_lookup[var.name].from_internal(val)
-            else:
-                results[var.name] = val
-
-        return results
 
     def distribute_posterior(self, idata):
         """Maps the traces from idata back to the individual Parameter objects."""

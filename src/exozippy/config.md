@@ -22,7 +22,9 @@ trunk `CLAUDE.md`.
    - `RANK_DERIVED_DATA = 60` — from data (e.g., RV offset from median)
    - `RANK_DERIVED_MIXED = 40` — solved using a mix of user + defaults
    - `RANK_DEFAULT = 20` — from `defaults.yaml`
-   - rank 30 is used for microlensing distance hints (overrides 10 pc default, yields to user)
+   - `RANK_DERIVED_DATA_WEAK = 30` -- a weak data hint (the microlensing distance: overrides the 10 pc default, yields to anything the engine derives)
+
+   `ConfigManager._provenance_label` collapses a rank to the coarse source the startup table, `export_solution` and the GUI report -- "user", "data", "solved", "default". The two data ranks are named in the **set** `DATA_RANKS`, not tested as a numeric band, and that is not a style choice: they do not bracket a contiguous range, since `RANK_DERIVED_MIXED` (40) sits between them and `RANK_DERIVED_USER` (80) above them and both are SOLVER ranks, so the obvious `>= 30 and < RANK_USER` test would report every engine-derived value as data-derived. The predicate previously hardcoded the two literals, which failed the other way -- any new intermediate data rank silently reported "solved". **A new data rank must be added to `DATA_RANKS` in the same commit that introduces it.** Tests: `tests/test_provenance_labels.py`.
 4. Runs a **relaxation engine** (`resolve_and_validate_parameters`): iteratively substitutes known values into the SymPy equations to derive unknowns and detect contradictions.
 5. Collects `init_scale` values from defaults, component hints, user sigmas, and the engine's own solved-value sync. These are **preliminary only** (see "Whitening", now `src/exozippy/whitening.md`): sampled parameters get their real scale from the startup probe, and soft-bound barrier steepness is measured numerically post-whitening (the old sympy forward/backward Jacobian scale passes are deleted). `init_scale` is **not user-facing**: entries in a params file are stripped with a warning at ConfigManager construction.
 
