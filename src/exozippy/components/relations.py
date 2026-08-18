@@ -39,6 +39,8 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
+from .component import resolve_star_ref
+
 logger = logging.getLogger(__name__)
 
 # The stellar quantities a relation may be asked to constrain.
@@ -127,7 +129,10 @@ class StellarRelation:
 
         Accepts a bare name (``"B"``), a path (``"star.B"``) and an index
         (``1`` or ``"star.1"``); raises a ValueError naming the available
-        stars otherwise.
+        stars otherwise.  The translation itself is the shared
+        ``component.resolve_star_ref``; only the "a 'star:' key is required"
+        case stays here, because only this component knows the key is
+        mandatory for it.
         """
         star_names = list(system.star.names)
         if raw_star is None:
@@ -135,15 +140,7 @@ class StellarRelation:
                 f"{self.prefix} '{nm}': a 'star:' key is required naming the "
                 f"star to constrain. Available stars: {star_names}."
             )
-        key = str(raw_star).split(".")[-1]
-        if key in star_names:
-            return star_names.index(key)
-        if key.isdigit() and int(key) < len(star_names):
-            return int(key)
-        raise ValueError(
-            f"{self.prefix} '{nm}': unknown star '{raw_star}'. "
-            f"Available stars: {star_names}."
-        )
+        return resolve_star_ref(raw_star, star_names, f"{self.prefix} '{nm}'")
 
     def _parse_constrain(self, nm, raw):
         """The set of quantities instance ``nm`` asked to constrain.

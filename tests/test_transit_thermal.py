@@ -267,7 +267,7 @@ def _flux_at(system, point, times):
     y = transit._compiled_full_lc(
         np.asarray(times, dtype=float), 0, *param_values
     )
-    baseline = transit._baseline_for(point, 0)
+    baseline = transit._point_value(point, transit.baseline, 0)
     return baseline + y
 
 
@@ -370,7 +370,7 @@ def test_build_likelihood_mu_shows_eclipse_dip_and_transit_dip(
         thermal_on_full_orbit
     )
     mu = _likelihood_mu(system, model, point)
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     times = system.transit.time
 
     mu_far = mu[_nearest_index(times, t_far)]
@@ -447,7 +447,7 @@ def test_thermal_off_model_is_flat_away_from_transit(thermal_off_system):
     transit-only model is unchanged.
     """
     system, model, point = thermal_off_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     far = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     secondary = _flux_at(system, point, [_TC + _PERIOD / 2.0])[0]
     assert far == pytest.approx(baseline, abs=1e-9)
@@ -464,7 +464,7 @@ def test_thermal_on_adds_constant_bump_away_from_either_conjunction(
     star isn't occulting the planet's disk there).
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     far = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     assert far == pytest.approx(baseline + _THERMAL_PPM * 1e-6, abs=1e-6)
 
@@ -479,7 +479,7 @@ def test_thermal_on_drops_during_secondary_eclipse(thermal_on_system):
     plateau.
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     plateau = _flux_at(system, point, [_TC + _PERIOD * 0.3])[0]
     secondary = _flux_at(system, point, [_TC + _PERIOD / 2.0])[0]
     # Should have lost most of the thermal bump...
@@ -501,7 +501,7 @@ def test_thermal_on_primary_transit_is_still_a_dip_below_baseline(
     (planetvisible == 1 in front of the star).
     """
     system, model, point = thermal_on_system
-    baseline = system.transit._baseline_for(point, 0)
+    baseline = system.transit._point_value(point, system.transit.baseline, 0)
     mid_transit = _flux_at(system, point, [_TC])[0]
     assert mid_transit < baseline
 
@@ -540,7 +540,7 @@ def test_thermal_eclipse_is_exposure_smeared(tmp_path_factory):
 
     tr = system.transit
     param_values = tr._point_to_plot_params(point, system)
-    baseline = tr._baseline_for(point, 0)
+    baseline = tr._point_value(point, tr.baseline, 0)
 
     smeared = baseline + tr._smeared_full_lc(t, 0, *param_values)
     np.testing.assert_allclose(mu, smeared, atol=1e-8)

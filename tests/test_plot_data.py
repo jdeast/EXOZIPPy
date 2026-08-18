@@ -516,7 +516,7 @@ def test_unphased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
     When plot_data builds the unphased chart,
     Then the plotted (gamma-subtracted) data carry that pinned offset.
 
-    Regression: _instrument_gamma read the point with
+    Regression: _point_value's predecessor read the point with
     point.get(label, 0.0), and a pinned parameter is always absent from the
     draws, so the whole instrument plotted -12345 m/s away from the model
     curve while the likelihood used the real offset.
@@ -541,13 +541,13 @@ def test_unphased_rv_data_uses_the_pinned_gamma(pinned_gamma_rv_system):
 def test_gamma_helper_returns_the_pinned_value(pinned_gamma_rv_system):
     """
     Given the same pinned-gamma fit,
-    When _instrument_gamma is asked for the instrument's offset,
+    When _point_value is asked for the instrument's offset,
     Then it returns the pinned value (in internal units), not zero.
     """
     system, _, point, _, _ = pinned_gamma_rv_system
     comp = system.rvinstrument
 
-    g_ms = comp._instrument_gamma(point, 0) * comp._rv_factor()
+    g_ms = comp._point_value(point, comp.gamma, 0) * comp._rv_factor()
 
     assert g_ms == pytest.approx(_PIN["gamma"], rel=1e-9)
 
@@ -656,12 +656,12 @@ def test_baseline_helper_returns_the_pinned_value(
 ):
     """
     Given the same pinned-baseline fit,
-    When _baseline_for is asked for the instrument's baseline,
+    When _point_value is asked for the instrument's baseline,
     Then it returns the pinned raw-count value, not 1.0.
     """
     system, _, point, _, _ = pinned_baseline_transit_system
 
-    base = system.transit._baseline_for(point, 0)
+    base = system.transit._point_value(point, system.transit.baseline, 0)
 
     assert base == pytest.approx(_LC["baseline"], rel=1e-9)
 
@@ -674,7 +674,7 @@ def test_unphased_transit_model_uses_the_pinned_baseline(
     When plot_data builds the unphased chart,
     Then the plotted model curve sits at that baseline, not at 1.0.
 
-    Regression: _baseline_for read the point with
+    Regression: _point_value's predecessor read the point with
     point.get(label, 1.0), and a pinned parameter is always absent from the
     draws, so the model curve plotted at unity -- 20000 counts below the
     data the likelihood actually fit.
@@ -717,3 +717,75 @@ def test_phased_transit_data_uses_the_pinned_baseline(
     )
     # the pre-fix cleaned flux (data - 1.0) is off by the whole flux scale
     assert not np.allclose(data_trace.y, flux - 1.0, atol=1.0)
+
+
+# ---------------------------------------------------------------------------
+# 2.5.1: the phased panels must survive a point that does not carry tc/period
+# ---------------------------------------------------------------------------
+#
+# The review item claimed a pinned (sigma: 0) orbit.tc is ABSENT from the
+# point and so crashed the RV phased panel with float(None).  Re-verified
+# 2026-08-18: it is not, because `orbit.tc` and `orbit.period` are declared
+# `force_node: True`, which makes them pm.Deterministics -- present in
+# model.deterministics, in get_internal_point and in the posterior -- even
+# with every element pinned.  What the fix removes is the no-fallback read
+# itself: both panels now go through Instrument._point_value, which is the
+# same "value from the point, else the Parameter's initval" rule gamma and
+# baseline already used.  These tests pin that contract on a point with the
+# keys genuinely removed, which is the only state that could still reach it
+# (a partial point, or a build where force_node is dropped).
+
+
+def test_pinned_ephemeris_is_still_in_the_point(pinned_gamma_rv_system):
+    """
+    Given an RV fit built from a config with tc and period seeded,
+    When the plotting point is built from the model,
+    Then both are in it -- force_node makes them Deterministics, so the
+    crash the item described cannot happen through that door.
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+
+    assert system.orbit.tc.label in point
+    assert system.orbit.period.label in point
+
+
+def test_phased_rv_panel_survives_a_point_without_tc(pinned_gamma_rv_system):
+    """
+    Given a point with orbit.tc and orbit.period removed entirely,
+    When plot_data builds the RV charts,
+    Then the phased panel is still produced, folded on the Parameters'
+    own initvals rather than crashing on float(None).
+    """
+    system, _, point, _, _ = pinned_gamma_rv_system
+    partial = {
+        k: v
+        for k, v in point.items()
+        if k not in (system.orbit.tc.label, system.orbit.period.label)
+    }
+
+    specs = system.rvinstrument.plot_data(system, partial)
+
+    phased = [s for s in specs if s.meta["phase_folded"]]
+    assert len(phased) == 1
+    assert phased[0].meta["period"] == pytest.approx(
+        float(np.atleast_1d(system.orbit.period.initval)[0]), rel=1e-9
+    )
+    assert phased[0].meta["tc"] == pytest.approx(
+        float(np.atleast_1d(system.orbit.tc.initval)[0]), rel=1e-9
+    )
+
+
+def test_point_value_falls_back_to_the_initval(pinned_gamma_rv_system):
+    """
+    Given a Parameter whose label is absent from the point,
+    When Instrument._point_value is asked for one of its elements,
+    Then it returns that element's initval, in internal units.
+    """
+    system, _, _, _, _ = pinned_gamma_rv_system
+    comp = system.rvinstrument
+
+    got = comp._point_value({}, system.orbit.tc, 0)
+
+    assert got == pytest.approx(
+        float(np.atleast_1d(system.orbit.tc.initval)[0]), rel=1e-12
+    )

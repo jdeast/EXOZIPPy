@@ -14,7 +14,7 @@ import yaml
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 
-from exozippy.components.component import Component
+from exozippy.components.component import Component, resolve_star_ref
 from exozippy.components.parameter import Parameter
 from exozippy.constants import ANG_TO_MICRON_CONST, LOGG_CONST
 from exozippy.outputs.prose import get_collector
@@ -342,31 +342,13 @@ class SED(Component):
 
     @staticmethod
     def _resolve_star_ref(ref, star_names):
-        """Translate a photType star reference (name or index) to an index."""
-        n = len(star_names)
-        if isinstance(ref, bool):
-            raise ValueError(f"Invalid star reference {ref!r} in photType.")
-        if isinstance(ref, (int, np.integer)):
-            idx = int(ref)
-        elif isinstance(ref, str):
-            if ref in star_names:
-                idx = star_names.index(ref)
-            else:
-                try:
-                    idx = int(ref)
-                except ValueError:
-                    raise ValueError(
-                        f"Unknown star reference '{ref}' in photType. "
-                        f"Known stars: {star_names} (or indices 0..{n - 1})."
-                    )
-        else:
-            raise ValueError(f"Invalid star reference {ref!r} in photType.")
-        if not 0 <= idx < n:
-            raise ValueError(
-                f"Star index {idx} in photType out of range; the system "
-                f"defines {n} star(s): {star_names}."
-            )
-        return idx
+        """A photType star reference (name, path or index) as an index.
+
+        The shared translator, so `photType` accepts exactly what every
+        other star reference does -- including the `star.<name>` path
+        spelling, which this local copy rejected.
+        """
+        return resolve_star_ref(ref, star_names, "photType")
 
     @staticmethod
     def _combo_label(pos, neg, star_names):

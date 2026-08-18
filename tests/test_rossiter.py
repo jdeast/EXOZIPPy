@@ -485,3 +485,65 @@ def test_rm_two_instrument_logp_and_gradient_finite_on_both_backends(tmp_path):
     # four orders below the ~0.01 nat scale at which a logp difference could
     # affect sampling.
     assert lp_jax == pytest.approx(lp_c, rel=1e-6)
+
+
+# --------------------------------------------------------------------------
+# 6. resolve_rm_indices reports CONFIG errors as config errors (review 2.5.3)
+# --------------------------------------------------------------------------
+class _RmStub:
+    """The smallest object graph resolve_rm_indices reads."""
+
+    def __init__(self, orbit_names=("b",), band_names=("V",), omap=(0,)):
+        self.orbit = type("O", (), {"names": list(orbit_names)})()
+        self.planet = type("P", (), {"orbit_map": list(omap)})()
+        if band_names is not None:
+            self.band = type("B", (), {"names": list(band_names)})()
+
+
+def test_unknown_rm_band_names_the_key_and_the_bands():
+    """
+    Given an rm_band that names no band block,
+    When the RM indices are resolved,
+    Then a ValueError names the key and lists the bands that do exist.
+
+    Regression: ``band_names.index`` raised a bare "'X' is not in list",
+    which names neither the key, the component, nor the alternatives.
+    """
+    with pytest.raises(ValueError) as exc:
+        rm.resolve_rm_indices(_RmStub(band_names=("V", "I")), "b", "Vee")
+
+    msg = str(exc.value)
+    assert "rm_band" in msg
+    assert "'Vee'" in msg
+    assert "'V'" in msg and "'I'" in msg
+
+
+def test_rm_without_any_band_block_says_rm_needs_a_band():
+    """
+    Given a config with `rm:` but no `band:` block at all,
+    When the RM indices are resolved,
+    Then a ValueError says RM needs a band and shows how to add one.
+
+    Regression: ``system.band`` was missing, so this surfaced as an
+    AttributeError from inside compute_rm_rv rather than as the config
+    error it is.
+    """
+    with pytest.raises(ValueError) as exc:
+        rm.resolve_rm_indices(_RmStub(band_names=None), "b")
+
+    msg = str(exc.value)
+    assert "band:" in msg
+    assert "rm_band" in msg
+
+
+def test_known_rm_band_and_default_band_still_resolve():
+    """
+    Given a valid rm_band, and separately no rm_band at all,
+    When the RM indices are resolved,
+    Then the named band is used, and the default is band 0 -- the guards
+    changed no working configuration.
+    """
+    stub = _RmStub(band_names=("V", "I"))
+
+    assert rm.resolve_rm_indices(stub, "b", "I") == (0, 0, 1)
+    assert rm.resolve_rm_indices(stub, "b") == (0, 0, 0)

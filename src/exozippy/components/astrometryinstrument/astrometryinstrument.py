@@ -997,19 +997,8 @@ class AstrometryInstrument(Instrument):
         dt_yr = (t - self.epoch) / DAYS_PER_YEAR
 
         def get(param):
-            """This star's value of ``param`` from the point, else its own
-            initval -- the same fallback _point_values uses.
-
-            A ``point.get(label, 0.0)`` here silently substituted ZERO for
-            any parameter absent from the draws, and pinned (``sigma: 0``)
-            parameters are always absent: a fit with a fixed nonzero proper
-            motion plotted a star that does not move while the likelihood
-            used the pinned value.
-            """
-            val = point.get(param.label)
-            if val is None:
-                val = param.initval
-            return np.atleast_1d(val)[s]
+            """This star's value of ``param``; see Instrument._point_value."""
+            return self._point_value(point, param, s)
 
         ra = get(star.ra)
         dec = get(star.dec)

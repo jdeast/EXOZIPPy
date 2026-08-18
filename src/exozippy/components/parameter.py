@@ -626,6 +626,16 @@ class Parameter:
     internal_unit: Any = (
         None  # this is the internally used unit that simplifies the math
     )
+    # Extra INTERNAL -> USER multiplier (scalar, or one per element), for a
+    # coordinate change the astropy unit system cannot express: multiplied
+    # into _get_conversion_factors, which is the internal -> user direction
+    # (NOT config.py's reciprocal -- see that method's comment).  Its one use
+    # today is the detrend coefficients, whose design-matrix columns are
+    # whitened at ingestion (Instrument._build_block_detrend): the sampler
+    # gets the well-conditioned coordinate while lower/upper/sigma go in, and
+    # the table reads out, per RAW column unit.  A component sets it through
+    # a manifest option; it is not user-facing.
+    internal_to_user_scale: Optional[Number] = None
     initval: Optional[Number] = None
     # Preliminary whitening scale (physical units). Optional: None falls back
     # to a fraction of the bound span in build_pymc; either way the probe-based
@@ -2568,11 +2578,21 @@ class Parameter:
                 )
 
         if is_sequence:
-            return np.array(
+            factors = np.array(
                 [_process_single(u) for u in self.unit], dtype=np.float64
             )
+        else:
+            factors = _process_single(self.unit)
 
-        return _process_single(self.unit)
+        # A component-declared coordinate change layered on top of the unit
+        # one, in the SAME internal -> user direction (see the field).
+        if self.internal_to_user_scale is not None:
+            extra = np.asarray(self.internal_to_user_scale, dtype=np.float64)
+            if extra.ndim == 0:
+                return factors * float(extra)
+            return np.atleast_1d(factors) * extra
+
+        return factors
 
     def set_whitening(self, raw_scale):
         """Rescale the whitening in place from a measured raw-space scale.

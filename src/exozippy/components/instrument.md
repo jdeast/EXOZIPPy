@@ -22,9 +22,80 @@ The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrom
 
 Time system: default is BJD_TDB in, untouched. `time_scale:` (utc/tai/tt/tdb/tcb/tcg/ut1, `ut` = ut1) and `time_frame:` (jd/hjd/bjd) convert to BJD_TDB at load via astropy (Eastman, Siverd & Gaudi 2010 algorithm: strip the input frame's light-travel term by fixed-point iteration, scale-convert, re-add the barycentric term). Conversion demands absolute JDs (raise if min < 2e6 -- point users at `time_offset`); jd/hjd frames demand **user-set** star ra/dec (`_time_coord` refuses defaults.yaml placeholders; `star_ndx` on the file entry picks the star). frame=bjd scale-only conversions need no coordinates (the barycentric term cancels exactly). Optional `time_location:` (observatory name or [lon, lat, height]; default geocenter, up to 21 ms unmodeled) and `time_ephemeris:` (default `builtin`, ~us; `de440` ~ns, needs jplephem). Not modeled -- all below the ~40 us float64 quantization of a single-float absolute JD: TT(BIPM), Shapiro delay, proper-motion/parallax evolution of the direction. MMEXOFAST seeding reads the raw files itself, so `MulensInstrument._reject_time_spec_with_mmexofast` hard-errors when both are active. Tests: `tests/test_instrument_time_columns.py`.
 
-`Instrument._apply_mask(df, i)` (called by `_read_data` after column selection) drops excluded rows per an optional per-file `mask:` config key — a flag-file path (one 0/1 per data row, nonzero = exclude), a boolean list, or a list of 0-based row indices, all referring to the file's ON-DISK row order (mask before sort, so indices from external tools stay valid). All-points-masked and length/range mismatches raise. Tests: `tests/test_instrument_mask.py`.
+`Instrument._apply_mask(df, i)` (called by `_read_data` after column selection) drops excluded rows per an optional per-file `mask:` config key -- a flag-file path (one 0/1 per data row, nonzero = exclude), a boolean list, or a list of 0-based row indices, all referring to the file's ON-DISK row order (mask before sort, so indices from external tools stay valid). All-points-masked and length/range mismatches raise, and so does an inline list of **integers that are all 0 or 1 with one entry per row** -- the two readings of that are OPPOSITES (`mask: [1, 0, 1, 0]` excludes rows 0 and 1 as INDICES, rows 0 and 2 as the per-row FLAGS the file form of the same numbers means), so it names both and asks for an explicit spelling instead of picking. The guard is deliberately narrow: a shorter 0/1 list has only one sensible reading and keeps it. Tests: `tests/test_instrument_mask.py`.
 
-Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none — its 2-observable modes would need per-channel coefficients.
+`Instrument.rows(i)` is the accessor for the `(start, stop)` ranges `ConcatenatedData.finalize` publishes as `row_ranges` -- element `i`'s rows in every concatenated array, as a `slice`. It is equivalent to `np.flatnonzero(inst_map == i)` precisely BECAUSE of the contiguity invariant above, and both spellings stay on purpose: the range where a contiguous RANGE is wanted, the boolean scan where the mask itself is (the plot paths index several arrays with one) or where the caller was handed `inst_map` rather than the component (`_prepare_gp`, `_prepare_robust`, driven standalone by their tests). **One trap when the array being indexed is a TENSOR rather than numpy**: a `pm.Data`'s length is symbolic to pytensor, so a slice's shape is `min(stop, len) - start` -- symbolic too -- and the JAX backend cannot trace it ("Shapes must be 1D sequences of concrete values of integer type"). Materialize it there, `np.arange(sl.start, sl.stop)`: an advanced index of constants has a statically known length. rvinstrument's Rossiter-McLaughlin subtensor is the live case, and `tests/test_rossiter.py::test_rm_two_instrument_logp_and_gradient_finite_on_both_backends` is what catches a regression.
+
+Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none -- its 2-observable modes would need per-channel coefficients.
+
+### Detrend columns are WHITENED at ingestion, per (instrument, column)
+
+`_build_block_detrend` subtracts each column's mean and divides by its own standard deviation as it places the column on the block diagonal, and publishes the standard deviations as `detrend_scales`. Both halves earn their place, and the two are not the same argument:
+
+- **Mean subtraction removes an exact degeneracy.** Along its mean direction a nonzero-mean column is indistinguishable from the instrument's own offset (`gamma` / `baseline`), so the pair sits on a flat likelihood ridge. Whitening the SAMPLER cannot rescue that -- it fixes scale, not correlation. Measured on `examples/gj1214`, whose seven ground-based light curves each detrend against airmass: the cosine between the raw column and the constant (offset) direction ran **0.9986 to 0.9995** per instrument, i.e. a 2x2 condition number of ~1.5e3 to ~4.4e3 on the (offset, coefficient) block. After whitening it is **exactly 0**. EXOFASTv2 mean-subtracts for the same reason.
+- **Scale division conditions the coefficient**, so a column's arbitrary physical magnitude does not set the sampler's step size.
+
+Three decisions the implementation makes explicitly:
+
+- **Per (instrument, column), never global.** The design is block-diagonal precisely so coefficients cannot mix across instruments; a global moment would couple the blocks again.
+- **A CONSTANT column RAISES**, naming the instrument and the column. It is exactly degenerate with the offset and carries no information, so there is nothing to estimate. Mean-subtracting it alone would leave an all-zero basis vector whose coefficient the likelihood never sees -- a free dimension held up only by its bounds -- and dividing by an epsilon would invent an arbitrary one. Neither silent option is acceptable; the user should delete the column (or list only the varying ones with `columns: {detrend: [...]}`).
+- **Sample whitened, report un-whitened.** The sampler gets the conditioned coordinate; the user's `lower`/`upper`/`sigma` go in, and the table reads out, per RAW column unit -- so a stated prior keeps its meaning and the reported number stays physically interpretable. That is a per-element internal <-> user coordinate change, so it is declared as a `Parameter` conversion factor (`internal_to_user_scale`, see `src/exozippy/components/parameter.md`) and applied by `to_internal` / `from_internal`. **Do not hand-write the factor at a call site** -- the two factor functions in this codebase are reciprocals and confusing them is silent. `Instrument.add_parameter` injects it, in the BASE class rather than in each child's manifest, because all three detrending children write the same one-line manifest entry and a child that forgot the scale would silently report whitened coefficients.
+
+**This changes what the offset means**, and that is the point rather than a side effect: `gamma` / `baseline` is now the model value at the detrend columns' MEANS rather than at column zero. For an airmass-like basis that is the more interpretable of the two (column zero is not a physical observing condition), and it is what makes the pair identifiable.
+
+The start point does not move (`detrend_coeffs` starts at 0, so the trend term is zero either way): `examples/gj1214`'s start logp is bit-identical at `116050.274910399`. What moves is the posterior geometry, and the fitted coefficient/offset pair with it.
+
+One known wart, pre-existing and NOT introduced here: `rvinstrument`'s `detrend_coeffs` is declared `unit: ""` while the term it adds is in the internal solRad/d, so the coefficient is reported in solRad/d rather than m/s. Fixing it would change reported numbers and belongs in its own change.
+
+## Plotting a fitted model: the point, and the per-observation terms
+
+`Instrument._point_value(point, param, index=None)` is the ONE "value from the point, else
+the Parameter's own `initval`" rule, in internal units, for any component's Parameter --
+the phased panels read `system.orbit.tc` and `system.orbit.period` through it. It replaced
+three hand-written copies (`_instrument_gamma`, `_baseline_for`, and astrometry's inner
+`get`). Everything it protects against has one cause: a parameter whose every element is
+pinned (`sigma: 0`) never becomes a `pm.Deterministic`, so it is in neither
+`model.deterministics` nor the posterior and is simply ABSENT from the point.
+
+- A `point.get(label, <literal>)` then silently substitutes a wrong number -- ZERO for a
+  pinned RV `gamma` (the whole instrument drawn one offset away from the model the
+  likelihood fit) or UNITY for a pinned transit `baseline`, whose seed is the light
+  curve's own median flux, so an un-normalized light curve was drawn off by the entire
+  flux scale.
+- A `point.get(label)` with NO default crashes on `float(np.atleast_1d(None)[i])`. Review
+  2.5.1 reported this for a pinned `orbit.tc`; **re-verified 2026-08-18, it does not
+  reproduce** -- `orbit.tc` and `orbit.period` are declared `force_node: True`, which makes
+  them Deterministics even when every element is pinned. The no-fallback read is gone
+  anyway, because the shared helper makes it free.
+
+**The fitted detrend model is subtracted from the plotted DATA, never added to the model
+curve** (`Instrument.detrend_at_data(point)` -> `(n_total_obs,)`, zeros without detrend
+columns). That is EXOFASTv2's convention and it is forced: the trend is built from the
+file's own extra columns per observation, and a model curve on a pretty time grid has no
+column values to evaluate it at. Until 2026-08 neither happened -- `rv_model`/`lc_model`
+included `pt.dot(X, c)` but every plotted node excluded it and the data were never
+corrected -- so any fit with active detrend columns showed a systematic data-vs-model
+mismatch equal to the whole fitted trend in every panel, reading as unmodeled residual
+structure. The correction is applied in NUMPY, so the graph walk that populates
+`PlotSpec.param_deps` cannot see it: `Instrument.detrend_dep_labels()` supplies the
+coefficient label explicitly, exactly as the `gamma` / `baseline` deps next to it do, and
+transit's unphased spec sets `dynamic_data` when (and only when) it has detrend columns.
+`Instrument.detrend_caption()` is the sentence the figure captions owe the reader when that
+correction is active (empty otherwise, so no shipped caption changes) -- the plotted points
+are then not the raw file.
+
+**The phased panels compute their point-only work once.** `_phased_arrays` (RV) runs per
+member orbit and `_phased_lc_arrays` (transit) per (planet, instrument), and each used to
+rebuild the same arrays every time: the marshalled parameter values, the model matrix at the
+OBSERVED times, and the per-observation GP and detrend corrections. The spaghetti re-runs the
+whole loop per posterior draw, so the waste multiplied by the draw count. They are hoisted
+into one `_phased_shared` / `_phased_lc_shared` dict per (component, point), and the compiled
+evaluator goes from `2N` calls to `N+1` for N bodies -- the call it drops is the pass over the
+full data set. What is NOT shared, and cannot be, is each body's model GRID: its time axis is
+that body's own period window. Transit's matrix at the observed times varies with the
+INSTRUMENT but not the planet, so it is cached per instrument and fills in lazily. Both
+helpers keep a `shared=None` default that builds one, so a standalone caller is unaffected;
+only the loop passes it.
 
 ## The signed jitter
 

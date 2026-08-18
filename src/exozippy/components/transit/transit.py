@@ -500,6 +500,15 @@ class Transit(Instrument):
         tensor (Deterministic "transit.dilution" for diagnostics), or
         None if no instrument's band filter is in the SED's BC grid.
         Instruments whose band filter is unavailable get dilution 1.
+
+        The cache is per BUILD, not per component: ``build_likelihood``
+        clears it (see ``_reset_build_caches``).  Components persist on the
+        System and a second ``system.build_model()`` is supported (the GUI
+        does it), so a cache that outlived the model handed the second
+        build's likelihood a Deterministic belonging to the FIRST model --
+        either a crash at logp compile or, worse, a silently stale dilution.
+        Within one build the cache is still wanted: the node is asked for
+        twice (the group loop and the beam term) and must be one node.
         """
         if getattr(self, "_dilution_node", None) is not None:
             return self._dilution_node
@@ -532,6 +541,13 @@ class Transit(Instrument):
         return self._dilution_node
 
     def build_likelihood(self, model, system):
+        # Stage 7 is once per BUILD, and a second system.build_model() on one
+        # System is supported (the GUI does it), so every cached NODE has to
+        # be dropped here.  A dilution node that outlived its model was handed
+        # to the second build's likelihood -- a crash at logp compile, or a
+        # silently stale dilution.
+        self._dilution_node = None
+
         time = pm.Data("transit_time", self.time)
         flux = pm.Data("transit_data", self.flux)
         err = pm.Data("transit_err", self.err)
@@ -1389,29 +1405,6 @@ class Transit(Instrument):
     # plot_data() path both go through these helpers, so the two paths
     # always draw the exact same arrays (see plotspec.PlotSpec).
     # ------------------------------------------------------------------
-    def _baseline_for(self, point, i):
-        """Baseline flux for instrument i, in internal units.
-
-        The value comes from the point when it is there, else from the
-        baseline Parameter's own initval -- the same fallback
-        _point_to_plot_params uses for every other plotted parameter.
-
-        A ``point.get(label, 1.0)`` here silently substituted UNITY for any
-        parameter absent from the draws, and pinned (``sigma: 0``)
-        parameters are always absent (an all-fixed vector never becomes a
-        pm.Deterministic, so it is in neither model.deterministics nor the
-        posterior).  Unity is not a neutral default: load_data seeds each
-        baseline with the light curve's own median flux, so on an
-        un-normalized light curve (raw counts) a pinned baseline plotted
-        the model curve and the phased panel's cleaned flux off by the
-        entire flux scale.
-        """
-        vals = point.get(self.baseline.label)
-        if vals is None:
-            vals = self.baseline.initval
-        base_vals = np.atleast_1d(vals)
-        return float(base_vals[i] if i < len(base_vals) else base_vals[0])
-
     def _eval_unphased_lc(self, system, point, i):
         """Full model light curve for instrument i: baseline + transit + GP.
 
@@ -1431,21 +1424,62 @@ class Transit(Instrument):
         param_values = self._point_to_plot_params(point, system)
         y_decrement = self._smeared_full_lc(t_pretty, i, *param_values)
         y_gp = self.gp_mean_on_grid(system, point, i, t_pretty)
-        return t_pretty, self._baseline_for(point, i) + y_decrement + y_gp
+        baseline = self._point_value(point, self.baseline, i)
+        return t_pretty, baseline + y_decrement + y_gp
 
-    def _phased_lc_arrays(self, system, point, p_idx, i):
+    def _phased_lc_shared(self, system, point):
+        """The parts of a phased panel that do NOT depend on which planet.
+
+        ``_phased_lc_arrays`` is called once per (planet, instrument) and
+        recomputed the same things every time: the marshalled parameter
+        values, the per-observation GP and detrend corrections (both
+        point-only), and the smeared LC matrix at instrument ``i``'s
+        observed times -- which varies with the INSTRUMENT but not with the
+        planet, so it was rebuilt N_planets times per light curve per
+        posterior draw (review 6.5.1).
+
+        Returned as one dict per (component, point); the per-instrument
+        matrices fill in lazily as instruments are reached, so a run that
+        plots one light curve does not compile the others'.
+        """
+        param_values = self._point_to_plot_params(point, system)
+        return {
+            "param_values": param_values,
+            # Removed from the phased data along with the other planets':
+            # the correlated component would smear the fold, and the fitted
+            # trend is a per-observation term no pretty-grid curve carries.
+            # Both are zeros when the feature is off.
+            "extra_signals": self.gp_mean_at_data(system, point)
+            + self.detrend_at_data(point),
+            "data_lc_matrix": {},
+        }
+
+    def _phased_lc_data_matrix(self, shared, i):
+        """Instrument ``i``'s smeared LC matrix at its own observed times."""
+        cache = shared["data_lc_matrix"]
+        if i not in cache:
+            cache[i] = self._smeared_lc_matrix(
+                self.time[self.rows(i)], i, *shared["param_values"]
+            )
+        return cache[i]
+
+    def _phased_lc_arrays(self, system, point, p_idx, i, shared=None):
         """
         One-period phase grid, isolated model decrement for planet p_idx,
         and the baseline-subtracted, other-planet-cleaned flux at the
         observed times -- used by plot_data() (and via it plot()). Uses
         _smeared_lc_matrix (see _eval_unphased_lc) so the phased panel
         matches the exposure-smeared model as well.
+
+        ``shared`` is this point's ``_phased_lc_shared`` dict; omit it and
+        one is built, which is what a standalone caller wants and what the
+        per-planet loop must NOT do.
         """
+        if shared is None:
+            shared = self._phased_lc_shared(system, point)
         planets = system.planet
-        P_ref = float(
-            np.atleast_1d(point.get(system.orbit.period.label))[p_idx]
-        )
-        tc_ref = float(np.atleast_1d(point.get(system.orbit.tc.label))[p_idx])
+        P_ref = self._point_value(point, system.orbit.period, p_idx)
+        tc_ref = self._point_value(point, system.orbit.tc, p_idx)
 
         t_model = np.linspace(
             tc_ref - 0.5 * P_ref, tc_ref + 0.5 * P_ref, 1000
@@ -1454,26 +1488,25 @@ class Transit(Instrument):
         time_from_center_model = phase_model * P_ref
         sort_m = np.argsort(phase_model)
 
-        param_values = self._point_to_plot_params(point, system)
-        lc_matrix = self._smeared_lc_matrix(t_model, i, *param_values)
+        lc_matrix = self._smeared_lc_matrix(
+            t_model, i, *shared["param_values"]
+        )
         y_planet = lc_matrix[:, p_idx]
 
-        mask = self.inst_map == i
-        data_lc_matrix = self._smeared_lc_matrix(
-            self.time[mask], i, *param_values
-        )
+        rows = self.rows(i)
+        data_lc_matrix = self._phased_lc_data_matrix(shared, i)
         other_mask = np.ones(planets.n_elements, dtype=bool)
         other_mask[p_idx] = False
         other_decrements = np.sum(data_lc_matrix[:, other_mask], axis=1)
 
-        baseline = self._baseline_for(point, i)
-        # Remove the correlated component along with the other planets', so
-        # the phased panel is not smeared by it. Zero without a gp: key.
-        gp_signal = self.gp_mean_at_data(system, point)[mask]
+        baseline = self._point_value(point, self.baseline, i)
         cleaned_flux = (
-            self.flux[mask] - baseline - other_decrements - gp_signal
+            self.flux[rows]
+            - baseline
+            - other_decrements
+            - shared["extra_signals"][rows]
         )
-        data_phases = ((self.time[mask] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
+        data_phases = ((self.time[rows] - tc_ref) / P_ref + 0.5) % 1.0 - 0.5
 
         return {
             "P_ref": P_ref,
@@ -1511,20 +1544,29 @@ class Transit(Instrument):
             getattr(self, "_lc_matrix_node", None), system
         )
 
-        # The baseline enters both panels in numpy (_baseline_for), not
-        # through the symbolic nodes, so the graph walk cannot see it --
-        # without this dep a baseline slider would never refresh these
+        # The baseline and the fitted detrend model enter the panels in
+        # numpy (_point_value / detrend_at_data), not through the symbolic
+        # nodes, so the graph walk cannot see them -- without these deps a
+        # baseline or detrend-coefficient slider would never refresh these
         # charts in the GUI.
         baseline_label = getattr(
             getattr(self, "baseline", None), "label", None
         )
-        if baseline_label:
-            if baseline_label not in full_deps:
-                full_deps = full_deps + [baseline_label]
-            if baseline_label not in matrix_deps:
-                matrix_deps = matrix_deps + [baseline_label]
+        numpy_deps = ([baseline_label] if baseline_label else []) + (
+            self.detrend_dep_labels()
+        )
+        full_deps = full_deps + [
+            lbl for lbl in numpy_deps if lbl not in full_deps
+        ]
+        matrix_deps = matrix_deps + [
+            lbl for lbl in numpy_deps if lbl not in matrix_deps
+        ]
 
         # ---- Unphased: flux vs time, per instrument -------------------
+        # The fitted trend is per observation, so it comes off the DATA
+        # rather than going onto the model curve; zeros without detrend
+        # columns (Instrument.detrend_at_data).
+        detrend = self.detrend_at_data(point)
         for i in range(self.n_elements):
             mask = self.inst_map == i
             traces = []
@@ -1553,7 +1595,7 @@ class Transit(Instrument):
                     role="data",
                     kind="scatter",
                     x=self.time[mask],
-                    y=self.flux[mask],
+                    y=self.flux[mask] - detrend[mask],
                     yerr=self.err[mask],
                     # Black-dot default (the historical PDF look); a user
                     # plot: color/marker still wins via _data_trace_style.
@@ -1581,10 +1623,15 @@ class Transit(Instrument):
                         "instrument": self.names[i],
                         "file_tag": f"LC_unphased_{self.names[i]}",
                         "figsize": (12, 5),
+                        # The unphased DATA are detrend-subtracted, so they
+                        # move with the point whenever this instrument has
+                        # detrend columns (and only then).
+                        "dynamic_data": self.total_detrend_cols > 0,
                         "caption": (
                             "Transit photometry from "
                             + latex_escape(self.names[i])
                             + " with the best-fit model (red)."
+                            + self.detrend_caption()
                         ),
                     },
                 )
@@ -1593,12 +1640,17 @@ class Transit(Instrument):
         # ---- Phased: one chart per planet/instrument (needs a model) --
         if point is not None:
             planets = system.planet
+            # Once per (component, point), not once per planet x instrument
+            # (6.5.1); the per-instrument matrices fill in lazily.
+            shared = self._phased_lc_shared(system, point)
             for p_idx in range(planets.n_elements):
                 for i in range(self.n_elements):
                     # A failed prep skips this panel, exactly as the old
                     # hand-drawn loop skipped its figure.
                     try:
-                        prep = self._phased_lc_arrays(system, point, p_idx, i)
+                        prep = self._phased_lc_arrays(
+                            system, point, p_idx, i, shared=shared
+                        )
                     except Exception as e:  # noqa: BLE001 - bad point/draw
                         logger.warning(f"LC phased model eval failed: {e}")
                         continue
@@ -1643,6 +1695,7 @@ class Transit(Instrument):
                             + " in "
                             + latex_escape(self.names[i])
                             + ", baseline and other planets removed."
+                            + self.detrend_caption()
                         ),
                         # The phased DATA re-folds with tc/P and its cleaning
                         # subtracts the baseline, other planets and any GP --

@@ -116,6 +116,12 @@ def test_jitter_floor_applies_unit_factor_before_squaring():
 # ---------------------------------------------------------------------------
 # Shared detrend block-diagonal builder
 # ---------------------------------------------------------------------------
+def _whiten(col):
+    """The whitening _build_block_detrend applies (see review 6.5.2)."""
+    col = np.asarray(col, dtype=float)
+    return (col - np.mean(col)) / np.std(col)
+
+
 def test_build_block_detrend_places_columns_on_the_diagonal():
     """
     Given two instruments with 3 and 2 observations and 1 and 2 detrend columns,
@@ -125,16 +131,18 @@ def test_build_block_detrend_places_columns_on_the_diagonal():
     """
     a = np.array([[1.0], [2.0], [3.0]])  # inst 0: 3 obs, 1 col
     b = np.array([[4.0, 5.0], [6.0, 7.0]])  # inst 1: 2 obs, 2 cols
-    matrix, per_inst, total = Instrument._build_block_detrend([a, b], 5)
+    inst = _make([{"name": "A"}, {"name": "B"}])
+    matrix, per_inst, total, _ = inst._build_block_detrend([a, b], 5)
 
     assert per_inst == [1, 2]
     assert total == 3
     assert matrix.shape == (5, 3)
     # inst 0 column only populated in its own rows/cols
-    assert np.array_equal(matrix[:3, 0], [1.0, 2.0, 3.0])
+    assert np.allclose(matrix[:3, 0], _whiten([1.0, 2.0, 3.0]))
     assert np.all(matrix[:3, 1:] == 0.0)  # no cross-instrument leakage
     assert np.all(matrix[3:, 0] == 0.0)
-    assert np.array_equal(matrix[3:, 1:], b)
+    assert np.allclose(matrix[3:, 1], _whiten(b[:, 0]))
+    assert np.allclose(matrix[3:, 2], _whiten(b[:, 1]))
 
 
 def test_build_block_detrend_handles_no_detrend_columns():
@@ -144,10 +152,12 @@ def test_build_block_detrend_handles_no_detrend_columns():
     Then it returns a (n_obs, 0) matrix and total 0.
     """
     empties = [np.empty((3, 0)), np.empty((2, 0))]
-    matrix, per_inst, total = Instrument._build_block_detrend(empties, 5)
+    inst = _make([{"name": "A"}, {"name": "B"}])
+    matrix, per_inst, total, scales = inst._build_block_detrend(empties, 5)
     assert total == 0
     assert per_inst == [0, 0]
     assert matrix.shape == (5, 0)
+    assert scales.shape == (0,)
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +244,8 @@ def test_concatenated_detrend_blocks_land_in_their_own_row_range():
     assert inst.detrend_matrix.shape == (12, 3)
     for i, (lo, hi) in enumerate(inst.row_ranges):
         block = inst.detrend_matrix[lo:hi, i]
-        assert np.array_equal(block, inst.time[lo:hi] + 100.0)
+        # whitened per (instrument, column) -- review 6.5.2
+        assert np.allclose(block, _whiten(inst.time[lo:hi] + 100.0))
         # Nothing of this file leaks into another file's rows/columns.
         assert np.all(inst.detrend_matrix[:lo, i] == 0.0)
         assert np.all(inst.detrend_matrix[hi:, i] == 0.0)
@@ -367,9 +378,9 @@ def test_concatenated_data_takes_detrend_columns_past_the_roles():
     blocks.finalize("rv")
 
     assert inst.n_detrend_per_inst == [2, 0]
-    assert np.array_equal(
-        inst.detrend_matrix[:2, :2], np.array([[7.0, 9.0], [8.0, 10.0]])
-    )
+    # whitened per (instrument, column) -- review 6.5.2
+    assert np.allclose(inst.detrend_matrix[:2, 0], _whiten([7.0, 8.0]))
+    assert np.allclose(inst.detrend_matrix[:2, 1], _whiten([9.0, 10.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -591,3 +602,34 @@ def test_trace_style_serializes_when_present():
 
     plain = Trace(name="m", role="model", kind="line", x=[1.0], y=[2.0])
     assert "style" not in plain.to_json()
+
+
+def test_rows_is_the_published_row_range():
+    """
+    Given the shared accumulator's published row_ranges,
+    When Instrument.rows(i) is asked for an element's rows,
+    Then it is that contiguous slice, and it selects exactly what the
+    inst_map boolean scan selects -- the two spellings the class docstring
+    says are equivalent.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    _filled_blocks(inst).finalize("rv")
+
+    for i, (lo, hi) in enumerate(inst.row_ranges):
+        sl = inst.rows(i)
+        assert (sl.start, sl.stop) == (lo, hi)
+        np.testing.assert_array_equal(
+            inst.time[sl], inst.time[inst.inst_map == i]
+        )
+
+
+def test_rows_refuses_a_component_that_never_concatenated():
+    """
+    Given a component with no row_ranges (it keeps per-file datasets),
+    When rows(i) is called,
+    Then it raises saying so, rather than silently selecting nothing.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+
+    with pytest.raises(ValueError, match="no row_ranges"):
+        inst.rows(0)

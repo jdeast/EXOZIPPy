@@ -234,8 +234,16 @@ class ConcatenatedData:
     ``mulensinstrument.observer_pos`` is addressed row-for-row against
     ``time``.  Both break silently if a file is added out of order or a side
     array disagrees in length, so ``add`` rejects both, and ``finalize``
-    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``
-    rather than leaving every consumer to re-derive them from ``inst_map``.
+    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``,
+    reached through ``Instrument.rows(i)``.
+
+    ``rows(i)`` and ``inst_map == i`` are two spellings of the same
+    selection, equivalent precisely BECAUSE of the invariant above, and both
+    are in use on purpose: the published range where a contiguous RANGE is
+    wanted, the boolean scan where the mask itself is (the plot paths index
+    several arrays with one) or where the caller was handed ``inst_map``
+    rather than the component (``_prepare_gp``, ``_prepare_robust``, which
+    are driven standalone by their tests).
     """
 
     def __init__(self, owner, n_roles=3):
@@ -332,8 +340,9 @@ class ConcatenatedData:
 
         Sets ``time``, ``<observable>``, ``err``, ``inst_map``,
         ``n_total_obs``, ``row_ranges``, every side array, and the
-        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols``
-        triple; then calls ``_prepare_gp`` and ``_prepare_robust``, which are
+        ``detrend_matrix`` / ``n_detrend_per_inst`` / ``total_detrend_cols`` /
+        ``detrend_scales`` quad; then calls ``_prepare_gp`` and
+        ``_prepare_robust``, which are
         no-ops unless a file set ``gp:`` / ``likelihood:``.
 
         ``user_factor`` converts the concatenated error from the internal unit
@@ -366,6 +375,7 @@ class ConcatenatedData:
             owner.detrend_matrix,
             owner.n_detrend_per_inst,
             owner.total_detrend_cols,
+            owner.detrend_scales,
         ) = owner._build_block_detrend(self.detrend, owner.n_total_obs)
 
         owner._prepare_gp(
@@ -411,6 +421,11 @@ class Instrument(Component):
         # running observation count.
         self.files = [c.get("file") for c in self.config]
         self.n_total_obs = 0
+        # One standard deviation per global detrend column, published by
+        # ConcatenatedData.finalize; None until then (and for a child that
+        # never detrends).  It is the internal <-> user coordinate change of
+        # detrend_coeffs -- see _build_block_detrend and add_parameter.
+        self.detrend_scales = None
         # Per-element (start, stop) row ranges into the concatenated arrays,
         # published by ConcatenatedData.finalize.  Empty for a child that does
         # not concatenate (astrometryinstrument keeps per-file datasets).
@@ -545,7 +560,9 @@ class Instrument(Component):
           boolean-list form below, which is the YAML spelling of the same
           thing.
         - a list of booleans, one per data row: True means EXCLUDE.
-        - a list of integers: 0-based row indices to EXCLUDE.
+        - a list of integers: 0-based row indices to EXCLUDE.  An all-0/1
+          integer list with one entry per row is REFUSED as ambiguous rather
+          than read as indices -- see the guard below.
 
         Absent or ``null`` keeps every point (the default: byte-for-byte the
         pre-feature behavior).
@@ -595,6 +612,27 @@ class Instrument(Component):
                 for v in spec
             ):
                 idx = np.asarray(spec, dtype=int)
+                # An all-0/1 integer list one entry per row is ambiguous, and
+                # the two readings are OPPOSITES: read as indices (what this
+                # branch does) `mask: [1, 0, 1, 0]` excludes rows 0 and 1;
+                # read as flags -- which is what the flag-FILE form of the
+                # same numbers means, and what anyone transcribing one into
+                # YAML would assume -- it excludes rows 0 and 2.  Refuse and
+                # name both explicit spellings rather than picking.
+                if idx.size == n and set(np.unique(idx)) <= {0, 1}:
+                    raise ValueError(
+                        f"[{label}] mask is {n} integers, all 0 or 1, one per "
+                        f"data row -- that is ambiguous.  As ROW INDICES it "
+                        f"would exclude rows "
+                        f"{sorted(set(int(v) for v in idx))}; as PER-ROW "
+                        f"FLAGS (what the mask-FILE form of these numbers "
+                        f"means) it would exclude rows "
+                        f"{[j for j, v in enumerate(idx) if v]}.  Say which: "
+                        f"write the flags as booleans "
+                        f"([true, false, ...]), or put the flags in a file "
+                        f"and give its path, or list only the row indices to "
+                        f"exclude."
+                    )
                 if idx.size and (idx.min() < 0 or idx.max() >= n):
                     raise ValueError(
                         f"[{label}] mask indices must be 0-based row indices "
@@ -641,7 +679,10 @@ class Instrument(Component):
                 "file's own row order before anything is derived from it: a "
                 "path to a file with one 0/1 flag per data row (nonzero = "
                 "exclude), a list of booleans (one per row, true = exclude), "
-                "or a list of 0-based row indices to exclude."
+                "or a list of 0-based row indices to exclude. An inline list "
+                "of integers that are all 0 or 1 with one entry per row is "
+                "refused as ambiguous (it could be either) -- write the "
+                "flags as booleans, or put them in a file."
             ),
         }
 
@@ -1063,7 +1104,10 @@ class Instrument(Component):
         defaults.yaml ra/dec are placeholders, and a conversion run against
         them would corrupt every BJD by up to +/-8 minutes with no error.
         """
-        star_ndx = int(self.config[i].get("star_ndx", 0))
+        star_ndx = self.resolve_star_ndx(
+            self.config[i].get("star_ndx"),
+            f"[{self.prefix}] {self.names[i]} star_ndx",
+        )
         ra = self.config_manager.resolve("star", "ra", element=star_ndx)
         dec = self.config_manager.resolve("star", "dec", element=star_ndx)
         if not (ra["user_modified"] and dec["user_modified"]):
@@ -1785,6 +1829,13 @@ class Instrument(Component):
         if not self.has_robust_likelihood:
             return
 
+        # New build, new nodes: the lazily compiled outlier-probability
+        # evaluators below close over the PREVIOUS model's plot_params and
+        # logodds nodes.  Rebuilt below; dropped here so a build that adds
+        # fewer files cannot leave a stale entry either.
+        self._hogg_logodds = {}
+        self._hogg_prob_fns = None
+
         self._build_robust_deterministics()
         for i in sorted(self._robust_obs_index):
             idx = self._robust_obs_index[i]
@@ -1873,6 +1924,177 @@ class Instrument(Component):
     # than fundamental, and is gone too (exoplanet-core >= 0.4.0 makes the
     # limb-darkening op JAX-differentiable).
 
+    def add_parameter(self, model, param_name, system, context_nodes=None):
+        """Stage 6, plus the detrend coefficients' whitening scale.
+
+        ``_build_block_detrend`` WHITENS every detrend column, so the SAMPLED
+        coefficient is per whitened column while the user's bounds and the
+        reported value must stay per RAW column unit.  That is a per-element
+        internal <-> user coordinate change, so it is declared the way every
+        other one is -- as a Parameter conversion factor, applied by
+        ``to_internal`` / ``from_internal`` -- and never hand-written at a
+        call site (the two factor functions in this codebase are reciprocals
+        and confusing them is silent; see CLAUDE.md).
+
+        It is injected HERE, in the base class, rather than in each child's
+        manifest, because all three detrending children (`rvinstrument`,
+        `transit`, `mulensinstrument`) write the same
+        ``self.manifest["detrend_coeffs"] = {"shape": ...}`` line and a child
+        that forgot the scale would silently report whitened coefficients.
+        ``setdefault`` keeps it overridable and idempotent across the repeat
+        ``build_model()`` the GUI does.
+        """
+        if param_name == "detrend_coeffs" and self.detrend_scales is not None:
+            entry = self.manifest.get(param_name)
+            if isinstance(entry, dict):
+                entry.setdefault(
+                    "internal_to_user_scale", 1.0 / self.detrend_scales
+                )
+        return super().add_parameter(
+            model, param_name, system, context_nodes=context_nodes
+        )
+
+    def rows(self, i):
+        """Element ``i``'s rows in every concatenated array, as a ``slice``.
+
+        The accessor for the ``row_ranges`` ``ConcatenatedData.finalize``
+        publishes.  Equivalent to ``np.flatnonzero(inst_map == i)`` by the
+        contiguity invariant that class ENFORCES -- a file's rows are one
+        contiguous block, in config order, in every array at once -- but a
+        contiguous slice rather than an advanced index, so it is a view, it
+        does not scan, and ``pt.inc_subtensor`` over it stays a plain
+        subtensor.
+
+        Use it where a per-element RANGE is wanted.  ``inst_map == i``
+        remains right where the BOOLEAN array itself is (the plot paths
+        index several arrays with one mask), and where the caller does not
+        have the concatenated arrays -- ``_prepare_gp`` / ``_prepare_robust``
+        take ``inst_map`` as an argument precisely so they can be driven
+        standalone.  Two spellings of one selection, both correct; not a
+        migration left half-done.
+
+        ONE trap when the array being indexed is a TENSOR rather than numpy:
+        a ``pm.Data``'s length is symbolic to pytensor, so a slice's shape is
+        ``min(stop, len) - start`` -- symbolic too -- and the JAX backend
+        cannot trace it ("Shapes must be 1D sequences of concrete values of
+        integer type").  Materialize it there, ``np.arange(sl.start,
+        sl.stop)``: an advanced index of constants has a statically known
+        length.  rvinstrument's Rossiter-McLaughlin subtensor is the live
+        case and says so at the call site.
+        """
+        if not self.row_ranges:
+            raise ValueError(
+                f"[{self.prefix}] has no row_ranges: this component does not "
+                f"concatenate its files (astrometryinstrument keeps per-file "
+                f"datasets), so there is no single row range per element."
+            )
+        lo, hi = self.row_ranges[i]
+        return slice(lo, hi)
+
+    # ------------------------------------------------------------------
+    # Shared plotting helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _point_value(point, param, index=None):
+        """Value of ``param`` from ``point``, else from its own ``initval``.
+
+        The single "value from the point, else the Parameter's start" rule
+        every plot path needs, in internal units.  ``index`` picks one
+        element (falling back to element 0 when the vector is shorter, as a
+        broadcast scalar parameter is); ``index=None`` returns the whole
+        1-D array.  ``param`` may belong to ANY component -- the phased
+        panels read ``system.orbit.tc`` and ``system.orbit.period`` through
+        it.
+
+        A ``point.get(label, <literal>)`` is the bug this replaces, in two
+        flavours, both caused by the same mechanism: a parameter whose every
+        element is pinned (``sigma: 0``) never becomes a pm.Deterministic,
+        so it is in neither ``model.deterministics`` nor the posterior and
+        is simply ABSENT from the point.
+
+        * With a literal default the plot silently substituted a wrong
+          number -- ZERO for a pinned RV ``gamma`` (every point of that
+          instrument drawn a whole offset away from the model the
+          likelihood fit) or UNITY for a pinned transit ``baseline`` (whose
+          seed is the light curve's own median flux, so an un-normalized
+          light curve was drawn off by the entire flux scale).
+        * With NO default it crashed: ``float(np.atleast_1d(None)[i])``.
+          Pinning ``orbit.tc`` to a literature ephemeris -- an ordinary RV
+          config -- killed the fit inside run.py's start plots BEFORE
+          sampling; transit's try/except merely swallowed it and dropped
+          every phased panel.
+        """
+        vals = point.get(param.label)
+        if vals is None:
+            vals = param.initval
+        vals = np.atleast_1d(vals).astype(np.float64)
+        if index is None:
+            return vals
+        return float(vals[index] if index < vals.size else vals[0])
+
+    def detrend_at_data(self, point):
+        """Fitted detrend model at every observation, in internal units.
+
+        ``(n_total_obs,)``, all zeros when this instrument declared no
+        detrend columns or when there is no point.  The plotted DATA are
+        corrected by this (EXOFASTv2's convention): the trend is a
+        per-observation quantity built from the file's own extra columns,
+        so a pretty-grid model curve cannot carry it, and without the
+        correction every panel of a detrending fit showed a systematic
+        data-vs-model mismatch equal to the whole fitted trend, reading as
+        unmodeled residual structure.
+
+        The value is in the same additive space as the likelihood's own
+        ``pt.dot(detrend, detrend_coeffs)`` term, i.e. the WHITENED design
+        matrix times the sampled coefficients (see ``_build_block_detrend``)
+        -- so it is exactly the term the model added, with no un-whitening
+        needed here.
+
+        ADDITIVE, which is what ``rvinstrument`` and ``transit`` want and
+        what a caller must not assume: ``mulensinstrument``'s coefficients
+        are magnitude-space and enter its flux model MULTIPLICATIVELY, as
+        ``10**(-0.4 * X.c)``.  A mulens plot path wants that factor, not
+        this sum, and dividing the plotted flux by it is the correction --
+        not subtracting.
+        """
+        if point is None or getattr(self, "total_detrend_cols", 0) == 0:
+            return np.zeros(self.n_total_obs)
+        coeffs = self._point_value(point, self.detrend_coeffs)
+        return np.asarray(self.detrend_matrix @ coeffs, dtype=float)
+
+    def detrend_caption(self):
+        """The sentence a detrending fit's figure captions owe the reader.
+
+        Empty without detrend columns, so no shipped caption changes unless
+        the fit really does subtract a trend from the plotted points -- which
+        the reader has to be told, since those are then not the raw data
+        (see ``detrend_at_data`` for why the correction goes on the data
+        rather than on the model curve).  It is `meta["caption"]` LaTeX,
+        which is verbatim, so it carries no escaping.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return ""
+        return (
+            " The fitted linear trend against the data file's detrend "
+            "columns has been subtracted from the plotted points; the model "
+            "curve is evaluated on a smooth time grid and so cannot carry a "
+            "per-observation term."
+        )
+
+    def detrend_dep_labels(self):
+        """``param_deps`` entry for the detrend coefficients, or ``[]``.
+
+        ``detrend_at_data`` is applied to the plotted data in NUMPY, not
+        through a symbolic model node, so ``_model_trace_param_deps``'s
+        graph walk cannot see it and a GUI slider on the coefficients would
+        never refresh the charts.  Same reasoning as the explicit gamma /
+        baseline deps next to it.
+        """
+        if getattr(self, "total_detrend_cols", 0) == 0:
+            return []
+        label = getattr(getattr(self, "detrend_coeffs", None), "label", None)
+        return [label] if label else []
+
     # ------------------------------------------------------------------
     # Shared noise machinery
     # ------------------------------------------------------------------
@@ -1946,24 +2168,67 @@ class Instrument(Component):
     # ------------------------------------------------------------------
     # Shared optional detrending against extra data columns
     # ------------------------------------------------------------------
-    @staticmethod
-    def _build_block_detrend(all_detrend, n_total_obs):
+    def _build_block_detrend(self, all_detrend, n_total_obs):
         """Block-diagonal detrend design matrix from per-instrument blocks.
 
         ``all_detrend`` is one ``(n_obs_i, n_cols_i)`` array per instrument
         (``n_cols_i == 0`` when that instrument has no detrend columns).
-        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols)`` where the
-        matrix is ``(n_total_obs, total_detrend_cols)`` with each instrument's
-        columns placed on the block diagonal so coefficients never mix across
-        instruments.
+        Returns ``(matrix, n_detrend_per_inst, total_detrend_cols, scales)``
+        where the matrix is ``(n_total_obs, total_detrend_cols)`` with each
+        instrument's columns placed on the block diagonal so coefficients
+        never mix across instruments.
+
+        Every column is WHITENED as it is placed: mean subtracted, then
+        divided by its own standard deviation.  ``scales`` is one standard
+        deviation per global column, and is what turns the sampled
+        coefficient back into a coefficient per raw column unit.
+
+        Why both halves:
+
+        * The MEAN subtraction removes an exact degeneracy.  A column with a
+          nonzero mean is, along its mean direction, indistinguishable from
+          the instrument's own offset (``gamma`` / ``baseline``), so the pair
+          has a perfectly flat likelihood ridge that no amount of whitening
+          the SAMPLER does can rescue -- whitening fixes scale, not
+          correlation.  EXOFASTv2 mean-subtracts for the same reason.  It
+          does change what the offset MEANS: it is now the model value at
+          the detrend columns' means rather than at column zero, which for
+          an airmass-like basis is the more interpretable of the two.
+        * The SCALE division makes the coefficients comparably conditioned,
+          so the columns' arbitrary physical magnitudes do not set the
+          sampler's step sizes.
+
+        The moments are per (instrument, column) and never global: the
+        design is block diagonal precisely so coefficients cannot mix across
+        instruments, and a global moment would couple the blocks again.
+
+        A CONSTANT column (zero variance) RAISES.  It is exactly degenerate
+        with the offset and carries no information, so there is nothing to
+        estimate: mean-subtracting it alone would leave an all-zero basis
+        vector whose coefficient the likelihood never sees (a free dimension
+        held up only by its bounds), and dividing by an epsilon would invent
+        an arbitrary one.  Refusing names the column instead.
         """
         n_per = [d.shape[1] for d in all_detrend]
         total = sum(n_per)
         matrix = np.zeros((n_total_obs, total))
+        scales = np.ones(total)
         r, c = 0, 0
-        for block in all_detrend:
+        for i, block in enumerate(all_detrend):
             n_r, n_c = block.shape
-            if n_c > 0:
-                matrix[r : r + n_r, c : c + n_c] = block
+            for j in range(n_c):
+                col = np.asarray(block[:, j], dtype=float)
+                sd = float(np.std(col))
+                if not np.isfinite(sd) or sd == 0.0:
+                    raise ValueError(
+                        f"[{self.prefix}[{self.names[i]}]] detrend column "
+                        f"{j} is constant (value {col.flat[0]!r}), so it "
+                        f"carries no information and is exactly degenerate "
+                        f"with this instrument's offset.  Remove the column "
+                        f"(or list only the varying ones with `columns: "
+                        f"{{detrend: [...]}}`)."
+                    )
+                matrix[r : r + n_r, c + j] = (col - np.mean(col)) / sd
+                scales[c + j] = sd
             r, c = r + n_r, c + n_c
-        return matrix, n_per, total
+        return matrix, n_per, total, scales
