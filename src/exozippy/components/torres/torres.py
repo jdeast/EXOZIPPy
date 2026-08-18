@@ -46,8 +46,6 @@ class Torres(StellarRelation, Component):
       build_likelihood below; mann passes ``normalize=True``.
     """
 
-    yaml_key = "torres"
-
     @property
     def prefix(self):
         return "torres"

@@ -19,12 +19,17 @@ def test_discover_components_returns_core_yaml_keys():
     assert not missing, f"Missing component keys: {missing}"
 
 
-def test_discover_components_uses_yaml_key_attribute_over_class_name():
+def test_discover_components_keys_on_the_lowercase_class_name():
     """
-    Given Band sets yaml_key = 'band' (class name would map to 'band' either way,
-      but the attribute lookup is explicit),
+    Given Band declares no yaml_key -- the factory's fallback is the
+      lowercase class name, which is already 'band',
     When discover_components scans the components directory,
     Then registry['band'] resolves to the Band class.
+
+    Review 4.2.4: three components restated that fallback as an explicit
+    `yaml_key`, which read as "this one differs from its class name" when
+    none of them did.  The override mechanism stays for a class that ever
+    does; nothing in the tree uses it.
     """
     from exozippy.components.band.band import Band
 
@@ -32,6 +37,7 @@ def test_discover_components_uses_yaml_key_attribute_over_class_name():
     assert registry.get("band") is Band, (
         f"Expected registry['band'] to be Band, got {registry.get('band')}"
     )
+    assert not hasattr(Band, "yaml_key")
 
 
 def test_discover_components_all_values_are_component_subclasses():

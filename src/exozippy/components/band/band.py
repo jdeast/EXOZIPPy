@@ -37,8 +37,6 @@ class Band(Component):
     deblending, astrometry fluxfrac) key on.
     """
 
-    yaml_key = "band"
-
     # Accepted `ld_law:` spellings. An unrecognized value raises rather than
     # falling through to the quadratic branch: a silently ignored law key is
     # the same bug class as `IMF: Salpeter` (PR #82), and here it would also

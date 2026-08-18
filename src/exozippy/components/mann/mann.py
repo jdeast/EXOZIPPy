@@ -54,8 +54,6 @@ class Mann(StellarRelation, Component):
     normalization that follows from it -- stay here.
     """
 
-    yaml_key = "mann"
-
     @property
     def prefix(self):
         return "mann"
