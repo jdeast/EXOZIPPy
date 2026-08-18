@@ -863,11 +863,6 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
     return new_labels, new_centers, merged_any, merge_notes
 
 
-def _count_transitions(labels_2d):
-    """Inter-mode label changes along each chain, skipping unassigned draws."""
-    return int(transition_stats(labels_2d)[0])
-
-
 def transition_stats(labels_2d):
     """Mode-change bookkeeping for a (chain, draw) label array.
 
