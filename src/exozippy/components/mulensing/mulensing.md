@@ -4,7 +4,10 @@
 seeding integration, and the rules about which bodies may be a lens or a source.
 
 Read this before touching the microlensing likelihood, the MMEXOFAST hand-off, or the
-lens/source body maps. Related: `src/exozippy/skyframe.md` (the frame the trajectory is
+lens/source body maps. Related: `src/exozippy/components/mulensing/conventions.md` (the
+sky frame, origins, parallax signs, `alpha`, `q > 1`, and the mappings onto other codes'
+and papers' conventions -- read that one before comparing any microlensing parameter to a
+published value), `src/exozippy/skyframe.md` (the frame the trajectory is
 built in -- microlensing already agrees with it),
 `src/exozippy/components/instrument.md` (the shared data scaffolding),
 `src/exozippy/components/star/star.md` (the lens mass priors and the galactic model),
