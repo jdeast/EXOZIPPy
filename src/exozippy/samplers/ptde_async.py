@@ -2,11 +2,10 @@
 Asynchronous (non-blocking) Parallel Tempering + Differential Evolution sampler.
 
 The production default for Op-based (non-differentiable) models (YAML:
-sampler.method: "ptde_async"; see hpc_optimization.txt PROMPT 13). Kept as a
-separate sampler module so the synchronous PTDE in ptde.py -- the reference
-implementation with fully up-to-date DE partner states -- stays available for
-A/B validation. The non-sampling scaffolding both share lives in
-exozippy.samplers._common.
+sampler.method: "ptde_async"). Kept as a separate sampler module so the
+synchronous PTDE in ptde.py -- the reference implementation with fully
+up-to-date DE partner states -- stays available for A/B validation. The
+non-sampling scaffolding both share lives in exozippy.samplers._common.
 
 MOTIVATION: ptde.py's synchronous design must wait for the SLOWEST of all
 n_temps*n_chains proposals before ANY chain can advance to its next step,
@@ -14,9 +13,10 @@ because every chain's next DE proposal needs its rung-mates' CURRENT states,
 and "current" is only well-defined once the whole step resolves. Production
 runs on examples/DC2018_128 show this stalls the entire sampler behind a rare
 but expensive near-caustic evaluation concentrated in the hottest 1-2 rungs
-(see hpc_optimization.txt's 2026-07-07 status update: 0.4%/0.09% of rung 6/7
-calls exceed 0.1s, and with 320 proposals/step the odds NONE of them land in
-that tail across a whole run are essentially zero). This module removes that
+(the per-rung timing table at the top of notes/hpc_optimization.txt:
+0.09%/0.7% of rung 6/7 calls exceed 0.1 s, and with 320 proposals/step the
+odds NONE of them land in that tail across a whole run are essentially zero).
+This module removes that
 barrier: every (rung, chain) slot is its own continuous pipeline against a
 shared worker pool -- as soon as one slot's evaluation resolves, it is
 accepted/rejected and that SAME slot's next proposal is immediately
@@ -54,8 +54,9 @@ per-chain draw counters `per_chain_draws`). A chain that reaches its target
 for chains still catching up) but stops being recorded. The run stops once
 every chain has recorded `draws` samples, or maxtime/convergence/user-
 interrupt fires first; at that point output is truncated to
-min(per_chain_draws) across chains (the simplest correct option per
-hpc_optimization.txt PROMPT 13 item 4).
+min(per_chain_draws) across chains (the simplest correct option: every
+chain then contributes the same number of draws, and no chain contributes
+draws its peers have not caught up to).
 """
 
 import logging
@@ -70,7 +71,7 @@ from exozippy.samplers._common import (
     DE_JITTER,
     LpPlausibilityGuard,
     _eval_logp,
-    de_proposal,
+    next_gamma,
 )
 from exozippy.samplers.ptde import (
     _check_convergence,
@@ -206,7 +207,11 @@ def ptde_async_sample(
 
     # compile logp ONCE; install in _common BEFORE forking workers so fork
     # children inherit it (copy-on-write; see _common.set_worker_globals)
-    logp_fn = model.compile_logp()
+    # PositionalLogp calls the compiled function by position instead of
+    # through pymc's dict wrapper -- same value, ~3.5x less call overhead on
+    # a 20-variable model, which at one call per proposal is the difference
+    # between 35 us and 10 us of pure plumbing per evaluation (6.4.3).
+    logp_fn = _common.PositionalLogp(model.compile_logp())
     _common.set_worker_globals(logp_fn, collect_rung_timing)
 
     # compile raw -> physical conversions ONCE (single-sample and batched;
@@ -258,11 +263,13 @@ def ptde_async_sample(
 
     # Per-(rung, chain) slot state. current_lp[k][i] is None until that
     # slot's first evaluation completes -- doubles as "still initializing".
+    # A rung's states are ONE (n_chains, n_raw_elements) array rather than a
+    # list of dicts, so the DE move is three vector operations instead of a
+    # Python loop over the free RVs; _common.RawLayout owns the packing and
+    # the proof that it is bit-identical (review 6.4.2).
+    layout = _common.RawLayout(raw_start, model_keys)
     current_state = [
-        [
-            {key: v.copy() for key, v in t1_starts[i % n_chains].items()}
-            for i in range(n_chains)
-        ]
+        layout.pack_many([t1_starts[i % n_chains] for i in range(n_chains)])
         for _ in range(n_temps)
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
@@ -390,27 +397,26 @@ def ptde_async_sample(
     _sub_seq = [0]
 
     def _build_proposal(k, i):
+        """The slot's next PACKED proposal (see _common.RawLayout)."""
         if current_lp[k][i] is None:
             # First evaluation for this slot: evaluate the start state itself.
-            return {key: v.copy() for key, v in current_state[k][i].items()}
-        return de_proposal(
-            rng,
-            current_state[k],
-            i,
-            gamma_box[0],
-            model_keys,
-            jitter=de_jitter,
+            return current_state[k][i].copy()
+        return layout.propose(
+            rng, current_state[k], i, gamma_box[0], jitter=de_jitter
         )
 
     def _submit(k, i):
+        # The slot keeps the packed vector; the worker is handed the dict the
+        # compiled logp wants.
         prop = _build_proposal(k, i)
+        payload = layout.unpack(prop)
         _sub_seq[0] += 1
         sub_id = _sub_seq[0]
         in_flight_meta[sub_id] = (k, i, prop, time.time(), state_gen[k][i])
         in_flight[0] += 1
         if pool is None:
             # Serial fallback: no real concurrency, evaluate immediately.
-            result_q.put((sub_id, _eval_logp(prop)))
+            result_q.put((sub_id, _eval_logp(payload)))
             return
 
         def _cb(result, sub_id=sub_id):
@@ -424,7 +430,7 @@ def ptde_async_sample(
             result_q.put((sub_id, failure))
 
         pool.apply_async(
-            _eval_logp, (prop,), callback=_cb, error_callback=_ecb
+            _eval_logp, (payload,), callback=_cb, error_callback=_ecb
         )
 
     def _attempt_swap():
@@ -448,10 +454,11 @@ def ptde_async_sample(
             1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
         )
         if rng.random() < np.exp(min(0.0, log_a)):
-            current_state[k][i], current_state[k + 1][j] = (
-                current_state[k + 1][j],
-                current_state[k][i],
-            )
+            # .copy() first: these are numpy ROWS, so the tuple form would
+            # hold views and the second assignment would read the first back.
+            _tmp = current_state[k][i].copy()
+            current_state[k][i] = current_state[k + 1][j]
+            current_state[k + 1][j] = _tmp
             current_lp[k][i], current_lp[k + 1][j] = lp_j, lp_i
             direction[k][i], direction[k + 1][j] = (
                 direction[k + 1][j],
@@ -532,9 +539,106 @@ def ptde_async_sample(
                 stop_reason[0] = "convergence criterion met"
                 stop_category[0] = "complete"
 
-    poll_timeout = (
+    # How often the stale scan below may run.  It is O(in-flight), so it is
+    # paced by a WALL CLOCK rather than by a completion count: the run's
+    # completion rate spans microseconds (a toy model) to seconds (a
+    # near-caustic binary lens), and either extreme would make a
+    # "scan every N results" rule either useless or expensive.
+    timeout_scan_interval = (
         max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
     )
+    next_timeout_scan = [np.inf]
+    if timeout_scan_interval is not None:
+        next_timeout_scan[0] = time.time() + timeout_scan_interval
+
+    # The main loop's blocking wait is ALWAYS bounded, even with no
+    # eval_timeout (the default).  It used to be `timeout=None` there, so
+    # the loop sat in result_q.get() until a result happened to arrive and
+    # _maybe_stop ran only on the result path: a Ctrl+C, a SIGTERM from the
+    # batch scheduler, or maxtime expiring were honored only when some slot
+    # finished.  On a model where every remaining evaluation is slow that is
+    # exactly when nothing finishes, so the user sent a SECOND signal, which
+    # raises KeyboardInterrupt out of the handler and abandons every draw
+    # already collected -- the abort save path is never reached (2.4.3).
+    # One wakeup a second costs nothing; missing the graceful stop costs the
+    # run.  A shorter eval_timeout tightens it further, since the stale scan
+    # has to keep up too.
+    POLL_CEILING = 1.0
+    poll_timeout = (
+        min(POLL_CEILING, timeout_scan_interval)
+        if timeout_scan_interval is not None
+        else POLL_CEILING
+    )
+
+    def _enforce_eval_timeout():
+        """Write off every in-flight submission once one has gone stale.
+
+        There is no way to kill a single hung worker in a
+        multiprocessing.Pool without tearing down the whole pool (same
+        limitation as ptde.py's _map_logp_timeout), so any OTHER
+        legitimately-still-running slot is also abandoned and immediately
+        resubmitted with a fresh proposal.
+
+        THIS MUST BE REACHABLE WHILE THE QUEUE IS BUSY.  It used to live
+        exclusively inside `except queue.Empty`, which is a state a healthy
+        run essentially never reaches: with hundreds of slots resolving in
+        milliseconds there is always another result waiting, so a genuinely
+        hung logp -- the exact scenario eval_timeout exists for -- froze its
+        slot for the whole run.  A frozen T=1 slot is worse than a lost
+        proposal: its chain stops recording, so min(per_chain_draws) never
+        reaches `draws`, the convergence checks stop firing, and only
+        maxtime or Ctrl+C ends the run (review 1.4.1).
+
+        No-op without a pool: in serial mode the evaluation happens inline
+        in _submit, so every in_flight_meta entry is already COMPLETE and
+        merely waiting to be read off the queue -- scanning their submission
+        times would write off finished work and then try to recycle a pool
+        that does not exist.  warn_serial_eval_timeout says so at startup.
+
+        Returns True when anything was written off.
+        """
+        nonlocal pool
+        if eval_timeout is None or pool is None:
+            return False
+        now = time.time()
+        stale = [
+            sid
+            for sid, (_, _, _, t0, _) in in_flight_meta.items()
+            if now - t0 > eval_timeout
+        ]
+        if not stale:
+            return False
+        n_eval_timeouts[0] += len(stale)
+        for sid in stale:
+            sk, si, stale_prop, _, _ = in_flight_meta[sid]
+            phys_params, raw_params = _common.describe_proposal(
+                layout.unpack(stale_prop),
+                raw_to_phys,
+                raw_var_names,
+                out_var_names,
+            )
+            logger.error(
+                f"PTDE-async: logp call exceeded "
+                f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
+                f"chain {si} — rejecting this proposal.\n"
+                f"  physical params: {phys_params}\n"
+                f"  raw params: {raw_params}"
+            )
+        # Write off EVERY in-flight submission (the pool recycle kills the
+        # workers running them). A written-off result that nevertheless
+        # arrives (it raced us through the queue) finds its sub_id gone and
+        # is dropped, so it can never be double-processed (1.15b).
+        lost = list(in_flight_meta.items())
+        in_flight_meta.clear()
+        in_flight[0] -= len(lost)
+        logger.warning(
+            f"PTDE-async: recycling worker pool ({len(stale)} timeout(s))"
+        )
+        pool = _common.recycle_pool(pool, actual_cores)
+        if not stopping[0]:
+            for _, (sk, si, _, _, _) in lost:
+                _submit(sk, si)
+        return True
 
     try:
         for k, i in slot_list:
@@ -544,51 +648,37 @@ def ptde_async_sample(
             try:
                 sub_id, result = result_q.get(timeout=poll_timeout)
             except queue.Empty:
-                # eval_timeout enforcement: scan for stale in-flight slots.
-                # There is no way to kill a single hung worker in a
-                # multiprocessing.Pool without tearing down the whole pool
-                # (same limitation as ptde.py's _map_logp_timeout), so any
-                # OTHER legitimately-still-running slot is also abandoned
-                # and immediately resubmitted with a fresh proposal.
-                now = time.time()
-                stale = [
-                    sid
-                    for sid, (_, _, _, t0, _) in in_flight_meta.items()
-                    if now - t0 > eval_timeout
-                ]
-                if stale:
-                    n_eval_timeouts[0] += len(stale)
-                    for sid in stale:
-                        sk, si, stale_prop, _, _ = in_flight_meta[sid]
-                        phys_params, raw_params = _common.describe_proposal(
-                            stale_prop,
-                            raw_to_phys,
-                            raw_var_names,
-                            out_var_names,
-                        )
-                        logger.error(
-                            f"PTDE-async: logp call exceeded "
-                            f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
-                            f"chain {si} — rejecting this proposal.\n"
-                            f"  physical params: {phys_params}\n"
-                            f"  raw params: {raw_params}"
-                        )
-                    # Write off EVERY in-flight submission (the pool recycle
-                    # kills the workers running them). A written-off result
-                    # that nevertheless arrives (it raced us through the
-                    # queue) finds its sub_id gone and is dropped, so it can
-                    # never be double-processed (1.15b).
-                    lost = list(in_flight_meta.items())
-                    in_flight_meta.clear()
-                    in_flight[0] -= len(lost)
-                    logger.warning(
-                        f"PTDE-async: recycling worker pool "
-                        f"({len(stale)} timeout(s))"
+                # _enforce_eval_timeout is a no-op when eval_timeout is
+                # unset, which is now a reachable state: the poll is bounded
+                # either way (see POLL_CEILING).  _maybe_stop is what the
+                # bounded poll is FOR -- on a quiet queue it is the only
+                # place a user signal or maxtime can be noticed.  The draws
+                # and convergence conditions it also tests cannot have
+                # changed since the last result, since every result path
+                # calls it too.
+                _enforce_eval_timeout()
+                if timeout_scan_interval is not None:
+                    next_timeout_scan[0] = time.time() + timeout_scan_interval
+                _maybe_stop()
+                if stop_category[0] == "abort":
+                    # Nothing completed within a whole poll, and the user (or
+                    # maxtime) has asked to stop: the remaining evaluations
+                    # are not coming back on any useful timescale, so stop
+                    # waiting on them and go save what is already stored.
+                    # The loop's normal exit is the RESULT path draining
+                    # in_flight to zero, which never happens when every
+                    # in-flight evaluation is wedged -- the state in which
+                    # the user reaches for a second Ctrl+C, and a second
+                    # signal raises straight out of the handler and throws
+                    # the collected draws away.  In-flight proposals carry
+                    # nothing that was recorded; the pool is torn down in
+                    # the `finally`.
+                    logger.info(
+                        f"PTDE-async: {stop_reason[0]} — abandoning "
+                        f"{in_flight[0]} in-flight evaluation(s) that did "
+                        f"not return, and saving what is stored"
                     )
-                    pool = _common.recycle_pool(pool, actual_cores)
-                    if not stopping[0]:
-                        for _, (sk, si, _, _, _) in lost:
-                            _submit(sk, si)
+                    break
                 continue
 
             meta = in_flight_meta.pop(sub_id, None)
@@ -598,6 +688,19 @@ def ptde_async_sample(
                 continue
             k, i, prop, _, gen_at_submit = meta
             in_flight[0] -= 1
+
+            # Same scan on the RESULT path, paced by the wall clock so a
+            # busy queue cannot hide a hung slot (review 1.4.1).  It runs
+            # AFTER the result in hand has been taken off the books, so a
+            # write-off never discards an evaluation that already finished.
+            # A scan that finds nothing stale touches no state and draws no
+            # random numbers, so a run in which no evaluation ever times out
+            # is bit-for-bit the run this sampler produced before.
+            if timeout_scan_interval is not None:
+                now = time.time()
+                if now >= next_timeout_scan[0]:
+                    next_timeout_scan[0] = now + timeout_scan_interval
+                    _enforce_eval_timeout()
 
             if collect_rung_timing:
                 lp, elapsed = result
@@ -656,8 +759,7 @@ def ptde_async_sample(
                     and per_chain_draws[i] < draws
                 ):
                     d = per_chain_draws[i]
-                    for key in model_keys:
-                        stored_raw[key][i, d] = current_state[k][i][key]
+                    layout.store_draw(stored_raw, current_state[k][i], i, d)
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
@@ -670,10 +772,9 @@ def ptde_async_sample(
                     and per_hot_draws[k - 1, i] < hot_cap
                 ):
                     d = per_hot_draws[k - 1, i]
-                    for key in model_keys:
-                        stored_hot_raw[key][k - 1, i, d] = current_state[k][i][
-                            key
-                        ]
+                    layout.store_draw(
+                        stored_hot_raw, current_state[k][i], k - 1, i, d
+                    )
                     stored_hot_lp[k - 1, i, d] = current_lp[k][i]
                     per_hot_draws[k - 1, i] = d + 1
 
@@ -688,15 +789,11 @@ def ptde_async_sample(
                 and n_propose_T1_window[0] >= gamma_adapt_window
             ):
                 ar_T1 = n_accept_T1_window[0] / max(n_propose_T1_window[0], 1)
+                # Skipped rather than shrunk when the window accepted
+                # nothing, exactly as in ptde.py; _common.next_gamma owns
+                # the rule itself.
                 if ar_T1 > 0:
-                    scale = (ar_T1 / target_accept) ** 0.5
-                    gamma_new = float(
-                        np.clip(
-                            gamma_box[0] * scale,
-                            gamma_box[0] * 0.1,
-                            gamma_box[0] * 10.0,
-                        )
-                    )
+                    gamma_new = next_gamma(gamma_box[0], ar_T1, target_accept)
                     if abs(gamma_new - gamma_box[0]) / gamma_box[0] > 0.01:
                         logger.info(
                             f"PTDE-async gamma: {gamma_box[0]:.4f} -> {gamma_new:.4f} "
@@ -866,35 +963,28 @@ def ptde_async_sample(
             )
 
     # Ladder communication statistics, stamped on the trace so the mode
-    # report can quote them as context.  These are TEMPERATURE round trips of
-    # a replica (T=1 -> T=max -> T=1), NOT mode changes: outputs.modes counts
-    # the latter itself from the stored T=1 labels and labels the two
-    # separately, because "swap" is ambiguous between them.
-    idata.posterior.attrs["ptde_ladder_round_trips"] = int(round_trips[0])
-    idata.posterior.attrs["ptde_swap_rounds"] = int(n_swap_rounds[0])
-
-    ar_T1 = float(n_accept[0] / max(n_propose[0], 1))
-    sr_all = n_swap_accept / np.maximum(n_swap_propose, 1)
-    rt_rate = round_trips[0] / max(n_swap_rounds[0], 1)
-    logger.info(
-        f"PTDE-async done: {actual_draws}/{draws} draws  accept(T=1)={ar_T1:.3f}  "
-        + (
-            f"swap=[{', '.join(f'{r:.2f}' for r in sr_all)}]  "
-            f"round_trips={round_trips[0]} (rate={rt_rate:.3f}/swap, "
-            f"schedule={swap_schedule})"
-            if n_temps > 1
-            else ""
-        )
-        + (
-            f"  swap_discards={n_swap_discards[0]}"
-            if n_swap_discards[0]
-            else ""
-        )
-        + (
-            f"  eval_timeouts={n_eval_timeouts[0]}"
-            if n_eval_timeouts[0]
-            else ""
-        )
+    # report can quote them as context (see stamp_and_log_run_summary).
+    _extras = []
+    if n_swap_discards[0]:
+        _extras.append(f"  swap_discards={n_swap_discards[0]}")
+    if n_eval_timeouts[0]:
+        _extras.append(f"  eval_timeouts={n_eval_timeouts[0]}")
+    _common.stamp_and_log_run_summary(
+        idata,
+        "PTDE-async",
+        logger,
+        actual_draws=actual_draws,
+        draws=draws,
+        n_accept=n_accept,
+        n_propose=n_propose,
+        n_swap_accept=n_swap_accept,
+        n_swap_propose=n_swap_propose,
+        round_trips=round_trips[0],
+        n_swap_rounds=n_swap_rounds[0],
+        n_temps=n_temps,
+        swap_schedule=swap_schedule,
+        rate_unit="swap",
+        extras=_extras,
     )
     # Async never resets the swap counters, so these stats span tune+draw;
     # still the right order of magnitude for the barrier check.

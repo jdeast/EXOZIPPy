@@ -762,3 +762,38 @@ def test_de_polish_serial_and_pooled_agree_on_the_same_stream():
     for pa, pb in zip(a, b):
         np.testing.assert_allclose(pa["x"], pb["x"])
     np.testing.assert_allclose(dlp_a, dlp_b)
+
+
+# ---------------------------------------------------------------------------
+# The gamma rule itself, now shared by the polish and both samplers (4.4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_next_gamma_is_the_damped_clipped_controller_all_three_callers_want():
+    """
+    Given an acceptance measurement and a target,
+    When the shared step-size rule is applied,
+    Then it is gamma * sqrt(ar/target), clipped to a factor 10 either way,
+      and an acceptance of exactly zero shrinks by that same factor.
+
+    One rule, three callers (ptde, ptde_async, polish_seed_starts): the
+    polish engine IS the sampler's T=1 move, so a second tuning story would
+    be one more thing to keep in sync.  The zero-acceptance branch is the
+    one difference between the callers -- the samplers guard on ar > 0 and
+    never reach it; the polish relies on it, because a T=1 optimizer
+    routinely accepts nothing for a whole window.
+    """
+    from exozippy.samplers._common import GAMMA_CLIP_FACTOR, next_gamma
+
+    # sqrt-damped, both directions
+    assert next_gamma(1.0, 0.8, 0.2) == pytest.approx(2.0)
+    assert next_gamma(1.0, 0.05, 0.2) == pytest.approx(0.5)
+    assert next_gamma(3.0, 0.2, 0.2) == pytest.approx(3.0)
+
+    # clipped either way
+    assert next_gamma(1.0, 1.0, 1e-6) == pytest.approx(GAMMA_CLIP_FACTOR)
+    assert next_gamma(1.0, 1e-9, 0.2) == pytest.approx(1.0 / GAMMA_CLIP_FACTOR)
+
+    # zero acceptance shrinks by the clip factor rather than stalling, and
+    # is bit-for-bit the `gamma * 0.1` the polish used to write inline
+    assert next_gamma(0.3, 0.0, 0.2) == 0.3 * 0.1

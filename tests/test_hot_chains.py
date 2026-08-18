@@ -474,6 +474,26 @@ def test_explicit_integer_thinning_is_honored_in_both_topologies():
     assert _resolve(True, planar) == DEFAULT_HOT_THIN
 
 
+def test_a_non_positive_integer_thinning_means_off_not_maximum_retention():
+    """
+    Given store_hot_chains set to the integer 0 (or a negative),
+    When it is resolved under either topology,
+    Then it means OFF -- the fourth spelling of off, not thin=1.
+
+    `max(1, int(spec))` used to floor it, so `store_hot_chains: 0` resolved
+    to MAXIMUM retention: every hot iteration of every hot rung, the exact
+    opposite of the "0 = off" the resolver's own summary line promises
+    (review 1.4.2).  A microlensing topology is the interesting case, since
+    that is where 'auto' would otherwise have turned retention on.
+    """
+    lensy = _TopologySystem(lens=True)
+    planar = _TopologySystem(transit=False)
+
+    assert _resolve(0, lensy) == 0
+    assert _resolve(0, planar) == 0
+    assert _resolve(-5, lensy) == 0
+
+
 def test_the_auto_decision_and_its_cost_are_logged(caplog):
     """
     Given either topology,
