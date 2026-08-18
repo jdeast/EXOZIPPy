@@ -107,11 +107,26 @@ def _attrs(idata) -> Dict[str, Any]:
 
 
 def _fingerprint_of(source) -> tuple:
-    """Accept a System (anything with structural_fingerprint()) or a ready
-    ``(hash, payload)`` pair.  The pair form lets a caller that already has a
-    built System -- run.py handing its fingerprint to mkparam -- pass it
-    straight through instead of recomputing it from a config dict that stage
-    1-2 may since have written into."""
+    """Accept a System (anything with ``structural_fingerprint()``) or a ready
+    ``(hash, payload)`` pair.
+
+    The pair form exists for a caller that has NO System.  Its one user is
+    ``mkparam.write_param_file``, which recomputes the pair from the same two
+    inputs its output is built from -- the config dict and the params on disk
+    -- via ``evaluator.structural_hash``/``structural_payload``.
+
+    That caller is deliberately not handed run.py's live fingerprint, and the
+    reasoning is recorded at both ends (``run.py``'s call to
+    ``write_param_file``; the long comment at mkparam's own
+    ``check_trace_freshness`` call).  In short: what mkparam merges the MAP
+    into IS that config and those params, so if they are not what was fitted
+    the restart file is wrong whatever the trace says -- and the recomputation
+    is measured to reproduce ``System``'s snapshot exactly, because the config
+    is mutated only inside ``System.__init__`` (which is why the snapshot is
+    taken at the END of it) and zero times by stages 1-7.  Do not "fix" run.py
+    to pass its fingerprint down; that would undo the check.  mkparam also has
+    two standalone entry points with no live System at all.
+    """
     if hasattr(source, "structural_fingerprint"):
         return source.structural_fingerprint()
     fingerprint, payload = source
