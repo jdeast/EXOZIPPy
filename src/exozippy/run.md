@@ -12,6 +12,12 @@ reload, with a deliberately different policy), `src/exozippy/samplers/samplers.m
 
 `run.run_fit(config, user_params=None)` accepts in-memory dicts for both arguments (no YAML files needed; data paths resolve relative to cwd). When `user_params` is omitted it falls back to reading `config["parameter_file"]` from disk.
 
+## Wrap-up: no diagnostic may kill a finished fit
+
+Everything after `pm.sample` returns is a REPORT on a fit that already finished, and its irreplaceable artifacts -- the trace, the mode report, the restart file, the modeling draft -- are cheap to lose and expensive to recreate. So every wrap-up step runs inside `run.nonfatal_wrapup(what)`, which warns with the traceback and carries on. The plotting block between the tables and `write_param_file` was the one stretch of bare calls in an otherwise wrapped wrap-up, and a degenerate-KDE crash inside `save_multipage_trace` (which any short or stopped run can provoke) therefore skipped the restart file and the final `paper.tex` regeneration of a multi-day fit. The guard is per COMPONENT, not per loop: one component's broken diagnostic costs its own figure and nothing else. `draws` is seeded empty before the guarded `get_draws`, because the modeling draft reads `draws[0]` past the wrap and must degrade to its data-only specs rather than `NameError`.
+
+The `except` is deliberately broad -- enumerating what a third-party plotting stack can raise is exactly the list that goes stale, and the invariant is that NO diagnostic from ANY component kills a finished fit. `KeyboardInterrupt`/`SystemExit` are not caught: somebody interrupting wrap-up wants it to stop. What the guard must never become is a silent swallow; `exc_info=True` is what puts the traceback in the log and so in the GUI's `status.json`. Tests: `tests/test_run_wrapup_guards.py`.
+
 ## The restart-file writer (`mkparam.py`)
 
 `mkparam.write_param_file(config, ...)` writes the next `params.yaml` from a finished fit's trace -- called automatically at the end of `run.py`, from `scripts/mkparam.py`, or directly. Config block `mkparam:` (`n_seeds`, `force`).

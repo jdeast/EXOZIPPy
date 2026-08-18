@@ -99,6 +99,36 @@ def sigterm_as_interrupt():
         signal.signal(signal.SIGTERM, old_sigterm)
 
 
+@contextlib.contextmanager
+def nonfatal_wrapup(what):
+    """Run one wrap-up step; a crash inside it warns instead of aborting.
+
+    Everything after ``pm.sample`` returns is a REPORT on a fit that already
+    finished, and the fit's irreplaceable artifacts -- the trace, the mode
+    report, the restart file -- are cheap to lose and expensive to recreate.
+    The plotting block between the tables and ``write_param_file`` was the
+    one stretch of bare calls in an otherwise wrapped wrap-up, so a
+    degenerate-KDE crash inside ``save_multipage_trace`` (which any short or
+    stopped run can provoke) skipped the restart file and the final
+    paper.tex regeneration of a multi-day fit.
+
+    Deliberately a broad ``except``: the point is that no diagnostic, from
+    any component, may kill a finished fit, and enumerating the exception
+    types a third-party plotting stack can raise is exactly the list that
+    goes stale.  ``exc_info=True`` keeps the traceback in the log (and so in
+    the GUI's status.json) rather than reducing the failure to one line --
+    the alternative, and the reason this is warn-and-continue rather than
+    swallow, is a wrap-up that silently produces fewer files than it should.
+
+    KeyboardInterrupt and SystemExit are NOT caught (they are not
+    ``Exception``): a user interrupting wrap-up wants it to stop.
+    """
+    try:
+        yield
+    except Exception:
+        logger.warning("%s failed (non-fatal)", what, exc_info=True)
+
+
 def warn_unknown_sampler_keys(sampler_cfg):
     """Warn about `sampler:` keys this module does not consume.
 
@@ -745,21 +775,29 @@ def _run_fit(config, gui, user_params=None):
         _format_summary(idata, burn_diag), encoding="utf-8"
     )
 
+    # Every plot below is wrapped, and per COMPONENT rather than per loop, so
+    # one component's broken diagnostic costs its own figure and nothing else
+    # -- neither its siblings' figures nor, further down, the restart file.
     # make a corner plot of fitted parameters (similar to EXOFASTv2 covar plot)
-    make_corner(model, idata, str(prefix) + "_corner.png")
+    with nonfatal_wrapup("corner plot"):
+        make_corner(model, idata, str(prefix) + "_corner.png")
 
     # Component-specific corner plots (e.g. mulensing geometry). Unlike
     # comp.plot(), which also runs pre-flight on a single point, this only
     # runs here, once, when the full posterior (idata) actually exists.
     for comp in system.active_components.values():
-        comp.plot_corner(idata, filename_prefix=str(prefix))
+        with nonfatal_wrapup(f"corner plot for {comp.label}"):
+            comp.plot_corner(idata, filename_prefix=str(prefix))
 
     # Save a 1D trace plot (similar to EXOFASTv2 chain file)
-    all_params = system.get_all_parameters()
-    plot_vars = [p.label for p in all_params if p.label in idata["posterior"]]
-    save_multipage_trace(
-        idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
-    )
+    with nonfatal_wrapup("detailed trace plot"):
+        all_params = system.get_all_parameters()
+        plot_vars = [
+            p.label for p in all_params if p.label in idata["posterior"]
+        ]
+        save_multipage_trace(
+            idata, plot_vars, str(prefix) + "_trace_detailed.pdf", model=model
+        )
 
     # Pick the suspected troublemakers
     # List every tracked parameter in the posterior
@@ -778,10 +816,16 @@ def _run_fit(config, gui, user_params=None):
     # )
     # plt.show()
 
-    # Generate final plots
-    draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
+    # Generate final plots.  `draws` outlives this block -- the modeling
+    # draft reads draws[0] for its model-bearing figures -- so it is seeded
+    # empty first: a get_draws failure must degrade the draft to its
+    # data-only specs, not NameError past the wrap.
+    draws = []
+    with nonfatal_wrapup("posterior draw extraction"):
+        draws = get_draws(idata, param_lookup=system.get_parameter_lookup())
     for comp in system.active_components.values():
-        comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
+        with nonfatal_wrapup(f"posterior plots for {comp.label}"):
+            comp.plot(system, draws, filename_prefix=str(prefix) + "_mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution -- see
