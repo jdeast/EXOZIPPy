@@ -486,6 +486,70 @@ def _logp_that_freezes_after(t_switch):
     return _logp
 
 
+def _logp_frozen_until(t_release):
+    """Blocks until `t_release` (wall clock), then evaluates normally.
+
+    The mirror image of _logp_that_freezes_after: here the run stalls from
+    its very first submission, so nothing ever reaches the result queue and
+    the stale scan has to run from the `queue.Empty` branch.
+    """
+
+    def _logp(point):
+        while time.time() < t_release:
+            time.sleep(0.05)
+        x = float(np.asarray(point["x"]))
+        return -0.5 * x * x
+
+    return _logp
+
+
+@requires_fork
+def test_eval_timeout_writes_off_a_wholly_stalled_pool_and_resubmits(caplog):
+    """
+    Given EVERY slot frozen at once -- so the result queue really is empty
+      and the stale scan runs from the `queue.Empty` branch --
+    When eval_timeout expires,
+    Then the whole in-flight batch is written off, the pool is recycled, the
+      slots resubmit, and the run completes once the freeze lifts.
+
+    The complement of the busy-queue test below: 1.4.1 added the result-path
+    scan, and this pins that the original empty-queue path still works.  Its
+    write-off/resubmit block had no coverage at all (review 7.4.2).
+    """
+    # ARRANGE
+    if mp.cpu_count() < 2:
+        pytest.skip("eval_timeout has no effect with a single core")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    release_at = time.time() + 1.5
+    model.compile_logp = lambda *a, **k: _logp_frozen_until(release_at)
+
+    # ACT
+    with caplog.at_level(
+        logging.WARNING, logger="exozippy.samplers.ptde_async"
+    ):
+        idata = ptde_async_sample(
+            model,
+            _MinimalSystem(),
+            draws=10,
+            tune=2,
+            n_temps=1,
+            n_chains=4,
+            cores=2,
+            initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+            seed=17,
+            log_interval=10**6,
+            eval_timeout=0.5,
+            maxtime=60.0,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert "recycling worker pool" in caplog.text
+    assert idata.posterior.sizes["draw"] == 10
+
+
 @requires_fork
 def test_maxtime_is_honored_when_no_result_ever_arrives(tmp_path):
     """

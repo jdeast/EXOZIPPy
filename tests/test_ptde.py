@@ -648,6 +648,85 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
 
 
 # ---------------------------------------------------------------------------
+# eval_timeout, actually FIRING (review 7.4.2).  It was only ever tested in
+# the "no timeout fires" regime, so the sentinel handling, describe_proposal
+# and the pool recycle had no coverage at all.
+# ---------------------------------------------------------------------------
+
+
+def _slower_than(seconds):
+    """A logp every call of which outlasts the timeout under test."""
+
+    def _logp(point):
+        time.sleep(seconds)
+        return -0.5 * float(np.asarray(point["x"])) ** 2
+
+    return _logp
+
+
+@requires_fork
+@pytest.mark.parametrize("collect_rung_timing", [False, True])
+def test_sync_eval_timeout_rejects_the_proposal_and_recycles(
+    caplog, collect_rung_timing
+):
+    """
+    Given a logp slower than eval_timeout on EVERY call,
+    When ptde_sample runs,
+    Then each proposal is timed out and rejected, the offending parameters
+      are logged in both physical and raw space, the worker pool is
+      recycled, the count reaches the wrap-up line, and the run still
+      returns a well-formed trace.
+
+    Parameterized over collect_rung_timing because the timeout SENTINEL
+    changes shape with it -- (-inf, elapsed) instead of a bare -inf -- and
+    the unpack that reads it had no coverage either.  Every proposal being
+    rejected also means the stored draw is the start state, which is what
+    makes the whole thing deterministic.
+
+    This exercises the shutdown path too: the last workers are still asleep
+    when the run ends, and they ignore SIGTERM (_worker_init), so a
+    close()+join() at wrap-up would hang here (review 2.4.1).
+    """
+    # ARRANGE
+    if mp.cpu_count() < 2:
+        pytest.skip("eval_timeout has no effect with a single core")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    model.compile_logp = lambda *a, **k: _slower_than(1.0)
+
+    # ACT
+    with caplog.at_level(logging.INFO, logger="exozippy.samplers.ptde"):
+        idata = ptde_sample(
+            model,
+            _MinimalSystem(),
+            draws=1,
+            tune=1,
+            n_temps=1,
+            n_chains=4,
+            cores=2,
+            initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+            seed=8,
+            log_interval=10**6,
+            eval_timeout=0.2,
+            collect_rung_timing=collect_rung_timing,
+            min_ess=None,
+            max_rhat=None,
+        )
+
+    # ASSERT
+    assert "logp call exceeded eval_timeout" in caplog.text
+    assert "physical params" in caplog.text and "raw params" in caplog.text
+    assert "recycling worker pool" in caplog.text
+    assert "eval_timeouts=" in caplog.text
+    assert idata.posterior.sizes["draw"] == 1
+    # every proposal was rejected, so the draw is the start state
+    assert np.allclose(
+        sorted(np.ravel(idata.posterior["x"].values)),
+        [0.0, 0.1, 0.2, 0.3],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sync early-stop paths (review 7.4.1): every one of these was uncovered,
 # while the async sampler's maxtime path was not.
 # ---------------------------------------------------------------------------
