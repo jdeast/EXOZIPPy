@@ -241,7 +241,10 @@ already superseded by the detailed note, which says minus on both in `tau`.)
   `tests/test_vbm_direct_vs_mulensmodel.py`.
 - The stakes are not academic. Earth's annual deviation is `~0.003 AU`, so a sign error
   there barely moves a ground-only fit; Spitzer's projected deviation is `~0.125 AU`, where
-  the same error gave `A = 1.91` against `1.77` -- 11x the scatter of 0.001 mag photometry.
+  the same error gave `A = 1.91` against `1.77` near peak -- an 8% error, against
+  photometry good to ~0.1%. So the sign is effectively untestable on ground data alone and
+  immediately fatal with a satellite, which is why this is pinned by a test rather than by
+  a fit looking healthy.
 
 ### C11 -- the two offsets differ by a sign because they are DIFFERENT QUANTITIES
 
