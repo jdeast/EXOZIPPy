@@ -350,7 +350,7 @@ def ptde_async_sample(
     n_propose = np.zeros(n_temps)
     # Per-rung explored span: see _common.SpanTracker for what it is for
     # and the DC2018 event 128 numbers that motivate reporting it live.
-    spans = _common.SpanTracker(n_temps, raw_start)
+    spans = _common.SpanTracker(n_temps, raw_start, layout)
 
     n_swap_accept = np.zeros(max(n_temps - 1, 1))
     n_swap_propose = np.zeros(max(n_temps - 1, 1))

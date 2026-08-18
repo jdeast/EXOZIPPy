@@ -96,17 +96,22 @@ def test_span_tracker_measures_per_rung_reach():
     reported span against that distance is the whole point.
     """
     # ARRANGE
-    from exozippy.samplers._common import SpanTracker
+    from exozippy.samplers._common import RawLayout, SpanTracker
 
-    tr = SpanTracker(
-        n_temps=3, raw_start={"a": np.zeros(2), "b": np.zeros(())}
-    )
+    # States are PACKED vectors, not dicts: since review 6.4.2 that is what a
+    # proposal is, and RawLayout is what maps a packed index back to the
+    # parameter that owns it.
+    start = {"a": np.zeros(2), "b": np.zeros(())}
+    layout = RawLayout(start)
+    tr = SpanTracker(n_temps=3, raw_start=start, layout=layout)
 
     # ACT: rung 0 wanders +-1, rung 2 wanders +-50 in "a"
-    tr.update(0, {"a": np.array([-1.0, 0.0]), "b": np.array(0.0)})
-    tr.update(0, {"a": np.array([1.0, 0.5]), "b": np.array(0.2)})
-    tr.update(2, {"a": np.array([-50.0, 0.0]), "b": np.array(0.0)})
-    tr.update(2, {"a": np.array([50.0, 1.0]), "b": np.array(0.1)})
+    tr.update(0, layout.pack({"a": np.array([-1.0, 0.0]), "b": np.array(0.0)}))
+    tr.update(0, layout.pack({"a": np.array([1.0, 0.5]), "b": np.array(0.2)}))
+    tr.update(
+        2, layout.pack({"a": np.array([-50.0, 0.0]), "b": np.array(0.0)})
+    )
+    tr.update(2, layout.pack({"a": np.array([50.0, 1.0]), "b": np.array(0.1)}))
     rep = tr.report()
 
     # ASSERT
@@ -124,10 +129,12 @@ def test_span_tracker_reports_zero_for_an_unvisited_rung():
     A diagnostic that shows inf reads as a bug rather than as "no data yet",
     and rung 1 here is genuinely unreported at this point in a run.
     """
-    from exozippy.samplers._common import SpanTracker
+    from exozippy.samplers._common import RawLayout, SpanTracker
 
-    tr = SpanTracker(n_temps=2, raw_start={"a": np.zeros(())})
-    tr.update(0, {"a": np.array(3.0)})
+    start = {"a": np.zeros(())}
+    layout = RawLayout(start)
+    tr = SpanTracker(n_temps=2, raw_start=start, layout=layout)
+    tr.update(0, layout.pack({"a": np.array(3.0)}))
 
     rep = tr.report()
     assert rep[1] == (0.0, "-")

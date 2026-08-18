@@ -495,26 +495,25 @@ class SpanTracker:
     proposal -- negligible against a logp evaluation.
     """
 
-    def __init__(self, n_temps, raw_start):
-        self.lo = {
-            k: np.full((n_temps,) + np.shape(v), np.inf)
-            for k, v in raw_start.items()
-        }
-        self.hi = {
-            k: np.full((n_temps,) + np.shape(v), -np.inf)
-            for k, v in raw_start.items()
-        }
+    def __init__(self, n_temps, raw_start, layout=None):
+        # PACKED, matching what the samplers actually carry: since review
+        # 6.4.2 a proposal is a (total,) float64 vector from RawLayout, not a
+        # dict of per-parameter arrays.  This class was written against the
+        # dict form and called state.items() on it, which merged cleanly with
+        # the packing (different regions of the file) and then died at run
+        # time with "'numpy.ndarray' object has no attribute 'items'" across
+        # every ptde_async test.  Packing it here is also simply less work:
+        # two whole-vector minimum/maximum calls per update instead of a
+        # Python loop over the keys.
+        self.layout = layout if layout is not None else RawLayout(raw_start)
+        self.lo = np.full((n_temps, self.layout.total), np.inf)
+        self.hi = np.full((n_temps, self.layout.total), -np.inf)
         self.n_temps = n_temps
 
-    def update(self, k, state):
-        # Plain assignment, not `out=`: for a SCALAR parameter self.lo[key]
-        # has shape (n_temps,), so self.lo[key][k] is a numpy scalar rather
-        # than an array and `out=` raises "return arrays must be of
-        # ArrayType".  Every model has scalar parameters, so the out= form
-        # would have crashed on essentially any real run.
-        for key, v in state.items():
-            self.lo[key][k] = np.minimum(self.lo[key][k], v)
-            self.hi[key][k] = np.maximum(self.hi[key][k], v)
+    def update(self, k, vec):
+        """Fold one packed state into rung ``k``'s running extremes."""
+        np.minimum(self.lo[k], vec, out=self.lo[k])
+        np.maximum(self.hi[k], vec, out=self.hi[k])
 
     def report(self):
         """[(widest span in sigma, which parameter)] per rung.
@@ -525,14 +524,23 @@ class SpanTracker:
         """
         out = []
         for k in range(self.n_temps):
-            best, best_key = 0.0, "-"
-            for key in self.lo:
-                span = self.hi[key][k] - self.lo[key][k]
-                if not np.all(np.isfinite(span)):
-                    continue
-                m = float(np.max(span))
-                if m > best:
-                    best, best_key = m, key
+            span = self.hi[k] - self.lo[k]
+            finite = np.isfinite(span)
+            if not finite.any():
+                out.append((0.0, "-"))
+                continue
+            masked = np.where(finite, span, -np.inf)
+            j = int(np.argmax(masked))
+            best = float(masked[j])
+            if best <= 0.0:
+                out.append((0.0, "-"))
+                continue
+            # Map the winning element back to the parameter that owns it.
+            best_key = "-"
+            for key, (a, b, _) in zip(self.layout.keys, self.layout.slices):
+                if a <= j < b:
+                    best_key = key
+                    break
             out.append((best, best_key))
         return out
 
