@@ -210,6 +210,22 @@ class Component(ABC):
         self._pending_reported = {}
         return finalized
 
+    @staticmethod
+    def _has_built_parameter(comp, name):
+        """Has ``comp`` already materialized ``name`` as a Parameter?
+
+        The one predicate for "this node exists, do not build it again".  It
+        must test the TYPE, not merely the attribute's presence: a component
+        class attribute or method sharing a manifest parameter's name would
+        otherwise be mistaken for the built node and either crash on
+        ``.value`` or wire the wrong thing into the graph (review 2.2.2).
+        Three of the four call sites already tested the type; the
+        external-dependency one asked ``hasattr`` alone.  There are no
+        collisions in the tree today -- which is exactly why the odd one out
+        never showed.
+        """
+        return isinstance(getattr(comp, name, None), Parameter)
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
         # Reported (role 3) selections park here until finalize_reported; keyed
@@ -219,9 +235,7 @@ class Component(ABC):
             self._pending_reported = {}
 
         # 0. Prevent double-building nodes
-        if hasattr(self, param_name) and isinstance(
-            getattr(self, param_name), Parameter
-        ):
+        if self._has_built_parameter(self, param_name):
             return getattr(self, param_name).value
 
         if not hasattr(self, "manifest"):
@@ -462,9 +476,7 @@ class Component(ABC):
 
         if "." not in d:
             # Local tracking recursive lookup
-            if not hasattr(self, d) or not isinstance(
-                getattr(self, d), Parameter
-            ):
+            if not self._has_built_parameter(self, d):
                 self.add_parameter(model, d, system, context_nodes)
             local = getattr(self, d)
             aligned = n_elements is not None and local._n_elements() == int(
@@ -489,7 +501,7 @@ class Component(ABC):
             )
 
         # Ensure the dependency node is built lazily on demand
-        if not hasattr(ext_comp, ext_param_name):
+        if not self._has_built_parameter(ext_comp, ext_param_name):
             ext_comp.add_parameter(
                 model, ext_param_name, system, context_nodes
             )
@@ -597,10 +609,7 @@ class Component(ABC):
                             f"[{self.prefix}.{param_name}] link '{plink.expr_str}' "
                             f"references component '{dcomp}', which is not active."
                         )
-                    if not (
-                        hasattr(comp, dparam)
-                        and isinstance(getattr(comp, dparam), Parameter)
-                    ):
+                    if not self._has_built_parameter(comp, dparam):
                         comp.add_parameter(model, dparam, system)
                     node = getattr(comp, dparam).value
                     if getattr(node, "ndim", 0) >= 1:
