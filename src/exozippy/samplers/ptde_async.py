@@ -532,18 +532,36 @@ def ptde_async_sample(
                 stop_reason[0] = "convergence criterion met"
                 stop_category[0] = "complete"
 
-    poll_timeout = (
-        max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
-    )
     # How often the stale scan below may run.  It is O(in-flight), so it is
     # paced by a WALL CLOCK rather than by a completion count: the run's
     # completion rate spans microseconds (a toy model) to seconds (a
     # near-caustic binary lens), and either extreme would make a
     # "scan every N results" rule either useless or expensive.
-    timeout_scan_interval = poll_timeout
+    timeout_scan_interval = (
+        max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
+    )
     next_timeout_scan = [np.inf]
     if timeout_scan_interval is not None:
         next_timeout_scan[0] = time.time() + timeout_scan_interval
+
+    # The main loop's blocking wait is ALWAYS bounded, even with no
+    # eval_timeout (the default).  It used to be `timeout=None` there, so
+    # the loop sat in result_q.get() until a result happened to arrive and
+    # _maybe_stop ran only on the result path: a Ctrl+C, a SIGTERM from the
+    # batch scheduler, or maxtime expiring were honored only when some slot
+    # finished.  On a model where every remaining evaluation is slow that is
+    # exactly when nothing finishes, so the user sent a SECOND signal, which
+    # raises KeyboardInterrupt out of the handler and abandons every draw
+    # already collected -- the abort save path is never reached (2.4.3).
+    # One wakeup a second costs nothing; missing the graceful stop costs the
+    # run.  A shorter eval_timeout tightens it further, since the stale scan
+    # has to keep up too.
+    POLL_CEILING = 1.0
+    poll_timeout = (
+        min(POLL_CEILING, timeout_scan_interval)
+        if timeout_scan_interval is not None
+        else POLL_CEILING
+    )
 
     def _enforce_eval_timeout():
         """Write off every in-flight submission once one has gone stale.
@@ -623,9 +641,37 @@ def ptde_async_sample(
             try:
                 sub_id, result = result_q.get(timeout=poll_timeout)
             except queue.Empty:
+                # _enforce_eval_timeout is a no-op when eval_timeout is
+                # unset, which is now a reachable state: the poll is bounded
+                # either way (see POLL_CEILING).  _maybe_stop is what the
+                # bounded poll is FOR -- on a quiet queue it is the only
+                # place a user signal or maxtime can be noticed.  The draws
+                # and convergence conditions it also tests cannot have
+                # changed since the last result, since every result path
+                # calls it too.
                 _enforce_eval_timeout()
                 if timeout_scan_interval is not None:
                     next_timeout_scan[0] = time.time() + timeout_scan_interval
+                _maybe_stop()
+                if stop_category[0] == "abort":
+                    # Nothing completed within a whole poll, and the user (or
+                    # maxtime) has asked to stop: the remaining evaluations
+                    # are not coming back on any useful timescale, so stop
+                    # waiting on them and go save what is already stored.
+                    # The loop's normal exit is the RESULT path draining
+                    # in_flight to zero, which never happens when every
+                    # in-flight evaluation is wedged -- the state in which
+                    # the user reaches for a second Ctrl+C, and a second
+                    # signal raises straight out of the handler and throws
+                    # the collected draws away.  In-flight proposals carry
+                    # nothing that was recorded; the pool is torn down in
+                    # the `finally`.
+                    logger.info(
+                        f"PTDE-async: {stop_reason[0]} — abandoning "
+                        f"{in_flight[0]} in-flight evaluation(s) that did "
+                        f"not return, and saving what is stored"
+                    )
+                    break
                 continue
 
             meta = in_flight_meta.pop(sub_id, None)

@@ -469,6 +469,72 @@ def _one_shot_hanging_logp(hang_flag, threshold=-5.0):
     return _logp
 
 
+def _logp_that_freezes_after(t_switch):
+    """Fast until `t_switch` (wall clock), then hangs forever.
+
+    Stands in for a run whose remaining evaluations have all wandered into
+    a pathological region at once: nothing completes, so nothing arrives on
+    the result queue.
+    """
+
+    def _logp(point):
+        x = float(np.asarray(point["x"]))
+        while time.time() > t_switch:
+            time.sleep(0.05)
+        return -0.5 * x * x
+
+    return _logp
+
+
+@requires_fork
+def test_maxtime_is_honored_when_no_result_ever_arrives(tmp_path):
+    """
+    Given a run whose evaluations all freeze partway through, so no result
+      reaches the queue again, and NO eval_timeout (the default),
+    When maxtime expires,
+    Then the sampler stops and returns the draws it had already stored.
+
+    The main loop used to block in result_q.get(timeout=None) and test the
+    stop conditions only on the result path, so a stop request was honored
+    only if some slot happened to finish -- and if none did, the user's
+    second Ctrl+C raised out of the signal handler and threw away every
+    draw already collected (review 2.4.3).
+    """
+    # Arrange
+    if mp.cpu_count() < 2:
+        pytest.skip("needs a worker pool to freeze")
+    with pm.Model() as model:
+        pm.Normal("x", mu=0.0, sigma=1.0)
+    freeze_at = time.time() + 1.5
+    model.compile_logp = lambda *a, **k: _logp_that_freezes_after(freeze_at)
+
+    # Act
+    t0 = time.time()
+    idata = ptde_async_sample(
+        model,
+        _MinimalSystem(),
+        draws=10**7,  # never reached; maxtime is what ends this run
+        tune=2,
+        n_temps=1,
+        n_chains=4,
+        cores=2,
+        initvals=[{"x": np.array(0.1 * j)} for j in range(4)],
+        seed=7,
+        log_interval=10**7,
+        maxtime=4.0,
+        min_ess=None,
+        max_rhat=None,
+    )
+    elapsed = time.time() - t0
+
+    # Assert
+    assert idata.posterior.sizes["draw"] >= 1
+    assert elapsed < 40.0, (
+        f"the run took {elapsed:.1f}s against a 4s maxtime, i.e. it was "
+        f"still blocked waiting for a result that never came"
+    )
+
+
 @requires_fork
 def test_hung_slot_is_written_off_while_other_slots_keep_the_queue_busy(
     tmp_path, caplog
