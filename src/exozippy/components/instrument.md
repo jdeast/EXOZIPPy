@@ -22,7 +22,7 @@ The four data components (`rvinstrument`, `transit`, `mulensinstrument`, `astrom
 
 Time system: default is BJD_TDB in, untouched. `time_scale:` (utc/tai/tt/tdb/tcb/tcg/ut1, `ut` = ut1) and `time_frame:` (jd/hjd/bjd) convert to BJD_TDB at load via astropy (Eastman, Siverd & Gaudi 2010 algorithm: strip the input frame's light-travel term by fixed-point iteration, scale-convert, re-add the barycentric term). Conversion demands absolute JDs (raise if min < 2e6 -- point users at `time_offset`); jd/hjd frames demand **user-set** star ra/dec (`_time_coord` refuses defaults.yaml placeholders; `star_ndx` on the file entry picks the star). frame=bjd scale-only conversions need no coordinates (the barycentric term cancels exactly). Optional `time_location:` (observatory name or [lon, lat, height]; default geocenter, up to 21 ms unmodeled) and `time_ephemeris:` (default `builtin`, ~us; `de440` ~ns, needs jplephem). Not modeled -- all below the ~40 us float64 quantization of a single-float absolute JD: TT(BIPM), Shapiro delay, proper-motion/parallax evolution of the direction. MMEXOFAST seeding reads the raw files itself, so `MulensInstrument._reject_time_spec_with_mmexofast` hard-errors when both are active. Tests: `tests/test_instrument_time_columns.py`.
 
-`Instrument._apply_mask(df, i)` (called by `_read_data` after column selection) drops excluded rows per an optional per-file `mask:` config key — a flag-file path (one 0/1 per data row, nonzero = exclude), a boolean list, or a list of 0-based row indices, all referring to the file's ON-DISK row order (mask before sort, so indices from external tools stay valid). All-points-masked and length/range mismatches raise, and so does an inline list of **integers that are all 0 or 1 with one entry per row** -- the two readings of that are OPPOSITES (`mask: [1, 0, 1, 0]` excludes rows 0 and 1 as INDICES, rows 0 and 2 as the per-row FLAGS the file form of the same numbers means), so it names both and asks for an explicit spelling instead of picking. The guard is deliberately narrow: a shorter 0/1 list has only one sensible reading and keeps it. Tests: `tests/test_instrument_mask.py`.
+`Instrument._apply_mask(df, i)` (called by `_read_data` after column selection) drops excluded rows per an optional per-file `mask:` config key -- a flag-file path (one 0/1 per data row, nonzero = exclude), a boolean list, or a list of 0-based row indices, all referring to the file's ON-DISK row order (mask before sort, so indices from external tools stay valid). All-points-masked and length/range mismatches raise, and so does an inline list of **integers that are all 0 or 1 with one entry per row** -- the two readings of that are OPPOSITES (`mask: [1, 0, 1, 0]` excludes rows 0 and 1 as INDICES, rows 0 and 2 as the per-row FLAGS the file form of the same numbers means), so it names both and asks for an explicit spelling instead of picking. The guard is deliberately narrow: a shorter 0/1 list has only one sensible reading and keeps it. Tests: `tests/test_instrument_mask.py`.
 
 Optional detrending against extra data columns (columns past the error column, one coefficient per column per instrument, block-diagonal so coefficients never mix) is supported by `rvinstrument`, `transit` and `mulensinstrument` (magnitude-space coefficients there, applied multiplicatively to the flux model as `10**(-0.4 * X.c)` -- the same model as the old additive magnitude detrending, and the right form for a throughput/extinction trend). `astrometryinstrument` has none -- its 2-observable modes would need per-channel coefficients.
 
@@ -78,6 +78,22 @@ structure. The correction is applied in NUMPY, so the graph walk that populates
 `PlotSpec.param_deps` cannot see it: `Instrument.detrend_dep_labels()` supplies the
 coefficient label explicitly, exactly as the `gamma` / `baseline` deps next to it do, and
 transit's unphased spec sets `dynamic_data` when (and only when) it has detrend columns.
+`Instrument.detrend_caption()` is the sentence the figure captions owe the reader when that
+correction is active (empty otherwise, so no shipped caption changes) -- the plotted points
+are then not the raw file.
+
+**The phased panels compute their point-only work once.** `_phased_arrays` (RV) runs per
+member orbit and `_phased_lc_arrays` (transit) per (planet, instrument), and each used to
+rebuild the same arrays every time: the marshalled parameter values, the model matrix at the
+OBSERVED times, and the per-observation GP and detrend corrections. The spaghetti re-runs the
+whole loop per posterior draw, so the waste multiplied by the draw count. They are hoisted
+into one `_phased_shared` / `_phased_lc_shared` dict per (component, point), and the compiled
+evaluator goes from `2N` calls to `N+1` for N bodies -- the call it drops is the pass over the
+full data set. What is NOT shared, and cannot be, is each body's model GRID: its time axis is
+that body's own period window. Transit's matrix at the observed times varies with the
+INSTRUMENT but not the planet, so it is cached per instrument and fills in lazily. Both
+helpers keep a `shared=None` default that builds one, so a standalone caller is unaffected;
+only the loop passes it.
 
 ## The signed jitter
 
