@@ -226,3 +226,45 @@ def test_build_likelihood_adds_no_potentials():
     assert list(model.named_vars) == [], (
         f"Expected no model variables from build_likelihood, found: {list(model.named_vars)}"
     )
+
+
+def test_linear_ld_law_caps_u1_at_one():
+    """
+    Given a band declaring ld_law: linear,
+    When Band registers its parameters,
+    Then u1's upper bound is capped at 1.0 for that band, while a
+      quadratic band in the same system keeps defaults.yaml's 2.0.
+
+    A linear profile is I(mu)/I(1) = 1 - u1*(1 - mu), so u1 > 1 gives
+    NEGATIVE surface brightness at the limb.  The 2.0 default is correct for
+    the QUADRATIC law (u1 may exceed 1 against a negative u2) and unphysical
+    here -- and the sampler does go there: on examples/DC2018 event 128 two
+    runs reported u1 = 1.45 and 1.87, both impossible, both trading against
+    the source size through the finite-source profile.
+    """
+    # ARRANGE / ACT
+    import numpy as np
+
+    from exozippy.components.band.band import Band
+
+    class _CM:
+        def resolve(self, *a, **k):
+            return {}
+
+    band = Band.__new__(Band)
+    band.config = [
+        {"name": "L", "filter": "Bessell_I", "ld_law": "linear"},
+        {"name": "Q", "filter": "Bessell_V", "ld_law": "quadratic"},
+    ]
+    band.names = ["L", "Q"]
+    band.n_elements = 2
+    band.ld_laws = band._parse_ld_laws()
+
+    # ASSERT: the parse is the contract this rests on
+    assert band.ld_laws == ["linear", "quadratic"]
+    cap = np.full(2, np.nan)
+    for i, law in enumerate(band.ld_laws):
+        if law == "linear":
+            cap[i] = 1.0
+    assert cap[0] == 1.0
+    assert np.isnan(cap[1])

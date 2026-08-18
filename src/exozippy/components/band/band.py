@@ -338,6 +338,30 @@ class Band(Component):
         if not unread:
             return
 
+        # A LINEAR law caps u1 at 1: the profile is
+        # I(mu)/I(1) = 1 - u1*(1 - mu), so u1 > 1 puts NEGATIVE surface
+        # brightness at the limb (mu = 0).  defaults.yaml's upper bound is 2,
+        # which is right for the QUADRATIC law (u1 can exceed 1 there against
+        # a negative u2) and unphysical for this one -- and the sampler does
+        # go there: on examples/DC2018 event 128 two runs reported
+        # u1 = 1.45 and 1.87, both impossible, both trading against the
+        # source size through the finite-source profile.
+        #
+        # Through "overrides" rather than "options" so it combines as
+        # min(user_upper, 1.0) and cannot RAISE a bound the user tightened
+        # (the channel note in CLAUDE.md).  This is a validity limit -- past
+        # it the intensity is negative -- which is exactly what that channel
+        # is for.  NaN leaves quadratic bands alone.
+        if "u1" in self.manifest:
+            cap = np.full(self.n_elements, np.nan)
+            for i, law in enumerate(self.ld_laws):
+                if law == "linear":
+                    cap[i] = 1.0
+            if np.isfinite(cap).any():
+                self.manifest["u1"] = merge_overrides(
+                    self.manifest.get("u1"), {"upper": cap.tolist()}
+                )
+
         # Per parameter, the elements that BOTH sample it and are unread; the
         # same opt-in pin the BEER terms and Instrument's GP/robust
         # registrations use (components/parameterization.py), merged into
