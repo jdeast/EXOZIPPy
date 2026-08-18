@@ -380,14 +380,26 @@ MulensModel's `Trajectory._get_xy` line for line.
 **One caveat for anyone chasing a 180-degree offset.** MulensModel's `Trajectory` class
 docstring says it "follows the conventions defined in Appendix A of Skowron et al. (2011)
 except the definition of *alpha*, which is shifted by 180 deg", and its `_get_xy` carries
-the same comment. Taking Skowron Section A.6 at its word -- "`alpha_0` is the angle of the LENS
-MOTION ... relative to the primary-secondary axis" -- that note does not hold: with
+the same comment. That note does not hold. Skowron Section A.6 (arXiv:1101.3312, p. 34)
+is quoted here verbatim, checked against the paper itself on 2026-08-18 rather than
+paraphrased:
+
+> All relative motion conventions are defined by the motion of the lens (with the source
+> thought of as fixed). Thus, first, the sign of `u_0` is positive if the lens passes the
+> source on its right. Second, `phi_pi = atan2(pi_E,E, pi_E,N)` is the angle of lens motion,
+> measured counter-clockwise relative to North. And third, **`alpha_0` is the angle of the
+> lens motion, measured counter-clockwise relative to the primary-secondary axis.**
+
+and Section A.4 says the same thing with the ambiguity closed by hand: "the direction of
+lens-source relative motion (i.e., **lens motion relative to the source**) with respect to
+the binary axis (which points from primary toward secondary) ... (The angle `alpha_0` is
+counter-clockwise.)". Against that definition: with
 `alpha = 0` MulensModel's source runs from `x = +tau_E` to `x = -tau_E`, so the lens moves
 relative to the source in the `+x` direction, which is primary-toward-secondary, which is
 `alpha = 0` in Skowron's sense. (Verified numerically against the installed MulensModel,
 and algebraically above.) The likeliest origin is reading Skowron's phrase "the direction
-of lens-source relative motion" as the source's motion, which Skowron disambiguates
-parenthetically as "i.e., lens motion relative to the source". **EXOZIPPy follows Skowron
+of lens-source relative motion" as the SOURCE's motion -- which is exactly the reading
+Skowron closes off with the parenthetical quoted above. **EXOZIPPy follows Skowron
 as written, which is also what MulensModel computes;** do not apply a 180-degree shift on
 the strength of that docstring.
 
