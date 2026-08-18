@@ -334,6 +334,11 @@ def _run_fit(config, gui, user_params=None):
                     raw_starts_pre,
                     n_steps=polish_steps,
                     seed_indices=seed_indices_pre,
+                    # Same core grant the sampler is about to use: the DE
+                    # engine ran serial here while every one of them sat
+                    # idle, which on a 64-core microlensing job was the
+                    # whole polish stage at 1/64 throughput.
+                    cores=cores,
                 )
                 system.apply_polished_starts(polished, seed_indices_pre)
                 raw_start = system.get_raw_start(model)
