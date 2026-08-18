@@ -21,3 +21,95 @@ raw scales the samplers are handed come from), `src/exozippy/run.md`.
 - Neither step method writes an `lp` sample stat; run.py's `_compute_lp_from_model` fills it in post hoc, which is the path these fits already take.
 - **PyMC's step classes are used directly -- `STEP_CLASSES` names `pm.DEMetropolis` / `pm.DEMetropolisZ`, with no local subclass.** There were two, carrying a `_fix_de_stats` coercion of the `scaling`/`lambda` sampler stats back to scalars: PyMC declared them scalar in `stats_dtypes_shapes` while `astep` returned the `np.atleast_1d` array `Metropolis.__init__` stores, and the trace backend rejected that with `ValueError: setting an array element with a sequence`. Upstream fixed it **below this project's floor** (DEMetropolisZ in pymc 5.26.0, DEMetropolis in 6.0.0; `pyproject.toml` requires `pymc>=6.0.0`), so the patch could not fire on any installable PyMC and was deleted in 2026-08. **The floor is what makes that safe** -- there is a comment on the `pymc` pin saying so; do not lower it. `tests/test_de_metropolis.py` samples both variants end to end and asserts the two stats are present and scalar in the written trace, which is exactly what the patch protected, so a re-regression fails a test rather than crashing a fit.
 
+
+## PTDE: the proposal path is BIT-IDENTICAL by construction
+
+A rung's population is one `(n_chains, n_raw_elements)` float64 array
+(`_common.RawLayout`), not a list of per-variable dicts, and the compiled logp is
+called by position with `trust_input` (`_common.PositionalLogp`) rather than
+through pymc's dict wrapper. Together those took a DC2018-shaped serial step
+(27 elements over 20 raw variables, 8 rungs x 54 chains) from 72 to 34
+ms/step, with an identical summed lp.
+
+Three properties make the packing bit-identical rather than merely equivalent
+in distribution, and **each is load-bearing** -- `tests/test_ptde.py` pins them:
+
+- the DE partner draw stays **per member** (`_pick_two`), because a batched
+  draw consumes the bit stream in a different order and moves every later
+  number;
+- one `standard_normal(total)` per proposal is the same SEQUENCE as one draw
+  per key in key order (numpy's generator fills sequentially);
+- the arithmetic is elementwise, so concatenating the operands changes no
+  float operation and no rounding.
+
+Two traps that follow. The populations are numpy **rows**, so the tuple-swap
+idiom `a[i], b[j] = b[j], a[i]` holds views and the second assignment reads the
+first one back -- both samplers copy first. And `PositionalLogp` **must**
+coerce with `np.asarray(v, dtype)`: `trust_input` disables filtering, and
+`pop[i] + gamma*(...)` on a 0-d parameter yields a numpy SCALAR, which the
+numba backend rejects outright ("Vectorized inputs must be arrays") and a wrong
+dtype would silently read as raw memory.
+
+Measuring any of this: **warm the pytensor module cache first**. The first
+`compile_logp()` in a process pays `cmodule.refresh()` (~20 s), and a naive
+end-to-end timing divides that by the step count and reports pure noise -- it
+briefly reported a 1.7x speedup for a change that had not been applied.
+
+Remaining headroom, measured and deliberately not taken: the IPC payload is
+still a dict (36 us to pickle, 21 us to unpickle per proposal, against 4.3 and
+3.1 us for one packed vector). Sending the vector and slicing it in the worker
+changes the contract `polish`, `_make_starts`, `describe_proposal` and the
+tests all share, so it is its own PR.
+
+## eval_timeout: what it does, and where it is enforced
+
+`eval_timeout` is opt-in (default None) and exists for a logp that can HANG --
+the near-caustic VBM evaluation -- not for one that is merely slow. Semantics
+worth knowing before changing it:
+
+- **It has no effect without a worker pool** (`cores <= 1`), which
+  `warn_serial_eval_timeout` says at startup: there is no process to time out
+  against, and in serial mode the evaluation has already completed by the time
+  anything could scan for it.
+- **A timeout tears down the WHOLE pool.** There is no way to kill one hung
+  worker in a `multiprocessing.Pool`, so every in-flight evaluation is written
+  off and resubmitted with a fresh proposal. A written-off result that arrives
+  anyway finds its submission id gone and is dropped, so nothing is ever
+  processed twice.
+- **ptde_async scans on BOTH the empty-queue and the result path**, paced by a
+  wall clock. The scan used to live only inside `except queue.Empty`, a state a
+  healthy run essentially never reaches -- so a hung slot froze for the whole
+  run, and a hung T=1 slot froze the run itself, since `min(per_chain_draws)`
+  never advanced (review 1.4.1). Do not move it back.
+- **The async poll is bounded (1 s) even with no eval_timeout**, because
+  `_maybe_stop` runs on the poll: otherwise a Ctrl+C, a scheduler SIGTERM or
+  maxtime is only noticed when some slot happens to finish, and the user's
+  second signal then throws away every draw already collected (2.4.3). If a
+  stop finds NOTHING completing, the loop leaves the in-flight evaluations
+  behind and goes to the save path rather than waiting on results that are not
+  coming.
+- Both samplers tear the pool down with `_common._shutdown_pool`, never
+  `close()` + `join()`: the workers ignore SIGTERM by design, so `join()` on a
+  wedged worker never returns (2.4.1).
+
+## Chain starts
+
+`store_hot_chains` (ptde_async only) takes `auto` / true / false / an integer
+thinning factor; **an integer <= 0 means OFF**, the same as `false`, and not
+the maximum retention `max(1, ...)` used to produce (1.4.2). An unrecognized
+STRING still raises -- a misspelled opt-in is how a mode search silently stops
+running.
+
+`_make_starts` measures the population it built against the probe scales and
+warns when the between-chain spread is under 1.0x of them
+(`warn_if_starts_underdispersed`). Rhat's between-chain term only means
+something if the chains start FURTHER apart than the posterior is wide, and
+`convergence.good_chain_mask`, `converged_on_tail` and the min_ess/max_rhat
+early stop all inherit that assumption -- so a restart seeded from a previous
+run's posterior draws can stop a fit that never mixed. It is reported, never
+corrected: a run past D = 500 is under-dispersed by construction, since the
+scatter factor is `min(sqrt(500/D), 3)`.
+
+Explicit `initvals` are consumed positionally, one per chain, and a
+wrong-length list RAISES (it used to be a bare `assert`, which `python -O`
+compiles out, leaving chains paired with the wrong starts).
