@@ -171,7 +171,7 @@ jobs:
       # suite builds and caches it in its compiledir. A CI job starts with an
       # empty one, so EVERY graph is compiled from scratch, and that dominates
       # the runtime here: locally, one full suite run against an empty
-      # compiledir takes ~53 minutes against ~9 warm, on six workers. The
+      # compiledir takes 27 minutes against ~9 warm, on six workers. The
       # 34-45 minute jobs this workflow currently reports are very largely
       # gcc.
       #
@@ -232,11 +232,13 @@ jobs:
       # The compiledir budget is tighter than the local default (3000). A
       # developer's cache wants room for several branches' worth of divergent
       # graphs; a CI job runs one commit, so anything beyond roughly one
-      # suite's ~1150 entries is dead weight that only inflates the artifact
-      # this job uploads.
+      # suite's 1564 entries is dead weight that only inflates the artifact
+      # this job uploads. 2500 leaves headroom above that measured figure --
+      # a budget BELOW one run's working set would evict entries this very
+      # run still needs.
       - name: Run test suite
         env:
-          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "1500"
+          EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES: "2500"
         run: poetry run pytest -q -n 2
 
       # The conftest prunes at session START, so at this point the directory
@@ -248,7 +250,7 @@ jobs:
         run: |
           export PYTENSOR_FLAGS="base_compiledir=$HOME/.pytensor-pytest"
           poetry run python scripts/pytensor_cache_budget.py \
-            --max-entries 1500 --sweep-other-platforms
+            --max-entries 2500 --sweep-other-platforms
 
       # See the long comment on the restore step for why this is master-only.
       - name: Save the PyTensor compile cache

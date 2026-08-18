@@ -82,12 +82,13 @@ for _var in (
 _COMPILEDIR_ENV = "EXOZIPPY_TEST_COMPILEDIR"
 _BUDGET_ENV = "EXOZIPPY_TEST_COMPILEDIR_MAX_ENTRIES"
 
-# One full cold run of this suite creates roughly 1000 entries, so the budget
-# has to be a comfortable multiple of that or every run would evict what the
-# next one needs and the cache would never be warm. 3000 holds about three
-# runs' worth of divergent branches -- enough that switching between two or
-# three worktrees stays warm -- while keeping the startup walk to about a
-# quarter of the 4035-entry disaster this replaces.
+# One full cold run of this suite creates 1564 entries (measured, 825 MB), so
+# the budget must clear that comfortably or every run would evict what the
+# next one needs and the cache would never be warm. Note a second run on a
+# different branch does NOT add another 1564: it reuses almost everything and
+# adds only the delta for the graphs that changed, so 3000 covers several
+# worktrees rather than the 1.9 runs the arithmetic suggests -- while keeping
+# the startup walk well under the 4035-entry directory this replaces.
 _DEFAULT_MAX_ENTRIES = 3000
 
 _raw_compiledir = os.environ.get(_COMPILEDIR_ENV)
@@ -117,7 +118,34 @@ if _BASE_COMPILEDIR is not None:
         # key later in the string wins. A developer who exported their own
         # base_compiledir therefore still gets it.
         _existing = os.environ.get("PYTENSOR_FLAGS", "")
-        _ours = f"base_compiledir={shlex.quote(str(_BASE_COMPILEDIR))}"
+        _ours = ",".join(
+            [
+                f"base_compiledir={shlex.quote(str(_BASE_COMPILEDIR))}",
+                # PyTensor serializes ALL compilation behind one lock per
+                # compiledir, so under -n 6 the six workers queue for it. Its
+                # default acquire timeout is 120 s (compile__wait * 24), and
+                # against a genuinely EMPTY compiledir that is not enough: a
+                # measured cold run had four tests die on
+                # `filelock._error.Timeout` while waiting their turn --
+                # test_nsnl, test_rossiter, test_distance_volume_prior and
+                # test_multiplanet, i.e. whichever ones happened to queue
+                # behind a long compile, exactly the same lottery as the
+                # refresh-walk timeout this file exists to fix.
+                #
+                # This is pre-existing and is not caused by the private
+                # compiledir above -- but that change makes EVERY developer
+                # pay one cold run when they first adopt it, which turns a
+                # rare failure into a guaranteed one. 600 s covers five
+                # workers queued behind a long compile.
+                #
+                # The cost of raising it: a lock left behind by a genuinely
+                # dead process takes longer to break. Live holders refresh
+                # the lock every half period, so this only delays recovery
+                # from a hard kill, and only for the one process that hits
+                # it.
+                "compile__timeout=600",
+            ]
+        )
         os.environ["PYTENSOR_FLAGS"] = ",".join(
             p for p in (_ours, _existing) if p
         )
