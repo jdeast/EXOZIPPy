@@ -779,7 +779,8 @@ class MulensInstrument(Instrument):
         scales, not a precise model.
 
         If the user has specified f_source and/or f_blend in their params file,
-        those values are respected (they are TOTALS over sources):
+        those values are respected (they are TOTALS over sources), for any
+        number of sources:
           - both given  → skip estimation entirely, derive q from the ratio
           - f_source only → fix it and solve for f_blend via median residuals
           - f_blend only  → fix it and solve for f_source via NNLS
@@ -867,21 +868,36 @@ class MulensInstrument(Instrument):
 
         q_flux_est = q_flux_fallback
         if len(A_cols) > 1:
-            # Multi-source NNLS: F = Σ_j f_s,j · A_j + f_b
-            X = np.column_stack(A_cols + [np.ones(len(t))])
-            sol, _ = nnls(X, F_obs)
-            f_srcs, f_blend_est = sol[:-1], sol[-1]
+            # Multi-source NNLS: F = Sum_j f_s,j * A_j + f_b
+            A_mat = np.column_stack(A_cols)
+            if f_blend_user is not None:
+                # A user-supplied blend is a STATEMENT, not a starting guess:
+                # subtract it and drop the constant column, exactly as the
+                # single-source branch below does.  This branch used to leave
+                # the ones column in and never look at f_blend_user (review
+                # 1.6.2 -- the elif that reads it is reachable only for a
+                # single column), so a 2S fit with a pinned or seeded f_blend
+                # got its log_f_total and q_source hints from an NNLS estimate
+                # that contradicted the entry the user had written.
+                f_srcs, _ = nnls(A_mat, F_obs - f_blend_user)
+                f_blend_est = f_blend_user
+            else:
+                X = np.column_stack([A_mat, np.ones(len(t))])
+                sol, _ = nnls(X, F_obs)
+                f_srcs, f_blend_est = sol[:-1], sol[-1]
             f_source_est = float(np.sum(f_srcs))
             if q_flux_user is None and f_srcs[0] > 1e-30 and len(f_srcs) > 1:
                 q_flux_est = float(np.clip(f_srcs[1] / f_srcs[0], 1e-3, 1e3))
             if f_source_user is not None and f_source_est > 1e-30:
-                # honor the user's total source flux; keep the NNLS ratio
+                # honor the user's total source flux; keep the NNLS ratio.
+                # (Unreachable with f_blend_user set -- both-user returns at
+                # the top -- but written against A_mat rather than a slice of
+                # X so it cannot silently mean the wrong columns.)
                 f_blend_est = max(
                     float(
                         np.median(
                             F_obs
-                            - X[:, :-1]
-                            @ (f_srcs * f_source_user / f_source_est)
+                            - A_mat @ (f_srcs * f_source_user / f_source_est)
                         )
                     ),
                     0.0,

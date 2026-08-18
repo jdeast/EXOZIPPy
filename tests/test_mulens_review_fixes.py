@@ -851,6 +851,87 @@ def test_flux_total_estimate_sharp_caustic_crossing():
     )
 
 
+def _make_2s_inst(f_blend=0.4, f_src=(0.6, 0.2), n=400):
+    """A two-source instrument whose synthetic flux is exactly
+    f_src[0]*A_0 + f_src[1]*A_1 + f_blend, so the bootstrap has a right
+    answer to be measured against."""
+    t0a, t0b, u0, tE = 2458554.89, 2458560.0, 0.3, 18.17
+    inst = MulensInstrument.__new__(MulensInstrument)
+    inst._n_sources = 2
+    inst.config_manager = _DummyConfigManager()
+    inst.config_manager.user_params = {
+        "lens.0.t_0": {"initval": t0a},
+        "lens.0.u_0": {"initval": u0},
+        "lens.0.t_E": {"initval": tE},
+        "lens.1.t_0": {"initval": t0b},
+        "lens.1.u_0": {"initval": 0.15},
+        "lens.1.t_E": {"initval": tE},
+        "lens.0.pi_E_N": {"initval": 0.0},
+        "lens.0.pi_E_E": {"initval": 0.0},
+    }
+
+    t = np.linspace(t0a - 40, t0a + 40, n)
+
+    def pspl(t0_, u0_):
+        tau = (t - t0_) / tE
+        u = np.sqrt(u0_**2 + tau**2)
+        return (u**2 + 2.0) / (u * np.sqrt(u**2 + 4.0))
+
+    flux = f_src[0] * pspl(t0a, u0) + f_src[1] * pspl(t0b, 0.15) + f_blend
+    return inst, t, flux, np.zeros((n, 3))
+
+
+def test_multisource_bootstrap_honors_a_user_f_blend():
+    """
+    Given a two-source light curve and a params entry pinning f_blend,
+    When the flux bootstrap runs,
+    Then f_total - f_source equals that entry exactly: a user blend is a
+      statement, not a starting guess.  The multi-source branch used to leave
+      the constant column in the NNLS design and never read f_blend_user at
+      all, so log_f_total and q_source were seeded from an estimate that
+      contradicted the user (review 1.6.2).
+    """
+    # Arrange
+    f_blend, f_src = 0.4, (0.6, 0.2)
+    inst, t, flux, xyz = _make_2s_inst(f_blend=f_blend, f_src=f_src)
+    # Deliberately NOT the truth: a wrong-but-pinned blend is what exposes
+    # whether the estimate is being overridden or merely coincides.
+    pinned = 0.25
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": pinned
+    }
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total * q_source == pytest.approx(f_total - pinned, rel=1e-9)
+    assert f_total - f_total * q_source == pytest.approx(pinned, rel=1e-9)
+
+
+def test_multisource_bootstrap_without_a_user_f_blend_is_unchanged():
+    """
+    Given the same two-source light curve and NO f_blend entry,
+    When the flux bootstrap runs,
+    Then it recovers the truth via the full NNLS -- the pre-existing path is
+      untouched by the fix above.
+    """
+    # Arrange
+    f_blend, f_src = 0.4, (0.6, 0.2)
+    inst, t, flux, xyz = _make_2s_inst(f_blend=f_blend, f_src=f_src)
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total == pytest.approx(sum(f_src) + f_blend, rel=1e-6)
+    assert f_total * q_source == pytest.approx(sum(f_src), rel=1e-6)
+
+
 def test_log_f_total_bootstrap_yields_to_user_params():
     """
     Given a MulensInstrument with a data-estimated total flux,
