@@ -103,18 +103,31 @@ def build_seed_ledger(system, model, raw_starts, seed_indices, logp_fn=None):
 
         raw_scales = {}
         log_sigma_sum = 0.0
+        # ONE scratch copy of the whole center, reused for every probe.
+        # _probe_element's bracket+bisect ladder calls eval_delta dozens of
+        # times per element, and this used to rebuild the entire center dict
+        # on every one of them -- for a perturbation of a single slot.  The
+        # slot is restored after each evaluation instead, so the scratch is
+        # always the unperturbed center on entry, exactly as a fresh copy
+        # was.  (The restore is in a finally: a non-finite logp is a normal
+        # outcome here -- _probe_element reads a wall inside +/-s as
+        # past-target -- and an exception must not leave the scratch dirty
+        # for the next element.)
+        probe = {
+            k: np.array(v, dtype=float, copy=True) for k, v in center.items()
+        }
         for key, val in center.items():
             n = np.asarray(val).size
             sc = np.ones(n)
             for i in range(n):
 
                 def eval_delta(step, key=key, i=i):
-                    probe = {
-                        k: np.array(v, dtype=float, copy=True)
-                        for k, v in center.items()
-                    }
-                    probe[key].flat[i] += step
-                    return lp0 - float(logp_fn(probe))
+                    saved = probe[key].flat[i]
+                    probe[key].flat[i] = saved + step
+                    try:
+                        return lp0 - float(logp_fn(probe))
+                    finally:
+                        probe[key].flat[i] = saved
 
                 scale, _method, _g = _probe_element(eval_delta)
                 if scale is not None and np.isfinite(scale):
