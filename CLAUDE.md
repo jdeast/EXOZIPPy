@@ -47,19 +47,19 @@ model  = system.build_model()
 pm.sample(...)
 ```
 
-### The six lifecycle stages
+### The seven lifecycle stages
 
-`System.prepare()` drives stages 1–3; `System.build_model()` drives stages 4–6.
+`System.prepare()` drives stages 1-4; `System.build_model()` drives stages 5-7.
 
 | Stage | Method | What happens |
 |-------|--------|--------------|
-| 1a | `comp.load_data(system)` | File I/O; push data-derived hints to ConfigManager |
-| 1b | `comp.build_maps()` | Build integer index arrays (`*_map`) linking children to parents |
-| 2 | `comp.register_parameters(system)` | Declare `comp.manifest`; push component-level hints |
-| 3 | `config_manager.finalize_user_params()` | Symbolic relaxation engine resolves all initvals/scales |
-| 4 | `comp.build_tensor_maps()` | Auto-convert `*_map` numpy arrays → PyTensor int32 variables |
-| 5 | `comp.add_parameter(model, name, system)` | Materialize PyMC nodes in topological order |
-| 6 | `comp.build_likelihood(model, system)` | Add `pm.Normal`/`pm.Potential` observational constraints |
+| 1 | `comp.load_data(system)` | File I/O; push data-derived hints to ConfigManager |
+| 2 | `comp.build_maps()` | Build integer index arrays (`*_map`) linking children to parents |
+| 3 | `comp.register_parameters(system)` | Declare `comp.manifest`; push component-level hints |
+| 4 | `config_manager.finalize_user_params()` | Symbolic relaxation engine resolves all initvals/scales |
+| 5 | `comp.build_tensor_maps()` | Auto-convert `*_map` numpy arrays → PyTensor int32 variables |
+| 6 | `comp.add_parameter(model, name, system)` | Materialize PyMC nodes in topological order |
+| 7 | `comp.build_likelihood(model, system)` | Add `pm.Normal`/`pm.Potential` observational constraints |
 
 The component contract -- the four standard files per component, the auto-discovering factory, the manifest vocabulary and the build order -- is in `src/exozippy/components/components.md`.
 

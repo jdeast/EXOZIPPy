@@ -522,7 +522,7 @@ def test_fingerprint_survives_component_config_normalization():
     afterwards. Every kelt4-style fit would then have refused to write its
     own restart file. Verified against
     examples/kelt4/kelt4_rv+transit+sed.yaml, whose config is mutated in
-    exactly three places, all inside System.__init__ -- stages 1-6 mutate it
+    exactly three places, all inside System.__init__ -- stages 1-7 mutate it
     zero times.
     """
     config = copy.deepcopy(_RELATION_CONFIG)

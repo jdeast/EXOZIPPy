@@ -9,7 +9,7 @@ with "Transit instrument(s) reference unknown band(s)" and nothing noticed.
 examples/hd80606 had the same disease one rename earlier (`inst.` for
 `rvinstrument.` in its params file).
 
-Scope is deliberately `prepare()` only (stages 1-3: file I/O, index maps,
+Scope is deliberately `prepare()` only (stages 1-4: file I/O, index maps,
 parameter registration, the relaxation engine). That is where a stale key,
 a dangling cross-reference or a renamed prefix shows up, and it costs a
 couple of seconds per example. Building the PyMC model, let alone sampling,
@@ -102,7 +102,7 @@ def test_shipped_example_prepares(path, rel, monkeypatch, caplog):
     assert system.active_components, f"{rel} instantiated no components"
     for key, comp in system.active_components.items():
         assert hasattr(comp, "manifest"), (
-            f"{rel}: component '{key}' registered no manifest in stage 2"
+            f"{rel}: component '{key}' registered no manifest in stage 3"
         )
 
     ignored = [

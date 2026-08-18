@@ -119,7 +119,7 @@ class StellarRelation:
         super().__init__(component_config, config_manager)
 
     # ------------------------------------------------------------------
-    # Stage 1a helpers: config parsing
+    # Stage 1 helpers: config parsing
     # ------------------------------------------------------------------
 
     def _resolve_star(self, system, nm, raw_star):
@@ -169,15 +169,15 @@ class StellarRelation:
         return con
 
     # ------------------------------------------------------------------
-    # Stage 1b
+    # Stage 2
     # ------------------------------------------------------------------
 
     def build_maps(self):
-        """Stage 1b: index array linking each instance to its star."""
+        """Stage 2: index array linking each instance to its star."""
         self.star_map = np.array(self.star_indices, dtype=int)
 
     # ------------------------------------------------------------------
-    # Stage 6 helpers
+    # Stage 7 helpers
     # ------------------------------------------------------------------
 
     def _warn_outside_range(self, system, param, low, high, message):
@@ -187,7 +187,7 @@ class StellarRelation:
         and hard-rejects out-of-range states.  A ``-inf`` wall has no gradient
         for NUTS to follow, so every range check in these components is a
         startup warning only -- nothing here bounds the posterior.  Called
-        from ``build_likelihood`` (stage 6) rather than earlier so the
+        from ``build_likelihood`` (stage 7) rather than earlier so the
         initvals read are the relaxed ones the sampler will actually start
         from.
 

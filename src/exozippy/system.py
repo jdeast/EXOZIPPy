@@ -122,7 +122,7 @@ class System(Component):
         # per build_model, so a second build on one System cannot accumulate.
         self._element_slice_checks = []
         # Many-to-one parameterizations' alternative branches, declared during
-        # stage 6 and marginalized over at the end of it (see
+        # stage 7 and marginalized over at the end of it (see
         # register_branch_alternative / _add_branch_mixtures).  Rebuilt per
         # build_model for the same reason.
         self._branch_alternatives = []
@@ -174,7 +174,7 @@ class System(Component):
         # mkparam.write_param_file.  Taking it any earlier fingerprints a
         # config spelling that exists only for the first few lines of
         # __init__, so a fingerprint recomputed later would never match;
-        # taking it later would fold in whatever stages 1-6 might one day
+        # taking it later would fold in whatever stages 1-7 might one day
         # write.  The params half is safe at either point: ConfigManager
         # deepcopies before it standardizes keys, strips links and injects
         # solved initvals, so self.user_params stays exactly the file that
@@ -200,23 +200,23 @@ class System(Component):
         # ==========================================================
         # PRE-FLIGHT SEQUENCE
         # ==========================================================
-        # Stage 1: DATA & LOGICAL MAPS
+        # Stages 1-2: DATA & LOGICAL MAPS
         for comp in self.active_components.values():
             if hasattr(comp, "load_data"):
                 comp.load_data(self)
             if hasattr(comp, "build_maps"):
                 comp.build_maps()
 
-        # Stage 2: REGISTRATION (The Blueprint)
+        # Stage 3: REGISTRATION (The Blueprint)
         for comp in self.active_components.values():
             if hasattr(comp, "register_parameters"):
                 comp.register_parameters(self)
 
-        # Stage 2b: the REPORTED-element invariant, checked before anything is
+        # After stage 3: the REPORTED-element invariant, checked before anything is
         # built (see _validate_reported_not_consumed).
         self._validate_reported_not_consumed()
 
-        # Stage 3: RECONCILIATION (The Solver)
+        # Stage 4: RECONCILIATION (The Solver)
         self.config_manager.finalize_user_params()
 
     def _validate_reported_not_consumed(self):
@@ -334,10 +334,10 @@ class System(Component):
         derived in another (planet.mass is sampled linearly when RV or
         astrometry measures it, and derived from log_q otherwise). The rule
         is `manifest.interpret_manifest_entry`'s, shared with
-        `Component.add_parameter` (stage 5) and
-        `graph.determine_pymc_build_order` (stage 4) -- a manifest value that
+        `Component.add_parameter` (stage 6) and
+        `graph.determine_pymc_build_order` (the build order) -- a manifest value that
         is a string, or a dict carrying an "expr_key", names an expression; a
-        bare None is a free parameter.  Valid after stage 2.
+        bare None is a free parameter.  Valid after stage 3.
 
         The question is asked through `expression_config` against the
         resolved config, exactly as the two build-time consumers ask it, and
@@ -372,7 +372,7 @@ class System(Component):
         -- so a partially derived vector no longer counts as derived there.
         That is the conservative direction: its consumers treat "derived" as
         "exempt", and a mixed vector has sampled elements that must not be
-        exempt.  Valid after stage 2.
+        exempt.  Valid after stage 3.
         """
         out = {}
         for comp in self.active_components.values():
@@ -412,7 +412,7 @@ class System(Component):
         The complement is manifest role 4: elements that are not parameters of
         their instance's parameterization (a non-MIST star's EEP).  Only entries
         that actually mask something appear, so a caller can treat a missing key
-        as "every element active".  Valid after stage 2, and the reporting
+        as "every element active".  Valid after stage 3, and the reporting
         layer's authority for what to leave out of a table.
         """
         out = {}
@@ -719,18 +719,18 @@ class System(Component):
         self._element_slice_checks = []
         self._branch_alternatives = []
         with pm.Model() as model:
-            # Stage 4a: Automatic PyTensor Map Conversion
+            # Stage 5: Automatic PyTensor Map Conversion
             # Convert logical numpy arrays into PyTensor variables for the graph
             for comp in self.active_components.values():
                 comp.build_tensor_maps()
 
-            # Stage 4: Topological Sort for Parameter Building
+            # Build order for stage 6: topological sort
             # Fetch the dynamic, component-agnostic build order driven by the physics dependency graph
             pymc_build_order = determine_pymc_build_order(
                 self.active_components, self.config_manager
             )
 
-            # Stage 5: Linearly materialize the nodes node-by-node
+            # Stage 6: Linearly materialize the nodes node-by-node
             for param_path in pymc_build_order:
                 comp_name, param_name = param_path.split(".", 1)
                 if comp_name in self.active_components:
@@ -753,14 +753,14 @@ class System(Component):
                         f"configuration."
                     )
 
-            # Stage 6: LIKELIHOOD
+            # Stage 7: LIKELIHOOD
             for comp in self.active_components.values():
                 if hasattr(comp, "build_likelihood"):
                     comp.build_likelihood(model, system=self)
 
-            # Stage 6b: REPORTED elements (manifest role 3).  Deliberately
-            # after stage 6: a reported element is consumed by nothing, so
-            # every consumer in stages 5-6 has already read the phase-1 tensor
+            # After stage 7: REPORTED elements (manifest role 3).  Deliberately
+            # after stage 7: a reported element is consumed by nothing, so
+            # every consumer in stages 6-7 has already read the phase-1 tensor
             # -- which is what makes the per-parameter cycle these expressions
             # would otherwise create dissolve.  See
             # Component.finalize_reported and Parameter.finalize_deferred.
@@ -769,7 +769,7 @@ class System(Component):
                 if callable(finalize):
                     finalize(model, system=self)
 
-            # Stage 6c: BRANCH MIXTURES.  A component whose parameterization is
+            # After stage 7: BRANCH MIXTURES.  A component whose parameterization is
             # many-to-one (today: the V_c/V_e eccentricity, whose inversion is
             # quadratic) declares its alternative nodes and the likelihood is
             # marginalized over them here.  Must come last: it snapshots every

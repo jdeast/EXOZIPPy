@@ -1,0 +1,76 @@
+# Seeded from MMEXOFAST solution 0 (0-indexed)
+# n_solutions in file: 2
+#
+# MMEXOFAST uncertainties are mapped to init_scale, NOT sigma.
+# init_scale = sampling hint only (no logp penalty).
+# sigma = Gaussian prior (would double-count the data).
+
+lens.Lens.t_0:
+    initval: 2458199.234148761025
+    init_scale: 0.0021618658356601372
+
+lens.Lens.u_0:
+    initval: 0.06893061672414033
+    init_scale: 0.0016174163103184272
+
+# t_E is derived in EXOZIPPy from stellar masses/distances/proper motions.
+# Provided here as an initval hint to seed the relaxation engine.
+lens.Lens.t_E:
+    initval: 11.56142700504093
+    init_scale: 0.2129798337082045
+
+lens.Lens.s:
+    initval: 2.420300352396205
+    init_scale: 0.0135098224
+
+# alpha: relaxation engine propagates initval/init_scale to cosalpha/sinalpha.
+lens.Lens.alpha:
+    initval: 1.8322968914160362
+    init_scale: 0.048835429805909714
+
+lens.Lens.rho:
+    initval: 0.024008570843962032
+    init_scale: 0.0883007029
+
+# q = M_companion / M_primary.  EXOZIPPy's relaxation engine propagates
+# this through the symbolic relation  q * M_primary = M_companion
+# to set the companion's mass initval automatically.
+lens.Lens.q:
+    initval: 0.0002225978981030849
+    init_scale: 0.0000138432
+
+star.Lens.ra:
+    initval: 268.68075
+    sigma: 0
+star.Lens.dec:
+    initval: -28.739278
+    sigma: 0
+star.Source.ra:
+    initval: 268.68075
+    sigma: 0
+star.Source.dec:
+    initval: -28.739278
+    sigma: 0
+
+# these shouldn't be fit for such models (on the to do list)
+# but as a temporary hack, we're just going to fix them at their arbitrary starting values
+star.Lens.radius:
+    sigma: 0.0
+star.Lens.teff:
+    sigma: 0.0
+star.Lens.feh:
+    sigma: 0.0
+star.Source.teff:
+    sigma: 0.0
+star.Source.feh:
+    sigma: 0.0
+planet.Companion.radius:
+    sigma: 0
+
+# Source radius is unconstrained without SED data (same reasoning as Lens.radius).
+star.Source.radius:
+    sigma: 0.0
+
+band.I.u1:
+    initval: 0.5
+    sigma: 0.2

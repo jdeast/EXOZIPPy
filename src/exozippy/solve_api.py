@@ -5,7 +5,7 @@ answer two questions about a configuration WITHOUT building the PyMC model:
 
   1. solve(config, user_params, workdir) -> SolveResult
      "Solve this config and tell me every parameter's value, unit, bounds, and
-     WHERE the value came from."  Runs only lifecycle stages 1-3
+     WHERE the value came from."  Runs only lifecycle stages 1-4
      (System.prepare(): data I/O, registration, symbolic relaxation) and reads
      back the in-memory solution via ConfigManager.export_solution().
 
@@ -21,7 +21,7 @@ workdir).  Data file paths inside a config are relative to workdir, and both
 functions RESOLVE them against it (_resolve_config_paths) rather than chdir'ing
 into it: the working directory is process-global and these endpoints run on
 FastAPI's threadpool, so two concurrent calls with different workdirs used to
-be able to read each other's data files.  Nothing in stages 1-3 depends on the
+be able to read each other's data files.  Nothing in stages 1-4 depends on the
 process cwd any more.
 
 Determinism: solve() IS reproducible, and this caveat used to say the
@@ -110,7 +110,7 @@ class _WarningCollector(logging.Handler):
 
 #: Config keys whose value is a filesystem path, and so the complete set
 #: _resolve_config_paths rewrites against workdir.  Derived from the shipped
-#: configs and from what stages 1-3 actually open: `file`/`files` (every data
+#: configs and from what stages 1-4 actually open: `file`/`files` (every data
 #: component and the SED), `path` (the SED's file glob), `mask` (a flag file,
 #: when it is a string rather than a list), `mmexofast` (an explicit seed JSON,
 #: when it is a path rather than one of the `auto`/false keywords),
@@ -199,7 +199,7 @@ def _resolve_config_paths(config, workdir):
 
 
 def _prepare_system(config, user_params, workdir):
-    """Build a fresh System and run stages 1-3 with paths rooted at workdir.
+    """Build a fresh System and run stages 1-4 with paths rooted at workdir.
 
     Returns (system, warnings).  Never builds the PyMC model.  Does NOT change
     the process working directory (see _resolve_config_paths for why).  Any
@@ -216,7 +216,7 @@ def _prepare_system(config, user_params, workdir):
         # config's parameter_file, which _resolve_config_paths has already
         # rooted at workdir.
         system = System(config, user_params=user_params)
-        system.prepare()  # stages 1-3 only -- never build_model()
+        system.prepare()  # stages 1-4 only -- never build_model()
     finally:
         pkg_logger.removeHandler(collector)
 
@@ -274,7 +274,7 @@ def solve(config, user_params=None, workdir=None):
       workdir: directory the config's data-file paths are relative to; solve
         runs from here.  None means the current directory.
 
-    Returns a SolveResult.  Runs only System.prepare() (stages 1-3); it never
+    Returns a SolveResult.  Runs only System.prepare() (stages 1-4); it never
     builds the PyMC model.  Safe to call repeatedly in one process.
     """
     start = time.time()

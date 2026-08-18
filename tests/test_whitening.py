@@ -12,6 +12,7 @@ import pymc as pm
 
 from exozippy.components.parameter import Parameter
 from exozippy.whitening import (
+    _CLIP_LO,
     apply_measured_whitening,
     probe_scales,
 )
@@ -333,6 +334,210 @@ def test_escalation_resolves_scales_beyond_probe_range():
     _, scales2 = probe_scales(raw_start, logp)
     final = float(np.asarray(scales2["toy.t_raw"])[0])
     assert 0.3 < final < 3.0, final
+
+
+def _too_tight_model(init_scale, true_sigma=1.0):
+    """A bounded parameter whose preliminary scale is far too TIGHT.
+
+    The mirror of the scenario above: there the preliminary scale was too
+    loose (the probe hits its step FLOOR), here it is too tight, so the probe
+    must walk far out in raw units -- past parameter.py's raw-cancellation
+    clip, which is the wall review 1.2.1 is about.
+    """
+    p = Parameter(
+        label="toy.t",
+        initval=2.0,
+        lower=0.0,
+        upper=10.0,
+        init_scale=init_scale,
+    )
+    with pm.Model() as model:
+        tv = p.build_pymc()
+        pm.Potential("like", -0.5 * ((tv - 2.0) / true_sigma) ** 2)
+    return model, p
+
+
+def test_escalation_resolves_a_far_too_tight_preliminary_scale(caplog):
+    """Given a preliminary scale 10 orders of magnitude too TIGHT
+    (init_scale 1e-10 on [0, 10] against a true sigma of 1.0 -- review
+    1.2.1's own reproduction),
+    When apply_measured_whitening runs,
+    Then the escalation resolves it -- a re-probe of the rescaled model lands
+    near 1 -- and no "still unresolved" warning is emitted.
+
+    Before the fix the measured multiplier was exactly the raw-cancellation
+    clip (1e4): that wall manufactures a 0.5-nat contour the probe cannot
+    see past, it sat well INSIDE the escalation window, so no round ran, no
+    warning fired, and the model was left ~1e6 under-whitened.
+    """
+    import logging
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-10)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+    raw_start = model.initial_point()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        report = apply_measured_whitening(
+            system, model, raw_start, logp_fn=logp
+        )
+
+    # Assert: the cumulative correction is the ~1e10 the setup asks for, not
+    # the 1e4 wall, and the rescaled model probes at ~1.
+    cumulative = float(np.asarray(report["multipliers"]["toy.t_raw"])[0])
+    assert 1e9 < cumulative < 1e11, cumulative
+    _, scales2 = probe_scales(raw_start, logp)
+    final = float(np.asarray(scales2["toy.t_raw"])[0])
+    assert 0.3 < final < 3.0, final
+    assert "still unresolved" not in caplog.text
+
+
+def test_probe_raises_the_raw_cancellation_clip_and_restores_it():
+    """Given the raw-cancellation clip is a sampler safety device,
+    When the whitening probe measures a too-tight element,
+    Then the clip is raised for the measurement and restored afterwards --
+    sampling must never run at the probe's value.
+    """
+    from exozippy.components import parameter as parameter_mod
+    from exozippy.whitening import _PROBE_RAW_CLIP
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-10)
+    system = _StubSystem([p])
+    inner_logp = model.compile_logp()
+    seen = []
+
+    def logp(point):
+        seen.append(parameter_mod.get_raw_cancellation_clip())
+        return inner_logp(point)
+
+    before = parameter_mod.get_raw_cancellation_clip()
+
+    # Act
+    apply_measured_whitening(system, model, model.initial_point(), logp)
+
+    # Assert
+    assert before == parameter_mod._RAW_CANCELLATION_CLIP
+    assert seen and set(seen) == {_PROBE_RAW_CLIP}
+    assert parameter_mod.get_raw_cancellation_clip() == before
+
+
+def test_escalation_iterates_past_two_rounds(caplog):
+    """Given a preliminary scale 19 orders of magnitude too tight -- past the
+    two rounds the escalation used to be hardcoded to (~6.5 orders each),
+    When apply_measured_whitening runs,
+    Then it keeps escalating until nothing is clipped: THREE rounds run and
+    the scale still resolves, so the reach is not a hardcoded number.
+    """
+    import logging
+
+    # Arrange
+    model, p = _too_tight_model(1.0e-19)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+    raw_start = model.initial_point()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        apply_measured_whitening(system, model, raw_start, logp_fn=logp)
+
+    # Assert
+    rounds = caplog.text.count("escalation round")
+    assert rounds >= 3, caplog.text
+    _, scales2 = probe_scales(raw_start, logp)
+    final = float(np.asarray(scales2["toy.t_raw"])[0])
+    assert 0.3 < final < 3.0, final
+    assert "still unresolved" not in caplog.text
+
+
+def test_no_false_still_unresolved_warning_after_escalation(caplog):
+    """Given the too-LOOSE scenario the shipped escalation test uses
+    (true sigma 5e-15, resolved by one round to a cumulative ~5e-15),
+    When apply_measured_whitening finishes,
+    Then no "still unresolved" warning is emitted: the test is on the LATEST
+    measured multiplier, not on the cumulative one -- which is outside the
+    window by construction after any successful escalation (review 1.2.2).
+    """
+    import logging
+
+    # Arrange
+    p = Parameter(label="toy.t", initval=2.0, lower=0.0, upper=10.0)
+    with pm.Model() as model:
+        tv = p.build_pymc()
+        pm.Potential("like", -0.5 * ((tv - 2.0) / 5.0e-15) ** 2)
+    system = _StubSystem([p])
+    logp = model.compile_logp()
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="exozippy.whitening"):
+        report = apply_measured_whitening(
+            system, model, model.initial_point(), logp_fn=logp
+        )
+
+    # Assert
+    cumulative = float(np.asarray(report["multipliers"]["toy.t_raw"])[0])
+    assert cumulative < _CLIP_LO  # the cumulative IS outside the window
+    assert "still unresolved" not in caplog.text
+
+
+def test_barrier_correction_round_refreshes_the_probe_diagnostics(monkeypatch):
+    """Given a barrier update that moves the start's logp, so the whitening
+    is re-measured against the final barriers,
+    When measure_and_whiten returns,
+    Then the report's probe_diagnostics come from the SECOND probe.
+
+    Review 3.2.1: only multipliers/raw_scales/map_lp were folded in, so the
+    flat/gradient lists shown to the user described the pre-barrier surface
+    -- stale in exactly the case that triggers the correction round.
+    """
+    from exozippy import whitening
+
+    # Arrange: two canned probes, and a logp that moves when the barriers do.
+    reports = [
+        {
+            "map_lp": 1.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([1.0])},
+            "probe_diagnostics": {"flat": ["a_raw[0]"], "gradient_nats": {}},
+        },
+        {
+            "map_lp": 2.0,
+            "multipliers": {"a_raw": np.array([1.0])},
+            "raw_scales": {"a_raw": np.array([2.0])},
+            "probe_diagnostics": {
+                "flat": [],
+                "gradient_nats": {"a_raw[0]": 7.0},
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        whitening,
+        "apply_measured_whitening",
+        lambda *a, **k: reports.pop(0),
+    )
+    monkeypatch.setattr(
+        whitening, "measure_barrier_scales", lambda *a, **k: {}
+    )
+    lps = iter([0.0, 5.0, 5.0, 5.0])
+
+    class _NoRefetchSystem(_StubSystem):
+        """The start is already the canonical one (no polish moved it)."""
+
+        get_raw_start = None
+
+    system = _NoRefetchSystem([])
+
+    # Act
+    report = whitening.measure_and_whiten(
+        system, None, {"a_raw": np.zeros(1)}, logp_fn=lambda pt_: next(lps)
+    )
+
+    # Assert
+    assert report["probe_diagnostics"]["flat"] == []
+    assert report["probe_diagnostics"]["gradient_nats"] == {"a_raw[0]": 7.0}
+    assert report["map_lp"] == 2.0
 
 
 def _barrier_model():

@@ -47,7 +47,7 @@ def determine_pymc_build_order(active_components, config_manager):
                 comp.prefix, param_name, shape=(comp.n_elements,)
             )
             # manifest.py is the single interpreter of the manifest
-            # vocabulary -- the same one Component.add_parameter (stage 5)
+            # vocabulary -- the same one Component.add_parameter (stage 6)
             # and System.derived_params read.  Do NOT re-derive the rules
             # here: a dict WITHOUT "expr_key" is a free parameter carrying
             # only options (an "overrides" pin, a shape, a table note), and

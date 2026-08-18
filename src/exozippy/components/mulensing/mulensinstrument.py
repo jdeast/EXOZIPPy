@@ -206,7 +206,7 @@ class MulensInstrument(Instrument):
         return flagged[0]
 
     def load_data(self, system):
-        """Stage 1a: Load photometry and pre-calculate observer positions.
+        """Stage 1: Load photometry and pre-calculate observer positions.
 
         Single-event assumption (enforced by Lens.__init__): index 0 is the
         only event, so the event-0 source, t0_par, and magnification are used
@@ -267,7 +267,7 @@ class MulensInstrument(Instrument):
         # velocity at t_0_par define the inertial frame.  All observer positions
         # are stored as deviations from this linear Earth trajectory so that
         # t_0/u_0 remain geocentric parameters.  Re-resolved here rather than
-        # taken from Lens.__init__: MMEXOFAST seeds arrive in stage 1a (via
+        # taken from Lens.__init__: MMEXOFAST seeds arrive in stage 1 (via
         # _resolve_mmexofast above), after the Lens snapshotted user_params,
         # and a reference epoch far from the data makes the linear Earth
         # extrapolation diverge (O(100) AU after ~20 yr), shearing tau/u by
@@ -352,7 +352,7 @@ class MulensInstrument(Instrument):
         """Final t0_par: the reference epoch anchoring the Skowron+2011 frame.
 
         Lens.__init__ resolves t0_par from the lens config and user_params
-        only; MMEXOFAST seeds arrive later (stage 1a, add_seed_hints), so
+        only; MMEXOFAST seeds arrive later (stage 1, add_seed_hints), so
         the automated workflow -- whose params file deliberately omits the
         microlensing start values -- used to fall through to the 2450000.0
         default, parking the reference epoch decades before the data.
@@ -407,7 +407,7 @@ class MulensInstrument(Instrument):
 
         - explicit file path: the JSON's bad-data mask (``excluded_points``)
           and error factors (``errfacs``) are applied to this component's
-          files; the seed hints are pushed by Lens at stage 2 as before. An
+          files; the seed hints are pushed by Lens at stage 3 as before. An
           absent file warns and skips; an unparseable one raises (see
           ``mmexofast_support.load_json``) rather than dropping the mask and
           the error factors along with the seeds.
@@ -434,10 +434,10 @@ class MulensInstrument(Instrument):
 
         if isinstance(spec, str) and spec != "auto":
             # Explicit JSON: masks + error factors, and the seed hints too.
-            # Lens re-pushes the same seeds at stage 2 (harmless, identical
+            # Lens re-pushes the same seeds at stage 3 (harmless, identical
             # content); pushing them HERE as well makes them visible to this
             # component's flux bootstrap (_estimate_flux_components), which
-            # runs later in this same load_data call -- stage 2 would be too
+            # runs later in this same load_data call -- stage 3 would be too
             # late and the per-band flux decomposition would silently fall
             # back to median-flux / q_source=0.95.
             self._reject_time_spec_with_mmexofast(spec)
@@ -938,7 +938,7 @@ class MulensInstrument(Instrument):
         return get_observer_position(time, observer_location=observer_location)
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest with bootstrapped fluxes."""
+        """Stage 3: Declare the manifest with bootstrapped fluxes."""
         f_total_init = np.array(self.fs_init)
         q_source_init = np.array(self.q_source_init)
 
@@ -1357,7 +1357,7 @@ class MulensInstrument(Instrument):
         zp is the DERIVED Parameter ``mulensinstrument.zeropoint``,
         zp_i = m_SED + 2.5*log10(f_s,i) (physics.calc_zeropoint), and its
         Gaussian prior (defaults: 0 +/- 0.2 mag) is applied by
-        Parameter.build_pymc's derived-with-sigma branch at stage 5.  This
+        Parameter.build_pymc's derived-with-sigma branch at stage 6.  This
         is the analytic marginalization of a zp nuisance tied exactly
         through the equation above; it adds no sampled dimension and leaves
         the (log_f_total, q_source) parameterization untouched.  sigma=0 is
@@ -1377,7 +1377,7 @@ class MulensInstrument(Instrument):
         against the SED-predicted blend of all source stars; a per-source
         flux-ratio (q_flux) constraint is future work.
 
-        What remains here at stage 6 is the opt-in blend tie:
+        What remains here at stage 7 is the opt-in blend tie:
         `sed_constrain_blend: true` additionally ties f_blend to the
         SED-predicted blend of the modeled non-source stars through the same
         zeropoint (Gaussian potential with `sed_blend_sigma`, default 0.2

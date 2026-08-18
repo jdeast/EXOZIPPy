@@ -37,8 +37,6 @@ class Band(Component):
     deblending, astrometry fluxfrac) key on.
     """
 
-    yaml_key = "band"
-
     # Accepted `ld_law:` spellings. An unrecognized value raises rather than
     # falling through to the quadratic branch: a silently ignored law key is
     # the same bug class as `IMF: Salpeter` (PR #82), and here it would also
@@ -263,7 +261,7 @@ class Band(Component):
         """Band indices whose limb darkening something in this topology reads.
 
         Read from each consumer's raw ``config`` rather than from its parsed
-        band map: ``MulensInstrument.band_map`` is built in *stage 2*
+        band map: ``MulensInstrument.band_map`` is built in *stage 3*
         (``register_parameters``), so whether it exists yet depends on
         component ordering, while ``Component.config`` is set in ``__init__``
         and is always available here.

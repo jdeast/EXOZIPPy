@@ -1,0 +1,15 @@
+#### TICv8.2 ####
+mstar 1.24
+rstar 1.61
+teff  6317
+feh -0.01000 0.10000
+##############
+av 0 -1 0 0.062705250
+# NOTE: the Gaia DR2 parallax (4.5577000) and uncertainty (0.0436000) has been corrected as prescribed in Lindegren+ (2018)
+#parallax 4.58770 0.05156
+# NOTE: the Gaia DR3 parallax (4.5860000) has been corrected by subtracting -0.031176187 mas as prescribed in Lindegren+ 2021
+# NOTE: the Gaia DR3 parallax uncertainty (0.0158000) has been added in quadrature with 0.01 to account for remaining systematic residuals
+parallax 4.61718 0.01870
+distance 218.05495
+# Apparent 2MASS K magnitude for the Mann relation
+appks  8.689000 0.020000

@@ -326,7 +326,7 @@ def test_lens_per_source_element_name_is_accepted():
     name, while the lens block itself has a single entry named 'Lens' --
     When the names are standardized,
     Then the key survives.  A per-parameter `names` list is a manifest option
-    resolved at stage 2, so a check restricted to the lens block's own entry
+    resolved at stage 3, so a check restricted to the lens block's own entry
     names would reject a shipped, working example.
     """
     config = {

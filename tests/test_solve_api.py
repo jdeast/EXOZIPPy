@@ -1,6 +1,6 @@
 """Tests for the headless solve / validate API (exozippy.solve_api).
 
-The solve_api runs only lifecycle stages 1-3 (System.prepare) and reads the
+The solve_api runs only lifecycle stages 1-4 (System.prepare) and reads the
 in-memory relaxation-engine solution back out -- no PyMC model is built.  These
 tests use the RV-only KELT-4 example (examples/kelt4/kelt4_rvonly.yaml).
 

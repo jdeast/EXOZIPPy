@@ -273,7 +273,7 @@ def _astrometry_sed_case(tmp_path, extra_user_params=None):
 
 @pytest.fixture(scope="module")
 def pinned_fluxfrac_system(tmp_path_factory):
-    """The SED-fluxfrac topology, prepared (stage 1-3 only)."""
+    """The SED-fluxfrac topology, prepared (stages 1-4 only)."""
     return _astrometry_sed_case(tmp_path_factory.mktemp("fluxfrac_pin"))
 
 

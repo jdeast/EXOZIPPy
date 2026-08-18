@@ -417,7 +417,7 @@ def test_manifest_overrides_pins_are_unaffected():
 #
 # The first group pins that it fires; the second pins that it does NOT fire
 # for any of the several channels a value legitimately arrives through, since
-# stage 5 is where they have all landed.
+# stage 6 is where they have all landed.
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +738,7 @@ def test_manifest_overrides_initval_satisfies_the_check():
     MulensInstrument._scale_flux_amplitudes and the GP amplitudes do),
     When the parameter is built,
     Then it builds -- the check has to see a channel applied inside its own
-    stage, which is why it lives at stage 5.
+    stage, which is why it lives at stage 6.
     """
     # ARRANGE
     config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})
@@ -1460,3 +1460,42 @@ def test_a_bad_entry_dies_at_construction_not_in_finalize():
         with pytest.raises(ValueError):
             cm = ConfigManager(bad, system_config=_LIST_FIELD_SYSTEM)
             cm.finalize_user_params()
+
+
+# A MULTI-SEED START MUST SAY WHERE IT STARTS EITHER (raw_from_initval).
+#
+# The same rule as the two above, at the one other door into a chain start.
+# NaN fails every comparison, so a non-finite seed value passed the bound
+# check silently and produced a NaN raw coordinate that reached a start dict
+# with nothing naming the element (review 2.2.1).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lower": 0.0, "upper": 10.0},  # logit branch
+        # gaussian branch: unbounded, so the raw N(0,1) IS the prior
+        {"mu": 1.0, "sigma": 2.0, "lower": -np.inf, "upper": np.inf},
+    ],
+    ids=["logit", "gaussian"],
+)
+def test_non_finite_seed_value_raises_seed_bound_violation(kwargs):
+    """
+    Given a built parameter and an alternate seed whose value is NaN,
+    When raw_from_initval maps that seed to a raw start,
+    Then SeedBoundViolation names the element, so the multi-seed caller skips
+    the seed loudly instead of starting a chain at a NaN coordinate.
+    """
+    # ARRANGE
+    from exozippy.components.parameter import SeedBoundViolation
+
+    p = Parameter(
+        label="star.teff", initval=5.0, unit="", internal_unit="", **kwargs
+    )
+    with pm.Model():
+        p.build_pymc()
+
+    # ACT & ASSERT
+    with pytest.raises(SeedBoundViolation, match="star.teff"):
+        p.raw_from_initval(np.array([np.nan]))

@@ -276,7 +276,7 @@ def _run_fit(config, gui, user_params=None):
     method = method.lower()
 
     # First modeling-draft checkpoint: the components declared their prose
-    # during stages 1-6 and the sampler is now resolved, so the citation
+    # during stages 1-7 and the sampler is now resolved, so the citation
     # scaffold (<prefix>_paper.tex) can be written BEFORE sampling --
     # the user keeps it even if the fit dies hours in.  Regenerated (not
     # appended) at wrap-up with the results/convergence/figures/table

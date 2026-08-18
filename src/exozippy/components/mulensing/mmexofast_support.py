@@ -14,9 +14,9 @@ lightly-optimized microlensing solutions spanning the standard degeneracies:
 
 Three consumers share this module:
 
-- ``Lens._load_mmexofast_seeds`` (stage 2) pushes each fit as a per-seed hint
+- ``Lens._load_mmexofast_seeds`` (stage 3) pushes each fit as a per-seed hint
   set when the lens block names an explicit ``mmexofast: <file>``.
-- ``MulensInstrument._resolve_mmexofast`` (stage 1a) applies the bad-data
+- ``MulensInstrument._resolve_mmexofast`` (stage 1) applies the bad-data
   mask (``excluded_points``) and error-rescaling factors (``errfacs``) to its
   own files, and -- when the user supplied no sufficient start values and no
   explicit file -- runs MMEXOFAST on the raw light curves to generate all of
@@ -150,7 +150,7 @@ def user_hints_sufficient(config_manager, is_binary, want_rho):
 
     So ask the relaxation engine (`ConfigManager.probe_derivable`), which
     follows exactly the relations that will set these values for real at
-    stage 3.  Bounds-only entries still do not count: a bound is not a start.
+    stage 4.  Bounds-only entries still do not count: a bound is not a start.
 
     A literal entry for every observable short-circuits the probe: naming a
     value outright makes it RANK_USER, which is derivable by definition, so
