@@ -176,8 +176,47 @@ class Component(ABC):
                     )
                     setattr(self, tensor_name, tensor_var)
 
+    def finalize_reported(self, model, system, context_nodes=None):
+        """Wire and apply this component's REPORTED elements (manifest role 3).
+
+        The second phase of the two-phase build, called by
+        ``System.build_model`` after stage 6 for every component, inside the
+        model context.  Every parameter exists by now, so the dependency of a
+        reported expression resolves to an already-built node instead of
+        recursing back into the parameter being built (see add_parameter).
+
+        Returns the number of parameters finalized; zero -- and no work at all
+        -- for a component with no reported elements, which is every component
+        that does not flip a parameterization.
+        """
+        pending = getattr(self, "_pending_reported", None)
+        if not pending:
+            return 0
+
+        context_nodes = context_nodes or {}
+        finalized = 0
+        for param_name, items in list(pending.items()):
+            param = getattr(self, param_name, None)
+            if not isinstance(param, Parameter):
+                continue
+            specs = [
+                self._element_expression(
+                    model, system, context_nodes, entry, sel, where
+                )
+                for (entry, sel, where) in items
+            ]
+            param.finalize_deferred(specs)
+            finalized += 1
+        self._pending_reported = {}
+        return finalized
+
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}
+        # Reported (role 3) selections park here until finalize_reported; keyed
+        # per parameter name, so a second build_model on one System starts clean
+        # (the GUI builds more than once).
+        if not hasattr(self, "_pending_reported"):
+            self._pending_reported = {}
 
         # 0. Prevent double-building nodes
         if hasattr(self, param_name) and isinstance(
@@ -253,20 +292,24 @@ class Component(ABC):
             built = []
             for sel in selections:
                 if sel.output_only:
-                    raise NotImplementedError(
-                        f"[{where}] REPORTED elements (a manifest "
-                        f"'output_expr_key') are declared but not built yet. "
-                        f"They are derived from quantities that are themselves "
-                        f"derived from them on OTHER elements, so the "
-                        f"per-parameter build order graph.py sorts has a cycle "
-                        f"even though the value graph does not; building them "
-                        f"needs the deferred pass (build the sampled/consumed "
-                        f"half at this parameter's topological position, patch "
-                        f"the reported elements once every parameter exists, "
-                        f"and only then create the Deterministic). That lands "
-                        f"with its first consumer, the V_c/V_e "
-                        f"parameterization."
+                    # REPORTED elements (role 3) defer their WHOLE wiring, not
+                    # just the patch.  Resolving their dependencies here would
+                    # recurse: the dep is a parameter that, on other elements,
+                    # is derived from this one, and this parameter is not yet
+                    # bound on the component (`setattr` happens below), so
+                    # add_parameter's already-built guard could not stop it.
+                    # Only the MASK is needed now, so build_pymc can mark the
+                    # role and hold back the Deterministic; the expression is
+                    # wired in finalize_reported, once every parameter exists.
+                    built.append(
+                        ElementExpression(
+                            mask=sel.mask, expr=None, output_only=True
+                        )
                     )
+                    self._pending_reported.setdefault(param_name, []).append(
+                        (entry, sel, where)
+                    )
+                    continue
                 built.append(
                     self._element_expression(
                         model, system, context_nodes, entry, sel, where

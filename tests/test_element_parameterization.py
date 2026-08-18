@@ -676,6 +676,193 @@ def test_the_start_point_check_accepts_an_elementwise_expression():
 
 
 # ---------------------------------------------------------------------------
+# 3b. REPORTED elements (role 3): the deferred second build phase
+# ---------------------------------------------------------------------------
+
+
+def test_a_reported_element_takes_its_expression_and_no_logp_term():
+    """
+    Given a vector whose element 1 is REPORTED (derived, consumed by nothing),
+    When the deferred phase runs,
+    Then element 1 carries the expression's value while the model's logp is
+      identical to the same model built without the reported element.
+
+    Role 3 exists so a parameterization flip can still REPORT the coordinate it
+    stopped sampling.  A report must not move the posterior: reported elements
+    are excluded from the Gaussian prior, the soft barriers and the logit
+    correction, so the logp is unchanged by construction -- this measures it
+    rather than trusting the exclusion.
+    """
+    node = pt.as_tensor_variable(np.array([0.0, 0.375]))
+
+    def build(with_report):
+        with pm.Model() as model:
+            p = _param(
+                label="comp.p",
+                element_expressions=(
+                    [
+                        ElementExpression(
+                            mask=[False, True],
+                            expr=lambda: node,
+                            output_only=True,
+                        )
+                    ]
+                    if with_report
+                    else None
+                ),
+                mask=None if with_report else [True, False],
+            )
+            p.build_pymc()
+            if with_report:
+                p.finalize_deferred()
+        return model, p
+
+    reported_model, reported = build(True)
+    plain_model, _ = build(False)
+
+    point = {"comp.p_raw": np.array([0.0])}
+    assert reported.is_reported.tolist() == [False, True]
+    assert reported.is_derived.tolist() == [False, True]
+    assert float(np.atleast_1d(reported.value.eval())[1]) == pytest.approx(
+        0.375
+    )
+    assert reported_model.compile_logp()(point) == pytest.approx(
+        plain_model.compile_logp()(point)
+    )
+
+
+def test_the_reported_deterministic_is_created_only_in_the_second_phase():
+    """
+    Given a parameter with a reported element,
+    When only the first phase has run,
+    Then no Deterministic bears its name yet -- and after the second phase
+      exactly one does, carrying the patched vector.
+
+    A Deterministic created in phase 1 would record the UNPATCHED vector, which
+    is the whole reason the creation waits.
+    """
+    node = pt.as_tensor_variable(np.array([0.0, 0.25]))
+    with pm.Model() as model:
+        p = _param(
+            element_expressions=[
+                ElementExpression(
+                    mask=[False, True], expr=lambda: node, output_only=True
+                )
+            ],
+        )
+        p.build_pymc()
+        assert "comp.p" not in {d.name for d in model.deterministics}
+
+        p.finalize_deferred()
+        assert "comp.p" in {d.name for d in model.deterministics}
+        # Idempotent: the GUI builds a model more than once per System.
+        p.finalize_deferred()
+        assert (
+            len([d for d in model.deterministics if d.name == "comp.p"]) == 1
+        )
+
+
+def test_a_reported_group_with_no_expression_raises():
+    """
+    Given a reported element whose expression was never supplied,
+    When the deferred phase runs,
+    Then it raises, naming who supplies it.
+
+    Component.add_parameter hands over only the MASK during phase 1 (resolving
+    the expression's deps there would recurse into the parameter being built),
+    so a missing expression means finalize_reported never ran -- silently
+    leaving the reported element at its transform value would be a reported
+    number that is not the quantity it claims to be.
+    """
+    p = _param(
+        element_expressions=[
+            ElementExpression(mask=[False, True], expr=None, output_only=True)
+        ]
+    )
+
+    with pm.Model():
+        p.build_pymc()
+        with pytest.raises(ValueError, match="no expression to apply"):
+            p.finalize_deferred()
+
+
+def test_a_two_way_flip_between_two_parameters_builds():
+    """
+    Given two parameters that are each other's inverse on OPPOSITE elements --
+      b is sampled on element 0 and reported from a there... the shape a
+      V_c/V_e flip has: `ecc` derives from `secosw` on one orbit while `secosw`
+      is reported from `ecc` on the other,
+    When both are built and the deferred phase runs,
+    Then both vectors carry the right values and the logp is finite.
+
+    Per element this is acyclic; per PARAMETER it is a cycle, which is exactly
+    what the deferred phase exists for.  graph.py contributes no edge for the
+    reported direction, so the build order can place both.
+    """
+    with pm.Model() as model:
+        # b declares its reported element up front with NO expression -- the
+        # real sequence: Component.add_parameter hands over the mask now and
+        # wires the expression in finalize_reported.
+        b = _param(
+            label="comp.b",
+            initval=np.array([0.6, 0.7]),
+            element_expressions=[
+                ElementExpression(
+                    mask=[True, False], expr=None, output_only=True
+                )
+            ],
+        )
+        b.build_pymc()
+
+        # a: element 0 sampled, element 1 derived from b (the consumed
+        # direction), reading b's phase-1 tensor.
+        a = _param(
+            label="comp.a",
+            initval=np.array([0.4, 0.5]),
+            element_expressions=[
+                ElementExpression(
+                    mask=[False, True], expr=lambda: b.value * 0.5
+                )
+            ],
+        )
+        a.build_pymc()
+
+        # ...and now b's element 0 is reported from a (the reverse direction).
+        b.finalize_deferred(
+            [
+                ElementExpression(
+                    mask=[True, False],
+                    expr=lambda: a.value * 2.0,
+                    output_only=True,
+                )
+            ]
+        )
+
+    point = model.initial_point()
+    a_val = np.atleast_1d(
+        model.compile_fn(
+            model.replace_rvs_by_values([a.value]),
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )(point)[0]
+    )
+    b_val = np.atleast_1d(
+        model.compile_fn(
+            model.replace_rvs_by_values([b.value]),
+            inputs=model.value_vars,
+            point_fn=True,
+            on_unused_input="ignore",
+        )(point)[0]
+    )
+
+    # a[1] = b[1]/2 (consumed direction), b[0] = a[0]*2 (reported direction).
+    assert a_val[1] == pytest.approx(b_val[1] * 0.5)
+    assert b_val[0] == pytest.approx(a_val[0] * 2.0)
+    assert np.isfinite(model.compile_logp()(point))
+
+
+# ---------------------------------------------------------------------------
 # 4. The whole-vector paths are untouched
 # ---------------------------------------------------------------------------
 

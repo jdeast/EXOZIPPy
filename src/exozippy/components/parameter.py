@@ -621,6 +621,11 @@ class Parameter:
     # barrier): the shared barrier-scale vector plus the pinned/needs masks
     # set_barrier_scales consults. See set_barrier_scales.
     _barrier_state: Optional[dict] = field(default=None, init=False)
+    # REPORTED elements awaiting their second build phase (set in build_pymc,
+    # consumed by finalize_deferred): the expressions to patch in and the shape
+    # to broadcast to.  None for every parameter without role-3 elements, which
+    # is every parameter that does not flip a parameterization.
+    _deferred_reported: Optional[dict] = field(default=None, init=False)
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
     auto_estimated: bool = False
@@ -1816,7 +1821,13 @@ class Parameter:
             # dependency slicing (Component._element_expression) keeps them out
             # of the expression in the first place wherever it can prove the
             # alignment.
-            for mask, expr, _output_only, sliced in expr_specs:
+            # REPORTED elements (role 3) are deliberately NOT patched here --
+            # see finalize_deferred.  Their expressions read quantities that,
+            # on other elements, are derived from THIS parameter, so they can
+            # only be built once every parameter exists.
+            for mask, expr, output_only, sliced in expr_specs:
+                if output_only:
+                    continue
                 phys_val = self._patch_elements(phys_val, mask, expr, sliced)
 
         # Strip Astropy units
@@ -1914,7 +1925,30 @@ class Parameter:
                 pt.as_tensor_variable(phys_val), actual_shape
             )
 
-        if track_node:
+        # REPORTED elements defer BOTH their patch and the Deterministic (see
+        # finalize_deferred).  Consumers built between here and there read this
+        # phase's tensor, which is correct by construction: every element they
+        # could read is identical in both phases, because a reported element is
+        # consumed by nothing.  A Deterministic created now would record the
+        # unpatched vector, so it waits.
+        deferred = [
+            (mask, expr, sliced)
+            for mask, expr, output_only, sliced in expr_specs
+            if output_only
+        ]
+        if deferred:
+            # `expr` is None for the ordinary path: Component.add_parameter
+            # hands over the mask now and the wiring later (see
+            # finalize_reported), because resolving a reported expression's
+            # deps mid-build would recurse.  A spec that DOES carry its
+            # expression (a Parameter built directly, as the tests do) is
+            # applied by finalize_deferred with no argument.
+            self._deferred_reported = {
+                "specs": deferred,
+                "shape": actual_shape,
+            }
+            self.value = val_to_save
+        elif track_node:
             self.value = pm.Deterministic(self.label, val_to_save)
         else:
             self.value = val_to_save
@@ -2100,6 +2134,85 @@ class Parameter:
                 f"logit_uniform_prior.{self.label}", pt.sum(correction)
             )
 
+        return self.value
+
+    def finalize_deferred(self, specs=None):
+        """Patch REPORTED elements and create this parameter's Deterministic.
+
+        The second half of a two-phase build, called by ``System.build_model``
+        once every parameter exists (inside the model context).  A REPORTED
+        element (manifest role 3) is derived from a quantity that, on OTHER
+        elements of some parameter, is derived from this one -- a V_c/V_e orbit
+        reports ``secosw`` computed from its ``ecc``/``omega``, while a
+        sqrt(e)cos/sin orbit derives its ``ecc`` from ``secosw``.  Per element
+        that is perfectly acyclic; per PARAMETER it is a cycle, which is why
+        the build order cannot place these expressions and why they wait here.
+        ``graph.py`` contributes no edge for them, for the same reason.
+
+        Safe by construction, in both directions:
+
+        * Nothing can have consumed the patched values.  A reported element is
+          consumed by nothing (the vocabulary's definition, and what makes the
+          cycle dissolve), so every consumer that read ``self.value`` during
+          stage 5 or 6 read an element this patch does not touch.
+        * The patch adds no logp term.  It creates one ``pm.Deterministic`` and
+          no potential: ``build_pymc`` already excludes reported elements from
+          the Gaussian prior (section A) and the soft barriers (section B), and
+          they carry no raw coordinate to correct (section C).  A prior on a
+          quantity the model does not consume would be a logp term with no data
+          behind it.
+
+        ``specs`` are the wired ``ElementExpression``s, supplied by
+        ``Component.finalize_reported`` (which could only build them now).  With
+        no argument, the specs recorded at build time are used, which is the
+        path a Parameter built directly takes.
+
+        Idempotent: the deferred state is cleared, so a second call is a no-op
+        (the GUI builds a model more than once per System).
+        """
+        import pymc as pm
+        import pytensor.tensor as pt
+
+        state = self._deferred_reported
+        if not state:
+            return self.value
+
+        n_elements = self._n_elements()
+        if specs is not None:
+            patches = [
+                (
+                    normalize_selector(s.mask, n_elements, self.label),
+                    s.expr,
+                    bool(s.sliced),
+                )
+                for s in specs
+            ]
+        else:
+            patches = state["specs"]
+
+        missing = [
+            i for i, (_m, expr, _s) in enumerate(patches) if expr is None
+        ]
+        if missing:
+            raise ValueError(
+                f"Parameter '{self.label}': reported element group(s) {missing} "
+                f"have no expression to apply. Component.finalize_reported "
+                f"supplies them; a Parameter built directly must pass its own "
+                f"ElementExpression list to finalize_deferred."
+            )
+
+        phys_val = pt.flatten(pt.as_tensor_variable(self.value))
+        for mask, expr, sliced in patches:
+            phys_val = self._patch_elements(phys_val, mask, expr, sliced)
+
+        shape = state["shape"]
+        if shape == ():
+            val_to_save = phys_val[0]
+        else:
+            val_to_save = pt.broadcast_to(phys_val, shape)
+
+        self._deferred_reported = None
+        self.value = pm.Deterministic(self.label, val_to_save)
         return self.value
 
     def generate_posterior(self, posterior_bundle, param_lookup=None):
