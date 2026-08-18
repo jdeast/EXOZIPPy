@@ -1,5 +1,8 @@
 """Tests for components/factory.py: discover_components auto-discovery."""
 
+import importlib
+
+from exozippy.components import factory
 from exozippy.components.component import Component
 from exozippy.components.factory import discover_components
 
@@ -53,3 +56,44 @@ def test_discover_components_returns_dict():
     registry = discover_components()
     assert isinstance(registry, dict)
     assert len(registry) > 0
+
+
+def test_a_broken_component_module_does_not_abort_discovery(monkeypatch):
+    """
+    Given ONE component module that raises at import time with something
+    other than ImportError (a SyntaxError, a NameError, a failed module-scope
+    table build),
+    When discover_components sweeps the tree,
+    Then every other component is still discovered and the broken one is
+    recorded in import_failures() -- so a config that names it still fails
+    loudly, and every fit that does not is unaffected.
+
+    Review 2.2.3: the sweep caught ImportError alone, so the comment's
+    promise that an unused broken component "shouldn't break the code" held
+    for a missing dependency and not for a typo -- one of those aborted
+    discovery for every fit and every GUI open.
+    """
+    # ARRANGE
+    real_import = importlib.import_module
+
+    def _fake_import(name, *args, **kwargs):
+        if name.endswith(".band.band"):
+            raise SyntaxError("invalid syntax (band.py, line 1)")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(factory.importlib, "import_module", _fake_import)
+
+    try:
+        # ACT
+        registry = discover_components()
+
+        # ASSERT
+        assert "star" in registry
+        assert "band" not in registry
+        failures = factory.import_failures()
+        assert "band" in failures
+        assert isinstance(failures["band"][1], SyntaxError)
+    finally:
+        # Leave the module-level failure record clean for the next test.
+        monkeypatch.undo()
+        discover_components()
