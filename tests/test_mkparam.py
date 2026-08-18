@@ -887,6 +887,52 @@ def test_output_version_skips_a_name_already_on_disk(tmp_path):
     assert already_there.read_text() == "# an earlier run's restart file\n"
 
 
+def test_bare_scalar_entries_are_discarded_like_initval_only_dicts(tmp_path):
+    """
+    Given a non-sampled entry written bare (`star.teff: 5800`) and its dict
+      equivalent (`{initval: 5800}`),
+    When mkparam runs,
+    Then BOTH are discarded -- the "initval-only entries are stale guesses"
+      policy is about content, not spelling.
+
+    The bare form is not a dict, so it fell through both branches of the
+    passthrough guard and was re-emitted into every successive restart file
+    forever.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": 5800.0,
+        "star.Host.av": [0.1, 0.2],  # bare list = per-seed starts
+        "star.Host.feh": {"initval": 0.0},
+        "star.Host.distance": {"initval": 100.0, "sigma": 5.0},
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    result = yaml.safe_load(open(out))
+    assert "star.Host.teff" not in result
+    assert "star.Host.av" not in result
+    assert "star.Host.feh" not in result
+    # ...and the one that really does state a constraint still survives.
+    assert result["star.Host.distance"]["sigma"] == pytest.approx(5.0)
+
+
 def test_output_version_skips_a_run_of_existing_versions(tmp_path):
     """
     Given versions 2 through 5 already on disk,

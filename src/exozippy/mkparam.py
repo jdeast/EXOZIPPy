@@ -928,20 +928,28 @@ def write_param_file(
     # existing file expressed them (star.0.param or star.param).
     for key, val in existing_params.items():
         if key not in consumed_existing:
-            if isinstance(val, dict) and not (_CONSTRAINT_FIELDS & val.keys()):
+            if not isinstance(val, dict):
+                # A BARE value is an initval and nothing else: `star.teff:
+                # 5800` (or a list of per-seed starts) states no constraint,
+                # so the discard policy above applies to it exactly as it
+                # does to `{initval: 5800}`.  Guarding the whole check with
+                # `isinstance(val, dict)` made the policy spelling-dependent
+                # -- the bare form fell through both branches and was
+                # re-emitted into every successive restart file forever.
+                continue
+            if not (_CONSTRAINT_FIELDS & val.keys()):
                 continue
             # For non-sampled constraint parameters (e.g. a Gaia parallax prior
-            # applied as a potential on distance), promote initval→mu so the
+            # applied as a potential on distance), promote initval->mu so the
             # prior center is explicit and cannot accidentally drift if initval
             # is ever edited.  Same logic as for sampled parameters above.
-            if isinstance(val, dict):
-                if (
-                    _sigma_is_nonzero_number(val.get("sigma"))
-                    and "mu" not in val
-                    and "initval" in val
-                ):
-                    val = dict(val)
-                    val["mu"] = val["initval"]
+            if (
+                _sigma_is_nonzero_number(val.get("sigma"))
+                and "mu" not in val
+                and "initval" in val
+            ):
+                val = dict(val)
+                val["mu"] = val["initval"]
             output[_normalize_key(key, config)] = val
 
     output_path = Path(output_path)
