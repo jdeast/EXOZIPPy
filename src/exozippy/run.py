@@ -61,6 +61,7 @@ KNOWN_SAMPLER_KEYS = {
     "n_temps",
     "T_max",
     "n_chains",
+    "adapt_ladder",
     "recompute_trace",
     "nthin",
     "measure_scales",
@@ -192,6 +193,12 @@ def _run_fit(config, gui, user_params=None):
     )  # None → auto-select after system is built
     # "auto" passes through to the sampler, which sizes the ladder from the
     # parameter count once the model is built (ptde.resolve_n_temps).
+    # Barrier-equalizing ladder re-spacing during tune (Syed et al. 2022).
+    # Off by default, matching the synchronous sampler; worth turning on when
+    # ladder_health_report shows NON-UNIFORM per-rung swap acceptance, since a
+    # round trip must cross every pair and more rungs cannot fix a badly
+    # SHAPED ladder.
+    adapt_ladder = bool(sampler_cfg.get("adapt_ladder", False))
     _n_temps_raw = sampler_cfg.get("n_temps", 8)
     n_temps = (
         _n_temps_raw if isinstance(_n_temps_raw, str) else int(_n_temps_raw)
@@ -489,6 +496,7 @@ def _run_fit(config, gui, user_params=None):
                     rung_thin_start=rung_thin_start,
                     collect_rung_timing=collect_rung_timing,
                     swap_schedule=swap_schedule,
+                    adapt_ladder=adapt_ladder,
                     progress_callback=gui.progress_callback,
                 )
             elif method == "ptde_async":

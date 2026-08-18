@@ -79,6 +79,7 @@ from exozippy.samplers.ptde import (
     _geometric_ladder,
     _record_round_trips,
     _safe_progress,
+    _update_ladder_barrier,
     ladder_health_report,
     resolve_n_temps,
 )
@@ -104,6 +105,7 @@ def ptde_async_sample(
     target_accept=0.20,
     adapt_gamma=True,
     gamma_adapt_window=None,
+    adapt_ladder=False,
     de_jitter=DE_JITTER,
     swap_interval=None,
     swap_schedule="deo",
@@ -139,6 +141,14 @@ def ptde_async_sample(
                legacy random-adjacent-pair draw for A/B comparison. The chains
                swapped within the chosen pair are random either way, and each
                swap is the identical MH test, so invariance is untouched.
+    adapt_ladder : bool -- re-space the ladder during tuning to equalize the
+               per-pair communication barrier (Syed et al. 2022). Default
+               False, matching the synchronous sampler. Turn it on when the
+               per-rung swap acceptances are non-uniform: a round trip must
+               cross every pair, so transport is throttled by the WORST
+               stretch, and a geometric ladder cannot fix that by getting
+               longer (measured on DC2018 event 128 -- see the block that
+               calls _update_ladder_barrier below).
     gamma_adapt_window : int | None -- adapt gamma once per this many
                completed T=1 proposals still within their own chain's tune
                phase. None -> max(n_chains, (tune * n_chains) // 20), i.e.
@@ -695,6 +705,50 @@ def ptde_async_sample(
                         gamma_box[0] = gamma_new
                 n_propose_T1_window[0] = 0
                 n_accept_T1_window[0] = 0
+
+            # Communication-barrier ladder adaptation (Syed et al. 2022),
+            # ported from the synchronous sampler, which had it and this one
+            # did not -- so until now `ptde_async` could not reshape its
+            # ladder AT ALL, only lengthen it via n_temps.
+            #
+            # Why it matters, measured on examples/DC2018 event 128 at
+            # T_max=8500 with n_temps=48 (correctly provisioned: Lambda=18.9
+            # against the 39 rungs the DEO criterion asks for, mean swap
+            # acceptance 0.598 at its 0.5 target): swap acceptance was
+            # strongly NON-uniform, 0.46-0.52 across the cold pairs against
+            # 0.66-0.70 hot, and round trips stayed at ZERO for 21 hours.
+            # The barrier concentrates where the posterior is sharp, while a
+            # geometric ladder spaces rungs uniformly in ln T -- so it
+            # over-resolves the easy hot end and under-resolves the stretch
+            # that actually throttles a traversal.  A round trip must cross
+            # EVERY pair, so the rate is set by the worst stretch, not the
+            # mean, which is why adding rungs uniformly did not help.
+            #
+            # Gated on `not gamma_frozen[0]`, the same flag gamma uses: that
+            # flips the moment the first T=1 chain enters its draw phase, and
+            # re-spacing once any chain is RECORDING would break invariance.
+            # `temperatures` is mutated IN PLACE because _attempt_swap closes
+            # over it by reference and never rebinds it.
+            if (
+                adapt_ladder
+                and not gamma_frozen[0]
+                and n_temps > 2
+                and n_swap_propose.sum() > 0
+            ):
+                new_T = _update_ladder_barrier(
+                    temperatures, n_swap_accept, n_swap_propose
+                )
+                if not np.allclose(new_T, temperatures):
+                    logger.info(
+                        "PTDE-async ladder (barrier-equalized): "
+                        f"T=[{', '.join(f'{t:.1f}' for t in new_T)}]"
+                    )
+                    temperatures[:] = new_T
+                # Fresh measurement per adaptation window, as the sync
+                # sampler does: a re-spaced ladder's acceptances say nothing
+                # about the ladder that produced them.
+                n_swap_accept[:] = 0
+                n_swap_propose[:] = 0
 
             if n_completed_total[0] % log_every_evals == 0:
                 ar = n_accept / np.maximum(n_propose, 1)
