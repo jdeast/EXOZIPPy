@@ -655,25 +655,22 @@ def _kmeans_bic(X, max_modes, seed):
     return best[1], best[2]
 
 
-def _dip_merge(X, labels, centers, merge_ratio):
-    """Merge cluster pairs with no density dip between their centers.
+# --- shared machinery of the two pairwise cluster-merge TESTS ---------------
+#
+# _dip_merge and _lp_ridge_merge ask different questions -- does the OCCUPANCY
+# density dip between two centers, and is there an lp BARRIER between them --
+# and those two tests stay separate functions.  Everything around the tests is
+# the same in both: the same union-find, the same projection onto the
+# center-to-center segment with the same cylinder around it, and the same
+# relabel-and-recompute-centers epilogue.
 
-    Two genuinely distinct modes have a density valley along the segment
-    connecting their centers; fragments that k-means carved out of one blob
-    (or one banana) do not.  The test must look at ALL draws near the
-    segment -- not just the two clusters' members, because in a fragmented
-    blob the region between two centers is owned by other clusters and a
-    members-only histogram dips artificially.
 
-    Two merge criteria, both evaluated on the segment direction u
-    (t = 0 at center i, t = 1 at center j):
-      1. overlap: if the clusters' projected spreads cover the separation
-         (sigma_i + sigma_j > ~half the separation) they are one blob;
-      2. cylinder dip: histogram t for every draw within a perpendicular
-         radius of the segment; merge when the valley between the peaks is
-         at least merge_ratio times the smaller peak.
+def _make_union_find(k):
+    """Union-find over k cluster indices; returns (find, union).
+
+    Path halving, so repeated finds stay near-flat.  ``union(a, b)`` puts b's
+    root under a's, matching what both merge loops wrote by hand.
     """
-    k = centers.shape[0]
     parent = list(range(k))
 
     def find(a):
@@ -682,42 +679,48 @@ def _dip_merge(X, labels, centers, merge_ratio):
             a = parent[a]
         return a
 
-    for i in range(k):
-        for j in range(i + 1, k):
-            u = centers[j] - centers[i]
-            sep = np.linalg.norm(u)
-            if sep == 0:
-                parent[find(j)] = find(i)
-                continue
-            u = u / sep
+    def union(a, b):
+        parent[find(b)] = find(a)
 
-            t_all = (X - centers[i]) @ u / sep  # 0 at c_i, 1 at c_j
-            mi, mj = labels == i, labels == j
+    return find, union
 
-            # criterion 1: projected spreads overlap the separation
-            sig_i = float(np.std(t_all[mi])) if mi.sum() > 1 else 0.0
-            sig_j = float(np.std(t_all[mj])) if mj.sum() > 1 else 0.0
-            if sig_i + sig_j > 0.6:
-                parent[find(j)] = find(i)
-                continue
 
-            # criterion 2: density dip along the segment, all draws within
-            # a cylinder whose radius comes from the members' perpendicular
-            # scatter about the segment
-            perp2 = ((X - centers[i]) ** 2).sum(axis=1) - (t_all * sep) ** 2
-            r2 = np.median(perp2[mi | mj])
-            in_cyl = perp2 <= 4.0 * max(r2, 1e-12)
-            t = t_all[in_cyl]
-            hist, edges = np.histogram(t, bins=50, range=(-0.5, 1.5))
-            mids = 0.5 * (edges[:-1] + edges[1:])
-            peak_i = hist[(mids >= -0.5) & (mids <= 0.3)].max(initial=0)
-            peak_j = hist[(mids >= 0.7) & (mids <= 1.5)].max(initial=0)
-            between = hist[(mids > 0.3) & (mids < 0.7)]
-            valley = between.min(initial=0) if between.size else 0
-            if valley >= merge_ratio * min(peak_i, peak_j):
-                parent[find(j)] = find(i)
+def _segment_cylinder(X, labels, centers, i, j):
+    """Project every draw onto the c_i -> c_j segment and select a cylinder.
 
-    # relabel by union-find roots
+    Returns ``(sep, t, in_cyl)``:
+
+    * ``sep`` is the center separation.  When it is 0 the segment does not
+      exist and ``t``/``in_cyl`` are None -- both callers merge such a pair
+      unconditionally.
+    * ``t`` is the projected coordinate of EVERY draw, 0 at center i and 1 at
+      center j.  Every draw, not just the two clusters' members: in a
+      fragmented blob the region between two centers is owned by OTHER
+      clusters, and a members-only histogram dips artificially.
+    * ``in_cyl`` selects the draws within twice the two clusters' median
+      perpendicular offset from the segment.
+
+    Both merge tests need exactly this, which is why they share it; what they
+    do with ``t`` and ``in_cyl`` afterwards is the part that differs.
+    """
+    u = centers[j] - centers[i]
+    sep = float(np.linalg.norm(u))
+    if sep == 0:
+        return 0.0, None, None
+    u = u / sep
+    t = (X - centers[i]) @ u / sep
+    perp2 = ((X - centers[i]) ** 2).sum(axis=1) - (t * sep) ** 2
+    r2 = np.median(perp2[(labels == i) | (labels == j)])
+    return sep, t, perp2 <= 4.0 * max(r2, 1e-12)
+
+
+def _union_relabel(X, labels, find, k):
+    """Collapse merged clusters to contiguous labels and recompute centers.
+
+    Returns ``(new_labels, new_centers, merged_any)``.  Roots are numbered in
+    ascending order of their lowest old label, so an unmerged run keeps its
+    labels exactly.
+    """
     roots = {}
     new_labels = np.empty_like(labels)
     for old in range(k):
@@ -731,6 +734,54 @@ def _dip_merge(X, labels, centers, merge_ratio):
         [X[new_labels == c].mean(axis=0) for c in range(n_new)]
     )
     return new_labels, new_centers, n_new != k
+
+
+def _dip_merge(X, labels, centers, merge_ratio):
+    """Merge cluster pairs with no density dip between their centers.
+
+    Two genuinely distinct modes have a density valley along the segment
+    connecting their centers; fragments that k-means carved out of one blob
+    (or one banana) do not.
+
+    Two merge criteria, both evaluated on _segment_cylinder's projection
+    (t = 0 at center i, t = 1 at center j):
+      1. overlap: if the clusters' projected spreads cover the separation
+         (sigma_i + sigma_j > ~half the separation) they are one blob;
+      2. cylinder dip: histogram t for every draw in the cylinder; merge
+         when the valley between the peaks is at least merge_ratio times
+         the smaller peak.
+    """
+    k = centers.shape[0]
+    find, union = _make_union_find(k)
+
+    for i in range(k):
+        for j in range(i + 1, k):
+            sep, t_all, in_cyl = _segment_cylinder(X, labels, centers, i, j)
+            if sep == 0:
+                union(i, j)
+                continue
+
+            mi, mj = labels == i, labels == j
+
+            # criterion 1: projected spreads overlap the separation
+            sig_i = float(np.std(t_all[mi])) if mi.sum() > 1 else 0.0
+            sig_j = float(np.std(t_all[mj])) if mj.sum() > 1 else 0.0
+            if sig_i + sig_j > 0.6:
+                union(i, j)
+                continue
+
+            # criterion 2: density dip along the segment
+            t = t_all[in_cyl]
+            hist, edges = np.histogram(t, bins=50, range=(-0.5, 1.5))
+            mids = 0.5 * (edges[:-1] + edges[1:])
+            peak_i = hist[(mids >= -0.5) & (mids <= 0.3)].max(initial=0)
+            peak_j = hist[(mids >= 0.7) & (mids <= 1.5)].max(initial=0)
+            between = hist[(mids > 0.3) & (mids < 0.7)]
+            valley = between.min(initial=0) if between.size else 0
+            if valley >= merge_ratio * min(peak_i, peak_j):
+                union(i, j)
+
+    return _union_relabel(X, labels, find, k)
 
 
 def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
@@ -748,8 +799,8 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
     Two genuinely distinct modes ARE separated by an lp barrier: the
     region between them is either empty of draws (chains rarely cross)
     or populated only by stragglers whose lp sits far below both peaks.
-    So, for each cluster pair, project every draw in ``_dip_merge``'s
-    cylinder onto the center-to-center segment and bin the interior:
+    So, for each cluster pair, take ``_segment_cylinder``'s projection --
+    the same one ``_dip_merge`` tests -- and bin the interior:
     merge iff EVERY interior bin is populated (an empty bin is absence
     of evidence and never merges -- this is also what keeps a curved
     banana whose true path bows away from the straight segment safely
@@ -765,13 +816,7 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
     Returns ``(labels, centers, merged_any, merge_notes)``.
     """
     k = centers.shape[0]
-    parent = list(range(k))
-
-    def find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
+    find, union = _make_union_find(k)
 
     finite = np.isfinite(lp)
     merge_notes = []
@@ -780,19 +825,13 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
             mi, mj = labels == i, labels == j
             if not ((mi & finite).any() and (mj & finite).any()):
                 continue
-            u = centers[j] - centers[i]
-            sep = np.linalg.norm(u)
+            sep, t_all, in_cyl = _segment_cylinder(X, labels, centers, i, j)
             if sep == 0:
-                parent[find(j)] = find(i)
+                union(i, j)
                 continue
-            u = u / sep
-
-            t_all = (X - centers[i]) @ u / sep  # 0 at c_i, 1 at c_j
-            # same cylinder as _dip_merge: perpendicular radius from the
-            # two clusters' own scatter about the segment
-            perp2 = ((X - centers[i]) ** 2).sum(axis=1) - (t_all * sep) ** 2
-            r2 = np.median(perp2[mi | mj])
-            in_cyl = (perp2 <= 4.0 * max(r2, 1e-12)) & finite
+            # the same cylinder _dip_merge uses, restricted to draws whose
+            # lp can actually be compared
+            in_cyl = in_cyl & finite
 
             peak = min(lp[mi & finite].max(), lp[mj & finite].max())
             allowed_dip = k_sigma * sigma_lp
@@ -809,7 +848,7 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
                     break
                 worst = max(worst, peak - lp_cyl[sel].max())
             if connected and worst <= allowed_dip:
-                parent[find(j)] = find(i)
+                union(i, j)
                 merge_notes.append(
                     f"clusters merged as one basin: the path between "
                     f"their centers is populated in every one of "
@@ -820,19 +859,8 @@ def _lp_ridge_merge(X, lp, labels, centers, sigma_lp, k_sigma=3.0, n_bins=10):
                     f"degeneracy direction), not a separate mode"
                 )
 
-    roots = {}
-    new_labels = np.empty_like(labels)
-    for old in range(k):
-        r = find(old)
-        if r not in roots:
-            roots[r] = len(roots)
-    for old in range(k):
-        new_labels[labels == old] = roots[find(old)]
-    n_new = len(roots)
-    new_centers = np.vstack(
-        [X[new_labels == c].mean(axis=0) for c in range(n_new)]
-    )
-    return new_labels, new_centers, n_new != k, merge_notes
+    new_labels, new_centers, merged_any = _union_relabel(X, labels, find, k)
+    return new_labels, new_centers, merged_any, merge_notes
 
 
 def _count_transitions(labels_2d):
