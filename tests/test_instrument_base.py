@@ -602,3 +602,34 @@ def test_trace_style_serializes_when_present():
 
     plain = Trace(name="m", role="model", kind="line", x=[1.0], y=[2.0])
     assert "style" not in plain.to_json()
+
+
+def test_rows_is_the_published_row_range():
+    """
+    Given the shared accumulator's published row_ranges,
+    When Instrument.rows(i) is asked for an element's rows,
+    Then it is that contiguous slice, and it selects exactly what the
+    inst_map boolean scan selects -- the two spellings the class docstring
+    says are equivalent.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+    _filled_blocks(inst).finalize("rv")
+
+    for i, (lo, hi) in enumerate(inst.row_ranges):
+        sl = inst.rows(i)
+        assert (sl.start, sl.stop) == (lo, hi)
+        np.testing.assert_array_equal(
+            inst.time[sl], inst.time[inst.inst_map == i]
+        )
+
+
+def test_rows_refuses_a_component_that_never_concatenated():
+    """
+    Given a component with no row_ranges (it keeps per-file datasets),
+    When rows(i) is called,
+    Then it raises saying so, rather than silently selecting nothing.
+    """
+    inst = _make(_BLOCKS_CONFIG)
+
+    with pytest.raises(ValueError, match="no row_ranges"):
+        inst.rows(0)

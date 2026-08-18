@@ -462,8 +462,10 @@ class RVInstrument(Instrument):
             for i, oname in enumerate(self.rm_orbit):
                 if not oname:
                     continue
-                rows = np.flatnonzero(self.inst_map == i)
-                if rows.size == 0:
+                # The published contiguous range (Instrument.rows), not a
+                # scan: inc_subtensor over a slice stays a plain subtensor.
+                rows = self.rows(i)
+                if rows.stop == rows.start:
                     continue
                 oidx, pidx, bidx = resolve_rm_indices(
                     system, oname, self.rm_band[i]
@@ -476,7 +478,7 @@ class RVInstrument(Instrument):
                     bidx,
                     model=self.rm_model[i],
                     light_travel_time_active=self.light_travel_time[i],
-                )  # (len(rows),) m/s
+                )  # (rows.stop - rows.start,) m/s
                 rv_model = pt.inc_subtensor(
                     rv_model[rows], rm_ms / rv_ms_per_internal
                 )

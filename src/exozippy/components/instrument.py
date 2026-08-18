@@ -234,8 +234,16 @@ class ConcatenatedData:
     ``mulensinstrument.observer_pos`` is addressed row-for-row against
     ``time``.  Both break silently if a file is added out of order or a side
     array disagrees in length, so ``add`` rejects both, and ``finalize``
-    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``
-    rather than leaving every consumer to re-derive them from ``inst_map``.
+    publishes the resulting ``(start, stop)`` ranges as ``owner.row_ranges``,
+    reached through ``Instrument.rows(i)``.
+
+    ``rows(i)`` and ``inst_map == i`` are two spellings of the same
+    selection, equivalent precisely BECAUSE of the invariant above, and both
+    are in use on purpose: the published range where a contiguous RANGE is
+    wanted, the boolean scan where the mask itself is (the plot paths index
+    several arrays with one) or where the caller was handed ``inst_map``
+    rather than the component (``_prepare_gp``, ``_prepare_robust``, which
+    are driven standalone by their tests).
     """
 
     def __init__(self, owner, n_roles=3):
@@ -1945,6 +1953,34 @@ class Instrument(Component):
         return super().add_parameter(
             model, param_name, system, context_nodes=context_nodes
         )
+
+    def rows(self, i):
+        """Element ``i``'s rows in every concatenated array, as a ``slice``.
+
+        The accessor for the ``row_ranges`` ``ConcatenatedData.finalize``
+        publishes.  Equivalent to ``np.flatnonzero(inst_map == i)`` by the
+        contiguity invariant that class ENFORCES -- a file's rows are one
+        contiguous block, in config order, in every array at once -- but a
+        contiguous slice rather than an advanced index, so it is a view, it
+        does not scan, and ``pt.inc_subtensor`` over it stays a plain
+        subtensor.
+
+        Use it where a per-element RANGE is wanted.  ``inst_map == i``
+        remains right where the BOOLEAN array itself is (the plot paths
+        index several arrays with one mask), and where the caller does not
+        have the concatenated arrays -- ``_prepare_gp`` / ``_prepare_robust``
+        take ``inst_map`` as an argument precisely so they can be driven
+        standalone.  Two spellings of one selection, both correct; not a
+        migration left half-done.
+        """
+        if not self.row_ranges:
+            raise ValueError(
+                f"[{self.prefix}] has no row_ranges: this component does not "
+                f"concatenate its files (astrometryinstrument keeps per-file "
+                f"datasets), so there is no single row range per element."
+            )
+        lo, hi = self.row_ranges[i]
+        return slice(lo, hi)
 
     # ------------------------------------------------------------------
     # Shared plotting helpers
