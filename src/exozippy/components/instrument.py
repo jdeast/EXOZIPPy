@@ -2049,6 +2049,13 @@ class Instrument(Component):
         matrix times the sampled coefficients (see ``_build_block_detrend``)
         -- so it is exactly the term the model added, with no un-whitening
         needed here.
+
+        ADDITIVE, which is what ``rvinstrument`` and ``transit`` want and
+        what a caller must not assume: ``mulensinstrument``'s coefficients
+        are magnitude-space and enter its flux model MULTIPLICATIVELY, as
+        ``10**(-0.4 * X.c)``.  A mulens plot path wants that factor, not
+        this sum, and dividing the plotted flux by it is the correction --
+        not subtracting.
         """
         if point is None or getattr(self, "total_detrend_cols", 0) == 0:
             return np.zeros(self.n_total_obs)
