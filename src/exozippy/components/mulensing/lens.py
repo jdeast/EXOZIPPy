@@ -1054,7 +1054,8 @@ class Lens(Component):
         unknowns -- by choosing a point on a circle (issue #93).  Where that
         disagrees with the seeded ``t_E``, Condition B rewrites the lowest-rank
         symbol in ``t_E = theta_E / |mu_rel_geo|``, which is ``theta_E`` via the
-        lens mass (defaults.yaml, rank 20) and distance (rank 25).  So ``t_E``
+        lens mass (defaults.yaml, ``RANK_DEFAULT``) and distance
+        (``RANK_MULENS_LENS_DISTANCE``).  So ``t_E``
         keeps its measured value, the proper motion keeps the prior's, and the
         lens mass absorbs the difference -- which is the standard microlensing
         chain (a measured t_E plus an assumed mu_rel implies theta_E, hence a

@@ -2175,9 +2175,9 @@ class ConfigManager:
             return "default"
         if rank >= RANK_USER:
             return "user"
-        # Microlensing distance hint (rank 30) and data-derived estimates
-        # (RANK_DERIVED_DATA = 60) both come from the data channel.
-        if rank == RANK_DERIVED_DATA or rank == 30:
+        # The microlensing source-distance hint and the data-derived estimates
+        # (RANK_DERIVED_DATA) both come from the data channel.
+        if rank == RANK_DERIVED_DATA or rank == RANK_MULENS_SOURCE_DISTANCE:
             return "data"
         if rank > RANK_DEFAULT:
             return "solved"
