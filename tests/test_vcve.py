@@ -457,21 +457,41 @@ def transit_lc(tmp_path_factory):
     return str(path)
 
 
-def test_a_vcve_orbit_samples_the_new_coordinates_and_reports_the_old(
-    transit_lc,
-):
-    """
-    Given a transit fit with fitvcve: true,
-    When the model is built,
-    Then V_c/V_e and the omega direction are sampled, ecc/omega are derived from
-      them, the sqrt(e) pair is REPORTED, and the logp and its gradient are
-      finite at the start.
+@pytest.fixture(scope="module")
+def vcve_transit_fit(transit_lc):
+    """One built `fitvcve` transit model, shared by the tests that read it.
+
+    Module-scoped because building it and compiling its logp is the expensive
+    part of this file, and the three tests below ask different questions of the
+    SAME model -- rebuilding it per test bought nothing and made this file the
+    slowest in the suite.  Nothing here mutates the model.
     """
     system = System(
         _transit_config(transit_lc, True), user_params=dict(_TRANSIT_PARAMS)
     )
     system.prepare()
     model = system.build_model()
+    return system, model, system.get_raw_start(model)
+
+
+def test_a_vcve_orbit_samples_the_new_coordinates_and_reports_the_old(
+    vcve_transit_fit,
+):
+    """
+    Given a transit fit with fitvcve: true,
+    When the model is built,
+    Then V_c/V_e and the omega direction are sampled, ecc/omega are derived from
+      them, the sqrt(e) pair is REPORTED, and the logp is finite at the start.
+
+    The GRADIENT of this particular model is deliberately not compiled here.
+    Compiling dlogp of a transit model whose likelihood the mixture has
+    duplicated is, cold, the single most expensive thing in this file -- and
+    both backends' gradients through exactly these graphs are checked anyway:
+    the JAX one by the numpyro leg below, which samples THIS model, and the C
+    one by the two-orbit mixed test above, which is the same mixture over a
+    cheaper likelihood.
+    """
+    system, model, start = vcve_transit_fit
 
     raw = {v.name for v in model.free_RVs}
     assert {"orbit.vcve_raw", "orbit.xomega_raw", "orbit.yomega_raw"} <= raw
@@ -485,13 +505,35 @@ def test_a_vcve_orbit_samples_the_new_coordinates_and_reports_the_old(
     assert "orbit.vcve_real_root" in names
     assert "branch_mixture" in names
 
-    start = system.get_raw_start(model)
     assert np.isfinite(model.compile_logp()(start))
-    assert np.all(np.isfinite(model.compile_dlogp()(start)))
 
 
-def _two_orbit_config(lc, fitvcve):
-    """Two planets, one transit dataset, `fitvcve` per orbit."""
+@pytest.fixture(scope="module")
+def rv_data(tmp_path_factory):
+    """A small RV file.
+
+    The two-orbit tests below deliberately do NOT use the transit light curve:
+    the mixture replicates the WHOLE likelihood per root combination, so a
+    two-V_c/V_e-orbit model compiles four copies of it, and four copies of a
+    transit model (limb darkening, the exoplanet-core ops) cost minutes -- for a
+    claim about element ROLES and BRANCH COUNT that no part of the transit
+    forward model participates in.  An RV likelihood makes the same statement
+    for a fraction of the compile.
+    """
+    path = tmp_path_factory.mktemp("vcve") / "rv.dat"
+    rng = np.random.default_rng(7)
+    t = np.linspace(2459600.0, 2459660.0, 40)
+    np.savetxt(
+        path,
+        np.column_stack(
+            [t, rng.normal(0.0, 10.0, t.size), np.full(t.size, 10.0)]
+        ),
+    )
+    return str(path)
+
+
+def _two_orbit_config(rv, fitvcve):
+    """Two planets on two orbits of one star, `fitvcve` per orbit."""
     return {
         "star": [{"name": "A", "mist": False}],
         "planet": [{"name": "b"}, {"name": "c", "orbit_ndx": 1}],
@@ -499,43 +541,58 @@ def _two_orbit_config(lc, fitvcve):
             {"name": "b", "fitvcve": fitvcve[0]},
             {"name": "c", "fitvcve": fitvcve[1]},
         ],
-        "band": [{"name": "TESS", "filter": "TESS"}],
-        "transit": [{"name": "inst0", "file": lc, "band": "TESS"}],
+        "rvinstrument": [{"name": "inst0", "file": rv}],
     }
 
 
-_TWO_ORBIT_PARAMS = dict(
-    _TRANSIT_PARAMS,
-    **{
-        "orbit.1.period": {"initval": 7.5},
-        "orbit.1.tc": {"initval": 2459634.4},
-        "orbit.1.cosi": {"initval": 0.03},
-        "planet.1.radius": {"initval": 1.1},
-    },
-)
+_TWO_ORBIT_PARAMS = {
+    "star.0.radius": {"initval": 1.61, "sigma": 0.05},
+    "star.0.mass": {"initval": 1.204, "sigma": 0.05},
+    "star.0.teff": {"initval": 6207, "sigma": 100},
+    "star.0.feh": {"initval": -0.116, "sigma": 0.08},
+    "orbit.0.period": {"initval": 2.99},
+    "orbit.0.tc": {"initval": 2459634.3},
+    "orbit.0.cosi": {"initval": 0.05},
+    "orbit.1.period": {"initval": 7.5},
+    "orbit.1.tc": {"initval": 2459634.4},
+    "orbit.1.cosi": {"initval": 0.03},
+    "planet.0.radius": {"initval": 1.7},
+    "planet.1.radius": {"initval": 1.1},
+}
 
 
 @pytest.mark.parametrize(
-    "modes,n_comb",
+    "modes,n_comb,evaluate",
     [
-        ([True, False], 2),
-        ([True, True], 4),
+        ([True, False], 2, True),
+        ([True, True], 4, False),
     ],
 )
-def test_each_vcve_orbit_adds_one_branch(transit_lc, modes, n_comb):
+def test_each_vcve_orbit_adds_one_branch(rv_data, modes, n_comb, evaluate):
     """
     Given a two-orbit system with one or both orbits in V_c/V_e mode,
     When the model is built,
-    Then the mixture covers 2^k combinations for the k V_c/V_e orbits, and the
-      logp and its gradient are finite at the start.
+    Then one branch is declared per V_c/V_e orbit (so the mixture covers 2^k
+      combinations), each orbit's element roles follow its own switch, and the
+      mixed model's logp and gradient are finite at the start.
 
-    The mixed case is the per-element-roles claim in its real setting: one
-    orbit samples the sqrt(e) pair while the other reports it, from one manifest
-    and one vector.  The both-vcve case is the composition the mixture has to
-    get right (see test_two_branches_on_one_node_cover_all_four_combinations).
+    The mixed case is the per-element-roles claim in its real setting: one orbit
+    samples the sqrt(e) pair while the other reports it, from one manifest and
+    one vector -- and it is where a consumer reading a reported element's
+    pre-patch placeholder would show up, since the two orbits disagree.  That
+    one is evaluated.
+
+    The both-vcve case is BUILT and NOT evaluated, deliberately: what it adds is
+    that two branches naming the same node coexist, which is a property of the
+    declaration, while the arithmetic of combining them is measured exactly (and
+    cheaply) by test_two_branches_on_one_node_cover_all_four_combinations.
+    Compiling it costs more than the whole rest of this file -- the mixture
+    replicates the entire likelihood per combination, so this model's graph is
+    four copies of it -- and buys a NaN check the single-orbit test, the shield
+    tests and the numpyro leg already make.
     """
     system = System(
-        _two_orbit_config(transit_lc, modes),
+        _two_orbit_config(rv_data, modes),
         user_params=dict(_TWO_ORBIT_PARAMS),
     )
     system.prepare()
@@ -545,16 +602,18 @@ def test_each_vcve_orbit_adds_one_branch(transit_lc, modes, n_comb):
     assert system.orbit.ecc.is_derived.tolist() == [True, True]
     assert system.orbit.vcve.is_sampled.tolist() == modes
 
-    start = system.get_raw_start(model)
-    assert np.isfinite(model.compile_logp()(start))
-    assert np.all(np.isfinite(model.compile_dlogp()(start)))
-
     # One branch per V_c/V_e orbit; the mixture potential is present either way.
     assert len(system._branch_alternatives) == sum(modes)
     assert 2 ** sum(modes) == n_comb
+    assert "branch_mixture" in {p.name for p in model.potentials}
+
+    if evaluate:
+        start = system.get_raw_start(model)
+        assert np.isfinite(model.compile_logp()(start))
+        assert np.all(np.isfinite(model.compile_dlogp()(start)))
 
 
-def test_the_reported_pair_matches_the_derived_eccentricity(transit_lc):
+def test_the_reported_pair_matches_the_derived_eccentricity(vcve_transit_fit):
     """
     Given a V_c/V_e orbit,
     When the reported sqrt(e)cos/sin pair is evaluated at the start,
@@ -564,12 +623,7 @@ def test_the_reported_pair_matches_the_derived_eccentricity(transit_lc):
     table rows, so a reader can compare fits and a params file can be carried
     across the switch.
     """
-    system = System(
-        _transit_config(transit_lc, True), user_params=dict(_TRANSIT_PARAMS)
-    )
-    system.prepare()
-    model = system.build_model()
-    start = system.get_raw_start(model)
+    system, model, start = vcve_transit_fit
 
     fn = model.compile_fn(
         model.replace_rvs_by_values(
@@ -592,7 +646,7 @@ def test_the_reported_pair_matches_the_derived_eccentricity(transit_lc):
     assert sesinw == pytest.approx(np.sqrt(ecc) * np.sin(omega), abs=1e-9)
 
 
-def test_the_jacobian_potential_carries_the_reciprocal_sign(transit_lc):
+def test_the_jacobian_potential_carries_the_reciprocal_sign(vcve_transit_fit):
     """
     Given a built V_c/V_e model,
     When the Jacobian potential is evaluated at the start,
@@ -605,12 +659,7 @@ def test_the_jacobian_potential_carries_the_reciprocal_sign(transit_lc):
     is visible only as slightly-too-eccentric answers, which is precisely the
     failure the parameterization exists to fix.
     """
-    system = System(
-        _transit_config(transit_lc, True), user_params=dict(_TRANSIT_PARAMS)
-    )
-    system.prepare()
-    model = system.build_model()
-    start = system.get_raw_start(model)
+    system, model, start = vcve_transit_fit
 
     (potential,) = [
         p for p in model.potentials if p.name == "orbit.vcve_jacobian"
@@ -658,7 +707,7 @@ def test_an_ecc_omega_seed_reaches_vcve(transit_lc):
     )
 
 
-def test_a_vcve_transit_fit_samples_under_numpyro(transit_lc):
+def test_a_vcve_transit_fit_samples_under_numpyro(vcve_transit_fit):
     """
     Given a fitvcve transit fit,
     When a short chain is sampled with nuts_sampler="numpyro",
@@ -670,11 +719,7 @@ def test_a_vcve_transit_fit_samples_under_numpyro(transit_lc):
     floored logs -- three separate places a JAX backward pass could produce the
     NaN a C-backend gradient check would not show.
     """
-    system = System(
-        _transit_config(transit_lc, True), user_params=dict(_TRANSIT_PARAMS)
-    )
-    system.prepare()
-    model = system.build_model()
+    _system, model, _start = vcve_transit_fit
 
     with model:
         idata = pm.sample(
