@@ -933,6 +933,81 @@ def test_bare_scalar_entries_are_discarded_like_initval_only_dicts(tmp_path):
     assert result["star.Host.distance"]["sigma"] == pytest.approx(5.0)
 
 
+def test_mu_promotion_takes_seed_0_of_a_multi_seed_initval(tmp_path):
+    """
+    Given a previous restart file's length-K initval list with a hand-added
+      sigma and no mu,
+    When mkparam promotes the implicit prior center,
+    Then mu is seed 0, not the whole list.
+
+    A prior center is one number.  The list is a set of PER-SEED STARTS, so
+    promoting it wholesale hands the next fit a Gaussian potential with a
+    vector center nobody wrote.  Seed 0 is canonical everywhere else --
+    run._user_initval reads a list initval as v[0], and this writer's own
+    bounds already come from seed 0.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.teff": {"initval": [6207.0, 6180.0, 6230.0], "sigma": 100.0}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.teff": 6193.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.teff"]
+    assert entry["mu"] == pytest.approx(6207.0, abs=1e-6)
+    assert not isinstance(entry["mu"], list)
+
+
+def test_mu_promotion_of_a_multi_seed_initval_on_a_non_sampled_entry(tmp_path):
+    """
+    Given the same multi-seed entry on a parameter the trace never sampled,
+    When mkparam runs,
+    Then the passthrough loop promotes seed 0 too -- the second, independent
+      copy of the promotion had the same bug.
+    """
+    import yaml
+
+    existing_params = {
+        "star.Host.distance": {"initval": [100.0, 102.0], "sigma": 5.0}
+    }
+    param_file = tmp_path / "star.params.yaml"
+    with open(param_file, "w") as f:
+        yaml.dump(existing_params, f)
+
+    trace = _make_idata({"star.mass": 1.0}, tmpdir=tmp_path)
+    config = {
+        "prefix": "fitresults/model",
+        "parameter_file": "star.params.yaml",
+        "star": [{"name": "Host"}],
+    }
+
+    out = write_param_file(
+        config,
+        base_dir=tmp_path,
+        trace_path=trace,
+        output_path=tmp_path / "out.yaml",
+    )
+
+    entry = yaml.safe_load(open(out))["star.Host.distance"]
+    assert entry["mu"] == pytest.approx(100.0, abs=1e-6)
+
+
 def test_output_version_skips_a_run_of_existing_versions(tmp_path):
     """
     Given versions 2 through 5 already on disk,

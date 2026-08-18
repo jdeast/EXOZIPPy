@@ -110,6 +110,29 @@ def _sigma_is_nonzero_number(sigma):
     return float(sigma) != 0
 
 
+def _promoted_prior_center(initval):
+    """The mu an implicit prior center is promoted to, from ``initval``.
+
+    A prior center is one number.  A list-valued ``initval`` is a length-K
+    set of PER-SEED STARTS (P4 multi-seed), which is a statement about where
+    K chains begin and not about a prior width's center -- promoting the
+    whole list would install a list as ``mu`` and hand the next fit a
+    Gaussian potential with a vector center nobody wrote.  Take seed 0,
+    which is the canonical element everywhere else: ``run._user_initval``
+    reads a list-valued initval as ``v[0]``, and this writer's own bounds
+    already come from seed 0.
+
+    The list can only be there because a previous mkparam run emitted one
+    and the user then hand-added a sigma to that entry -- the very round
+    trip ``_apply_existing_constraints`` exists to keep honest.  An empty
+    list has no seed 0 and so nothing to promote; return None and let the
+    caller skip, rather than inventing a center.
+    """
+    if isinstance(initval, (list, tuple)):
+        return initval[0] if len(initval) else None
+    return initval
+
+
 def _apply_existing_constraints(entry, existing_entry):
     """Layer an existing params entry's constraint fields onto a fresh entry.
 
@@ -120,11 +143,12 @@ def _apply_existing_constraints(entry, existing_entry):
     point, so it must never drift toward the MAP.  That asymmetry is the
     whole job of this function.
 
-    If the original carried a Gaussian prior (sigma > 0) but no explicit mu,
-    its initval WAS the prior center (``Parameter.build_pymc`` centers the
-    potential on initval whenever mu is absent, for sampled and derived
-    parameters alike), so promote it to mu. Without the promotion the prior
-    would silently follow the MAP on every successive mkparam run.
+    If the original carried a Gaussian prior (numeric sigma > 0) but no
+    explicit mu, its initval WAS the prior center (``Parameter.build_pymc``
+    centers the potential on initval whenever mu is absent, for sampled and
+    derived parameters alike), so promote it to mu -- seed 0 of it if it is a
+    multi-seed list, see ``_promoted_prior_center``. Without the promotion
+    the prior would silently follow the MAP on every successive mkparam run.
 
     Returns ``entry`` (mutated in place) for convenience.
     """
@@ -149,7 +173,9 @@ def _apply_existing_constraints(entry, existing_entry):
         and "mu" not in existing_entry
         and "initval" in existing_entry
     ):
-        entry["mu"] = existing_entry["initval"]
+        center = _promoted_prior_center(existing_entry["initval"])
+        if center is not None:
+            entry["mu"] = center
     return entry
 
 
@@ -948,8 +974,10 @@ def write_param_file(
                 and "mu" not in val
                 and "initval" in val
             ):
-                val = dict(val)
-                val["mu"] = val["initval"]
+                center = _promoted_prior_center(val["initval"])
+                if center is not None:
+                    val = dict(val)
+                    val["mu"] = center
             output[_normalize_key(key, config)] = val
 
     output_path = Path(output_path)
