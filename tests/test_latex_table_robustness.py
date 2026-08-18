@@ -7,10 +7,12 @@ produces it today.  They are grouped in one file because they share the
 stub system/component scaffolding, not because they share a cause.
 """
 
+import pathlib
 import re
 
 import numpy as np
 
+import exozippy
 from exozippy.components.parameter import Parameter
 from exozippy.outputs.latex import build_latex_output
 from exozippy.outputs.modes import ModeInfo, ModeReport
@@ -331,3 +333,69 @@ def test_up_to_26_notes_keep_their_single_letters(tmp_path):
     assert re.findall(
         r"\\tablenotemark\{([^}]*)\}", table_path.read_text()
     ) == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# 1.11.1 -- purely internal derived parameters stay out of the table
+# ---------------------------------------------------------------------------
+
+
+def test_orbit_mean_motion_is_marked_unprintable():
+    """
+    Given the orbit component's defaults,
+    When they are read,
+    Then the mean motion n carries print_to_table: false -- it is 2*pi/P in
+      rad/day, a unit conversion of a row the table already carries, and it
+      exists only because the Kepler solvers, the light-travel-time
+      correction and the RM model take it as a dep.  Its neighbours in the
+      same block are untouched, so the flag is not a blanket one.
+    """
+    # ARRANGE
+    import yaml
+
+    defaults_path = (
+        pathlib.Path(exozippy.__file__).parent
+        / "components"
+        / "orbit"
+        / "defaults.yaml"
+    )
+
+    # ACT
+    orbit = yaml.safe_load(defaults_path.read_text())["orbit"]
+
+    # ASSERT
+    assert orbit["n"]["print_to_table"] is False
+    for still_printed in ("period", "tc", "ecc", "inc"):
+        assert "print_to_table" not in orbit[still_printed]
+
+
+def test_an_unprintable_parameter_reaches_neither_table_nor_macros(tmp_path):
+    """
+    Given a component holding one printable and one print_to_table: false
+      parameter,
+    When the table is written,
+    Then the unprintable one contributes no row AND no macro -- the mechanism
+      the mean-motion fix relies on.  Both halves matter: a row with no macro
+      is an undefined control sequence, and a macro with no row is dead
+      weight in the definitions file.
+    """
+    # ARRANGE
+    comp = _FakeComp()
+    comp.teff = _scalar_param(np.linspace(1.0, 2.0, 50), label="star.teff")
+    comp.hidden = _scalar_param(
+        np.linspace(1.0, 2.0, 50), label="star.hidden", latex="h"
+    )
+    comp.hidden.print_to_table = False
+    var_path, table_path = tmp_path / "v.tex", tmp_path / "t.tex"
+
+    # ACT
+    build_latex_output(
+        _fake_system(comp),
+        var_filename=str(var_path),
+        table_filename=str(table_path),
+    )
+
+    # ASSERT
+    assert "ezstarhidden" not in table_path.read_text()
+    assert "ezstarhidden" not in var_path.read_text()
+    assert "ezstarteff" in table_path.read_text()

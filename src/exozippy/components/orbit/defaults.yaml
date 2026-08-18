@@ -24,6 +24,14 @@ orbit:
     internal_unit: "1/d"
     latex: "n"
     description: "Mean Motion"
+    # Purely internal: n is 2*pi/period in rad/day, i.e. a unit conversion of
+    # a row the table already carries, and it exists only because the Kepler
+    # solvers, the LTT correction and the RM model take it as a dep.  It
+    # carries no information a reader cannot get from the period, so it is
+    # kept out of the LaTeX table and the results CSV.  Nothing else about
+    # it changes -- it is still built, still consumed, and still available
+    # to any consumer that asks for orbit.n by name.
+    print_to_table: false
     expressions:
       default:
         func_name: "calc_n"
