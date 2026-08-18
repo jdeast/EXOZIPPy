@@ -711,6 +711,13 @@ class Parameter:
     _deferred_reported: Optional[dict] = field(default=None, init=False)
 
     user_params: Optional[Mapping[str, Mapping[str, Any]]] = None
+    # The SINK for ConfigManager.resolve()'s "auto_estimated" key, not a field
+    # anything here reads (review 5.2.1).  Kept deliberately: resolve() returns
+    # a dict meant to be splatted straight into this constructor -- as
+    # Component.add_parameter and several tests do -- so removing the field
+    # would turn `Parameter(**resolve(...))` into a TypeError, and the flag's
+    # real reader is that dict.  Consume it here if provenance reporting ever
+    # wants it; do not delete it without also removing the key.
     auto_estimated: bool = False
     # Params file these values came from, if any (Component.add_parameter
     # forwards ConfigManager.param_file).  Metadata only -- it is quoted in
@@ -2476,21 +2483,9 @@ class Parameter:
         # Return the proper shape with 'sample' at the end again to match ArviZ's format
         return np.moveaxis(result, 0, -1)
 
-    def get_scale(self):
-        return {self.name: self.init_scale}
-
     # ---------
     # Units (metadata convenience)
     # ---------
-
-    def get_physical_value(self, model, point):
-        """
-        Translates a PyMC 'point' (which uses interval-space)
-        back to this parameter's physical value.
-        """
-        # Compile a quick function that takes the point and returns the RV value
-        fn = model.compile_fn(self.value, on_unused_input="ignore")
-        return fn(point)
 
     def _get_conversion_factors(self):
         """
