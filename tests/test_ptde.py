@@ -926,6 +926,83 @@ def test_an_early_stop_does_not_allocate_the_draws_it_never_takes():
 
 
 # ---------------------------------------------------------------------------
+# Packed populations (review 6.4.2)
+# ---------------------------------------------------------------------------
+
+
+def _mixed_state(rng):
+    """A raw state with the shapes a real model mixes: 0-d, 1-d and 2-d."""
+    return {
+        "a": rng.standard_normal(()),
+        "b": rng.standard_normal(3),
+        "c": rng.standard_normal((2, 2)),
+        "d": rng.standard_normal(1),
+    }
+
+
+def test_packed_proposal_is_bit_identical_to_the_dict_one():
+    """
+    Given the same population and the same seed,
+    When a DE proposal is built from packed rows and from the dicts,
+    Then the two agree BIT FOR BIT, element by element.
+
+    This is the whole licence for the packing: the partner draw stays per
+    member (a batched one would consume the bit stream in a different
+    order), one standard_normal(total) is the same SEQUENCE as one draw per
+    key in key order, and the arithmetic is elementwise so concatenating
+    the operands changes no rounding.  If any of those three ever stops
+    holding, every PTDE run silently moves.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import RawLayout, de_proposal
+
+    rng = np.random.default_rng(0)
+    pop = [_mixed_state(rng) for _ in range(9)]
+    keys = list(pop[0])
+    layout = RawLayout(pop[0], keys)
+    packed = layout.pack_many(pop)
+    gamma = 0.37
+
+    # ACT / ASSERT: same seed on both sides, several members, jitter on and off
+    for jitter in (1e-4, 0.0):
+        for i in (0, 4, 8):
+            a = de_proposal(
+                np.random.default_rng(5), pop, i, gamma, keys, jitter=jitter
+            )
+            b = layout.propose(
+                np.random.default_rng(5), packed, i, gamma, jitter=jitter
+            )
+            flat = np.concatenate([np.ravel(a[k]) for k in keys])
+            assert np.array_equal(flat, b), (jitter, i)
+
+
+def test_raw_layout_round_trips_shapes_and_does_not_alias():
+    """
+    Given a state with mixed shapes,
+    When it is packed and unpacked,
+    Then every value comes back with its own shape, and the unpacked dict
+      shares no memory with the vector it came from -- a worker's payload
+      must not change under it when the next proposal is built.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import RawLayout
+
+    state = _mixed_state(np.random.default_rng(1))
+    layout = RawLayout(state)
+
+    # ACT
+    vec = layout.pack(state)
+    back = layout.unpack(vec)
+    vec[:] = 0.0
+
+    # ASSERT
+    assert layout.total == 9
+    for k, v in state.items():
+        assert back[k].shape == np.shape(v)
+        assert np.array_equal(back[k], np.asarray(v))
+
+
+# ---------------------------------------------------------------------------
 # The positional logp call (review 6.4.3)
 # ---------------------------------------------------------------------------
 

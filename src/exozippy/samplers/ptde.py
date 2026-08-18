@@ -943,12 +943,14 @@ def ptde_sample(
         logger,
     )
 
-    # Replicate T=1 starts to all rungs; hotter chains spread quickly during tune
+    # Replicate T=1 starts to all rungs; hotter chains spread quickly during
+    # tune.  A rung's population is ONE (n_chains, n_raw_elements) array, not
+    # a list of dicts: the DE move is then three vector operations instead of
+    # a Python loop over the free RVs (see _common.RawLayout, which owns the
+    # packing and the proof that it is bit-identical).
+    layout = _common.RawLayout(raw_start, model_keys)
     populations = [
-        [
-            {k: v.copy() for k, v in t1_starts[i % n_chains].items()}
-            for i in range(n_chains)
-        ]
+        layout.pack_many([t1_starts[i % n_chains] for i in range(n_chains)])
         for _ in range(n_temps)
     ]
 
@@ -1056,7 +1058,9 @@ def ptde_sample(
     try:
         # initial logp evaluations
         flat_starts = [
-            populations[k][i] for k in range(n_temps) for i in range(n_chains)
+            layout.unpack(populations[k][i])
+            for k in range(n_temps)
+            for i in range(n_chains)
         ]
         flat_start_labels = [
             f"rung {k} chain {i}"
@@ -1132,18 +1136,19 @@ def ptde_sample(
 
             # 1. build DE proposals for every chain at every ACTIVE temperature
             #    (rung thinning skips hot rungs on most steps; see _active_rungs)
-            props_flat = []
+            props_vec = []  # packed, for the population
+            props_flat = []  # unpacked, for the workers
             prop_map = []
             for k in _active_rungs(
                 step, n_temps, _rung_thin_start, _rung_thin_factor
             ):
                 pop_k = populations[k]
                 for i in range(n_chains):
-                    props_flat.append(
-                        de_proposal(
-                            rng, pop_k, i, gamma, model_keys, jitter=de_jitter
-                        )
+                    vec = layout.propose(
+                        rng, pop_k, i, gamma, jitter=de_jitter
                     )
+                    props_vec.append(vec)
+                    props_flat.append(layout.unpack(vec))
                     prop_map.append((k, i))
             _t_build = time.time()
 
@@ -1165,7 +1170,7 @@ def ptde_sample(
                 if np.isfinite(lp_new) and rng.random() < np.exp(
                     min(0.0, (lp_new - logps[k][i]) / T)
                 ):
-                    populations[k][i] = props_flat[idx]
+                    populations[k][i] = props_vec[idx]
                     logps[k][i] = lp_new
                     n_accept[k] += 1
                     # Runaway-lp early detection (see LpPlausibilityGuard).
@@ -1199,10 +1204,12 @@ def ptde_sample(
                                 1.0 / temperatures[k] - 1.0 / temperatures[kp1]
                             )
                             if rng.random() < np.exp(min(0.0, log_a)):
-                                populations[k][i], populations[kp1][j] = (
-                                    populations[kp1][j],
-                                    populations[k][i],
-                                )
+                                # .copy() first: these are numpy ROWS, so
+                                # the tuple would hold views and the second
+                                # assignment would read the first one back.
+                                _tmp = populations[k][i].copy()
+                                populations[k][i] = populations[kp1][j]
+                                populations[kp1][j] = _tmp
                                 logps[k][i], logps[kp1][j] = (
                                     logps[kp1][j],
                                     logps[k][i],
@@ -1226,10 +1233,9 @@ def ptde_sample(
                             1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
                         )
                         if rng.random() < np.exp(min(0.0, log_a)):
-                            populations[k][i], populations[k + 1][j] = (
-                                populations[k + 1][j],
-                                populations[k][i],
-                            )
+                            _tmp = populations[k][i].copy()  # views; see above
+                            populations[k][i] = populations[k + 1][j]
+                            populations[k + 1][j] = _tmp
                             logps[k][i], logps[k + 1][j] = (
                                 logps[k + 1][j],
                                 logps[k][i],
@@ -1262,8 +1268,9 @@ def ptde_sample(
                     stored_raw, stored_lp, draw_idx + 1
                 )
                 for i in range(n_chains):
-                    for key in model_keys:
-                        stored_raw[key][i, draw_idx] = populations[0][i][key]
+                    layout.store_draw(
+                        stored_raw, populations[0][i], i, draw_idx
+                    )
                     stored_lp[i, draw_idx] = logps[0][i]
                 actual_draws = draw_idx + 1
 

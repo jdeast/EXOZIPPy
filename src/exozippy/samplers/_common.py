@@ -738,6 +738,102 @@ def warn_if_starts_underdispersed(starts, scales, label, log):
     return median
 
 
+class RawLayout:
+    """One flat float64 vector per state, instead of a dict of small arrays.
+
+    A raw-space state is a dict of ~20 little arrays, one per free RV, and
+    that shape is what made the DE move expensive: every proposal ran a
+    Python loop over the keys doing three array operations and a dict
+    insert, plus its own ``standard_normal`` draw per key.  Measured on a
+    DC2018-shaped model (27 elements over 20 raw variables, 20k proposals):
+
+        _pick_two (rng.choice)                8.8 us
+        20 per-key standard_normal draws     18.3 us   -> 0.9 us as one draw
+        20 per-key arithmetic + dict         29.2 us   -> 2.1 us packed
+        loop/np.shape/branch overhead       ~28 us     -> gone
+        ------------------------------------------------------------------
+        de_proposal total                    85.2 us   -> ~20 us
+
+    which on an 8 x 54 ladder is 36.8 ms of SERIAL parent time per step
+    against ~8 ms -- and the parent is the bottleneck the async sampler
+    exists to keep fed (review 6.4.2).
+
+    BIT-IDENTICAL, not merely equivalent in distribution, and both halves of
+    that are load-bearing:
+
+    * The partner draw stays per member, exactly the ``_pick_two`` the dict
+      path used.  A batched partner draw would consume the bit stream in a
+      different order and change every subsequent number.
+    * ONE ``standard_normal(total)`` per proposal is the same SEQUENCE as
+      one draw per key in key order -- numpy's generator fills sequentially
+      with no per-call buffering, verified over mixed shapes including 0-d
+      and 2-d, and verified again after an intervening ``rng.choice``.
+    * The arithmetic is elementwise, so concatenating the operands changes
+      no float operation and no rounding.
+
+    ``unpack`` returns views into ONE freshly copied buffer, so the dict a
+    worker is handed cannot be aliased by a later proposal, and shapes come
+    back exactly as the model declared them (a 0-d parameter comes back as
+    a 0-d ARRAY, where the dict path produced a numpy scalar -- strictly
+    closer to what the compiled logp wants; see PositionalLogp).
+    """
+
+    def __init__(self, raw_start, keys=None):
+        self.keys = list(raw_start.keys() if keys is None else keys)
+        self.shapes = [np.shape(raw_start[k]) for k in self.keys]
+        self.sizes = [int(np.prod(s)) if s else 1 for s in self.shapes]
+        offsets = np.concatenate([[0], np.cumsum(self.sizes)]).astype(int)
+        self.total = int(offsets[-1])
+        self.slices = [
+            (int(a), int(b), sh)
+            for a, b, sh in zip(offsets[:-1], offsets[1:], self.shapes)
+        ]
+
+    def pack(self, state):
+        """dict -> (total,) float64 vector."""
+        out = np.empty(self.total, dtype=float)
+        for key, (a, b, _) in zip(self.keys, self.slices):
+            out[a:b] = np.ravel(np.asarray(state[key], dtype=float))
+        return out
+
+    def pack_many(self, states):
+        """list of dicts -> (n, total) float64 array."""
+        out = np.empty((len(states), self.total), dtype=float)
+        for row, state in zip(out, states):
+            for key, (a, b, _) in zip(self.keys, self.slices):
+                row[a:b] = np.ravel(np.asarray(state[key], dtype=float))
+        return out
+
+    def unpack(self, vec):
+        """(total,) vector -> dict of arrays in the model's own shapes."""
+        buf = np.array(vec, dtype=float, copy=True)
+        return {
+            key: buf[a:b].reshape(sh)
+            for key, (a, b, sh) in zip(self.keys, self.slices)
+        }
+
+    def store_draw(self, stored_raw, vec, *index):
+        """Write one packed state into the per-variable draw buffers.
+
+        ``index`` is whatever leads the buffer's draw axis -- (chain, draw)
+        for the cold group, (rung, chain, draw) for the hot one.
+        """
+        for key, (a, b, sh) in zip(self.keys, self.slices):
+            stored_raw[key][index] = vec[a:b].reshape(sh)
+
+    def propose(self, rng, pop, i, gamma, jitter=DE_JITTER):
+        """The ter Braak DE-MC move of ``de_proposal``, on packed rows.
+
+        ``pop`` is an (n_chains, total) array; returns a new (total,)
+        vector.  Draws exactly what de_proposal draws, in the same order.
+        """
+        j1, j2 = _pick_two(rng, len(pop), i)
+        step = gamma * (pop[j1] - pop[j2])
+        if jitter:
+            step = step + jitter * rng.standard_normal(self.total)
+        return pop[i] + step
+
+
 def warn_if_population_degenerate(n_chains, n_params, label, log):
     """Warn when the DE population cannot span parameter space.
 

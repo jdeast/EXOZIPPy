@@ -71,7 +71,6 @@ from exozippy.samplers._common import (
     DE_JITTER,
     LpPlausibilityGuard,
     _eval_logp,
-    de_proposal,
     next_gamma,
 )
 from exozippy.samplers.ptde import (
@@ -264,11 +263,13 @@ def ptde_async_sample(
 
     # Per-(rung, chain) slot state. current_lp[k][i] is None until that
     # slot's first evaluation completes -- doubles as "still initializing".
+    # A rung's states are ONE (n_chains, n_raw_elements) array rather than a
+    # list of dicts, so the DE move is three vector operations instead of a
+    # Python loop over the free RVs; _common.RawLayout owns the packing and
+    # the proof that it is bit-identical (review 6.4.2).
+    layout = _common.RawLayout(raw_start, model_keys)
     current_state = [
-        [
-            {key: v.copy() for key, v in t1_starts[i % n_chains].items()}
-            for i in range(n_chains)
-        ]
+        layout.pack_many([t1_starts[i % n_chains] for i in range(n_chains)])
         for _ in range(n_temps)
     ]
     current_lp = [[None] * n_chains for _ in range(n_temps)]
@@ -396,27 +397,26 @@ def ptde_async_sample(
     _sub_seq = [0]
 
     def _build_proposal(k, i):
+        """The slot's next PACKED proposal (see _common.RawLayout)."""
         if current_lp[k][i] is None:
             # First evaluation for this slot: evaluate the start state itself.
-            return {key: v.copy() for key, v in current_state[k][i].items()}
-        return de_proposal(
-            rng,
-            current_state[k],
-            i,
-            gamma_box[0],
-            model_keys,
-            jitter=de_jitter,
+            return current_state[k][i].copy()
+        return layout.propose(
+            rng, current_state[k], i, gamma_box[0], jitter=de_jitter
         )
 
     def _submit(k, i):
+        # The slot keeps the packed vector; the worker is handed the dict the
+        # compiled logp wants.
         prop = _build_proposal(k, i)
+        payload = layout.unpack(prop)
         _sub_seq[0] += 1
         sub_id = _sub_seq[0]
         in_flight_meta[sub_id] = (k, i, prop, time.time(), state_gen[k][i])
         in_flight[0] += 1
         if pool is None:
             # Serial fallback: no real concurrency, evaluate immediately.
-            result_q.put((sub_id, _eval_logp(prop)))
+            result_q.put((sub_id, _eval_logp(payload)))
             return
 
         def _cb(result, sub_id=sub_id):
@@ -430,7 +430,7 @@ def ptde_async_sample(
             result_q.put((sub_id, failure))
 
         pool.apply_async(
-            _eval_logp, (prop,), callback=_cb, error_callback=_ecb
+            _eval_logp, (payload,), callback=_cb, error_callback=_ecb
         )
 
     def _attempt_swap():
@@ -454,10 +454,11 @@ def ptde_async_sample(
             1.0 / temperatures[k] - 1.0 / temperatures[k + 1]
         )
         if rng.random() < np.exp(min(0.0, log_a)):
-            current_state[k][i], current_state[k + 1][j] = (
-                current_state[k + 1][j],
-                current_state[k][i],
-            )
+            # .copy() first: these are numpy ROWS, so the tuple form would
+            # hold views and the second assignment would read the first back.
+            _tmp = current_state[k][i].copy()
+            current_state[k][i] = current_state[k + 1][j]
+            current_state[k + 1][j] = _tmp
             current_lp[k][i], current_lp[k + 1][j] = lp_j, lp_i
             direction[k][i], direction[k + 1][j] = (
                 direction[k + 1][j],
@@ -611,7 +612,7 @@ def ptde_async_sample(
         for sid in stale:
             sk, si, stale_prop, _, _ = in_flight_meta[sid]
             phys_params, raw_params = _common.describe_proposal(
-                stale_prop,
+                layout.unpack(stale_prop),
                 raw_to_phys,
                 raw_var_names,
                 out_var_names,
@@ -758,8 +759,7 @@ def ptde_async_sample(
                     and per_chain_draws[i] < draws
                 ):
                     d = per_chain_draws[i]
-                    for key in model_keys:
-                        stored_raw[key][i, d] = current_state[k][i][key]
+                    layout.store_draw(stored_raw, current_state[k][i], i, d)
                     stored_lp[i, d] = current_lp[k][i]
                     per_chain_draws[i] = d + 1
 
@@ -772,10 +772,9 @@ def ptde_async_sample(
                     and per_hot_draws[k - 1, i] < hot_cap
                 ):
                     d = per_hot_draws[k - 1, i]
-                    for key in model_keys:
-                        stored_hot_raw[key][k - 1, i, d] = current_state[k][i][
-                            key
-                        ]
+                    layout.store_draw(
+                        stored_hot_raw, current_state[k][i], k - 1, i, d
+                    )
                     stored_hot_lp[k - 1, i, d] = current_lp[k][i]
                     per_hot_draws[k - 1, i] = d + 1
 
