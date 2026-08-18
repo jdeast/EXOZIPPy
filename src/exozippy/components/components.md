@@ -57,3 +57,21 @@ The sibling helper `pin_unselected(n_elements, selected)` is the **opt-in** pin,
 4. Every sampled (non-derived, non-fixed) parameter **must** have `lower` and `upper` in `defaults.yaml`. `init_scale` is recommended but optional (it seeds the whitening probe; missing values fall back to a fraction of the span).
 5. Add the YAML key to example configs to test.
 
+## Referring to a star
+
+Every user-facing star reference -- an instrument's or a band's `star_ndx:`, an SED
+`photType` entry, a relation component's `star:` key -- goes through the one translator
+`components.component.resolve_star_ref(ref, star_names, where)`. It accepts an index
+(`1`), a name (`"B"`) and either as a path (`"star.B"`, `"star.1"`), rejects a bool
+(`star_ndx: true` is a typo, not star 1), range-checks the result, and puts the
+caller-supplied `where` plus the known star names in every message.
+
+There were three copies of this and, worse, two schemas that advertised the behaviour
+without having it: `rvinstrument` and `band` both documented `star_ndx` as "Index or name"
+while every consumer called `int()` on it, so a name crashed with a raw
+`invalid literal for int()` (review 3.5.1). `Component.resolve_star_ndx(ref, where)` is the
+component-side wrapper (`None` -> the default index), and it reads the star names off
+`config_manager.system_config` rather than `system.star`, so a NAME resolves at
+construction and at stage 1 -- before the Star component exists. With no system config
+(a test stub) only indices resolve, which is the historical behaviour rather than a
+spurious failure.

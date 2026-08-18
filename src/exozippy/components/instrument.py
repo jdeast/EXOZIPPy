@@ -1096,7 +1096,10 @@ class Instrument(Component):
         defaults.yaml ra/dec are placeholders, and a conversion run against
         them would corrupt every BJD by up to +/-8 minutes with no error.
         """
-        star_ndx = int(self.config[i].get("star_ndx", 0))
+        star_ndx = self.resolve_star_ndx(
+            self.config[i].get("star_ndx"),
+            f"[{self.prefix}] {self.names[i]} star_ndx",
+        )
         ra = self.config_manager.resolve("star", "ra", element=star_ndx)
         dec = self.config_manager.resolve("star", "dec", element=star_ndx)
         if not (ra["user_modified"] and dec["user_modified"]):

@@ -8,6 +8,57 @@ from ..physics_registry import PHYSICS_REGISTRY
 from .parameter import ElementExpression, Parameter
 
 
+def resolve_star_ref(ref, star_names, where):
+    """Star INDEX from a name, a ``star.<name>``/``star.<i>`` path, or an index.
+
+    The one translator behind every user-facing "index or name" star
+    reference: an instrument's or a band's ``star_ndx:``, an SED
+    ``photType`` entry, a relation component's ``star:`` key.  It existed
+    three times with three messages and, worse, was simply absent from the
+    two schemas that advertised it -- ``rvinstrument`` and ``band`` both
+    documented ``star_ndx`` as "Index or name" while every consumer called
+    ``int()`` on it, so a name crashed with a raw ValueError (review 3.5.1).
+
+    ``where`` names the offending config location in the error, since only
+    the caller knows it ("band 'I' star_ndx", "photType", "mann 'B'").
+    ``star_names`` may be empty, in which case only integers and digit
+    strings resolve -- a caller running before the star instances are known
+    still gets the historical behaviour rather than a spurious failure.
+    """
+    names = list(star_names or [])
+    n = len(names)
+
+    def _bad(reason):
+        known = f" Known stars: {names}." if names else ""
+        return ValueError(
+            f"{where}: {reason}.{known}"
+            + (f" Valid indices are 0..{n - 1}." if n else "")
+        )
+
+    # bool is an int in Python; `star_ndx: true` is a typo, not star 1.
+    if isinstance(ref, bool):
+        raise _bad(f"invalid star reference {ref!r}")
+    if isinstance(ref, (int, np.integer)):
+        idx = int(ref)
+    elif isinstance(ref, str):
+        # A path spelling ("star.B", "star.1") names the same element as the
+        # bare one; only the last segment selects.
+        key = ref.split(".")[-1]
+        if key in names:
+            idx = names.index(key)
+        else:
+            try:
+                idx = int(key)
+            except ValueError:
+                raise _bad(f"unknown star '{ref}'") from None
+    else:
+        raise _bad(f"invalid star reference {ref!r}")
+
+    if n and not 0 <= idx < n:
+        raise _bad(f"star index {idx} is out of range")
+    return idx
+
+
 class Component(ABC):
     """
     Base class for all physical and instrumental components in the system.
@@ -236,6 +287,36 @@ class Component(ABC):
         never showed.
         """
         return isinstance(getattr(comp, name, None), Parameter)
+
+    def declared_star_names(self):
+        """Star instance names from the raw system config, or ``[]``.
+
+        Read from ``config_manager.system_config`` rather than from
+        ``system.star``, so a NAME resolves at construction and at stage 1 --
+        before the Star component exists.  Empty when the config manager has
+        no system config (a test stub), which ``resolve_star_ref`` treats as
+        "indices only".
+        """
+        cfg = getattr(self.config_manager, "system_config", None) or {}
+        entries = cfg.get("star")
+        if not isinstance(entries, list):
+            return []
+        return [
+            str(e.get("name", i))
+            for i, e in enumerate(entries)
+            if isinstance(e, dict)
+        ]
+
+    def resolve_star_ndx(self, ref, where, default=0):
+        """This component's ``star_ndx``-style reference as a star index.
+
+        ``None`` (the key absent) takes ``default``; anything else goes
+        through :func:`resolve_star_ref`, so the name form the schemas
+        advertise actually works.
+        """
+        if ref is None:
+            return int(default)
+        return resolve_star_ref(ref, self.declared_star_names(), where)
 
     def add_parameter(self, model, param_name, system, context_nodes=None):
         context_nodes = context_nodes or {}

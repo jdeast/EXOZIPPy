@@ -99,7 +99,11 @@ class Band(Component):
                 "required": False,
                 "doc": (
                     "Index or name of the star whose limb darkening this "
-                    "band models. Default 0."
+                    "band models ('star.<name>' works too). Default 0, but "
+                    "the LD consumers are asked: a value contradicting the "
+                    "star a transit / finite-source microlensing / RM "
+                    "consumer reads is refused, and with the key absent "
+                    "their answer is used."
                 ),
             },
             {
@@ -163,7 +167,17 @@ class Band(Component):
         # resolved answer (declaration validated against, or derived from,
         # the LD consumers) is written by _resolve_ld_stars at stage 3; this
         # is the provisional value anything reading earlier would see.
-        self.star_ndx_declared = [c.get("star_ndx") for c in self.config]
+        # Index or name (as the schema advertises), resolved through the one
+        # shared translator; None where the key is absent.
+        self.star_ndx_declared = [
+            None
+            if c.get("star_ndx") is None
+            else self.resolve_star_ndx(
+                c["star_ndx"],
+                f"[{self.prefix}] band '{c.get('name', i)}' star_ndx",
+            )
+            for i, c in enumerate(self.config)
+        ]
         self.star_indices = [
             0 if d is None else int(d) for d in self.star_ndx_declared
         ]

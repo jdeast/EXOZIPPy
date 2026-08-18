@@ -26,7 +26,16 @@ class RVInstrument(Instrument):
         # Which star the RVs are of; its Doppler signal is the sum over
         # every orbit that star is a body of (planetary reflex and stellar
         # companions alike).
-        self.star_ndx = [int(c.get("star_ndx", 0)) for c in self.config]
+        # Index or name (as the schema below advertises): resolved through
+        # the one shared translator, which reads the star instance names off
+        # the raw system config -- available here, where system.star is not.
+        self.star_ndx = [
+            self.resolve_star_ndx(
+                c.get("star_ndx"),
+                f"[{self.prefix}] {c.get('name', i)} star_ndx",
+            )
+            for i, c in enumerate(self.config)
+        ]
         # Rossiter-McLaughlin: a file may set `rm: <orbit_name>` to add the
         # in-transit RM distortion of that orbit to this instrument's RV
         # model (off by default -> the RV likelihood is unchanged). Optional
@@ -123,8 +132,9 @@ class RVInstrument(Instrument):
                 "accepts": ["star"],
                 "required": False,
                 "doc": (
-                    "Index or name of the observed star (default 0). The RV "
-                    "model sums orbit.K over every orbit containing this star."
+                    "Index or name of the observed star (default 0); the "
+                    "'star.<name>' path spelling works too. The RV model "
+                    "sums orbit.K over every orbit containing this star."
                 ),
             },
             {
