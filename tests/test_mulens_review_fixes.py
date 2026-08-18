@@ -5,6 +5,7 @@ import logging
 import warnings
 
 import numpy as np
+import pytensor.tensor as pt
 import pytest
 
 from conftest import _DummyComponent, _DummyConfigManager, _DummySystem
@@ -12,10 +13,12 @@ from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
+    MulensMagOp,
     VBMDirectMagOp,
     _build_binary_model,
     _build_pspl_model,
     _dev_skycoord,
+    _MagGradOp,
 )
 from exozippy.run import KNOWN_SAMPLER_KEYS
 
@@ -256,6 +259,104 @@ def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one():
     assert len(messages) == 2
     assert any("non-finite" in m for m in messages)
     assert any("SetLensGeometry" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Gradient honesty on the Op path (reviews 1.6.3, 2.6.5)
+# ---------------------------------------------------------------------------
+
+
+def _mag_op_output(op, n_times=7):
+    """Apply an Op to symbolic inputs and hand back (output, param vector)."""
+    p = pt.dvector("p")
+    times = pt.dvector("t")
+    obs = pt.dmatrix("obs")
+    return op(p, times, obs), p
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        MulensMagOp(COORDS, mag_method="point_source"),
+        BinaryLensMagOp(COORDS, mag_method="auto_vbbl", use_rho=False),
+    ],
+    ids=["pspl", "binary"],
+)
+def test_mulensmodel_op_refuses_to_be_differentiated(op):
+    """
+    Given a MulensModel-backed magnification Op,
+    When a gradient is requested through it,
+    Then it raises rather than quietly wiring a forward-difference _MagGradOp
+      that burns N_params+1 full light curves per step for an O(eps) answer
+      (review 2.6.5) -- the same refusal VBMDirectMagOp.pullback already makes.
+    """
+    # Arrange
+    out, p = _mag_op_output(op)
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="no gradient"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_vbm_direct_op_refuses_to_be_differentiated():
+    """
+    Given the default binary backend,
+    When a gradient is requested through it,
+    Then it raises -- pinned here beside the MulensModel Ops so the two
+      backends cannot drift apart on this again.
+    """
+    # Arrange
+    out, p = _mag_op_output(VBMDirectMagOp(COORDS, n_companions=1))
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="no gradient"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_mag_grad_op_refuses_a_second_derivative():
+    """
+    Given _MagGradOp (the forward-difference gradient machinery, now reachable
+      only if someone revives it),
+    When a second derivative is requested,
+    Then it RAISES rather than returning DisconnectedType: the output IS
+      linear in the incoming cotangent, so "disconnected" would be a false
+      claim handing back an absent gradient, while a Hessian built on a
+      first-order finite difference is numerically meaningless anyway
+      (review 1.6.3).
+    """
+    # Arrange
+    grad_op = _MagGradOp(_build_pspl_model, COORDS, "point_source")
+    p = pt.dvector("p")
+    times = pt.dvector("t")
+    obs = pt.dmatrix("obs")
+    g = pt.dvector("g")
+    out = grad_op(p, times, obs, g)
+
+    # Act / Assert
+    with pytest.raises(NotImplementedError, match="second derivative"):
+        pt.grad(pt.sum(out), g)
+    with pytest.raises(NotImplementedError, match="second derivative"):
+        pt.grad(pt.sum(out), p)
+
+
+def test_mag_grad_op_still_declares_the_cotangent_connected():
+    """
+    Given _MagGradOp,
+    When its connection_pattern is read,
+    Then the incoming cotangent is CONNECTED -- the output really is linear in
+      it, and declaring it disconnected (the obvious way to "fix" the wrongly
+      shaped VJP it used to return) would let pytensor skip pullback and hand
+      back an absent gradient instead of the error above.
+    """
+    # Arrange
+    grad_op = _MagGradOp(_build_pspl_model, COORDS, "point_source")
+
+    # Act
+    pattern = grad_op.connection_pattern(None)
+
+    # Assert
+    assert pattern[0] == [True]  # parameters
+    assert pattern[3] == [True]  # incoming cotangent
 
 
 def test_lens_rejects_missing_body_component():

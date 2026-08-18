@@ -6,7 +6,6 @@ import numpy as np
 import pytensor.tensor as pt
 import VBMicrolensing
 from astropy.coordinates import SkyCoord
-from pytensor.gradient import DisconnectedType
 from pytensor.graph import Apply, Op
 
 from exozippy.compat import patch_mulensmodel_method_order
@@ -266,20 +265,29 @@ class _MagOpBase(Op):
         outputs[0][0] = np.asarray(A)
 
     def pullback(self, inputs, outputs, cotangents):
-        p, times, obs_pos = inputs
-        g = cotangents[0]
-        grad_op = _MagGradOp(
-            type(self)._builder,
-            self.coords,
-            self.mag_method,
-            self.use_rho,
-            self.bandpass,
+        # Deliberately loud, and deliberately the SAME refusal
+        # VBMDirectMagOp.pullback makes (review 2.6.5).  This Op used to hand
+        # back a _MagGradOp instead, which silently wired N_params+1 full
+        # MulensModel light curves per gradient evaluation -- a forward
+        # difference, so a NUTS step paid that cost for a gradient carrying
+        # O(eps) error, and nothing anywhere said so.  We do not support
+        # gradient-based samplers through the Op path (Lens.sampler_requirements
+        # already declares that), so an attempt to build one is a
+        # configuration error, not something to serve slowly and inaccurately.
+        #
+        # This is the MulensModel A/B reference backend, so the stakes are
+        # lower than VBMDirectMagOp's -- but the failure mode is worse
+        # precisely because it "works": the fit runs, burns the CPU, and
+        # returns a posterior nobody has reason to distrust.  The symbolic
+        # PSPL path (Lens.get_magnification) is separate and STAYS
+        # differentiable; that is what NUTS-compatible microlensing means
+        # here.  _MagGradOp is kept as the recipe if this is ever revisited.
+        raise NotImplementedError(
+            f"{type(self).__name__} has no gradient; use the PTDE (or another "
+            "gradient-free) sampler for binary/finite-source microlensing. "
+            "Point-source PSPL takes the symbolic path, which is "
+            "differentiable."
         )
-        return [
-            grad_op(p, times, obs_pos, g),
-            DisconnectedType()(),
-            DisconnectedType()(),
-        ]
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
@@ -716,16 +724,45 @@ class _MagGradOp(Op):
         outputs[0][0] = out
 
     def pullback(self, inputs, outputs, cotangents):
-        return [
-            DisconnectedType()(),
-            DisconnectedType()(),
-            DisconnectedType()(),
-            cotangents[0],
-        ]
+        # This Op has no second derivative, and says so rather than inventing
+        # one (review 1.6.3).  What it used to return was wrong twice over:
+        # `cotangents[0]` for the incoming-cotangent input g is n_params long
+        # while the true VJP there is TIMES-shaped (this Op computes
+        # out[i] = sum_t g[t] * D[i,t], so d out / d g is D itself), and the
+        # params input was handed a DisconnectedType while connection_pattern
+        # declared it connected.
+        #
+        # RAISE, not DisconnectedType, and the distinction matters.
+        # DisconnectedType asserts that the output does not depend on that
+        # input, and for g that assertion is FALSE -- the output is exactly
+        # linear in g.  Declaring it disconnected would return a silently
+        # ABSENT gradient where a real one exists, which is the same class of
+        # bug this comment is about, only quieter.
+        #
+        # Nothing is lost by refusing.  A second derivative built on top of a
+        # FIRST-ORDER FINITE DIFFERENCE carries O(eps) error on a quantity
+        # that is itself only O(eps) accurate, so the Hessian would be
+        # numerically meaningless even if it were implemented correctly.
+        # There is no future in which second-order support is added inside
+        # this Op rather than by rewriting the magnification in pytensor or
+        # porting a differentiable library.
+        raise NotImplementedError(
+            "_MagGradOp has no second derivative: its own output is a "
+            "forward-difference approximation, so any Hessian built on it "
+            "would be numerically meaningless.  Use a gradient-free sampler "
+            "(PTDE) for binary/finite-source microlensing."
+        )
 
     # Backward compatibility with PyTensor < 3 which calls grad() instead of pullback()
     def grad(self, inputs, gradients):
         return self.pullback(inputs, [], gradients)
 
     def connection_pattern(self, node):
+        # Honest, and honest is what makes the raise above reachable.  Both
+        # the parameter vector and the incoming cotangent g genuinely feed the
+        # output, so both are connected; declaring g disconnected -- the
+        # obvious way to "fix" the wrong VJP it used to return -- would let
+        # pytensor skip pullback entirely and hand back an absent gradient
+        # instead of the error.  times/obs_pos stay False, matching
+        # _MagOpBase: they are data, never differentiated against.
         return [[True], [False], [False], [True]]
