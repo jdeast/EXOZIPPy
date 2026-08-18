@@ -64,7 +64,7 @@ the left** that is counterclockwise, which is why the astrometry sky panels inve
 horizontal axis (`astrometryinstrument.py`, `meta["x_inverted"] = True  # East to the
 left`).
 
-Skowron+2011 Appendix A.6 states the same thing as "all coordinate systems are
+Skowron+2011 Section A.6 states the same thing as "all coordinate systems are
 right-handed, either in two dimensions [(N,E), ...]": `(N, E)` is a right-handed 2-D pair,
 so `N -> E` is the positive sense. C1's left-handedness and C2's right-handed `(N, E)` pair
 are not in conflict -- C1 is about the 3-D triple including the line of sight, C2 about the
@@ -90,16 +90,20 @@ and the symbolic path share one line of sight by construction, not by coincidenc
 - Pinned by: `tests/test_skyframe.py::test_sky_basis_is_the_spherical_tangent_basis`,
   `::test_cross_product_construction_agrees`.
 
-ASCII picture of the sky plane as EXOZIPPy plots it:
+ASCII picture of the sky plane as EXOZIPPy plots it (only the POSITIVE half-axes carry
+arrowheads):
 
-                      N (+X)
-                        ^
-                        |
-                        |
-          E (+Y) <------o------>          +Z points AWAY from the reader
-                        |                 (into the page): the observer is
-                        |                 in front, the source behind.
-                        v
+                              N (+X)
+                                ^
+                                |
+                                |
+            E (+Y) <------------o
+                                |
+                                |
+
+    +Z points AWAY from the reader, into the page: the observer is in
+    front of the page and the source behind it.  So the triple is
+    left-handed, X x Y = -Z.
 
     Positive angles (PA, bigomega, phi_pi, alpha) rotate N -> E, i.e.
     counterclockwise AS DRAWN.
@@ -110,9 +114,13 @@ ASCII picture of the sky plane as EXOZIPPy plots it:
 
 ### C4 -- times are BJD_TDB
 
-Every epoch entering the microlensing model is BJD_TDB. Files in another time system are
-converted at load by the shared `Instrument._read_data` machinery (`time_scale:`,
-`time_frame:`, `time_offset:`); see `src/exozippy/components/instrument.md`.
+Every epoch entering the microlensing model -- data times, `t_0`, `t0_par` -- is BJD_TDB.
+Files in another time system are converted at load by the shared `Instrument._read_data`
+machinery (`time_scale:`, `time_frame:`, `time_offset:`); see
+`src/exozippy/components/instrument.md`. Microlensing has one extra rule:
+`MulensInstrument._reject_time_spec_with_mmexofast` hard-errors when a time spec and an
+active MMEXOFAST seeding run are combined, because MMEXOFAST reads the raw files itself
+and would see the unconverted times.
 
 ### C5 -- the geocentric frame, anchored at `t0_par`
 
@@ -157,7 +165,7 @@ Earth's is small (annual parallax). Rows of zeros mean no parallax.
     pi_rel     = 1000/d_lens - 1000/d_source     (mas, with d in pc)
 
 - Implemented in: `mulensing/symbolic_physics.py` `RELATIONS`.
-- This is Skowron+2011 A.6's rule verbatim: "all relative motion conventions are defined by
+- This is Skowron+2011 Section A.6's rule verbatim: "all relative motion conventions are defined by
   the motion of the lens (with the source thought of as fixed)".
 
 ---
@@ -186,12 +194,15 @@ the East-of-North sense** (C2). Then the LENS-minus-SOURCE angular separation, i
               + [(t - t_0)/t_E] * tau_hat
               - (pi_rel/theta_E) * (delta_N, delta_E)
 
-with `(delta_N, delta_E) = observer_sky_offset(...)` in AU and `pi_rel` in mas, so that the
-last term is C10's parallax excursion resolved into its `tau_hat` and `beta_hat` components.
-Two consequences worth stating plainly:
+-- everything in `(N, E)` components, with
+`(delta_N, delta_E) = observer_sky_offset(...)` in AU and `pi_rel` in mas per AU of
+observer displacement (the standard microlensing shorthand; the code writes exactly
+`-(pi_rel/theta_E) * delta_n` and likewise for E). Rotating that last term onto
+`(tau_hat, beta_hat)` is what gives C10's two scalar equations. Two consequences worth
+stating plainly:
 
 - `u_0` is the coefficient of `beta_hat`, so **`u_0 > 0` means the lens passes the source on
-  the lens's right** -- exactly Skowron+2011 A.6's sign rule.
+  the lens's right** -- exactly Skowron+2011 Section A.6's sign rule.
 - `A(u)` depends only on `|u|`, so the sign of `u_0` is observable only through parallax;
   see C23.
 
@@ -226,9 +237,9 @@ displacement **of the source** per unit parallax (what MulensModel calls `delta`
 The two displays are the same equations. **"Minus on the East terms" is not a
 convention-free statement** and should not be repeated without saying which offset is
 meant: in the first display `tau` carries a minus on BOTH N and E, in the second it carries
-a plus on both. (An older summary of this rule in the project memory said only "minus on
-the East terms, per Gould 2004 / Yee+2014"; that phrasing is ambiguous at best and was
-already superseded by the detailed note, which says minus on both in `tau`.)
+a plus on both. The shorthand "minus on the East terms, per Gould 2004 / Yee+2014" has
+circulated in this project's notes and in review text; retire it -- it names neither offset
+and is not true of `tau` under either reading. Quote one of the two displays above instead.
 
 - Implemented in: `Lens.get_magnification` (symbolic, first display) and
   `op.VBMDirectMagOp._compute` + `_deltas` (numeric, second display).
@@ -248,7 +259,8 @@ already superseded by the detailed note, which says minus on both in `tau`.)
 
 ### C11 -- the two offsets differ by a sign because they are DIFFERENT QUANTITIES
 
-`observer_sky_offset` and `parallax_factors` do not carry different conventions. `observer_sky_offset` is where the OBSERVER moved;
+`observer_sky_offset` and `parallax_factors` do not carry different conventions.
+`observer_sky_offset` is where the OBSERVER moved;
 `parallax_factors` is where the SOURCE appears to move, which for an observer displaced by
 `R` looking at a source at distance `d` is `-R/d`. `skyframe.parallax_factors` is therefore
 *defined* as the negative of the other rather than written out a second time. Microlensing
@@ -271,7 +283,7 @@ lens positions with the primary at the origin and then shifts by `pos -= m @ pos
 source coordinates are not shifted, so they are COM-referenced. The single-companion branch
 hands `(s, q, x, y)` to VBMicrolensing, which is COM-centred by the same convention.
 
-Skowron+2011 A.6 requires the "system center" to be stated explicitly; this is ours.
+Skowron+2011 Section A.6 requires the "system center" to be stated explicitly; this is ours.
 
 ### C13 -- lengths are in Einstein radii of the TOTAL lens mass
 
@@ -342,11 +354,11 @@ backends take degrees, which is what `Lens._alpha_deg` converts to.
 
 ## 5. Mappings to other conventions
 
-### C17 -- Skowron et al. (2011) Appendix A: IDENTICAL, as A.6 defines it
+### C17 -- Skowron et al. (2011) Appendix A: IDENTICAL, as Section A.6 defines it
 
-Appendix A.6 states three rules, and EXOZIPPy satisfies all three unchanged:
+Section A.6 states three rules, and EXOZIPPy satisfies all three unchanged:
 
-| Skowron A.6 | EXOZIPPy |
+| Skowron Section A.6 | EXOZIPPy |
 |---|---|
 | "the sign of `u_0` is positive if the lens passes the source on its right" | C9 |
 | "`phi_pi = atan2(pi_E_E, pi_E_N)` is the angle of lens motion, measured counter-clockwise relative to North" | C8 |
@@ -368,7 +380,7 @@ MulensModel's `Trajectory._get_xy` line for line.
 **One caveat for anyone chasing a 180-degree offset.** MulensModel's `Trajectory` class
 docstring says it "follows the conventions defined in Appendix A of Skowron et al. (2011)
 except the definition of *alpha*, which is shifted by 180 deg", and its `_get_xy` carries
-the same comment. Taking Skowron A.6 at its word -- "`alpha_0` is the angle of the LENS
+the same comment. Taking Skowron Section A.6 at its word -- "`alpha_0` is the angle of the LENS
 MOTION ... relative to the primary-secondary axis" -- that note does not hold: with
 `alpha = 0` MulensModel's source runs from `x = +tau_E` to `x = -tau_E`, so the lens moves
 relative to the source in the `+x` direction, which is primary-toward-secondary, which is
@@ -461,11 +473,12 @@ while the fitted `alpha` (307.686) sat 0.3 degrees from the light curve's own op
 ### C23 -- the discrete degeneracies, and what they do to the signs
 
 - **`(u_0, alpha) -> -(u_0, alpha)`** is EXACT for a static binary with no parallax
-  (Skowron A12). This is why `alpha` and the sign of `u_0` can only ever be established
+  (Skowron Eq. A12). This is why `alpha` and the sign of `u_0` can only ever be established
   together.
-- **The ecliptic degeneracy** `(u_0, alpha, pi_E_perp) -> -(u_0, alpha, pi_E_perp)`
-  (Skowron A13) is approximate but strong for bulge sources, which is why `examples/ob140939`
-  seeds all four Yee et al. (2015) basins.
+- **The ecliptic degeneracy**: `(u_0, pi_E_perp) -> -(u_0, pi_E_perp)` for a point lens
+  (Skowron Eq. A6) and `(u_0, alpha, pi_E_perp) -> -(u_0, alpha, pi_E_perp)` for a static binary
+  (Skowron Eq. A13). Approximate, but strong for bulge sources, which is why the point-lens
+  `examples/ob140939` seeds all four Yee et al. (2015) basins rather than one.
 - **Close/wide**: `log_s -> -log_s` (C13). Sampling `log_s` makes it an exact reflection of
   the domain onto itself.
 - `U_0_FLOOR` is applied to `|u_0|` with the sign kept
