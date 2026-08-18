@@ -13,6 +13,7 @@ from scipy.stats import kstest
 
 from conftest import requires_fork
 from exozippy.components.parameter import Parameter
+from exozippy.samplers._common import resolve_start_population
 from exozippy.samplers.ptde import (
     _PROBE_FLAT_SCALE,
     _active_rungs,
@@ -638,6 +639,88 @@ def test_make_starts_falls_back_when_system_has_no_jitter():
     # ASSERT
     assert len(starts) == 6
     assert all(np.isfinite(float(logp_fn(s))) for s in starts)
+
+
+# ---------------------------------------------------------------------------
+# Chain initialization: the retry loop's give-up, and the initvals bypass
+# (review 7.4.3, 2.4.4)
+# ---------------------------------------------------------------------------
+
+
+def test_chain_init_raises_when_no_finite_start_can_be_found():
+    """
+    Given a model whose whole start region evaluates to lp = -inf,
+    When _make_starts exhausts its retry budget,
+    Then it raises a RuntimeError naming the chain and pointing at
+      initval/bounds -- rather than returning a population of -inf starts
+      that every later diagnostic would have to explain.
+    """
+    # ARRANGE
+    model = _simple_model()
+    raw_start = model.initial_point()
+    rng = np.random.default_rng(0)
+
+    def _all_minus_inf(_point):
+        return -np.inf
+
+    # raw_scales short-circuits the probe, which would otherwise spend its
+    # own budget on the same flat -inf surface.
+    scales = {
+        k: np.ones_like(np.asarray(v, dtype=float))
+        for k, v in raw_start.items()
+    }
+
+    # ACT / ASSERT
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        _make_starts(
+            2, raw_start, _all_minus_inf, rng, system=None, raw_scales=scales
+        )
+
+
+def test_explicit_initvals_are_used_verbatim_and_length_checked():
+    """
+    Given an explicit initvals list,
+    When the start population is resolved,
+    Then those dicts are the population, in order -- and a list whose length
+      does not match n_chains RAISES.
+
+    The list is consumed positionally (start j becomes chain j), so a wrong
+    length mispairs chains with starts, or hands the sampler fewer members
+    than it will index.  The check used to be a bare `assert`, which
+    `python -O` compiles out entirely (review 2.4.4).
+    """
+    # ARRANGE
+    model = _simple_model()
+    raw_start = model.initial_point()
+    initvals = [
+        {k: np.asarray(v, dtype=float) + j for k, v in raw_start.items()}
+        for j in range(3)
+    ]
+
+    # ACT
+    starts, seed_index = resolve_start_population(
+        model,
+        _MinimalSystem(),
+        3,
+        model.compile_logp(),
+        np.random.default_rng(0),
+        raw_start,
+        initvals=initvals,
+    )
+
+    # ASSERT
+    assert starts is initvals
+    assert seed_index == [0, 0, 0]
+    with pytest.raises(ValueError, match="4 chains per rung"):
+        resolve_start_population(
+            model,
+            _MinimalSystem(),
+            4,
+            model.compile_logp(),
+            np.random.default_rng(0),
+            raw_start,
+            initvals=initvals,
+        )
 
 
 @requires_fork

@@ -816,10 +816,23 @@ def resolve_start_population(
     to system.get_raw_starts, and further to a bare raw_start (single start)
     for minimal test/system stubs that don't implement get_raw_starts at all.
 
+    The explicit-``initvals`` bypass RAISES on a length mismatch rather than
+    asserting it: `python -O` compiles an assert out entirely, and the list
+    is consumed positionally (start j becomes chain j), so a wrong-length
+    list would silently pair chains with the wrong starts -- or, shorter
+    than n_chains, hand the sampler a population it then indexes past.
+
     Returns (t1_starts, chain_seed_index).
     """
     if initvals is not None:
-        assert len(initvals) == n_chains, "len(initvals) must equal n_chains"
+        if len(initvals) != n_chains:
+            raise ValueError(
+                f"initvals has {len(initvals)} start(s) but there are "
+                f"{n_chains} chains per rung; the list is consumed "
+                f"positionally, so it must have exactly one entry per "
+                f"chain. Pass n_chains={len(initvals)}, or omit initvals to "
+                f"start from the solved point."
+            )
         return initvals, [0] * n_chains
     if raw_starts is None:
         if hasattr(system, "get_raw_starts"):
