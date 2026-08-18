@@ -535,6 +535,85 @@ def ptde_async_sample(
     poll_timeout = (
         max(eval_timeout / 4.0, 0.05) if eval_timeout is not None else None
     )
+    # How often the stale scan below may run.  It is O(in-flight), so it is
+    # paced by a WALL CLOCK rather than by a completion count: the run's
+    # completion rate spans microseconds (a toy model) to seconds (a
+    # near-caustic binary lens), and either extreme would make a
+    # "scan every N results" rule either useless or expensive.
+    timeout_scan_interval = poll_timeout
+    next_timeout_scan = [np.inf]
+    if timeout_scan_interval is not None:
+        next_timeout_scan[0] = time.time() + timeout_scan_interval
+
+    def _enforce_eval_timeout():
+        """Write off every in-flight submission once one has gone stale.
+
+        There is no way to kill a single hung worker in a
+        multiprocessing.Pool without tearing down the whole pool (same
+        limitation as ptde.py's _map_logp_timeout), so any OTHER
+        legitimately-still-running slot is also abandoned and immediately
+        resubmitted with a fresh proposal.
+
+        THIS MUST BE REACHABLE WHILE THE QUEUE IS BUSY.  It used to live
+        exclusively inside `except queue.Empty`, which is a state a healthy
+        run essentially never reaches: with hundreds of slots resolving in
+        milliseconds there is always another result waiting, so a genuinely
+        hung logp -- the exact scenario eval_timeout exists for -- froze its
+        slot for the whole run.  A frozen T=1 slot is worse than a lost
+        proposal: its chain stops recording, so min(per_chain_draws) never
+        reaches `draws`, the convergence checks stop firing, and only
+        maxtime or Ctrl+C ends the run (review 1.4.1).
+
+        No-op without a pool: in serial mode the evaluation happens inline
+        in _submit, so every in_flight_meta entry is already COMPLETE and
+        merely waiting to be read off the queue -- scanning their submission
+        times would write off finished work and then try to recycle a pool
+        that does not exist.  warn_serial_eval_timeout says so at startup.
+
+        Returns True when anything was written off.
+        """
+        nonlocal pool
+        if eval_timeout is None or pool is None:
+            return False
+        now = time.time()
+        stale = [
+            sid
+            for sid, (_, _, _, t0, _) in in_flight_meta.items()
+            if now - t0 > eval_timeout
+        ]
+        if not stale:
+            return False
+        n_eval_timeouts[0] += len(stale)
+        for sid in stale:
+            sk, si, stale_prop, _, _ = in_flight_meta[sid]
+            phys_params, raw_params = _common.describe_proposal(
+                stale_prop,
+                raw_to_phys,
+                raw_var_names,
+                out_var_names,
+            )
+            logger.error(
+                f"PTDE-async: logp call exceeded "
+                f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
+                f"chain {si} — rejecting this proposal.\n"
+                f"  physical params: {phys_params}\n"
+                f"  raw params: {raw_params}"
+            )
+        # Write off EVERY in-flight submission (the pool recycle kills the
+        # workers running them). A written-off result that nevertheless
+        # arrives (it raced us through the queue) finds its sub_id gone and
+        # is dropped, so it can never be double-processed (1.15b).
+        lost = list(in_flight_meta.items())
+        in_flight_meta.clear()
+        in_flight[0] -= len(lost)
+        logger.warning(
+            f"PTDE-async: recycling worker pool ({len(stale)} timeout(s))"
+        )
+        pool = _common.recycle_pool(pool, actual_cores)
+        if not stopping[0]:
+            for _, (sk, si, _, _, _) in lost:
+                _submit(sk, si)
+        return True
 
     try:
         for k, i in slot_list:
@@ -544,51 +623,9 @@ def ptde_async_sample(
             try:
                 sub_id, result = result_q.get(timeout=poll_timeout)
             except queue.Empty:
-                # eval_timeout enforcement: scan for stale in-flight slots.
-                # There is no way to kill a single hung worker in a
-                # multiprocessing.Pool without tearing down the whole pool
-                # (same limitation as ptde.py's _map_logp_timeout), so any
-                # OTHER legitimately-still-running slot is also abandoned
-                # and immediately resubmitted with a fresh proposal.
-                now = time.time()
-                stale = [
-                    sid
-                    for sid, (_, _, _, t0, _) in in_flight_meta.items()
-                    if now - t0 > eval_timeout
-                ]
-                if stale:
-                    n_eval_timeouts[0] += len(stale)
-                    for sid in stale:
-                        sk, si, stale_prop, _, _ = in_flight_meta[sid]
-                        phys_params, raw_params = _common.describe_proposal(
-                            stale_prop,
-                            raw_to_phys,
-                            raw_var_names,
-                            out_var_names,
-                        )
-                        logger.error(
-                            f"PTDE-async: logp call exceeded "
-                            f"eval_timeout={eval_timeout:.0f}s at rung {sk} "
-                            f"chain {si} — rejecting this proposal.\n"
-                            f"  physical params: {phys_params}\n"
-                            f"  raw params: {raw_params}"
-                        )
-                    # Write off EVERY in-flight submission (the pool recycle
-                    # kills the workers running them). A written-off result
-                    # that nevertheless arrives (it raced us through the
-                    # queue) finds its sub_id gone and is dropped, so it can
-                    # never be double-processed (1.15b).
-                    lost = list(in_flight_meta.items())
-                    in_flight_meta.clear()
-                    in_flight[0] -= len(lost)
-                    logger.warning(
-                        f"PTDE-async: recycling worker pool "
-                        f"({len(stale)} timeout(s))"
-                    )
-                    pool = _common.recycle_pool(pool, actual_cores)
-                    if not stopping[0]:
-                        for _, (sk, si, _, _, _) in lost:
-                            _submit(sk, si)
+                _enforce_eval_timeout()
+                if timeout_scan_interval is not None:
+                    next_timeout_scan[0] = time.time() + timeout_scan_interval
                 continue
 
             meta = in_flight_meta.pop(sub_id, None)
@@ -598,6 +635,19 @@ def ptde_async_sample(
                 continue
             k, i, prop, _, gen_at_submit = meta
             in_flight[0] -= 1
+
+            # Same scan on the RESULT path, paced by the wall clock so a
+            # busy queue cannot hide a hung slot (review 1.4.1).  It runs
+            # AFTER the result in hand has been taken off the books, so a
+            # write-off never discards an evaluation that already finished.
+            # A scan that finds nothing stale touches no state and draws no
+            # random numbers, so a run in which no evaluation ever times out
+            # is bit-for-bit the run this sampler produced before.
+            if timeout_scan_interval is not None:
+                now = time.time()
+                if now >= next_timeout_scan[0]:
+                    next_timeout_scan[0] = now + timeout_scan_interval
+                    _enforce_eval_timeout()
 
             if collect_rung_timing:
                 lp, elapsed = result
