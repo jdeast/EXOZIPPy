@@ -530,6 +530,25 @@ class Orbit(Component):
                 ),
             },
             {
+                # Read by Transit/RVInstrument through
+                # components/globalsearch.search_mode; it lives on the orbit
+                # block because that is the thing being seeded, exactly as
+                # 'mmexofast:' lives on the lens block.  The orbit component
+                # itself never reads it.
+                "key": "global_search",
+                "kind": "option",
+                "accepts": [True, False],
+                "required": False,
+                "doc": (
+                    "Blind period search (BLS on transit photometry, "
+                    "Lomb-Scargle on radial velocities) to seed this orbit's "
+                    "period and conjunction time. Default: run it only when "
+                    "the relaxation engine cannot derive them from the params "
+                    "file. true forces it; false opts out. Single-orbit "
+                    "systems only -- a periodogram peak names no orbit."
+                ),
+            },
+            {
                 "key": "fitvcve",
                 "kind": "option",
                 "accepts": [False],
