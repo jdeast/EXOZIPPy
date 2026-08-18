@@ -129,6 +129,39 @@ def nonfatal_wrapup(what):
         logger.warning("%s failed (non-fatal)", what, exc_info=True)
 
 
+# Samplers that cannot honor `maxtime`, and why.  The three external NUTS
+# backends run their whole chain outside Python's per-draw loop -- the JAX
+# ones inside one jitted scan, nutpie inside Rust -- so there is no point at
+# which a wall-clock check could raise the KeyboardInterrupt that the maxtime
+# mechanism turns into a graceful stop.  PyMC agrees and says so out loud:
+# pm.sample RAISES for a `callback` with any `nuts_sampler` but its own.
+MAXTIME_UNSUPPORTED_METHODS = ("numpyro", "blackjax", "nutpie")
+
+
+def warn_maxtime_unsupported(method, maxtime):
+    """Say so when `maxtime:` cannot be honored by the selected sampler.
+
+    A key that is silently ignored is worse than one that is refused: the
+    whole point of `maxtime` is that a scheduler-bound job stops itself
+    before the queue kills it, so a user who sets it and gets nothing has no
+    partial trace AND no idea why.  demc already warns for exactly this
+    reason (PyMC's population path discards per-draw callbacks); these three
+    were the remaining silent ones.
+
+    Returns True when a warning was emitted, so the check is exercisable
+    without running a fit -- same shape as ``warn_unknown_sampler_keys``.
+    """
+    if maxtime is None or method not in MAXTIME_UNSUPPORTED_METHODS:
+        return False
+    logger.warning(
+        f"{method}: maxtime={float(maxtime):.0f}s is IGNORED -- external NUTS "
+        f"samplers run the chain outside Python's per-draw loop and invoke no "
+        f"callback, so there is nothing to interrupt. Use method: nuts, "
+        f"ptde_async or demcz for a wall-clock cap."
+    )
+    return True
+
+
 def warn_unknown_sampler_keys(sampler_cfg):
     """Warn about `sampler:` keys this module does not consume.
 
@@ -501,6 +534,12 @@ def _run_fit(config, gui, user_params=None):
                         f"Install with: poetry install --extras jax"
                     )
                     method = "nuts"
+
+            # Placed AFTER the import fallback above, so a config asking for
+            # numpyro on a box without it -- which lands on PyMC NUTS, where
+            # maxtime IS honored -- is not warned about a limit that will be
+            # applied.
+            warn_maxtime_unsupported(method, maxtime)
 
             if method == "ptde":
                 idata = ptde_sample(
