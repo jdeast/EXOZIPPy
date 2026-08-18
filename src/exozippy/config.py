@@ -576,6 +576,20 @@ RANK_DERIVED_USER = 80  # Solved using ONLY Rank 100s
 RANK_DERIVED_DATA = 60  # auto-estimated (e.g., K-band mass, RV offsets)
 RANK_DERIVED_MIXED = 40  # Solved using a mix of User and Defaults
 RANK_DEFAULT = 20  # From defaults.yaml
+# A WEAK data hint: above defaults.yaml, below every solver rank.  Its one
+# use today is the microlensing distance hint, which must beat the 10 pc
+# default while yielding to anything the engine can derive.
+RANK_DERIVED_DATA_WEAK = 30
+
+# Which ranks mean "a component pushed this from the DATA", as opposed to
+# "the relaxation engine derived it".  A SET and not a numeric band, because
+# the two data ranks do not bracket a contiguous range: RANK_DERIVED_MIXED
+# (40) sits between them and RANK_DERIVED_USER (80) sits above them, and both
+# are solver ranks.  So the obvious `>= 30 and < RANK_USER` test would report
+# every engine-derived value as data-derived -- the mirror of the bug this
+# replaces, which hardcoded the two literals and so reported any NEW data
+# rank as "solved".  Add a rank here in the same commit that introduces it.
+DATA_RANKS = frozenset({RANK_DERIVED_DATA, RANK_DERIVED_DATA_WEAK})
 
 
 """ 
@@ -2160,9 +2174,12 @@ class ConfigManager:
             return "default"
         if rank >= RANK_USER:
             return "user"
-        # Microlensing distance hint (rank 30) and data-derived estimates
-        # (RANK_DERIVED_DATA = 60) both come from the data channel.
-        if rank == RANK_DERIVED_DATA or rank == 30:
+        # Every rank a component pushes a hint at -- see DATA_RANKS for why
+        # membership and not a numeric band.  Hardcoding the two literals
+        # here meant any NEW intermediate data rank silently reported
+        # "solved", which is a wrong provenance in the startup table, in
+        # export_solution and in the GUI.
+        if rank in DATA_RANKS:
             return "data"
         if rank > RANK_DEFAULT:
             return "solved"
