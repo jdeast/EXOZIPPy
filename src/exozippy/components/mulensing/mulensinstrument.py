@@ -83,6 +83,10 @@ class MulensInstrument(Instrument):
         super().__init__(config, config_manager)
         self.label = "Microlensing Data"
         self.total_detrend_cols = 0
+        # _finite_source_limb_darkening is called from both build_likelihood
+        # and compile_plotters; the notice belongs to the topology, not to the
+        # call, so it is emitted once.
+        self._warned_multiband_ld = False
 
     @property
     def prefix(self):
@@ -1089,6 +1093,42 @@ class MulensInstrument(Instrument):
             manifest[param] = entry
         return manifest
 
+    def _finite_source_limb_darkening(self, system):
+        """(u1, bandpass) for the finite-source magnification, or (None, None).
+
+        ONE resolver, called by both `build_likelihood` and
+        `compile_plotters`.  It used to live inline in `build_likelihood`
+        only, so the plotters passed neither argument, `get_magnification_op`
+        computed `effective_bandpass = None`, and every plotted/GUI model
+        curve was the UNIFORM-source magnification while the likelihood fitted
+        the limb-darkened one -- a discrepancy of up to several percent, and
+        largest exactly where these plots are read (caustic crossings, the
+        finite-source peak).  A helper rather than a cached value because both
+        call sites want the live `band.u1` node; the warn-once flag is what
+        keeps the multi-band notice from being printed twice.
+
+        LD applies only when the lens is finite-source AND a Band component is
+        wired to at least one of this instrument's light curves; a uniform
+        source has no limb to darken.  Multiple distinct bands across one
+        instrument's finite-source light curves are not yet supported -- the
+        first band is used, and said so.
+        """
+        if not (
+            system.lens.finite_source[0]
+            and hasattr(system, "band")
+            and np.any(self.band_map >= 0)
+        ):
+            return None, None
+
+        unique = sorted({int(b) for b in self.band_map if b >= 0})
+        if len(unique) > 1 and not self._warned_multiband_ld:
+            self._warned_multiband_ld = True
+            logger.warning(
+                "Multiple bands for finite-source instruments; using first band's u1."
+            )
+        band_idx = unique[0]
+        return system.band.u1.value[band_idx], system.band.names[band_idx]
+
     def build_likelihood(self, model, system):
 
         # 1. Constants
@@ -1101,29 +1141,9 @@ class MulensInstrument(Instrument):
         #    PSPL→symbolic (NUTS-friendly), binary/finite-source→MulensModel
         #    Op (use Metropolis).
         #
-        #    When finite source is active, pass u1 and bandpass from the connected
-        #    Band component.  Multiple distinct bands across instruments are not yet
-        #    supported for finite-source LD; the first band found is used.
-        u1 = None
-        bandpass = None
-        if (
-            system.lens.finite_source[0]
-            and hasattr(system, "band")
-            and np.any(self.band_map >= 0)
-        ):
-            band_indices = [
-                self.band_map[i]
-                for i in range(self.n_elements)
-                if self.band_map[i] >= 0
-            ]
-            unique = sorted(set(band_indices))
-            if len(unique) > 1:
-                logger.warning(
-                    "Multiple bands for finite-source instruments; using first band's u1."
-                )
-            band_idx = unique[0]
-            u1 = system.band.u1.value[band_idx]
-            bandpass = system.band.names[band_idx]
+        #    u1/bandpass come from the ONE resolver compile_plotters also
+        #    calls, so the plotted curve is the curve the likelihood fits.
+        u1, bandpass = self._finite_source_limb_darkening(system)
 
         # One magnification curve per source trajectory (NSNL)
         n_src = self._n_sources
@@ -1421,9 +1441,18 @@ class MulensInstrument(Instrument):
         param_symbols = [p.value for p in system.plot_params]
 
         n_src = self._n_sources
+        # Same (u1, bandpass) resolution build_likelihood uses -- passing
+        # neither here silently plotted the UNIFORM-source magnification for a
+        # limb-darkened fit (review 1.6.1).
+        u1, bandpass = self._finite_source_limb_darkening(system)
         A_per_source = [
             system.lens.get_magnification_op(
-                t_input, obs_pos_input, system, index=j
+                t_input,
+                obs_pos_input,
+                system,
+                index=j,
+                u1=u1,
+                bandpass=bandpass,
             )
             for j in range(n_src)
         ]
@@ -1431,8 +1460,20 @@ class MulensInstrument(Instrument):
         fs_inst = self.f_source.value[inst_idx]
         fb_inst = self.f_blend.value[inst_idx]
 
-        # Δmag = mag(t) − mag_baseline = −2.5·log10(A_eff).
-        # Zero at baseline, negative when brighter, independent of f_total.
+        # The model in instrument inst_idx's own FLUX system -- the same
+        # expression build_likelihood scores against the data.  It stops here:
+        # the conversion to the plotted delta-magnitude is done in numpy by
+        # plot_data, through the very `_flux_to_mag` the data traces go
+        # through, so the model curve and the points it is drawn over cannot
+        # disagree about what a non-positive flux means.  This graph used to
+        # end in `-2.5*log10(maximum(A_eff, 1e-30))`, i.e. it kept the ~75 mag
+        # spike the data path had already replaced with a gap (review 1.6.4):
+        # a posterior draw with f_blend < -f_source*A is a real possibility in
+        # heavy-negative-blending difference imaging, and the honest picture of
+        # it is a break in the curve, not a spike off the bottom of the axis.
+        #
+        # The GP conditional mean is additive in this same space, which is why
+        # the "physical + GP" curve is built on it too (see plot_data).
         if n_src == 1:
             model_flux = fs_inst * A_per_source[0] + fb_inst
         else:
@@ -1442,37 +1483,16 @@ class MulensInstrument(Instrument):
                 + fs_inst * qf_inst / (1.0 + qf_inst) * A_per_source[1]
                 + fb_inst
             )
-        f_total_inst = pt.maximum(fs_inst + fb_inst, 1e-30)
-        A_eff = model_flux / f_total_inst
-        model_delta_mag = -2.5 * pt.log10(pt.maximum(A_eff, 1e-30))
 
         # Retained symbolically so plot_data can walk the graph for
         # param_deps (the evaluator skips components whose specs declare no
         # dependency on a moved slider -- empty deps would freeze the GUI's
         # microlensing charts in live mode).
-        self._delta_mag_node = model_delta_mag
+        self._model_flux_node = model_flux
 
-        self._compiled_delta_mag = pytensor.function(
-            inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
-            outputs=model_delta_mag,
-            on_unused_input="ignore",
-        )
-
-        # The same curve before the delta-mag normalization: the model flux in
-        # instrument inst_idx's own flux system.  The GP conditional mean is
-        # additive there, so this is what the "physical + GP" plot curve is
-        # built on (see plot_data).
         self._compiled_model_flux = pytensor.function(
             inputs=[t_input, obs_pos_input, inst_idx] + param_symbols,
             outputs=model_flux,
-            on_unused_input="ignore",
-        )
-
-        # Baseline flux at a given parameter point, used by plot() to normalize
-        # the data onto the same Δmag scale as the model curves.
-        self._compiled_f_total = pytensor.function(
-            inputs=[inst_idx] + param_symbols,
-            outputs=f_total_inst,
             on_unused_input="ignore",
         )
 
@@ -1708,9 +1728,8 @@ class MulensInstrument(Instrument):
         param_values = self._point_to_plot_params(point, system)
         aln = self._flux_alignment(param_values)
         align, ref_idx = aln["align"], aln["ref_idx"]
-        fs_vec, fb_vec = aln["fs_vec"], aln["fb_vec"]
 
-        node = getattr(self, "_delta_mag_node", None)
+        node = getattr(self, "_model_flux_node", None)
         deps = self._model_trace_param_deps(node, system)
 
         traces = []
@@ -1718,9 +1737,22 @@ class MulensInstrument(Instrument):
             i = obs_to_inst[obs_loc]
             try:
                 # ref_idx: reference flux system, this observer's
-                # magnification (parallax between sites is preserved).
-                y_model = self._compiled_delta_mag(
-                    t_model, obs_model_pos[obs_loc], ref_idx, *param_values
+                # magnification (parallax between sites is preserved).  The
+                # model comes back as a FLUX and is converted here, through
+                # the same `_flux_to_mag` + `baseline_ref` the data traces use
+                # -- so a non-positive model flux becomes a NaN gap, exactly
+                # as a non-positive datum does, instead of the ~75 mag spike
+                # the old in-graph 1e-30 clamp drew (review 1.6.4).
+                y_model = (
+                    self._flux_to_mag(
+                        self._compiled_model_flux(
+                            t_model,
+                            obs_model_pos[obs_loc],
+                            ref_idx,
+                            *param_values,
+                        )
+                    )
+                    - aln["baseline_ref"]
                 )
             except Exception as e:
                 logger.warning(
