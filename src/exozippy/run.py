@@ -274,7 +274,9 @@ def _run_fit(config, gui, user_params=None):
     # Data-driven whitening: probe each raw element's true local scale from
     # the start and rescale the model's whitening in place before sampling.
     # On by default; 'measure_scales: false' keeps the preliminary scales
-    # (defaults.yaml init_scale or the span-fraction fallback).
+    # (defaults.yaml init_scale or the span-fraction fallback).  It gates the
+    # MEASUREMENT only -- reusing a trace still restores the whitening that
+    # trace was sampled under, whatever this says.
     measure_scales = sampler_cfg.get("measure_scales", True)
     profile = sampler_cfg.get("profile", False)
     _min_ess_raw = sampler_cfg.get("min_ess", 1000)
@@ -428,14 +430,25 @@ def _run_fit(config, gui, user_params=None):
                 raw_start = system.get_raw_start(model)
 
         whiten_report = None
-        if measure_scales:
-            # Fresh run -> measure + persist.  Reuse -> restore only: the
-            # whitening is a property of the draws being decoded, so it is
-            # never re-measured and never rewritten there (a mismatch
-            # raises StaleWhiteningError, a missing file warns and keeps
-            # the preliminary scales).  The old code fell back to
-            # measure + save on BOTH, silently re-coordinating the trace it
-            # was reusing and overwriting the only record of how to read it.
+        # Fresh run -> measure + persist.  Reuse -> restore only: the
+        # whitening is a property of the draws being decoded, so it is
+        # never re-measured and never rewritten there (a mismatch
+        # raises StaleWhiteningError, a missing file warns and keeps
+        # the preliminary scales).  The old code fell back to
+        # measure + save on BOTH, silently re-coordinating the trace it
+        # was reusing and overwriting the only record of how to read it.
+        #
+        # `measure_scales: false` gates only the MEASUREMENT, and cannot gate
+        # the restore: it asks "do not probe this run's start", which is a
+        # statement about a run that is about to sample.  A trace sampled
+        # under measured scales and reloaded with the key off would otherwise
+        # decode its raw draws under preliminary scales, silently and with no
+        # message -- the exact failure restore_whitening_for_trace exists to
+        # prevent.  The reuse path's honest answer when the trace really was
+        # sampled without measurement is already built in: no whitening file
+        # exists, so the restore warns and keeps the preliminary scales, which
+        # for that trace ARE the sampled coordinates.
+        if reusing_trace or measure_scales:
             whiten_report = prepare_whitening(
                 system,
                 model,
