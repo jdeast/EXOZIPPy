@@ -14,6 +14,7 @@ cannot fix that by getting longer.
 """
 
 import numpy as np
+import pytest
 
 from exozippy.samplers.ptde import _update_ladder_barrier
 
@@ -72,3 +73,62 @@ def test_async_accepts_adapt_ladder_and_defaults_it_off():
     sig = inspect.signature(ptde_async_sample)
     assert "adapt_ladder" in sig.parameters
     assert sig.parameters["adapt_ladder"].default is False
+
+
+# ---------------------------------------------------------------------------
+# Per-rung explored span (_common.SpanTracker)
+# ---------------------------------------------------------------------------
+
+
+def test_span_tracker_measures_per_rung_reach():
+    """
+    Given states visited at a cold and a hot rung,
+    When SpanTracker records them,
+    Then each rung reports its own widest span, in raw (whitened) sigma, and
+      names the parameter responsible.
+
+    This is what makes "can this ladder reach the thing I am looking for?"
+    answerable DURING a run.  On DC2018 event 128 the known second basin
+    (s = 0.854 against the posterior's 0.9755) sits 296 sigma away in log_s,
+    while a rung at temperature T explores ~sqrt(T) sigma: 14 sigma at
+    T_max=200 (21 widths -- unreachable at any runtime) against 92 sigma at
+    T_max=8500 (3.2 widths -- reachable across 54 chains).  Comparing the
+    reported span against that distance is the whole point.
+    """
+    # ARRANGE
+    from exozippy.samplers._common import SpanTracker
+
+    tr = SpanTracker(
+        n_temps=3, raw_start={"a": np.zeros(2), "b": np.zeros(())}
+    )
+
+    # ACT: rung 0 wanders +-1, rung 2 wanders +-50 in "a"
+    tr.update(0, {"a": np.array([-1.0, 0.0]), "b": np.array(0.0)})
+    tr.update(0, {"a": np.array([1.0, 0.5]), "b": np.array(0.2)})
+    tr.update(2, {"a": np.array([-50.0, 0.0]), "b": np.array(0.0)})
+    tr.update(2, {"a": np.array([50.0, 1.0]), "b": np.array(0.1)})
+    rep = tr.report()
+
+    # ASSERT
+    assert rep[0][0] == pytest.approx(2.0)  # a spans -1..1
+    assert rep[0][1] == "a"
+    assert rep[2][0] == pytest.approx(100.0)  # a spans -50..50
+    assert rep[2][1] == "a"
+    # the hot rung reaches 50x further than the cold one
+    assert rep[2][0] / rep[0][0] == pytest.approx(50.0)
+
+
+def test_span_tracker_reports_zero_for_an_unvisited_rung():
+    """An unvisited rung has no span; it must not print inf or nan.
+
+    A diagnostic that shows inf reads as a bug rather than as "no data yet",
+    and rung 1 here is genuinely unreported at this point in a run.
+    """
+    from exozippy.samplers._common import SpanTracker
+
+    tr = SpanTracker(n_temps=2, raw_start={"a": np.zeros(())})
+    tr.update(0, {"a": np.array(3.0)})
+
+    rep = tr.report()
+    assert rep[1] == (0.0, "-")
+    assert np.isfinite(rep[0][0])

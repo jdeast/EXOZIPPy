@@ -468,6 +468,76 @@ def resolve_n_chains(n_chains, n_params, label, log):
 
 
 # ---------------------------------------------------------------------------
+# Per-rung explored span
+# ---------------------------------------------------------------------------
+
+
+class SpanTracker:
+    """Running min/max of every raw coordinate, per temperature rung.
+
+    The cheapest honest answer to "how far can this ladder actually reach?".
+    Raw space is whitened, so one unit is one measured posterior sigma and
+    the span is directly comparable to the distance to a candidate
+    alternative solution.
+
+    Why this rather than an inline mode search: on DC2018 event 128 the known
+    second basin (s = 0.854 against the posterior's 0.9755) sits 296 sigma
+    away in log_s.  A rung at temperature T explores a width ~sqrt(T) sigma,
+    so T_max=200 spans ~14 sigma -- 21 widths away, unreachable at any
+    runtime -- while T_max=8500 spans ~92 sigma, 3.2 widths, rare per step
+    but reachable across 54 chains.  Reporting the span per rung turns that
+    from an after-the-fact calculation into something visible WHILE the run
+    is going: if the top rung's span is not of order the distance to whatever
+    you hoped to find, more runtime will not find it and T_max is too low.
+
+    Updated only where a slot's state changes (first evaluation and accepted
+    moves), so the cost is two numpy ops on one parameter vector per accepted
+    proposal -- negligible against a logp evaluation.
+    """
+
+    def __init__(self, n_temps, raw_start):
+        self.lo = {
+            k: np.full((n_temps,) + np.shape(v), np.inf)
+            for k, v in raw_start.items()
+        }
+        self.hi = {
+            k: np.full((n_temps,) + np.shape(v), -np.inf)
+            for k, v in raw_start.items()
+        }
+        self.n_temps = n_temps
+
+    def update(self, k, state):
+        # Plain assignment, not `out=`: for a SCALAR parameter self.lo[key]
+        # has shape (n_temps,), so self.lo[key][k] is a numpy scalar rather
+        # than an array and `out=` raises "return arrays must be of
+        # ArrayType".  Every model has scalar parameters, so the out= form
+        # would have crashed on essentially any real run.
+        for key, v in state.items():
+            self.lo[key][k] = np.minimum(self.lo[key][k], v)
+            self.hi[key][k] = np.maximum(self.hi[key][k], v)
+
+    def report(self):
+        """[(widest span in sigma, which parameter)] per rung.
+
+        A rung no slot has reported yet gives (0.0, "-") rather than nan or
+        inf: an unvisited rung has no span, and a diagnostic that prints inf
+        reads as a bug rather than as "no data yet".
+        """
+        out = []
+        for k in range(self.n_temps):
+            best, best_key = 0.0, "-"
+            for key in self.lo:
+                span = self.hi[key][k] - self.lo[key][k]
+                if not np.all(np.isfinite(span)):
+                    continue
+                m = float(np.max(span))
+                if m > best:
+                    best, best_key = m, key
+            out.append((best, best_key))
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Hot-rung retention (store_hot_chains)
 # ---------------------------------------------------------------------------
 
