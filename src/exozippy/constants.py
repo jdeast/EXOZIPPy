@@ -43,7 +43,9 @@ KAPPA = (
 K_VEL_CONVERSION = (const.au / u.yr).to(u.km / u.s).value
 
 # --- 2. MATHEMATICAL CONSTANTS ---
-PI = np.pi
+# (PI = np.pi lived here with zero consumers repo-wide -- an alias for a name
+# every module already imports.  Deleted, review 5.2.2.  TWOPI stays: it has
+# real callers and spells something np.pi does not.)
 TWOPI = 2.0 * np.pi
 
 
