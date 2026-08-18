@@ -209,7 +209,7 @@ def test_probe_derivable_leaves_no_trace():
     Given a ConfigManager,
     When the derivability probe runs,
     Then user_params, diagnostics and the export snapshots are unchanged --
-    the probe must not pre-empt the real solve at stage 3.
+    the probe must not pre-empt the real solve at stage 4.
     """
     import copy
 

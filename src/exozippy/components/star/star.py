@@ -155,7 +155,7 @@ class Star(Component):
         """Read each star's ``mass_function:`` key into per-star arrays.
 
         Sets three parallel, ``n_elements``-long attributes that the
-        galacticmodel reads at stage 6:
+        galacticmodel reads at stage 7:
 
           ``mass_functions`` -- "imf" or "ffp", one per star
           ``ffp_mask``       -- the same thing as a boolean array
@@ -487,7 +487,7 @@ class Star(Component):
         return {"overrides": {"lower": floors.tolist()}}
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest and push to ConfigManager."""
+        """Stage 3: Declare the manifest and push to ConfigManager."""
 
         # 1. Get the stellar parameters we always want.  logmass may carry a
         # power-law-IMF floor (None otherwise, i.e. a plain free parameter).
@@ -762,7 +762,7 @@ class Star(Component):
         )
 
     def build_likelihood(self, model, system):
-        """Stage 6: the constant-space-density (volume) prior on distance.
+        """Stage 7: the constant-space-density (volume) prior on distance.
 
         A bounded element with no sigma is sampled UNIFORM in its own
         coordinate -- parameter.py's logit transform implies exactly

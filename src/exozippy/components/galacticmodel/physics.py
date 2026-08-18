@@ -3,7 +3,7 @@
 ``GalacticModel.build_likelihood`` evaluates the kinematic prior symbolically,
 but the *mean* of that prior is also wanted in plain numpy, early, as a start
 value: the relaxation engine has to seed ``star.pm_ra``/``star.pm_dec`` before
-any PyMC node exists (stage 2), and with nothing better to go on it used to
+any PyMC node exists (stage 3), and with nothing better to go on it used to
 leave both at their defaults.yaml value and let one of them absorb whatever the
 ``t_E`` constraint implied -- which is how the direction of relative proper
 motion ended up arbitrary (see issue #93).

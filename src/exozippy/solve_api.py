@@ -5,7 +5,7 @@ answer two questions about a configuration WITHOUT building the PyMC model:
 
   1. solve(config, user_params, workdir) -> SolveResult
      "Solve this config and tell me every parameter's value, unit, bounds, and
-     WHERE the value came from."  Runs only lifecycle stages 1-3
+     WHERE the value came from."  Runs only lifecycle stages 1-4
      (System.prepare(): data I/O, registration, symbolic relaxation) and reads
      back the in-memory solution via ConfigManager.export_solution().
 
@@ -106,7 +106,7 @@ class _WarningCollector(logging.Handler):
 
 
 def _prepare_system(config, user_params, workdir):
-    """Build a fresh System and run stages 1-3 from within workdir.
+    """Build a fresh System and run stages 1-4 from within workdir.
 
     Returns (system, warnings).  Never builds the PyMC model.  Restores the
     previous working directory even on error.  Any exception raised by prepare
@@ -123,7 +123,7 @@ def _prepare_system(config, user_params, workdir):
         # System accepts user_params as a dict directly; when None it reads the
         # config's parameter_file relative to the (now chdir'd) working dir.
         system = System(config, user_params=user_params)
-        system.prepare()  # stages 1-3 only -- never build_model()
+        system.prepare()  # stages 1-4 only -- never build_model()
     finally:
         os.chdir(prev_cwd)
         pkg_logger.removeHandler(collector)
@@ -182,7 +182,7 @@ def solve(config, user_params=None, workdir=None):
       workdir: directory the config's data-file paths are relative to; solve
         runs from here.  None means the current directory.
 
-    Returns a SolveResult.  Runs only System.prepare() (stages 1-3); it never
+    Returns a SolveResult.  Runs only System.prepare() (stages 1-4); it never
     builds the PyMC model.  Safe to call repeatedly in one process.
     """
     start = time.time()

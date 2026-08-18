@@ -135,7 +135,7 @@ def parse_orbit_bodies(orbit_cfgs, system_config):
             if not comp_b:
                 # No planet references this orbit (standalone/test usage or
                 # a sparse config): fall back to the historical one-to-one
-                # pairing.  Validated against the live system at stage 2.
+                # pairing.  Validated against the live system at stage 3.
                 comp_b = [("planet", i)]
                 prim_b = [("star", 0)]
         elif prim_cfg is None or comp_cfg is None:

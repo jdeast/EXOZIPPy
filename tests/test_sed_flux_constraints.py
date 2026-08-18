@@ -30,7 +30,7 @@ _KMT_DIR = Path(__file__).parent.parent / "examples" / "KMT-2019-BLG-1806"
 
 
 # ---------------------------------------------------------------------------
-# Mulensing zeropoint (stage 5)
+# Mulensing zeropoint (stage 6)
 # ---------------------------------------------------------------------------
 
 
@@ -268,7 +268,7 @@ def test_zeropoint_sigma_zero_raises():
 
 
 # ---------------------------------------------------------------------------
-# Astrometry SED fluxfrac (stage 7)
+# Astrometry SED fluxfrac (stage 6)
 # ---------------------------------------------------------------------------
 
 

@@ -129,7 +129,7 @@ def test_scaleless_solved_target_does_not_crash_the_engine():
     """
     Given a params entry on a derived parameter (orbit a) whose relation
     parents carry no init_scale from any source,
-    When the relaxation engine solves it (stage 3 of prepare),
+    When the relaxation engine solves it (stage 4 of prepare),
     Then the solve completes and the entry simply gets no init_scale.
 
     The user period entry is load-bearing: an initval with no sigma pins the

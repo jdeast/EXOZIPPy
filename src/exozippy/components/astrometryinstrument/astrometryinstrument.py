@@ -312,7 +312,7 @@ class AstrometryInstrument(Instrument):
         ]
 
     # ------------------------------------------------------------------
-    # Stage 1a
+    # Stage 1
     # ------------------------------------------------------------------
     def load_data(self, system):
         """Load per-instrument astrometry and precompute parallax factors."""
@@ -462,7 +462,7 @@ class AstrometryInstrument(Instrument):
         )
 
     # ------------------------------------------------------------------
-    # Stage 1b
+    # Stage 2
     # ------------------------------------------------------------------
     def build_maps(self):
         self.star_map = np.array([c.get("star_ndx", 0) for c in self.config])
@@ -471,7 +471,7 @@ class AstrometryInstrument(Instrument):
         )
 
     # ------------------------------------------------------------------
-    # Stage 2
+    # Stage 3
     # ------------------------------------------------------------------
     def register_parameters(self, system):
         self.manifest = {"fluxfrac": None}
@@ -730,7 +730,7 @@ class AstrometryInstrument(Instrument):
         return dE, dN
 
     # ------------------------------------------------------------------
-    # Stage 6
+    # Stage 7
     # ------------------------------------------------------------------
     def build_likelihood(self, model, system):
         if not hasattr(system, "star"):

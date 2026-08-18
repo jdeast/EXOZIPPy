@@ -417,7 +417,7 @@ def test_manifest_overrides_pins_are_unaffected():
 #
 # The first group pins that it fires; the second pins that it does NOT fire
 # for any of the several channels a value legitimately arrives through, since
-# stage 5 is where they have all landed.
+# stage 6 is where they have all landed.
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +738,7 @@ def test_manifest_overrides_initval_satisfies_the_check():
     MulensInstrument._scale_flux_amplitudes and the GP amplitudes do),
     When the parameter is built,
     Then it builds -- the check has to see a channel applied inside its own
-    stage, which is why it lives at stage 5.
+    stage, which is why it lives at stage 6.
     """
     # ARRANGE
     config_manager = ConfigManager({}, system_config={"star": [{"name": "A"}]})

@@ -352,7 +352,7 @@ class ConcatenatedData:
         setattr(owner, observable, np.concatenate(self.obs).astype(float))
         owner.err = np.concatenate(self.errs).astype(float)
         # Named `inst_map` so Component.build_tensor_maps auto-generates
-        # `inst_map_tensor` in stage 4.
+        # `inst_map_tensor` in stage 5.
         owner.inst_map = np.repeat(
             np.arange(owner.n_elements), self.counts
         ).astype(int)
@@ -692,7 +692,7 @@ class Instrument(Component):
     # Optional per-file column layout (columns:)
     # ------------------------------------------------------------------
     def _parse_columns_spec(self, c, i):
-        """Validate one config entry's optional ``columns:`` key (stage 0).
+        """Validate one config entry's optional ``columns:`` key (at construction).
 
         The value is a mapping from role name to a 0-based column index in
         the data file, plus an optional ``detrend`` role mapping to a LIST
@@ -871,7 +871,7 @@ class Instrument(Component):
     # Optional per-file time system (time_offset / time_scale / time_frame)
     # ------------------------------------------------------------------
     def _parse_time_spec(self, c, i):
-        """Validate one config entry's optional time-system keys (stage 0).
+        """Validate one config entry's optional time-system keys (at construction).
 
         Returns a dict with ``offset`` (days, added to the raw times
         first), ``scale`` (astropy time scale of the input), ``frame``
@@ -1167,7 +1167,7 @@ class Instrument(Component):
     # Optional per-file Gaussian-process noise (celerite2)
     # ------------------------------------------------------------------
     def _load_gp_config(self):
-        """Read the per-instrument ``gp:`` key (stage 0, in ``__init__``).
+        """Read the per-instrument ``gp:`` key (at construction, in ``__init__``).
 
         Populates ``self.gp_terms[i]`` -- a (possibly empty) tuple of kernel
         names for element ``i`` -- and ``self.has_gp``.  Absent or ``none``
@@ -1239,7 +1239,7 @@ class Instrument(Component):
         return names
 
     def _prepare_gp(self, time, err, inst_map, user_factor=1.0):
-        """Stage 1a: index and seed the GP terms from the loaded data.
+        """Stage 1: index and seed the GP terms from the loaded data.
 
         Call at the end of ``load_data``, once the concatenated ``time``,
         error and ``inst_map`` arrays exist.  Two jobs:
@@ -1297,7 +1297,7 @@ class Instrument(Component):
                 self.config_manager.add_scale_hint(path, amp)
 
     def _register_gp(self, manifest):
-        """Stage 2: add this component's GP hyperparameters to ``manifest``.
+        """Stage 3: add this component's GP hyperparameters to ``manifest``.
 
         Every GP parameter is a full-length (``n_elements``) vector so that a
         user path resolves the same way as any other instrument parameter --
@@ -1488,7 +1488,7 @@ class Instrument(Component):
     def add_observation_likelihood(
         self, name, mu, sigma, observed, system=None
     ):
-        """Stage 6: the observational likelihood, with or without GPs and
+        """Stage 7: the observational likelihood, with or without GPs and
         robust families.
 
         Drop-in replacement for the ``pm.Normal(name, mu, sigma, observed)``
@@ -1654,7 +1654,7 @@ class Instrument(Component):
     # Optional per-file robust likelihood (hogg mixture / Student-t)
     # ------------------------------------------------------------------
     def _load_likelihood_config(self):
-        """Read the per-instrument ``likelihood:`` key (stage 0, in __init__).
+        """Read the per-instrument ``likelihood:`` key (at construction, in __init__).
 
         Populates ``self.likelihood_kinds[i]`` -- ``""`` (plain Gaussian, the
         default for every file) or a key from
@@ -1704,7 +1704,7 @@ class Instrument(Component):
         return robust_support.likelihood_config_schema_entry()
 
     def _prepare_robust(self, err, inst_map, user_factor=1.0):
-        """Stage 1a: index the robust files and seed the mixture scale.
+        """Stage 1: index the robust files and seed the mixture scale.
 
         Call at the end of ``load_data``, right next to ``_prepare_gp``.
         Records each opted-in element's indices into the concatenated
@@ -1749,7 +1749,7 @@ class Instrument(Component):
             self.config_manager.add_scale_hint(path, scale)
 
     def _register_robust(self, manifest):
-        """Stage 2: add this component's robust-likelihood parameters.
+        """Stage 3: add this component's robust-likelihood parameters.
 
         Same shape as ``_register_gp``: every parameter is a full-length
         (``n_elements``) vector so user paths resolve by instrument name, and

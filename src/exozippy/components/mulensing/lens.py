@@ -416,7 +416,7 @@ class Lens(Component):
         return self.source_bodies[event_idx][0]
 
     def _mass_initval(self, comp_type, ndx):
-        """Best-effort mass initval (solMass) for a body at stage 2, from
+        """Best-effort mass initval (solMass) for a body at stage 3, from
         user_params mass or logmass entries; None when neither is given."""
         up = self.config_manager.user_params
         entry = up.get(f"{comp_type}.{ndx}.mass")
@@ -546,7 +546,7 @@ class Lens(Component):
     # ------------------------------------------------------------------
 
     def build_maps(self):
-        """Stage 1b: Build integer index arrays for lens and source bodies.
+        """Stage 2: Build integer index arrays for lens and source bodies.
 
         source_map has one entry per SOURCE BODY (not per event): it drives the
         shapes of the per-source parameter chain (pi_rel, t_E, rho, ...) via the
@@ -614,7 +614,7 @@ class Lens(Component):
         """
         mmx_file = self.config[0].get("mmexofast") if self.config else None
         # Only an explicit file path is handled here. "auto" / absent-key
-        # auto-initialization is owned by MulensInstrument (stage 1a), which
+        # auto-initialization is owned by MulensInstrument (stage 1), which
         # pushes the seed hints itself before this method ever runs; False
         # opts out entirely.
         if not isinstance(mmx_file, str) or mmx_file == "auto":
@@ -638,7 +638,7 @@ class Lens(Component):
         )
 
     def register_parameters(self, system):
-        """Stage 2: Declare the manifest."""
+        """Stage 3: Declare the manifest."""
         self._validate_bodies(system)
 
         # s is derived from the sampled log_s; move any user s bounds onto log_s
@@ -982,7 +982,7 @@ class Lens(Component):
 
         # resolve() hands back the value in the parameter's USER unit, which for
         # ra/dec is degrees (Parameter.__post_init__ is what converts to the
-        # internal radians, and it has not run at stage 2).  The galactic-model
+        # internal radians, and it has not run at stage 3).  The galactic-model
         # helpers take radians.
         return (
             float(np.radians(np.atleast_1d(ra_all)[source_ndx])),
@@ -1087,7 +1087,7 @@ class Lens(Component):
         return float(v @ e_hat), float(v @ n_hat)
 
     def _validate_q_start(self):
-        """Stage 6: check the START value of the mass ratio, loudly and once.
+        """Stage 7: check the START value of the mass ratio, loudly and once.
 
         The magnification path clips q into [Q_MIN, Q_MAX] (physics.clip_q) --
         a statement about where the backends are defined, not a licence to
@@ -1137,7 +1137,7 @@ class Lens(Component):
             return None
 
     def _validate_pspl_start(self):
-        """Stage 6: check the START values of the SAMPLED trajectory
+        """Stage 7: check the START values of the SAMPLED trajectory
         parameters, loudly and once.  The sibling of
         :meth:`_validate_q_start`, and it makes the same split for the same
         reason: NaN raises (the fit cannot start), out of range warns (the fit
@@ -1204,7 +1204,7 @@ class Lens(Component):
             )
 
     def build_likelihood(self, model, system):
-        """Stage 6: Observational penalties on the lensing geometry."""
+        """Stage 7: Observational penalties on the lensing geometry."""
         self._validate_q_start()
         self._validate_pspl_start()
 

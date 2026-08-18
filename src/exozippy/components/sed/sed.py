@@ -313,7 +313,7 @@ class SED(Component):
         ]
 
     # ------------------------------------------------------------------
-    # 1) register_parameters — declare the manifest for stage 2.
+    # 1) register_parameters — declare the manifest for stage 3.
     # ------------------------------------------------------------------
     def register_parameters(self, system):
         # in future could foresee doing per facility error scaling
@@ -626,7 +626,7 @@ class SED(Component):
     # ------------------------------------------------------------------
     # Star Parameters the BC forward model below reads directly.  They are
     # not declared as manifest deps of anything on this component, so a
-    # cross-component caller that runs at stage 5 (mulensinstrument's derived
+    # cross-component caller that runs at stage 6 (mulensinstrument's derived
     # zeropoint) can reach here before the topological order has built them.
     _STAR_NODE_DEPS = (
         "teffsed",
@@ -644,7 +644,7 @@ class SED(Component):
         This is the same lazy build ``Component.add_parameter`` performs for
         a declared cross-component dep ("star.mass[lens_map]"); these are
         read through the predict_* API instead of being declared, so the
-        build has to happen here.  A no-op at stage 6, where every manifest
+        build has to happen here.  A no-op at stage 7, where every manifest
         parameter already exists.
         """
         star = getattr(system, "star", None)

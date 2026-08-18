@@ -160,7 +160,7 @@ def main(config_file, min_weight, max_modes, feature_vars, seed, logger_level):
     )
 
     # Regenerate the modeling-draft scaffold against the rewritten table
-    # fragments.  The components' prose exists (stages 1-6 ran above); the
+    # fragments.  The components' prose exists (stages 1-7 ran above); the
     # run-level convergence paragraph does not (no live diagnostics here),
     # which the regenerated file simply omits.  Never fatal, like every
     # other output this forensic tool writes.

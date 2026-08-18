@@ -1115,7 +1115,7 @@ class ConfigManager:
         # engine's solved start values back under the index form, and on
         # ob161003 those legitimately sit alongside the user's own name-form
         # entries -- reading self.user_params here would fail every such fit
-        # at stage 5.
+        # at stage 6.
         if names:
             raw_keys = getattr(self, "_raw_user_param_keys", set())
             for i in range(n_elements):
@@ -1511,7 +1511,7 @@ class ConfigManager:
             #     of the lens's per-source vectors by the SOURCE STAR's name;
             #     the lens block itself has one entry, named "Lens".  The
             #     per-parameter `names` list is a manifest option and is not
-            #     known until stage 2, long after this runs.
+            #     known until stage 3, long after this runs.
             #   * `mann.B.ks_offset` names a mann block that has no `name:`
             #     yet: this ConfigManager is built BEFORE the component loop
             #     in System.__init__, and mann/torres derive their name from
@@ -2233,7 +2233,7 @@ class ConfigManager:
 
         Runs the engine on a snapshot and rolls every mutation back, so this
         is a read-only question: `finalize_user_params` still does the real
-        solve later, from the same inputs plus whatever stages 1-2 add.
+        solve later, from the same inputs plus whatever stages 1-3 add.
 
         The test is on **provenance**, not on presence: the engine's "default
         armor" step seeds every mapped path from defaults.yaml, so almost
@@ -2242,7 +2242,7 @@ class ConfigManager:
         a default -- i.e. someone actually told us, directly or through a
         relation.
 
-        Called at stage 1a (before most hints exist), so a False here means
+        Called at stage 1 (before most hints exist), so a False here means
         "not derivable *yet*"; callers that must decide early -- notably the
         MMEXOFAST trigger -- get the conservative answer.
         """

@@ -1,6 +1,6 @@
 """The one interpreter for the manifest vocabulary.
 
-A component declares ``self.manifest`` at stage 2: a dict mapping parameter
+A component declares ``self.manifest`` at stage 3: a dict mapping parameter
 name -> entry.  An entry may be
 
 * ``None`` (or any falsy value) -- a free parameter with no options,
@@ -10,9 +10,9 @@ name -> entry.  An entry may be
 
 The vocabulary has three consumers, at three different lifecycle stages:
 
-* ``graph.determine_pymc_build_order`` (stage 4) -- needs the expression key
+* ``graph.determine_pymc_build_order`` (the build order) -- needs the expression key
   and its dependency list to place the parameter in the build order;
-* ``Component.add_parameter`` (stage 5) -- needs the expression key, its
+* ``Component.add_parameter`` (stage 6) -- needs the expression key, its
   dependency list, and every remaining option;
 * ``System.derived_params`` -- needs only "does this entry name an
   expression at all".

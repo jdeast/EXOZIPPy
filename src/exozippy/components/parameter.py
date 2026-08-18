@@ -512,7 +512,7 @@ class PriorContribution:
 
     ``Parameter.get_prior_str`` describes a prior from the Parameter's own
     fields -- ``sigma``, ``mu``, ``lower``/``upper``.  A ``pm.Potential`` a
-    component adds in stage 6 is invisible to that, so a parameter carrying
+    component adds in stage 7 is invisible to that, so a parameter carrying
     one was reported as whatever its own fields implied, which for a bounded
     no-sigma element is "Uniform".  Three shipped priors were misreported
     that way: ``star.distance``'s d^2 volume prior, ``star.logmass``'s IMF,
@@ -848,7 +848,7 @@ class Parameter:
         guessing from the topology, which cannot see a user's ``sigma: 0`` or
         a component's per-element ``"overrides"`` pin.
 
-        Callable only after the model has been built (stage 5 onwards); before
+        Callable only after the model has been built (stage 6 onwards); before
         that the mask does not exist and this conservatively returns False.
         """
         return self._element_role("is_sampled", index, default=False)
@@ -1435,11 +1435,11 @@ class Parameter:
         # sigma with no center: it does not describe a model.  If the user is
         # fixing a parameter they should know what they are fixing it to.
         #
-        # This runs at stage 5, which is deliberate: it is the earliest point
+        # This runs at stage 6, which is deliberate: it is the earliest point
         # that sees EVERY channel a value can arrive through.  The manifest
         # "overrides" channel that pins whole vectors (GP, robust likelihood,
         # band LD) and the plain manifest options are both applied inside
-        # this stage; a check at ConfigManager construction or at stage 3
+        # this stage; a check at ConfigManager construction or at stage 4
         # would have to guess about them and would fire falsely.
         #
         # Three exemptions, all because the value comes from somewhere other
@@ -1497,7 +1497,7 @@ class Parameter:
         # log(NaN/(1-NaN)) and the fit died much later inside PyMC's
         # initial-point check, naming a raw variable instead of the parameter.
         #
-        # Stage 5 for the same reason the pin check is: it is the earliest
+        # Stage 6 for the same reason the pin check is: it is the earliest
         # point that sees EVERY channel a value can arrive through --
         # defaults.yaml, the params file, a component hint, the manifest
         # "overrides" and "options" channels, and the relaxation engine's
@@ -2285,7 +2285,7 @@ class Parameter:
         * Nothing can have consumed the patched values.  A reported element is
           consumed by nothing (the vocabulary's definition, and what makes the
           cycle dissolve), so every consumer that read ``self.value`` during
-          stage 5 or 6 read an element this patch does not touch.
+          stage 6 or 6 read an element this patch does not touch.
         * The patch adds no logp term.  It creates one ``pm.Deterministic`` and
           no potential: ``build_pymc`` already excludes reported elements from
           the Gaussian prior (section A) and the soft barriers (section B), and

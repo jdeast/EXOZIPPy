@@ -129,7 +129,7 @@ def test_dc2018_128_example_builds_with_list_valued_mmexofast_seeds(tmp_path):
       load_data-time code (mulensinstrument's flux-bootstrap/data-format
       checks, lens.t0_par) that read raw user_params values directly and
       crashed on a Python list before ConfigManager.finalize_user_params
-      (stage 3, which runs after load_data) collapses it back to a seed-0
+      (stage 4, which runs after load_data) collapses it back to a seed-0
       scalar -- the synthetic PSPL configs elsewhere in this file have no
       mulensinstrument component and never exercised that code path.
     """

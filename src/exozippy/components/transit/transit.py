@@ -152,7 +152,7 @@ class Transit(Instrument):
         ]
 
     def load_data(self, system):
-        """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
+        """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.baseline_init = [1.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -275,7 +275,7 @@ class Transit(Instrument):
         self._oversample_inverse_order = np.argsort(np.concatenate(row_order))
 
     def register_parameters(self, system):
-        """Stage 2: Embed data-driven hints into the PyMC manifest."""
+        """Stage 3: Embed data-driven hints into the PyMC manifest."""
         self._hint_baseline()
         self.manifest = {"baseline": None}
         self._register_noise(self.manifest, self.jittervar_lower)
@@ -315,8 +315,8 @@ class Transit(Instrument):
     def _hint_baseline(self):
         """Push each light curve's median flux as a RANK_DERIVED_DATA hint.
 
-        The median is measured in ``load_data`` (stage 1a), so it is ready
-        by the time this runs at stage 2 -- which is what lets it go through
+        The median is measured in ``load_data`` (stage 1), so it is ready
+        by the time this runs at stage 3 -- which is what lets it go through
         the provenance pipeline at all.
 
         It used to be a plain manifest option (``{"baseline": {"initval":

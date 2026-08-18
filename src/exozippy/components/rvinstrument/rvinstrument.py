@@ -137,7 +137,7 @@ class RVInstrument(Instrument):
         ]
 
     def load_data(self, system):
-        """Stage 1a: Load CSVs and generate data-driven bounds/inits."""
+        """Stage 1: Load CSVs and generate data-driven bounds/inits."""
         self.gamma_init = [0.0] * self.n_elements
         self.jittervar_lower = [0.0] * self.n_elements
 
@@ -219,7 +219,7 @@ class RVInstrument(Instrument):
         return 1.0
 
     def register_parameters(self, system):
-        """Stage 2: Embed data-driven hints into the PyMC manifest."""
+        """Stage 3: Embed data-driven hints into the PyMC manifest."""
         gamma_arr = np.atleast_1d(self.gamma_init)
         for i in range(self.n_elements):
             val = (

@@ -107,7 +107,7 @@ def test_baseline_is_a_hint_at_rank_derived_data(tmp_path):
 
 def test_baseline_manifest_entry_carries_no_initval_option(tmp_path):
     """
-    Given the transit component after stage 2,
+    Given the transit component after stage 3,
     When its manifest entry for baseline is inspected,
     Then it carries no 'initval' option -- the value travels through the
     hint channel now, and a manifest option would override the resolved

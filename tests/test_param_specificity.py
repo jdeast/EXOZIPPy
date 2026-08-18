@@ -403,7 +403,7 @@ def test_engine_injected_index_entry_is_not_a_second_spelling():
 
     The check reads the keys the USER wrote, not the live user_params dict.
     examples/ob161003 ends every prepare() in exactly this state, so reading
-    the dict would fail the fit at stage 5.
+    the dict would fail the fit at stage 6.
     """
     # ARRANGE
     cm = _canonical_cm({"star.A.distance": {"initval": 9.0}})

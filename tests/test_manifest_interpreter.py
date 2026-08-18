@@ -4,8 +4,8 @@
 entry derived, which expressions: block does it select, and what options does
 it carry".  Three places ask, at three lifecycle stages:
 
-  graph.determine_pymc_build_order  (stage 4) -- build order
-  Component.add_parameter           (stage 5) -- what actually gets built
+  graph.determine_pymc_build_order  (build order) -- build order
+  Component.add_parameter           (stage 6) -- what actually gets built
   System.derived_params                       -- reporting / introspection
 
 They each used to answer it themselves, and they disagreed: a dict without
