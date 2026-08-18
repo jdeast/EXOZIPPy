@@ -341,6 +341,10 @@ def ptde_async_sample(
 
     n_accept = np.zeros(n_temps)
     n_propose = np.zeros(n_temps)
+    # Per-rung explored span: see _common.SpanTracker for what it is for
+    # and the DC2018 event 128 numbers that motivate reporting it live.
+    spans = _common.SpanTracker(n_temps, raw_start)
+
     n_swap_accept = np.zeros(max(n_temps - 1, 1))
     n_swap_propose = np.zeros(max(n_temps - 1, 1))
     n_eval_timeouts = [0]
@@ -616,6 +620,7 @@ def ptde_async_sample(
                 # First evaluation for this slot: the start state itself.
                 current_state[k][i] = prop
                 current_lp[k][i] = lp
+                spans.update(k, prop)
             else:
                 T = temperatures[k]
                 n_propose[k] += 1
@@ -630,6 +635,7 @@ def ptde_async_sample(
                     current_state[k][i] = prop
                     current_lp[k][i] = lp
                     n_accept[k] += 1
+                    spans.update(k, prop)
                     # Runaway-lp early detection (see LpPlausibilityGuard).
                     if k == 0:
                         lp_guard.check(i, lp)
@@ -768,6 +774,14 @@ def ptde_async_sample(
                         if n_temps > 1
                         else ""
                     )
+                )
+                span_rep = spans.report()
+                logger.info(
+                    "PTDE-async explored span (raw sigma, running): "
+                    f"T=1 {span_rep[0][0]:.1f} ({span_rep[0][1]})  "
+                    f"T={temperatures[-1]:.0f} {span_rep[-1][0]:.1f} "
+                    f"({span_rep[-1][1]})  "
+                    f"top/cold={span_rep[-1][0] / max(span_rep[0][0], 1e-9):.0f}x"
                 )
 
             _maybe_stop()
