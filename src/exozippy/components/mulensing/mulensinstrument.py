@@ -825,9 +825,32 @@ class MulensInstrument(Instrument):
 
         if f_source_user is not None and f_blend_user is not None:
             f_total = f_source_user + f_blend_user
-            q_source = float(
-                np.clip(f_source_user / max(f_total, 1e-30), 0.05, 0.95)
-            )
+            if not (f_total > 0.0) or not np.isfinite(f_total):
+                # The one branch that returned the user's numbers unchecked.
+                # f_total is the light curve's BASELINE FLUX SCALE, and every
+                # consumer needs it strictly positive: log_f_total takes its
+                # log10 (NaN, which resurfaces much later as the stage-6
+                # missing-start error naming log_f_total rather than the two
+                # entries that caused it), and _scale_flux_amplitudes
+                # multiplies it into per-light-curve upper bounds (negative
+                # bounds).  A negative blend is legitimate on its own -- that
+                # is difference imaging -- but a negative TOTAL is a statement
+                # that the star is not there.  Fall back to the data, loudly,
+                # naming both entries (review 2.6.3).
+                logger.warning(
+                    f"{self.prefix}.{inst_idx}: f_source = {f_source_user!r} "
+                    f"and f_blend = {f_blend_user!r} sum to a baseline flux of "
+                    f"{f_total!r}, which is not positive.  Using the data's own "
+                    "baseline instead for the flux scale; fix the two entries "
+                    "if you meant them (a negative BLEND is fine, a negative "
+                    "total is not)."
+                )
+                return (
+                    self._baseline_flux_fallback(f_obs),
+                    0.95,
+                    q_flux_fallback,
+                )
+            q_source = float(np.clip(f_source_user / f_total, 0.05, 0.95))
             return f_total, q_source, q_flux_fallback
 
         if t0 is None or u0 is None:

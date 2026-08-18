@@ -752,16 +752,44 @@ class Lens(Component):
                 self._mass_initval(c_type, c_ndx)
                 for c_type, c_ndx in self.lens_bodies[0]
             ]
+            # Loud, once, at config time, because the alternative -- a start
+            # that quietly comes from nowhere -- is what review 1.6.5 traced
+            # (and what 2.6.6 asks be said out loud until the relations are
+            # generalized).  A WARNING and not an INFO: for a 2-body lens the
+            # engine derives all of this from ANY of the masses, q or the
+            # trajectory, so a user who has never had to supply body masses
+            # gets no other signal that a third body changes the rules.
+            user_q = [
+                f"lens.{j}.q"
+                for j in range(1, self.n_companions)
+                if self.config_manager.user_params.get(f"lens.{j}.q")
+                is not None
+            ]
+            if user_q:
+                logger.warning(
+                    f"{self.prefix}: {', '.join(user_q)} sets the START of a "
+                    "derived mass ratio but CANNOT set the companion mass it "
+                    "is computed from -- the relaxation engine's q relation "
+                    "covers companion slot 0 only (see "
+                    "mulensing/symbolic_physics.py).  The fit will run at the "
+                    "masses, not at the q you typed.  Supply "
+                    "<component>.<body>.mass (or logmass) for every lens body "
+                    "instead."
+                )
             if any(m is None for m in body_masses):
                 missing = [
                     f"{ct}.{cn}"
                     for (ct, cn), m in zip(self.lens_bodies[0], body_masses)
                     if m is None
                 ]
-                logger.info(
-                    f"No mass initval for lens body/bodies {missing}; cannot "
-                    "seed lens.0.mlens_total or per-companion q — supply body "
-                    "masses (or logmass) in the params file for 3+ body lenses."
+                logger.warning(
+                    f"{self.prefix}: no mass initval for lens body/bodies "
+                    f"{missing}, so lens.0.mlens_total and the per-companion "
+                    "q starts fall back to defaults.  A lens with 3+ bodies "
+                    "REQUIRES explicit body masses: the engine's mass-sum and "
+                    "q relations are binary-only, so nothing else can supply "
+                    "them (review 2.6.6).  Add mass (or logmass) initvals for "
+                    f"{missing} to the params file."
                 )
             else:
                 self.config_manager.add_hint(

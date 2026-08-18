@@ -50,6 +50,31 @@ def test_dev_skycoord_cache_distinguishes_same_length_arrays():
     assert _dev_skycoord(satellite, cache) is coord_sat
 
 
+def test_ephemeris_caches_key_on_bytes_not_on_a_hash():
+    """
+    Given the two observer-deviation caches in op.py,
+    When their keys are inspected,
+    Then the array's BYTES are in the key, not hash(bytes): a 64-bit siphash
+      can collide, and the whole point of these caches is telling apart two
+      same-shaped deviation arrays, so a collision would silently reuse the
+      wrong observer's parallax deltas (review 2.6.4).
+    """
+    # Arrange
+    cache = {}
+    dev = np.arange(15, dtype=float).reshape(5, 3)
+    op = VBMDirectMagOp(COORDS, n_companions=1)
+
+    # Act
+    _dev_skycoord(dev, cache)
+    op._deltas(dev)
+
+    # Assert
+    for store in (cache, op._delta_cache):
+        ((shape, blob),) = store.keys()
+        assert shape == (5, 3)
+        assert blob == dev.tobytes()
+
+
 def test_pspl_model_floors_nonpositive_rho():
     """
     Given a finite-source PSPL parameter vector whose rho is 0
@@ -930,6 +955,65 @@ def test_multisource_bootstrap_without_a_user_f_blend_is_unchanged():
     # Assert
     assert f_total == pytest.approx(sum(f_src) + f_blend, rel=1e-6)
     assert f_total * q_source == pytest.approx(sum(f_src), rel=1e-6)
+
+
+def test_nonpositive_user_f_total_falls_back_with_a_warning(caplog):
+    """
+    Given f_source and f_blend entries whose SUM is not positive,
+    When the flux bootstrap runs,
+    Then it falls back to the data's own baseline and warns naming both
+      entries -- the both-user branch used to return the sum unchecked, so
+      log_f_total took log10 of a non-positive number (surfacing much later as
+      a missing-start error naming the wrong parameter) and
+      _scale_flux_amplitudes derived negative upper bounds from it
+      (review 2.6.3).
+    """
+    # Arrange -- a negative BLEND is legitimate (difference imaging); it is
+    # the negative TOTAL that is not.
+    inst, t, flux, xyz = _make_inst_with_q_source_data(f_baseline=0.62)
+    inst.config_manager.user_params["mulensinstrument.0.f_source"] = {
+        "initval": 0.5
+    }
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": -0.5
+    }
+
+    # Act
+    with caplog.at_level("WARNING"):
+        f_total, q_source, _q_flux = inst._estimate_flux_components(
+            t, flux, xyz, 0.0, 0.0, inst_idx=0
+        )
+
+    # Assert
+    assert f_total > 0.0
+    assert 0.0 < q_source <= 1.0
+    assert "f_source" in caplog.text and "f_blend" in caplog.text
+
+
+def test_positive_user_f_total_is_still_taken_verbatim():
+    """
+    Given f_source and f_blend entries summing to a positive baseline,
+    When the flux bootstrap runs,
+    Then the user's numbers are used exactly -- the guard above must not
+      disturb the ordinary both-user path.
+    """
+    # Arrange
+    inst, t, flux, xyz = _make_inst_with_q_source_data()
+    inst.config_manager.user_params["mulensinstrument.0.f_source"] = {
+        "initval": 0.5
+    }
+    inst.config_manager.user_params["mulensinstrument.0.f_blend"] = {
+        "initval": 0.1
+    }
+
+    # Act
+    f_total, q_source, _q_flux = inst._estimate_flux_components(
+        t, flux, xyz, 0.0, 0.0, inst_idx=0
+    )
+
+    # Assert
+    assert f_total == pytest.approx(0.6)
+    assert q_source == pytest.approx(0.5 / 0.6)
 
 
 def test_log_f_total_bootstrap_yields_to_user_params():

@@ -121,3 +121,55 @@ def test_sampled_q_with_a_nan_start_still_raises(
     # Act / Assert
     with pytest.raises(ValueError, match="not a number"):
         lens._validate_q_start()
+
+
+# ---------------------------------------------------------------------------
+# The requirement itself, said out loud at config time (review 2.6.6)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_body_masses_warn_at_config_time(triple_lens_lc, caplog):
+    """
+    Given a three-body lens with no body-mass entries,
+    When the lens registers its parameters,
+    Then it WARNS, naming the bodies and the requirement: the engine's
+      mass-sum and q relations are binary-only, so nothing else can supply
+      mlens_total or the per-companion q starts.  This used to be an INFO,
+      which for a user who has only ever fitted 2-body lenses (where the
+      engine derives all of it) is no signal at all.
+    """
+    # Arrange
+    system = System(
+        _triple_lens_config(triple_lens_lc), user_params=_triple_lens_params()
+    )
+
+    # Act
+    with caplog.at_level("WARNING"):
+        system.prepare()
+
+    # Assert
+    assert "3+ bodies" in caplog.text
+    assert "planet.0" in caplog.text and "planet.1" in caplog.text
+
+
+def test_a_user_q_on_an_extra_companion_warns(triple_lens_lc, caplog):
+    """
+    Given a three-body lens whose params file sets lens.1.q,
+    When the lens registers its parameters,
+    Then it warns that the entry sets a derived parameter's START but cannot
+      set the companion mass the runtime value is computed from -- so the fit
+      runs at the masses, not at the q that was typed (review 2.6.6).
+    """
+    # Arrange
+    system = System(
+        _triple_lens_config(triple_lens_lc),
+        user_params=_triple_lens_params(**{"lens.1.q": {"initval": 1e-3}}),
+    )
+
+    # Act
+    with caplog.at_level("WARNING"):
+        system.prepare()
+
+    # Assert
+    assert "lens.1.q" in caplog.text
+    assert "CANNOT set the companion mass" in caplog.text

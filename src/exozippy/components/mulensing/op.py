@@ -56,7 +56,13 @@ def _dev_skycoord(obs_pos_np, cache):
     exactly matching Lens.get_magnification.
     """
     obs_pos_2d = np.atleast_2d(obs_pos_np)
-    key = (obs_pos_2d.shape, hash(obs_pos_2d.tobytes()))
+    # Keyed on the BYTES, not on hash(bytes): a 64-bit siphash can collide,
+    # and this cache's whole reason to exist is telling apart two deviation
+    # arrays of the SAME shape (ground and satellite over one plot grid), so a
+    # collision would hand the second observer the first one's parallax
+    # deltas.  Astronomically unlikely, and free to rule out (review 2.6.4);
+    # the dict hashes the bytes for us and then compares them on a hit.
+    key = (obs_pos_2d.shape, obs_pos_2d.tobytes())
     if key not in cache:
         cache[key] = SkyCoord(
             x=obs_pos_2d[:, 0] * u.au,
@@ -448,7 +454,8 @@ class VBMDirectMagOp(Op):
         reused for every proposal.
         """
         dev = np.atleast_2d(obs_pos_np)
-        key = (dev.shape, hash(dev.tobytes()))
+        # Bytes, not hash(bytes) -- see _dev_skycoord (review 2.6.4).
+        key = (dev.shape, dev.tobytes())
         if key not in self._delta_cache:
             # MulensModel's delta convention is the NEGATED observer offset,
             # i.e. exactly parallax_factors (see exozippy.skyframe: the same
