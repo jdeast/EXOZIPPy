@@ -779,8 +779,15 @@ def ptde_sample(
     T_max : float   — hottest temperature (default 200, EXOFASTv2 parity)
     n_chains : int | None  — chains per temperature rung;
                None → 2 × n_params (standard DE minimum for good mixing)
-    cores : int | None  — CPU cores for parallel logp evaluation;
-               None → n_temps × n_chains (fully parallel, one core per chain)
+    cores : int | None  — CPU cores for parallel logp evaluation. NOT one
+               core per chain: the pool is capped at the proposal count
+               (n_temps x n_chains) but sized from the MACHINE, as
+               max(1, min(0.75*n_cpu, n_cpu - 1)) -- see
+               _common.create_pool, and run.py, which applies the same
+               formula when the sampler block leaves `cores` unset. A
+               64-core box therefore runs a 320-proposal step 47 at a time,
+               not 320. Passing a value above the physical count is allowed
+               and warns.
     initvals : list[dict] | None  — n_chains raw-space starting dicts for
                the T=1 rung; replicated across hotter rungs.
                None → probe-based from MAP (same logic as DEMetropolis block).
