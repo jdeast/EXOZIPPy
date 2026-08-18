@@ -77,6 +77,16 @@ DIRTY_ATTR = "exozippy_git_dirty"
 # which is what it always meant.
 ROLES_ATTR = "exozippy_element_roles"
 
+# Which unit system the posterior's sampled variables are stored in.  run.py
+# runs _convert_posterior_to_user_units on the way to netCDF, so every trace
+# this code writes says "user" -- but a trace written before that conversion
+# existed holds INTERNAL-unit draws that are numerically plausible and
+# indistinguishable from user-unit ones (radians against degrees, solar
+# against jupiter masses).  Nothing downstream can detect that, so the stamp
+# is what makes the difference statable at all.
+UNITS_ATTR = "exozippy_posterior_units"
+POSTERIOR_UNITS = "user"
+
 # The payload is a debugging aid, not the check itself; a pathological
 # config (thousands of per-parameter entries) should not bloat the trace
 # file.  Past this many characters only the hash is stored, and a mismatch
@@ -275,6 +285,10 @@ def stamp_structural_metadata(idata, source) -> None:
     fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     attrs[HASH_ATTR] = fingerprint
+    # The save path converts the posterior to user units immediately before
+    # this call, so the stamp is a statement of fact about the array being
+    # written -- not a promise about a future format.
+    attrs[UNITS_ATTR] = POSTERIOR_UNITS
     roles = element_roles(source)
     if roles:
         attrs[ROLES_ATTR] = json.dumps(roles, sort_keys=True)
@@ -355,6 +369,57 @@ def describe_structural_diff(
     return lines
 
 
+def check_posterior_units(attrs, trace_path) -> str:
+    """Report which unit system a reloaded trace's posterior is stored in.
+
+    Returns ``"user"``, ``"unverifiable"`` (no stamp) or ``"unknown"`` (a
+    stamp this code does not recognize).  Warns for the latter two; never
+    raises, and never converts.
+
+    **Warn, not raise, and deliberately not the same call as staleness.** A
+    stale trace is a DETECTED mismatch and cannot be repaired, so it raises.
+    A missing units stamp is the ``trace_meta`` unverifiable case: it means
+    the trace predates the stamp, and the overwhelming majority of those are
+    perfectly fine -- the posterior conversion is older than the stamp, so
+    only a genuinely pre-2026 trace holds internal-unit draws. Refusing them
+    all would invalidate working traces to catch a shrinking population.
+
+    **And never convert.** Multiplying by the conversion factor on a guess
+    would corrupt every trace whose draws were already in user units, which
+    is nearly all of them; there is no way to tell the two apart from the
+    numbers (radians against degrees, solar against jupiter masses are all
+    plausible), which is precisely why the stamp had to exist.  The remedy
+    is re-sampling, and the warning says so.
+    """
+    stamped = attrs.get(UNITS_ATTR)
+    if stamped == POSTERIOR_UNITS:
+        return POSTERIOR_UNITS
+    if stamped:
+        logger.warning(
+            f"{_BANNER}\n"
+            f"UNKNOWN POSTERIOR UNITS: {trace_path} declares its posterior "
+            f"is stored in '{stamped}' units, which this version of EXOZIPPy "
+            f"does not know how to read (it writes '{POSTERIOR_UNITS}'). "
+            f"Every reported value may be wrong by a unit conversion factor. "
+            f"Upgrade EXOZIPPy, or re-sample with "
+            f"'sampler: {{recompute_trace: true}}'.\n{_BANNER}"
+        )
+        return "unknown"
+    logger.warning(
+        f"{_BANNER}\n"
+        f"UNVERIFIABLE POSTERIOR UNITS: {trace_path} carries no unit stamp, "
+        f"so it cannot be confirmed to hold USER-unit draws. Traces written "
+        f"before the posterior conversion existed (pre-2026) hold INTERNAL-"
+        f"unit draws -- radians rather than degrees, solar rather than "
+        f"jupiter masses -- which are numerically plausible and cannot be "
+        f"told apart from the numbers, so nothing here converts or refuses. "
+        f"This is NOT a detected mismatch -- proceeding. If the reported "
+        f"values look wrong by a unit conversion factor, re-sample with "
+        f"'sampler: {{recompute_trace: true}}'.\n{_BANNER}"
+    )
+    return "unverifiable"
+
+
 def check_trace_freshness(idata, source, trace_path) -> str:
     """Verify a reloaded trace was sampled from this model.
 
@@ -364,10 +429,17 @@ def check_trace_freshness(idata, source, trace_path) -> str:
     that fingerprint is compared -- the recorded version/commit are printed
     in the error but never tested, so newer code with an unchanged model
     reloads its trace silently.
+
+    Also runs :func:`check_posterior_units`, whose result is advisory and
+    does not change the return value: which units the draws are stored in is
+    a different question from whether they came from this model, it can only
+    ever warn, and every reload should ask it -- which is what makes this
+    single choke point the right place for it.
     """
     fingerprint, payload = _fingerprint_of(source)
     attrs = _attrs(idata)
     stored = attrs.get(HASH_ATTR)
+    check_posterior_units(attrs, trace_path)
 
     if not stored:
         logger.warning(
