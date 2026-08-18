@@ -389,9 +389,16 @@ class VBMDirectMagOp(Op):
         # copy-on-write copy, so per-instance scratch state is never shared.
         self._vbm = self._build_vbm()
         self._delta_cache = {}
-        # Warn-once flag for the non-finite guard in _compute, mirroring
-        # _MagOpBase._warned.
+        # Warn-once flags, mirroring _MagOpBase._warned.  TWO of them, because
+        # the two failure modes have different fixes and must not silence each
+        # other: `_warned` covers a non-finite parameter vector reaching
+        # _compute (the model is exploring/misconfigured upstream), while
+        # `_warned_backend` covers VBMicrolensing itself raising (a
+        # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+        # wheel).  One shared flag would let a burst of NaN proposals early on
+        # permanently suppress the report that the backend is broken.
         self._warned = False
+        self._warned_backend = False
 
     def _build_vbm(self):
         vbm = VBMicrolensing.VBMicrolensing()
@@ -515,7 +522,29 @@ class VBMDirectMagOp(Op):
         p, times_np, obs_pos_np = inputs
         try:
             A = self._compute(p, times_np, obs_pos_np)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
+            # Invalid parameter combination -> NaN magnifications -> logp =
+            # -inf -> the proposal is rejected.  That is the intended handling
+            # of a bad proposal, and it is ALSO what a broken backend looks
+            # like, which is why this cannot be silent: a VBM-level error (a
+            # SetLensGeometry rejection, a SWIG ValueError, API drift in a new
+            # wheel) rejects every proposal forever, and the default-backend
+            # binary fit then runs to a garbage posterior with no message
+            # anywhere.  This is exactly how the point-source-binary "VBBL"
+            # bug stayed hidden, and it is what _MagOpBase.perform already
+            # guards against -- mirror it here rather than trusting that this
+            # Op's inputs are pre-validated.
+            if not self._warned_backend:
+                self._warned_backend = True
+                warnings.warn(
+                    f"{type(self).__name__}: VBMicrolensing raised "
+                    f"{type(exc).__name__}: {exc} -- returning NaN "
+                    "magnifications (logp = -inf) for this proposal. "
+                    "If this repeats for every proposal the backend is "
+                    "misconfigured, not merely exploring bad parameters.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             A = np.full(len(times_np), np.nan)
         outputs[0][0] = np.asarray(A, dtype=np.float64)
 

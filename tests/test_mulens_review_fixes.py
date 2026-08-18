@@ -12,6 +12,7 @@ from exozippy.components.mulensing.lens import Lens
 from exozippy.components.mulensing.mulensinstrument import MulensInstrument
 from exozippy.components.mulensing.op import (
     BinaryLensMagOp,
+    VBMDirectMagOp,
     _build_binary_model,
     _build_pspl_model,
     _dev_skycoord,
@@ -171,6 +172,90 @@ def test_mag_op_warns_once_when_falling_back_to_nan():
     runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
     assert len(runtime) == 1
     assert "VBBL" in str(runtime[0].message)
+
+
+class _RaisingVBM:
+    """A stand-in for the VBMicrolensing object that fails the way a broken
+    backend does: every magnification call raises.  Real causes are a
+    SetLensGeometry rejection, a SWIG ValueError, or API drift in a new
+    wheel."""
+
+    a1 = 0.0
+    Tol = 1e-3
+    RelTol = 0.0
+
+    def _boom(self, *args, **kwargs):
+        raise ValueError("SetLensGeometry: bad lens configuration")
+
+    BinaryMag0 = BinaryMag2 = MultiMag0 = MultiMag2 = _boom
+    SetLensGeometry = _boom
+
+
+def test_vbm_direct_op_warns_once_when_the_backend_raises():
+    """
+    Given a VBMDirectMagOp whose VBMicrolensing backend raises on every call
+      (a misconfigured/broken backend, not a bad proposal),
+    When perform() is called twice with a perfectly ordinary parameter vector,
+    Then both calls return NaN (so the proposal is rejected) AND a single
+      RuntimeWarning naming the underlying error is emitted -- silently
+      returning all-NaN forever is how a default-backend binary fit runs to a
+      garbage posterior with no message (review 2.6.1).
+    """
+    # Arrange
+    op = VBMDirectMagOp(COORDS, n_companions=1, use_rho=False)
+    op._vbm = _RaisingVBM()
+    times = np.linspace(2449980.0, 2450020.0, 11)
+    obs_pos = np.zeros((times.size, 3))
+    first, second = [[None]], [[None]]
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], first)
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], second)
+
+    # Assert
+    assert np.all(np.isnan(first[0][0]))
+    assert np.all(np.isnan(second[0][0]))
+    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(runtime) == 1
+    assert "SetLensGeometry" in str(runtime[0].message)
+    assert "VBMDirectMagOp" in str(runtime[0].message)
+
+
+def test_vbm_direct_op_nonfinite_warning_does_not_silence_the_backend_one():
+    """
+    Given a VBMDirectMagOp that first sees a non-finite parameter vector and
+      then hits a raising backend,
+    When perform() is called for each in turn,
+    Then BOTH are reported: the two failure modes have different fixes (fix
+      the model vs. fix the install), so one warn-once flag would let a burst
+      of NaN proposals permanently hide a broken backend.
+    """
+    # Arrange
+    op = VBMDirectMagOp(COORDS, n_companions=1, use_rho=False)
+    times = np.linspace(2449980.0, 2450020.0, 11)
+    obs_pos = np.zeros((times.size, 3))
+    nonfinite = _P_BINARY_PS.copy()
+    nonfinite[1] = np.nan
+    out = [[None]]
+
+    # Act
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        op.perform(None, [nonfinite, times, obs_pos], out)
+        op._vbm = _RaisingVBM()
+        op.perform(None, [_P_BINARY_PS, times, obs_pos], out)
+
+    # Assert
+    messages = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, RuntimeWarning)
+    ]
+    assert len(messages) == 2
+    assert any("non-finite" in m for m in messages)
+    assert any("SetLensGeometry" in m for m in messages)
 
 
 def test_lens_rejects_missing_body_component():
