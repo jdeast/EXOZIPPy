@@ -6,6 +6,7 @@ import pytensor.tensor as pt
 
 from exozippy.components.component import Component
 from exozippy.components.parameter import sampled_bounds
+from exozippy.components.parameterization import merge_overrides
 from exozippy.constants import (
     FFP_MASS_FUNCTION_MIN_MEARTH,
     FFP_MASS_FUNCTION_SLOPE,
@@ -663,14 +664,19 @@ class Star(Component):
                 idx_list = sorted(ml_source_idx - skip_idx)
                 if not idx_list or param_name not in self.manifest:
                     return
-                entry = self.manifest[param_name]
-                entry = dict(entry) if isinstance(entry, dict) else {}
                 pin = np.full(self.n_elements, np.nan)
                 pin[idx_list] = 0.0
-                overrides = dict(entry.get("overrides", {}))
-                overrides["sigma"] = pin.tolist()
-                entry["overrides"] = overrides
-                self.manifest[param_name] = entry
+                # merge_overrides, not a hand-written
+                # `dict(entry) if isinstance(entry, dict) else {}`: that
+                # spelling reads the manifest vocabulary as a writer and
+                # silently DROPS a bare-string expr_key, turning a derived
+                # parameter into a sampled one with no message (review
+                # 4.5.3, the same defect Band's autopin carried).  Latent
+                # here -- none of the six parameters below is a bare string
+                # today -- and unrepresentable now.
+                self.manifest[param_name] = merge_overrides(
+                    self.manifest[param_name], {"sigma": pin.tolist()}
+                )
 
             _pin_sigma("logmass", relation_idx)
             _pin_sigma("teff", relation_idx | sed_idx)
