@@ -749,25 +749,10 @@ def _run_fit(config, gui, user_params=None):
             # must be told rather than left to assume 1 (see
             # ModeReport.thin_factor / thin_known).
             idata.posterior.attrs["nthin"] = int(nthin)
-            # Ensure lp is in sample_stats; compute and persist if missing.
-            ss_vars = (
-                list(idata.sample_stats.data_vars)
-                if hasattr(idata, "sample_stats")
-                else []
-            )
-            if "lp" not in ss_vars:
-                import xarray as xr
-
-                lp_vals = _compute_lp_from_model(model, idata)
-                if lp_vals is not None:
-                    idata.sample_stats["lp"] = xr.DataArray(
-                        lp_vals,
-                        dims=["chain", "draw"],
-                        coords={
-                            "chain": idata.posterior.chain,
-                            "draw": idata.posterior.draw,
-                        },
-                    )
+            # Ensure lp is in sample_stats; compute and persist if missing,
+            # so the archived trace carries it and no later reader (modes,
+            # mkparam, the plotters) has to recompute it.
+            _ensure_lp(idata, model)
             # Convert sampled variables to user-facing units before archiving.
             # This makes the trace file, trace plots, ArviZ summary, and
             # mkparam output all use the same units the user specified.
@@ -1566,6 +1551,53 @@ def _lp_eval_chain(args):
     return chain_idx, lp_chain
 
 
+def _ensure_lp(idata, model=None):
+    """Make sure ``idata.sample_stats["lp"]`` exists; return whether it does.
+
+    NUTS writes lp itself; the Metropolis/DE families and PTDE do not, so it
+    is computed from the model and persisted -- once, right after sampling,
+    so the saved trace carries it and no reader has to recompute it.  The
+    fallback also serves old trace files written before that was done.
+
+    One function for two call sites that had drifted, and the merge turned up
+    that BOTH were broken for a trace carrying no ``sample_stats`` group at
+    all -- just differently.  The save path checked
+    ``hasattr(idata, "sample_stats")`` and then assigned into
+    ``idata.sample_stats`` regardless, so the assignment raised; the plotting
+    path guarded it with ``idata.add_groups(...)``, which is arviz 0.x API
+    that no supported arviz has (``pyproject.toml`` floors it at 1.1.0, where
+    ``InferenceData`` IS an ``xarray.DataTree``), so it raised too. Adding a
+    group on a DataTree is ``idata["sample_stats"] = xr.Dataset()``.
+
+    ``model=None`` means "report, do not compute": the plotting path can be
+    handed a trace with no model, and there is nothing to fall back to.
+    """
+    ss = getattr(idata, "sample_stats", None)
+    if ss is not None and "lp" in ss.data_vars:
+        return True
+    if model is None:
+        return False
+
+    logger.info("lp is not in the trace -- computing it from the model")
+    lp_vals = _compute_lp_from_model(model, idata)
+    if lp_vals is None:
+        return False
+
+    import xarray as xr
+
+    if getattr(idata, "sample_stats", None) is None:
+        idata["sample_stats"] = xr.Dataset()
+    idata.sample_stats["lp"] = xr.DataArray(
+        lp_vals,
+        dims=["chain", "draw"],
+        coords={
+            "chain": idata.posterior.chain,
+            "draw": idata.posterior.draw,
+        },
+    )
+    return True
+
+
 def _compute_lp_from_model(model, idata):
     """Compute log posterior at each draw by evaluating the compiled model logp.
 
@@ -1910,38 +1942,12 @@ def save_multipage_trace(
         thin_factor = max(1, n_draws // draws_per_chain)
         idata = idata.isel(draw=slice(None, None, thin_factor))
 
-    # lp is in sample_stats for NUTS traces and for Metropolis traces saved after
-    # the fix that computes and persists it right after pm.sample().
-    # Fall back to computing it for old trace files.
-    ss_vars = (
-        list(idata.sample_stats.data_vars)
-        if hasattr(idata, "sample_stats")
-        else []
-    )
-    if "lp" in ss_vars:
+    # lp is in sample_stats for NUTS traces and for every trace saved after
+    # the fix that computes and persists it right after pm.sample().  Fall
+    # back to computing it for old trace files; a trace with no model to
+    # fall back to simply gets no lp page.
+    if _ensure_lp(idata, model):
         lp_idata, lp_var = idata, "lp"
-    elif model is not None:
-        logger.info("lp not in trace — computing from model (old trace file)")
-        import xarray as xr
-
-        lp_vals = _compute_lp_from_model(model, idata)
-        if lp_vals is not None:
-            if (
-                not hasattr(idata, "sample_stats")
-                or idata.sample_stats is None
-            ):
-                idata.add_groups({"sample_stats": xr.Dataset()})
-            idata.sample_stats["lp"] = xr.DataArray(
-                lp_vals,
-                dims=["chain", "draw"],
-                coords={
-                    "chain": idata.posterior.chain,
-                    "draw": idata.posterior.draw,
-                },
-            )
-            lp_idata, lp_var = idata, "lp"
-        else:
-            lp_idata, lp_var = None, None
     else:
         lp_idata, lp_var = None, None
 
