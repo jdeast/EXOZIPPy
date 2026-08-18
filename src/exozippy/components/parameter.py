@@ -899,11 +899,19 @@ class Parameter:
         return self._element_role("is_active", index, default=True)
 
     def _n_elements(self):
-        """Element count from ``shape`` (1 for a scalar), as build_pymc reads it."""
-        actual_shape = (
-            self.shape if isinstance(self.shape, tuple) else (self.shape,)
-        )
-        return int(np.prod(actual_shape)) if actual_shape != () else 1
+        """Element count from ``shape`` (1 for a scalar), as build_pymc reads it.
+
+        The ONE implementation (review 4.2.1).  It was hand-copied six times
+        in two spellings that were not equivalent -- one crashed on
+        ``shape=None``, the other did not -- so it accepts every spelling any
+        of them did: a tuple, a bare int, ``()`` and ``None``.
+        """
+        shape = self.shape
+        if shape is None or shape == ():
+            return 1
+        if not isinstance(shape, tuple):
+            shape = (shape,)
+        return int(np.prod(shape))
 
     def _built_roles(self):
         """Has build_pymc written the per-element role masks yet?
@@ -992,7 +1000,7 @@ class Parameter:
             return f"{prefix}.{self.names[index]}.{attr}"
 
         # If no names, use the index: star.0.radius
-        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
+        n_elements = self._n_elements()
         if n_elements > 1:
             return f"{prefix}.{index}.{attr}"
 
@@ -1372,7 +1380,7 @@ class Parameter:
         actual_shape = (
             self.shape if isinstance(self.shape, tuple) else (self.shape,)
         )
-        n_elements = int(np.prod(actual_shape)) if actual_shape != () else 1
+        n_elements = self._n_elements()
 
         inits = to_vec(self.initval, n_elements, fill=0.0)
         scales = to_vec(self.init_scale, n_elements, fill=np.nan)
@@ -2633,9 +2641,7 @@ class Parameter:
         tf["init_scale_logits"] = scale_logits.copy()
         tf["gaussian_scales"] = gauss_scales.copy()
 
-        n_elements = (
-            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
-        )
+        n_elements = self._n_elements()
         phys_scales = to_vec(self.init_scale, n_elements, fill=1.0)
         raw_init = (
             np.asarray(self.raw_initval, dtype=float).reshape(-1)
@@ -2760,9 +2766,7 @@ class Parameter:
             # No sampled elements (fully fixed/derived) -> empty raw start.
             return np.zeros(0)
         idx = tf["sampled_idx"]
-        n_elements = (
-            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
-        )
+        n_elements = self._n_elements()
         v = to_vec(initval_internal, n_elements)
         v = np.asarray(v, dtype=float).reshape(-1)
         raw = np.zeros(len(idx))
@@ -2823,9 +2827,7 @@ class Parameter:
         if tf is None:
             return np.zeros(0)
         idx = tf["sampled_idx"]
-        n_elements = (
-            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
-        )
+        n_elements = self._n_elements()
         raw = np.asarray(raw_vec, dtype=float).reshape(-1)
         out = np.zeros(n_elements)
         for j, i in enumerate(idx):
@@ -2976,7 +2978,7 @@ class Parameter:
             # MUST define it or the document dies with 'Undefined control
             # sequence' at the end of the fit (the DC2018_128
             # star.luminosity case).  \nodata is aastex's blank-cell mark.
-            n = int(np.prod(self.shape)) if self.shape != () else 1
+            n = self._n_elements()
             if n > 1:
                 return "".join(
                     rf"\providecommand{{\{self.latex_varname}{idx_to_words(i)}}}{{\nodata}}"
@@ -3338,9 +3340,7 @@ class Parameter:
         inline cell text.  Without it (a caller with no note machinery)
         the historical inline composition is used.
         """
-        n_elements = (
-            int(np.prod(self.shape)) if self.shape not in ((), None) else 1
-        )
+        n_elements = self._n_elements()
         lines = []
         for i in range(n_elements):
             idx_str = idx_to_words(i) if n_elements > 1 else ""
@@ -3370,17 +3370,27 @@ class Parameter:
             return rf"\multicolumn{{{len(mode_suffixes)}}}{{c}}{{{base}}}"
         return " & ".join(base + sfx + r"\dotfill" for sfx in mode_suffixes)
 
-    def to_table_line(
-        self,
-        sigfigs: int = 2,
-        note_mark: Optional[str] = None,
-        mode_suffixes: Optional[list] = None,
-    ) -> str:
+    def _require_table_fields(self):
+        """Both table emitters need a symbol and a description."""
         if self.latex is None:
             raise ValueError(f"{self.label}: latex symbol not set.")
         if self.description is None:
             raise ValueError(f"{self.label}: description not set.")
 
+    def _table_row(
+        self, index, symbol, idx_str, sigfigs, note_mark, mode_suffixes
+    ):
+        """One deluxetable row: the body both emitters share (review 4.2.1).
+
+        The two differ ONLY in what they put in the symbol column and in
+        whether they loop -- ``to_table_line`` subscripts the symbol with the
+        instance name because it emits every element under one header, while
+        ``to_table_line_at`` emits one element under a header that already
+        names the instance.  Everything else -- the unit, the note mark, the
+        trusted-LaTeX description, the value cells (or the posterior summary
+        when there are no macros), and the per-element prior macro -- was a
+        second copy, and the multimodal path had to be threaded through both.
+        """
         safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
         unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
         mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
@@ -3390,76 +3400,6 @@ class Parameter:
         # audit in tests/test_prose.py::test_descriptions_are_valid_latex
         # catches raw specials in shipped defaults.yaml files.
         desc = self.description
-
-        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
-
-        lines = []
-        for i in range(n_elements):
-            idx_str = idx_to_words(i) if n_elements > 1 else ""
-
-            if n_elements > 1:
-                if self.names and i < len(self.names):
-                    clean_name = latex_escape(str(self.names[i]))
-                    symbol = self.latex + r"_{\rm " + clean_name + r"}"
-                else:
-                    symbol = f"{self.latex}_{{{i}}}"
-            else:
-                symbol = self.latex
-
-            if self.print_to_table:
-                val_txt = self._value_cells(idx_str, mode_suffixes)
-            else:
-                if self.summary is None:
-                    self.compute_summary()
-
-                summ = (
-                    self.summary[i]
-                    if isinstance(self.summary, list)
-                    else self.summary
-                )
-                val_txt = (
-                    r"\ensuremath{"
-                    + summ.latex_value(sigfigs=sigfigs)
-                    + "}"
-                    + r"\dotfill"
-                )
-
-            # Per-element prior macro (see to_latex_prior_def): a vector's
-            # elements may carry different priors.
-            prior_text = "\\" + self.latex_varname + idx_str + "prior"
-
-            lines.append(
-                rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
-                rf"{desc}{unit_text}\dotfill & "
-                rf"{val_txt} & "
-                rf"{prior_text} \\" + "\n"
-            )
-
-        return "".join(lines)
-
-    def to_table_line_at(
-        self,
-        index: int,
-        sigfigs: int = 2,
-        note_mark: Optional[str] = None,
-        mode_suffixes: Optional[list] = None,
-    ) -> str:
-        """Single table row for element ``index``, without an instance subscript.
-
-        Used when the enclosing section header already identifies the instance.
-        """
-        if self.latex is None:
-            raise ValueError(f"{self.label}: latex symbol not set.")
-        if self.description is None:
-            raise ValueError(f"{self.label}: description not set.")
-
-        n_elements = np.prod(self.shape).astype(int) if self.shape != () else 1
-        idx_str = idx_to_words(index) if n_elements > 1 else ""
-
-        safe_unit = self.unit_latex.replace("$", "") if self.unit_latex else ""
-        unit_text = "" if not safe_unit else rf" (\ensuremath{{{safe_unit}}})"
-        mark_text = rf"\tablenotemark{{{note_mark}}}" if note_mark else ""
-        desc = self.description  # trusted LaTeX, same contract as table_note
 
         if self.print_to_table:
             val_txt = self._value_cells(idx_str, mode_suffixes)
@@ -3478,13 +3418,62 @@ class Parameter:
                 + r"\dotfill"
             )
 
+        # Per-element prior macro (see to_latex_prior_def): a vector's
+        # elements may carry different priors.
         prior_text = "\\" + self.latex_varname + idx_str + "prior"
 
         return (
-            rf"~~~~${self.latex}$" + mark_text + rf"\dotfill & "
+            rf"~~~~${symbol}$" + mark_text + rf"\dotfill & "
             rf"{desc}{unit_text}\dotfill & "
             rf"{val_txt} & "
             rf"{prior_text} \\" + "\n"
+        )
+
+    def to_table_line(
+        self,
+        sigfigs: int = 2,
+        note_mark: Optional[str] = None,
+        mode_suffixes: Optional[list] = None,
+    ) -> str:
+        self._require_table_fields()
+        n_elements = self._n_elements()
+
+        lines = []
+        for i in range(n_elements):
+            idx_str = idx_to_words(i) if n_elements > 1 else ""
+
+            if n_elements > 1:
+                if self.names and i < len(self.names):
+                    clean_name = latex_escape(str(self.names[i]))
+                    symbol = self.latex + r"_{\rm " + clean_name + r"}"
+                else:
+                    symbol = f"{self.latex}_{{{i}}}"
+            else:
+                symbol = self.latex
+
+            lines.append(
+                self._table_row(
+                    i, symbol, idx_str, sigfigs, note_mark, mode_suffixes
+                )
+            )
+
+        return "".join(lines)
+
+    def to_table_line_at(
+        self,
+        index: int,
+        sigfigs: int = 2,
+        note_mark: Optional[str] = None,
+        mode_suffixes: Optional[list] = None,
+    ) -> str:
+        """Single table row for element ``index``, without an instance subscript.
+
+        Used when the enclosing section header already identifies the instance.
+        """
+        self._require_table_fields()
+        idx_str = idx_to_words(index) if self._n_elements() > 1 else ""
+        return self._table_row(
+            index, self.latex, idx_str, sigfigs, note_mark, mode_suffixes
         )
 
     # ---------
