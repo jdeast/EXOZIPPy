@@ -158,7 +158,8 @@ def test_component_schema_exposes_utilities():
     assert by_name["getdata"]["available"] is True
     # Arguments carry the JSON argument schema for form rendering.
     assert any(a["name"] == "id" for a in by_name["getdata"]["arguments"])
-    assert by_name["bls"]["available"] is False
+    assert by_name["bls"]["available"] is True
+    assert any(a["name"] == "files" for a in by_name["bls"]["arguments"])
 
 
 def test_every_component_utility_list_is_json_serializable():

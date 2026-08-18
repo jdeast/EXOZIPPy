@@ -78,7 +78,7 @@ class Transit(Instrument):
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities import getdata
+        from ...utilities import bls, getdata
         from ...utilities.registry import (
             UtilitySpec,
             argparse_subprocess_runner,
@@ -101,11 +101,13 @@ class Transit(Instrument):
                 name="bls",
                 label="BLS period search",
                 description=(
-                    "Box Least Squares transit-period search (not yet "
-                    "implemented)."
+                    "Box Least Squares transit search: report the period, "
+                    "epoch, depth and duration of the strongest signal."
                 ),
                 component_keys=["transit"],
-                available=False,
+                available=True,
+                build_parser=bls.build_parser,
+                run=argparse_subprocess_runner("exozippy.utilities.bls"),
             ),
         ]
 
@@ -213,6 +215,136 @@ class Transit(Instrument):
         blocks.finalize("flux")
 
         self._build_oversample_grid()
+
+        # Blind seeding: measure the period and conjunction epoch from the
+        # photometry when nothing else supplies them.  Stage 1a, not stage 2
+        # -- see components/globalsearch.py for why (Orbit builds tc's hard
+        # window at stage 2 from whatever start it can see).
+        self.bls_signal = None
+        self._seed_from_bls(system)
+
+    def _seed_from_bls(self, system):
+        """Seed orbital period, conjunction epoch and radius ratio from BLS.
+
+        Runs only when the relaxation engine cannot already DERIVE the
+        period and conjunction time (``globalsearch.starts_satisfied``), and
+        pushes a value only for the quantities that were missing -- so a
+        params file that gives the period but not the epoch keeps its period
+        and gains an epoch, with no precedence question to adjudicate.
+
+        The radius ratio is opportunistic: a missing ``planet.p`` does not
+        trigger a search (a fit can start at 1 Jupiter radius), but a search
+        that ran for the period reports a depth, and ``sqrt(depth)`` is the
+        radius ratio to the accuracy a start value needs.  The engine turns
+        it into a ``planet.radius`` through ``Eq(p, radius / star_radius)``.
+        """
+        from .. import globalsearch
+
+        mode = globalsearch.search_mode(system)
+        if mode == "off":
+            return
+        orbit_ndx = globalsearch.sole_orbit_index(system, self.prefix)
+        if orbit_ndx is None:
+            return
+
+        cm = self.config_manager
+        planet_ndx = self._sole_planet_index(system, orbit_ndx)
+        groups = {
+            "period": (
+                f"orbit.{orbit_ndx}.period",
+                f"orbit.{orbit_ndx}.logP",
+            ),
+            "tc": (f"orbit.{orbit_ndx}.tc",),
+        }
+        if planet_ndx is not None:
+            groups["p"] = (
+                f"planet.{planet_ndx}.p",
+                f"planet.{planet_ndx}.radius",
+            )
+        satisfied = globalsearch.starts_satisfied(cm, groups)
+        required_missing = not (satisfied["period"] and satisfied["tc"])
+        if mode != "force" and not required_missing:
+            logger.debug(
+                "[%s] BLS not needed: the orbital period and conjunction "
+                "time are already derivable.",
+                self.prefix,
+            )
+            return
+
+        logger.info(
+            "[%s] no start value for %s -- running a Box Least Squares "
+            "search over %d photometric points.",
+            self.prefix,
+            ", ".join(k for k, v in satisfied.items() if not v) or "(forced)",
+            self.time.size,
+        )
+
+        # Each file in its own flux system: divide by that file's median so
+        # the concatenation is one relative-flux series and the box depth
+        # means the same thing in every row.
+        baseline = np.asarray(self.baseline_init, dtype=float)
+        scale = np.where(
+            np.isfinite(baseline) & (baseline != 0.0), baseline, 1.0
+        )
+        norm = scale[self.inst_map]
+        signal = globalsearch.bls_search(
+            self.time,
+            self.flux / norm,
+            self.err / norm,
+            context=self.prefix,
+        )
+        self.bls_signal = signal
+        if signal is None:
+            return
+
+        q = globalsearch.QUALITY_TRANSIT
+        source = f"BLS on {self.n_elements} light curve(s)"
+        if mode == "force" or not satisfied["period"]:
+            globalsearch.seed_start(
+                cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+            )
+        if mode == "force" or not satisfied["tc"]:
+            globalsearch.seed_start(
+                cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+            )
+        if planet_ndx is not None and (
+            mode == "force" or not satisfied.get("p", True)
+        ):
+            globalsearch.seed_start(
+                cm,
+                f"planet.{planet_ndx}.p",
+                float(np.sqrt(signal.depth)),
+                q,
+                source,
+            )
+
+        get_collector(system).add(
+            "Initial values for the orbital period and time of conjunction "
+            "were measured from the photometry with a Box Least Squares "
+            r"periodogram \citep{Kovacs:2002}, as implemented in "
+            r"\texttt{astropy} \citep{Astropy:2013,Astropy:2018,Astropy:2022}."
+            " Starting values do not enter the likelihood and cannot move "
+            "the posterior.",
+            section="data",
+            key=f"{self.prefix}.global_search",
+            rank=70,
+        )
+
+    def _sole_planet_index(self, system, orbit_ndx):
+        """The one planet on this orbit, or None if there is not exactly one.
+
+        Read off the raw config rather than ``planet.orbit_map``: this runs
+        at stage 1a, where the maps may not have been built yet.
+        """
+        planets = getattr(system, "planet", None)
+        if planets is None:
+            return None
+        on_orbit = [
+            j
+            for j, entry in enumerate(planets.config)
+            if int((entry or {}).get("orbit_ndx", 0)) == orbit_ndx
+        ]
+        return on_orbit[0] if len(on_orbit) == 1 else None
 
     def _build_oversample_grid(self):
         """

@@ -79,18 +79,27 @@ class RVInstrument(Instrument):
 
     @classmethod
     def get_utilities(cls):
-        from ...utilities.registry import UtilitySpec
+        from ...utilities import lomb_scargle
+        from ...utilities.registry import (
+            UtilitySpec,
+            argparse_subprocess_runner,
+        )
 
         return [
             UtilitySpec(
                 name="lomb_scargle",
                 label="Lomb-Scargle periodogram",
                 description=(
-                    "Lomb-Scargle radial-velocity periodogram (not yet "
-                    "implemented)."
+                    "Lomb-Scargle radial-velocity periodogram: report the "
+                    "period, epoch and semi-amplitude of the strongest "
+                    "signal."
                 ),
                 component_keys=["rvinstrument"],
-                available=False,
+                available=True,
+                build_parser=lomb_scargle.build_parser,
+                run=argparse_subprocess_runner(
+                    "exozippy.utilities.lomb_scargle"
+                ),
             ),
         ]
 
@@ -171,6 +180,113 @@ class RVInstrument(Instrument):
         blocks.finalize("rv", user_factor=(u.solRad / u.d).to(u.m / u.s))
 
         self.k_init = self._estimate_k_init()
+
+        # Blind seeding: measure the period and conjunction epoch from the
+        # velocities when nothing else supplies them.  Stage 1a, not stage 2
+        # -- see components/globalsearch.py for why (Orbit builds tc's hard
+        # window at stage 2 from whatever start it can see).
+        self.ls_signal = None
+        self._seed_from_lombscargle(system)
+
+    def _seed_from_lombscargle(self, system):
+        """Seed orbital period and conjunction epoch from a Lomb-Scargle peak.
+
+        Runs only when the relaxation engine cannot already DERIVE the period
+        and conjunction time, and seeds only the quantities that were
+        missing.  A transit search on the same orbit outranks this one
+        (``globalsearch.QUALITY_TRANSIT``), so on a system with both, the
+        photometric period and epoch stand and the RVs contribute the
+        semi-amplitude.
+
+        The semi-amplitude is not pushed as a hint: it REPLACES
+        ``self.k_init``, which ``Planet.register_parameters`` already turns
+        into the ``planet.K`` hint at stage 2.  One channel, one number --
+        and the sinusoid fit is the better estimator of the two, since
+        ``sqrt(2) * std`` counts the noise variance as signal.
+        """
+        from .. import globalsearch
+
+        mode = globalsearch.search_mode(system)
+        if mode == "off":
+            return
+        orbit_ndx = globalsearch.sole_orbit_index(system, self.prefix)
+        if orbit_ndx is None:
+            return
+
+        cm = self.config_manager
+        groups = {
+            "period": (
+                f"orbit.{orbit_ndx}.period",
+                f"orbit.{orbit_ndx}.logP",
+            ),
+            "tc": (f"orbit.{orbit_ndx}.tc",),
+        }
+        satisfied = globalsearch.starts_satisfied(cm, groups)
+        if mode != "force" and all(satisfied.values()):
+            logger.debug(
+                "[%s] Lomb-Scargle not needed: the orbital period and "
+                "conjunction time are already derivable.",
+                self.prefix,
+            )
+            return
+
+        logger.info(
+            "[%s] no start value for %s -- running a Lomb-Scargle search "
+            "over %d velocities.",
+            self.prefix,
+            ", ".join(k for k, v in satisfied.items() if not v) or "(forced)",
+            self.time.size,
+        )
+
+        # Work in m/s with each instrument's own offset removed: a
+        # periodogram of the raw concatenation measures the offsets, not the
+        # planet.
+        to_ms = (u.solRad / u.d).to(u.m / u.s)
+        gammas = np.asarray(self.gamma_init, dtype=float)
+        residual = self.rv * to_ms - gammas[self.inst_map]
+        signal = globalsearch.lombscargle_search(
+            self.time,
+            residual,
+            self.err * to_ms,
+            inst_map=self.inst_map,
+            context=self.prefix,
+        )
+        self.ls_signal = signal
+        if signal is None:
+            return
+
+        q = globalsearch.QUALITY_RV
+        source = f"Lomb-Scargle on {self.n_elements} RV data set(s)"
+        if mode == "force" or not satisfied["period"]:
+            globalsearch.seed_start(
+                cm, f"orbit.{orbit_ndx}.period", signal.period, q, source
+            )
+        if mode == "force" or not satisfied["tc"]:
+            globalsearch.seed_start(
+                cm, f"orbit.{orbit_ndx}.tc", signal.epoch, q, source
+            )
+        if np.isfinite(signal.amplitude) and signal.amplitude > 0.0:
+            logger.info(
+                "[%s] planet.K start moved from %.4g to %.4g m/s (the "
+                "Lomb-Scargle sinusoid's semi-amplitude replaces "
+                "sqrt(2) x scatter).",
+                self.prefix,
+                self.k_init,
+                signal.amplitude,
+            )
+            self.k_init = float(signal.amplitude)
+
+        get_collector(system).add(
+            "Initial values for the orbital period and time of conjunction "
+            "were measured from the radial velocities with a Lomb-Scargle "
+            r"periodogram \citep{Lomb:1976,Scargle:1982}, as implemented in "
+            r"\texttt{astropy} \citep{VanderPlas:2018,Astropy:2022}. "
+            "Starting values do not enter the likelihood and cannot move the "
+            "posterior.",
+            section="data",
+            key=f"{self.prefix}.global_search",
+            rank=70,
+        )
 
     def _estimate_k_init(self):
         """Seed for the planetary RV semi-amplitude, in m/s.
