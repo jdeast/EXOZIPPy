@@ -146,6 +146,28 @@ def test_a_compiledir_within_budget_is_left_alone(compiledir):
     assert (compiledir / "ancient").is_dir()
 
 
+def test_under_budget_skips_the_per_entry_scan_entirely(compiledir):
+    """Given a compiledir within budget that also holds a broken entry,
+    When it is pruned,
+    Then nothing is touched -- not even the broken entry."""
+    # Arrange -- this pins the cheap pre-check, which is load-bearing rather
+    # than an optimization: the per-entry pass opens a directory and stats a
+    # key.pkl for every entry, 72 s over 4034 of them on a cold page cache,
+    # and it would otherwise run on every `pytest -n0 -x` single-test debug
+    # invocation. One listdir of the parent bounds the count from above, so
+    # being under budget is provable without the pass.
+    _make_entry(compiledir, "good")
+    _make_entry(compiledir, "broken", module=False)
+
+    # Act
+    stats = budget.prune_compiledir(compiledir, max_entries=10)
+
+    # Assert -- the broken entry surviving IS the documented tradeoff:
+    # refresh() removes those itself, and they are rare.
+    assert stats.removed == 0
+    assert (compiledir / "broken").is_dir()
+
+
 def test_stranded_platform_trees_are_swept_but_the_live_one_is_kept(tmp_path):
     """Given sibling compiledirs left by another kernel or Python version,
     When the base compiledir is swept,

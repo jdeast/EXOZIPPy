@@ -84,12 +84,22 @@ class PruneStats:
     removed_broken: int = 0
     removed_lru: int = 0
     removed_platform_dirs: list[str] = field(default_factory=list)
+    # True when the cheap pre-check proved we were under budget and the
+    # per-entry pass never ran. `scanned` is then a listdir name count, i.e.
+    # an upper bound on the entry count rather than a measurement of it, and
+    # the summary must not claim otherwise.
+    skipped: bool = False
 
     @property
     def removed(self) -> int:
         return self.removed_broken + self.removed_lru
 
     def summary(self, compiledir: Path, max_entries: int) -> str:
+        if self.skipped:
+            return (
+                f"pytensor compiledir {compiledir}: at most {self.scanned} "
+                f"entries, within the budget of {max_entries}, not scanned"
+            )
         parts = [
             f"pytensor compiledir {compiledir}: {self.scanned} entries "
             f"scanned, budget {max_entries}, kept {self.kept}, removed "
@@ -141,15 +151,44 @@ def prune_compiledir(
     if not compiledir.is_dir():
         return stats
 
+    # CHEAP PRE-CHECK, and it is not an optimization detail -- without it
+    # this function reproduces the very cost it exists to remove. The scan
+    # below opens one directory and stats one key.pkl PER ENTRY, which on a
+    # cold page cache measured 72 s over 4034 entries: paid on every pytest
+    # invocation, including the `-n0 -x` single-test runs that are supposed
+    # to be the fast path.
+    #
+    # One listdir of the parent bounds the entry count from ABOVE (the names
+    # include lock_dir and any stray files, neither of which is an entry), so
+    # a raw count within budget proves the real count is too, and we can skip
+    # the pass entirely. Steady state is therefore one directory read. The
+    # cost is only paid when it buys something: when we are actually over
+    # budget and about to reclaim.
+    #
+    # What this skips when under budget is the broken-entry sweep. That is
+    # deliberate -- refresh() removes those itself, and there were 8 of them
+    # in 4034.
+    try:
+        names = os.listdir(compiledir)
+    except OSError:
+        return stats
+    if len(names) <= max_entries:
+        stats.scanned = stats.kept = len(names)
+        stats.skipped = True
+        return stats
+
     live: list[tuple[float, Path]] = []
-    for entry in sorted(compiledir.iterdir()):
-        if entry.name == _LOCK_DIR or not entry.is_dir():
+    for name in sorted(names):
+        if name == _LOCK_DIR:
             continue
-        stats.scanned += 1
+        entry = compiledir / name
         try:
             files = os.listdir(entry)
+        except NotADirectoryError:
+            continue
         except OSError:
             continue
+        stats.scanned += 1
         if "key.pkl" not in files or not _module_present(files):
             stats.removed_broken += 1
             if not dry_run:
