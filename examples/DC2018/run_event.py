@@ -185,6 +185,16 @@ def build_config(name, files, prefix, mmx_json, args):
             # to 8 on an unchanged 20-rung ladder.  Set n_chains down when
             # setting n_temps up to hold the slot count roughly fixed.
             "n_chains": args.n_chains,
+            # Re-space the ladder during tune to equalize the per-pair
+            # communication barrier (Syed+2022).  Worth turning on when the
+            # per-rung swap acceptances are non-uniform: a round trip must
+            # cross EVERY pair, so transport is throttled by the worst
+            # stretch and a geometric ladder cannot fix that by getting
+            # longer.  Measured on event 128 at n_temps=48 (a correctly
+            # provisioned ladder: Lambda=18.9 vs the 39 the DEO criterion
+            # asks): acceptance 0.46-0.52 cold against 0.66-0.70 hot, and
+            # zero round trips in 21 h.
+            "adapt_ladder": bool(args.adapt_ladder),
             "cores": args.cores,
             "tune": args.tune,
             "draws": args.draws,
@@ -272,6 +282,14 @@ def main(argv=None):
         help="PT temperature rungs: an integer or 'auto' "
         "(max(8, ceil(sqrt(D/2)*ln(T_max))); use when the ladder-health "
         "warning reports a communication-limited ladder)",
+    )
+    ap.add_argument(
+        "--adapt-ladder",
+        action="store_true",
+        help="Re-space the PT ladder during tuning to equalize the per-pair "
+        "communication barrier (sampler key adapt_ladder). Use when the "
+        "per-rung swap acceptances reported by the ladder-health line are "
+        "non-uniform",
     )
     ap.add_argument(
         "--n-chains",
